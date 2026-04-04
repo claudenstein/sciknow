@@ -22,7 +22,7 @@ All AI inference runs locally. No cloud APIs required to operate the system.
 
 | Component | Minimum | Recommended |
 |---|---|---|
-| GPU | RTX 3090 (24 GB VRAM) | RTX 3090 + DGX Spark |
+| GPU | RTX 3090 (24 GB VRAM) | RTX 3090 + remote GPU server |
 | RAM | 32 GB | 64 GB |
 | Storage | 500 GB SSD | 2 TB NVMe |
 | OS | Ubuntu 22.04+ | Ubuntu 22.04+ |
@@ -34,7 +34,7 @@ All AI inference runs locally. No cloud APIs required to operate the system.
 - bge-reranker-v2-m3: ~0.5 GB
 - Total: fits comfortably within 24 GB
 
-**DGX Spark transition:** Set `OLLAMA_HOST=http://dgx-spark:11434` in `.env`. Zero code changes needed. At that point you can upgrade to `qwen2.5:72b` or `llama3.1:405b-q4`.
+**Remote GPU server:** Set `OLLAMA_HOST=http://your-gpu-server:11434` in `.env`. Zero code changes needed. At that point you can upgrade to `qwen2.5:72b` or `llama3.1:405b-q4`.
 
 ---
 
@@ -258,7 +258,7 @@ All settings are read from `.env` (or environment variables). Managed by Pydanti
 | `CROSSREF_EMAIL` | `user@example.com` | **Set this.** Used in Crossref User-Agent header |
 | `EMBEDDING_BATCH_SIZE` | `8` | Chunks per embedding batch (tune for your VRAM) |
 
-**DGX Spark migration:** Change only `OLLAMA_HOST=http://dgx-spark:11434`. Everything else stays the same.
+**Remote GPU server:** Change only `OLLAMA_HOST=http://your-gpu-server:11434`. Everything else stays the same.
 
 ---
 

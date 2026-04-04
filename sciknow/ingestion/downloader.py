@@ -16,7 +16,7 @@ import httpx
 
 
 _HEADERS = {
-    "User-Agent": "sciknow/0.1 (research use; https://github.com/sciknow)",
+    "User-Agent": "sciknow/0.1 (research use; https://github.com/claudenstein/sciknow)",
     "Accept": "application/pdf,*/*;q=0.9",
 }
 
