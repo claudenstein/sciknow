@@ -1,19 +1,32 @@
 """
-PDF to Markdown/JSON converter using Marker (marker-pdf).
+PDF to Markdown/JSON converter.
 
-Conversion modes:
-  - JSON (default): uses Marker's structured JSONRenderer, which preserves
-    block types (SectionHeader, Text, Table, Equation, …) with heading levels
-    and section hierarchy. Preferred for new ingestion — gives the section-aware
-    chunker exact structural signals instead of regex heuristics.
+Supports two backends, chosen via settings.pdf_converter_backend:
 
-  - Markdown (legacy): used automatically as a fallback if JSON conversion fails.
+  - **mineru** (default, primary) — OpenDataLab MinerU 2.5 pipeline backend.
+    Best quality on scientific papers per OmniDocBench: dedicated MFD/MFR models
+    for formulas, structured table reconstruction, consistent reading-order on
+    multi-column layouts. Output is MinerU's content_list.json (a flat list of
+    typed blocks: text with text_level, table with HTML body, equation with
+    LaTeX, image, code, list, …).
+
+  - **marker** (fallback) — datalab-to/marker with Surya OCR + layout models.
+    Kept as a fallback for documents where MinerU fails (rare). Produces
+    Marker's block-tree JSON or, if that also fails, plain markdown.
+
+`convert()` dispatches based on settings.pdf_converter_backend:
+  - "mineru"  → MinerU only; raises ConversionError on failure
+  - "marker"  → Marker JSON → Marker markdown (legacy behaviour)
+  - "auto"    → MinerU → Marker JSON → Marker markdown (default)
 
 The returned ConversionResult carries:
-  - json_path  : Path to the saved .json file (None in markdown fallback)
-  - md_path    : Path to the saved .md file (None in JSON mode)
-  - text       : Plain-text representation for metadata extraction (always set)
-  - json_data  : Parsed dict from the JSON file (None in markdown fallback)
+  - backend      : which backend produced the result
+  - json_path    : Marker JSON file (marker backend only)
+  - json_data    : parsed Marker JSON tree (marker backend only)
+  - content_list : MinerU content_list.json as a list of dicts (mineru only)
+  - content_list_path : path to the saved content_list.json (mineru only)
+  - md_path      : markdown file (marker markdown fallback only)
+  - text         : plain-text representation for metadata extraction (always set)
 """
 from __future__ import annotations
 
@@ -21,6 +34,10 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
+
+
+Backend = Literal["mineru", "marker_json", "marker_md"]
 
 
 class ConversionError(Exception):
@@ -30,11 +47,18 @@ class ConversionError(Exception):
 @dataclass
 class ConversionResult:
     """Returned by convert(). Carries all forms of the converted document."""
-    # JSON mode fields
+    # Which backend produced this result.
+    backend: Backend = "marker_json"
+
+    # MinerU fields (backend="mineru")
+    content_list: list[dict] | None = None
+    content_list_path: Path | None = None
+
+    # Marker JSON fields (backend="marker_json")
     json_path: Path | None = None
     json_data: dict | None = None
 
-    # Markdown fallback fields
+    # Marker markdown fallback fields (backend="marker_md")
     md_path: Path | None = None
 
     # Always set: plain text for metadata extraction
@@ -42,7 +66,9 @@ class ConversionResult:
 
     @property
     def is_json(self) -> bool:
-        return self.json_data is not None
+        """True if we have structured output (either backend). The chunker
+        uses this to decide between structure-aware parsing and markdown regex."""
+        return self.backend in ("mineru", "marker_json")
 
 
 # ---------------------------------------------------------------------------
@@ -185,19 +211,159 @@ def _marker_config() -> dict:
     return cfg
 
 
-def convert(pdf_path: Path, output_dir: Path) -> ConversionResult:
-    """
-    Convert a PDF to structured JSON (preferred) with plain-text fallback.
+# ---------------------------------------------------------------------------
+# MinerU plain-text extraction (for the metadata stage)
+# ---------------------------------------------------------------------------
 
-    Output layout:
-        output_dir/
-          <stem>/
-            <stem>.json     ← Marker JSON (block-structured)
-            <stem>.md       ← only written on markdown fallback
-            images/         ← extracted images (markdown mode only)
+# Content_list item types that contribute to the plain-text rendering.
+# (image/chart/seal/page_number/header/footer are skipped as noise.)
+_MINERU_TEXTISH_TYPES = {"text", "equation", "code", "list"}
 
-    Returns a ConversionResult; always sets .text for metadata extraction.
+
+def extract_text_from_content_list(content_list: list[dict]) -> str:
     """
+    Flatten MinerU's content_list.json into a plain-text string for the
+    metadata extraction stage. Preserves heading markers so the first few
+    hundred chars still look like a well-structured document.
+    """
+    parts: list[str] = []
+
+    for item in content_list or []:
+        itype = item.get("type", "")
+
+        if itype == "text":
+            text = (item.get("text") or "").strip()
+            if not text:
+                continue
+            level = item.get("text_level") or 0
+            if level and level >= 1:
+                # Use markdown-ish heading for downstream text consumers
+                hashes = "#" * min(level, 4)
+                parts.append(f"\n\n{hashes} {text}\n")
+            else:
+                parts.append(text)
+
+        elif itype == "equation":
+            eq = (item.get("text") or "").strip()
+            if eq:
+                parts.append(eq)
+
+        elif itype == "code":
+            code = (item.get("code_body") or "").strip()
+            if code:
+                parts.append(code)
+
+        elif itype == "list":
+            for li in item.get("list_items") or []:
+                if isinstance(li, str) and li.strip():
+                    parts.append(f"- {li.strip()}")
+                elif isinstance(li, dict):
+                    txt = (li.get("text") or "").strip()
+                    if txt:
+                        parts.append(f"- {txt}")
+
+        elif itype == "table":
+            body = item.get("table_body") or ""
+            if body:
+                parts.append(_table_to_text(body))
+
+        # image/chart/seal/header/footer/page_number/page_footnote/aside_text → skip
+
+    return "\n\n".join(p.strip() for p in parts if p.strip())
+
+
+# ---------------------------------------------------------------------------
+# MinerU backend
+# ---------------------------------------------------------------------------
+
+def _load_mineru():
+    """Lazy-load MinerU. Raises ConversionError if not installed."""
+    try:
+        from mineru.cli.common import do_parse, read_fn
+        return do_parse, read_fn
+    except ImportError as exc:
+        raise ConversionError(
+            f"mineru not installed ({exc}). Run:\n"
+            f"  uv add 'mineru[core]'"
+        )
+
+
+def _convert_mineru(pdf_path: Path, output_dir: Path) -> ConversionResult:
+    """
+    Run MinerU's pipeline backend on a single PDF and return a ConversionResult.
+
+    MinerU writes files to `{output_dir}/{pdf_stem}/pipeline/`:
+        - content_list.json  ← primary structured output (what we parse)
+        - middle.json        ← intermediate rep with bboxes (kept for debugging)
+        - {stem}.md          ← disabled (we parse content_list directly)
+        - *_layout.pdf       ← disabled (visualisation, we don't need)
+        - *_span.pdf         ← disabled (same)
+
+    The model weights download on first call (ModelScope/HuggingFace, a few GB);
+    subsequent calls reuse the cache. Models stay resident in VRAM for the
+    duration of the Python process.
+    """
+    do_parse, read_fn = _load_mineru()
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stem = pdf_path.stem
+    pdf_bytes = read_fn(str(pdf_path))
+
+    # Run MinerU — pipeline backend, English, with formula + table enabled.
+    # Disable all the visualisation/dump outputs we don't use to keep the
+    # per-document footprint light.
+    do_parse(
+        output_dir=str(output_dir),
+        pdf_file_names=[stem],
+        pdf_bytes_list=[pdf_bytes],
+        p_lang_list=["en"],
+        backend="pipeline",
+        parse_method="auto",
+        formula_enable=True,
+        table_enable=True,
+        f_draw_layout_bbox=False,
+        f_draw_span_bbox=False,
+        f_dump_md=False,
+        f_dump_middle_json=True,   # small + useful for debugging
+        f_dump_model_output=False,
+        f_dump_orig_pdf=False,
+        f_dump_content_list=True,  # this is the file we consume
+    )
+
+    content_list_path = output_dir / stem / "auto" / f"{stem}_content_list.json"
+    # Newer MinerU layouts put outputs under "pipeline/" instead of "auto/".
+    # Try both.
+    if not content_list_path.exists():
+        alt = output_dir / stem / "pipeline" / f"{stem}_content_list.json"
+        if alt.exists():
+            content_list_path = alt
+    if not content_list_path.exists():
+        # Last-resort glob: MinerU versions move things around.
+        candidates = list((output_dir / stem).rglob("*content_list*.json"))
+        if candidates:
+            content_list_path = candidates[0]
+
+    if not content_list_path.exists():
+        raise ConversionError(
+            f"MinerU ran but content_list.json not found under {output_dir / stem}"
+        )
+
+    content_list = json.loads(content_list_path.read_text(encoding="utf-8"))
+    text = extract_text_from_content_list(content_list)
+
+    if not text.strip():
+        raise ConversionError("MinerU produced empty text")
+
+    return ConversionResult(
+        backend="mineru",
+        content_list=content_list,
+        content_list_path=content_list_path,
+        text=text,
+    )
+
+
+def _convert_marker_json(pdf_path: Path, output_dir: Path) -> ConversionResult:
+    """Marker structured JSON path (legacy primary, now fallback)."""
     PdfConverter, _ = _load_marker()
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -205,77 +371,116 @@ def convert(pdf_path: Path, output_dir: Path) -> ConversionResult:
     paper_out_dir = output_dir / stem
     paper_out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ------------------------------------------------------------------
-    # Primary path: JSON output
-    # ------------------------------------------------------------------
     json_path = paper_out_dir / f"{stem}.json"
-    try:
-        models = _get_models()
-        converter = PdfConverter(
-            config=_marker_config(),
-            artifact_dict=models,
-            renderer='marker.renderers.json.JSONRenderer',
-        )
-        rendered = converter(str(pdf_path))
+    models = _get_models()
+    converter = PdfConverter(
+        config=_marker_config(),
+        artifact_dict=models,
+        renderer='marker.renderers.json.JSONRenderer',
+    )
+    rendered = converter(str(pdf_path))
 
-        # rendered is a JSONOutput Pydantic model
-        raw = rendered.model_dump_json(exclude=['metadata'])
-        json_path.write_text(raw, encoding='utf-8')
+    raw = rendered.model_dump_json(exclude=['metadata'])
+    json_path.write_text(raw, encoding='utf-8')
 
-        json_data = json.loads(raw)
-        text = extract_text_from_json(json_data)
+    json_data = json.loads(raw)
+    text = extract_text_from_json(json_data)
 
-        if not text.strip():
-            raise ConversionError("JSON conversion produced empty text")
+    if not text.strip():
+        raise ConversionError("Marker JSON conversion produced empty text")
 
-        return ConversionResult(
-            json_path=json_path,
-            json_data=json_data,
-            text=text,
-        )
+    return ConversionResult(
+        backend="marker_json",
+        json_path=json_path,
+        json_data=json_data,
+        text=text,
+    )
 
-    except ConversionError:
-        raise
-    except Exception as exc:
-        # Fall through to markdown fallback
-        _fallback_reason = str(exc)
 
-    # ------------------------------------------------------------------
-    # Fallback: markdown output (keeps legacy behaviour)
-    # ------------------------------------------------------------------
+def _convert_marker_markdown(pdf_path: Path, output_dir: Path) -> ConversionResult:
+    """Marker markdown path (last-ditch fallback)."""
+    PdfConverter, _ = _load_marker()
+    from marker.output import text_from_rendered
+    from marker.config.parser import ConfigParser
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stem = pdf_path.stem
+    paper_out_dir = output_dir / stem
+    paper_out_dir.mkdir(parents=True, exist_ok=True)
+
     md_path = paper_out_dir / f"{stem}.md"
-    try:
-        from marker.output import text_from_rendered
-        from marker.config.parser import ConfigParser
 
-        models = _get_models()
-        config_parser = ConfigParser({
-            'output_format': 'markdown',
-            **_marker_config(),
-        })
-        converter = PdfConverter(
-            config=config_parser.generate_config_dict(),
-            artifact_dict=models,
-        )
-        rendered = converter(str(pdf_path))
-        text, _, images = text_from_rendered(rendered)
+    models = _get_models()
+    config_parser = ConfigParser({
+        'output_format': 'markdown',
+        **_marker_config(),
+    })
+    converter = PdfConverter(
+        config=config_parser.generate_config_dict(),
+        artifact_dict=models,
+    )
+    rendered = converter(str(pdf_path))
+    text, _, images = text_from_rendered(rendered)
 
-        md_path.write_text(text, encoding='utf-8')
+    md_path.write_text(text, encoding='utf-8')
 
-        if images:
-            img_dir = paper_out_dir / 'images'
-            img_dir.mkdir(exist_ok=True)
-            for img_name, img in images.items():
-                img.save(img_dir / img_name)
+    if images:
+        img_dir = paper_out_dir / 'images'
+        img_dir.mkdir(exist_ok=True)
+        for img_name, img in images.items():
+            img.save(img_dir / img_name)
 
-        return ConversionResult(
-            md_path=md_path,
-            text=text,
-        )
+    return ConversionResult(
+        backend="marker_md",
+        md_path=md_path,
+        text=text,
+    )
 
-    except Exception as exc:
-        raise ConversionError(
-            f"Both JSON and markdown conversion failed for {pdf_path.name}.\n"
-            f"JSON error: {_fallback_reason}\n"
-            f"Markdown error: {exc}"
-        ) from exc
+
+def convert(pdf_path: Path, output_dir: Path) -> ConversionResult:
+    """
+    Convert a PDF to structured output. Dispatches based on
+    settings.pdf_converter_backend and falls back through the chain on failure.
+
+    Backends:
+      - "mineru"  : MinerU pipeline only (raises on failure)
+      - "marker"  : Marker JSON → Marker markdown (legacy behaviour)
+      - "auto"    : MinerU → Marker JSON → Marker markdown (default)
+
+    Always returns a ConversionResult with `.backend` set to the backend that
+    actually produced the result, and `.text` populated for metadata extraction.
+    """
+    from sciknow.config import settings
+
+    backend_setting = getattr(settings, "pdf_converter_backend", "auto")
+    errors: list[str] = []
+
+    # ---- 1. MinerU (primary in "auto" and "mineru") ----
+    if backend_setting in ("auto", "mineru"):
+        try:
+            return _convert_mineru(pdf_path, output_dir)
+        except Exception as exc:
+            msg = f"MinerU: {exc}"
+            errors.append(msg)
+            if backend_setting == "mineru":
+                # Explicit MinerU-only mode: do not fall back.
+                raise ConversionError(msg) from exc
+
+    # ---- 2. Marker JSON (primary in "marker", fallback in "auto") ----
+    if backend_setting in ("auto", "marker"):
+        try:
+            return _convert_marker_json(pdf_path, output_dir)
+        except Exception as exc:
+            errors.append(f"Marker JSON: {exc}")
+
+    # ---- 3. Marker markdown (last resort for "auto" and "marker") ----
+    if backend_setting in ("auto", "marker"):
+        try:
+            return _convert_marker_markdown(pdf_path, output_dir)
+        except Exception as exc:
+            errors.append(f"Marker markdown: {exc}")
+
+    raise ConversionError(
+        f"All configured PDF converter backends failed for {pdf_path.name}:\n  "
+        + "\n  ".join(errors)
+    )

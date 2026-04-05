@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     # Crossref polite pool
     crossref_email: str = "user@example.com"
 
+    # PDF converter backend. "mineru" (default) uses OpenDataLab MinerU 2.5
+    # pipeline — best quality on scientific papers per OmniDocBench. "marker"
+    # uses datalab-to/marker (legacy). "auto" tries MinerU first and falls
+    # back to Marker on failure.
+    pdf_converter_backend: str = "auto"
+
     # Ingestion
     # Chunks per bge-m3 batch. Default 32 is safe on a 24GB GPU when the LLM is
     # also resident; raise to 64-128 for embedder-only runs, lower to 8-16 if
