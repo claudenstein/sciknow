@@ -15,6 +15,12 @@ All AI inference runs locally. No cloud APIs required to operate the system.
 | 2 | Hybrid search (dense + sparse + FTS, RRF fusion, reranker) | **Done** |
 | 3 | RAG — grounded question answering over papers | **Done** |
 | 4 | Writing assistant — multi-paper synthesis, section drafting | **Done** |
+| 5 | Draft persistence — save, browse, export writing drafts | **Done** |
+| 6 | Book structure — books → chapters hierarchy with LLM-generated outline | **Done** |
+| 7 | Topic clustering — LLM assigns named clusters to papers for filtered search | **Done** |
+| 8 | Argument mapping — evidence classification (SUPPORTS/CONTRADICTS/NEUTRAL) | **Done** |
+| 9 | Gap analysis — LLM identifies missing topics, weak chapters, unwritten sections | **Done** |
+| 10 | Multi-project support — separate books, shared paper library | **Done** |
 
 ---
 
@@ -114,7 +120,10 @@ sciknow/
     │   ├── db.py               # sciknow db ...
     │   ├── ingest.py           # sciknow ingest ...
     │   ├── search.py           # sciknow search ...
-    │   └── ask.py              # sciknow ask ...
+    │   ├── ask.py              # sciknow ask ...
+    │   ├── catalog.py          # sciknow catalog ...
+    │   ├── book.py             # sciknow book ...
+    │   └── draft.py            # sciknow draft ...
     ├── ingestion/
     │   ├── pdf_converter.py    # Marker (marker-pdf) wrapper
     │   ├── metadata.py         # 4-layer metadata extraction
@@ -307,6 +316,9 @@ sciknow search query "aerosol radiative forcing" --year-from 2010 --year-to 2023
 # Filter by domain
 sciknow search query "stellar evolution" --domain astrophysics
 
+# Filter by topic cluster (set topic clusters with `sciknow catalog cluster` first)
+sciknow search query "solar forcing" --topic "Solar Irradiance"
+
 # Skip reranking (faster, uses RRF scores directly)
 sciknow search query "climate sensitivity" --no-rerank --top-k 20
 
@@ -348,6 +360,15 @@ sciknow ask synthesize "galaxy formation and feedback mechanisms" \
 # Draft a paper section grounded in your library
 sciknow ask write "aerosol-cloud interactions" --section introduction
 sciknow ask write "stellar population synthesis" --section methods --domain astrophysics
+
+# Save the draft to the database (optionally link to a book chapter)
+sciknow ask write "solar forcing mechanisms" --section introduction --save
+sciknow ask write "ocean heat content trends" --section results --save \
+    --book "Global Cooling" --chapter 3
+
+# Filter retrieval to a topic cluster
+sciknow ask question "How does solar activity affect climate?" --topic "Solar Irradiance"
+sciknow ask synthesize "ocean-atmosphere heat exchange" --topic "Ocean Heat Transport"
 ```
 
 ### `sciknow catalog`
@@ -370,6 +391,73 @@ sciknow catalog show "solar magnetic field eigenvectors"
 sciknow catalog export --output catalog.csv
 sciknow catalog export --format json --output catalog.json
 sciknow catalog export --author Zharkova --output zharkova.csv
+
+# Assign topic clusters to all papers (LLM groups papers into 6–14 named clusters)
+sciknow catalog cluster
+sciknow catalog cluster --dry-run           # Preview clusters without saving
+sciknow catalog cluster --batch 100         # Smaller batches for large collections
+
+# List all clusters with paper counts
+sciknow catalog topics
+```
+
+### `sciknow book`
+
+The book system organises writing projects. Each book has chapters; each chapter can have multiple draft sections.
+
+```bash
+# Create a new book project
+sciknow book create "Global Cooling"
+sciknow book create "Solar Cycle Mechanisms" --description "Overview of solar variability and climate links"
+
+# List all books
+sciknow book list
+
+# Show a book's chapters and draft progress
+sciknow book show "Global Cooling"
+
+# Add a chapter manually
+sciknow book chapter add "Global Cooling" "The Maunder Minimum"
+sciknow book chapter add "Global Cooling" "Ocean Heat Uptake and Thermal Lag" --number 5
+
+# Generate a full chapter outline with the LLM (proposes 6–12 chapters based on your paper library)
+sciknow book outline "Global Cooling"
+
+# Draft a chapter section (streams output + saves to drafts table)
+sciknow book write "Global Cooling" 2                       # Chapter 2, default section = introduction
+sciknow book write "Global Cooling" 3 --section methods
+sciknow book write "Global Cooling" 1 --context-k 15       # More context passages
+
+# Map evidence for/against a claim (argument analysis)
+sciknow book argue "Global cooling is primarily driven by solar variability"
+sciknow book argue "Aerosol forcing exceeds solar forcing since 1980" --save
+
+# Identify gaps in the book: missing topics, weak chapters, unwritten sections
+sciknow book gaps "Global Cooling"
+
+# Compile all chapter drafts into a single Markdown document
+sciknow book export "Global Cooling"
+sciknow book export "Global Cooling" --output global_cooling_manuscript.md
+```
+
+### `sciknow draft`
+
+```bash
+# List all saved drafts
+sciknow draft list
+sciknow draft list --book "Global Cooling"
+sciknow draft list --page 2
+
+# Print full draft content (use first 8 chars of ID from draft list)
+sciknow draft show 3f2a1b4c
+
+# Delete a draft
+sciknow draft delete 3f2a1b4c
+sciknow draft delete 3f2a1b4c --yes   # Skip confirmation
+
+# Export a draft to Markdown
+sciknow draft export 3f2a1b4c
+sciknow draft export 3f2a1b4c --output chapter2_intro.md
 ```
 
 ### `sciknow db export`
@@ -644,6 +732,18 @@ Retrieves the most relevant passages for a topic (default `--context-k 12`) and 
 
 Drafts a specific paper section (`introduction`, `methods`, `results`, `discussion`, `conclusion`) on a given topic. The search query is biased toward the target section type to retrieve the most relevant content.
 
+### `ask write --save`
+
+Add `--save` to any `ask write` invocation to persist the draft to the database. Optionally associate it with a book and chapter:
+
+```bash
+sciknow ask write "solar activity proxies" --section introduction --save
+sciknow ask write "ocean heat content trends" --section results --save \
+    --book "Global Cooling" --chapter 3
+```
+
+Saved drafts appear in `sciknow draft list` and can be exported to Markdown with `sciknow draft export`.
+
 ### `db export`
 
 Exports the knowledge base as a JSONL fine-tuning dataset:
@@ -652,6 +752,77 @@ Exports the knowledge base as a JSONL fine-tuning dataset:
 
 Fields always present: `title`, `year`, `section`, `doi`, `content`
 Fields with `--generate-qa`: adds `question`, `answer`
+
+---
+
+## Phase 5–10 — Book Writing System
+
+Phases 5–10 add a structured book-writing workflow on top of the RAG pipeline. The book system is designed for long-form academic writing projects (books, reports, review articles) where many papers contribute to a coherent narrative across multiple chapters.
+
+### Data model
+
+```
+Book  (title, description, status)
+  └── BookChapter  (number, title, description, topic_query, topic_cluster)
+        └── Draft  (section_type, content, sources, word_count, model_used)
+```
+
+All three tables live in PostgreSQL alongside the paper library. Drafts store the raw LLM output, the section type (introduction / methods / etc.), and the APA-formatted source list used to generate them.
+
+### Topic clustering (Phase 7)
+
+Before writing, run `sciknow catalog cluster` to group your papers into named thematic clusters. The LLM reads all paper titles and proposes 6–14 descriptive cluster names, then assigns every paper to exactly one cluster.
+
+Once clusters are assigned, they act as a first-level filter in search and writing:
+
+```bash
+sciknow search query "solar cycle length" --topic "Solar Irradiance"
+sciknow ask question "What drives the 11-year solar cycle?" --topic "Solar Activity"
+sciknow book write "Global Cooling" 1 --topic "Solar Irradiance"
+```
+
+Cluster assignments are stored in `paper_metadata.topic_cluster` and indexed in Qdrant for fast pre-filtering.
+
+### Workflow: writing a book from scratch
+
+```bash
+# 1. Cluster papers into topics
+sciknow catalog cluster
+
+# 2. Create the book
+sciknow book create "Global Cooling"
+
+# 3. Generate a chapter outline (LLM proposes structure from your paper titles)
+sciknow book outline "Global Cooling"
+
+# 4. Review and adjust chapters if needed
+sciknow book show "Global Cooling"
+sciknow book chapter add "Global Cooling" "Policy Implications" --number 11
+
+# 5. Check for gaps before writing
+sciknow book gaps "Global Cooling"
+
+# 6. Write chapter by chapter
+sciknow book write "Global Cooling" 1
+sciknow book write "Global Cooling" 2 --section introduction
+sciknow book write "Global Cooling" 2 --section methods
+
+# 7. Review and export drafts
+sciknow draft list --book "Global Cooling"
+sciknow draft show <id>
+sciknow book export "Global Cooling" --output manuscript.md
+```
+
+### Argument mapping (Phase 8)
+
+Use `sciknow book argue` to map the evidence landscape for any claim. The LLM classifies retrieved passages as SUPPORTS, CONTRADICTS, or NEUTRAL and writes a structured argument map:
+
+```bash
+sciknow book argue "Global cooling is primarily driven by reduced solar output"
+sciknow book argue "Aerosol forcing explains the post-1980 cooling hiatus" --save
+```
+
+Saved argument maps are stored as drafts with `section_type = "argument_map"`.
 
 ## Backup & Restore (`db backup` / `db restore`)
 

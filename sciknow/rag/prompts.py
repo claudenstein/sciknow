@@ -240,6 +240,192 @@ def write_section(
     )
 
 
+# ── Book outline generation ───────────────────────────────────────────────────
+
+OUTLINE_SYSTEM = """\
+You are an expert scientific book editor. Given a list of scientific paper titles \
+and their publication years, propose a structured book outline.
+
+Rules:
+- Propose 6–12 chapters that logically build the book's argument
+- Each chapter should have a clear title and a 1–2 sentence description of what it covers
+- Order chapters so the argument flows from foundational evidence to conclusions
+- Respond ONLY with valid JSON in the exact format shown"""
+
+OUTLINE_USER = """\
+Book title: {book_title}
+
+Available papers in the collection ({n_papers} total):
+{paper_list}
+
+Propose a chapter structure for this book. Return JSON:
+{{
+  "chapters": [
+    {{"number": 1, "title": "...", "description": "...", "topic_query": "..."}},
+    ...
+  ]
+}}
+
+The "topic_query" should be a short search phrase (3–6 words) that retrieves the most \
+relevant papers from the collection for that chapter."""
+
+
+def outline(book_title: str, papers: list[dict]) -> tuple[str, str]:
+    """papers: list of {title, year}"""
+    lines = []
+    for i, p in enumerate(papers[:150], 1):  # cap at 150 to fit context
+        yr = f" ({p['year']})" if p.get("year") else ""
+        lines.append(f"{i}. {p['title']}{yr}")
+    paper_list = "\n".join(lines)
+    return OUTLINE_SYSTEM, OUTLINE_USER.format(
+        book_title=book_title,
+        n_papers=len(papers),
+        paper_list=paper_list,
+    )
+
+
+# ── Topic clustering ──────────────────────────────────────────────────────────
+
+CLUSTER_SYSTEM = """\
+You are a scientific librarian. Given a list of paper titles, group them into \
+thematic clusters.
+
+Rules:
+- Identify 6–14 distinct topic clusters appropriate for this collection
+- Assign EVERY paper to exactly one cluster
+- Use short, descriptive cluster names (2–4 words, e.g. "Solar Irradiance", "Ocean Cycles")
+- Respond ONLY with valid JSON"""
+
+CLUSTER_USER = """\
+Papers ({n} total):
+{paper_list}
+
+Group these papers into thematic clusters. Return JSON:
+{{
+  "clusters": ["Cluster Name 1", "Cluster Name 2", ...],
+  "assignments": {{"Paper title": "Cluster Name", ...}}
+}}"""
+
+
+def cluster(papers: list[dict]) -> tuple[str, str]:
+    """papers: list of {title, year}"""
+    lines = []
+    for p in papers[:200]:
+        yr = f" ({p['year']})" if p.get("year") else ""
+        lines.append(f"- {p['title']}{yr}")
+    return CLUSTER_SYSTEM, CLUSTER_USER.format(
+        n=len(papers),
+        paper_list="\n".join(lines),
+    )
+
+
+# ── Argument mapping ──────────────────────────────────────────────────────────
+
+ARGUE_SYSTEM = """\
+You are a scientific argument analyst. Given a claim and a set of literature passages, \
+map the argument by classifying each source.
+
+For each passage classify it as:
+- SUPPORTS: directly supports the claim with evidence or reasoning
+- CONTRADICTS: presents evidence or reasoning against the claim
+- NEUTRAL: methodological, background, or tangentially related
+
+Then write a structured argument map with:
+1. A summary of the evidence FOR the claim
+2. A summary of the evidence AGAINST (counterarguments to address)
+3. Key methodological papers
+4. An overall assessment of how well the literature supports the claim
+
+Cite passages inline as [N]. Be analytically rigorous."""
+
+ARGUE_USER = """\
+Claim: {claim}
+
+Literature passages:
+
+{context}
+
+---
+
+Map the argument for this claim. Structure your response as:
+
+## Evidence Supporting the Claim
+[passages that support it, with [N] citations]
+
+## Counterarguments & Contradicting Evidence
+[passages that contradict or complicate the claim]
+
+## Key Methodological Context
+[methods papers needed to evaluate the evidence]
+
+## Assessment
+[overall strength of the evidence base for this claim]"""
+
+
+def argue(claim: str, results: list) -> tuple[str, str]:
+    return ARGUE_SYSTEM, ARGUE_USER.format(
+        claim=claim,
+        context=format_context(results),
+    )
+
+
+# ── Gap analysis ──────────────────────────────────────────────────────────────
+
+GAPS_SYSTEM = """\
+You are a scientific book editor reviewing a work in progress. Given a book's chapter \
+outline and the available literature, identify gaps that should be addressed."""
+
+GAPS_USER = """\
+Book: {book_title}
+
+Chapter outline:
+{chapter_list}
+
+Papers available in the collection ({n_papers} total):
+{paper_list}
+
+Existing draft sections:
+{draft_list}
+
+---
+
+Identify the most important gaps in this book project:
+
+1. **Topic gaps**: important aspects of "{book_title}" not covered by any chapter
+2. **Evidence gaps**: chapters with weak paper support (suggest search terms to find more papers)
+3. **Argument gaps**: logical steps missing between chapters
+4. **Draft gaps**: chapters that have no drafts yet (highest writing priority)
+
+Be specific and actionable."""
+
+
+def gaps(
+    book_title: str,
+    chapters: list[dict],
+    papers: list[dict],
+    drafts: list[dict],
+) -> tuple[str, str]:
+    chapter_list = "\n".join(
+        f"  Ch.{c['number']}: {c['title']} — {c.get('description', '')}"
+        for c in chapters
+    )
+    paper_lines = "\n".join(
+        f"  - {p['title']} ({p.get('year', '?')})"
+        for p in papers[:100]
+    )
+    draft_lines = "\n".join(
+        f"  - [{d['section_type']}] {d['title']} (Ch.{d.get('chapter_number', '?')})"
+        for d in drafts
+    ) or "  (none yet)"
+    return GAPS_SYSTEM, GAPS_USER.format(
+        book_title=book_title,
+        chapter_list=chapter_list,
+        n_papers=len(papers),
+        paper_list=paper_lines,
+        draft_list=draft_lines,
+    )
+
+
 # ── Fine-tuning Q&A generation ────────────────────────────────────────────────
 
 FINETUNE_QA_SYSTEM = """\

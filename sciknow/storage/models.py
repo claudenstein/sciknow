@@ -76,6 +76,7 @@ class PaperMetadata(Base):
     # Tags
     keywords: Mapped[list | None] = mapped_column(ARRAY(Text))
     domains: Mapped[list | None] = mapped_column(ARRAY(Text))
+    topic_cluster: Mapped[str | None] = mapped_column(Text)
 
     # Source tracking
     metadata_source: Mapped[str] = mapped_column(Text, nullable=False, default="unknown")
@@ -208,6 +209,87 @@ class Citation(Base):
             "cited_doi",
             postgresql_where="cited_doi IS NOT NULL",
         ),
+    )
+
+
+class Book(Base):
+    __tablename__ = "books"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    title: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="draft")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    chapters: Mapped[list["BookChapter"]] = relationship(
+        back_populates="book", order_by="BookChapter.number", cascade="all, delete-orphan"
+    )
+    drafts: Mapped[list["Draft"]] = relationship(back_populates="book")
+
+
+class BookChapter(Base):
+    __tablename__ = "book_chapters"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    book_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("books.id", ondelete="CASCADE"), nullable=False
+    )
+    number: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    topic_query: Mapped[str | None] = mapped_column(Text)
+    topic_cluster: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    book: Mapped["Book"] = relationship(back_populates="chapters")
+    drafts: Mapped[list["Draft"]] = relationship(back_populates="chapter")
+
+    __table_args__ = (
+        Index("idx_chapters_book", "book_id"),
+    )
+
+
+class Draft(Base):
+    __tablename__ = "drafts"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    book_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("books.id", ondelete="SET NULL"), nullable=True
+    )
+    chapter_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("book_chapters.id", ondelete="SET NULL"), nullable=True
+    )
+    section_type: Mapped[str | None] = mapped_column(Text)
+    topic: Mapped[str | None] = mapped_column(Text)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    word_count: Mapped[int | None] = mapped_column(Integer)
+    sources: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    model_used: Mapped[str | None] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    book: Mapped["Book | None"] = relationship(back_populates="drafts")
+    chapter: Mapped["BookChapter | None"] = relationship(back_populates="drafts")
+
+    __table_args__ = (
+        Index("idx_drafts_book", "book_id", postgresql_where="book_id IS NOT NULL"),
+        Index("idx_drafts_chapter", "chapter_id", postgresql_where="chapter_id IS NOT NULL"),
     )
 
 

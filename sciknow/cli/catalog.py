@@ -438,3 +438,167 @@ def stats():
     for src, n in by_source:
         t4.add_row(src, str(n), quality.get(src, ""))
     console.print(t4)
+
+
+# ── topics ─────────────────────────────────────────────────────────────────────
+
+@app.command()
+def topics():
+    """
+    List all topic clusters with paper counts.
+
+    Examples:
+
+      sciknow catalog topics
+    """
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+
+    with get_session() as session:
+        rows = session.execute(text("""
+            SELECT topic_cluster, COUNT(*) as n
+            FROM paper_metadata
+            WHERE topic_cluster IS NOT NULL AND topic_cluster != ''
+            GROUP BY topic_cluster
+            ORDER BY n DESC
+        """)).fetchall()
+
+        total_clustered = session.execute(text("""
+            SELECT COUNT(*) FROM paper_metadata
+            WHERE topic_cluster IS NOT NULL AND topic_cluster != ''
+        """)).scalar()
+
+        total = session.execute(text("SELECT COUNT(*) FROM paper_metadata")).scalar()
+
+    if not rows:
+        console.print("[yellow]No topic clusters found. Run [bold]sciknow catalog cluster[/bold] first.[/yellow]")
+        raise typer.Exit(0)
+
+    table = Table(title=f"Topic Clusters  ({total_clustered}/{total} papers assigned)", box=box.SIMPLE_HEAD)
+    table.add_column("Cluster",  ratio=3)
+    table.add_column("Papers", justify="right", style="cyan", width=8)
+    table.add_column("",        ratio=2)
+
+    max_n = max(n for _, n in rows) if rows else 1
+    for cluster_name, n in rows:
+        bar = "█" * int(25 * n / max_n)
+        table.add_row(cluster_name, str(n), f"[blue]{bar}[/blue]")
+
+    console.print(table)
+
+
+# ── cluster ────────────────────────────────────────────────────────────────────
+
+@app.command()
+def cluster(
+    limit: int = typer.Option(0, "--limit", "-l",
+                               help="Max papers to cluster (0 = all). Useful for large collections."),
+    batch: int = typer.Option(200, "--batch",
+                               help="Papers per LLM batch."),
+    model: str | None = typer.Option(None, "--model", help="Override LLM model name (Ollama)."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print proposed clusters without saving."),
+):
+    """
+    Assign topic clusters to all papers using an LLM.
+
+    The LLM proposes 6–14 named topic clusters and assigns every paper to one.
+    Clusters are stored in paper_metadata.topic_cluster and can be used as a
+    filter in search and ask commands (--topic).
+
+    Examples:
+
+      sciknow catalog cluster
+
+      sciknow catalog cluster --batch 100 --dry-run
+    """
+    import json as _json
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+    from sciknow.rag import prompts as rag_prompts
+    from sciknow.rag.llm import complete as llm_complete
+
+    with get_session() as session:
+        rows = session.execute(text("""
+            SELECT pm.document_id::text, pm.title, pm.year
+            FROM paper_metadata pm
+            WHERE pm.title IS NOT NULL
+            ORDER BY pm.year DESC NULLS LAST, pm.title
+        """)).fetchall()
+
+    papers = [{"doc_id": r[0], "title": r[1], "year": r[2]} for r in rows]
+
+    if limit:
+        papers = papers[:limit]
+
+    if not papers:
+        console.print("[yellow]No papers with titles found.[/yellow]")
+        raise typer.Exit(0)
+
+    console.print(f"Clustering [bold]{len(papers)}[/bold] papers in batches of {batch}…")
+
+    # Process in batches — each batch returns its own cluster set, then we merge
+    all_assignments: dict[str, str] = {}
+
+    for batch_start in range(0, len(papers), batch):
+        batch_papers = papers[batch_start:batch_start + batch]
+        batch_num = batch_start // batch + 1
+        total_batches = (len(papers) + batch - 1) // batch
+
+        with console.status(f"[bold green]LLM clustering batch {batch_num}/{total_batches}…", spinner="dots"):
+            system, user = rag_prompts.cluster(batch_papers)
+            raw = llm_complete(system, user, model=model)
+
+        # Parse JSON
+        try:
+            # Strip markdown code fences if present
+            cleaned = raw.strip()
+            if cleaned.startswith("```"):
+                cleaned = "\n".join(cleaned.split("\n")[1:])
+            if cleaned.endswith("```"):
+                cleaned = "\n".join(cleaned.split("\n")[:-1])
+            data = _json.loads(cleaned)
+            assignments = data.get("assignments", {})
+        except (_json.JSONDecodeError, KeyError) as e:
+            console.print(f"[red]Failed to parse LLM response for batch {batch_num}:[/red] {e}")
+            console.print(f"[dim]{raw[:500]}[/dim]")
+            continue
+
+        # Map title → doc_id for this batch
+        title_to_doc = {p["title"]: p["doc_id"] for p in batch_papers}
+        for title, cluster_name in assignments.items():
+            doc_id = title_to_doc.get(title)
+            if doc_id:
+                all_assignments[doc_id] = cluster_name
+
+        console.print(
+            f"  Batch {batch_num}/{total_batches}: "
+            f"{len(assignments)} assignments, "
+            f"{len(data.get('clusters', []))} clusters"
+        )
+
+    console.print(f"\nTotal assignments: [bold]{len(all_assignments)}[/bold] / {len(papers)}")
+
+    if dry_run:
+        # Print cluster summary
+        from collections import Counter
+        counts = Counter(all_assignments.values())
+        table = Table(title="Proposed Clusters (dry run — not saved)", box=box.SIMPLE_HEAD)
+        table.add_column("Cluster", ratio=2)
+        table.add_column("Papers", justify="right", style="cyan")
+        for name, n in counts.most_common():
+            table.add_row(name, str(n))
+        console.print(table)
+        return
+
+    # Save to DB
+    with get_session() as session:
+        updated = 0
+        for doc_id, cluster_name in all_assignments.items():
+            session.execute(text("""
+                UPDATE paper_metadata SET topic_cluster = :cluster
+                WHERE document_id::text = :doc_id
+            """), {"cluster": cluster_name, "doc_id": doc_id})
+            updated += 1
+        session.commit()
+
+    console.print(f"[green]✓ Updated topic_cluster for {updated} papers[/green]")

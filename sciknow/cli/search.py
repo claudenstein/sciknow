@@ -31,6 +31,7 @@ def query(
         None, "--section", "-s",
         help="Filter by section type (abstract, introduction, methods, results, discussion, conclusion).",
     ),
+    topic: str | None = typer.Option(None, "--topic", "-t", help="Filter by topic cluster name."),
 ):
     """
     Search papers using hybrid retrieval (dense + sparse + FTS) with optional reranking.
@@ -42,6 +43,8 @@ def query(
       sciknow search query "radiative forcing aerosols" --year-from 2010 --section methods
 
       sciknow search query "DNA replication fidelity" --no-rerank --show-content
+
+      sciknow search query "solar forcing" --topic "Solar Irradiance"
     """
     from sciknow.retrieval import hybrid_search, reranker, context_builder
     from sciknow.storage.db import get_session
@@ -60,6 +63,7 @@ def query(
                 year_to=year_to,
                 domain=domain,
                 section=section,
+                topic_cluster=topic,
             )
 
         if not candidates:

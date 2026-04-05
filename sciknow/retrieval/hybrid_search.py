@@ -101,6 +101,7 @@ def _build_qdrant_filter(
     year_to: int | None,
     domain: str | None,
     section: str | None,
+    topic_cluster: str | None = None,
 ) -> Filter | None:
     conditions = []
     if year_from is not None or year_to is not None:
@@ -117,6 +118,8 @@ def _build_qdrant_filter(
         conditions.append(FieldCondition(key="domains", match=MatchValue(value=domain)))
     if section:
         conditions.append(FieldCondition(key="section_type", match=MatchValue(value=section)))
+    if topic_cluster:
+        conditions.append(FieldCondition(key="topic_cluster", match=MatchValue(value=topic_cluster)))
 
     if not conditions:
         return None
@@ -167,6 +170,7 @@ def _postgres_fts(
     year_to: int | None,
     domain: str | None,
     section: str | None,
+    topic_cluster: str | None = None,
 ) -> list[str]:
     """
     Full-text search over paper_metadata.search_vector, joined to chunks.
@@ -190,6 +194,9 @@ def _postgres_fts(
     if section:
         extra_conditions.append("c.section_type = :section")
         params["section"] = section
+    if topic_cluster:
+        extra_conditions.append("pm.topic_cluster = :topic_cluster")
+        params["topic_cluster"] = topic_cluster
 
     extra_where = ("AND " + " AND ".join(extra_conditions)) if extra_conditions else ""
 
@@ -293,6 +300,7 @@ def search(
     year_to: int | None = None,
     domain: str | None = None,
     section: str | None = None,
+    topic_cluster: str | None = None,
     weights: tuple[float, float, float] = (1.0, 1.0, 0.5),
 ) -> list[SearchCandidate]:
     """
@@ -301,11 +309,11 @@ def search(
     weights = (dense_weight, sparse_weight, fts_weight)
     """
     dense_vec, sparse_vec = _embed_query(query)
-    qdrant_filter = _build_qdrant_filter(year_from, year_to, domain, section)
+    qdrant_filter = _build_qdrant_filter(year_from, year_to, domain, section, topic_cluster)
 
     dense_ids  = _qdrant_dense(qdrant_client, dense_vec, candidate_k, qdrant_filter)
     sparse_ids = _qdrant_sparse(qdrant_client, sparse_vec, candidate_k, qdrant_filter)
-    fts_ids    = _postgres_fts(session, query, candidate_k, year_from, year_to, domain, section)
+    fts_ids    = _postgres_fts(session, query, candidate_k, year_from, year_to, domain, section, topic_cluster)
 
     merged = _rrf_merge(
         [dense_ids, sparse_ids, fts_ids],

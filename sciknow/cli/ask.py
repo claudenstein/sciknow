@@ -22,6 +22,7 @@ _YEAR_FROM   = typer.Option(None, "--year-from",          help="Filter: publishe
 _YEAR_TO     = typer.Option(None, "--year-to",            help="Filter: published <= year.")
 _DOMAIN      = typer.Option(None, "--domain",             help="Filter by domain tag.")
 _SECTION     = typer.Option(None, "--section",    "-s",  help="Filter by section type.")
+_TOPIC       = typer.Option(None, "--topic",      "-t",  help="Filter by topic cluster name.")
 _MODEL       = typer.Option(None, "--model",              help="Override LLM model name (Ollama).")
 
 
@@ -36,6 +37,7 @@ def _retrieve(
     section: str | None,
     session,
     qdrant,
+    topic: str | None = None,
 ):
     from sciknow.retrieval import context_builder, hybrid_search, reranker
 
@@ -48,6 +50,7 @@ def _retrieve(
         year_to=year_to,
         domain=domain,
         section=section,
+        topic_cluster=topic,
     )
     if not candidates_list:
         return []
@@ -81,6 +84,7 @@ def question(
     year_to: int | None = _YEAR_TO,
     domain: str | None = _DOMAIN,
     section: str | None = _SECTION,
+    topic: str | None = _TOPIC,
     model: str | None = _MODEL,
 ):
     """
@@ -104,7 +108,7 @@ def question(
     with get_session() as session:
         with console.status("[bold green]Retrieving relevant passages...", spinner="dots"):
             results = _retrieve(q, context_k, candidates, no_rerank,
-                                year_from, year_to, domain, section, session, qdrant)
+                                year_from, year_to, domain, section, session, qdrant, topic)
 
         if not results:
             console.print("[yellow]No relevant passages found in the knowledge base.[/yellow]")
@@ -138,6 +142,7 @@ def synthesize(
     year_from: int | None = _YEAR_FROM,
     year_to: int | None = _YEAR_TO,
     domain: str | None = _DOMAIN,
+    topic_filter: str | None = _TOPIC,
     model: str | None = _MODEL,
 ):
     """
@@ -161,7 +166,7 @@ def synthesize(
     with get_session() as session:
         with console.status("[bold green]Retrieving relevant passages...", spinner="dots"):
             results = _retrieve(topic, context_k, candidates, no_rerank,
-                                year_from, year_to, domain, None, session, qdrant)
+                                year_from, year_to, domain, None, session, qdrant, topic_filter)
 
         if not results:
             console.print("[yellow]No relevant passages found.[/yellow]")
@@ -202,7 +207,11 @@ def write(
     year_from: int | None = _YEAR_FROM,
     year_to: int | None = _YEAR_TO,
     domain: str | None = _DOMAIN,
+    topic_filter: str | None = _TOPIC,
     model: str | None = _MODEL,
+    save: bool = typer.Option(False, "--save", help="Save the draft to the database."),
+    book: str | None = typer.Option(None, "--book", "-b", help="Book title to associate with the draft (requires --save)."),
+    chapter: int | None = typer.Option(None, "--chapter", "-c", help="Chapter number to associate with the draft (requires --book)."),
 ):
     """
     Draft a paper section grounded in your literature library.
@@ -213,6 +222,9 @@ def write(
 
       sciknow ask write "stellar population synthesis methods" --section methods \\
           --domain astrophysics --year-from 2010
+
+      sciknow ask write "solar forcing mechanisms" --section introduction --save \\
+          --book "Global Cooling" --chapter 2
     """
     if section not in _VALID_SECTIONS:
         console.print(f"[red]Unknown section type:[/red] {section}")
@@ -231,7 +243,7 @@ def write(
     with get_session() as session:
         with console.status("[bold green]Retrieving relevant passages...", spinner="dots"):
             results = _retrieve(search_query, context_k, candidates, no_rerank,
-                                year_from, year_to, domain, None, session, qdrant)
+                                year_from, year_to, domain, None, session, qdrant, topic_filter)
 
         if not results:
             console.print("[yellow]No relevant passages found.[/yellow]")
@@ -243,7 +255,14 @@ def write(
     console.print(Rule(f"[bold]Draft {section.capitalize()}:[/bold] {topic}"))
     console.print()
 
-    _stream_answer(system, user, model)
+    # Collect streamed output so we can save it
+    from sciknow.rag.llm import stream as llm_stream
+    tokens: list[str] = []
+    for token in llm_stream(system, user, model=model):
+        console.print(token, end="", highlight=False)
+        tokens.append(token)
+    console.print()
+    content = "".join(tokens)
 
     if show_sources:
         from sciknow.rag.prompts import format_sources
@@ -251,3 +270,60 @@ def write(
         console.print(Rule("[dim]Sources[/dim]"))
         console.print(f"[dim]{format_sources(results)}[/dim]")
     console.print()
+
+    if save:
+        from sqlalchemy import text
+        from sciknow.storage.db import get_session
+        import uuid
+
+        source_lines = [
+            prompts._apa_citation(r, i + 1)
+            for i, r in enumerate(results)
+        ]
+        word_count = len(content.split())
+
+        book_id = None
+        chapter_id = None
+
+        with get_session() as session:
+            if book:
+                row = session.execute(
+                    text("SELECT id FROM books WHERE title ILIKE :t LIMIT 1"),
+                    {"t": f"%{book}%"},
+                ).fetchone()
+                if row:
+                    book_id = str(row[0])
+                else:
+                    console.print(f"[yellow]Warning: book not found: {book!r}[/yellow]")
+
+            if book_id and chapter is not None:
+                row = session.execute(
+                    text("SELECT id FROM book_chapters WHERE book_id = :bid AND number = :num LIMIT 1"),
+                    {"bid": book_id, "num": chapter},
+                ).fetchone()
+                if row:
+                    chapter_id = str(row[0])
+                else:
+                    console.print(f"[yellow]Warning: chapter {chapter} not found in book[/yellow]")
+
+            draft_title = f"{section.capitalize()}: {topic}"
+            session.execute(text("""
+                INSERT INTO drafts (id, title, book_id, chapter_id, section_type, topic,
+                                    content, word_count, sources, model_used)
+                VALUES (:id, :title, :book_id, :chapter_id, :section_type, :topic,
+                        :content, :word_count, :sources::jsonb, :model_used)
+            """), {
+                "id": str(uuid.uuid4()),
+                "title": draft_title,
+                "book_id": book_id,
+                "chapter_id": chapter_id,
+                "section_type": section,
+                "topic": topic,
+                "content": content,
+                "word_count": word_count,
+                "sources": __import__("json").dumps(source_lines),
+                "model_used": model or "default",
+            })
+            session.commit()
+
+        console.print(f"[green]✓ Draft saved:[/green] {draft_title}  ({word_count} words)")
