@@ -1,14 +1,18 @@
 """
 Section-aware chunker for scientific paper documents.
 
-Two entry points:
-  parse_sections_from_json(json_data)  — preferred; reads Marker's structured
-                                         JSON output for exact block-type-based
-                                         section detection and heading levels.
-  parse_sections(markdown)             — legacy fallback; regex over plain
-                                         markdown headings.
+Three entry points, one per PDF backend:
+  parse_sections_from_mineru(content_list) — primary; reads MinerU 2.5
+                                             content_list.json (flat list of
+                                             typed blocks with text_level for
+                                             headings).
+  parse_sections_from_json(json_data)      — fallback; reads Marker's nested
+                                             block tree (SectionHeader/Text/
+                                             Table/Equation/…).
+  parse_sections(markdown)                 — last resort; regex over plain
+                                             markdown headings.
 
-Both return list[Section], consumed by chunk_document().
+All three return list[Section], consumed by chunk_document().
 """
 from __future__ import annotations
 
@@ -195,6 +199,160 @@ def _is_implicit_section_header(html: str) -> bool:
     # Must match one of the known prefixes exactly
     return any(normalised == kw or normalised.startswith(kw + ' ')
                for kw in _KNOWN_SECTION_WORDS)
+
+
+def _mineru_list_items_to_text(list_items: list) -> str:
+    """MinerU list_items is either list[str] or list[dict{text: str}]."""
+    out: list[str] = []
+    for li in list_items or []:
+        if isinstance(li, str):
+            s = li.strip()
+            if s:
+                out.append(f"- {s}")
+        elif isinstance(li, dict):
+            txt = (li.get("text") or "").strip()
+            if txt:
+                out.append(f"- {txt}")
+    return "\n".join(out)
+
+
+def parse_sections_from_mineru(content_list: list[dict]) -> list[Section]:
+    """
+    Build a list of Sections by walking MinerU's content_list.json.
+
+    Input format (MinerU 2.5 pipeline backend):
+      Flat list of typed items:
+        {type: "text",     text: "...", text_level: 0|1|2|3, bbox, page_idx}
+        {type: "table",    table_body: "<html>...</html>", table_caption: [...], ...}
+        {type: "equation", text: "<latex>", text_format: "latex"}
+        {type: "code",     code_body: "...", code_caption: [...], sub_type: "code"|"algorithm"}
+        {type: "list",     list_items: [...] }
+        {type: "image",    img_path, image_caption, image_footnote}
+        {type: "chart"|"seal"}             — treated like image (skipped)
+        {type: "header"|"footer"|"page_number"|"page_footnote"|"aside_text"} — skipped
+
+    Algorithm:
+      - text with text_level == 0 (or missing) → body content for current section
+      - text with text_level == 1 or 2         → open a new top-level section
+      - text with text_level >= 3              → inline bold subheading within current section
+      - table/equation/code/list               → body content
+      - image/chart/seal/auxiliary             → skipped
+      - Implicit-heading heuristic: short Text blocks whose body matches a known
+        section word are promoted to section headers (same as the Marker path).
+    """
+    sections: list[Section] = []
+    current_type = "unknown"
+    current_title = ""
+    current_parts: list[str] = []
+    section_index = 0
+
+    def _flush() -> None:
+        nonlocal section_index
+        if not current_parts:
+            return
+        content = '\n\n'.join(p for p in current_parts if p.strip())
+        if not content.strip():
+            return
+        sections.append(Section(
+            section_type=current_type,
+            section_title=current_title,
+            section_index=section_index,
+            content=content,
+        ))
+        section_index += 1
+
+    # Auxiliary / noise types that never contribute to section content
+    NOISE_TYPES = {"image", "chart", "seal", "header", "footer",
+                   "page_number", "page_footnote", "aside_text"}
+
+    for item in content_list or []:
+        itype = item.get("type", "")
+
+        if itype in NOISE_TYPES:
+            continue
+
+        if itype == "text":
+            text = (item.get("text") or "").strip()
+            if not text:
+                continue
+            level = item.get("text_level") or 0
+
+            if level in (1, 2):
+                # Top-level section heading
+                _flush()
+                current_parts = []
+                current_title = text
+                current_type = _classify_heading(text)
+                continue
+
+            if level and level >= 3:
+                # Subheading — inline bold marker, keep within current section
+                current_parts.append(f"**{text}**")
+                continue
+
+            # level 0 (body text) — but check implicit section heuristic first.
+            # Short body-level blocks that look exactly like a canonical section
+            # word get promoted to section headings. This handles older PDFs
+            # where MinerU's layout model didn't emit a text_level.
+            if len(text.split()) <= 6:
+                normalised = re.sub(r'^[\d.]+\s*', '', text.lower().strip())
+                normalised = re.sub(r'[^\w\s]', '', normalised).strip()
+                if any(normalised == kw or normalised.startswith(kw + ' ')
+                       for kw in _KNOWN_SECTION_WORDS):
+                    _flush()
+                    current_parts = []
+                    current_title = text
+                    current_type = _classify_heading(text)
+                    continue
+
+            current_parts.append(text)
+
+        elif itype == "table":
+            body = item.get("table_body") or ""
+            if body:
+                table_text = _table_to_text(body)
+                if table_text.strip():
+                    # Include caption if present for better retrieval signal
+                    caption_parts = item.get("table_caption") or []
+                    caption = " ".join(c for c in caption_parts if isinstance(c, str)).strip()
+                    if caption:
+                        current_parts.append(f"{caption}\n{table_text}")
+                    else:
+                        current_parts.append(table_text)
+
+        elif itype == "equation":
+            eq = (item.get("text") or "").strip()
+            if eq:
+                current_parts.append(eq)
+
+        elif itype == "code":
+            code = (item.get("code_body") or "").strip()
+            if code:
+                current_parts.append(code)
+
+        elif itype == "list":
+            list_text = _mineru_list_items_to_text(item.get("list_items") or [])
+            if list_text:
+                current_parts.append(list_text)
+
+        # Unknown types are ignored rather than raising — MinerU may introduce
+        # new types across versions, and silently dropping them is safer than
+        # breaking ingestion on upgrade.
+
+    _flush()  # last section
+
+    # Handle documents with no section headers at all
+    if not sections and current_parts:
+        all_text = '\n\n'.join(current_parts)
+        if all_text.strip():
+            sections.append(Section(
+                section_type="unknown",
+                section_title="",
+                section_index=0,
+                content=all_text.strip(),
+            ))
+
+    return sections
 
 
 def parse_sections_from_json(json_data: dict) -> list[Section]:

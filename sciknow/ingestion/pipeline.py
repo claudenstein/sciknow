@@ -137,11 +137,12 @@ def ingest(pdf_path: Path, force: bool = False) -> UUID:
             result = pdf_converter.convert(pdf_path, output_dir)
             doc.mineru_output_path = str(output_dir)
 
-            output_file = result.json_path or result.md_path
+            output_file = result.content_list_path or result.json_path or result.md_path
             _log_job(session, doc_id, "convert", "completed",
                      int((time.monotonic() - t0) * 1000),
                      {
-                         "output": str(output_file),
+                         "output": str(output_file) if output_file else None,
+                         "backend": result.backend,
                          "mode": "json" if result.is_json else "markdown",
                          "chars": len(result.text),
                      })
@@ -194,7 +195,9 @@ def ingest(pdf_path: Path, force: bool = False) -> UUID:
             session.query(PaperSection).filter_by(document_id=doc_id).delete()
             session.query(Chunk).filter_by(document_id=doc_id).delete()
 
-            if result.is_json:
+            if result.backend == "mineru":
+                sections = chunker.parse_sections_from_mineru(result.content_list)
+            elif result.backend == "marker_json":
                 sections = chunker.parse_sections_from_json(result.json_data)
             else:
                 sections = chunker.parse_sections(result.text)
