@@ -50,7 +50,8 @@ All AI inference runs locally. No cloud APIs required to operate the system.
 PDFs (scanned or text)
         │
         ▼
- [1] Marker (marker-pdf)        PDF → structured Markdown + images
+ [1] MinerU 2.5 (pipeline)      PDF → content_list.json (typed blocks)
+     ↳ Marker fallback          ↳ used if MinerU fails (rare)
         │
         ▼
  [2] Metadata extraction       PyMuPDF → Crossref API → arXiv API → LLM fallback
@@ -108,11 +109,12 @@ sciknow/
 │   ├── inbox/                  # drop PDFs here
 │   ├── processed/              # PDFs moved here after successful ingest
 │   ├── failed/                 # PDFs moved here on failure
-│   └── mineru_output/          # raw Marker output per paper
+│   └── mineru_output/          # raw converter output per paper
 │       └── {uuid}/
-│           ├── {name}.json     # Marker block-structured JSON (primary)
-│           ├── {name}.md       # markdown fallback (only if JSON fails)
-│           └── images/         # extracted images (markdown fallback only)
+│           └── {stem}/
+│               └── auto/       # MinerU pipeline backend default subdir
+│                   ├── {stem}_content_list.json  # MinerU typed block list (primary)
+│                   └── {stem}_middle.json        # MinerU intermediate rep (debug)
 └── sciknow/
     ├── config.py               # Pydantic Settings — all config flows through here
     ├── cli/
@@ -125,7 +127,7 @@ sciknow/
     │   ├── book.py             # sciknow book ...
     │   └── draft.py            # sciknow draft ...
     ├── ingestion/
-    │   ├── pdf_converter.py    # Marker (marker-pdf) wrapper
+    │   ├── pdf_converter.py    # MinerU + Marker fallback dispatcher
     │   ├── metadata.py         # 4-layer metadata extraction
     │   ├── chunker.py          # section detection + chunking
     │   ├── embedder.py         # bge-m3 → Qdrant upsert
@@ -164,7 +166,7 @@ What it does:
 - Downloads Qdrant binary to `~/.local/qdrant/` and registers it as a systemd user service
 - Installs Ollama and pulls the fast metadata model (`mistral:7b-instruct-q4_K_M`)
 - Installs `uv` and runs `uv sync` to set up the Python environment
-- Installs Marker (`marker-pdf`); models are auto-downloaded from HuggingFace on first use
+- Installs MinerU 2.5 (`mineru[core]`) as the primary PDF backend and Marker (`marker-pdf`) as fallback; both download their models lazily on first use (MinerU → `~/.cache/modelscope`, Marker → `~/.cache/datalab`)
 - Copies `.env.example` → `.env`
 
 ### 2. Pull the main LLM
@@ -236,12 +238,20 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
 ```
 
-**Marker:**
+**PDF converters:**
 ```bash
+# Primary: MinerU 2.5 (OpenDataLab, OmniDocBench SOTA for scientific papers)
+uv add "mineru[core]"
+
+# Fallback: Marker (kept for robustness)
 uv pip install marker-pdf
 ```
 
-Models (Surya OCR, layout) are downloaded automatically from HuggingFace on first use and cached in `~/.cache/huggingface/`. GPU is used automatically if CUDA is available.
+MinerU downloads its pipeline models (layout, MFD, MFR, table OCR, text OCR) on first use to `~/.cache/modelscope` (~2 GB). Marker downloads Surya OCR + layout models to `~/.cache/datalab` on first use. Both use CUDA automatically when available. You can select the backend with `PDF_CONVERTER_BACKEND` in `.env`:
+
+- `auto` (default) — MinerU → Marker JSON → Marker markdown fallback chain
+- `mineru` — MinerU only, fails hard on error
+- `marker` — legacy Marker-only path (Marker JSON → markdown)
 
 ---
 
@@ -264,10 +274,29 @@ All settings are read from `.env` (or environment variables). Managed by Pydanti
 | `LLM_MODEL` | `qwen2.5:32b-instruct-q4_K_M` | Main LLM (Ollama model name) |
 | `LLM_FAST_MODEL` | `mistral:7b-instruct-q4_K_M` | Fast LLM for metadata extraction fallback |
 | `RERANKER_MODEL` | `BAAI/bge-reranker-v2-m3` | Cross-encoder reranker (used in Phase 2+) |
-| `CROSSREF_EMAIL` | `user@example.com` | **Set this.** Used in Crossref User-Agent header |
-| `EMBEDDING_BATCH_SIZE` | `8` | Chunks per embedding batch (tune for your VRAM) |
+| `CROSSREF_EMAIL` | `user@example.com` | **Set this.** Used in Crossref/OpenAlex polite pool User-Agent |
+| `PDF_CONVERTER_BACKEND` | `auto` | `auto` / `mineru` / `marker` — see above |
+| `EMBEDDING_BATCH_SIZE` | `32` | Chunks per bge-m3 batch (16 if LLM co-resident, 64 for embedder-only runs) |
+| `MARKER_BATCH_MULTIPLIER` | `2` | Marker/Surya internal batch size multiplier (Marker fallback path) |
+| `PG_POOL_SIZE` / `PG_MAX_OVERFLOW` | `20` / `20` | SQLAlchemy connection pool for parallel workers |
+| `QDRANT_HNSW_M` | `32` | HNSW graph connectivity (applied on collection creation) |
+| `QDRANT_HNSW_EF_CONSTRUCT` | `256` | HNSW build-time exploration (applied on collection creation) |
+| `QDRANT_HNSW_EF` | `128` | HNSW query-time exploration (applied per query) |
+| `QDRANT_SCALAR_QUANTIZATION` | `true` | int8 dense-vector quantization (~75% memory savings, negligible recall hit) |
+| `INGEST_WORKERS` | `1` | Parallel worker subprocesses for `ingest directory` (raise to 2 only when LLM is off-GPU) |
+| `ENRICH_WORKERS` | `8` | Concurrent Crossref/OpenAlex lookups in `db enrich` |
+| `EXPAND_DOWNLOAD_WORKERS` | `6` | Concurrent OA PDF lookups in `db expand` |
+| `LLM_PARALLEL_WORKERS` | `4` | Concurrent LLM calls in bulk commands; **must be ≤ `OLLAMA_NUM_PARALLEL` on the Ollama server** (server default is 1) |
+| `EXPAND_RELEVANCE_THRESHOLD` | `0.55` | Cosine similarity cut-off for the `db expand` relevance filter |
 
 **Remote GPU server:** Change only `OLLAMA_HOST=http://your-gpu-server:11434`. Everything else stays the same.
+
+**Server-side Ollama parallelism:** the default `OLLAMA_NUM_PARALLEL=1` serialises every LLM request regardless of client-side concurrency. To unlock `LLM_PARALLEL_WORKERS`, set it on the Ollama host:
+```bash
+systemctl --user edit ollama
+# add:  Environment="OLLAMA_NUM_PARALLEL=4"
+systemctl --user restart ollama
+```
 
 ---
 
@@ -297,6 +326,11 @@ sciknow ingest directory ./papers/
 
 # Non-recursive
 sciknow ingest directory ./papers/ --no-recursive
+
+# Parallel ingestion — spawns N worker subprocesses, each with its own
+# Marker/MinerU + bge-m3 models. On a 24 GB 3090 with an LLM resident,
+# keep --workers 1. Raise to 2 only when the LLM is off-GPU.
+sciknow ingest directory ./papers/ --workers 2
 
 # Re-ingest a paper that was already processed
 sciknow ingest file paper.pdf --force
@@ -500,17 +534,28 @@ Failed PDFs are copied to `data/failed/`. Successfully processed PDFs are copied
 
 ## Ingestion Pipeline Details
 
-### Stage 1 — PDF Conversion (Marker)
+### Stage 1 — PDF Conversion (MinerU → Marker fallback)
 
-Marker (`marker-pdf`) detects whether a PDF is text-based or scanned and applies the appropriate pipeline:
-- **Text PDF:** layout analysis, reading order detection, multi-column handling, LaTeX math
-- **Scanned PDF:** Surya OCR + layout analysis, GPU-accelerated
+`sciknow/ingestion/pdf_converter.py` dispatches based on `PDF_CONVERTER_BACKEND`:
 
-**Output format — JSON (primary):** Marker's `JSONRenderer` produces a structured block tree where every element is typed: `SectionHeader` (with explicit heading level h1–h4), `Text`, `Table`, `Equation`, `ListItem`, `Caption`, `PageHeader`, `PageFooter`, `Figure`, etc. This is used by the section-aware chunker for exact structural detection instead of regex heuristics.
+1. **MinerU 2.5** (primary) — OpenDataLab's pipeline backend. Runs a cascade of specialised models: DocLayout-YOLO for layout, MFD (Math Formula Detection) + MFR (Math Formula Recognition) for LaTeX extraction, table OCR + structure reconstruction (HTML tables), text OCR, seal detection. Scores 86.2 on [OmniDocBench v1.5](https://arxiv.org/abs/2412.07626) — current SOTA among open-source pipeline tools on scientific papers. Runs on any GPU with ≥8 GB VRAM (Volta or newer). Models cached to `~/.cache/modelscope` on first use (~2 GB).
 
-**Fallback — Markdown:** if JSON conversion fails for any document, Marker falls back to `MarkdownRenderer` and saves a `.md` file. The rest of the pipeline continues normally.
+2. **Marker JSON** (fallback) — `marker-pdf`'s `JSONRenderer` produces a structured block tree (`SectionHeader`, `Text`, `Table`, `Equation`, `ListItem`, ...). Used automatically when MinerU fails, or when `PDF_CONVERTER_BACKEND=marker`.
 
-Output is saved to `data/mineru_output/{doc_id}/{stem}.json` (or `.md` on fallback). Models are downloaded automatically from HuggingFace on first use and cached in `~/.cache/datalab/`. Marker models are loaded once and cached in memory for the duration of an ingestion run.
+3. **Marker markdown** (last resort) — if Marker's JSON path also fails, the markdown renderer runs as a final fallback.
+
+**MinerU output format:** `content_list.json` — a flat list of typed blocks:
+- `text` with `text_level` (0 = body, 1 = title, 2 = section heading, 3+ = subheading)
+- `table` with HTML `table_body` + caption arrays
+- `equation` with `text` containing LaTeX and `text_format: "latex"`
+- `image` / `chart` / `seal` with paths + captions
+- `code` with `code_body` and `sub_type` (code vs algorithm)
+- `list` with `list_items` array
+- Auxiliary blocks (`header`, `footer`, `page_number`, `page_footnote`, `aside_text`) — dropped by the chunker
+
+Output lands in `data/mineru_output/{doc_id}/{stem}/auto/` (or `pipeline/` depending on MinerU version). Models for both backends load once per Python process and stay resident in VRAM — batching ingestion with `--workers N` amortises the load across many PDFs.
+
+Why MinerU as primary: Marker has a known severe performance regression on RTX 3090 ([datalab-to/marker#919](https://github.com/datalab-to/marker/issues/919) — ~0.03 pages/s with 18–19 GB of VRAM sitting idle). MinerU 2.5 on the same GPU runs at ~0.4 pages/s single-stream. See `OPTIMIZATION.md` for the full rationale and benchmarks.
 
 ### Stage 2 — Metadata Extraction (4 layers)
 
@@ -525,9 +570,13 @@ Fields extracted: title, abstract, year, DOI, arXiv ID, journal, volume, issue, 
 
 ### Stage 3 — Section-Aware Chunking
 
-**JSON mode (primary):** the chunker reads the Marker block tree directly. `SectionHeader` blocks at heading level h1/h2 open new sections; h3/h4 are inlined as bold subheadings within the parent section to avoid fragmentation. `Text`, `Table`, `Equation`, and `ListItem` blocks are accumulated into the current section. `PageHeader`, `PageFooter`, `Figure`, and `Picture` blocks are discarded. Short `Text` blocks that contain only a known section keyword (`Abstract`, `Introduction`, etc.) are also recognised as implicit section headers — this handles older PDFs where heading formatting was lost during scanning.
+The chunker has three parallel parsers, one per PDF backend, all producing the same `Section` list downstream:
 
-**Markdown mode (fallback):** sections are detected from markdown headings (`#` through `####`) using regex.
+**MinerU mode (primary):** `parse_sections_from_mineru(content_list)` walks the flat typed-block list. Text items with `text_level == 1 or 2` open a new top-level section; `text_level >= 3` become inline bold subheadings; `text_level == 0` (body) is accumulated. Tables are rendered to pipe-delimited plain text (with caption prepended). Equations contribute their LaTeX string. Code blocks contribute `code_body`. Lists are joined with newlines. Images/charts/seals and page-level blocks (headers, footers, page numbers) are dropped. Short body-text blocks matching a known section keyword (`Abstract`, `Introduction`, ...) are promoted to implicit section headers — handles older PDFs where MinerU's layout model didn't emit a `text_level`.
+
+**Marker JSON mode (fallback):** `parse_sections_from_json(json_data)` walks Marker's nested block tree. `SectionHeader` blocks at heading level h1/h2 open new sections; h3/h4 are inlined as bold subheadings. `Text`, `Table`, `Equation`, `ListItem` blocks are accumulated. `PageHeader`, `PageFooter`, `Figure`, `Picture` are discarded. Same implicit-heading heuristic as the MinerU path.
+
+**Markdown mode (last resort):** `parse_sections(markdown)` detects sections from markdown headings (`#` through `####`) using regex. Only used if both MinerU and Marker JSON fail.
 
 Both modes classify sections into canonical types:
 
@@ -579,7 +628,7 @@ Both are stored in Qdrant. Abstracts are also embedded separately in the `abstra
 
 | Table | Description |
 |---|---|
-| `documents` | One row per PDF. Tracks ingestion status and file hash (SHA-256, used for deduplication). |
+| `documents` | One row per PDF. Tracks ingestion status, file hash (SHA-256 — used for deduplication), and `ingest_source` (`seed` for manual ingests, `expand` for auto-discovered references). |
 | `paper_metadata` | Bibliographic metadata: title, abstract, authors, DOI, year, journal, keywords, domains. Maintains a `tsvector` column for full-text search via an automatic trigger. |
 | `paper_sections` | Sections extracted from the document (JSON or markdown), classified by type. |
 | `chunks` | Individual retrieval units. Each chunk links to a section and a Qdrant point UUID. |
@@ -603,7 +652,8 @@ Managed by `uv` via `pyproject.toml`. Key packages:
 
 | Package | Purpose |
 |---|---|
-| `marker-pdf` | PDF→Markdown conversion (Marker) |
+| `mineru[core]` | PDF→JSON conversion (MinerU 2.5 pipeline backend, primary) |
+| `marker-pdf` | PDF→JSON/Markdown conversion (Marker, fallback) |
 | `FlagEmbedding` | BAAI/bge-m3 embedder and bge-reranker-v2-m3 cross-encoder |
 | `qdrant-client` | Qdrant vector store client |
 | `sqlalchemy` + `psycopg2-binary` | PostgreSQL ORM + driver |
@@ -647,7 +697,9 @@ A failed PDF can be re-ingested — the pipeline detects the existing record by 
 
 ### Scaling embedding batch size
 
-`EMBEDDING_BATCH_SIZE=8` is conservative for a 3090. With only the embedding model loaded (no LLM), you can increase to 32–64 for faster bulk ingestion. Set back to 8 when running LLM + embedder simultaneously.
+`EMBEDDING_BATCH_SIZE=32` is the default — safe on a 24 GB 3090 with a 32B q4 LLM co-resident. With only the embedder on the GPU (no LLM), raise to 64 for faster bulk ingestion. Drop to 16 when running MinerU `--workers 2` simultaneously (each worker loads its own bge-m3 + MinerU models).
+
+See `OPTIMIZATION.md` for the full tuning guide (3090 + incoming DGX Spark).
 
 ---
 
@@ -889,59 +941,70 @@ sciknow catalog stats
 
 ## Reference Expansion (`db expand`)
 
-Automatically grows the collection by following citations in existing papers.
+Automatically grows the collection by following citations in existing papers. Expand v2 (2026-04) adds semantic relevance filtering, four new OA sources, provenance tracking, and batched in-process ingestion.
 
 ### How it works
 
-1. **Reference extraction** — for each paper in the collection, references are
-   pulled from two sources:
-   - *Crossref reference list*: the structured `reference` array returned by
-     the Crossref API when the paper has a DOI. These often include DOIs for
-     each cited work directly.
-   - *Markdown bibliography section*: the references / bibliography heading in
-     the Marker-converted markdown, parsed with regex to extract DOIs, arXiv
-     IDs, and titles.
+1. **Reference extraction** — for each paper in the collection, references are pulled from four sources and unioned:
+   - **Crossref reference list** — structured `reference` array from the Crossref API (the bulk of refs for papers with DOIs).
+   - **MinerU `content_list.json`** — walks the typed-block list looking for the References heading, then harvests DOIs/arXiv IDs from subsequent text blocks until the next top-level heading (Appendix, Supplementary, etc.). Primary source for MinerU-converted papers.
+   - **Marker markdown bibliography** — legacy regex parser for papers ingested before the MinerU switch.
+   - **OpenAlex `referenced_works`** — per-paper API call for papers where local sources yielded < 10 refs. Batch-resolves OpenAlex work IDs to DOIs (50 per request). Catches preprints and post-2020 publications that Crossref deposits often miss.
 
-2. **Deduplication** — references already present in the collection (by DOI or
-   arXiv ID) are skipped.
+2. **Deduplication** — references already present in the collection (by DOI or arXiv ID) are skipped. Within-batch dedup also collapses near-duplicates by normalised title prefix.
 
-3. **Title resolution** *(opt-in, `--resolve`)* — for references that have
-   only a title (no DOI), Crossref title search is used to find a DOI (~0.3 s
-   each). Off by default because the base pool of DOI-bearing references is
-   usually large enough.
+3. **Semantic relevance filter** *(`--relevance`, on by default)* — candidate reference titles are embedded with bge-m3 and scored against either the **corpus centroid** (mean of all abstract embeddings — default) or a **user-provided topic query** (`-q "solar forcing"` / `--relevance-query ...`). References scoring below `EXPAND_RELEVANCE_THRESHOLD` (default 0.55 cosine similarity) are dropped. A score histogram with the cut point is printed so you can sanity-check the threshold before committing. Degrades gracefully on GPU OOM (common when ingestion is active) — prints a warning and continues without the filter. Disable explicitly with `--no-relevance`.
 
-4. **Open-access PDF discovery** — for each new reference with a DOI or arXiv
-   ID, the following sources are queried in order:
-   - **Unpaywall** (`api.unpaywall.org`) — largest database of legal OA PDFs
-   - **arXiv** — direct PDF for papers with an arXiv ID
-   - **Semantic Scholar** — additional OA source
+4. **Title resolution** *(opt-in, `--resolve`)* — for references with only a title (no DOI), Crossref title search is used to find a DOI (~0.3 s each). Off by default because the base pool of DOI-bearing references is usually large enough.
 
-5. **Download + ingest** — valid PDFs are saved to `--download-dir` and
-   immediately passed through the full ingestion pipeline (conversion →
-   chunking → embedding).
+5. **Open-access PDF discovery** — for each surviving candidate, six sources are queried in priority order:
+   - **Copernicus** — zero-cost URL construction for `10.5194/*` DOIs covering ACP, CP, TC, ESSD, BG, HESS, GMD, ESD, NHESS, OS, SE, WCD. Typically 15–25% of a climate/earth-science corpus lands here with no network lookup at all.
+   - **arXiv** — direct PDF for any arXiv ID.
+   - **Unpaywall** (`api.unpaywall.org`) — largest general OA database.
+   - **OpenAlex** `best_oa_location.pdf_url` — catches preprints and institutional repos Unpaywall misses.
+   - **Europe PMC** — free full-text for biomedical papers (`fullTextUrlList` + PMC article fallback).
+   - **Semantic Scholar** — final fallback via their public API.
+
+6. **Parallel download + batch ingest** — downloads run in a thread pool (`EXPAND_DOWNLOAD_WORKERS`, default 6). After **all** downloads complete, the main process calls the ingestion pipeline directly on each new PDF in-process, so MinerU + bge-m3 models load once and stay resident across the whole batch. This eliminates the ~15–20s of per-file Python/MinerU startup that the old subprocess-per-file approach paid. Sciknow's SHA-256 hash dedup makes the old `.ingest_done` cache redundant (still read for backward-compat, no longer written).
+
+7. **Provenance tagging** — every paper added by expand is tagged `ingest_source='expand'` in the `documents` table. `sciknow db stats` shows an "Ingest source" breakdown alongside the status breakdown, so you can see at a glance how much of your library is seed material vs grown.
 
 ```bash
-sciknow db expand                              # Download and ingest all discoverable OA papers
-sciknow db expand --dry-run                    # Preview what would be downloaded
-sciknow db expand --limit 50                   # Cap at 50 new papers
-sciknow db expand --no-ingest                  # Download PDFs but don't ingest yet
-sciknow db expand --resolve                    # Also resolve title-only references (slow)
-sciknow db expand --download-dir ~/papers/new  # Custom download directory
+# Preview what would be added, with the relevance filter on (default)
+sciknow db expand --dry-run --limit 50
+
+# Run it for real with a bounded first expansion
+sciknow db expand --limit 100
+
+# Topic-targeted expansion using a free-text anchor instead of the centroid
+sciknow db expand --limit 50 -q "solar irradiance climate forcing"
+
+# Tune the relevance threshold (higher = more selective)
+sciknow db expand --relevance-threshold 0.65 --limit 100
+
+# Disable the filter entirely (not recommended — expand will drift off-topic)
+sciknow db expand --no-relevance --limit 100
+
+# Download-only (skip ingest, useful if you want to curate the downloads folder first)
+sciknow db expand --no-ingest --limit 50
+
+# Also resolve title-only references to DOIs (slow, ~0.3 s each)
+sciknow db expand --resolve --limit 50
 ```
 
 ### Expected open-access hit rate
 
-Not every referenced paper is freely available. Typical Unpaywall coverage:
+Not every referenced paper is freely available. Typical coverage with the expand v2 six-source chain (Copernicus + arXiv + Unpaywall + OpenAlex + Europe PMC + Semantic Scholar):
 
-| Paper age | OA hit rate |
-|---|---|
-| 2020–present | ~50–65% |
-| 2010–2019 | ~35–50% |
-| Pre-2010 | ~15–30% |
+| Paper age | OA hit rate (Unpaywall only) | OA hit rate (v2 chain) |
+|---|---|---|
+| 2020–present | ~50–65% | ~65–80% |
+| 2010–2019 | ~35–50% | ~45–60% |
+| Pre-2010 | ~15–30% | ~20–35% |
 
-Running `db expand` is non-destructive and idempotent — already-downloaded
-files are skipped on re-runs, and papers already in the collection are never
-re-ingested.
+Climate / earth-science libraries see larger lifts because Copernicus journals (ACP, CP, TC, ESSD, ...) hit with zero API calls via URL pattern matching. Biomedical / environmental-health overlap benefits from Europe PMC.
+
+Running `db expand` is non-destructive and idempotent — already-downloaded files are skipped on re-runs, and papers already in the collection are never re-ingested (sciknow's SHA-256 hash dedup handles this automatically, independent of the on-disk `.no_oa_cache` file).
 
 ## Metadata Enrichment (`db enrich`)
 
