@@ -128,6 +128,18 @@ def _build_qdrant_filter(
 
 # ── Individual search legs ─────────────────────────────────────────────────────
 
+def _search_params() -> "SearchParams | None":
+    """Query-time HNSW ef + quantization rescoring, driven by settings."""
+    from sciknow.config import settings
+    from qdrant_client.models import QuantizationSearchParams, SearchParams
+    return SearchParams(
+        hnsw_ef=settings.qdrant_hnsw_ef,
+        quantization=QuantizationSearchParams(rescore=True)
+        if settings.qdrant_scalar_quantization
+        else None,
+    )
+
+
 def _qdrant_dense(
     client: QdrantClient,
     dense_vec: list[float],
@@ -141,6 +153,7 @@ def _qdrant_dense(
         limit=top_k,
         query_filter=qdrant_filter,
         with_payload=True,
+        search_params=_search_params(),
     )
     return [str(p.id) for p in response.points]
 
