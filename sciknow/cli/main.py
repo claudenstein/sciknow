@@ -1,3 +1,7 @@
+import sys
+from datetime import datetime
+from pathlib import Path
+
 import typer
 from rich.console import Console
 
@@ -15,6 +19,21 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+
+
+@app.callback()
+def _log_invocation(ctx: typer.Context) -> None:
+    """Log every CLI invocation to data/sciknow.log before the command runs."""
+    try:
+        log_path = Path("data/sciknow.log")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cmd = " ".join(sys.argv[1:]) or "(no args)"
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(f"{ts}  {cmd}\n")
+    except Exception:
+        pass  # never let logging break the CLI
+
 
 app.add_typer(catalog_module.app, name="catalog")
 app.add_typer(db_module.app, name="db")
