@@ -277,6 +277,7 @@ All settings are read from `.env` (or environment variables). Managed by Pydanti
 
 ```bash
 sciknow db init              # Run migrations + init Qdrant collections
+sciknow db reset             # Wipe everything and re-initialise (use before a full re-ingest)
 sciknow db stats             # Show paper/chunk counts and status breakdown
 sciknow db refresh-metadata  # Re-run metadata extraction for papers with poor-quality metadata
 sciknow db enrich            # Find DOIs for papers that don't have one (Crossref + OpenAlex search by title)

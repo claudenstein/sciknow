@@ -37,6 +37,22 @@ class AlreadyIngested(Exception):
         super().__init__(str(document_id))
 
 
+def _delete_qdrant_vectors(qdrant, document_id: str) -> None:
+    """Remove all Qdrant points for a document before re-ingesting it."""
+    from qdrant_client.models import Filter, FieldCondition, MatchValue
+    from sciknow.storage.qdrant import PAPERS_COLLECTION
+
+    try:
+        qdrant.delete(
+            collection_name=PAPERS_COLLECTION,
+            points_selector=Filter(
+                must=[FieldCondition(key="document_id", match=MatchValue(value=document_id))]
+            ),
+        )
+    except Exception:
+        pass  # collection may not exist yet on first run
+
+
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -68,11 +84,14 @@ def _set_status(session: Session, doc: Document, status: str) -> None:
     session.flush()
 
 
-def ingest(pdf_path: Path) -> UUID:
+def ingest(pdf_path: Path, force: bool = False) -> UUID:
     """
     Ingest a single PDF. Returns the document UUID.
-    Raises AlreadyIngested if the PDF has been seen before.
-    Raises PipelineError on unrecoverable failure.
+
+    force=True  — re-ingest even if already complete. Deletes existing
+                  sections, chunks, and Qdrant vectors before reprocessing.
+    force=False — raises AlreadyIngested if the PDF has been seen before
+                  and completed successfully.
     """
     pdf_path = pdf_path.resolve()
     if not pdf_path.exists():
@@ -82,13 +101,15 @@ def ingest(pdf_path: Path) -> UUID:
     qdrant = get_qdrant()
 
     with get_session() as session:
-        # Deduplication check
         existing = session.query(Document).filter_by(file_hash=file_hash).first()
         if existing:
-            if existing.ingestion_status == "complete":
+            if existing.ingestion_status == "complete" and not force:
                 raise AlreadyIngested(existing.id)
-            # Resume a failed/partial ingest — reset and retry
+            # Force re-ingest or resume a failed/partial ingest
             doc = existing
+            if force:
+                # Delete stale Qdrant vectors for this document
+                _delete_qdrant_vectors(qdrant, str(existing.id))
             doc.ingestion_status = "pending"
             doc.ingestion_error = None
         else:

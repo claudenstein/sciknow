@@ -349,6 +349,140 @@ def init():
 
 
 @app.command()
+def reset(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
+    keep_pdfs: bool = typer.Option(True, "--keep-pdfs/--no-keep-pdfs",
+                                    help="Keep PDFs in data/processed/ and downloads/ (default: yes)."),
+    keep_marker: bool = typer.Option(False, "--keep-marker",
+                                      help="Keep Marker output cache in data/mineru_output/ (default: no)."),
+):
+    """
+    Wipe the entire database and vector store, then re-initialise from scratch.
+
+    Deletes ALL ingested data: PostgreSQL tables, Qdrant collections, and
+    Marker output cache. PDFs in data/processed/ and downloads/ are kept by
+    default so you can re-ingest without downloading everything again.
+
+    Use this before a full re-ingest (e.g. after switching to JSON output mode).
+
+    Examples:
+
+      sciknow db reset --yes
+
+      sciknow db reset --yes --no-keep-pdfs   # also delete all PDFs
+    """
+    import shutil
+
+    from alembic import command
+    from alembic.config import Config as AlembicConfig
+    from sqlalchemy import text
+
+    from sciknow.config import settings
+    from sciknow.storage.db import check_connection
+    from sciknow.storage.db import engine as db_engine
+    from sciknow.storage.qdrant import (
+        PAPERS_COLLECTION,
+        check_connection as qdrant_ok,
+        init_collections,
+    )
+    from sciknow.storage.qdrant import get_client as get_qdrant
+
+    # ------------------------------------------------------------------
+    # Checks
+    # ------------------------------------------------------------------
+    if not check_connection():
+        console.print("[red]✗ PostgreSQL unreachable.[/red]")
+        raise typer.Exit(1)
+    if not qdrant_ok():
+        console.print("[red]✗ Qdrant unreachable.[/red]")
+        raise typer.Exit(1)
+
+    # ------------------------------------------------------------------
+    # Confirm
+    # ------------------------------------------------------------------
+    marker_dir = settings.mineru_output_dir
+    marker_size = sum(
+        f.stat().st_size for f in marker_dir.rglob("*") if f.is_file()
+    ) if marker_dir.exists() else 0
+
+    console.print()
+    console.print("[bold red]⚠  This will permanently delete:[/bold red]")
+    console.print("  • All PostgreSQL tables (documents, chunks, metadata, books, drafts, …)")
+    console.print("  • All Qdrant vector collections")
+    if not keep_marker:
+        console.print(
+            f"  • Marker output cache ({marker_dir})  "
+            f"[dim]{marker_size // 1024 // 1024} MB[/dim]"
+        )
+    if not keep_pdfs:
+        console.print(
+            f"  • PDFs in data/processed/ and downloads/"
+        )
+    console.print()
+
+    if not yes:
+        typer.confirm("Are you sure you want to reset the entire database?", abort=True)
+
+    # ------------------------------------------------------------------
+    # 1. Drop and recreate PostgreSQL schema
+    # ------------------------------------------------------------------
+    console.print("\n[bold]Dropping PostgreSQL schema...[/bold]")
+    with db_engine.connect() as conn:
+        conn.execute(text("DROP SCHEMA public CASCADE"))
+        conn.execute(text("CREATE SCHEMA public"))
+        conn.commit()
+
+    console.print("[bold]Re-running migrations...[/bold]")
+    cfg = AlembicConfig("alembic.ini")
+    command.upgrade(cfg, "head")
+    console.print("[green]✓ PostgreSQL schema reset[/green]")
+
+    # ------------------------------------------------------------------
+    # 2. Drop and recreate Qdrant collections
+    # ------------------------------------------------------------------
+    console.print("\n[bold]Dropping Qdrant collections...[/bold]")
+    qdrant = get_qdrant()
+    try:
+        collections = qdrant.get_collections().collections
+        for col in collections:
+            qdrant.delete_collection(col.name)
+            console.print(f"  Deleted collection: {col.name}")
+    except Exception as e:
+        console.print(f"[yellow]Warning: {e}[/yellow]")
+
+    init_collections()
+    console.print("[green]✓ Qdrant collections reset[/green]")
+
+    # ------------------------------------------------------------------
+    # 3. Delete Marker output cache
+    # ------------------------------------------------------------------
+    if not keep_marker and marker_dir.exists():
+        console.print(f"\n[bold]Deleting Marker cache ({marker_dir})...[/bold]")
+        shutil.rmtree(marker_dir)
+        console.print("[green]✓ Marker cache deleted[/green]")
+
+    # ------------------------------------------------------------------
+    # 4. Optionally delete PDFs
+    # ------------------------------------------------------------------
+    if not keep_pdfs:
+        for pdf_dir in [settings.processed_dir, settings.data_dir / "downloads"]:
+            if pdf_dir.exists():
+                console.print(f"\n[bold]Deleting {pdf_dir}...[/bold]")
+                shutil.rmtree(pdf_dir)
+                pdf_dir.mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # Done
+    # ------------------------------------------------------------------
+    console.print()
+    console.print("[bold green]✓ Reset complete.[/bold green]")
+    console.print()
+    console.print("Re-ingest your documents with:")
+    console.print("  [bold]sciknow ingest directory data/processed/[/bold]")
+    console.print("  [bold]sciknow ingest directory downloads/[/bold]")
+
+
+@app.command()
 def stats():
     """Show paper counts and ingestion status breakdown."""
     from sqlalchemy import func, text

@@ -40,7 +40,7 @@ def file(
     console.print(f"Ingesting [bold]{path.name}[/bold]...")
 
     try:
-        doc_id = ingest(path)
+        doc_id = ingest(path, force=force)
         console.print(f"[green]✓ Done.[/green] Document ID: [dim]{doc_id}[/dim]")
     except AlreadyIngested as e:
         console.print(f"[yellow]Already ingested[/yellow] (id={e.document_id}). Use --force to re-ingest.")
@@ -67,6 +67,10 @@ def _run_worker_loop(
     remaining = list(pdfs)
 
     while remaining:
+        env = {**__import__("os").environ}
+        if force:
+            env["SCIKNOW_FORCE_INGEST"] = "1"
+
         proc = subprocess.Popen(
             [sys.executable, "-m", "sciknow.ingestion.worker"],
             stdin=subprocess.PIPE,
@@ -74,6 +78,7 @@ def _run_worker_loop(
             stderr=subprocess.DEVNULL,
             text=True,
             bufsize=1,
+            env=env,
         )
 
         # Write paths to the worker's stdin in a background thread to avoid

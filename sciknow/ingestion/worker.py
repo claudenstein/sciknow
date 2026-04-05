@@ -27,6 +27,9 @@ def _emit(msg: dict) -> None:
 
 
 def main() -> None:
+    import os
+    force = os.environ.get("SCIKNOW_FORCE_INGEST", "0") == "1"
+
     for raw_line in sys.stdin:
         line = raw_line.strip()
         if not line:
@@ -35,7 +38,7 @@ def main() -> None:
         _emit({"file": str(path), "status": "started"})
         try:
             from sciknow.ingestion.pipeline import AlreadyIngested, PipelineError, ingest
-            doc_id = ingest(path)
+            doc_id = ingest(path, force=force)
             _emit({"file": str(path), "status": "done", "doc_id": str(doc_id)})
         except AlreadyIngested:
             _emit({"file": str(path), "status": "skipped"})
