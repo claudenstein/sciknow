@@ -499,6 +499,11 @@ def stats():
             .group_by(Document.ingestion_status)
             .all()
         )
+        source_rows = (
+            session.query(Document.ingest_source, func.count(Document.id))
+            .group_by(Document.ingest_source)
+            .all()
+        )
         total_chunks = session.query(func.count(Chunk.id)).scalar()
         embedded = (
             session.query(func.count(Chunk.id))
@@ -528,6 +533,13 @@ def stats():
     for status, count in sorted(status_rows):
         colour = "green" if status == "complete" else "red" if status == "failed" else "yellow"
         table.add_row(f"  [{colour}]{status}[/{colour}]", str(count))
+
+    if source_rows:
+        table.add_section()
+        table.add_row("[bold]Ingest source[/bold]", "")
+        for source, count in sorted(source_rows):
+            colour = "cyan" if source == "seed" else "magenta"
+            table.add_row(f"  [{colour}]{source}[/{colour}]", str(count))
 
     console.print(table)
 
@@ -848,6 +860,12 @@ def expand(
                                         help="Ingest downloaded PDFs immediately."),
     dry_run:      bool  = typer.Option(False, "--dry-run",   help="Show what would be downloaded without doing it."),
     delay:        float = typer.Option(0.3,   "--delay",     help="Seconds between API calls."),
+    relevance:          bool  = typer.Option(True,  "--relevance/--no-relevance",
+                                              help="Filter candidate references by semantic relevance to the corpus."),
+    relevance_threshold: float = typer.Option(0.0, "--relevance-threshold",
+                                               help="Cosine similarity threshold (0 = use EXPAND_RELEVANCE_THRESHOLD from .env, default 0.55)."),
+    relevance_query:    str   = typer.Option("",    "--relevance-query", "-q",
+                                              help="Free-text topic anchor for the relevance filter. If empty, the corpus centroid is used."),
 ):
     """
     Expand the collection by following references in existing papers.
@@ -883,6 +901,8 @@ def expand(
     from sciknow.ingestion.references import (
         extract_references_from_crossref,
         extract_references_from_markdown,
+        extract_references_from_mineru_content_list,
+        fetch_openalex_references,
     )
     from sciknow.storage.db import get_session
 
@@ -905,22 +925,90 @@ def expand(
                   f"{len(existing_dois)} with DOI, {len(existing_arxivs)} with arXiv ID")
 
     # ── Step 2: extract all references ───────────────────────────────────────
+    # Four sources, unioned per paper:
+    #   A. Crossref-stored reference list (structured, DOI-rich)
+    #   B. MinerU content_list.json (primary for MinerU-ingested papers)
+    #   C. Marker markdown bibliography section (legacy fallback)
+    #   D. OpenAlex referenced_works (only when A+B+C yielded few refs)
     all_refs: list = []
+    source_counts = {"crossref": 0, "mineru": 0, "markdown": 0, "openalex": 0}
+
+    # First pass: local sources (A, B, C)
+    needs_openalex: list[str] = []  # DOIs of papers with <10 refs locally
     for doi, arxiv_id, title, crossref_raw, marker_out in papers:
+        local_count_before = len(all_refs)
+
         # Source A: Crossref reference list (structured, reliable)
         if crossref_raw:
-            all_refs.extend(extract_references_from_crossref(crossref_raw))
+            crs = extract_references_from_crossref(crossref_raw)
+            all_refs.extend(crs)
+            source_counts["crossref"] += len(crs)
 
-        # Source B: bibliography section of the markdown
         if marker_out:
             from pathlib import Path as _Path
             mp = _Path(marker_out)
-            md_files = list(mp.glob("**/*.md")) if mp.exists() else []
-            if md_files:
-                md_text = md_files[0].read_text(encoding="utf-8", errors="replace")
-                all_refs.extend(extract_references_from_markdown(md_text))
+            if mp.exists():
+                # Source B: MinerU content_list.json (primary for post-switch ingests)
+                import json as _json
+                content_list_candidates = list(mp.rglob("*_content_list.json"))
+                if not content_list_candidates:
+                    content_list_candidates = list(mp.rglob("content_list.json"))
+                if content_list_candidates:
+                    try:
+                        cl = _json.loads(
+                            content_list_candidates[0].read_text(encoding="utf-8")
+                        )
+                        mrefs = extract_references_from_mineru_content_list(cl)
+                        all_refs.extend(mrefs)
+                        source_counts["mineru"] += len(mrefs)
+                    except Exception:
+                        pass
 
-    console.print(f"Extracted [bold]{len(all_refs)}[/bold] raw reference entries.")
+                # Source C: Marker markdown bibliography (legacy)
+                md_files = list(mp.rglob("*.md"))
+                if md_files:
+                    try:
+                        md_text = md_files[0].read_text(encoding="utf-8", errors="replace")
+                        mdrefs = extract_references_from_markdown(md_text)
+                        all_refs.extend(mdrefs)
+                        source_counts["markdown"] += len(mdrefs)
+                    except Exception:
+                        pass
+
+        local_count_added = len(all_refs) - local_count_before
+        # Queue for OpenAlex augmentation if we got a weak local signal.
+        # Threshold of 10 is conservative — most real papers have 20-80 refs.
+        if doi and local_count_added < 10:
+            needs_openalex.append(doi)
+
+    # Second pass: OpenAlex referenced_works for low-yield papers (parallel)
+    if needs_openalex:
+        console.print(
+            f"Querying OpenAlex referenced_works for "
+            f"[bold]{len(needs_openalex)}[/bold] papers with weak local ref signal…"
+        )
+        from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+        oa_workers = max(1, settings.enrich_workers)
+        with ThreadPoolExecutor(max_workers=oa_workers) as pool:
+            futures = {
+                pool.submit(fetch_openalex_references, d, settings.crossref_email): d
+                for d in needs_openalex
+            }
+            for fut in _as_completed(futures):
+                try:
+                    oa_refs = fut.result()
+                except Exception:
+                    continue
+                all_refs.extend(oa_refs)
+                source_counts["openalex"] += len(oa_refs)
+
+    console.print(
+        f"Extracted [bold]{len(all_refs)}[/bold] raw reference entries "
+        f"(crossref={source_counts['crossref']}, "
+        f"mineru={source_counts['mineru']}, "
+        f"markdown={source_counts['markdown']}, "
+        f"openalex={source_counts['openalex']})."
+    )
 
     # ── Step 3: deduplicate references against each other and the collection ─
     seen: set[str] = set()
@@ -952,6 +1040,84 @@ def expand(
     console.print(
         f"Downloadable (have DOI or arXiv ID): [bold]{len(downloadable)}[/bold]"
     )
+
+    # ── Step 4b: semantic relevance filter (optional) ─────────────────────────
+    # Embed candidate titles with bge-m3 and drop those that score below the
+    # configured threshold against the chosen anchor (either a user query or
+    # the corpus centroid). This prevents expand from dragging in unrelated
+    # papers when a seed paper cites cross-disciplinary methods.
+    if relevance and downloadable:
+        try:
+            from sciknow.retrieval.relevance import (
+                compute_corpus_centroid,
+                embed_query,
+                score_candidates,
+                score_histogram,
+            )
+
+            eff_threshold = (
+                relevance_threshold if relevance_threshold > 0
+                else settings.expand_relevance_threshold
+            )
+
+            if relevance_query:
+                anchor_desc = f'query "{relevance_query[:60]}"'
+                anchor_vec = embed_query(relevance_query)
+            else:
+                anchor_desc = "corpus centroid"
+                anchor_vec = compute_corpus_centroid()
+
+            if anchor_vec is None:
+                console.print(
+                    "[yellow]⚠ Relevance filter: no anchor available "
+                    "(abstracts collection empty?). Skipping filter.[/yellow]"
+                )
+            else:
+                titles_for_scoring = [
+                    (r.title or r.raw_text or "")[:300] for r in downloadable
+                ]
+                console.print(
+                    f"Scoring [bold]{len(downloadable)}[/bold] candidates "
+                    f"against {anchor_desc} (threshold={eff_threshold:.2f})…"
+                )
+                scores = score_candidates(titles_for_scoring, anchor_vec)
+                for ref, s in zip(downloadable, scores):
+                    ref._relevance_score = s  # transient attribute; not persisted
+
+                kept = [r for r in downloadable if r._relevance_score >= eff_threshold]
+                dropped = len(downloadable) - len(kept)
+
+                hist = score_histogram(scores, bins=10)
+                if hist:
+                    console.print("[dim]Relevance score distribution:[/dim]")
+                    max_count = max(c for _, _, c in hist) or 1
+                    for lo, hi, c in hist:
+                        bar_width = int(40 * c / max_count)
+                        marker = "  " if hi < eff_threshold else "▶ " if lo <= eff_threshold < hi else "  "
+                        console.print(
+                            f"  {marker}[dim]{lo:.2f}-{hi:.2f}[/dim] "
+                            f"{'█' * bar_width} {c}"
+                        )
+                    console.print(
+                        f"  [green]kept {len(kept)}[/green]  "
+                        f"[red]dropped {dropped}[/red]  (cut at {eff_threshold:.2f})"
+                    )
+
+                downloadable = sorted(
+                    kept, key=lambda r: r._relevance_score, reverse=True
+                )
+        except Exception as exc:
+            # Most common failure mode: CUDA OOM because another model
+            # (Ollama-held LLM, or a concurrent ingest) is occupying VRAM.
+            # Degrade gracefully — skip the filter rather than fail the
+            # whole command, since expand without a filter is still useful.
+            msg = str(exc)[:160]
+            console.print(
+                "[yellow]⚠ Relevance filter failed, continuing without it.[/yellow]\n"
+                f"  [dim]{type(exc).__name__}: {msg}[/dim]\n"
+                "  [dim]Common cause: GPU OOM. Free VRAM with `ollama stop <model>` "
+                "and re-run, or use [bold]--no-relevance[/bold] to skip explicitly.[/dim]"
+            )
 
     # Apply limit early so --resolve doesn't waste time on refs we won't download
     if limit:
@@ -1008,7 +1174,18 @@ def expand(
     if ingest_done_file.exists():
         ingest_done = set(ingest_done_file.read_text().splitlines())
 
-    # ── Step 7: download and ingest ───────────────────────────────────────────
+    # ── Step 7: download phase (parallel) + ingest phase (serial, in-process) ─
+    #
+    # Phase split (expand v2):
+    #   1. All downloads run in a thread pool (network I/O bound).
+    #   2. After all downloads settle, newly-downloaded PDFs are ingested
+    #      serially IN THE SAME PROCESS via pipeline.ingest(). This keeps
+    #      Marker/MinerU + bge-m3 models loaded once across the whole batch
+    #      instead of paying ~15-20s of per-file subprocess startup.
+    #
+    # Sciknow's SHA-256 hash-based dedup in pipeline.ingest() makes the old
+    # `.ingest_done` file redundant — we still consult it for backward-compat
+    # with pre-v2 runs, but we no longer write to it.
     downloaded = skipped = ingested = failed_dl = failed_ingest = 0
 
     log_file = download_dir / "expand.log"
@@ -1028,9 +1205,6 @@ def expand(
 
     dl_workers = max(1, _settings.expand_download_workers)
 
-    # Partition refs: cached skips handled first (no work), rest fed to a
-    # download pool. Ingest subprocesses stay on the main thread to avoid GPU
-    # contention on the 3090 (see OPTIMIZATION.md).
     def _prep(ref):
         ref_key = (ref.doi or ref.arxiv_id or "").lower()
         safe_name = (ref.doi or ref.arxiv_id or "unknown").replace("/", "_").replace(":", "_")
@@ -1052,13 +1226,8 @@ def expand(
         )
         return ("downloaded" if ok else "no_oa", source)
 
-    def _ingest_one(dest: Path) -> tuple[bool, str]:
-        result = subprocess.run(
-            [sys.executable, "-m", "sciknow.cli.main", "ingest", "file", str(dest)],
-            capture_output=True, text=True,
-        )
-        err = (result.stderr or result.stdout or "").strip()[:120]
-        return result.returncode == 0, err
+    # Phase 1: parallel downloads. Collect successful PDF paths for phase 2.
+    to_ingest: list[tuple[str, str, Path]] = []  # (ref_key, title, dest)
 
     with Progress(
         SpinnerColumn(),
@@ -1116,24 +1285,60 @@ def expand(
                     downloaded += 1
                     progress.update(task, description=f"[green]↓ {source}[/green] {label[:40]}")
                     _log(f"DL     {ref_key}  | {title}  | source={source}")
+                    if ingest:
+                        to_ingest.append((ref_key, title, dest))
 
-                # status in {"downloaded", "exists"} -> optionally ingest
-                if ingest:
-                    ok, err = _ingest_one(dest)
-                    if ok:
-                        ingested += 1
-                        _log(f"INGEST {ref_key}  | {title}")
-                        with ingest_done_file.open("a") as f:
-                            f.write(ref_key + "\n")
-                        ingest_done.add(ref_key)
-                    else:
-                        failed_ingest += 1
-                        _log(f"INGEST_FAIL {ref_key}  | {title}  | {err}")
                 elif status == "exists":
-                    skipped += 1
-                    _log(f"SKIP   {ref_key}  | {title}  (pdf on disk, --no-ingest)")
+                    # PDF already on disk from a prior (interrupted) run.
+                    # Queue for ingestion anyway — pipeline.ingest() will
+                    # hash-dedupe against the DB.
+                    if ingest:
+                        to_ingest.append((ref_key, title, dest))
+                    else:
+                        skipped += 1
+                        _log(f"SKIP   {ref_key}  | {title}  (pdf on disk, --no-ingest)")
 
                 progress.advance(task)
+
+    # Phase 2: in-process ingestion of everything that downloaded cleanly.
+    # Models (MinerU + bge-m3) load once and stay resident across all files.
+    if ingest and to_ingest:
+        from sciknow.ingestion.pipeline import AlreadyIngested, PipelineError, ingest as _ingest_fn
+
+        console.print(
+            f"\nIngesting [bold]{len(to_ingest)}[/bold] new PDF(s) in-process…"
+        )
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            console=console,
+            transient=False,
+        ) as progress:
+            itask = progress.add_task("Ingesting", total=len(to_ingest))
+
+            for ref_key, title, dest in to_ingest:
+                progress.update(itask, description=f"[dim]{title[:60]}[/dim]")
+                try:
+                    _ingest_fn(dest, ingest_source="expand")
+                    ingested += 1
+                    _log(f"INGEST {ref_key}  | {title}")
+                except AlreadyIngested:
+                    # Hash-based resume: the PDF was already ingested in a
+                    # prior run. Count as success for UX purposes.
+                    ingested += 1
+                    _log(f"INGEST {ref_key}  | {title}  (already in DB)")
+                except PipelineError as exc:
+                    failed_ingest += 1
+                    err = str(exc)[:120]
+                    _log(f"INGEST_FAIL {ref_key}  | {title}  | {err}")
+                except Exception as exc:
+                    failed_ingest += 1
+                    err = f"{type(exc).__name__}: {exc}"[:120]
+                    _log(f"INGEST_FAIL {ref_key}  | {title}  | {err}")
+                progress.advance(itask)
 
     _log(
         f"SUMMARY  downloaded={downloaded}  ingested={ingested}  "
