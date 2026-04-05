@@ -19,6 +19,7 @@ dependencies = [
     "tiktoken>=0.7",
     "arxiv>=2.1",
     "ollama>=0.3",
+    "mineru[core]>=3.0.8",
 ]
 
 [project.scripts]
