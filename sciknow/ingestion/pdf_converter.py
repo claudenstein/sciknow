@@ -171,6 +171,20 @@ def _get_models() -> dict:
     return _models
 
 
+def _marker_config() -> dict:
+    """Marker runtime tuning knobs driven by settings.
+
+    `batch_multiplier` multiplies Marker/Surya's internal batch sizes. Each
+    unit is ~5GB VRAM peak at the OCR stage. Conservative default is 2.
+    """
+    from sciknow.config import settings
+    cfg: dict = {}
+    mult = getattr(settings, "marker_batch_multiplier", 1)
+    if mult and mult > 1:
+        cfg["batch_multiplier"] = mult
+    return cfg
+
+
 def convert(pdf_path: Path, output_dir: Path) -> ConversionResult:
     """
     Convert a PDF to structured JSON (preferred) with plain-text fallback.
@@ -198,7 +212,7 @@ def convert(pdf_path: Path, output_dir: Path) -> ConversionResult:
     try:
         models = _get_models()
         converter = PdfConverter(
-            config={},
+            config=_marker_config(),
             artifact_dict=models,
             renderer='marker.renderers.json.JSONRenderer',
         )
@@ -235,7 +249,10 @@ def convert(pdf_path: Path, output_dir: Path) -> ConversionResult:
         from marker.config.parser import ConfigParser
 
         models = _get_models()
-        config_parser = ConfigParser({'output_format': 'markdown'})
+        config_parser = ConfigParser({
+            'output_format': 'markdown',
+            **_marker_config(),
+        })
         converter = PdfConverter(
             config=config_parser.generate_config_dict(),
             artifact_dict=models,
