@@ -114,10 +114,7 @@ def _archive_pdf(pdf_path: Path, dest_dir: Path) -> None:
     if is_our_file:
         shutil.move(str(pdf_path), str(dest))
     else:
-        try:
-            dest.symlink_to(pdf_path.resolve())
-        except OSError:
-            shutil.copy2(str(pdf_path), str(dest))
+        shutil.copy2(str(pdf_path), str(dest))
 
 
 def ingest(
