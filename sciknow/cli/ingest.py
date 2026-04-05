@@ -57,6 +57,8 @@ def _run_worker_loop(
     failed_files: list[tuple[str, str]],
     force: bool = False,
     lock: "threading.Lock | None" = None,
+    ingest_source: str = "seed",
+    on_file_done=None,
 ) -> None:
     """
     Drive one or more worker subprocesses through the PDF list.
@@ -69,9 +71,27 @@ def _run_worker_loop(
     When called from multiple threads (parallel ingestion), pass a shared
     `lock` — it guards the results dict and failed_files list. rich.Progress
     is already thread-safe for advance/update calls.
+
+    `ingest_source` is propagated to the worker via SCIKNOW_INGEST_SOURCE env
+    var; the worker passes it to pipeline.ingest() which stamps new documents
+    with it on first insert. 'seed' = manual CLI ingest, 'expand' = auto-
+    discovered via `db expand`.
+
+    `on_file_done` is an optional callback invoked from the parsing thread
+    with (file_path, status, error_msg|None) for each file that reaches a
+    terminal state (done / skipped / failed / crash). Lets callers attach
+    per-file logging (e.g. expand.log with ref_key + title) without extending
+    this function's signature further.
     """
     import contextlib
     _lock_ctx = lock if lock is not None else contextlib.nullcontext()
+
+    def _notify(path, status, error=None):
+        if on_file_done is not None:
+            try:
+                on_file_done(path, status, error)
+            except Exception:
+                pass  # never let a user callback bring down the worker loop
 
     remaining = list(pdfs)
 
@@ -79,6 +99,7 @@ def _run_worker_loop(
         env = {**__import__("os").environ}
         if force:
             env["SCIKNOW_FORCE_INGEST"] = "1"
+        env["SCIKNOW_INGEST_SOURCE"] = ingest_source
 
         proc = subprocess.Popen(
             [sys.executable, "-m", "sciknow.ingestion.worker"],
@@ -126,17 +147,21 @@ def _run_worker_loop(
                     results["done"] += 1
                 processed.add(file_path)
                 progress.advance(task)
+                _notify(file_path, "done", None)
             elif status == "skipped":
                 with _lock_ctx:
                     results["skipped"] += 1
                 processed.add(file_path)
                 progress.advance(task)
+                _notify(file_path, "skipped", None)
             elif status == "failed":
+                err = msg.get("error", "")[:120]
                 with _lock_ctx:
                     results["failed"] += 1
-                    failed_files.append((file_path.name, msg.get("error", "")[:120]))
+                    failed_files.append((file_path.name, err))
                 processed.add(file_path)
                 progress.advance(task)
+                _notify(file_path, "failed", err)
 
         feeder.join()
         proc.wait()
@@ -144,14 +169,13 @@ def _run_worker_loop(
         # If the worker crashed (non-zero exit) while processing a file,
         # that file was never reported as done/failed — mark it now.
         if proc.returncode != 0 and current_file and current_file not in processed:
+            err = f"worker crashed (exit {proc.returncode})"
             with _lock_ctx:
                 results["failed"] += 1
-                failed_files.append((
-                    current_file.name,
-                    f"worker crashed (exit {proc.returncode})",
-                ))
+                failed_files.append((current_file.name, err))
             processed.add(current_file)
             progress.advance(task)
+            _notify(current_file, "failed", err)
 
         remaining = [p for p in remaining if p not in processed]
 
@@ -164,6 +188,8 @@ def _run_parallel_workers(
     failed_files: list[tuple[str, str]],
     force: bool,
     num_workers: int,
+    ingest_source: str = "seed",
+    on_file_done=None,
 ) -> None:
     """
     Fan `pdfs` across `num_workers` concurrent worker subprocesses.
@@ -171,9 +197,14 @@ def _run_parallel_workers(
     Each bucket gets its own Python thread driving its own worker subprocess.
     Buckets are round-robin so slow PDFs distribute evenly. A single Lock
     guards shared counters and the failure list; rich.Progress is thread-safe.
+
+    `ingest_source` and `on_file_done` are forwarded to every worker loop.
     """
     if num_workers <= 1 or len(pdfs) == 1:
-        _run_worker_loop(pdfs, progress, task, results, failed_files, force=force)
+        _run_worker_loop(
+            pdfs, progress, task, results, failed_files,
+            force=force, ingest_source=ingest_source, on_file_done=on_file_done,
+        )
         return
 
     buckets = [pdfs[i::num_workers] for i in range(num_workers)]
@@ -185,7 +216,12 @@ def _run_parallel_workers(
         t = threading.Thread(
             target=_run_worker_loop,
             args=(bucket, progress, task, results, failed_files),
-            kwargs={"force": force, "lock": lock},
+            kwargs={
+                "force": force,
+                "lock": lock,
+                "ingest_source": ingest_source,
+                "on_file_done": on_file_done,
+            },
             daemon=True,
         )
         t.start()
@@ -203,7 +239,7 @@ def directory(
     workers: int = typer.Option(
         0, "--workers", "-w",
         help="Parallel ingestion worker subprocesses (0 = use INGEST_WORKERS "
-             "from .env, default 1). Each worker loads its own Marker (~5GB "
+             "from .env, default 1). Each worker loads its own MinerU (~7GB "
              "VRAM) + bge-m3 (~2.2GB). On a 24GB GPU with an LLM resident, "
              "keep at 1. Raise to 2 only when the LLM is off-GPU.",
     ),

@@ -866,6 +866,11 @@ def expand(
                                                help="Cosine similarity threshold (0 = use EXPAND_RELEVANCE_THRESHOLD from .env, default 0.55)."),
     relevance_query:    str   = typer.Option("",    "--relevance-query", "-q",
                                               help="Free-text topic anchor for the relevance filter. If empty, the corpus centroid is used."),
+    workers:            int   = typer.Option(0,     "--workers", "-w",
+                                              help="Parallel ingestion worker subprocesses for the post-download ingest phase "
+                                                   "(0 = use INGEST_WORKERS from .env, default 1). Each worker loads its own "
+                                                   "MinerU (~7GB VRAM) + bge-m3 (~2.2GB). On a 24GB 3090 with an LLM resident, "
+                                                   "keep at 1. Raise to 2 only when the LLM is off-GPU."),
 ):
     """
     Expand the collection by following references in existing papers.
@@ -1300,14 +1305,53 @@ def expand(
 
                 progress.advance(task)
 
-    # Phase 2: in-process ingestion of everything that downloaded cleanly.
-    # Models (MinerU + bge-m3) load once and stay resident across all files.
+    # Phase 2: parallel ingestion of everything that downloaded cleanly.
+    # Each worker subprocess loads its own MinerU + bge-m3 once and processes
+    # its bucket of PDFs. The main process's bge-m3 (loaded for the relevance
+    # filter, if it ran) is released first so we don't keep a redundant copy
+    # alongside the worker copies.
     if ingest and to_ingest:
-        from sciknow.ingestion.pipeline import AlreadyIngested, PipelineError, ingest as _ingest_fn
+        from sciknow.cli.ingest import _run_parallel_workers
+        from sciknow.ingestion.embedder import release_model as _release_embedder
 
+        # Resolve worker count: CLI flag wins, else INGEST_WORKERS from .env.
+        ingest_workers = workers if workers > 0 else max(1, settings.ingest_workers)
+        ingest_workers = min(ingest_workers, len(to_ingest))
+
+        # Free the main-process bge-m3 so worker subprocesses can load theirs
+        # without fighting the main process for VRAM.
+        _release_embedder()
+
+        # Build a path → (ref_key, title) lookup so the per-file callback can
+        # write expand.log entries with the metadata workers don't know about.
+        path_to_meta: dict[Path, tuple[str, str]] = {
+            dest.resolve(): (ref_key, title) for ref_key, title, dest in to_ingest
+        }
+
+        def _on_file_done(path, status, error):
+            # Counters and log lines mutate nonlocal state; rich.Progress
+            # handles its own threading so no extra lock is needed here.
+            nonlocal ingested, failed_ingest
+            ref_key, title = path_to_meta.get(path.resolve(), ("?", path.name))
+            if status == "done":
+                ingested += 1
+                _log(f"INGEST {ref_key}  | {title}")
+            elif status == "skipped":
+                # Already in DB via SHA-256 match — count as success for UX.
+                ingested += 1
+                _log(f"INGEST {ref_key}  | {title}  (already in DB)")
+            elif status == "failed":
+                failed_ingest += 1
+                _log(f"INGEST_FAIL {ref_key}  | {title}  | {error or ''}")
+
+        worker_note = f" ({ingest_workers} workers)" if ingest_workers > 1 else ""
         console.print(
-            f"\nIngesting [bold]{len(to_ingest)}[/bold] new PDF(s) in-process…"
+            f"\nIngesting [bold]{len(to_ingest)}[/bold] new PDF(s){worker_note}…"
         )
+
+        ingest_results = {"done": 0, "skipped": 0, "failed": 0}
+        ingest_failed_files: list[tuple[str, str]] = []
+
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -1318,27 +1362,15 @@ def expand(
             transient=False,
         ) as progress:
             itask = progress.add_task("Ingesting", total=len(to_ingest))
-
-            for ref_key, title, dest in to_ingest:
-                progress.update(itask, description=f"[dim]{title[:60]}[/dim]")
-                try:
-                    _ingest_fn(dest, ingest_source="expand")
-                    ingested += 1
-                    _log(f"INGEST {ref_key}  | {title}")
-                except AlreadyIngested:
-                    # Hash-based resume: the PDF was already ingested in a
-                    # prior run. Count as success for UX purposes.
-                    ingested += 1
-                    _log(f"INGEST {ref_key}  | {title}  (already in DB)")
-                except PipelineError as exc:
-                    failed_ingest += 1
-                    err = str(exc)[:120]
-                    _log(f"INGEST_FAIL {ref_key}  | {title}  | {err}")
-                except Exception as exc:
-                    failed_ingest += 1
-                    err = f"{type(exc).__name__}: {exc}"[:120]
-                    _log(f"INGEST_FAIL {ref_key}  | {title}  | {err}")
-                progress.advance(itask)
+            _run_parallel_workers(
+                [dest for _, _, dest in to_ingest],
+                progress, itask,
+                ingest_results, ingest_failed_files,
+                force=False,
+                num_workers=ingest_workers,
+                ingest_source="expand",
+                on_file_done=_on_file_done,
+            )
 
     _log(
         f"SUMMARY  downloaded={downloaded}  ingested={ingested}  "

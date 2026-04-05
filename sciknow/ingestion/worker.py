@@ -29,6 +29,10 @@ def _emit(msg: dict) -> None:
 def main() -> None:
     import os
     force = os.environ.get("SCIKNOW_FORCE_INGEST", "0") == "1"
+    # Provenance tag recorded in documents.ingest_source on first insert.
+    # Defaults to 'seed'; `sciknow db expand` sets it to 'expand' so the
+    # resulting rows can be distinguished in db stats / future pruning.
+    ingest_source = os.environ.get("SCIKNOW_INGEST_SOURCE", "seed")
 
     for raw_line in sys.stdin:
         line = raw_line.strip()
@@ -38,7 +42,7 @@ def main() -> None:
         _emit({"file": str(path), "status": "started"})
         try:
             from sciknow.ingestion.pipeline import AlreadyIngested, PipelineError, ingest
-            doc_id = ingest(path, force=force)
+            doc_id = ingest(path, force=force, ingest_source=ingest_source)
             _emit({"file": str(path), "status": "done", "doc_id": str(doc_id)})
         except AlreadyIngested:
             _emit({"file": str(path), "status": "skipped"})

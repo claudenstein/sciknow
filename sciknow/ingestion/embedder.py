@@ -26,6 +26,30 @@ def _get_model():
     return _model
 
 
+def release_model() -> None:
+    """
+    Drop the cached bge-m3 model from this process and clear the CUDA
+    allocator cache. Used before spawning ingestion worker subprocesses in
+    `db expand`, so the main process doesn't hold a redundant copy of the
+    embedder while each worker loads its own. Safe to call when no model
+    has been loaded yet.
+    """
+    global _model
+    if _model is None:
+        return
+    try:
+        del _model
+    finally:
+        _model = None
+    try:
+        import gc, torch
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
 def _to_sparse(lexical_weights: dict) -> SparseVector:
     indices = []
     values = []
