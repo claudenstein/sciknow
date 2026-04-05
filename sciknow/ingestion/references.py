@@ -1,11 +1,18 @@
 """
 Reference extraction from scientific papers.
 
-Two sources:
-  1. Markdown bibliography section  — regex-based parsing of the reference list
-     produced by Marker when converting a PDF.
-  2. Crossref raw data              — the `reference` array stored in paper_metadata
-     when a paper was fetched via the Crossref API.
+Three sources:
+  1. MinerU content_list.json       — walks the structured block list produced
+     by the MinerU 2.5 pipeline backend; finds the References/Bibliography
+     heading and harvests DOIs/arXiv IDs from subsequent text blocks. This is
+     the primary source for new (MinerU-ingested) papers.
+  2. Markdown bibliography section  — legacy regex parser for the reference
+     list produced by Marker when converting a PDF. Still used as a fallback
+     for any documents ingested before the MinerU switch.
+  3. Crossref raw data              — the `reference` array stored in
+     paper_metadata when a paper was fetched via the Crossref API. Complements
+     the other two by catching references the publisher deposited to Crossref
+     but which may not have been rendered legibly in the source PDF.
 
 Each reference is returned as a Reference dataclass with whatever fields could
 be extracted (DOI is the most valuable; title is used as a fallback for lookup).
@@ -24,6 +31,175 @@ class Reference:
     title: str | None = None
     year: int | None = None
     authors: list[str] = field(default_factory=list)
+
+
+# ── MinerU content_list.json reference section detection ─────────────────────
+
+# Heading text that indicates the start of the references section. Matched
+# case-insensitively with normalisation (strip punctuation + numeric prefixes).
+_REF_HEADING_WORDS: frozenset[str] = frozenset({
+    "references", "reference", "bibliography", "works cited",
+    "literature cited", "citations", "citation",
+})
+
+
+def _normalise_heading(s: str) -> str:
+    import re as _re
+    s = _re.sub(r"^[\d.]+\s*", "", (s or "").lower().strip())
+    s = _re.sub(r"[^\w\s]", "", s).strip()
+    return s
+
+
+def _is_reference_heading(text: str) -> bool:
+    norm = _normalise_heading(text)
+    if not norm:
+        return False
+    for w in _REF_HEADING_WORDS:
+        if norm == w or norm.startswith(w + " "):
+            return True
+    return False
+
+
+def extract_references_from_mineru_content_list(
+    content_list: list[dict],
+) -> list[Reference]:
+    """
+    Walk a MinerU 2.5 content_list.json and harvest reference entries.
+
+    Algorithm:
+      1. Scan for the first text item with `text_level` >= 1 whose text looks
+         like a References/Bibliography heading.
+      2. From that point forward, treat every text item as a potential
+         reference entry until we hit another level-1/level-2 heading that
+         is clearly NOT part of the references section (Appendix, Supplementary,
+         Author Contributions, Funding, etc.) or the end of the document.
+      3. For each candidate entry, run the standard DOI/arXiv/title parser.
+
+    MinerU sometimes splits a single reference across two or three text items
+    (particularly when a reference contains a URL that wraps). We heuristically
+    merge consecutive short items that don't start with a typical entry marker
+    (`[1]`, `1.`, or a capitalised surname) into the previous entry.
+    """
+    if not content_list:
+        return []
+
+    # Phase 1: find the references heading.
+    ref_start_idx: int | None = None
+    for i, item in enumerate(content_list):
+        if item.get("type") != "text":
+            continue
+        level = item.get("text_level") or 0
+        text = (item.get("text") or "").strip()
+        if not text:
+            continue
+        # Accept either a properly-levelled heading, or a short plain-text
+        # block that matches a known references word (common for older PDFs
+        # where MinerU's layout model didn't emit a text_level).
+        is_short = len(text.split()) <= 4
+        if (level >= 1 or is_short) and _is_reference_heading(text):
+            ref_start_idx = i + 1
+            break
+
+    if ref_start_idx is None:
+        return []
+
+    # Phase 2: collect candidate entries until the next top-level heading that
+    # is clearly the end of the references section.
+    STOP_WORDS = {
+        "appendix", "appendices", "supplementary", "supporting information",
+        "author contributions", "acknowledgments", "acknowledgements",
+        "funding", "data availability", "conflict of interest",
+        "competing interests", "about the author",
+    }
+
+    raw_entries: list[str] = []
+    current: list[str] = []
+
+    def _flush_current() -> None:
+        if current:
+            joined = " ".join(current).strip()
+            if joined:
+                raw_entries.append(joined)
+            current.clear()
+
+    for item in content_list[ref_start_idx:]:
+        if item.get("type") != "text":
+            # Tables/equations/images inside a reference section are noise;
+            # they don't break the current entry — skip them.
+            continue
+        text = (item.get("text") or "").strip()
+        if not text:
+            continue
+
+        level = item.get("text_level") or 0
+        if level >= 1:
+            norm = _normalise_heading(text)
+            if any(norm == w or norm.startswith(w + " ") for w in STOP_WORDS):
+                _flush_current()
+                break
+            if _is_reference_heading(text):
+                # Another "references" heading (shouldn't happen but be safe)
+                continue
+            # A new top-level heading that isn't in the stop list — assume
+            # the ref section ended here anyway.
+            _flush_current()
+            break
+
+        # Body text — either a new entry or a continuation of the previous.
+        if _looks_like_entry_start(text):
+            _flush_current()
+            current.append(text)
+        else:
+            if current:
+                current.append(text)
+            else:
+                # Orphan continuation before any entry started — treat as
+                # first entry.
+                current.append(text)
+
+    _flush_current()
+
+    # Phase 3: parse each raw entry string.
+    refs: list[Reference] = []
+    for entry in raw_entries:
+        if len(entry) < 25:
+            continue
+        parsed = _parse_entry(entry)
+        if parsed is not None:
+            refs.append(parsed)
+
+    return refs
+
+
+def _looks_like_entry_start(text: str) -> bool:
+    """
+    Heuristic for whether a text block starts a new reference entry (vs
+    continuing the previous one).
+
+    Positive signals:
+      - Starts with a numbered marker:  `[12]`, `12.`, `(12)`, `12 `
+      - Starts with a Capitalised surname followed by , or initial:
+        `Smith, J.`, `Smith J.`, `Smith J 2023`
+      - Starts with a year in parens after a name block (harder to detect;
+        we fall through to the default "assume new entry" for longish lines)
+    """
+    import re as _re
+    if not text:
+        return False
+    # Numbered markers: [12], 12., 12)
+    if _re.match(r"^\[?\d{1,4}[\]\.\)]\s", text):
+        return True
+    # Capitalised surname + comma/initial: Smith, J. or Smith J
+    if _re.match(r"^[A-Z][a-z]+[,\s][A-Z]", text):
+        return True
+    # URL fragment / "doi:" / "http" — continuation markers
+    if text[:5].lower() in ("http:", "https", "doi:"):
+        return False
+    # A short fragment without a capital letter start is likely a continuation.
+    if len(text) < 30 and not text[0].isupper():
+        return False
+    # Otherwise, assume it's a new entry when long enough to stand alone.
+    return len(text) >= 40
 
 
 # ── Markdown reference section detection ──────────────────────────────────────
@@ -123,6 +299,89 @@ def _parse_entry(text: str) -> Reference | None:
         title=title,
         year=year,
     )
+
+
+# ── OpenAlex referenced_works lookup ─────────────────────────────────────────
+
+def fetch_openalex_references(
+    doi: str,
+    email: str,
+    timeout: float = 10.0,
+) -> list[Reference]:
+    """
+    Query OpenAlex for a paper by DOI and return its referenced_works resolved
+    to Reference objects.
+
+    OpenAlex's `referenced_works` array contains OpenAlex work IDs (W-numbers),
+    not DOIs directly. We resolve those IDs to DOIs by batching them through
+    the `/works?filter=openalex:W1|W2|...` endpoint (up to 50 IDs per request
+    per the OpenAlex API limits).
+
+    Returns an empty list on any error — this is a best-effort enrichment
+    source, not a hard requirement.
+    """
+    import httpx
+
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            # Step 1: fetch the citing paper to get its referenced_works list
+            resp = client.get(
+                f"https://api.openalex.org/works/doi:{doi}",
+                params={"mailto": email, "select": "referenced_works"},
+                headers={"User-Agent": "sciknow/0.1"},
+            )
+            if resp.status_code != 200:
+                return []
+            ref_ids = resp.json().get("referenced_works") or []
+            if not ref_ids:
+                return []
+
+            # Normalize: full URLs → bare W-numbers
+            w_ids: list[str] = []
+            for rid in ref_ids:
+                if not isinstance(rid, str):
+                    continue
+                w = rid.rsplit("/", 1)[-1]
+                if w.startswith("W"):
+                    w_ids.append(w)
+
+            # Step 2: batch-resolve W-numbers to DOIs + titles + years
+            refs: list[Reference] = []
+            BATCH = 50
+            for start in range(0, len(w_ids), BATCH):
+                batch = w_ids[start : start + BATCH]
+                filt = "openalex:" + "|".join(batch)
+                resp = client.get(
+                    "https://api.openalex.org/works",
+                    params={
+                        "filter": filt,
+                        "per_page": BATCH,
+                        "select": "id,doi,title,publication_year",
+                        "mailto": email,
+                    },
+                    headers={"User-Agent": "sciknow/0.1"},
+                )
+                if resp.status_code != 200:
+                    continue
+                for w in resp.json().get("results") or []:
+                    doi_full = w.get("doi") or ""
+                    if doi_full.startswith("https://doi.org/"):
+                        ref_doi = doi_full[len("https://doi.org/"):]
+                    else:
+                        ref_doi = doi_full or None
+                    title = w.get("title") or None
+                    year = w.get("publication_year") or None
+                    if not ref_doi and not title:
+                        continue
+                    refs.append(Reference(
+                        raw_text=f"{title or ''} ({year or ''})"[:400],
+                        doi=ref_doi,
+                        title=title,
+                        year=year,
+                    ))
+            return refs
+    except Exception:
+        return []
 
 
 # ── Crossref stored reference list ────────────────────────────────────────────
