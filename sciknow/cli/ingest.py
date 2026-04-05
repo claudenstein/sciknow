@@ -27,7 +27,10 @@ def file(
     force: bool = typer.Option(False, "--force", "-f", help="Re-ingest even if already processed."),
 ):
     """Ingest a single PDF file."""
+    from sciknow.cli import preflight
     from sciknow.ingestion.pipeline import AlreadyIngested, PipelineError, ingest
+
+    preflight()
 
     if not path.exists():
         console.print(f"[red]File not found:[/red] {path}")
@@ -245,7 +248,10 @@ def directory(
     ),
 ):
     """Ingest all PDFs in a directory."""
+    from sciknow.cli import preflight
     from sciknow.config import settings
+
+    preflight()
 
     if not path.is_dir():
         console.print(f"[red]Not a directory:[/red] {path}")

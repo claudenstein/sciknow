@@ -511,6 +511,9 @@ def cluster(
 
       sciknow catalog cluster --batch 100 --dry-run
     """
+    from sciknow.cli import preflight
+    preflight(qdrant=False)  # cluster writes to PostgreSQL only
+
     import json as _json
     from sqlalchemy import text
     from sciknow.storage.db import get_session

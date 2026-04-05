@@ -705,6 +705,9 @@ def enrich(
 
       sciknow db enrich --limit 50 --delay 0.5
     """
+    from sciknow.cli import preflight
+    preflight(qdrant=False)  # enrich only touches PostgreSQL
+
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     from sqlalchemy import text
@@ -898,6 +901,9 @@ def expand(
     """
     import sys
     import time
+
+    from sciknow.cli import preflight
+    preflight()
 
     from sqlalchemy import text as sql_text
 
@@ -1423,6 +1429,9 @@ def export(
         "question": "...", "answer": "..."   # only with --generate-qa
       }
     """
+    from sciknow.cli import preflight
+    preflight(qdrant=False)  # export reads from PostgreSQL only
+
     from sqlalchemy import text
 
     from sciknow.storage.db import get_session
