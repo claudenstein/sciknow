@@ -106,27 +106,32 @@ def ingest(pdf_path: Path) -> UUID:
 
         try:
             # ------------------------------------------------------------------
-            # Stage 1: PDF → Markdown (MinerU)
+            # Stage 1: PDF → JSON (Marker structured output)
+            # Falls back to markdown automatically if JSON conversion fails.
             # ------------------------------------------------------------------
             _set_status(session, doc, "converting")
             t0 = time.monotonic()
 
             output_dir = settings.mineru_output_dir / str(doc_id)
-            md_path = pdf_converter.convert(pdf_path, output_dir)
+            result = pdf_converter.convert(pdf_path, output_dir)
             doc.mineru_output_path = str(output_dir)
-            markdown_text = md_path.read_text(encoding="utf-8", errors="replace")
 
+            output_file = result.json_path or result.md_path
             _log_job(session, doc_id, "convert", "completed",
                      int((time.monotonic() - t0) * 1000),
-                     {"md_path": str(md_path), "chars": len(markdown_text)})
+                     {
+                         "output": str(output_file),
+                         "mode": "json" if result.is_json else "markdown",
+                         "chars": len(result.text),
+                     })
 
             # ------------------------------------------------------------------
-            # Stage 2: Metadata extraction
+            # Stage 2: Metadata extraction  (uses plain text from the result)
             # ------------------------------------------------------------------
             _set_status(session, doc, "metadata_extraction")
             t0 = time.monotonic()
 
-            meta = metadata.extract(pdf_path, markdown_text)
+            meta = metadata.extract(pdf_path, result.text)
 
             # Delete old metadata row if resuming
             session.query(PaperMetadata).filter_by(document_id=doc_id).delete()
@@ -158,6 +163,8 @@ def ingest(pdf_path: Path) -> UUID:
 
             # ------------------------------------------------------------------
             # Stage 3: Section parsing + chunking
+            # JSON mode uses block-type-aware section detection.
+            # Markdown fallback uses regex heading detection.
             # ------------------------------------------------------------------
             _set_status(session, doc, "chunking")
             t0 = time.monotonic()
@@ -166,7 +173,10 @@ def ingest(pdf_path: Path) -> UUID:
             session.query(PaperSection).filter_by(document_id=doc_id).delete()
             session.query(Chunk).filter_by(document_id=doc_id).delete()
 
-            sections = chunker.parse_sections(markdown_text)
+            if result.is_json:
+                sections = chunker.parse_sections_from_json(result.json_data)
+            else:
+                sections = chunker.parse_sections(result.text)
             db_sections: dict[int, UUID] = {}
 
             for sec in sections:
