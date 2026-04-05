@@ -39,7 +39,32 @@ class Settings(BaseSettings):
     crossref_email: str = "user@example.com"
 
     # Ingestion
-    embedding_batch_size: int = 8
+    # Chunks per bge-m3 batch. Default 32 is safe on a 24GB GPU when the LLM is
+    # also resident; raise to 64-128 for embedder-only runs, lower to 8-16 if
+    # running alongside a large LLM (e.g. 32B q4) on the same GPU.
+    embedding_batch_size: int = 32
+
+    # Marker batch_multiplier (parallel_factor). Higher = more pages per Marker
+    # forward pass; costs more VRAM. ~5GB peak per unit on Marker docs. Safe
+    # default 2 on a 24GB GPU.
+    marker_batch_multiplier: int = 2
+
+    # SQLAlchemy connection pool. Raise when running parallel ingestion workers
+    # or bulk ops (db enrich, db expand) that open many sessions concurrently.
+    pg_pool_size: int = 20
+    pg_max_overflow: int = 20
+
+    # Qdrant HNSW + quantization knobs. Changes apply only on collection
+    # (re)creation — existing collections keep their original params.
+    qdrant_hnsw_m: int = 32
+    qdrant_hnsw_ef_construct: int = 256
+    qdrant_hnsw_ef: int = 128
+    qdrant_scalar_quantization: bool = True
+
+    # Bulk-op concurrency knobs
+    enrich_workers: int = 8            # concurrent Crossref/OpenAlex lookups
+    expand_download_workers: int = 6   # concurrent OA PDF lookups/downloads
+    llm_parallel_workers: int = 4      # concurrent LLM calls (match OLLAMA_NUM_PARALLEL)
 
     @computed_field
     @property
