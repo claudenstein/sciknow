@@ -55,6 +55,7 @@ def _run_worker_loop(
     task,
     results: dict,
     failed_files: list[tuple[str, str]],
+    force: bool = False,
 ) -> None:
     """
     Drive one or more worker subprocesses through the PDF list.
@@ -181,7 +182,7 @@ def directory(
         transient=False,
     ) as progress:
         task = progress.add_task("Ingesting", total=len(pdfs))
-        _run_worker_loop(pdfs, progress, task, results, failed_files)
+        _run_worker_loop(pdfs, progress, task, results, failed_files, force=force)
 
     # Summary table
     table = Table(title="Ingestion Summary", show_header=False)
