@@ -79,6 +79,13 @@ class Settings(BaseSettings):
     # or LLM moved to a remote host like DGX Spark).
     ingest_workers: int = 1
 
+    # Citation-count boost factor applied to RRF scores during search.
+    # Papers cited by more corpus papers rank slightly higher. Uses a log-
+    # dampened multiplicative formula: score *= (1 + factor * log2(1 + count)).
+    # Set to 0 to disable. Default 0.1 is a gentle nudge — retrieval signals
+    # (dense + sparse + FTS) still dominate.
+    citation_boost_factor: float = 0.1
+
     # `sciknow db expand` relevance filter. Cosine similarity threshold under
     # which candidate references are dropped before download. 0.55 is a sane
     # default for bge-m3 — ~80% of on-topic refs score above it on a focused

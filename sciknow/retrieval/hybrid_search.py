@@ -33,6 +33,9 @@ class SearchCandidate:
     authors: list[dict] = field(default_factory=list)
     journal: str | None = None
     doi: str | None = None
+    # Citation count: how many other papers in the corpus cite this paper.
+    # Populated by _apply_citation_boost after hydration.
+    citation_count: int = 0
 
 
 # ── RRF ───────────────────────────────────────────────────────────────────────
@@ -302,6 +305,71 @@ def _hydrate(
     return candidates
 
 
+# ── Citation boost ─────────────────────────────────────────────────────────────
+
+def _apply_citation_boost(
+    candidates: list[SearchCandidate],
+    session: Session,
+    boost_factor: float = 0.0,
+) -> list[SearchCandidate]:
+    """
+    Apply a log-dampened multiplicative citation boost to RRF scores.
+
+    For each candidate, look up how many other corpus papers cite the same
+    document. The boost formula:
+
+        boosted_score = rrf_score × (1 + boost_factor × log2(1 + citation_count))
+
+    At the default boost_factor=0.1:
+        0 citations → ×1.00  (no change)
+        5 citations → ×1.26
+       10 citations → ×1.35
+       50 citations → ×1.57
+
+    This is a gentle nudge, not a takeover — the three retrieval signals
+    (dense + sparse + FTS) still dominate. The reranker runs AFTER this
+    and can still override the boost for any genuinely irrelevant chunk.
+
+    If `boost_factor` is 0.0, the function is a no-op (just populates
+    citation_count without modifying scores).
+    """
+    if not candidates:
+        return candidates
+
+    doc_ids = {c.document_id for c in candidates}
+    if not doc_ids:
+        return candidates
+
+    from sqlalchemy import text
+
+    placeholders = ", ".join(f":d{i}" for i, _ in enumerate(doc_ids))
+    params = {f"d{i}": did for i, did in enumerate(doc_ids)}
+    rows = session.execute(
+        text(f"""
+            SELECT cited_document_id::text, COUNT(*) AS cnt
+            FROM citations
+            WHERE cited_document_id IS NOT NULL
+              AND cited_document_id::text IN ({placeholders})
+            GROUP BY cited_document_id
+        """),
+        params,
+    ).fetchall()
+    cite_counts = {r[0]: r[1] for r in rows}
+
+    import math
+
+    for c in candidates:
+        count = cite_counts.get(c.document_id, 0)
+        c.citation_count = count
+        if boost_factor > 0 and count > 0:
+            c.rrf_score *= 1.0 + boost_factor * math.log2(1 + count)
+
+    if boost_factor > 0:
+        candidates.sort(key=lambda c: c.rrf_score, reverse=True)
+
+    return candidates
+
+
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 def search(
@@ -317,10 +385,13 @@ def search(
     weights: tuple[float, float, float] = (1.0, 1.0, 0.5),
 ) -> list[SearchCandidate]:
     """
-    Run hybrid search and return up to `candidate_k` results sorted by RRF score.
+    Run hybrid search and return up to `candidate_k` results sorted by RRF score,
+    with an optional citation-count boost.
 
     weights = (dense_weight, sparse_weight, fts_weight)
     """
+    from sciknow.config import settings
+
     dense_vec, sparse_vec = _embed_query(query)
     qdrant_filter = _build_qdrant_filter(year_from, year_to, domain, section, topic_cluster)
 
@@ -333,4 +404,7 @@ def search(
         weights=list(weights),
     )[:candidate_k]
 
-    return _hydrate(qdrant_client, session, merged)
+    candidates = _hydrate(qdrant_client, session, merged)
+
+    boost = getattr(settings, "citation_boost_factor", 0.1)
+    return _apply_citation_boost(candidates, session, boost_factor=boost)
