@@ -123,6 +123,24 @@ MoE models are the right call — they exploit Spark's memory capacity while kee
 
 ---
 
+## 3b. Update — MinerU primary, Marker fallback (2026-04-05)
+
+After landing tier-1/tier-2 above, we also switched the PDF converter.
+
+**Why:** Marker has a known severe performance regression on RTX 3090 ([marker#919](https://github.com/datalab-to/marker/issues/919)) — ~0.03 pages/s vs 25 pages/s on H100, with 18–19 GB of VRAM sitting unused. MinerU 2.5's pipeline backend is OmniDocBench SOTA (86.2) for scientific papers, has dedicated formula/table models (MFD + MFR + structured table reconstruction), and runs comfortably on 8 GB+ GPUs.
+
+**What shipped:**
+- `sciknow/ingestion/pdf_converter.py` — new `_convert_mineru()` path. `convert()` dispatches on `settings.pdf_converter_backend`:
+  - `auto` (default): MinerU → Marker JSON → Marker markdown
+  - `mineru`: MinerU only, raises on failure
+  - `marker`: legacy Marker JSON → Marker markdown
+- `sciknow/ingestion/chunker.py` — new `parse_sections_from_mineru(content_list)`. Walks MinerU's flat `content_list.json` (text with `text_level`, table HTML, equation LaTeX, code, list). Reuses `_SECTION_PATTERNS` / `_classify_heading` / `_table_to_text` so section classification stays identical across backends.
+- `sciknow/ingestion/pipeline.py` — dispatches to the right chunker based on `result.backend`.
+- Marker remains installed as a fallback. No code was deleted; both paths co-exist.
+- Existing Qdrant chunks are unaffected — the switch only changes how *new* PDFs are parsed. The `mineru_output_dir` directory name is now semantically correct again.
+
+**Install note:** `uv add "mineru[core]"`. First run downloads models (~2 GB) to `~/.cache/modelscope`.
+
 ## 4. Execution order
 
 1. `EMBEDDING_BATCH_SIZE=32` in `.env` + `OLLAMA_NUM_PARALLEL=4` on the Ollama host. Zero code changes, immediate 3–8× on two hot paths.
