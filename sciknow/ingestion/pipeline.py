@@ -84,6 +84,42 @@ def _set_status(session: Session, doc: Document, status: str) -> None:
     session.flush()
 
 
+def _archive_pdf(pdf_path: Path, dest_dir: Path) -> None:
+    """
+    Record a PDF in `dest_dir` (processed/ or failed/) without duplicating it
+    on disk.
+
+    - If the PDF lives under `data/downloads/` (expand-created, we own it):
+      **move** it to dest_dir. This stops downloads/ from growing forever.
+    - If the PDF is external (user's original, e.g. ~/Papers/...):
+      **symlink** into dest_dir. Zero disk cost; the symlink serves as an
+      index so `sciknow ingest directory data/processed/` works after a
+      db reset without needing the originals to be copied.
+    - Falls back to copy if symlinks fail (cross-filesystem edge case).
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / pdf_path.name
+
+    # Avoid overwriting an existing file/symlink with the same name.
+    if dest.exists() or dest.is_symlink():
+        return
+
+    downloads_dir = (settings.data_dir / "downloads").resolve()
+    is_our_file = False
+    try:
+        is_our_file = pdf_path.resolve().is_relative_to(downloads_dir)
+    except (ValueError, OSError):
+        pass
+
+    if is_our_file:
+        shutil.move(str(pdf_path), str(dest))
+    else:
+        try:
+            dest.symlink_to(pdf_path.resolve())
+        except OSError:
+            shutil.copy2(str(pdf_path), str(dest))
+
+
 def ingest(
     pdf_path: Path,
     force: bool = False,
@@ -358,10 +394,9 @@ def ingest(
             # ------------------------------------------------------------------
             _set_status(session, doc, "complete")
 
-            # Move PDF to processed/
-            dest = settings.processed_dir / pdf_path.name
-            settings.processed_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(pdf_path), str(dest))
+            # Record PDF in processed/ — symlink for external files (no
+            # disk duplication), move for files we own (data/downloads/).
+            _archive_pdf(pdf_path, settings.processed_dir)
 
             return doc_id
 
@@ -370,10 +405,7 @@ def ingest(
             doc.ingestion_error = str(exc)[:2000]
             _log_job(session, doc_id, "pipeline", "failed", details={"error": str(exc)})
 
-            # Move PDF to failed/
-            dest = settings.failed_dir / pdf_path.name
-            settings.failed_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(pdf_path), str(dest))
+            _archive_pdf(pdf_path, settings.failed_dir)
 
             raise PipelineError(str(exc)) from exc
 
