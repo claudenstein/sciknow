@@ -37,7 +37,7 @@ def backup(
       - PostgreSQL dump (all papers, chunks, metadata)
       - Qdrant vector snapshots (embeddings for all collections)
       - Original PDFs (data/processed/)          [--pdfs, on by default]
-      - Auto-downloaded PDFs (downloads/)         [--downloads, on by default]
+      - Auto-downloaded PDFs (data/downloads/)     [--downloads, on by default]
       - Marker markdown output (data/mineru_output/) [--marker, off by default]
       - .env configuration file
 
@@ -120,7 +120,7 @@ def backup(
             console.print(f"  [green]✓[/green] Processed PDFs  ({n} files)")
 
         if include_downloads:
-            dl_dir = Path("downloads")
+            dl_dir = Path("data/downloads")
             if dl_dir.exists():
                 with console.status("Copying downloaded PDFs…"):
                     shutil.copytree(dl_dir, staging / "downloads")
@@ -290,7 +290,7 @@ def restore(
 
             downloads_src = staging / "downloads"
             if downloads_src.exists():
-                dl_dest = Path("downloads")
+                dl_dest = Path("data/downloads")
                 dl_dest.mkdir(exist_ok=True)
                 with console.status("Restoring downloaded PDFs…"):
                     shutil.copytree(downloads_src, dl_dest, dirs_exist_ok=True)
@@ -360,7 +360,7 @@ def reset(
     Wipe the entire database and vector store, then re-initialise from scratch.
 
     Deletes ALL ingested data: PostgreSQL tables, Qdrant collections, and
-    Marker output cache. PDFs in data/processed/ and downloads/ are kept by
+    Marker output cache. PDFs in data/processed/ and data/downloads/ are kept by
     default so you can re-ingest without downloading everything again.
 
     Use this before a full re-ingest (e.g. after switching to JSON output mode).
@@ -416,7 +416,7 @@ def reset(
         )
     if not keep_pdfs:
         console.print(
-            f"  • PDFs in data/processed/ and downloads/"
+            f"  • PDFs in data/processed/ and data/downloads/"
         )
     console.print()
 
@@ -465,7 +465,7 @@ def reset(
     # 4. Optionally delete PDFs
     # ------------------------------------------------------------------
     if not keep_pdfs:
-        for pdf_dir in [settings.processed_dir, settings.data_dir / "downloads"]:
+        for pdf_dir in [settings.processed_dir, settings.data_dir / "downloads"  # already data/downloads via settings.data_dir]:
             if pdf_dir.exists():
                 console.print(f"\n[bold]Deleting {pdf_dir}...[/bold]")
                 shutil.rmtree(pdf_dir)
@@ -479,7 +479,7 @@ def reset(
     console.print()
     console.print("Re-ingest your documents with:")
     console.print("  [bold]sciknow ingest directory data/processed/[/bold]")
-    console.print("  [bold]sciknow ingest directory downloads/[/bold]")
+    console.print("  [bold]sciknow ingest directory data/downloads/[/bold]")
 
 
 @app.command()
@@ -832,7 +832,7 @@ def enrich(
 
 @app.command()
 def expand(
-    download_dir: Path  = typer.Option(Path("downloads"), "--download-dir", "-d",
+    download_dir: Path  = typer.Option(Path("data/downloads"), "--download-dir", "-d",
                                         help="Directory where new PDFs are saved before ingestion."),
     limit:        int   = typer.Option(0,     "--limit",     help="Max new papers to download (0 = all found)."),
     resolve:      bool  = typer.Option(False, "--resolve/--no-resolve",

@@ -844,7 +844,7 @@ Move or clone the full sciknow collection to another machine.
 | PostgreSQL database (papers, chunks, metadata) | ✅ always | — |
 | Qdrant vector embeddings | ✅ always | `--skip-vectors` on restore |
 | Original ingested PDFs (`data/processed/`) | ✅ on | `--no-pdfs` |
-| Auto-downloaded PDFs (`downloads/`) | ✅ on | `--no-downloads` |
+| Auto-downloaded PDFs (`data/downloads/`) | ✅ on | `--no-downloads` |
 | Marker markdown output (`data/mineru_output/`) | ❌ off | `--marker` |
 | `.env` config file | ✅ always | — |
 
