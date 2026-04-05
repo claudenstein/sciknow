@@ -990,7 +990,14 @@ sciknow db expand --no-ingest --limit 50
 
 # Also resolve title-only references to DOIs (slow, ~0.3 s each)
 sciknow db expand --resolve --limit 50
+
+# Parallel post-download ingestion (N worker subprocesses, each loading
+# its own MinerU + bge-m3). Same VRAM rules as `sciknow ingest directory`:
+# ~9-10 GB per worker, so --workers 2 only when the LLM is off-GPU.
+sciknow db expand --limit 200 --workers 2
 ```
+
+Phase 2 of `db expand` (the in-process ingest of just-downloaded PDFs) reuses the same worker-subprocess fan-out as `sciknow ingest directory`. The relevance filter's bge-m3 is automatically released before workers spawn, so you don't pay for two copies even with `--relevance` on. When `--workers` is omitted, the command falls back to `INGEST_WORKERS` from `.env` (default 1).
 
 ### Expected open-access hit rate
 
