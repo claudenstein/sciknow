@@ -56,6 +56,7 @@ def _run_worker_loop(
     results: dict,
     failed_files: list[tuple[str, str]],
     force: bool = False,
+    lock: "threading.Lock | None" = None,
 ) -> None:
     """
     Drive one or more worker subprocesses through the PDF list.
@@ -64,7 +65,14 @@ def _run_worker_loop(
     either finishes its queue or crashes (SIGABRT / SIGSEGV / any non-zero exit).
     On crash, the in-flight file is marked failed and a fresh worker picks up
     where the previous one left off.
+
+    When called from multiple threads (parallel ingestion), pass a shared
+    `lock` — it guards the results dict and failed_files list. rich.Progress
+    is already thread-safe for advance/update calls.
     """
+    import contextlib
+    _lock_ctx = lock if lock is not None else contextlib.nullcontext()
+
     remaining = list(pdfs)
 
     while remaining:
@@ -114,17 +122,20 @@ def _run_worker_loop(
                 current_file = file_path
                 progress.update(task, description=f"[dim]{file_path.name[:50]}[/dim]")
             elif status == "done":
-                results["done"] += 1
+                with _lock_ctx:
+                    results["done"] += 1
                 processed.add(file_path)
                 progress.advance(task)
             elif status == "skipped":
-                results["skipped"] += 1
+                with _lock_ctx:
+                    results["skipped"] += 1
                 processed.add(file_path)
                 progress.advance(task)
             elif status == "failed":
-                results["failed"] += 1
+                with _lock_ctx:
+                    results["failed"] += 1
+                    failed_files.append((file_path.name, msg.get("error", "")[:120]))
                 processed.add(file_path)
-                failed_files.append((file_path.name, msg.get("error", "")[:120]))
                 progress.advance(task)
 
         feeder.join()
@@ -133,15 +144,55 @@ def _run_worker_loop(
         # If the worker crashed (non-zero exit) while processing a file,
         # that file was never reported as done/failed — mark it now.
         if proc.returncode != 0 and current_file and current_file not in processed:
-            results["failed"] += 1
-            failed_files.append((
-                current_file.name,
-                f"worker crashed (exit {proc.returncode})",
-            ))
+            with _lock_ctx:
+                results["failed"] += 1
+                failed_files.append((
+                    current_file.name,
+                    f"worker crashed (exit {proc.returncode})",
+                ))
             processed.add(current_file)
             progress.advance(task)
 
         remaining = [p for p in remaining if p not in processed]
+
+
+def _run_parallel_workers(
+    pdfs: list[Path],
+    progress,
+    task,
+    results: dict,
+    failed_files: list[tuple[str, str]],
+    force: bool,
+    num_workers: int,
+) -> None:
+    """
+    Fan `pdfs` across `num_workers` concurrent worker subprocesses.
+
+    Each bucket gets its own Python thread driving its own worker subprocess.
+    Buckets are round-robin so slow PDFs distribute evenly. A single Lock
+    guards shared counters and the failure list; rich.Progress is thread-safe.
+    """
+    if num_workers <= 1 or len(pdfs) == 1:
+        _run_worker_loop(pdfs, progress, task, results, failed_files, force=force)
+        return
+
+    buckets = [pdfs[i::num_workers] for i in range(num_workers)]
+    buckets = [b for b in buckets if b]
+
+    lock = threading.Lock()
+    threads: list[threading.Thread] = []
+    for bucket in buckets:
+        t = threading.Thread(
+            target=_run_worker_loop,
+            args=(bucket, progress, task, results, failed_files),
+            kwargs={"force": force, "lock": lock},
+            daemon=True,
+        )
+        t.start()
+        threads.append(t)
+
+    for t in threads:
+        t.join()
 
 
 @app.command()
@@ -149,8 +200,16 @@ def directory(
     path: Path = typer.Argument(..., help="Directory containing PDF files."),
     recursive: bool = typer.Option(True, "--recursive/--no-recursive", "-r/-R"),
     force: bool = typer.Option(False, "--force", "-f"),
+    workers: int = typer.Option(
+        0, "--workers", "-w",
+        help="Parallel ingestion worker subprocesses (0 = use INGEST_WORKERS "
+             "from .env, default 1). Each worker loads its own Marker (~5GB "
+             "VRAM) + bge-m3 (~2.2GB). On a 24GB GPU with an LLM resident, "
+             "keep at 1. Raise to 2 only when the LLM is off-GPU.",
+    ),
 ):
     """Ingest all PDFs in a directory."""
+    from sciknow.config import settings
 
     if not path.is_dir():
         console.print(f"[red]Not a directory:[/red] {path}")
@@ -166,7 +225,11 @@ def directory(
         console.print("[yellow]No PDF files found.[/yellow]")
         raise typer.Exit(0)
 
-    console.print(f"Found [bold]{len(pdfs)}[/bold] PDF(s) in {path}")
+    num_workers = workers if workers > 0 else max(1, settings.ingest_workers)
+    num_workers = min(num_workers, len(pdfs))
+
+    worker_note = f" ({num_workers} workers)" if num_workers > 1 else ""
+    console.print(f"Found [bold]{len(pdfs)}[/bold] PDF(s) in {path}{worker_note}")
 
     results = {"done": 0, "skipped": 0, "failed": 0}
     failed_files: list[tuple[str, str]] = []
@@ -182,7 +245,10 @@ def directory(
         transient=False,
     ) as progress:
         task = progress.add_task("Ingesting", total=len(pdfs))
-        _run_worker_loop(pdfs, progress, task, results, failed_files, force=force)
+        _run_parallel_workers(
+            pdfs, progress, task, results, failed_files,
+            force=force, num_workers=num_workers,
+        )
 
     # Summary table
     table = Table(title="Ingestion Summary", show_header=False)

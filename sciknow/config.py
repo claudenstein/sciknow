@@ -66,6 +66,13 @@ class Settings(BaseSettings):
     expand_download_workers: int = 6   # concurrent OA PDF lookups/downloads
     llm_parallel_workers: int = 4      # concurrent LLM calls (match OLLAMA_NUM_PARALLEL)
 
+    # Ingestion worker processes for `sciknow ingest directory`. Each worker
+    # loads its own Marker (~5GB VRAM peak) + bge-m3 (~2.2GB). On a 24GB GPU
+    # with an LLM actively resident (e.g. Ollama-held 32B q4 ~18GB), keep this
+    # at 1. Raise to 2 only when the LLM is off-GPU (no Ollama model loaded,
+    # or LLM moved to a remote host like DGX Spark).
+    ingest_workers: int = 1
+
     @computed_field
     @property
     def pg_url(self) -> str:
