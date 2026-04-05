@@ -84,7 +84,11 @@ def _set_status(session: Session, doc: Document, status: str) -> None:
     session.flush()
 
 
-def ingest(pdf_path: Path, force: bool = False) -> UUID:
+def ingest(
+    pdf_path: Path,
+    force: bool = False,
+    ingest_source: str = "seed",
+) -> UUID:
     """
     Ingest a single PDF. Returns the document UUID.
 
@@ -92,6 +96,12 @@ def ingest(pdf_path: Path, force: bool = False) -> UUID:
                   sections, chunks, and Qdrant vectors before reprocessing.
     force=False — raises AlreadyIngested if the PDF has been seen before
                   and completed successfully.
+    ingest_source — provenance tag recorded in documents.ingest_source.
+                  'seed'   = manually ingested via CLI (default)
+                  'expand' = auto-discovered via `sciknow db expand`
+                  Applied only on first insert; existing rows keep their
+                  original source (so a failed seed paper re-tried from
+                  expand stays tagged 'seed').
     """
     pdf_path = pdf_path.resolve()
     if not pdf_path.exists():
@@ -119,6 +129,7 @@ def ingest(pdf_path: Path, force: bool = False) -> UUID:
                 filename=pdf_path.name,
                 file_size_bytes=pdf_path.stat().st_size,
                 ingestion_status="pending",
+                ingest_source=ingest_source,
             )
             session.add(doc)
             session.flush()

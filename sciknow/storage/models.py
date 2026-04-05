@@ -30,6 +30,12 @@ class Document(Base):
     ingestion_status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
     ingestion_error: Mapped[str | None] = mapped_column(Text)
     mineru_output_path: Mapped[str | None] = mapped_column(Text)
+    # How this document entered the collection. 'seed' = manually ingested,
+    # 'expand' = auto-discovered via `sciknow db expand`. Used for provenance
+    # and to support future `db prune --source expand` operations.
+    ingest_source: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="seed"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
