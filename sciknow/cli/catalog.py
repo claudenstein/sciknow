@@ -534,23 +534,21 @@ def cluster(
         console.print("[yellow]No papers with titles found.[/yellow]")
         raise typer.Exit(0)
 
-    console.print(f"Clustering [bold]{len(papers)}[/bold] papers in batches of {batch}…")
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from sciknow.config import settings as _settings
 
-    # Process in batches — each batch returns its own cluster set, then we merge
-    all_assignments: dict[str, str] = {}
+    workers = max(1, _settings.llm_parallel_workers)
+    total_batches = (len(papers) + batch - 1) // batch
+    console.print(
+        f"Clustering [bold]{len(papers)}[/bold] papers in {total_batches} "
+        f"batches of {batch} ({workers} parallel LLM calls)…"
+    )
 
-    for batch_start in range(0, len(papers), batch):
-        batch_papers = papers[batch_start:batch_start + batch]
-        batch_num = batch_start // batch + 1
-        total_batches = (len(papers) + batch - 1) // batch
-
-        with console.status(f"[bold green]LLM clustering batch {batch_num}/{total_batches}…", spinner="dots"):
-            system, user = rag_prompts.cluster(batch_papers)
-            raw = llm_complete(system, user, model=model)
-
-        # Parse JSON
+    def _run_batch(batch_num: int, batch_papers: list[dict]) -> tuple[int, dict[str, str], int]:
+        """Runs in a worker thread. Returns (batch_num, doc_id→cluster, n_clusters)."""
+        system, user = rag_prompts.cluster(batch_papers)
         try:
-            # Strip markdown code fences if present
+            raw = llm_complete(system, user, model=model)
             cleaned = raw.strip()
             if cleaned.startswith("```"):
                 cleaned = "\n".join(cleaned.split("\n")[1:])
@@ -558,23 +556,35 @@ def cluster(
                 cleaned = "\n".join(cleaned.split("\n")[:-1])
             data = _json.loads(cleaned)
             assignments = data.get("assignments", {})
-        except (_json.JSONDecodeError, KeyError) as e:
-            console.print(f"[red]Failed to parse LLM response for batch {batch_num}:[/red] {e}")
-            console.print(f"[dim]{raw[:500]}[/dim]")
-            continue
+            n_clusters = len(data.get("clusters", []))
+        except Exception as e:
+            console.print(f"[red]Batch {batch_num} failed:[/red] {e}")
+            return batch_num, {}, 0
 
-        # Map title → doc_id for this batch
         title_to_doc = {p["title"]: p["doc_id"] for p in batch_papers}
-        for title, cluster_name in assignments.items():
-            doc_id = title_to_doc.get(title)
-            if doc_id:
-                all_assignments[doc_id] = cluster_name
+        doc_assignments = {
+            title_to_doc[t]: c
+            for t, c in assignments.items()
+            if t in title_to_doc
+        }
+        return batch_num, doc_assignments, n_clusters
 
-        console.print(
-            f"  Batch {batch_num}/{total_batches}: "
-            f"{len(assignments)} assignments, "
-            f"{len(data.get('clusters', []))} clusters"
-        )
+    all_assignments: dict[str, str] = {}
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = []
+        for batch_start in range(0, len(papers), batch):
+            batch_papers = papers[batch_start:batch_start + batch]
+            batch_num = batch_start // batch + 1
+            futures.append(pool.submit(_run_batch, batch_num, batch_papers))
+
+        for fut in as_completed(futures):
+            batch_num, doc_assignments, n_clusters = fut.result()
+            all_assignments.update(doc_assignments)
+            console.print(
+                f"  Batch {batch_num}/{total_batches}: "
+                f"{len(doc_assignments)} assignments, {n_clusters} clusters"
+            )
 
     console.print(f"\nTotal assignments: [bold]{len(all_assignments)}[/bold] / {len(papers)}")
 

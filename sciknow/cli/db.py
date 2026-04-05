@@ -465,7 +465,8 @@ def reset(
     # 4. Optionally delete PDFs
     # ------------------------------------------------------------------
     if not keep_pdfs:
-        for pdf_dir in [settings.processed_dir, settings.data_dir / "downloads"  # already data/downloads via settings.data_dir]:
+        # settings.data_dir / "downloads" is already data/downloads
+        for pdf_dir in [settings.processed_dir, settings.data_dir / "downloads"]:
             if pdf_dir.exists():
                 console.print(f"\n[bold]Deleting {pdf_dir}...[/bold]")
                 shutil.rmtree(pdf_dir)
@@ -692,10 +693,11 @@ def enrich(
 
       sciknow db enrich --limit 50 --delay 0.5
     """
-    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     from sqlalchemy import text
 
+    from sciknow.config import settings
     from sciknow.ingestion.metadata import (
         _is_garbage_title,
         _layer_arxiv,
@@ -721,14 +723,37 @@ def enrich(
         console.print("[green]No papers need enrichment.[/green]")
         raise typer.Exit(0)
 
+    workers = max(1, settings.enrich_workers)
     console.print(
         f"Found [bold]{len(rows)}[/bold] papers without a DOI. "
-        f"Querying Crossref (threshold={threshold})…"
+        f"Querying Crossref (threshold={threshold}, {workers} workers)…"
     )
     if dry_run:
         console.print("[dim]Dry run — no changes will be written.[/dim]\n")
 
     matched = failed = skipped = 0
+
+    def _lookup(row) -> tuple[str, str, PaperMeta | None, str]:
+        """Pure API lookup — runs in worker thread, never touches the DB."""
+        pm_id, title, authors, arxiv_id, _ = row
+
+        if _is_garbage_title(title) or len(title.strip()) < 15:
+            return pm_id, title, None, "skip"
+
+        first_author: str | None = None
+        if authors:
+            first_author = (authors[0] or {}).get("name")
+
+        meta = search_crossref_by_title(title, first_author, threshold=threshold)
+        if meta is None:
+            meta = search_openalex_by_title(title, first_author, threshold=threshold)
+        if meta is None and arxiv_id:
+            stub = PaperMeta(arxiv_id=arxiv_id)
+            _layer_arxiv(stub)
+            if stub.title:
+                meta = stub
+
+        return pm_id, title, meta, "ok" if meta else "no_match"
 
     with Progress(
         SpinnerColumn(),
@@ -741,83 +766,65 @@ def enrich(
     ) as progress:
         task = progress.add_task("Enriching", total=len(rows))
 
-        for pm_id, title, authors, arxiv_id, meta_source in rows:
-            progress.update(task, description=f"[dim]{title[:55]}[/dim]")
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_lookup, row) for row in rows]
 
-            # Skip titles that are clearly garbage (filenames, short codes, etc.)
-            if _is_garbage_title(title) or len(title.strip()) < 15:
-                skipped += 1
+            for fut in as_completed(futures):
+                try:
+                    pm_id, title, meta, status = fut.result()
+                except Exception:
+                    failed += 1
+                    progress.advance(task)
+                    continue
+
+                progress.update(task, description=f"[dim]{title[:55]}[/dim]")
+
+                if status == "skip" or meta is None:
+                    skipped += 1
+                    progress.advance(task)
+                    continue
+
+                if dry_run:
+                    doi_str = f"doi:{meta.doi}" if meta.doi else f"arXiv:{meta.arxiv_id}"
+                    console.print(
+                        f"  [green]✓[/green] {title[:60]}  →  {doi_str}"
+                        f"  [dim](score≥{threshold})[/dim]"
+                    )
+                    matched += 1
+                    progress.advance(task)
+                    continue
+
+                try:
+                    with get_session() as session:
+                        pm = session.query(PaperMetadata).filter_by(id=pm_id).first()
+                        if pm is None:
+                            skipped += 1
+                            progress.advance(task)
+                            continue
+
+                        pm.doi             = meta.doi or pm.doi
+                        pm.arxiv_id        = meta.arxiv_id or pm.arxiv_id
+                        pm.title           = meta.title or pm.title
+                        pm.abstract        = meta.abstract or pm.abstract
+                        pm.year            = meta.year or pm.year
+                        pm.journal         = meta.journal or pm.journal
+                        pm.volume          = meta.volume or pm.volume
+                        pm.issue           = meta.issue or pm.issue
+                        pm.pages           = meta.pages or pm.pages
+                        pm.publisher       = meta.publisher or pm.publisher
+                        if meta.authors:
+                            pm.authors = meta.authors
+                        pm.keywords        = meta.keywords or pm.keywords
+                        pm.metadata_source = meta.source
+                        pm.crossref_raw    = meta.crossref_raw or pm.crossref_raw
+                        pm.arxiv_raw       = meta.arxiv_raw or pm.arxiv_raw
+                        session.commit()
+
+                    matched += 1
+                except Exception:
+                    failed += 1
+
                 progress.advance(task)
-                continue
-
-            first_author: str | None = None
-            if authors:
-                first_author = (authors[0] or {}).get("name")
-
-            meta = search_crossref_by_title(title, first_author, threshold=threshold)
-
-            # Fallback 1: OpenAlex (broader coverage than Crossref)
-            if meta is None:
-                meta = search_openalex_by_title(title, first_author, threshold=threshold)
-                time.sleep(delay)   # extra polite delay for second API call
-
-            # Fallback 2: arXiv layer for papers with an arXiv ID
-            if meta is None and arxiv_id:
-                stub = PaperMeta(arxiv_id=arxiv_id)
-                _layer_arxiv(stub)
-                if stub.title:
-                    meta = stub
-
-            if meta is None:
-                skipped += 1
-                progress.advance(task)
-                time.sleep(delay)
-                continue
-
-            if dry_run:
-                doi_str = f"doi:{meta.doi}" if meta.doi else f"arXiv:{meta.arxiv_id}"
-                console.print(
-                    f"  [green]✓[/green] {title[:60]}  →  {doi_str}"
-                    f"  [dim](score≥{threshold})[/dim]"
-                )
-                matched += 1
-                progress.advance(task)
-                time.sleep(delay)
-                continue
-
-            try:
-                with get_session() as session:
-                    pm = session.query(PaperMetadata).filter_by(id=pm_id).first()
-                    if pm is None:
-                        skipped += 1
-                        progress.advance(task)
-                        time.sleep(delay)
-                        continue
-
-                    pm.doi             = meta.doi or pm.doi
-                    pm.arxiv_id        = meta.arxiv_id or pm.arxiv_id
-                    pm.title           = meta.title or pm.title
-                    pm.abstract        = meta.abstract or pm.abstract
-                    pm.year            = meta.year or pm.year
-                    pm.journal         = meta.journal or pm.journal
-                    pm.volume          = meta.volume or pm.volume
-                    pm.issue           = meta.issue or pm.issue
-                    pm.pages           = meta.pages or pm.pages
-                    pm.publisher       = meta.publisher or pm.publisher
-                    if meta.authors:
-                        pm.authors = meta.authors
-                    pm.keywords        = meta.keywords or pm.keywords
-                    pm.metadata_source = meta.source
-                    pm.crossref_raw    = meta.crossref_raw or pm.crossref_raw
-                    pm.arxiv_raw       = meta.arxiv_raw or pm.arxiv_raw
-                    session.commit()
-
-                matched += 1
-            except Exception as exc:
-                failed += 1
-
-            progress.advance(task)
-            time.sleep(delay)
 
     console.print(
         f"\n[green]✓ Matched & updated {matched}[/green]  "
@@ -1016,6 +1023,43 @@ def expand(
     _log(f"RUN  {_run_ts}  papers={len(papers)}  candidates={len(downloadable)}")
     _log(f"{'='*72}")
 
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from sciknow.config import settings as _settings
+
+    dl_workers = max(1, _settings.expand_download_workers)
+
+    # Partition refs: cached skips handled first (no work), rest fed to a
+    # download pool. Ingest subprocesses stay on the main thread to avoid GPU
+    # contention on the 3090 (see OPTIMIZATION.md).
+    def _prep(ref):
+        ref_key = (ref.doi or ref.arxiv_id or "").lower()
+        safe_name = (ref.doi or ref.arxiv_id or "unknown").replace("/", "_").replace(":", "_")
+        dest = download_dir / f"{safe_name}.pdf"
+        title = (ref.title or "")[:80]
+        return ref, ref_key, dest, title
+
+    def _download_one(ref, ref_key, dest, title):
+        """I/O-bound: runs in a worker thread. Never touches caches/logs/DB."""
+        if ref_key in ingest_done or ref_key in no_oa_cache:
+            return ("cached", None)
+        if dest.exists():
+            return ("exists", None)
+        ok, source = find_and_download(
+            doi=ref.doi,
+            arxiv_id=ref.arxiv_id,
+            dest_path=dest,
+            email=settings.crossref_email,
+        )
+        return ("downloaded" if ok else "no_oa", source)
+
+    def _ingest_one(dest: Path) -> tuple[bool, str]:
+        result = subprocess.run(
+            [sys.executable, "-m", "sciknow.cli.main", "ingest", "file", str(dest)],
+            capture_output=True, text=True,
+        )
+        err = (result.stderr or result.stdout or "").strip()[:120]
+        return result.returncode == 0, err
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -1025,93 +1069,71 @@ def expand(
         console=console,
         transient=False,
     ) as progress:
-        task = progress.add_task("Downloading", total=len(downloadable))
+        task = progress.add_task(
+            f"Downloading ({dl_workers} workers)", total=len(downloadable)
+        )
 
-        for ref in downloadable:
-            label = (ref.title or ref.doi or ref.arxiv_id or "")[:50]
-            progress.update(task, description=f"[dim]{label}[/dim]")
+        prepped = [_prep(r) for r in downloadable]
 
-            ref_key = (ref.doi or ref.arxiv_id or "").lower()
-            safe_name = (ref.doi or ref.arxiv_id or "unknown").replace("/", "_").replace(":", "_")
-            dest = download_dir / f"{safe_name}.pdf"
+        with ThreadPoolExecutor(max_workers=dl_workers) as pool:
+            future_to_info = {
+                pool.submit(_download_one, *info): info for info in prepped
+            }
 
-            _ref_title = (ref.title or "")[:80]
+            for fut in as_completed(future_to_info):
+                ref, ref_key, dest, title = future_to_info[fut]
+                label = (ref.title or ref.doi or ref.arxiv_id or "")[:50]
+                progress.update(task, description=f"[dim]{label}[/dim]")
 
-            # Already fully processed in a previous run
-            if ref_key in ingest_done:
-                skipped += 1
-                _log(f"SKIP   {ref_key}  | {_ref_title}")
-                progress.advance(task)
-                continue
+                try:
+                    status, source = fut.result()
+                except Exception as exc:
+                    failed_dl += 1
+                    _log(f"ERROR  {ref_key}  | {title}  | {exc}")
+                    progress.advance(task)
+                    continue
 
-            # PDF exists on disk but ingest didn't complete — retry ingest
-            if dest.exists() and ref_key not in ingest_done:
+                if status == "cached":
+                    if ref_key in ingest_done:
+                        skipped += 1
+                        _log(f"SKIP   {ref_key}  | {title}")
+                    else:
+                        failed_dl += 1
+                        _log(f"NO_OA  {ref_key}  | {title}  (cached)")
+                    progress.advance(task)
+                    continue
+
+                if status == "no_oa":
+                    failed_dl += 1
+                    with no_oa_cache_file.open("a") as f:
+                        f.write(ref_key + "\n")
+                    no_oa_cache.add(ref_key)
+                    _log(f"NO_OA  {ref_key}  | {title}")
+                    progress.advance(task)
+                    continue
+
+                if status == "downloaded":
+                    downloaded += 1
+                    progress.update(task, description=f"[green]↓ {source}[/green] {label[:40]}")
+                    _log(f"DL     {ref_key}  | {title}  | source={source}")
+
+                # status in {"downloaded", "exists"} -> optionally ingest
                 if ingest:
-                    result = subprocess.run(
-                        [sys.executable, "-m", "sciknow.cli.main", "ingest", "file", str(dest)],
-                        capture_output=True, text=True,
-                    )
-                    if result.returncode == 0:
+                    ok, err = _ingest_one(dest)
+                    if ok:
                         ingested += 1
-                        _log(f"INGEST {ref_key}  | {_ref_title}  (retry ok)")
+                        _log(f"INGEST {ref_key}  | {title}")
                         with ingest_done_file.open("a") as f:
                             f.write(ref_key + "\n")
+                        ingest_done.add(ref_key)
                     else:
                         failed_ingest += 1
-                        err = (result.stderr or result.stdout or "").strip()[:120]
-                        _log(f"INGEST_FAIL {ref_key}  | {_ref_title}  | {err}")
-                else:
+                        _log(f"INGEST_FAIL {ref_key}  | {title}  | {err}")
+                elif status == "exists":
                     skipped += 1
-                    _log(f"SKIP   {ref_key}  | {_ref_title}  (pdf on disk, --no-ingest)")
+                    _log(f"SKIP   {ref_key}  | {title}  (pdf on disk, --no-ingest)")
+
                 progress.advance(task)
-                continue
-
-            # No OA PDF found in a previous run — skip the API call
-            if ref_key in no_oa_cache:
-                failed_dl += 1
-                _log(f"NO_OA  {ref_key}  | {_ref_title}  (cached)")
-                progress.advance(task)
-                continue
-
-            ok, source = find_and_download(
-                doi=ref.doi,
-                arxiv_id=ref.arxiv_id,
-                dest_path=dest,
-                email=settings.crossref_email,
-            )
-
-            if not ok:
-                failed_dl += 1
-                with no_oa_cache_file.open("a") as f:
-                    f.write(ref_key + "\n")
-                no_oa_cache.add(ref_key)
-                _log(f"NO_OA  {ref_key}  | {_ref_title}")
-                progress.advance(task)
-                time.sleep(delay)
-                continue
-
-            downloaded += 1
-            progress.update(task, description=f"[green]↓ {source}[/green] {label[:40]}")
-            _log(f"DL     {ref_key}  | {_ref_title}  | source={source}")
-
-            if ingest:
-                result = subprocess.run(
-                    [sys.executable, "-m", "sciknow.cli.main", "ingest", "file", str(dest)],
-                    capture_output=True, text=True,
-                )
-                if result.returncode == 0:
-                    ingested += 1
-                    _log(f"INGEST {ref_key}  | {_ref_title}")
-                    with ingest_done_file.open("a") as f:
-                        f.write(ref_key + "\n")
-                    ingest_done.add(ref_key)
-                else:
-                    failed_ingest += 1
-                    err = (result.stderr or result.stdout or "").strip()[:120]
-                    _log(f"INGEST_FAIL {ref_key}  | {_ref_title}  | {err}")
-
-            time.sleep(delay)
-            progress.advance(task)
 
     _log(
         f"SUMMARY  downloaded={downloaded}  ingested={ingested}  "
@@ -1197,6 +1219,36 @@ def export(
     written = 0
     skipped = 0
 
+    def _row_to_record(row) -> dict:
+        chunk_id, content, section_type, tokens, title, year, doi, authors = row
+        return {
+            "title":   title,
+            "year":    year,
+            "section": section_type,
+            "doi":     doi,
+            "content": content,
+        }
+
+    def _generate_qa_for(record: dict) -> dict | None:
+        """Runs in a worker thread. Must not touch DB or shared files."""
+        from sciknow.rag import prompts
+        from sciknow.rag.llm import complete
+        sys_p, usr_p = prompts.finetune_qa(
+            record["title"], record["year"], record["section"], record["content"]
+        )
+        try:
+            raw = complete(sys_p, usr_p, temperature=0.3, num_ctx=4096).strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            qa = json.loads(raw)
+        except Exception:
+            return None
+        return {
+            **record,
+            "question": qa.get("question", ""),
+            "answer":   qa.get("answer", ""),
+        }
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -1209,39 +1261,37 @@ def export(
         task = progress.add_task("Exporting", total=len(rows))
 
         with output.open("w", encoding="utf-8") as fh:
-            for row in rows:
-                chunk_id, content, section_type, tokens, title, year, doi, authors = row
-                progress.update(task, description=f"[dim]{(title or '')[:40]}[/dim]")
+            if not generate_qa:
+                # Fast path: no LLM, just stream rows to disk.
+                for row in rows:
+                    fh.write(json.dumps(_row_to_record(row), ensure_ascii=False) + "\n")
+                    written += 1
+                    progress.advance(task)
+            else:
+                # Concurrent LLM calls. Ollama's server-side parallelism is
+                # controlled by OLLAMA_NUM_PARALLEL (default 1, set to 4+ to
+                # actually see the speedup from this client-side pool).
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                from sciknow.config import settings as _settings
 
-                record: dict = {
-                    "title":   title,
-                    "year":    year,
-                    "section": section_type,
-                    "doi":     doi,
-                    "content": content,
-                }
+                workers = max(1, _settings.llm_parallel_workers)
+                progress.update(
+                    task, description=f"Generating Q&A ({workers} parallel LLM calls)"
+                )
 
-                if generate_qa:
-                    from sciknow.rag import prompts
-                    from sciknow.rag.llm import complete
-                    sys_p, usr_p = prompts.finetune_qa(title, year, section_type, content)
-                    try:
-                        raw = complete(sys_p, usr_p, temperature=0.3, num_ctx=4096)
-                        # Strip markdown code fences if present
-                        raw = raw.strip()
-                        if raw.startswith("```"):
-                            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-                        qa = json.loads(raw)
-                        record["question"] = qa.get("question", "")
-                        record["answer"]   = qa.get("answer", "")
-                    except Exception as exc:
-                        skipped += 1
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures = {
+                        pool.submit(_generate_qa_for, _row_to_record(row)): row
+                        for row in rows
+                    }
+                    for fut in as_completed(futures):
+                        result = fut.result()
+                        if result is None:
+                            skipped += 1
+                        else:
+                            fh.write(json.dumps(result, ensure_ascii=False) + "\n")
+                            written += 1
                         progress.advance(task)
-                        continue
-
-                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-                written += 1
-                progress.advance(task)
 
     console.print(f"[green]✓ Wrote {written} records[/green]" +
                   (f", skipped {skipped}" if skipped else "") +
