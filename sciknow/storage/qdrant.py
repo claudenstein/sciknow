@@ -4,6 +4,10 @@ from qdrant_client.models import (
     HnswConfigDiff,
     OptimizersConfigDiff,
     PayloadSchemaType,
+    QuantizationSearchParams,
+    ScalarQuantization,
+    ScalarQuantizationConfig,
+    ScalarType,
     SparseVectorParams,
     VectorParams,
 )
@@ -14,8 +18,17 @@ PAPERS_COLLECTION = "papers"
 ABSTRACTS_COLLECTION = "abstracts"
 
 
+# Module-level singleton client — QdrantClient holds an httpx session internally;
+# reusing it avoids per-call connection setup across the many retrieval and
+# ingestion call sites.
+_client: QdrantClient | None = None
+
+
 def get_client() -> QdrantClient:
-    return QdrantClient(host=settings.qdrant_host, port=settings.qdrant_port)
+    global _client
+    if _client is None:
+        _client = QdrantClient(host=settings.qdrant_host, port=settings.qdrant_port)
+    return _client
 
 
 def init_collections(client: QdrantClient | None = None) -> None:
@@ -25,6 +38,20 @@ def init_collections(client: QdrantClient | None = None) -> None:
     existing = {c.name for c in client.get_collections().collections}
 
     if PAPERS_COLLECTION not in existing:
+        # Scalar int8 quantization trades a tiny recall hit for ~75% memory
+        # savings on dense vectors; `always_ram=True` keeps the quantized copy
+        # hot while original vectors stay on disk (see settings.qdrant_*).
+        quant_config = (
+            ScalarQuantization(
+                scalar=ScalarQuantizationConfig(
+                    type=ScalarType.INT8,
+                    quantile=0.99,
+                    always_ram=True,
+                )
+            )
+            if settings.qdrant_scalar_quantization
+            else None
+        )
         client.create_collection(
             collection_name=PAPERS_COLLECTION,
             vectors_config={
@@ -32,7 +59,10 @@ def init_collections(client: QdrantClient | None = None) -> None:
                     size=settings.embedding_dim,
                     distance=Distance.COSINE,
                     on_disk=True,
-                    hnsw_config=HnswConfigDiff(m=16, ef_construct=200),
+                    hnsw_config=HnswConfigDiff(
+                        m=settings.qdrant_hnsw_m,
+                        ef_construct=settings.qdrant_hnsw_ef_construct,
+                    ),
                 )
             },
             sparse_vectors_config={
@@ -42,6 +72,7 @@ def init_collections(client: QdrantClient | None = None) -> None:
                 indexing_threshold=20000,
                 memmap_threshold=50000,
             ),
+            quantization_config=quant_config,
         )
         # Payload indexes for fast filtering
         for field, schema in [

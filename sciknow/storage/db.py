@@ -7,7 +7,12 @@ from sqlalchemy.orm import Session, sessionmaker
 from sciknow.config import settings
 
 
-engine = create_engine(settings.pg_url, pool_pre_ping=True)
+engine = create_engine(
+    settings.pg_url,
+    pool_pre_ping=True,
+    pool_size=settings.pg_pool_size,
+    max_overflow=settings.pg_max_overflow,
+)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 
