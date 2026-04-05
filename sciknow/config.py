@@ -79,6 +79,13 @@ class Settings(BaseSettings):
     # or LLM moved to a remote host like DGX Spark).
     ingest_workers: int = 1
 
+    # `sciknow db expand` relevance filter. Cosine similarity threshold under
+    # which candidate references are dropped before download. 0.55 is a sane
+    # default for bge-m3 — ~80% of on-topic refs score above it on a focused
+    # library, while off-topic references (statistical methods cited from a
+    # climate paper, etc.) typically score 0.3-0.45.
+    expand_relevance_threshold: float = 0.55
+
     @computed_field
     @property
     def pg_url(self) -> str:
