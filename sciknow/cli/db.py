@@ -511,6 +511,10 @@ def stats():
             .scalar()
         )
         with_metadata = session.query(func.count(PaperMetadata.id)).scalar()
+        total_citations = session.execute(text("SELECT COUNT(*) FROM citations")).scalar()
+        linked_citations = session.execute(
+            text("SELECT COUNT(*) FROM citations WHERE cited_document_id IS NOT NULL")
+        ).scalar()
 
     try:
         qdrant = get_client()
@@ -528,6 +532,8 @@ def stats():
     table.add_row("Total chunks", str(total_chunks))
     table.add_row("Embedded chunks", str(embedded))
     table.add_row("Qdrant points (papers)", str(qdrant_points))
+    table.add_row("Citations (total)", str(total_citations))
+    table.add_row("Citations (cross-linked)", str(linked_citations))
     table.add_section()
 
     for status, count in sorted(status_rows):
@@ -1401,6 +1407,99 @@ def expand(
         console.print(
             f"[dim]{cache_size} DOIs cached as 'no OA PDF' — will be skipped on next run.[/dim]"
         )
+
+
+@app.command(name="link-citations")
+def link_citations(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be linked without making changes."),
+):
+    """
+    Cross-link the citations table so that cited_document_id is set whenever
+    the cited paper is already in the corpus.
+
+    Useful after a bulk ingest or expand: any citation whose cited_doi matches
+    a corpus paper's DOI gets its cited_document_id pointer filled in. Also
+    prints a summary of citation counts (how many times each paper is cited
+    by other papers in the collection).
+
+    This is the same cross-linking that pipeline.ingest() does per-paper, but
+    applied in a single pass over the whole citations table — catches any gaps
+    from papers ingested before the citation feature was added.
+    """
+    from sciknow.cli import preflight
+    preflight(qdrant=False)
+
+    from sqlalchemy import text as sql_text
+    from sciknow.storage.db import get_session
+
+    with get_session() as session:
+        # Build a lowercase-DOI → document_id map for all complete papers
+        rows = session.execute(sql_text("""
+            SELECT pm.doi, d.id
+            FROM paper_metadata pm
+            JOIN documents d ON d.id = pm.document_id
+            WHERE pm.doi IS NOT NULL AND d.ingestion_status = 'complete'
+        """)).fetchall()
+        doi_to_doc = {r[0].lower(): r[1] for r in rows}
+
+        # Find unlinked citations whose cited_doi matches a corpus paper
+        unlinked = session.execute(sql_text("""
+            SELECT c.id, c.cited_doi
+            FROM citations c
+            WHERE c.cited_doi IS NOT NULL AND c.cited_document_id IS NULL
+        """)).fetchall()
+
+        linked = 0
+        for cit_id, cited_doi in unlinked:
+            doc_id = doi_to_doc.get((cited_doi or "").lower())
+            if doc_id:
+                if not dry_run:
+                    session.execute(
+                        sql_text("UPDATE citations SET cited_document_id = :doc_id WHERE id = :cit_id"),
+                        {"doc_id": doc_id, "cit_id": cit_id},
+                    )
+                linked += 1
+
+        if not dry_run:
+            session.commit()
+
+        # Stats
+        total_citations = session.execute(sql_text("SELECT COUNT(*) FROM citations")).scalar()
+        total_linked = session.execute(
+            sql_text("SELECT COUNT(*) FROM citations WHERE cited_document_id IS NOT NULL")
+        ).scalar()
+
+    action = "Would link" if dry_run else "Linked"
+    console.print(
+        f"[green]✓ {action} {linked} citations[/green] "
+        f"(total: {total_citations}, cross-linked: {total_linked})"
+    )
+
+    if total_linked:
+        # Show top-cited papers
+        with get_session() as session:
+            top = session.execute(sql_text("""
+                SELECT pm.title, pm.doi, COUNT(*) AS cite_count
+                FROM citations c
+                JOIN paper_metadata pm ON pm.document_id = c.cited_document_id
+                WHERE c.cited_document_id IS NOT NULL
+                GROUP BY pm.title, pm.doi
+                ORDER BY cite_count DESC
+                LIMIT 15
+            """)).fetchall()
+
+        if top:
+            table = Table(title="Most-Cited Papers in the Collection", box=box.SIMPLE_HEAD)
+            table.add_column("Title", ratio=3)
+            table.add_column("DOI", ratio=1, style="dim")
+            table.add_column("Cited by", justify="right", style="cyan")
+            for title, doi, count in top:
+                table.add_row(
+                    (title or "")[:70],
+                    (doi or "")[:30],
+                    str(count),
+                )
+            console.print(table)
 
 
 @app.command()

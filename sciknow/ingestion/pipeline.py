@@ -195,6 +195,76 @@ def ingest(
                      {"source": meta.source, "title": meta.title})
 
             # ------------------------------------------------------------------
+            # Stage 2b: Citation extraction + cross-linking
+            #
+            # Extract references from the same sources expand uses (Crossref
+            # raw + MinerU content_list + Marker markdown). For each ref,
+            # check if the cited paper is already in the corpus and set
+            # cited_document_id. Also backlink: if another paper previously
+            # cited THIS paper by DOI and we didn't know it was in the
+            # corpus yet, set cited_document_id on those existing rows now.
+            # ------------------------------------------------------------------
+            session.query(Citation).filter_by(citing_document_id=doc_id).delete()
+
+            from sciknow.ingestion.references import (
+                extract_references_from_crossref,
+                extract_references_from_mineru_content_list,
+                extract_references_from_markdown,
+            )
+
+            raw_refs = []
+            if meta.crossref_raw:
+                raw_refs.extend(extract_references_from_crossref(meta.crossref_raw))
+            if result.backend == "mineru" and result.content_list:
+                raw_refs.extend(
+                    extract_references_from_mineru_content_list(result.content_list)
+                )
+            elif result.backend == "marker_md" and result.text:
+                raw_refs.extend(extract_references_from_markdown(result.text))
+
+            # Deduplicate by DOI within this paper's refs
+            seen_ref_keys: set[str] = set()
+            for ref in raw_refs:
+                key = (ref.doi or "").lower() or (ref.title or "")[:60].lower()
+                if not key or key in seen_ref_keys:
+                    continue
+                seen_ref_keys.add(key)
+
+                # Check if cited paper is already in the corpus
+                cited_doc_id = None
+                if ref.doi:
+                    from sqlalchemy import text as _text
+                    row = session.execute(
+                        _text("SELECT d.id FROM documents d JOIN paper_metadata pm "
+                              "ON pm.document_id = d.id WHERE LOWER(pm.doi) = :doi "
+                              "AND d.ingestion_status = 'complete' LIMIT 1"),
+                        {"doi": ref.doi.lower()},
+                    ).first()
+                    if row:
+                        cited_doc_id = row[0]
+
+                session.add(Citation(
+                    citing_document_id=doc_id,
+                    cited_doi=ref.doi,
+                    cited_title=ref.title,
+                    cited_year=ref.year,
+                    cited_document_id=cited_doc_id,
+                    raw_reference_text=(ref.raw_text or "")[:400],
+                ))
+
+            # Backlink: if existing citations point to THIS paper by DOI,
+            # set their cited_document_id now that this paper is in the DB.
+            if meta.doi:
+                from sqlalchemy import text as _text
+                session.execute(
+                    _text("UPDATE citations SET cited_document_id = :doc_id "
+                          "WHERE LOWER(cited_doi) = :doi AND cited_document_id IS NULL"),
+                    {"doc_id": doc_id, "doi": meta.doi.lower()},
+                )
+
+            session.flush()
+
+            # ------------------------------------------------------------------
             # Stage 3: Section parsing + chunking
             # JSON mode uses block-type-aware section detection.
             # Markdown fallback uses regex heading detection.
