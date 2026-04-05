@@ -110,9 +110,9 @@ sciknow/
 │   ├── failed/                 # PDFs moved here on failure
 │   └── mineru_output/          # raw Marker output per paper
 │       └── {uuid}/
-│           ├── {name}.md
-│           ├── {name}_content_list.json
-│           └── images/
+│           ├── {name}.json     # Marker block-structured JSON (primary)
+│           ├── {name}.md       # markdown fallback (only if JSON fails)
+│           └── images/         # extracted images (markdown fallback only)
 └── sciknow/
     ├── config.py               # Pydantic Settings — all config flows through here
     ├── cli/
@@ -505,7 +505,11 @@ Marker (`marker-pdf`) detects whether a PDF is text-based or scanned and applies
 - **Text PDF:** layout analysis, reading order detection, multi-column handling, LaTeX math
 - **Scanned PDF:** Surya OCR + layout analysis, GPU-accelerated
 
-Output: `data/mineru_output/{stem}/{stem}.md` plus an `images/` subdirectory. Models are downloaded automatically from HuggingFace on first use and cached in `~/.cache/datalab/`.
+**Output format — JSON (primary):** Marker's `JSONRenderer` produces a structured block tree where every element is typed: `SectionHeader` (with explicit heading level h1–h4), `Text`, `Table`, `Equation`, `ListItem`, `Caption`, `PageHeader`, `PageFooter`, `Figure`, etc. This is used by the section-aware chunker for exact structural detection instead of regex heuristics.
+
+**Fallback — Markdown:** if JSON conversion fails for any document, Marker falls back to `MarkdownRenderer` and saves a `.md` file. The rest of the pipeline continues normally.
+
+Output is saved to `data/mineru_output/{doc_id}/{stem}.json` (or `.md` on fallback). Models are downloaded automatically from HuggingFace on first use and cached in `~/.cache/datalab/`. Marker models are loaded once and cached in memory for the duration of an ingestion run.
 
 ### Stage 2 — Metadata Extraction (4 layers)
 
@@ -514,13 +518,17 @@ Each layer is tried in order; later layers only run if the previous didn't fully
 1. **PyMuPDF** — reads embedded XMP/Info fields from the PDF. Fast but often incomplete.
 2. **Crossref API** — authoritative bibliographic data by DOI. DOI is extracted from the paper text via regex. Uses the Crossref polite pool (rate limit: 50 req/s with email in User-Agent).
 3. **arXiv API** — for preprints. arXiv IDs are extracted from URLs and filenames.
-4. **Ollama LLM fallback** — sends the first ~3000 characters of markdown to `LLM_FAST_MODEL` with a structured JSON extraction prompt. Used when no DOI or arXiv ID is found.
+4. **Ollama LLM fallback** — sends the first ~3000 characters of the document text to `LLM_FAST_MODEL` with a structured JSON extraction prompt. Used when no DOI or arXiv ID is found.
 
 Fields extracted: title, abstract, year, DOI, arXiv ID, journal, volume, issue, pages, publisher, authors (with ORCID and affiliation where available), keywords.
 
 ### Stage 3 — Section-Aware Chunking
 
-Sections are detected from markdown headings (`#` through `####`) and classified into canonical types:
+**JSON mode (primary):** the chunker reads the Marker block tree directly. `SectionHeader` blocks at heading level h1/h2 open new sections; h3/h4 are inlined as bold subheadings within the parent section to avoid fragmentation. `Text`, `Table`, `Equation`, and `ListItem` blocks are accumulated into the current section. `PageHeader`, `PageFooter`, `Figure`, and `Picture` blocks are discarded. Short `Text` blocks that contain only a known section keyword (`Abstract`, `Introduction`, etc.) are also recognised as implicit section headers — this handles older PDFs where heading formatting was lost during scanning.
+
+**Markdown mode (fallback):** sections are detected from markdown headings (`#` through `####`) using regex.
+
+Both modes classify sections into canonical types:
 
 | Canonical type | Detected headings |
 |---|---|
@@ -572,7 +580,7 @@ Both are stored in Qdrant. Abstracts are also embedded separately in the `abstra
 |---|---|
 | `documents` | One row per PDF. Tracks ingestion status and file hash (SHA-256, used for deduplication). |
 | `paper_metadata` | Bibliographic metadata: title, abstract, authors, DOI, year, journal, keywords, domains. Maintains a `tsvector` column for full-text search via an automatic trigger. |
-| `paper_sections` | Sections extracted from the markdown, classified by type. |
+| `paper_sections` | Sections extracted from the document (JSON or markdown), classified by type. |
 | `chunks` | Individual retrieval units. Each chunk links to a section and a Qdrant point UUID. |
 | `citations` | Reference list entries (from Crossref). Cross-linked if a cited paper is also in the DB. |
 | `ingestion_jobs` | Audit log of every pipeline stage with timing and status. |
