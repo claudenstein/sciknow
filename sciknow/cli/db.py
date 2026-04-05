@@ -1004,6 +1004,18 @@ def expand(
     # ── Step 7: download and ingest ───────────────────────────────────────────
     downloaded = skipped = ingested = failed_dl = failed_ingest = 0
 
+    log_file = download_dir / "expand.log"
+    from datetime import datetime as _dt
+    _run_ts = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def _log(line: str) -> None:
+        with log_file.open("a", encoding="utf-8") as _lf:
+            _lf.write(line + "\n")
+
+    _log(f"\n{'='*72}")
+    _log(f"RUN  {_run_ts}  papers={len(papers)}  candidates={len(downloadable)}")
+    _log(f"{'='*72}")
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -1023,9 +1035,12 @@ def expand(
             safe_name = (ref.doi or ref.arxiv_id or "unknown").replace("/", "_").replace(":", "_")
             dest = download_dir / f"{safe_name}.pdf"
 
+            _ref_title = (ref.title or "")[:80]
+
             # Already fully processed in a previous run
             if ref_key in ingest_done:
                 skipped += 1
+                _log(f"SKIP   {ref_key}  | {_ref_title}")
                 progress.advance(task)
                 continue
 
@@ -1038,18 +1053,23 @@ def expand(
                     )
                     if result.returncode == 0:
                         ingested += 1
+                        _log(f"INGEST {ref_key}  | {_ref_title}  (retry ok)")
                         with ingest_done_file.open("a") as f:
                             f.write(ref_key + "\n")
                     else:
                         failed_ingest += 1
+                        err = (result.stderr or result.stdout or "").strip()[:120]
+                        _log(f"INGEST_FAIL {ref_key}  | {_ref_title}  | {err}")
                 else:
                     skipped += 1
+                    _log(f"SKIP   {ref_key}  | {_ref_title}  (pdf on disk, --no-ingest)")
                 progress.advance(task)
                 continue
 
             # No OA PDF found in a previous run — skip the API call
             if ref_key in no_oa_cache:
                 failed_dl += 1
+                _log(f"NO_OA  {ref_key}  | {_ref_title}  (cached)")
                 progress.advance(task)
                 continue
 
@@ -1065,12 +1085,14 @@ def expand(
                 with no_oa_cache_file.open("a") as f:
                     f.write(ref_key + "\n")
                 no_oa_cache.add(ref_key)
+                _log(f"NO_OA  {ref_key}  | {_ref_title}")
                 progress.advance(task)
                 time.sleep(delay)
                 continue
 
             downloaded += 1
             progress.update(task, description=f"[green]↓ {source}[/green] {label[:40]}")
+            _log(f"DL     {ref_key}  | {_ref_title}  | source={source}")
 
             if ingest:
                 result = subprocess.run(
@@ -1079,15 +1101,22 @@ def expand(
                 )
                 if result.returncode == 0:
                     ingested += 1
+                    _log(f"INGEST {ref_key}  | {_ref_title}")
                     with ingest_done_file.open("a") as f:
                         f.write(ref_key + "\n")
                     ingest_done.add(ref_key)
                 else:
                     failed_ingest += 1
+                    err = (result.stderr or result.stdout or "").strip()[:120]
+                    _log(f"INGEST_FAIL {ref_key}  | {_ref_title}  | {err}")
 
             time.sleep(delay)
             progress.advance(task)
 
+    _log(
+        f"SUMMARY  downloaded={downloaded}  ingested={ingested}  "
+        f"skipped={skipped}  no_oa={failed_dl}  ingest_failed={failed_ingest}"
+    )
     console.print(
         f"\n[bold]Summary:[/bold] "
         f"[green]↓ {downloaded} downloaded[/green]  "
@@ -1096,6 +1125,7 @@ def expand(
         f"[red]✗ {failed_dl} no OA PDF[/red]"
         + (f"  [red]✗ {failed_ingest} ingest failed[/red]" if failed_ingest else "")
     )
+    console.print(f"[dim]Run log appended to {log_file}[/dim]")
     if downloaded:
         console.print(
             f"\nNew PDFs saved to [bold]{download_dir}[/bold]. "
