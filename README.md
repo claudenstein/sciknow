@@ -681,6 +681,63 @@ Both are stored in Qdrant. Abstracts are also embedded separately in the `abstra
 
 ---
 
+## AI Models
+
+Sciknow uses four types of AI models, each serving a different role:
+
+### GPU-resident models (loaded once per process, stay in VRAM)
+
+| Model | VRAM | Used by | Purpose |
+|---|---|---|---|
+| **MinerU 2.5 pipeline** (DocLayout-YOLO, MFD, MFR, table OCR, text OCR) | ~7 GB peak | PDF conversion (primary) | PDF → structured `content_list.json` |
+| **BAAI/bge-m3** (FP16, 1024-dim dense + sparse) | ~2.2 GB | Embedding, search, relevance scoring | Chunk & query embeddings, expand relevance filter |
+| **BAAI/bge-reranker-v2-m3** (FP16 cross-encoder) | ~0.5 GB | Reranking | Re-scores top-50 candidates to top-k |
+| **Marker** (Surya OCR + layout, fallback only) | ~5 GB peak | PDF conversion (fallback) | Only loaded if MinerU fails |
+
+### LLM: `LLM_FAST_MODEL` (default: `mistral:7b-instruct-q4_K_M`)
+
+Small, fast model (~1 s/call) for lightweight structured extraction. Used where speed matters more than reasoning depth:
+
+| Task | Where |
+|---|---|
+| Metadata fallback (layer 4) | Extracts title/authors/year from first ~3000 chars when Crossref/arXiv fail |
+| Query expansion (`--expand`) | Adds synonyms/acronyms to search queries before embedding |
+| Draft summary generation | Auto-generates 100-200 word summaries for cross-chapter coherence |
+
+### LLM: `LLM_MODEL` (default: `qwen2.5:32b-instruct-q4_K_M`)
+
+Primary model for all generation, analysis, and reasoning (~5-30 s/call). Used wherever output quality matters:
+
+| Task | Where |
+|---|---|
+| RAG Q&A | `sciknow ask question` |
+| Multi-paper synthesis | `sciknow ask synthesize` |
+| Section drafting | `sciknow ask write`, `sciknow book write` |
+| Book outline generation | `sciknow book outline` |
+| Book plan (thesis) | `sciknow book plan` |
+| Sentence planning | `sciknow book write --plan` |
+| Review (critic agent) | `sciknow book review` |
+| Revision | `sciknow book revise` |
+| Claim verification | `sciknow book write --verify` |
+| IPCC uncertainty language | `sciknow book write --ipcc` |
+| Argument mapping | `sciknow book argue` |
+| Gap analysis | `sciknow book gaps` |
+| Topic clustering | `sciknow catalog cluster` |
+| QA pair generation | `sciknow db export --generate-qa` |
+
+### Model lifecycle by pipeline phase
+
+```
+INGESTION:    MinerU (GPU) → LLM_FAST_MODEL (metadata fallback) → bge-m3 (GPU)
+RETRIEVAL:    bge-m3 (GPU) → [LLM_FAST_MODEL for --expand] → bge-reranker (GPU)
+RAG/WRITING:  LLM_MODEL (all generation) + LLM_FAST_MODEL (draft summaries)
+EXPANSION:    bge-m3 (GPU, relevance filter) → no model (reference extraction)
+```
+
+All LLM calls go through Ollama at `OLLAMA_HOST`. Any command with `--model` can override the default for that invocation. When DGX Spark arrives, the plan is to split: fast model stays on the 3090, heavy model moves to Spark (see `OPTIMIZATION.md`).
+
+---
+
 ## Database Schema
 
 ### Tables
