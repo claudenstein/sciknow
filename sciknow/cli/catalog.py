@@ -525,10 +525,12 @@ def cluster(
     preflight(qdrant=False)  # cluster writes to PostgreSQL only
 
     import json as _json
+    import time as _time
+    import threading
     from sqlalchemy import text
     from sciknow.storage.db import get_session
     from sciknow.rag import prompts as rag_prompts
-    from sciknow.rag.llm import complete as llm_complete
+    from sciknow.rag.llm import stream as llm_stream
 
     with get_session() as session:
         rows = session.execute(text("""
@@ -558,26 +560,19 @@ def cluster(
     )
 
     def _sanitize_json(raw: str) -> str:
-        """Clean common LLM JSON output issues before parsing."""
         import re
         cleaned = raw.strip()
-        # Strip markdown code fences
         if cleaned.startswith("```"):
             cleaned = "\n".join(cleaned.split("\n")[1:])
         if cleaned.endswith("```"):
             cleaned = "\n".join(cleaned.split("\n")[:-1])
-        # Remove control characters (except \n, \r, \t) that break JSON parsing
         cleaned = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', cleaned)
-        # Fix invalid \escapes: replace \X (where X is not a valid JSON escape) with \\X
         cleaned = re.sub(r'\\([^"\\\/bfnrtu])', r'\\\\\1', cleaned)
         return cleaned
 
     def _fuzzy_title_match(llm_title: str, title_to_doc: dict[str, str]) -> str | None:
-        """Match an LLM-returned title to a paper, tolerating minor differences."""
-        # Exact match first
         if llm_title in title_to_doc:
             return title_to_doc[llm_title]
-        # Normalize: lowercase, strip punctuation, collapse whitespace
         import re
         def _norm(s: str) -> str:
             return re.sub(r'\s+', ' ', re.sub(r'[^\w\s]', '', s.lower())).strip()
@@ -585,30 +580,48 @@ def cluster(
         for paper_title, doc_id in title_to_doc.items():
             if _norm(paper_title) == norm_llm:
                 return doc_id
-        # Prefix match (LLM may truncate long titles)
         if len(norm_llm) >= 40:
             for paper_title, doc_id in title_to_doc.items():
                 if _norm(paper_title).startswith(norm_llm[:40]):
                     return doc_id
         return None
 
+    # Shared state for the live status display. Each running batch updates
+    # its token count; the main thread prints a consolidated status line.
+    _batch_state: dict[int, dict] = {}
+    _state_lock = threading.Lock()
+
     def _run_batch(batch_num: int, batch_papers: list[dict]) -> tuple[int, dict[str, str], int]:
-        """Runs in a worker thread. Returns (batch_num, doc_id→cluster, n_clusters)."""
+        """Stream the LLM response, updating live token count for the status display."""
         system, user = rag_prompts.cluster(batch_papers)
+
+        with _state_lock:
+            _batch_state[batch_num] = {"tokens": 0, "status": "generating", "start": _time.monotonic()}
+
         try:
-            # 200 papers × ~80 chars/title ≈ 16K chars input + ~4K output.
-            # Default num_ctx=8192 is too small — truncated output causes
-            # invalid JSON. 32K fits comfortably on qwen2.5:32b.
-            raw = llm_complete(system, user, model=model, num_ctx=32768)
+            tokens: list[str] = []
+            for tok in llm_stream(system, user, model=model, num_ctx=32768):
+                tokens.append(tok)
+                with _state_lock:
+                    _batch_state[batch_num]["tokens"] = len(tokens)
+
+            raw = "".join(tokens)
+            with _state_lock:
+                _batch_state[batch_num]["status"] = "parsing"
+
             cleaned = _sanitize_json(raw)
-            # strict=False accepts control characters (tabs, raw newlines)
-            # inside JSON string values — common with LLM-generated JSON.
             data = _json.loads(cleaned, strict=False)
             assignments = data.get("assignments", {})
             n_clusters = len(data.get("clusters", []))
         except Exception as e:
+            with _state_lock:
+                _batch_state[batch_num]["status"] = "failed"
             console.print(f"[red]Batch {batch_num} failed:[/red] {e}")
             return batch_num, {}, 0
+        finally:
+            with _state_lock:
+                if _batch_state[batch_num]["status"] == "generating":
+                    _batch_state[batch_num]["status"] = "done"
 
         title_to_doc = {p["title"]: p["doc_id"] for p in batch_papers}
         doc_assignments = {}
@@ -616,24 +629,66 @@ def cluster(
             doc_id = _fuzzy_title_match(t, title_to_doc)
             if doc_id:
                 doc_assignments[doc_id] = c
+
+        with _state_lock:
+            _batch_state[batch_num]["status"] = "done"
+
         return batch_num, doc_assignments, n_clusters
 
     all_assignments: dict[str, str] = {}
+    completed_batches = 0
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = []
-        for batch_start in range(0, len(papers), batch):
-            batch_papers = papers[batch_start:batch_start + batch]
-            batch_num = batch_start // batch + 1
-            futures.append(pool.submit(_run_batch, batch_num, batch_papers))
+    # Live status printer: runs in a background thread, updates the console
+    # every second with per-batch token counts and elapsed time.
+    _status_stop = threading.Event()
 
-        for fut in as_completed(futures):
-            batch_num, doc_assignments, n_clusters = fut.result()
-            all_assignments.update(doc_assignments)
-            console.print(
-                f"  Batch {batch_num}/{total_batches}: "
-                f"{len(doc_assignments)} assignments, {n_clusters} clusters"
-            )
+    def _status_printer():
+        from rich.live import Live
+        from rich.text import Text
+        with Live(console=console, refresh_per_second=2, transient=True) as live:
+            while not _status_stop.is_set():
+                with _state_lock:
+                    parts = []
+                    for bn in sorted(_batch_state):
+                        s = _batch_state[bn]
+                        elapsed = _time.monotonic() - s["start"]
+                        toks = s["tokens"]
+                        st = s["status"]
+                        if st == "generating":
+                            tps = toks / elapsed if elapsed > 0 else 0
+                            parts.append(f"B{bn}:[green]{toks}tok {tps:.1f}t/s[/green]")
+                        elif st == "parsing":
+                            parts.append(f"B{bn}:[yellow]parsing[/yellow]")
+                        elif st == "done":
+                            parts.append(f"B{bn}:[dim]done[/dim]")
+                        elif st == "failed":
+                            parts.append(f"B{bn}:[red]failed[/red]")
+                line = f"  [{completed_batches}/{total_batches} done]  " + "  ".join(parts)
+                live.update(Text.from_markup(line))
+                _status_stop.wait(0.5)
+
+    status_thread = threading.Thread(target=_status_printer, daemon=True)
+    status_thread.start()
+
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = []
+            for batch_start in range(0, len(papers), batch):
+                batch_papers = papers[batch_start:batch_start + batch]
+                batch_num = batch_start // batch + 1
+                futures.append(pool.submit(_run_batch, batch_num, batch_papers))
+
+            for fut in as_completed(futures):
+                batch_num, doc_assignments, n_clusters = fut.result()
+                all_assignments.update(doc_assignments)
+                completed_batches += 1
+                console.print(
+                    f"  Batch {batch_num}/{total_batches}: "
+                    f"{len(doc_assignments)} assignments, {n_clusters} clusters"
+                )
+    finally:
+        _status_stop.set()
+        status_thread.join(timeout=2)
 
     console.print(f"\nTotal assignments: [bold]{len(all_assignments)}[/bold] / {len(papers)}")
 
