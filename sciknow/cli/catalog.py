@@ -565,14 +565,47 @@ def cluster(
     )
 
     def _sanitize_json(raw: str) -> str:
+        """Aggressively repair common LLM JSON output issues."""
         import re
         cleaned = raw.strip()
+
+        # Strip markdown code fences
         if cleaned.startswith("```"):
             cleaned = "\n".join(cleaned.split("\n")[1:])
         if cleaned.endswith("```"):
             cleaned = "\n".join(cleaned.split("\n")[:-1])
+
+        # Extract the outermost { } if there's preamble/postamble text
+        first_brace = cleaned.find("{")
+        last_brace = cleaned.rfind("}")
+        if first_brace >= 0 and last_brace > first_brace:
+            cleaned = cleaned[first_brace:last_brace + 1]
+
+        # Remove control characters (except \n, \r, \t which are JSON whitespace)
         cleaned = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', cleaned)
-        cleaned = re.sub(r'\\([^"\\\/bfnrtu])', r'\\\\\1', cleaned)
+
+        # Fix invalid \escapes: replace \X (not a valid JSON escape) with \\X
+        cleaned = re.sub(r'\\([^"\\\/bfnrtu\n])', r'\\\\\1', cleaned)
+
+        # Remove trailing commas before } and ] — the #1 LLM JSON failure
+        cleaned = re.sub(r',\s*}', '}', cleaned)
+        cleaned = re.sub(r',\s*]', ']', cleaned)
+
+        # If the JSON is truncated (unclosed), try to close it
+        open_braces = cleaned.count('{') - cleaned.count('}')
+        open_brackets = cleaned.count('[') - cleaned.count(']')
+
+        if open_braces > 0 or open_brackets > 0:
+            # Truncate at the last complete entry (last line ending with comma or value)
+            lines = cleaned.rstrip().rsplit('\n', 1)
+            if len(lines) > 1:
+                last_line = lines[-1].strip()
+                # If the last line is incomplete (no closing quote/comma), drop it
+                if last_line and not last_line.endswith((',', '"', '}', ']')):
+                    cleaned = lines[0]
+            # Close the JSON
+            cleaned += ']' * max(0, open_brackets) + '}' * max(0, open_braces)
+
         return cleaned
 
     def _fuzzy_title_match(llm_title: str, title_to_doc: dict[str, str]) -> str | None:
@@ -623,9 +656,18 @@ def cluster(
             # a manual JSON repair pass before giving up.
             import logging as _logging
             _log = _logging.getLogger("sciknow.cluster")
+            # Log the area around the error for debugging
+            import re as _re
+            err_str = str(e)
+            char_match = _re.search(r'char (\d+)', err_str)
+            err_pos = int(char_match.group(1)) if char_match else 0
+            context_start = max(0, err_pos - 200)
+            context_end = min(len(cleaned), err_pos + 200)
             _log.warning(
                 f"Batch {batch_num} JSON parse failed: {e}\n"
-                f"Raw output (first 2000 chars):\n{cleaned[:2000]}"
+                f"Around error (char {err_pos}):\n"
+                f"...{cleaned[context_start:context_end]}...\n"
+                f"Last 500 chars:\n{cleaned[-500:]}"
             )
 
             # Repair attempt: find the outermost { } and try again
