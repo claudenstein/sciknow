@@ -557,11 +557,21 @@ sciknow book autowrite "Global Cooling" --full --max-iter 3 --target-score 0.85
 # With auto-expand: fetches new papers when reviewer identifies evidence gaps
 sciknow book autowrite "Global Cooling" --full --auto-expand --ipcc
 
+# ── Web reader ────────────────────────────────────────────────────────────
+
+# Launch a local web reader in your browser — sidebar navigation, inline
+# editing, comments, citation links, dark/light theme. Live from the database.
+sciknow book serve "Global Cooling"
+sciknow book serve "Global Cooling" --port 9000
+
 # ── Export ────────────────────────────────────────────────────────────────
 
 # Markdown (default)
 sciknow book export "Global Cooling"
 sciknow book export "Global Cooling" -o manuscript.md
+
+# Self-contained HTML (open in any browser, shareable without sciknow)
+sciknow book export "Global Cooling" --format html -o book.html
 
 # BibTeX bibliography from all cited papers
 sciknow book export "Global Cooling" --format bibtex -o refs.bib
@@ -1058,11 +1068,28 @@ sciknow book write "Global Cooling" 1 --section introduction    # uses chapter's
 
 `sciknow book gaps` identifies four types of gaps (topic, evidence, argument, draft) and persists them to the `book_gaps` table for tracking across sessions. View saved gaps in `book show`.
 
+### Web reader (`book serve`)
+
+`sciknow book serve "Global Cooling"` launches a local web application at `http://127.0.0.1:8765` with:
+
+- **Sidebar navigation** — chapters and sections with word counts and version numbers
+- **Live rendering** — content served from PostgreSQL, refreshes on each page load (sees autowrite progress in real-time)
+- **Inline editing** — click "Edit" to modify draft text directly in the browser, saves back to DB
+- **Comments/annotations** — add comments per section, resolve them when addressed. Stored in the `draft_comments` table.
+- **Citation links** — `[N]` references are highlighted and the source list is shown in the right panel
+- **Review feedback** — the right panel shows the latest review from `book review`
+- **Search** — search within all book content
+- **Dark/light theme** — toggle with the button in the bottom-right corner
+- **No external dependencies** — pure HTML/CSS/JS, no npm, no React, no build step
+
+The web reader is the recommended way to read and interact with the book while writing. The autowrite loop can run in one terminal while you browse the evolving book in the browser.
+
 ### Export formats
 
 | Format | Command | Notes |
 |---|---|---|
 | Markdown | `book export "..." -o book.md` | Default. Inline [N] citations + bibliography |
+| HTML | `book export "..." --format html -o book.html` | Self-contained reader with sidebar + theme. Shareable. |
 | BibTeX | `book export "..." --format bibtex -o refs.bib` | From paper_metadata (DOI, authors, journal, etc.) |
 | LaTeX | `book export "..." --format latex -o book.tex` | Via Pandoc + `--citeproc` (requires `pandoc` installed) |
 | DOCX | `book export "..." --format docx -o book.docx` | Via Pandoc (requires `pandoc` installed) |

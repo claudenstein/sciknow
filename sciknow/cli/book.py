@@ -1099,6 +1099,47 @@ def gaps(
             console.print("[dim]No structured gaps extracted.[/dim]")
 
 
+# ── serve (web reader) ─────────────────────────────────────────────────────────
+
+@app.command()
+def serve(
+    book_title: Annotated[str, typer.Argument(help="Book title or ID fragment.")],
+    port: int = typer.Option(8765, "--port", "-p", help="HTTP port."),
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind address."),
+):
+    """
+    Launch a local web reader for the book.
+
+    Opens a browser-based reading experience with sidebar navigation,
+    inline editing, comments, citation links, quality scores, and
+    version history. Content is served live from the database.
+
+    Examples:
+
+      sciknow book serve "Global Cooling"
+
+      sciknow book serve "Global Cooling" --port 9000
+    """
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+
+    with get_session() as session:
+        book = _get_book(session, book_title)
+        if not book:
+            console.print(f"[red]Book not found:[/red] {book_title}")
+            raise typer.Exit(1)
+
+    from sciknow.web.app import app as web_app, set_book
+    set_book(book[0], book[1])
+
+    console.print(f"\n[bold]SciKnow Book Reader[/bold]: {book[1]}")
+    console.print(f"  [link=http://{host}:{port}]http://{host}:{port}[/link]")
+    console.print(f"  [dim]Press Ctrl+C to stop.[/dim]\n")
+
+    import uvicorn
+    uvicorn.run(web_app, host=host, port=port, log_level="warning")
+
+
 # ── autowrite (Karpathy-loop-inspired convergence) ─────────────────────────────
 
 _DEFAULT_SECTIONS = ["introduction", "methods", "results", "discussion", "conclusion"]
@@ -1470,7 +1511,7 @@ def export(
     include_sources: bool = typer.Option(True, "--sources/--no-sources",
                                           help="Include source citations per chapter."),
     fmt:        str = typer.Option("markdown", "--format", "-f",
-                                    help="Export format: markdown, bibtex, latex, docx."),
+                                    help="Export format: markdown, html, bibtex, latex, docx."),
 ):
     """
     Compile all chapter drafts into a single document.
@@ -1582,6 +1623,20 @@ def export(
     md = "\n".join(lines)
 
     safe = book[1].lower().replace(" ", "_").replace("/", "-")[:50]
+
+    # ── HTML export (self-contained static reader) ─────────────────────
+    if fmt == "html":
+        from sciknow.web.app import _get_book_data, _render_book, set_book
+        set_book(book[0], book[1])
+        bk, chs, drs, gps, comms = _get_book_data()
+        html = _render_book(bk, chs, drs, gps, comms)
+        html_path = output or Path(f"{safe}.html")
+        html_path.write_text(html, encoding="utf-8")
+        console.print(
+            f"[green]✓ HTML exported:[/green] [bold]{html_path}[/bold]  "
+            f"({total_words:,} words) — open in any browser"
+        )
+        return
 
     # ── BibTeX export ────────────────────────────────────────────────────
     if fmt == "bibtex":

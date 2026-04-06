@@ -305,6 +305,22 @@ class Draft(Base):
     )
 
 
+class DraftComment(Base):
+    __tablename__ = "draft_comments"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    draft_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("drafts.id", ondelete="CASCADE"), nullable=False
+    )
+    paragraph_index: Mapped[int | None] = mapped_column(Integer)
+    selected_text: Mapped[str | None] = mapped_column(Text)
+    comment: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="open")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class BookGap(Base):
     __tablename__ = "book_gaps"
 
