@@ -461,6 +461,9 @@ sciknow catalog cluster
 sciknow catalog cluster --dry-run           # Preview clusters without saving
 sciknow catalog cluster --batch 100         # Smaller batches for large collections
 
+# Resume after partial failure (only processes papers without a cluster yet)
+sciknow catalog cluster --resume
+
 # List all clusters with paper counts
 sciknow catalog topics
 ```
