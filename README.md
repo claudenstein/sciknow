@@ -231,6 +231,35 @@ ollama pull mistral:7b-instruct-q4_K_M
 ollama pull qwen2.5:32b-instruct-q4_K_M
 ```
 
+**Ollama performance tuning (recommended):**
+
+Two environment variables that significantly improve LLM inference speed at no quality cost:
+
+```bash
+# Add to ~/.bashrc to make permanent
+export OLLAMA_FLASH_ATTENTION=1     # 25-47% speed boost, cuts attention VRAM ~8GB → ~1.5GB at 16K context
+export OLLAMA_KV_CACHE_TYPE=q8_0    # Halves KV cache VRAM with <5% speed hit and negligible quality loss
+```
+
+Then start Ollama:
+```bash
+ollama serve &
+```
+
+| Setting | What it does | Impact on RTX 3090 |
+|---|---|---|
+| `OLLAMA_FLASH_ATTENTION=1` | Uses FlashAttention-2 for the attention layer | **+47% tok/s** at 16K context; critical for long-context calls (clustering, book writing) |
+| `OLLAMA_KV_CACHE_TYPE=q8_0` | Quantizes the KV cache from FP16 to INT8 | Frees ~4 GB VRAM at 32K context; faster long-context generation |
+
+Real measured improvement on qwen2.5:32b-instruct-q4_K_M with an RTX 3090:
+
+| Configuration | Speed |
+|---|---|
+| Default (no FA, FP16 KV) | ~5 tok/s |
+| **FA + q8_0 KV** | **~7.7 tok/s (+54%)** |
+
+These settings apply to all sciknow LLM operations: `ask`, `book write`, `book review`, `catalog cluster`, `db export --generate-qa`, etc.
+
 **Python environment:**
 ```bash
 # Install uv (fast Python package manager)
