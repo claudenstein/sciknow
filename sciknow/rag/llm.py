@@ -92,3 +92,40 @@ def complete(
     Non-streaming completion. Returns the full response string.
     """
     return "".join(stream(system, user, model=model, temperature=temperature, num_ctx=num_ctx))
+
+
+def complete_with_status(
+    system: str,
+    user: str,
+    label: str = "Generating",
+    model: str | None = None,
+    temperature: float = 0.1,
+    num_ctx: int = 8192,
+) -> str:
+    """
+    Like complete(), but shows a live token counter on the console while
+    the LLM generates. Useful for blocking calls that would otherwise show
+    no output for 30-120 seconds.
+
+    Display: `  Generating... 847 tokens (4.2 tok/s, 32s)`
+
+    Returns the full response string.
+    """
+    from rich.console import Console
+    from rich.live import Live
+    from rich.text import Text
+
+    console = Console(stderr=True)
+    tokens: list[str] = []
+    t0 = time.monotonic()
+
+    with Live(console=console, refresh_per_second=2, transient=True) as live:
+        for tok in stream(system, user, model=model, temperature=temperature, num_ctx=num_ctx):
+            tokens.append(tok)
+            elapsed = time.monotonic() - t0
+            tps = len(tokens) / elapsed if elapsed > 0 else 0
+            live.update(Text.from_markup(
+                f"  [dim]{label}... {len(tokens)} tokens ({tps:.1f} tok/s, {elapsed:.0f}s)[/dim]"
+            ))
+
+    return "".join(tokens)

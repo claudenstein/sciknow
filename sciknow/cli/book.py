@@ -79,10 +79,13 @@ def _get_prior_summaries(session, book_id: str, before_chapter_number: int) -> l
 def _auto_summarize(content: str, section_type: str, chapter_title: str, model: str | None = None) -> str:
     """Generate a 100-200 word summary of a draft for cross-chapter context."""
     from sciknow.rag import prompts
-    from sciknow.rag.llm import complete
+    from sciknow.rag.llm import complete_with_status
     system, user = prompts.draft_summary(section_type, chapter_title, content)
     try:
-        return complete(system, user, model=model, temperature=0.1, num_ctx=4096).strip()
+        return complete_with_status(
+            system, user, label="Summarizing for coherence",
+            model=model, temperature=0.1, num_ctx=4096,
+        ).strip()
     except Exception:
         return ""
 
@@ -357,8 +360,8 @@ def outline(
         papers=[{"title": p[0], "year": p[1]} for p in papers if p[0]],
     )
 
-    with console.status("[bold green]Asking LLM for chapter structure…"):
-        raw = complete(system, user, model=model, temperature=0.3, num_ctx=16384)
+    from sciknow.rag.llm import complete_with_status
+    raw = complete_with_status(system, user, label="Generating outline", model=model, temperature=0.3, num_ctx=16384)
 
     # Strip markdown code fences if present
     raw = raw.strip()
@@ -447,7 +450,7 @@ def write(
       sciknow book write "Global Cooling" 3 --section results --ipcc --expand
     """
     from sciknow.rag import prompts
-    from sciknow.rag.llm import stream as llm_stream, complete as llm_complete
+    from sciknow.rag.llm import stream as llm_stream, complete as llm_complete, complete_with_status
     from sciknow.retrieval import context_builder, hybrid_search, reranker
     from sciknow.storage.db import get_session
     from sciknow.storage.qdrant import get_client
@@ -529,9 +532,9 @@ def write(
 
     # ── Optional: IPCC uncertainty language ───────────────────────────────
     if ipcc:
-        console.print(Rule("[dim]Applying IPCC calibrated uncertainty language...[/dim]"))
+        console.print(Rule("[dim]Applying IPCC calibrated uncertainty language[/dim]"))
         sys_i, usr_i = prompts.ipcc_uncertainty(content, results)
-        content = llm_complete(sys_i, usr_i, model=model, temperature=0.1, num_ctx=16384)
+        content = complete_with_status(sys_i, usr_i, label="IPCC pass", model=model, temperature=0.1, num_ctx=16384)
         console.print("[green]✓ IPCC uncertainty language applied.[/green]")
         console.print()
 
@@ -545,10 +548,10 @@ def write(
     # ── Optional: claim verification ─────────────────────────────────────
     verify_feedback = None
     if verify:
-        console.print(Rule("[dim]Verifying claims...[/dim]"))
+        console.print(Rule("[dim]Verifying claims[/dim]"))
         sys_v, usr_v = prompts.verify_claims(content, results)
         try:
-            raw = llm_complete(sys_v, usr_v, model=model, temperature=0.0, num_ctx=16384)
+            raw = complete_with_status(sys_v, usr_v, label="Verifying claims", model=model, temperature=0.0, num_ctx=16384)
             cleaned = raw.strip()
             if cleaned.startswith("```"):
                 cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
@@ -1050,20 +1053,20 @@ def gaps(
 
     # Pass 2: structured JSON extraction → save to book_gaps
     if save:
-        with console.status("[dim]Extracting structured gaps...[/dim]"):
-            sys_j, usr_j = prompts.gaps_json(
-                book_title=book[1], chapters=ch_list, papers=p_list, drafts=d_list,
-            )
-            try:
-                raw = llm_complete(sys_j, usr_j, model=model, temperature=0.0, num_ctx=16384)
-                cleaned = raw.strip()
-                if cleaned.startswith("```"):
-                    cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-                gap_data = _json.loads(cleaned, strict=False)
-                gap_list = gap_data.get("gaps", [])
-            except Exception as exc:
-                console.print(f"[yellow]Structured gap extraction failed: {exc}[/yellow]")
-                gap_list = []
+        from sciknow.rag.llm import complete_with_status as _cws
+        sys_j, usr_j = prompts.gaps_json(
+            book_title=book[1], chapters=ch_list, papers=p_list, drafts=d_list,
+        )
+        try:
+            raw = _cws(sys_j, usr_j, label="Extracting structured gaps", model=model, temperature=0.0, num_ctx=16384)
+            cleaned = raw.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            gap_data = _json.loads(cleaned, strict=False)
+            gap_list = gap_data.get("gaps", [])
+        except Exception as exc:
+            console.print(f"[yellow]Structured gap extraction failed: {exc}[/yellow]")
+            gap_list = []
 
         if gap_list:
             # Build chapter number → chapter_id map
