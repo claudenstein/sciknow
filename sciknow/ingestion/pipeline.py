@@ -230,72 +230,97 @@ def ingest(
             # ------------------------------------------------------------------
             # Stage 2b: Citation extraction + cross-linking
             #
-            # Extract references from the same sources expand uses (Crossref
-            # raw + MinerU content_list + Marker markdown). For each ref,
-            # check if the cited paper is already in the corpus and set
-            # cited_document_id. Also backlink: if another paper previously
-            # cited THIS paper by DOI and we didn't know it was in the
-            # corpus yet, set cited_document_id on those existing rows now.
+            # Best-effort: a citation extraction failure must NEVER kill the
+            # paper's ingestion. The whole block runs in a try/except so that
+            # a malformed reference, constraint violation, or unexpected data
+            # degrades gracefully to "paper ingested without citations" rather
+            # than "paper failed entirely."
             # ------------------------------------------------------------------
-            session.query(Citation).filter_by(citing_document_id=doc_id).delete()
+            try:
+                session.query(Citation).filter_by(citing_document_id=doc_id).delete()
 
-            from sciknow.ingestion.references import (
-                extract_references_from_crossref,
-                extract_references_from_mineru_content_list,
-                extract_references_from_markdown,
-            )
-
-            raw_refs = []
-            if meta.crossref_raw:
-                raw_refs.extend(extract_references_from_crossref(meta.crossref_raw))
-            if result.backend == "mineru" and result.content_list:
-                raw_refs.extend(
-                    extract_references_from_mineru_content_list(result.content_list)
+                from sciknow.ingestion.references import (
+                    extract_references_from_crossref,
+                    extract_references_from_mineru_content_list,
+                    extract_references_from_markdown,
                 )
-            elif result.backend == "marker_md" and result.text:
-                raw_refs.extend(extract_references_from_markdown(result.text))
 
-            # Deduplicate by DOI within this paper's refs
-            seen_ref_keys: set[str] = set()
-            for ref in raw_refs:
-                key = (ref.doi or "").lower() or (ref.title or "")[:60].lower()
-                if not key or key in seen_ref_keys:
-                    continue
-                seen_ref_keys.add(key)
+                raw_refs = []
+                if meta.crossref_raw:
+                    raw_refs.extend(extract_references_from_crossref(meta.crossref_raw))
+                if result.backend == "mineru" and result.content_list:
+                    raw_refs.extend(
+                        extract_references_from_mineru_content_list(result.content_list)
+                    )
+                elif result.backend == "marker_md" and result.text:
+                    raw_refs.extend(extract_references_from_markdown(result.text))
 
-                # Check if cited paper is already in the corpus
-                cited_doc_id = None
-                if ref.doi:
+                seen_ref_keys: set[str] = set()
+                for ref in raw_refs:
+                    key = (ref.doi or "").lower() or (ref.title or "")[:60].lower()
+                    if not key or key in seen_ref_keys:
+                        continue
+                    seen_ref_keys.add(key)
+
+                    cited_doc_id = None
+                    if ref.doi:
+                        from sqlalchemy import text as _text
+                        row = session.execute(
+                            _text("SELECT d.id FROM documents d JOIN paper_metadata pm "
+                                  "ON pm.document_id = d.id WHERE LOWER(pm.doi) = :doi "
+                                  "AND d.ingestion_status = 'complete' LIMIT 1"),
+                            {"doi": ref.doi.lower()},
+                        ).first()
+                        if row:
+                            cited_doc_id = row[0]
+
+                    session.add(Citation(
+                        citing_document_id=doc_id,
+                        cited_doi=ref.doi,
+                        cited_title=(ref.title or "")[:500],
+                        cited_year=ref.year,
+                        cited_document_id=cited_doc_id,
+                        raw_reference_text=(ref.raw_text or "")[:400],
+                    ))
+
+                if meta.doi:
                     from sqlalchemy import text as _text
-                    row = session.execute(
-                        _text("SELECT d.id FROM documents d JOIN paper_metadata pm "
-                              "ON pm.document_id = d.id WHERE LOWER(pm.doi) = :doi "
-                              "AND d.ingestion_status = 'complete' LIMIT 1"),
-                        {"doi": ref.doi.lower()},
-                    ).first()
-                    if row:
-                        cited_doc_id = row[0]
+                    session.execute(
+                        _text("UPDATE citations SET cited_document_id = :doc_id "
+                              "WHERE LOWER(cited_doi) = :doi AND cited_document_id IS NULL"),
+                        {"doc_id": doc_id, "doi": meta.doi.lower()},
+                    )
 
-                session.add(Citation(
-                    citing_document_id=doc_id,
-                    cited_doi=ref.doi,
-                    cited_title=ref.title,
-                    cited_year=ref.year,
-                    cited_document_id=cited_doc_id,
-                    raw_reference_text=(ref.raw_text or "")[:400],
-                ))
-
-            # Backlink: if existing citations point to THIS paper by DOI,
-            # set their cited_document_id now that this paper is in the DB.
-            if meta.doi:
-                from sqlalchemy import text as _text
-                session.execute(
-                    _text("UPDATE citations SET cited_document_id = :doc_id "
-                          "WHERE LOWER(cited_doi) = :doi AND cited_document_id IS NULL"),
-                    {"doc_id": doc_id, "doi": meta.doi.lower()},
-                )
-
-            session.flush()
+                session.flush()
+            except Exception as cit_exc:
+                # Roll back the citation-specific changes but keep the session
+                # alive for subsequent stages (chunking, embedding).
+                try:
+                    session.rollback()
+                    # Re-set the document status which was lost in the rollback
+                    doc = session.query(Document).filter_by(id=doc_id).first()
+                    if doc:
+                        doc.ingestion_status = "metadata_extraction"
+                    pm = session.query(PaperMetadata).filter_by(document_id=doc_id).first()
+                    if not pm:
+                        # Re-insert metadata that was lost in the rollback
+                        pm = PaperMetadata(
+                            document_id=doc_id,
+                            title=meta.title, abstract=meta.abstract, year=meta.year,
+                            doi=meta.doi, arxiv_id=meta.arxiv_id, journal=meta.journal,
+                            volume=meta.volume, issue=meta.issue, pages=meta.pages,
+                            publisher=meta.publisher, authors=meta.authors,
+                            keywords=meta.keywords, domains=meta.domains,
+                            metadata_source=meta.source,
+                            crossref_raw=meta.crossref_raw, arxiv_raw=meta.arxiv_raw,
+                        )
+                        session.add(pm)
+                    session.flush()
+                except Exception:
+                    pass  # if recovery itself fails, let the outer handler catch it
+                _log_job(session, doc_id, "citations", "failed", details={
+                    "error": str(cit_exc)[:300],
+                })
 
             # ------------------------------------------------------------------
             # Stage 3: Section parsing + chunking
