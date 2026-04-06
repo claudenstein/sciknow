@@ -24,6 +24,7 @@ _DOMAIN      = typer.Option(None, "--domain",             help="Filter by domain
 _SECTION     = typer.Option(None, "--section",    "-s",  help="Filter by section type.")
 _TOPIC       = typer.Option(None, "--topic",      "-t",  help="Filter by topic cluster name.")
 _MODEL       = typer.Option(None, "--model",              help="Override LLM model name (Ollama).")
+_EXPAND      = typer.Option(False, "--expand/--no-expand", "-e", help="Expand query with LLM synonyms before retrieval.")
 
 
 def _retrieve(
@@ -38,6 +39,7 @@ def _retrieve(
     session,
     qdrant,
     topic: str | None = None,
+    expand: bool = False,
 ):
     from sciknow.retrieval import context_builder, hybrid_search, reranker
 
@@ -51,6 +53,7 @@ def _retrieve(
         domain=domain,
         section=section,
         topic_cluster=topic,
+        use_query_expansion=expand,
     )
     if not candidates_list:
         return []
@@ -86,6 +89,7 @@ def question(
     section: str | None = _SECTION,
     topic: str | None = _TOPIC,
     model: str | None = _MODEL,
+    expand: bool = _EXPAND,
 ):
     """
     Answer a question using RAG over ingested papers.
@@ -98,6 +102,8 @@ def question(
           --year-from 2000 --section methods
 
       sciknow ask question "Explain the central dogma of molecular biology" --no-sources
+
+      sciknow ask question "solar forcing" --expand
     """
     from sciknow.rag import prompts
     from sciknow.storage.db import get_session
@@ -108,7 +114,8 @@ def question(
     with get_session() as session:
         with console.status("[bold green]Retrieving relevant passages...", spinner="dots"):
             results = _retrieve(q, context_k, candidates, no_rerank,
-                                year_from, year_to, domain, section, session, qdrant, topic)
+                                year_from, year_to, domain, section, session, qdrant, topic,
+                                expand=expand)
 
         if not results:
             console.print("[yellow]No relevant passages found in the knowledge base.[/yellow]")
@@ -144,6 +151,7 @@ def synthesize(
     domain: str | None = _DOMAIN,
     topic_filter: str | None = _TOPIC,
     model: str | None = _MODEL,
+    expand: bool = _EXPAND,
 ):
     """
     Write a multi-paper synthesis on a topic.
@@ -166,7 +174,8 @@ def synthesize(
     with get_session() as session:
         with console.status("[bold green]Retrieving relevant passages...", spinner="dots"):
             results = _retrieve(topic, context_k, candidates, no_rerank,
-                                year_from, year_to, domain, None, session, qdrant, topic_filter)
+                                year_from, year_to, domain, None, session, qdrant, topic_filter,
+                                expand=expand)
 
         if not results:
             console.print("[yellow]No relevant passages found.[/yellow]")
@@ -209,6 +218,7 @@ def write(
     domain: str | None = _DOMAIN,
     topic_filter: str | None = _TOPIC,
     model: str | None = _MODEL,
+    expand: bool = _EXPAND,
     save: bool = typer.Option(False, "--save", help="Save the draft to the database."),
     book: str | None = typer.Option(None, "--book", "-b", help="Book title to associate with the draft (requires --save)."),
     chapter: int | None = typer.Option(None, "--chapter", "-c", help="Chapter number to associate with the draft (requires --book)."),
@@ -243,7 +253,8 @@ def write(
     with get_session() as session:
         with console.status("[bold green]Retrieving relevant passages...", spinner="dots"):
             results = _retrieve(search_query, context_k, candidates, no_rerank,
-                                year_from, year_to, domain, None, session, qdrant, topic_filter)
+                                year_from, year_to, domain, None, session, qdrant, topic_filter,
+                                expand=expand)
 
         if not results:
             console.print("[yellow]No relevant passages found.[/yellow]")

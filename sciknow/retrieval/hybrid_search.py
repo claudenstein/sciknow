@@ -370,6 +370,47 @@ def _apply_citation_boost(
     return candidates
 
 
+# ── Query expansion ────────────────────────────────────────────────────────────
+
+def expand_query(query: str) -> str:
+    """
+    Use the fast LLM to expand a search query with synonyms and related terms.
+
+    Returns the expanded query string, or the original query on any failure
+    (Ollama unreachable, timeout, bad output). The expansion is designed to
+    improve recall for terse queries: e.g. "solar forcing" → "solar forcing
+    total solar irradiance TSI sunspot cycle solar variability climate".
+
+    Uses LLM_FAST_MODEL (Mistral 7B by default) for speed (~1 s). Never blocks
+    the search pipeline — falls through silently on error.
+    """
+    try:
+        from sciknow.rag.llm import complete
+
+        system = (
+            "You are a scientific search query expander. Given a short search "
+            "query about scientific papers, output an expanded version that "
+            "includes synonyms, acronyms, related technical terms, and alternate "
+            "phrasings that researchers might use. Keep the original query terms "
+            "and ADD related terms. Output ONLY the expanded query, no "
+            "explanation, no bullet points, no formatting. Keep it under 60 words."
+        )
+        from sciknow.config import settings
+        expanded = complete(
+            system, query,
+            model=settings.llm_fast_model,
+            temperature=0.1,
+            num_ctx=512,
+        ).strip()
+
+        # Sanity: if LLM returned something weird or empty, use original
+        if not expanded or len(expanded) < len(query) or len(expanded) > 500:
+            return query
+        return expanded
+    except Exception:
+        return query
+
+
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 def search(
@@ -383,16 +424,21 @@ def search(
     section: str | None = None,
     topic_cluster: str | None = None,
     weights: tuple[float, float, float] = (1.0, 1.0, 0.5),
+    use_query_expansion: bool = False,
 ) -> list[SearchCandidate]:
     """
     Run hybrid search and return up to `candidate_k` results sorted by RRF score,
-    with an optional citation-count boost.
+    with optional query expansion and citation-count boost.
 
     weights = (dense_weight, sparse_weight, fts_weight)
     """
     from sciknow.config import settings
 
-    dense_vec, sparse_vec = _embed_query(query)
+    effective_query = query
+    if use_query_expansion:
+        effective_query = expand_query(query)
+
+    dense_vec, sparse_vec = _embed_query(effective_query)
     qdrant_filter = _build_qdrant_filter(year_from, year_to, domain, section, topic_cluster)
 
     dense_ids  = _qdrant_dense(qdrant_client, dense_vec, candidate_k, qdrant_filter)

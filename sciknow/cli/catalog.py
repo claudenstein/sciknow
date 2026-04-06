@@ -122,9 +122,16 @@ def list_papers(
     sql = text(f"""
         SELECT pm.title, pm.authors, pm.year, pm.journal,
                pm.doi, pm.arxiv_id, pm.metadata_source,
-               d.filename
+               d.filename,
+               COALESCE(cc.cnt, 0) AS cite_count
         FROM paper_metadata pm
         JOIN documents d ON d.id = pm.document_id
+        LEFT JOIN (
+            SELECT cited_document_id, COUNT(*) AS cnt
+            FROM citations
+            WHERE cited_document_id IS NOT NULL
+            GROUP BY cited_document_id
+        ) cc ON cc.cited_document_id = d.id
         {where}
         ORDER BY {sort_col}
         {limit_clause}
@@ -158,8 +165,10 @@ def list_papers(
     table.add_column("Title",                   ratio=3)
     table.add_column("Journal",                 ratio=2)
     table.add_column("Identifier", style="dim", ratio=1)
+    table.add_column("Cited", style="magenta", justify="right", width=5)
 
-    for i, (title_val, authors, yr, journal_val, doi_val, arxiv_val, src, fname) in enumerate(rows, start=offset + 1):
+    for i, row in enumerate(rows, start=offset + 1):
+        title_val, authors, yr, journal_val, doi_val, arxiv_val, src, fname, cite_count = row
         table.add_row(
             str(i),
             str(yr) if yr else "—",
@@ -167,6 +176,7 @@ def list_papers(
             title_val or f"[dim]{fname}[/dim]",
             journal_val or "",
             _identifier(doi_val, arxiv_val),
+            str(cite_count) if cite_count else "",
         )
 
     console.print(table)

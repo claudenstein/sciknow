@@ -28,6 +28,7 @@ class SearchResult:
     authors: list[dict]
     journal: str | None
     doi: str | None
+    citation_count: int = 0
 
     @property
     def citation(self) -> str:
@@ -86,5 +87,6 @@ def build(
             authors=candidate.authors,
             journal=candidate.journal,
             doi=candidate.doi,
+            citation_count=candidate.citation_count,
         ))
     return results
