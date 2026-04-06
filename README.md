@@ -6,21 +6,21 @@ All AI inference runs locally. No cloud APIs required to operate the system.
 
 ---
 
-## Roadmap
+## Features
 
-| Phase | Description | Status |
-|---|---|---|
-| 0 | Infrastructure (PostgreSQL, Qdrant, migrations) | **Done** |
-| 1 | Ingestion pipeline (PDF → markdown → metadata → chunks → embeddings) | **Done** |
-| 2 | Hybrid search (dense + sparse + FTS, RRF fusion, reranker) | **Done** |
-| 3 | RAG — grounded question answering over papers | **Done** |
-| 4 | Writing assistant — multi-paper synthesis, section drafting | **Done** |
-| 5 | Draft persistence — save, browse, export writing drafts | **Done** |
-| 6 | Book structure — books → chapters hierarchy with LLM-generated outline | **Done** |
-| 7 | Topic clustering — LLM assigns named clusters to papers for filtered search | **Done** |
-| 8 | Argument mapping — evidence classification (SUPPORTS/CONTRADICTS/NEUTRAL) | **Done** |
-| 9 | Gap analysis — LLM identifies missing topics, weak chapters, unwritten sections | **Done** |
-| 10 | Multi-project support — separate books, shared paper library | **Done** |
+- **Ingestion pipeline** — PDF → structured JSON (MinerU 2.5) → metadata extraction → section-aware chunking → dense+sparse embedding → PostgreSQL + Qdrant
+- **Hybrid search** — dense vector + sparse lexical + full-text search, fused with Reciprocal Rank Fusion and reranked with a cross-encoder. Citation-count boosted scoring. Optional LLM query expansion.
+- **RAG question answering** — grounded Q&A over your papers with inline citations and source attribution
+- **Writing assistant** — multi-paper synthesis, section drafting, sentence planning, claim verification, IPCC uncertainty language
+- **Book projects** — structured book → chapter hierarchy with LLM-generated outlines, book plans (thesis + scope), cross-chapter coherence, iterative write → review → revise workflow
+- **Argument mapping** — evidence classification (SUPPORTS / CONTRADICTS / NEUTRAL) for any claim
+- **Gap analysis** — identifies missing topics, weak chapters, and unwritten sections; persists gaps for tracking
+- **Topic clustering** — LLM assigns papers to named thematic clusters for filtered search and writing
+- **Citation graph** — extracts + cross-links references during ingestion; citation-count boosted retrieval
+- **Collection expansion** — follows citations to discover + download open-access papers with semantic relevance filtering (6 OA sources: Copernicus, arXiv, Unpaywall, OpenAlex, Europe PMC, Semantic Scholar)
+- **Multi-format export** — Markdown, BibTeX, LaTeX, and DOCX via Pandoc
+- **Similar papers** — find papers with similar abstracts via embedding similarity
+- **Backup & restore** — portable archives for migrating between machines
 
 ---
 
@@ -273,7 +273,7 @@ All settings are read from `.env` (or environment variables). Managed by Pydanti
 | `EMBEDDING_DIM` | `1024` | Embedding vector dimension |
 | `LLM_MODEL` | `qwen2.5:32b-instruct-q4_K_M` | Main LLM (Ollama model name) |
 | `LLM_FAST_MODEL` | `mistral:7b-instruct-q4_K_M` | Fast LLM for metadata extraction fallback |
-| `RERANKER_MODEL` | `BAAI/bge-reranker-v2-m3` | Cross-encoder reranker (used in Phase 2+) |
+| `RERANKER_MODEL` | `BAAI/bge-reranker-v2-m3` | Cross-encoder reranker (search + ask + book write) |
 | `CROSSREF_EMAIL` | `user@example.com` | **Set this.** Used in Crossref/OpenAlex polite pool User-Agent |
 | `PDF_CONVERTER_BACKEND` | `auto` | `auto` / `mineru` / `marker` — see above |
 | `EMBEDDING_BATCH_SIZE` | `32` | Chunks per bge-m3 batch (16 if LLM co-resident, 64 for embedder-only runs) |
@@ -744,12 +744,16 @@ All LLM calls go through Ollama at `OLLAMA_HOST`. Any command with `--model` can
 
 | Table | Description |
 |---|---|
-| `documents` | One row per PDF. Tracks ingestion status, file hash (SHA-256 — used for deduplication), and `ingest_source` (`seed` for manual ingests, `expand` for auto-discovered references). |
-| `paper_metadata` | Bibliographic metadata: title, abstract, authors, DOI, year, journal, keywords, domains. Maintains a `tsvector` column for full-text search via an automatic trigger. |
-| `paper_sections` | Sections extracted from the document (JSON or markdown), classified by type. |
-| `chunks` | Individual retrieval units. Each chunk links to a section and a Qdrant point UUID. |
-| `citations` | Reference list entries (from Crossref). Cross-linked if a cited paper is also in the DB. |
-| `ingestion_jobs` | Audit log of every pipeline stage with timing and status. |
+| `documents` | One row per PDF. Tracks ingestion status, file hash (SHA-256 — used for deduplication), and `ingest_source` (`seed` / `expand`). |
+| `paper_metadata` | Bibliographic metadata: title, abstract, authors, DOI, year, journal, keywords, domains, topic_cluster. Full-text search via `tsvector` trigger. |
+| `paper_sections` | Sections extracted from the document, classified by type. |
+| `chunks` | Individual retrieval units. Links to a section and a Qdrant point UUID. |
+| `citations` | Reference list entries (from Crossref, MinerU content_list, OpenAlex). `cited_document_id` cross-links to corpus papers. |
+| `ingestion_jobs` | Audit log of every pipeline stage with timing, status, and backend used. |
+| `books` | Book projects with title, description, plan (thesis), and status. |
+| `book_chapters` | Chapters within a book (number, title, topic_query, topic_cluster). |
+| `drafts` | Written sections with content, sources, summary, version, parent_draft_id, review_feedback. |
+| `book_gaps` | Persistent gap tracking (type, description, chapter, status, resolved_draft_id). |
 
 ### Qdrant Collections
 
@@ -794,7 +798,7 @@ Edit `_SECTION_PATTERNS` in `sciknow/ingestion/chunker.py` — add a new `(canon
 
 1. Update `EMBEDDING_MODEL` and `EMBEDDING_DIM` in `.env`
 2. Re-initialize Qdrant collections: `sciknow db init` (will create new collections if missing; existing data is preserved)
-3. Re-embed all papers: existing chunks will have a mismatched `embedding_model` field — use `sciknow db reindex` (Phase 2)
+3. Re-embed all papers: existing chunks will have a mismatched `embedding_model` field and need re-embedding via `db reset` + re-ingest
 
 ### Metadata quality
 
@@ -819,9 +823,9 @@ See `OPTIMIZATION.md` for the full tuning guide (3090 + incoming DGX Spark).
 
 ---
 
-## Phase 2 — Retrieval
+## Retrieval
 
-Hybrid search combining three signal types, fused with Reciprocal Rank Fusion (RRF) and reranked with a cross-encoder.
+Hybrid search combining three signal types, fused with Reciprocal Rank Fusion (RRF), reranked with a cross-encoder, and boosted by citation count.
 
 ### How it works
 
@@ -849,13 +853,21 @@ score(chunk) = Σ weight_i / (60 + rank_i)
 
 Default weights: dense=1.0, sparse=1.0, FTS=0.5. The top 50 fused candidates proceed to reranking.
 
-**Step 4: Cross-encoder reranking**
+**Step 4: Citation-count boost**
+
+Papers cited by more corpus papers receive a log-dampened score boost: `score *= (1 + 0.1 × log₂(1 + citation_count))`. Controlled by `CITATION_BOOST_FACTOR` (0 to disable). The boost is gentle — retrieval signals still dominate.
+
+**Step 5: Cross-encoder reranking**
 
 `BAAI/bge-reranker-v2-m3` scores each `(query, chunk_text)` pair directly. This is slower but much more accurate than embedding similarity alone. Returns top `--top-k` results (default 10).
 
-**Step 5: Metadata hydration**
+**Step 6: Metadata hydration**
 
-Full chunk content and bibliographic metadata (title, authors, year, DOI, journal) are fetched from PostgreSQL and attached to each result.
+Full chunk content and bibliographic metadata (title, authors, year, DOI, journal, citation count) are fetched from PostgreSQL and attached to each result.
+
+**Optional: LLM query expansion** (`--expand` / `-e`)
+
+Before step 1, sends the query to `LLM_FAST_MODEL` to add synonyms, acronyms, and related terms. The expanded query feeds the dense + sparse legs; PostgreSQL FTS keeps the original for precision. Falls through silently if Ollama is unavailable.
 
 ### Filters
 
@@ -866,14 +878,15 @@ All filters are applied before the vector search (as Qdrant pre-filters and SQL 
 | Year range | `--year-from`, `--year-to` | `--year-from 2015 --year-to 2023` |
 | Domain tag | `--domain` | `--domain climatology` |
 | Section type | `--section` | `--section methods` |
+| Topic cluster | `--topic` | `--topic "Solar Irradiance"` |
 
-## Phase 3 — RAG
+## Question Answering (RAG)
 
 `sciknow ask question` retrieves the most relevant passages from your library and asks the configured LLM to answer grounded strictly in those sources.
 
 ### How it works
 
-1. **Retrieval** — same hybrid search pipeline as Phase 2 (dense + sparse + FTS → RRF → reranker). Produces the top `--context-k` chunks (default 8).
+1. **Retrieval** — same hybrid search pipeline (dense + sparse + FTS → RRF → citation boost → reranker). Produces the top `--context-k` chunks (default 8).
 2. **Context assembly** — chunks are numbered `[1]`, `[2]`, … and formatted with paper title, year, and section type as a header.
 3. **LLM completion** — the context + question is sent to Ollama via the `sciknow/rag/llm.py` wrapper. The response is **streamed token by token** to the terminal.
 4. **Sources** — after the answer, the source list (title, year, authors, DOI) is printed.
@@ -897,7 +910,7 @@ Each chunk is ~512 tokens + headers. The default `--context-k 8` uses ~4 500 tok
 
 ---
 
-## Phase 4 — Writing Assistant
+## Writing Assistant
 
 Extends the RAG pipeline with longer-form generation tasks. All commands stream output and print sources.
 
@@ -932,74 +945,112 @@ Fields with `--generate-qa`: adds `question`, `answer`
 
 ---
 
-## Phase 5–10 — Book Writing System
+## Book Writing System
 
-Phases 5–10 add a structured book-writing workflow on top of the RAG pipeline. The book system is designed for long-form academic writing projects (books, reports, review articles) where many papers contribute to a coherent narrative across multiple chapters.
+A structured writing pipeline for long-form academic projects (books, reports, review articles). Built on the RAG pipeline, with iterative refinement and cross-chapter coherence.
 
 ### Data model
 
 ```
-Book  (title, description, status)
-  └── BookChapter  (number, title, description, topic_query, topic_cluster)
-        └── Draft  (section_type, content, sources, word_count, model_used)
+Book  (title, description, plan, status)
+  ├── BookChapter  (number, title, description, topic_query, topic_cluster)
+  │     └── Draft  (section_type, content, sources, summary, version,
+  │                  parent_draft_id, review_feedback, model_used)
+  └── BookGap  (gap_type, description, chapter_id, status, resolved_draft_id)
 ```
 
-All three tables live in PostgreSQL alongside the paper library. Drafts store the raw LLM output, the section type (introduction / methods / etc.), and the APA-formatted source list used to generate them.
+Key fields added in writing system v2:
+- `books.plan` — thesis statement + scope (200-500 words), injected into every write call
+- `drafts.summary` — auto-generated 100-200 word summary for cross-chapter context
+- `drafts.parent_draft_id` — links revisions to their parent (version chain: v1 → v2 → v3)
+- `drafts.review_feedback` — the reviewer agent's structured assessment
+- `book_gaps` — persistent gap tracking with type, priority, and resolution status
 
-### Topic clustering (Phase 7)
+### Cross-chapter coherence
 
-Before writing, run `sciknow catalog cluster` to group your papers into named thematic clusters. The LLM reads all paper titles and proposes 6–14 descriptive cluster names, then assigns every paper to exactly one cluster.
+The biggest quality improvement over simple per-section generation. When writing Chapter N, the prompt automatically includes:
+1. **Book plan** — the thesis statement and scope document (generated once with `book plan`)
+2. **Prior chapter summaries** — auto-generated 100-200 word summaries of every draft from chapters 1 through N-1
 
-Once clusters are assigned, they act as a first-level filter in search and writing:
+This prevents contradictions, repeated explanations, and inconsistent terminology across chapters.
+
+### The write → review → revise loop
+
+Every draft goes through an iterative refinement cycle:
+
+1. **Write** (`book write`) — RAG-grounded draft with cross-chapter context
+2. **Review** (`book review`) — LLM critic assesses groundedness, completeness, accuracy, coherence, redundancy. Saves structured feedback.
+3. **Revise** (`book revise`) — applies review feedback (or a custom instruction) to produce version N+1. The original is preserved.
+4. Repeat 2-3 until satisfied.
+
+### Additional quality passes (flags on `book write`)
+
+| Flag | What it does |
+|---|---|
+| `--plan` | Shows a paragraph-by-paragraph sentence plan before drafting |
+| `--verify` | Post-generation claim verification — checks each [N] citation against its source passage, reports a groundedness score |
+| `--ipcc` | Adds IPCC-style calibrated uncertainty language (very likely, high confidence, etc.) based on evidence assessment |
+| `--expand` | LLM query expansion before retrieval |
+
+### Topic clustering
+
+Before writing, `sciknow catalog cluster` groups papers into 6-14 named thematic clusters. Clusters act as pre-filters in search and writing:
 
 ```bash
-sciknow search query "solar cycle length" --topic "Solar Irradiance"
-sciknow ask question "What drives the 11-year solar cycle?" --topic "Solar Activity"
-sciknow book write "Global Cooling" 1 --topic "Solar Irradiance"
+sciknow search query "solar cycle" --topic "Solar Irradiance"
+sciknow book write "Global Cooling" 1 --section introduction    # uses chapter's topic_cluster
 ```
 
-Cluster assignments are stored in `paper_metadata.topic_cluster` and indexed in Qdrant for fast pre-filtering.
+### Argument mapping
+
+`sciknow book argue` classifies retrieved evidence as SUPPORTS / CONTRADICTS / NEUTRAL for any claim and writes a structured argument map. Optionally saved as a draft.
+
+### Gap analysis
+
+`sciknow book gaps` identifies four types of gaps (topic, evidence, argument, draft) and persists them to the `book_gaps` table for tracking across sessions. View saved gaps in `book show`.
+
+### Export formats
+
+| Format | Command | Notes |
+|---|---|---|
+| Markdown | `book export "..." -o book.md` | Default. Inline [N] citations + bibliography |
+| BibTeX | `book export "..." --format bibtex -o refs.bib` | From paper_metadata (DOI, authors, journal, etc.) |
+| LaTeX | `book export "..." --format latex -o book.tex` | Via Pandoc + `--citeproc` (requires `pandoc` installed) |
+| DOCX | `book export "..." --format docx -o book.docx` | Via Pandoc (requires `pandoc` installed) |
 
 ### Workflow: writing a book from scratch
 
 ```bash
-# 1. Cluster papers into topics
+# 1. Cluster papers into topics (optional but improves retrieval scoping)
 sciknow catalog cluster
 
-# 2. Create the book
+# 2. Create the book and generate its structure
 sciknow book create "Global Cooling"
-
-# 3. Generate a chapter outline (LLM proposes structure from your paper titles)
 sciknow book outline "Global Cooling"
 
-# 4. Review and adjust chapters if needed
-sciknow book show "Global Cooling"
-sciknow book chapter add "Global Cooling" "Policy Implications" --number 11
+# 3. Generate the book plan (thesis + scope — anchors all chapters)
+sciknow book plan "Global Cooling"
 
-# 5. Check for gaps before writing
+# 4. Check for gaps before writing
 sciknow book gaps "Global Cooling"
 
-# 6. Write chapter by chapter
-sciknow book write "Global Cooling" 1
-sciknow book write "Global Cooling" 2 --section introduction
-sciknow book write "Global Cooling" 2 --section methods
+# 5. Write chapter by chapter (with coherence, planning, and verification)
+sciknow book write "Global Cooling" 1 --section introduction --plan --verify
+sciknow book write "Global Cooling" 1 --section methods
+sciknow book write "Global Cooling" 2 --section introduction --plan
 
-# 7. Review and export drafts
-sciknow draft list --book "Global Cooling"
-sciknow draft show <id>
-sciknow book export "Global Cooling" --output manuscript.md
+# 6. Review + revise loop
+sciknow book review <draft_id>                    # critic pass
+sciknow book revise <draft_id>                    # apply review feedback
+sciknow book revise <draft_id> -i "add more evidence for the solar forcing claim"
+
+# 7. For climate science: add IPCC uncertainty language
+sciknow book write "Global Cooling" 3 --section discussion --ipcc
+
+# 8. Export
+sciknow book export "Global Cooling" --format latex -o manuscript.tex
+sciknow book export "Global Cooling" --format bibtex -o refs.bib
 ```
-
-### Argument mapping (Phase 8)
-
-Use `sciknow book argue` to map the evidence landscape for any claim. The LLM classifies retrieved passages as SUPPORTS, CONTRADICTS, or NEUTRAL and writes a structured argument map:
-
-```bash
-sciknow book argue "Global cooling is primarily driven by reduced solar output"
-sciknow book argue "Aerosol forcing explains the post-1980 cooling hiatus" --save
-```
-
-Saved argument maps are stored as drafts with `section_type = "argument_map"`.
 
 ## Backup & Restore (`db backup` / `db restore`)
 
@@ -1113,7 +1164,7 @@ sciknow db expand --resolve --limit 50
 sciknow db expand --limit 200 --workers 2
 ```
 
-Phase 2 of `db expand` (the in-process ingest of just-downloaded PDFs) reuses the same worker-subprocess fan-out as `sciknow ingest directory`. The relevance filter's bge-m3 is automatically released before workers spawn, so you don't pay for two copies even with `--relevance` on. When `--workers` is omitted, the command falls back to `INGEST_WORKERS` from `.env` (default 1).
+The ingest phase of `db expand` (just-downloaded PDFs) reuses the same worker-subprocess fan-out as `sciknow ingest directory`. The relevance filter's bge-m3 is automatically released before workers spawn, so you don't pay for two copies even with `--relevance` on. When `--workers` is omitted, the command falls back to `INGEST_WORKERS` from `.env` (default 1).
 
 ### Expected open-access hit rate
 
@@ -1175,3 +1226,46 @@ design:
 A well-curated library of peer-reviewed journal articles can reach ~95% DOI
 coverage. A collection that also includes books, reports, and grey literature
 will typically plateau at 55–70%.
+
+## Citation Graph
+
+References are extracted from every ingested paper (from Crossref, MinerU content_list, Marker markdown, and OpenAlex referenced_works) and stored in the `citations` table. When a cited paper is also in the corpus, the row is cross-linked via `cited_document_id`.
+
+**Automatic cross-linking:** during ingestion, for each new paper's references, the pipeline checks if the cited DOI matches an existing corpus paper (forward link). It also backlinks: existing citation rows pointing to this paper's DOI get updated. The graph is consistent regardless of ingestion order.
+
+**Batch re-linking:** `sciknow db link-citations` scans all unlinked citations and sets pointers wherever the cited paper is now in the corpus. Useful after bulk ingestion or expand runs. Shows a "Most-Cited Papers" table.
+
+**Citation-boosted retrieval:** papers cited by more corpus papers rank slightly higher in search results. The boost is log-dampened and configurable via `CITATION_BOOST_FACTOR` (default 0.1, set to 0 to disable).
+
+## Similar Papers
+
+Find papers with similar abstracts using the Qdrant `abstracts` collection:
+
+```bash
+sciknow search similar "Water Vapor Feedback"          # by title fragment
+sciknow search similar 10.1038/nature12345             # by DOI
+sciknow search similar 2301.12345                      # by arXiv ID
+sciknow search similar "Water Vapor" --show-scores -k 20  # with similarity scores
+```
+
+Uses the same bge-m3 dense embeddings that power the main search pipeline. Returns a ranked table of nearest neighbours from the paper library.
+
+## Provenance Tracking
+
+Every document has an `ingest_source` field:
+- `seed` — manually ingested via CLI (`sciknow ingest file`, `sciknow ingest directory`)
+- `expand` — auto-discovered via `sciknow db expand`
+
+`sciknow db stats` shows an "Ingest source" breakdown alongside the status breakdown, so you can see at a glance how much of your library is seed material vs auto-grown.
+
+## Pre-flight Checks
+
+All long-running commands (`ingest`, `expand`, `enrich`, `export`, `catalog cluster`) verify that PostgreSQL and/or Qdrant are reachable **before** doing any work. If a service is down, you get an actionable error message immediately instead of waiting for MinerU to run for minutes and then crashing at the database write.
+
+```
+✗ Qdrant is unreachable.
+  Check that the service is running:
+    systemctl --user status qdrant
+    systemctl --user start qdrant
+  And that .env has the correct QDRANT_HOST/QDRANT_PORT.
+```
