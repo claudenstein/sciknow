@@ -61,6 +61,18 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _sanitize(text: str | None) -> str | None:
+    """Strip NUL bytes that PostgreSQL rejects in text columns.
+
+    Some PDFs (especially scanned/OCR'd) produce text with embedded \\x00
+    from MinerU or Marker. PostgreSQL raises ``ValueError: A string literal
+    cannot contain NUL (0x00) characters`` on insert.
+    """
+    if text is None:
+        return None
+    return text.replace("\x00", "")
+
+
 def _log_job(
     session: Session,
     document_id: UUID | None,
@@ -69,14 +81,23 @@ def _log_job(
     duration_ms: int = 0,
     details: dict | None = None,
 ) -> None:
-    session.add(IngestionJob(
-        document_id=document_id,
-        stage=stage,
-        status=status,
-        duration_ms=duration_ms,
-        details=details or {},
-    ))
-    session.flush()
+    try:
+        session.add(IngestionJob(
+            document_id=document_id,
+            stage=stage,
+            status=status,
+            duration_ms=duration_ms,
+            details=details or {},
+        ))
+        session.flush()
+    except Exception:
+        # If the session is rolled back (e.g. from a prior NUL-byte error),
+        # silently skip the job log rather than raising a secondary exception
+        # that masks the real root cause.
+        try:
+            session.rollback()
+        except Exception:
+            pass
 
 
 def _set_status(session: Session, doc: Document, status: str) -> None:
@@ -197,22 +218,27 @@ def ingest(
             _set_status(session, doc, "metadata_extraction")
             t0 = time.monotonic()
 
+            # Sanitize the converted text before feeding it to metadata extraction
+            # and DB insertion — MinerU/Marker can produce NUL bytes from OCR
+            # on corrupted scanned pages, which PostgreSQL rejects.
+            result.text = _sanitize(result.text) or ""
+
             meta = metadata.extract(pdf_path, result.text)
 
             # Delete old metadata row if resuming
             session.query(PaperMetadata).filter_by(document_id=doc_id).delete()
             pm = PaperMetadata(
                 document_id=doc_id,
-                title=meta.title,
-                abstract=meta.abstract,
+                title=_sanitize(meta.title),
+                abstract=_sanitize(meta.abstract),
                 year=meta.year,
-                doi=meta.doi,
-                arxiv_id=meta.arxiv_id,
-                journal=meta.journal,
-                volume=meta.volume,
-                issue=meta.issue,
-                pages=meta.pages,
-                publisher=meta.publisher,
+                doi=_sanitize(meta.doi),
+                arxiv_id=_sanitize(meta.arxiv_id),
+                journal=_sanitize(meta.journal),
+                volume=_sanitize(meta.volume),
+                issue=_sanitize(meta.issue),
+                pages=_sanitize(meta.pages),
+                publisher=_sanitize(meta.publisher),
                 authors=meta.authors,
                 keywords=meta.keywords,
                 domains=meta.domains,
@@ -346,9 +372,9 @@ def ingest(
                 db_sec = PaperSection(
                     document_id=doc_id,
                     section_type=sec.section_type,
-                    section_title=sec.section_title,
+                    section_title=_sanitize(sec.section_title) or "",
                     section_index=sec.section_index,
-                    content=sec.content,
+                    content=_sanitize(sec.content) or "",
                     word_count=sec.word_count,
                 )
                 session.add(db_sec)
@@ -365,7 +391,7 @@ def ingest(
                     section_id=section_id,
                     chunk_index=rc.chunk_index,
                     section_type=rc.section_type,
-                    content=rc.content,
+                    content=_sanitize(rc.content) or "",
                     content_tokens=rc.content_tokens,
                     char_start=rc.char_start,
                     char_end=rc.char_end,
