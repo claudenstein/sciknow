@@ -1020,37 +1020,128 @@ sciknow book write "Global Cooling" 1 --section introduction    # uses chapter's
 
 ### Workflow: writing a book from scratch
 
+#### Step 1 — Cluster your papers into topics
+
+Gives the LLM a map of what's in your library before proposing chapters:
+
 ```bash
-# 1. Cluster papers into topics (optional but improves retrieval scoping)
 sciknow catalog cluster
+sciknow catalog topics              # see what clusters were created
+```
 
-# 2. Create the book and generate its structure
-sciknow book create "Global Cooling"
-sciknow book outline "Global Cooling"
+#### Step 2 — Create the book and generate its structure
 
-# 3. Generate the book plan (thesis + scope — anchors all chapters)
+```bash
+sciknow book create "Global Cooling" \
+    --description "Evidence for solar-driven climate variability and the case for an approaching cooling period"
+
+sciknow book outline "Global Cooling"     # LLM proposes 6-12 chapters from your corpus
+sciknow book show "Global Cooling"        # review the proposed chapters
+```
+
+Adjust manually if needed:
+
+```bash
+sciknow book chapter add "Global Cooling" "Policy Implications" --number 12
+```
+
+#### Step 3 — Generate the book plan
+
+The thesis statement that anchors every chapter — the single most important step for coherence:
+
+```bash
 sciknow book plan "Global Cooling"
+```
 
-# 4. Check for gaps before writing
+Read it carefully. Regenerate with `--edit` if the scope or thesis doesn't match your intent.
+
+#### Step 4 — Check gaps before writing
+
+```bash
 sciknow book gaps "Global Cooling"
+```
 
-# 5. Write chapter by chapter (with coherence, planning, and verification)
+This tells you which chapters have weak paper support and suggests search terms to fill them. If gaps are severe, expand the corpus in that specific area:
+
+```bash
+sciknow db expand --limit 50 -q "solar grand minimum Little Ice Age cooling"
+```
+
+#### Step 5 — Write chapter by chapter
+
+Start from chapter 1 and work forward — each chapter gets the summaries of all prior chapters as context:
+
+```bash
+# Chapter 1: introduction with sentence plan + verification
 sciknow book write "Global Cooling" 1 --section introduction --plan --verify
+
+# Chapter 1: methods
 sciknow book write "Global Cooling" 1 --section methods
+
+# Chapter 2 (now aware of chapter 1's content via cross-chapter summaries)
 sciknow book write "Global Cooling" 2 --section introduction --plan
+sciknow book write "Global Cooling" 2 --section results --ipcc
+```
 
-# 6. Review + revise loop
-sciknow book review <draft_id>                    # critic pass
-sciknow book revise <draft_id>                    # apply review feedback
-sciknow book revise <draft_id> -i "add more evidence for the solar forcing claim"
+#### Step 6 — Review and revise
 
-# 7. For climate science: add IPCC uncertainty language
-sciknow book write "Global Cooling" 3 --section discussion --ipcc
+After each section:
 
-# 8. Export
+```bash
+# See all drafts for the book
+sciknow draft list --book "Global Cooling"
+
+# Run the critic (assesses groundedness, completeness, accuracy, coherence)
+sciknow book review <draft_id>
+
+# Apply the review feedback (creates v2, preserves v1)
+sciknow book revise <draft_id>
+
+# Or give a specific instruction
+sciknow book revise <draft_id> -i "expand the discussion of Maunder Minimum evidence with more proxy data"
+```
+
+#### Step 7 — Argument mapping for contested claims
+
+For any claim where the evidence is mixed:
+
+```bash
+sciknow book argue "solar activity is the primary driver of 20th century warming" --save
+sciknow book argue "cosmic rays significantly modulate low cloud cover" --save
+```
+
+These map SUPPORTS / CONTRADICTS / NEUTRAL evidence. Use the insights to write more nuanced discussion sections.
+
+#### Step 8 — Re-check gaps, iterate
+
+```bash
+sciknow book gaps "Global Cooling"          # what's still missing?
+sciknow book show "Global Cooling"          # overview of all chapters + drafts + gaps
+```
+
+#### Step 9 — Export
+
+```bash
+# Markdown
+sciknow book export "Global Cooling" -o manuscript.md
+
+# LaTeX for journal submission (requires pandoc)
 sciknow book export "Global Cooling" --format latex -o manuscript.tex
 sciknow book export "Global Cooling" --format bibtex -o refs.bib
+
+# DOCX for collaborators
+sciknow book export "Global Cooling" --format docx -o manuscript.docx
 ```
+
+### Tips for effective book writing with sciknow
+
+- **Write sequentially** (ch1 → ch2 → ch3). Each chapter's prompt includes summaries of all prior chapters — writing out of order loses this coherence benefit.
+- **Use `--plan` on the first draft** of each section. It shows the paragraph skeleton before the full draft streams, letting you spot structural issues early.
+- **Use `--verify` on important sections.** Catches hallucinated citations before they propagate.
+- **Use `--ipcc` on results/discussion sections.** Inserts calibrated uncertainty language ("very likely", "high confidence") appropriate for climate science publications.
+- **Argue before you write discussion sections.** Run `book argue` on your key claims first, then use those structured evidence maps to write a more nuanced discussion.
+- **Expand targetedly when gaps appear.** If `book gaps` says chapter 7 has weak support, run `db expand -q "your topic" --limit 30` to grow the corpus in that area, then re-write.
+- **Review every section before moving on.** The `book review → book revise` loop catches groundedness issues, missing topics, and redundancy early rather than in the final manuscript.
 
 ## Backup & Restore (`db backup` / `db restore`)
 
