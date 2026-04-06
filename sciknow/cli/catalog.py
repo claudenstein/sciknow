@@ -601,7 +601,9 @@ def cluster(
             # invalid JSON. 32K fits comfortably on qwen2.5:32b.
             raw = llm_complete(system, user, model=model, num_ctx=32768)
             cleaned = _sanitize_json(raw)
-            data = _json.loads(cleaned)
+            # strict=False accepts control characters (tabs, raw newlines)
+            # inside JSON string values — common with LLM-generated JSON.
+            data = _json.loads(cleaned, strict=False)
             assignments = data.get("assignments", {})
             n_clusters = len(data.get("clusters", []))
         except Exception as e:

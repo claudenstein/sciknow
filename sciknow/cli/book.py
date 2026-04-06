@@ -366,7 +366,7 @@ def outline(
         raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
 
     try:
-        data = json.loads(raw)
+        data = json.loads(raw, strict=False)
         chapters = data.get("chapters", [])
     except Exception:
         console.print("[red]LLM returned invalid JSON. Raw output:[/red]")
@@ -552,7 +552,7 @@ def write(
             cleaned = raw.strip()
             if cleaned.startswith("```"):
                 cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-            vdata = _json.loads(cleaned)
+            vdata = _json.loads(cleaned, strict=False)
             score = vdata.get("groundedness_score", "?")
             console.print(f"  Groundedness score: [bold]{score}[/bold]")
             for claim in vdata.get("claims", []):
@@ -1059,7 +1059,7 @@ def gaps(
                 cleaned = raw.strip()
                 if cleaned.startswith("```"):
                     cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-                gap_data = _json.loads(cleaned)
+                gap_data = _json.loads(cleaned, strict=False)
                 gap_list = gap_data.get("gaps", [])
             except Exception as exc:
                 console.print(f"[yellow]Structured gap extraction failed: {exc}[/yellow]")

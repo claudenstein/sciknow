@@ -1586,7 +1586,7 @@ def export(
             raw = complete(sys_p, usr_p, temperature=0.3, num_ctx=4096).strip()
             if raw.startswith("```"):
                 raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-            qa = json.loads(raw)
+            qa = json.loads(raw, strict=False)
         except Exception:
             return None
         return {
