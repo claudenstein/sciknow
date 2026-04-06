@@ -557,16 +557,47 @@ def cluster(
         f"batches of {batch} ({workers} parallel LLM calls)…"
     )
 
+    def _sanitize_json(raw: str) -> str:
+        """Clean common LLM JSON output issues before parsing."""
+        import re
+        cleaned = raw.strip()
+        # Strip markdown code fences
+        if cleaned.startswith("```"):
+            cleaned = "\n".join(cleaned.split("\n")[1:])
+        if cleaned.endswith("```"):
+            cleaned = "\n".join(cleaned.split("\n")[:-1])
+        # Remove control characters (except \n, \r, \t) that break JSON parsing
+        cleaned = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', cleaned)
+        # Fix invalid \escapes: replace \X (where X is not a valid JSON escape) with \\X
+        cleaned = re.sub(r'\\([^"\\\/bfnrtu])', r'\\\\\1', cleaned)
+        return cleaned
+
+    def _fuzzy_title_match(llm_title: str, title_to_doc: dict[str, str]) -> str | None:
+        """Match an LLM-returned title to a paper, tolerating minor differences."""
+        # Exact match first
+        if llm_title in title_to_doc:
+            return title_to_doc[llm_title]
+        # Normalize: lowercase, strip punctuation, collapse whitespace
+        import re
+        def _norm(s: str) -> str:
+            return re.sub(r'\s+', ' ', re.sub(r'[^\w\s]', '', s.lower())).strip()
+        norm_llm = _norm(llm_title)
+        for paper_title, doc_id in title_to_doc.items():
+            if _norm(paper_title) == norm_llm:
+                return doc_id
+        # Prefix match (LLM may truncate long titles)
+        if len(norm_llm) >= 40:
+            for paper_title, doc_id in title_to_doc.items():
+                if _norm(paper_title).startswith(norm_llm[:40]):
+                    return doc_id
+        return None
+
     def _run_batch(batch_num: int, batch_papers: list[dict]) -> tuple[int, dict[str, str], int]:
         """Runs in a worker thread. Returns (batch_num, doc_id→cluster, n_clusters)."""
         system, user = rag_prompts.cluster(batch_papers)
         try:
             raw = llm_complete(system, user, model=model)
-            cleaned = raw.strip()
-            if cleaned.startswith("```"):
-                cleaned = "\n".join(cleaned.split("\n")[1:])
-            if cleaned.endswith("```"):
-                cleaned = "\n".join(cleaned.split("\n")[:-1])
+            cleaned = _sanitize_json(raw)
             data = _json.loads(cleaned)
             assignments = data.get("assignments", {})
             n_clusters = len(data.get("clusters", []))
@@ -575,11 +606,11 @@ def cluster(
             return batch_num, {}, 0
 
         title_to_doc = {p["title"]: p["doc_id"] for p in batch_papers}
-        doc_assignments = {
-            title_to_doc[t]: c
-            for t, c in assignments.items()
-            if t in title_to_doc
-        }
+        doc_assignments = {}
+        for t, c in assignments.items():
+            doc_id = _fuzzy_title_match(t, title_to_doc)
+            if doc_id:
+                doc_assignments[doc_id] = c
         return batch_num, doc_assignments, n_clusters
 
     all_assignments: dict[str, str] = {}
