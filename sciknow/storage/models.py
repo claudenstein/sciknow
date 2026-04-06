@@ -224,6 +224,7 @@ class Book(Base):
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     title: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     description: Mapped[str | None] = mapped_column(Text)
+    plan: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="draft")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -283,6 +284,11 @@ class Draft(Base):
     sources: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     model_used: Mapped[str | None] = mapped_column(Text)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    summary: Mapped[str | None] = mapped_column(Text)
+    parent_draft_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("drafts.id", ondelete="SET NULL"), nullable=True
+    )
+    review_feedback: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -296,6 +302,27 @@ class Draft(Base):
     __table_args__ = (
         Index("idx_drafts_book", "book_id", postgresql_where="book_id IS NOT NULL"),
         Index("idx_drafts_chapter", "chapter_id", postgresql_where="chapter_id IS NOT NULL"),
+    )
+
+
+class BookGap(Base):
+    __tablename__ = "book_gaps"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    book_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("books.id", ondelete="CASCADE"), nullable=False
+    )
+    gap_type: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    chapter_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("book_chapters.id", ondelete="SET NULL"), nullable=True
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="open")
+    resolved_draft_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("drafts.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
 

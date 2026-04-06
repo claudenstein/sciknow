@@ -458,3 +458,428 @@ def finetune_qa(
         section=section or "text",
         content=content[:2000],
     )
+
+
+# ── Book plan generation ─────────────────────────────────────────────────────
+
+PLAN_SYSTEM = """\
+You are a scientific book editor. Write a concise book plan (200–500 words) that serves \
+as the thesis statement and scope document for a scientific book.
+
+The plan should define:
+1. Central argument or thesis of the book
+2. Scope: what is covered and what is explicitly excluded
+3. Intended audience
+4. How the evidence will be structured to build the argument
+5. Key terms and definitions that will be used consistently"""
+
+PLAN_USER = """\
+Book title: {book_title}
+{description_line}
+
+Chapter outline:
+{chapter_list}
+
+Available papers ({n_papers} total, showing top 50):
+{paper_list}
+
+---
+
+Write the book plan."""
+
+
+def book_plan(
+    book_title: str,
+    description: str | None,
+    chapters: list[dict],
+    papers: list[dict],
+) -> tuple[str, str]:
+    chapter_list = "\n".join(
+        f"  Ch.{c['number']}: {c['title']} — {c.get('description', '')}"
+        for c in chapters
+    ) or "  (no chapters yet)"
+    paper_lines = "\n".join(
+        f"  - {p['title']} ({p.get('year', '?')})"
+        for p in papers[:50]
+    )
+    desc = f"\nDescription: {description}" if description else ""
+    return PLAN_SYSTEM, PLAN_USER.format(
+        book_title=book_title,
+        description_line=desc,
+        chapter_list=chapter_list,
+        n_papers=len(papers),
+        paper_list=paper_lines,
+    )
+
+
+# ── Draft summary generation ─────────────────────────────────────────────────
+
+SUMMARY_SYSTEM = """\
+Summarise the following draft section in 100–200 words. Focus on: key claims made, \
+evidence cited, conclusions drawn. This summary will be used as context when writing \
+subsequent chapters to maintain cross-chapter coherence. Do NOT include meta-commentary \
+about the writing — only summarise the substantive content."""
+
+SUMMARY_USER = """\
+Section type: {section_type}
+Chapter: {chapter_title}
+
+Draft content:
+{content}"""
+
+
+def draft_summary(
+    section_type: str,
+    chapter_title: str,
+    content: str,
+) -> tuple[str, str]:
+    return SUMMARY_SYSTEM, SUMMARY_USER.format(
+        section_type=section_type or "text",
+        chapter_title=chapter_title or "Unknown",
+        content=content[:8000],
+    )
+
+
+# ── Enhanced write_section with cross-chapter context ────────────────────────
+
+WRITE_V2_SYSTEM = """\
+You are an expert scientific writer drafting a section of a book. Write in a formal, \
+precise academic style appropriate for a scientific monograph.
+
+Rules:
+- Base ALL claims on the provided literature passages — cite as [N]
+- Never invent references or cite papers not in the provided context
+- Use precise, quantitative language; avoid vague generalisations
+- Maintain consistency with the book plan and prior chapter summaries below
+- Do not repeat content already covered in prior chapters — reference it instead
+
+{book_plan_section}
+{prior_summaries_section}"""
+
+WRITE_V2_USER = """\
+Literature passages:
+
+{context}
+
+---
+
+Draft a {section} section on the following topic.
+
+Topic: {topic}"""
+
+
+def write_section_v2(
+    section: str,
+    topic: str,
+    results: list,
+    book_plan: str | None = None,
+    prior_summaries: list[dict] | None = None,
+) -> tuple[str, str]:
+    plan_block = ""
+    if book_plan:
+        plan_block = f"\nBook plan:\n{book_plan}\n"
+
+    summaries_block = ""
+    if prior_summaries:
+        lines = []
+        for s in prior_summaries:
+            lines.append(f"Ch.{s.get('chapter_number', '?')} [{s.get('section_type', 'text')}]: {s['summary']}")
+        summaries_block = "\nPrior chapter summaries:\n" + "\n".join(lines) + "\n"
+
+    return (
+        WRITE_V2_SYSTEM.format(
+            book_plan_section=plan_block,
+            prior_summaries_section=summaries_block,
+        ),
+        WRITE_V2_USER.format(
+            context=format_context(results),
+            section=section,
+            topic=topic,
+        ),
+    )
+
+
+# ── Review (critic agent) ───────────────────────────────────────────────────
+
+REVIEW_SYSTEM = """\
+You are a rigorous scientific peer reviewer evaluating a draft book section. \
+Assess the draft on these dimensions and provide structured feedback:
+
+1. **Groundedness**: Is every claim supported by a cited source [N]? Flag any unsupported claims.
+2. **Completeness**: Are there obvious gaps — topics the section should cover but doesn't?
+3. **Accuracy**: Based on the provided source passages, are any claims misrepresented?
+4. **Coherence**: Does the argument flow logically? Are there contradictions?
+5. **Redundancy**: Is anything repeated unnecessarily?
+6. **Suggestions**: Concrete, actionable improvements (max 5).
+
+Be specific. Quote the problematic text. Reference [N] citations where relevant."""
+
+REVIEW_USER = """\
+Section type: {section_type}
+Topic: {topic}
+
+Draft to review:
+{draft_content}
+
+---
+
+Source passages the draft was based on:
+{context}
+
+---
+
+Provide your review."""
+
+
+def review(
+    section_type: str,
+    topic: str,
+    draft_content: str,
+    results: list,
+) -> tuple[str, str]:
+    return REVIEW_SYSTEM, REVIEW_USER.format(
+        section_type=section_type or "text",
+        topic=topic or "",
+        draft_content=draft_content[:12000],
+        context=format_context(results),
+    )
+
+
+# ── Revise (apply instruction to existing draft) ────────────────────────────
+
+REVISE_SYSTEM = """\
+You are a scientific writer revising a draft section based on specific feedback. \
+Apply the requested change while preserving the rest of the text, its citations, \
+and its academic tone. Output the COMPLETE revised section, not just the changed parts."""
+
+REVISE_USER = """\
+Current draft:
+{draft_content}
+
+---
+
+Revision instruction: {instruction}
+
+---
+
+Additional literature passages (if the revision needs new evidence):
+{context}
+
+---
+
+Output the complete revised section."""
+
+
+def revise(
+    draft_content: str,
+    instruction: str,
+    results: list | None = None,
+) -> tuple[str, str]:
+    ctx = format_context(results) if results else "(no additional passages)"
+    return REVISE_SYSTEM, REVISE_USER.format(
+        draft_content=draft_content[:12000],
+        instruction=instruction,
+        context=ctx,
+    )
+
+
+# ── Claim verification ──────────────────────────────────────────────────────
+
+VERIFY_SYSTEM = """\
+You are a fact-checker for scientific text. Given a draft and its source passages, \
+check whether each citation [N] in the draft actually supports the claim it's attached to.
+
+For each citation, classify it as:
+- SUPPORTED: the claim accurately reflects what the cited passage says
+- EXTRAPOLATED: the claim goes beyond what the passage states
+- MISREPRESENTED: the claim contradicts or misrepresents the passage
+- MISSING: the claim has no citation but should have one
+
+Respond in JSON format:
+{{"claims": [
+  {{"text": "the claim text", "citation": "[N]", "verdict": "SUPPORTED|EXTRAPOLATED|MISREPRESENTED", "reason": "brief explanation"}},
+  ...
+],
+"unsupported_claims": ["claim text without citation that needs one", ...],
+"groundedness_score": 0.85
+}}
+
+The groundedness_score is the fraction of cited claims that are SUPPORTED (0.0–1.0)."""
+
+VERIFY_USER = """\
+Draft:
+{draft_content}
+
+---
+
+Source passages:
+{context}
+
+---
+
+Verify the claims."""
+
+
+def verify_claims(
+    draft_content: str,
+    results: list,
+) -> tuple[str, str]:
+    return VERIFY_SYSTEM, VERIFY_USER.format(
+        draft_content=draft_content[:12000],
+        context=format_context(results),
+    )
+
+
+# ── Sentence planning ───────────────────────────────────────────────────────
+
+SENTENCE_PLAN_SYSTEM = """\
+You are a scientific writing planner. Given a section type, topic, and retrieved \
+literature passages, create a detailed paragraph-by-paragraph plan for the section.
+
+For each paragraph specify:
+- The main point it should make
+- Which source(s) [N] it should cite
+- How it connects to the previous paragraph
+
+Output as a numbered list. Each entry is one paragraph. Keep it to 5–10 paragraphs. \
+This plan will be used by the writer to draft the actual section."""
+
+SENTENCE_PLAN_USER = """\
+Section type: {section_type}
+Topic: {topic}
+
+Literature passages:
+{context}
+
+{plan_context}
+---
+
+Create a paragraph-by-paragraph plan for this section."""
+
+
+def sentence_plan(
+    section_type: str,
+    topic: str,
+    results: list,
+    book_plan: str | None = None,
+    prior_summaries: list[dict] | None = None,
+) -> tuple[str, str]:
+    plan_ctx = ""
+    if book_plan:
+        plan_ctx += f"\nBook plan:\n{book_plan}\n"
+    if prior_summaries:
+        lines = [f"Ch.{s.get('chapter_number','?')} [{s.get('section_type','text')}]: {s['summary']}"
+                 for s in prior_summaries]
+        plan_ctx += "\nPrior chapter summaries:\n" + "\n".join(lines) + "\n"
+    return SENTENCE_PLAN_SYSTEM, SENTENCE_PLAN_USER.format(
+        section_type=section_type or "text",
+        topic=topic or "",
+        context=format_context(results),
+        plan_context=plan_ctx,
+    )
+
+
+# ── IPCC uncertainty language ────────────────────────────────────────────────
+
+IPCC_SYSTEM = """\
+You are a climate science editor applying IPCC-style calibrated uncertainty language \
+to a draft section. For each substantive claim in the text, assess the evidence base \
+and insert appropriate IPCC calibrated language:
+
+Confidence levels (based on evidence amount + agreement):
+- Very high confidence: robust evidence, high agreement
+- High confidence: substantial evidence, good agreement
+- Medium confidence: some evidence, moderate agreement
+- Low confidence: limited evidence or low agreement
+
+Likelihood scale (for probabilistic claims):
+- Virtually certain (>99%), Very likely (>90%), Likely (>66%)
+- About as likely as not (33–66%), Unlikely (<33%)
+- Very unlikely (<10%), Exceptionally unlikely (<1%)
+
+Insert these naturally into the text (e.g., "Global mean temperature has very likely \
+increased..."). Do NOT change the substantive content or citations — only add \
+uncertainty qualifiers. Output the COMPLETE revised text."""
+
+IPCC_USER = """\
+Draft section:
+{draft_content}
+
+---
+
+Source passages (for assessing evidence strength):
+{context}
+
+---
+
+Add IPCC-style calibrated uncertainty language to the claims in this section. \
+Output the complete revised text."""
+
+
+def ipcc_uncertainty(
+    draft_content: str,
+    results: list,
+) -> tuple[str, str]:
+    return IPCC_SYSTEM, IPCC_USER.format(
+        draft_content=draft_content[:12000],
+        context=format_context(results),
+    )
+
+
+# ── Structured gap analysis (JSON) ──────────────────────────────────────────
+
+GAPS_JSON_SYSTEM = """\
+You are a scientific book editor. Analyse a book project and return structured \
+gaps in JSON format.
+
+Respond ONLY with valid JSON:
+{{"gaps": [
+  {{"type": "topic|evidence|argument|draft",
+    "description": "specific gap description",
+    "chapter_number": null or int,
+    "priority": "high|medium|low",
+    "suggested_action": "concrete action to address this gap"}}
+]}}"""
+
+GAPS_JSON_USER = """\
+Book: {book_title}
+
+Chapter outline:
+{chapter_list}
+
+Papers available ({n_papers} total):
+{paper_list}
+
+Existing drafts:
+{draft_list}
+
+---
+
+Identify all gaps. Return JSON."""
+
+
+def gaps_json(
+    book_title: str,
+    chapters: list[dict],
+    papers: list[dict],
+    drafts: list[dict],
+) -> tuple[str, str]:
+    chapter_list = "\n".join(
+        f"  Ch.{c['number']}: {c['title']} — {c.get('description', '')}"
+        for c in chapters
+    ) or "  (no chapters yet)"
+    paper_lines = "\n".join(
+        f"  - {p['title']} ({p.get('year', '?')})"
+        for p in papers[:100]
+    )
+    draft_lines = "\n".join(
+        f"  - [{d['section_type']}] {d['title']} (Ch.{d.get('chapter_number', '?')})"
+        for d in drafts
+    ) or "  (none yet)"
+    return GAPS_JSON_SYSTEM, GAPS_JSON_USER.format(
+        book_title=book_title,
+        chapter_list=chapter_list,
+        n_papers=len(papers),
+        paper_list=paper_lines,
+        draft_list=draft_lines,
+    )

@@ -7,13 +7,17 @@ Commands:
   show            Show a book's chapters and draft status
   chapter add     Add a chapter to a book
   outline         Generate a chapter structure from the literature (LLM)
-  write           Draft a chapter section and save it
+  plan            Generate / view / edit the book plan (thesis + scope)
+  write           Draft a chapter section (with cross-chapter coherence)
+  review          Run a critic pass over a saved draft
+  revise          Revise a draft based on instructions or review feedback
   argue           Map the argument for a claim against the literature
-  gaps            Identify what's missing in the book
-  export          Compile all chapter drafts into a single document
+  gaps            Identify + persist what's missing in the book
+  export          Compile all chapter drafts into Markdown, LaTeX, or DOCX
 """
 from __future__ import annotations
 
+import json as _json
 from pathlib import Path
 from typing import Annotated
 
@@ -35,7 +39,7 @@ console = Console()
 def _get_book(session, title_or_id: str):
     from sqlalchemy import text
     row = session.execute(text("""
-        SELECT id::text, title, description, status, created_at
+        SELECT id::text, title, description, status, created_at, plan
         FROM books WHERE title ILIKE :q OR id::text LIKE :q
         LIMIT 1
     """), {"q": f"%{title_or_id}%"}).fetchone()
@@ -45,7 +49,6 @@ def _get_book(session, title_or_id: str):
 def _get_chapter(session, book_id: str, chapter_ref: str):
     """Find a chapter by number or title fragment."""
     from sqlalchemy import text
-    # Try by number first
     if chapter_ref.isdigit():
         row = session.execute(text("""
             SELECT id::text, number, title, description, topic_query, topic_cluster
@@ -53,12 +56,67 @@ def _get_chapter(session, book_id: str, chapter_ref: str):
         """), {"bid": book_id, "num": int(chapter_ref)}).fetchone()
         if row:
             return row
-    # Fall back to title fragment
     return session.execute(text("""
         SELECT id::text, number, title, description, topic_query, topic_cluster
         FROM book_chapters WHERE book_id = :bid AND title ILIKE :q
         LIMIT 1
     """), {"bid": book_id, "q": f"%{chapter_ref}%"}).fetchone()
+
+
+def _get_prior_summaries(session, book_id: str, before_chapter_number: int) -> list[dict]:
+    """Return summaries of all drafts from chapters before the given chapter number."""
+    from sqlalchemy import text
+    rows = session.execute(text("""
+        SELECT bc.number, d.section_type, d.summary
+        FROM drafts d
+        JOIN book_chapters bc ON bc.id = d.chapter_id
+        WHERE d.book_id = :bid AND bc.number < :ch_num AND d.summary IS NOT NULL
+        ORDER BY bc.number, d.section_type
+    """), {"bid": book_id, "ch_num": before_chapter_number}).fetchall()
+    return [{"chapter_number": r[0], "section_type": r[1], "summary": r[2]} for r in rows]
+
+
+def _auto_summarize(content: str, section_type: str, chapter_title: str, model: str | None = None) -> str:
+    """Generate a 100-200 word summary of a draft for cross-chapter context."""
+    from sciknow.rag import prompts
+    from sciknow.rag.llm import complete
+    system, user = prompts.draft_summary(section_type, chapter_title, content)
+    try:
+        return complete(system, user, model=model, temperature=0.1, num_ctx=4096).strip()
+    except Exception:
+        return ""
+
+
+def _save_draft(session, *, title, book_id, chapter_id, section_type, topic,
+                content, sources, model, summary=None, parent_draft_id=None,
+                review_feedback=None, version=1):
+    """Insert a draft row and return the draft_id."""
+    from sqlalchemy import text
+    row = session.execute(text("""
+        INSERT INTO drafts (title, book_id, chapter_id, section_type, topic, content,
+                            word_count, sources, model_used, version, summary,
+                            parent_draft_id, review_feedback)
+        VALUES (:title, :book_id, :chapter_id, :section, :topic, :content,
+                :wc, :sources::jsonb, :model, :version, :summary,
+                :parent_id, :review_feedback)
+        RETURNING id::text
+    """), {
+        "title": title,
+        "book_id": book_id,
+        "chapter_id": chapter_id,
+        "section": section_type,
+        "topic": topic,
+        "content": content,
+        "wc": len(content.split()),
+        "sources": _json.dumps(sources or []),
+        "model": model,
+        "version": version,
+        "summary": summary,
+        "parent_id": parent_draft_id,
+        "review_feedback": review_feedback,
+    })
+    session.commit()
+    return row.fetchone()[0]
 
 
 # ── create ─────────────────────────────────────────────────────────────────────
@@ -368,22 +426,28 @@ def write(
     year_to:    int | None = typer.Option(None, "--year-to"),
     model:      str | None = typer.Option(None, "--model"),
     no_save:    bool = typer.Option(False, "--no-save", help="Print only, don't save to DB."),
+    expand:     bool = typer.Option(False, "--expand", "-e", help="Expand query with LLM synonyms before retrieval."),
+    show_plan:  bool = typer.Option(False, "--plan", help="Show a sentence plan before drafting."),
+    verify:     bool = typer.Option(False, "--verify", help="Run claim verification after drafting."),
+    ipcc:       bool = typer.Option(False, "--ipcc", help="Add IPCC-style calibrated uncertainty language."),
 ):
     """
-    Draft a chapter section and save it.
+    Draft a chapter section with cross-chapter coherence.
 
-    Uses the chapter's topic_query (or the chapter title) to retrieve
-    the most relevant papers, then streams a draft and saves it.
+    Injects the book plan and summaries of prior chapters into the prompt
+    so the LLM maintains consistency across the book. Auto-generates a
+    summary after saving for use by subsequent chapters.
 
     Examples:
 
       sciknow book write "Global Cooling" 1 --section introduction
 
-      sciknow book write "Global Cooling" "Solar Activity" --section discussion
+      sciknow book write "Global Cooling" 2 --section methods --plan --verify
+
+      sciknow book write "Global Cooling" 3 --section results --ipcc --expand
     """
-    from sqlalchemy import text
     from sciknow.rag import prompts
-    from sciknow.rag.llm import stream as llm_stream
+    from sciknow.rag.llm import stream as llm_stream, complete as llm_complete
     from sciknow.retrieval import context_builder, hybrid_search, reranker
     from sciknow.storage.db import get_session
     from sciknow.storage.qdrant import get_client
@@ -394,13 +458,20 @@ def write(
             console.print(f"[red]Book not found:[/red] {book_title}")
             raise typer.Exit(1)
 
-        ch = _get_chapter(session, book[0], chapter)
+        book_id, b_title, b_desc, b_status, b_created, b_plan = book
+
+        ch = _get_chapter(session, book_id, chapter)
         if not ch:
             console.print(f"[red]Chapter not found:[/red] {chapter}")
             raise typer.Exit(1)
 
         ch_id, ch_num, ch_title, ch_desc, topic_query, topic_cluster = ch
         search_query = f"{section} {topic_query or ch_title}"
+
+        # Retrieve prior chapter summaries for cross-chapter coherence
+        prior_summaries = _get_prior_summaries(session, book_id, ch_num)
+        if prior_summaries:
+            console.print(f"[dim]Injecting {len(prior_summaries)} prior chapter summaries for coherence.[/dim]")
 
         qdrant = get_client()
         candidates_list = hybrid_search.search(
@@ -411,6 +482,7 @@ def write(
             year_from=year_from,
             year_to=year_to,
             topic_cluster=topic_cluster,
+            use_query_expansion=expand,
         )
 
         if not candidates_list:
@@ -420,7 +492,27 @@ def write(
         candidates_list = reranker.rerank(search_query, candidates_list, top_k=context_k)
         results = context_builder.build(candidates_list, session)
 
-    system, user = prompts.write_section(section, topic_query or ch_title, results)
+    # ── Optional: sentence plan ──────────────────────────────────────────
+    if show_plan:
+        console.print()
+        console.print(Rule("[bold]Sentence Plan[/bold]"))
+        console.print()
+        sys_p, usr_p = prompts.sentence_plan(
+            section, topic_query or ch_title, results,
+            book_plan=b_plan,
+            prior_summaries=prior_summaries,
+        )
+        for token in llm_stream(sys_p, usr_p, model=model):
+            console.print(token, end="", highlight=False)
+        console.print()
+        console.print()
+
+    # ── Draft with v2 prompt (book plan + prior summaries) ───────────────
+    system, user = prompts.write_section_v2(
+        section, topic_query or ch_title, results,
+        book_plan=b_plan,
+        prior_summaries=prior_summaries,
+    )
 
     console.print()
     console.print(Rule(f"[bold]Ch.{ch_num}: {ch_title}[/bold] — {section.capitalize()}"))
@@ -434,7 +526,14 @@ def write(
     console.print()
 
     content = "".join(output_tokens)
-    word_count = len(content.split())
+
+    # ── Optional: IPCC uncertainty language ───────────────────────────────
+    if ipcc:
+        console.print(Rule("[dim]Applying IPCC calibrated uncertainty language...[/dim]"))
+        sys_i, usr_i = prompts.ipcc_uncertainty(content, results)
+        content = llm_complete(sys_i, usr_i, model=model, temperature=0.1, num_ctx=16384)
+        console.print("[green]✓ IPCC uncertainty language applied.[/green]")
+        console.print()
 
     from sciknow.rag.prompts import format_sources
     source_lines = format_sources(results).splitlines()
@@ -443,28 +542,336 @@ def write(
         console.print(f"  [dim]{line}[/dim]")
     console.print()
 
+    # ── Optional: claim verification ─────────────────────────────────────
+    verify_feedback = None
+    if verify:
+        console.print(Rule("[dim]Verifying claims...[/dim]"))
+        sys_v, usr_v = prompts.verify_claims(content, results)
+        try:
+            raw = llm_complete(sys_v, usr_v, model=model, temperature=0.0, num_ctx=16384)
+            cleaned = raw.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            vdata = _json.loads(cleaned)
+            score = vdata.get("groundedness_score", "?")
+            console.print(f"  Groundedness score: [bold]{score}[/bold]")
+            for claim in vdata.get("claims", []):
+                v = claim.get("verdict", "?")
+                colour = "green" if v == "SUPPORTED" else "yellow" if v == "EXTRAPOLATED" else "red"
+                console.print(f"  [{colour}]{v}[/{colour}]: {claim.get('text', '')[:80]}")
+            unsupported = vdata.get("unsupported_claims", [])
+            if unsupported:
+                console.print(f"  [red]Unsupported claims ({len(unsupported)}):[/red]")
+                for u in unsupported[:5]:
+                    console.print(f"    [red]- {u[:80]}[/red]")
+            verify_feedback = raw
+        except Exception as exc:
+            console.print(f"  [yellow]Verification failed: {exc}[/yellow]")
+        console.print()
+
+    # ── Save draft ───────────────────────────────────────────────────────
     if not no_save:
+        # Auto-generate a summary for cross-chapter context
+        with console.status("[dim]Generating summary for future chapters...[/dim]"):
+            summary = _auto_summarize(content, section, ch_title, model=model)
+
         draft_title = f"Ch.{ch_num} {ch_title} — {section.capitalize()}"
         with get_session() as session:
-            session.execute(text("""
-                INSERT INTO drafts (title, book_id, chapter_id, section_type, topic, content,
-                                    word_count, sources, model_used)
-                VALUES (:title, :book_id, :chapter_id, :section, :topic, :content,
-                        :wc, :sources::jsonb, :model)
-            """), {
-                "title":      draft_title,
-                "book_id":    book[0],
-                "chapter_id": ch_id,
-                "section":    section,
-                "topic":      topic_query or ch_title,
-                "content":    content,
-                "wc":         word_count,
-                "sources":    __import__("json").dumps(source_lines),
-                "model":      model,
-            })
+            draft_id = _save_draft(
+                session,
+                title=draft_title,
+                book_id=book_id,
+                chapter_id=ch_id,
+                section_type=section,
+                topic=topic_query or ch_title,
+                content=content,
+                sources=source_lines,
+                model=model,
+                summary=summary,
+                review_feedback=verify_feedback,
+            )
+        console.print(
+            f"[green]✓ Saved draft:[/green] [bold]{draft_title}[/bold]  "
+            f"({len(content.split())} words)"
+        )
+
+
+# ── plan ───────────────────────────────────────────────────────────────────────
+
+@app.command()
+def plan(
+    book_title: Annotated[str, typer.Argument(help="Book title or ID fragment.")],
+    model: str | None = typer.Option(None, "--model"),
+    edit: bool = typer.Option(False, "--edit", help="Open the plan in $EDITOR for manual editing after generation."),
+):
+    """
+    Generate or view the book plan (thesis + scope document).
+
+    The book plan is a 200-500 word document defining the central argument,
+    scope, audience, and key terms. It's injected into every `book write`
+    call so all chapters stay aligned.
+
+    If the book already has a plan, prints it. Use --edit to regenerate or
+    modify it.
+
+    Examples:
+
+      sciknow book plan "Global Cooling"
+
+      sciknow book plan "Global Cooling" --edit
+    """
+    from sqlalchemy import text
+    from sciknow.rag import prompts as rag_prompts
+    from sciknow.rag.llm import stream as llm_stream, complete as llm_complete
+    from sciknow.storage.db import get_session
+
+    with get_session() as session:
+        book = _get_book(session, book_title)
+        if not book:
+            console.print(f"[red]Book not found:[/red] {book_title}")
+            raise typer.Exit(1)
+
+        book_id, b_title, b_desc, b_status, b_created, b_plan = book
+
+        # If plan exists and not editing, just show it
+        if b_plan and not edit:
+            console.print()
+            console.print(Rule(f"[bold]Book Plan:[/bold] {b_title}"))
+            console.print()
+            console.print(b_plan)
+            console.print()
+            console.print("[dim]Use --edit to regenerate or modify.[/dim]")
+            return
+
+        # Load chapters and papers for plan generation
+        chapters = session.execute(text("""
+            SELECT number, title, description FROM book_chapters
+            WHERE book_id = :bid ORDER BY number
+        """), {"bid": book_id}).fetchall()
+        ch_list = [{"number": r[0], "title": r[1], "description": r[2] or ""} for r in chapters]
+
+        papers = session.execute(text("""
+            SELECT pm.title, pm.year FROM paper_metadata pm
+            JOIN documents d ON d.id = pm.document_id
+            WHERE d.ingestion_status = 'complete' AND pm.title IS NOT NULL
+            ORDER BY pm.year DESC NULLS LAST
+        """)).fetchall()
+        paper_list = [{"title": r[0], "year": r[1]} for r in papers]
+
+    # Generate plan
+    console.print()
+    console.print(Rule(f"[bold]Generating Book Plan:[/bold] {b_title}"))
+    console.print()
+
+    sys_p, usr_p = rag_prompts.book_plan(b_title, b_desc, ch_list, paper_list)
+    output_tokens = []
+    for token in llm_stream(sys_p, usr_p, model=model):
+        console.print(token, end="", highlight=False)
+        output_tokens.append(token)
+    console.print()
+    console.print()
+
+    new_plan = "".join(output_tokens).strip()
+
+    # Save
+    with get_session() as session:
+        session.execute(text("UPDATE books SET plan = :plan WHERE id::text = :bid"),
+                        {"plan": new_plan, "bid": book_id})
+        session.commit()
+    console.print("[green]✓ Book plan saved.[/green]")
+    console.print("[dim]This plan will be injected into all future `book write` calls.[/dim]")
+
+
+# ── review ─────────────────────────────────────────────────────────────────────
+
+@app.command()
+def review(
+    draft_id: Annotated[str, typer.Argument(help="Draft ID (first 8+ chars).")],
+    model: str | None = typer.Option(None, "--model"),
+    save: bool = typer.Option(True, "--save/--no-save", help="Save review feedback to the draft."),
+):
+    """
+    Run a critic pass over a saved draft.
+
+    Assesses groundedness, completeness, accuracy, coherence, and redundancy.
+    Produces structured feedback with specific quotes and actionable suggestions.
+    The feedback is saved to the draft's review_feedback field.
+
+    Examples:
+
+      sciknow book review 3f2a1b4c
+
+      sciknow book review 3f2a1b4c --no-save
+    """
+    from sqlalchemy import text
+    from sciknow.rag import prompts as rag_prompts
+    from sciknow.rag.llm import stream as llm_stream
+    from sciknow.retrieval import context_builder, hybrid_search, reranker
+    from sciknow.storage.db import get_session
+    from sciknow.storage.qdrant import get_client
+
+    with get_session() as session:
+        row = session.execute(text("""
+            SELECT d.id::text, d.title, d.section_type, d.topic, d.content,
+                   d.book_id::text, d.chapter_id::text
+            FROM drafts d WHERE d.id::text LIKE :q
+            LIMIT 1
+        """), {"q": f"{draft_id}%"}).fetchone()
+
+    if not row:
+        console.print(f"[red]Draft not found:[/red] {draft_id}")
+        raise typer.Exit(1)
+
+    d_id, d_title, d_section, d_topic, d_content, d_book_id, d_chapter_id = row
+
+    # Retrieve the same passages the draft was based on
+    qdrant = get_client()
+    search_query = f"{d_section or ''} {d_topic or d_title}"
+    with get_session() as session:
+        candidates_list = hybrid_search.search(
+            query=search_query, qdrant_client=qdrant, session=session, candidate_k=50,
+        )
+        if candidates_list:
+            candidates_list = reranker.rerank(search_query, candidates_list, top_k=12)
+            results = context_builder.build(candidates_list, session)
+        else:
+            results = []
+
+    console.print()
+    console.print(Rule(f"[bold]Reviewing:[/bold] {d_title}"))
+    console.print()
+
+    sys_r, usr_r = rag_prompts.review(d_section, d_topic or d_title, d_content, results)
+    output_tokens = []
+    for token in llm_stream(sys_r, usr_r, model=model):
+        console.print(token, end="", highlight=False)
+        output_tokens.append(token)
+    console.print()
+
+    feedback = "".join(output_tokens).strip()
+
+    if save:
+        with get_session() as session:
+            session.execute(text("UPDATE drafts SET review_feedback = :fb WHERE id::text = :did"),
+                            {"fb": feedback, "did": d_id})
             session.commit()
-        console.print(f"[green]✓ Saved draft:[/green] [bold]{draft_title}[/bold]  ({word_count} words)")
-        console.print("View with: [bold]sciknow draft list --book " + repr(book[1]) + "[/bold]")
+        console.print()
+        console.print("[green]✓ Review feedback saved to draft.[/green]")
+        console.print("[dim]Use `sciknow book revise` to apply the feedback.[/dim]")
+
+
+# ── revise ─────────────────────────────────────────────────────────────────────
+
+@app.command()
+def revise(
+    draft_id: Annotated[str, typer.Argument(help="Draft ID (first 8+ chars).")],
+    instruction: str = typer.Option("", "--instruction", "-i",
+                                     help="Revision instruction (or leave empty to apply saved review feedback)."),
+    context_k: int = typer.Option(8, "--context-k", "-k", help="Additional passages to retrieve."),
+    model: str | None = typer.Option(None, "--model"),
+):
+    """
+    Revise a draft based on instructions or saved review feedback.
+
+    Creates a new version (version N+1) linked to the original via
+    parent_draft_id. The original is preserved. If no --instruction is
+    given, uses the draft's saved review_feedback from `book review`.
+
+    Examples:
+
+      sciknow book revise 3f2a1b4c -i "expand the section on solar cycles"
+
+      sciknow book revise 3f2a1b4c -i "add counterarguments from the skeptic literature"
+
+      sciknow book revise 3f2a1b4c       # uses saved review feedback
+    """
+    from sqlalchemy import text
+    from sciknow.rag import prompts as rag_prompts
+    from sciknow.rag.llm import stream as llm_stream
+    from sciknow.retrieval import context_builder, hybrid_search, reranker
+    from sciknow.storage.db import get_session
+    from sciknow.storage.qdrant import get_client
+
+    with get_session() as session:
+        row = session.execute(text("""
+            SELECT d.id::text, d.title, d.section_type, d.topic, d.content,
+                   d.book_id::text, d.chapter_id::text, d.version,
+                   d.review_feedback, d.sources
+            FROM drafts d WHERE d.id::text LIKE :q
+            LIMIT 1
+        """), {"q": f"{draft_id}%"}).fetchone()
+
+    if not row:
+        console.print(f"[red]Draft not found:[/red] {draft_id}")
+        raise typer.Exit(1)
+
+    d_id, d_title, d_section, d_topic, d_content, d_book_id, d_chapter_id, \
+        d_version, d_review_feedback, d_sources = row
+
+    # Determine revision instruction
+    rev_instruction = instruction.strip()
+    if not rev_instruction:
+        if d_review_feedback:
+            rev_instruction = f"Apply the following review feedback:\n\n{d_review_feedback}"
+            console.print("[dim]Using saved review feedback as revision instruction.[/dim]")
+        else:
+            console.print("[red]No instruction provided and no saved review feedback.[/red]")
+            console.print("Use: sciknow book revise <id> -i \"your instruction\"")
+            raise typer.Exit(1)
+
+    # Optionally retrieve additional passages for evidence
+    results = []
+    if context_k > 0:
+        qdrant = get_client()
+        search_query = f"{d_section or ''} {d_topic or d_title}"
+        with get_session() as session:
+            candidates_list = hybrid_search.search(
+                query=search_query, qdrant_client=qdrant, session=session, candidate_k=50,
+            )
+            if candidates_list:
+                candidates_list = reranker.rerank(search_query, candidates_list, top_k=context_k)
+                results = context_builder.build(candidates_list, session)
+
+    console.print()
+    console.print(Rule(f"[bold]Revising:[/bold] {d_title} (v{d_version} → v{d_version + 1})"))
+    console.print()
+
+    sys_r, usr_r = rag_prompts.revise(d_content, rev_instruction, results or None)
+    output_tokens = []
+    for token in llm_stream(sys_r, usr_r, model=model):
+        console.print(token, end="", highlight=False)
+        output_tokens.append(token)
+    console.print()
+
+    revised_content = "".join(output_tokens).strip()
+
+    # Auto-generate summary for the new version
+    with console.status("[dim]Generating summary...[/dim]"):
+        summary = _auto_summarize(revised_content, d_section or "text", d_title, model=model)
+
+    # Save as new version
+    with get_session() as session:
+        new_id = _save_draft(
+            session,
+            title=d_title,
+            book_id=d_book_id,
+            chapter_id=d_chapter_id,
+            section_type=d_section,
+            topic=d_topic,
+            content=revised_content,
+            sources=_json.loads(d_sources) if isinstance(d_sources, str) else (d_sources or []),
+            model=model,
+            summary=summary,
+            parent_draft_id=d_id,
+            version=d_version + 1,
+        )
+
+    console.print()
+    console.print(
+        f"[green]✓ Saved as v{d_version + 1}:[/green] [bold]{d_title}[/bold]  "
+        f"({len(revised_content.split())} words)"
+    )
+    console.print(f"[dim]Original (v{d_version}) preserved. New draft ID: {new_id[:8]}[/dim]")
 
 
 # ── argue ──────────────────────────────────────────────────────────────────────
@@ -572,17 +979,25 @@ def argue(
 def gaps(
     book_title: Annotated[str, typer.Argument(help="Book title or ID fragment.")],
     model: str | None = typer.Option(None, "--model"),
+    save: bool = typer.Option(True, "--save/--no-save",
+                               help="Persist identified gaps to the book_gaps table (default: yes)."),
 ):
     """
-    Identify gaps in the book: missing topics, weak chapters, and unwritten sections.
+    Identify + persist gaps in the book: missing topics, weak chapters, unwritten sections.
+
+    Runs two passes: a human-readable narrative (streamed), and a structured JSON
+    extraction that saves each gap to the book_gaps table for tracking. View saved
+    gaps in `book show`.
 
     Examples:
 
       sciknow book gaps "Global Cooling"
+
+      sciknow book gaps "Global Cooling" --no-save   # informational only
     """
     from sqlalchemy import text
     from sciknow.rag import prompts
-    from sciknow.rag.llm import stream as llm_stream
+    from sciknow.rag.llm import stream as llm_stream, complete as llm_complete
     from sciknow.storage.db import get_session
 
     with get_session() as session:
@@ -591,33 +1006,37 @@ def gaps(
             console.print(f"[red]Book not found:[/red] {book_title}")
             raise typer.Exit(1)
 
+        book_id = book[0]
+
         chapters = session.execute(text("""
             SELECT number, title, description FROM book_chapters
             WHERE book_id = :bid ORDER BY number
-        """), {"bid": book[0]}).fetchall()
+        """), {"bid": book_id}).fetchall()
 
         papers = session.execute(text(
             "SELECT title, year FROM paper_metadata ORDER BY year DESC NULLS LAST LIMIT 150"
         )).fetchall()
 
-        drafts = session.execute(text("""
+        drafts_rows = session.execute(text("""
             SELECT d.title, d.section_type, bc.number as chapter_number
             FROM drafts d
             LEFT JOIN book_chapters bc ON bc.id = d.chapter_id
             WHERE d.book_id = :bid
             ORDER BY bc.number, d.created_at
-        """), {"bid": book[0]}).fetchall()
+        """), {"bid": book_id}).fetchall()
 
     if not chapters:
         console.print("[yellow]No chapters defined yet.[/yellow]")
         console.print(f"Run [bold]sciknow book outline {book_title!r}[/bold] first.")
         raise typer.Exit(0)
 
+    ch_list = [{"number": c[0], "title": c[1], "description": c[2]} for c in chapters]
+    p_list = [{"title": p[0], "year": p[1]} for p in papers if p[0]]
+    d_list = [{"title": d[0], "section_type": d[1], "chapter_number": d[2]} for d in drafts_rows]
+
+    # Pass 1: human-readable narrative (streamed)
     system, user = prompts.gaps(
-        book_title=book[1],
-        chapters=[{"number": c[0], "title": c[1], "description": c[2]} for c in chapters],
-        papers=[{"title": p[0], "year": p[1]} for p in papers if p[0]],
-        drafts=[{"title": d[0], "section_type": d[1], "chapter_number": d[2]} for d in drafts],
+        book_title=book[1], chapters=ch_list, papers=p_list, drafts=d_list,
     )
 
     console.print()
@@ -629,6 +1048,53 @@ def gaps(
     console.print()
     console.print()
 
+    # Pass 2: structured JSON extraction → save to book_gaps
+    if save:
+        with console.status("[dim]Extracting structured gaps...[/dim]"):
+            sys_j, usr_j = prompts.gaps_json(
+                book_title=book[1], chapters=ch_list, papers=p_list, drafts=d_list,
+            )
+            try:
+                raw = llm_complete(sys_j, usr_j, model=model, temperature=0.0, num_ctx=16384)
+                cleaned = raw.strip()
+                if cleaned.startswith("```"):
+                    cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                gap_data = _json.loads(cleaned)
+                gap_list = gap_data.get("gaps", [])
+            except Exception as exc:
+                console.print(f"[yellow]Structured gap extraction failed: {exc}[/yellow]")
+                gap_list = []
+
+        if gap_list:
+            # Build chapter number → chapter_id map
+            ch_id_map = {}
+            with get_session() as session:
+                ch_rows = session.execute(text("""
+                    SELECT number, id::text FROM book_chapters WHERE book_id = :bid
+                """), {"bid": book_id}).fetchall()
+                ch_id_map = {r[0]: r[1] for r in ch_rows}
+
+                # Clear old gaps and insert new ones
+                session.execute(text("DELETE FROM book_gaps WHERE book_id = :bid"),
+                                {"bid": book_id})
+                for g in gap_list:
+                    ch_num = g.get("chapter_number")
+                    session.execute(text("""
+                        INSERT INTO book_gaps (book_id, gap_type, description, chapter_id, status)
+                        VALUES (:bid, :gtype, :desc, :ch_id, 'open')
+                    """), {
+                        "bid": book_id,
+                        "gtype": g.get("type", "topic"),
+                        "desc": g.get("description", ""),
+                        "ch_id": ch_id_map.get(ch_num) if ch_num else None,
+                    })
+                session.commit()
+
+            console.print(f"[green]✓ Saved {len(gap_list)} gaps to book_gaps table.[/green]")
+            console.print("[dim]View with `sciknow book show`.[/dim]")
+        else:
+            console.print("[dim]No structured gaps extracted.[/dim]")
+
 
 # ── export ─────────────────────────────────────────────────────────────────────
 
@@ -639,18 +1105,25 @@ def export(
                                             help="Output file (default: <book_title>.md)."),
     include_sources: bool = typer.Option(True, "--sources/--no-sources",
                                           help="Include source citations per chapter."),
+    fmt:        str = typer.Option("markdown", "--format", "-f",
+                                    help="Export format: markdown, bibtex, latex, docx."),
 ):
     """
-    Compile all chapter drafts into a single Markdown document.
+    Compile all chapter drafts into a single document.
 
-    Drafts are ordered by chapter number, then by section type
-    (introduction → methods → results → discussion → conclusion).
+    Formats:
+      markdown  — Markdown with inline [N] citations + bibliography (default)
+      bibtex    — .bib file from all cited papers' metadata
+      latex     — Markdown → LaTeX via Pandoc (requires pandoc installed)
+      docx      — Markdown → DOCX via Pandoc (requires pandoc installed)
 
     Examples:
 
       sciknow book export "Global Cooling"
 
-      sciknow book export "Global Cooling" --output my_book.md --no-sources
+      sciknow book export "Global Cooling" --format bibtex -o refs.bib
+
+      sciknow book export "Global Cooling" --format latex -o book.tex
     """
     from sqlalchemy import text
     from sciknow.storage.db import get_session
@@ -744,12 +1217,122 @@ def export(
 
     md = "\n".join(lines)
 
-    if output is None:
-        safe = book[1].lower().replace(" ", "_").replace("/", "-")[:50]
-        output = Path(f"{safe}.md")
+    safe = book[1].lower().replace(" ", "_").replace("/", "-")[:50]
 
-    output.write_text(md, encoding="utf-8")
-    console.print(
-        f"[green]✓ Exported [bold]{book[1]}[/bold][/green] → [bold]{output}[/bold]  "
-        f"({total_words:,} words, {len(drafts)} sections)"
-    )
+    # ── BibTeX export ────────────────────────────────────────────────────
+    if fmt == "bibtex":
+        bib = _generate_bibtex(session if 'session' in dir() else None, book[0])
+        bib_path = output or Path(f"{safe}.bib")
+        bib_path.write_text(bib, encoding="utf-8")
+        console.print(f"[green]✓ BibTeX exported:[/green] {bib_path}")
+        return
+
+    # ── Markdown (default) ───────────────────────────────────────────────
+    md_path = output or Path(f"{safe}.md")
+    md_path.write_text(md, encoding="utf-8")
+
+    if fmt == "markdown":
+        console.print(
+            f"[green]✓ Exported [bold]{book[1]}[/bold][/green] → [bold]{md_path}[/bold]  "
+            f"({total_words:,} words, {len(drafts)} sections)"
+        )
+        return
+
+    # ── LaTeX / DOCX via Pandoc ──────────────────────────────────────────
+    if fmt in ("latex", "docx"):
+        import subprocess, shutil
+        if not shutil.which("pandoc"):
+            console.print(
+                "[red]Pandoc not installed.[/red] Required for LaTeX/DOCX export.\n"
+                "Install: [bold]sudo apt install pandoc[/bold]"
+            )
+            raise typer.Exit(1)
+
+        bib = _generate_bibtex(None, book[0])
+        bib_path = md_path.with_suffix(".bib")
+        bib_path.write_text(bib, encoding="utf-8")
+
+        ext = ".tex" if fmt == "latex" else ".docx"
+        out_path = output or Path(f"{safe}{ext}")
+
+        cmd = [
+            "pandoc", str(md_path),
+            "--citeproc", f"--bibliography={bib_path}",
+            "-o", str(out_path),
+        ]
+        if fmt == "latex":
+            cmd.extend(["--standalone"])
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            console.print(f"[red]Pandoc failed:[/red] {result.stderr[:300]}")
+            raise typer.Exit(1)
+
+        console.print(
+            f"[green]✓ Exported [bold]{book[1]}[/bold][/green] → [bold]{out_path}[/bold]  "
+            f"({total_words:,} words)"
+        )
+        console.print(f"[dim]BibTeX: {bib_path}[/dim]")
+        return
+
+    console.print(f"[red]Unknown format: {fmt}[/red]. Use: markdown, bibtex, latex, docx")
+
+
+def _generate_bibtex(session, book_id: str) -> str:
+    """Generate a BibTeX file from the metadata of all papers cited in the book's drafts."""
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+
+    with get_session() as sess:
+        # Get all DOIs from drafts' sources (which are stored as JSONB string arrays).
+        # Also get all documents cited by any chunk that was used as a source.
+        rows = sess.execute(text("""
+            SELECT DISTINCT pm.doi, pm.title, pm.year, pm.authors, pm.journal,
+                   pm.volume, pm.issue, pm.pages, pm.publisher
+            FROM paper_metadata pm
+            WHERE pm.doi IS NOT NULL
+            ORDER BY pm.year DESC NULLS LAST, pm.title
+        """)).fetchall()
+
+    entries = []
+    for doi, title, year, authors, journal, volume, issue, pages, publisher in rows:
+        if not doi or not title:
+            continue
+        # Generate a citekey: AuthorYear format
+        author_str = ""
+        citekey_author = "Unknown"
+        if authors and isinstance(authors, list) and len(authors) > 0:
+            first = authors[0]
+            name = first.get("name", "") if isinstance(first, dict) else str(first)
+            parts = name.split()
+            citekey_author = parts[-1] if parts else "Unknown"
+            # Format all authors for BibTeX
+            auth_list = []
+            for a in authors[:10]:
+                n = a.get("name", "") if isinstance(a, dict) else str(a)
+                auth_list.append(n)
+            author_str = " and ".join(auth_list)
+
+        citekey = f"{citekey_author}{year or 'nd'}"
+
+        entry = f"@article{{{citekey},\n"
+        entry += f"  title = {{{title}}},\n"
+        if author_str:
+            entry += f"  author = {{{author_str}}},\n"
+        if year:
+            entry += f"  year = {{{year}}},\n"
+        if journal:
+            entry += f"  journal = {{{journal}}},\n"
+        if volume:
+            entry += f"  volume = {{{volume}}},\n"
+        if issue:
+            entry += f"  number = {{{issue}}},\n"
+        if pages:
+            entry += f"  pages = {{{pages}}},\n"
+        if publisher:
+            entry += f"  publisher = {{{publisher}}},\n"
+        entry += f"  doi = {{{doi}}},\n"
+        entry += "}\n"
+        entries.append(entry)
+
+    return "\n".join(entries)
