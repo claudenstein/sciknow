@@ -584,8 +584,10 @@ def cluster(
         # Remove control characters (except \n, \r, \t which are JSON whitespace)
         cleaned = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', cleaned)
 
-        # Fix invalid \escapes: replace \X (not a valid JSON escape) with \\X
-        cleaned = re.sub(r'\\([^"\\\/bfnrtu\n])', r'\\\\\1', cleaned)
+        # Strip invalid \escapes entirely. Paper titles contain LaTeX (\mathbf,
+        # \textbf) and Windows paths (H:\PS\...) that produce invalid JSON
+        # escapes. For clustering, the backslash-free text is equally useful.
+        cleaned = re.sub(r'\\(?!["\\/bfnrtu])', '', cleaned)
 
         # Remove trailing commas before } and ] — the #1 LLM JSON failure
         cleaned = re.sub(r',\s*}', '}', cleaned)
