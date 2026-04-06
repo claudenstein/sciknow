@@ -596,7 +596,10 @@ def cluster(
         """Runs in a worker thread. Returns (batch_num, doc_id→cluster, n_clusters)."""
         system, user = rag_prompts.cluster(batch_papers)
         try:
-            raw = llm_complete(system, user, model=model)
+            # 200 papers × ~80 chars/title ≈ 16K chars input + ~4K output.
+            # Default num_ctx=8192 is too small — truncated output causes
+            # invalid JSON. 32K fits comfortably on qwen2.5:32b.
+            raw = llm_complete(system, user, model=model, num_ctx=32768)
             cleaned = _sanitize_json(raw)
             data = _json.loads(cleaned)
             assignments = data.get("assignments", {})
