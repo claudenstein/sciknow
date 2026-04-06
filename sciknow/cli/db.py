@@ -9,6 +9,7 @@ from pathlib import Path
 import typer
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, MofNCompleteColumn, BarColumn, TextColumn, TimeElapsedColumn
+from rich import box
 from rich.table import Table
 
 app = typer.Typer(help="Database and infrastructure management.")
