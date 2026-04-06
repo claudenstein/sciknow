@@ -1,4 +1,6 @@
+import logging
 import sys
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -12,6 +14,7 @@ from sciknow.cli import db as db_module
 from sciknow.cli import draft as draft_module
 from sciknow.cli import ingest as ingest_module
 from sciknow.cli import search as search_module
+from sciknow.logging_config import setup_logging
 
 app = typer.Typer(
     name="sciknow",
@@ -20,19 +23,15 @@ app = typer.Typer(
 )
 console = Console()
 
+logger = logging.getLogger("sciknow.cli")
+
 
 @app.callback()
-def _log_invocation(ctx: typer.Context) -> None:
-    """Log every CLI invocation to data/sciknow.log before the command runs."""
-    try:
-        log_path = Path("data/sciknow.log")
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        cmd = " ".join(sys.argv[1:]) or "(no args)"
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(f"{ts}  {cmd}\n")
-    except Exception:
-        pass  # never let logging break the CLI
+def _startup(ctx: typer.Context) -> None:
+    """Initialize logging and record the CLI invocation."""
+    setup_logging()
+    cmd = " ".join(sys.argv[1:]) or "(no args)"
+    logger.info(f"CLI  {cmd}")
 
 
 app.add_typer(catalog_module.app, name="catalog")

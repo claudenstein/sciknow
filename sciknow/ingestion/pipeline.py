@@ -5,6 +5,7 @@ Each stage updates documents.ingestion_status in PostgreSQL so progress is
 visible and failures are recoverable.
 """
 import hashlib
+import logging
 import shutil
 import time
 from datetime import datetime, timezone
@@ -12,6 +13,8 @@ from pathlib import Path
 from uuid import UUID
 
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger("sciknow.pipeline")
 
 from sciknow.config import settings
 from sciknow.ingestion import chunker, embedder, metadata, pdf_converter
@@ -101,6 +104,7 @@ def _log_job(
 
 
 def _set_status(session: Session, doc: Document, status: str) -> None:
+    logger.debug(f"  stage → {status}  doc={doc.id}")
     doc.ingestion_status = status
     session.flush()
 
@@ -161,6 +165,7 @@ def ingest(
     if not pdf_path.exists():
         raise PipelineError(f"File not found: {pdf_path}")
 
+    logger.info(f"INGEST START  {pdf_path.name}  source={ingest_source}")
     file_hash = _sha256(pdf_path)
     qdrant = get_qdrant()
 
@@ -441,17 +446,22 @@ def ingest(
             # Done
             # ------------------------------------------------------------------
             _set_status(session, doc, "complete")
-
-            # Record PDF in processed/ — symlink for external files (no
-            # disk duplication), move for files we own (data/downloads/).
             _archive_pdf(pdf_path, settings.processed_dir)
 
+            logger.info(f"INGEST OK    {pdf_path.name}  doc={doc_id}")
             return doc_id
 
         except Exception as exc:
+            logger.error(
+                f"INGEST FAIL  {pdf_path.name}  doc={doc_id}  "
+                f"error={type(exc).__name__}: {exc}",
+                exc_info=True,
+            )
             doc.ingestion_status = "failed"
-            doc.ingestion_error = str(exc)[:2000]
-            _log_job(session, doc_id, "pipeline", "failed", details={"error": str(exc)})
+            doc.ingestion_error = _sanitize(str(exc)[:2000])
+            _log_job(session, doc_id, "pipeline", "failed", details={
+                "error": _sanitize(str(exc)[:500]),
+            })
 
             _archive_pdf(pdf_path, settings.failed_dir)
 

@@ -1,10 +1,13 @@
 """CLI subpackage for sciknow."""
 from __future__ import annotations
 
+import logging
+
 import typer
 from rich.console import Console
 
 _console = Console(stderr=True)
+_logger = logging.getLogger("sciknow.preflight")
 
 
 def preflight(*, pg: bool = True, qdrant: bool = True) -> None:
@@ -23,6 +26,7 @@ def preflight(*, pg: bool = True, qdrant: bool = True) -> None:
     if pg:
         from sciknow.storage.db import check_connection as pg_ok
         if not pg_ok():
+            _logger.error("PREFLIGHT FAIL  PostgreSQL unreachable")
             _console.print(
                 "[red]✗ PostgreSQL is unreachable.[/red]\n"
                 "  Check that the server is running:\n"
@@ -34,6 +38,7 @@ def preflight(*, pg: bool = True, qdrant: bool = True) -> None:
     if qdrant:
         from sciknow.storage.qdrant import check_connection as qdrant_ok
         if not qdrant_ok():
+            _logger.error("PREFLIGHT FAIL  Qdrant unreachable")
             _console.print(
                 "[red]✗ Qdrant is unreachable.[/red]\n"
                 "  Check that the service is running:\n"
