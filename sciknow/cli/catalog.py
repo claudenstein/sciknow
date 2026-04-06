@@ -619,10 +619,30 @@ def cluster(
             assignments = data.get("assignments", {})
             n_clusters = len(data.get("clusters", []))
         except Exception as e:
-            with _state_lock:
-                _batch_state[batch_num]["status"] = "failed"
-            console.print(f"[red]Batch {batch_num} failed:[/red] {e}")
-            return batch_num, {}, 0
+            # Log the failing output for debugging, then retry with
+            # a manual JSON repair pass before giving up.
+            import logging as _logging
+            _log = _logging.getLogger("sciknow.cluster")
+            _log.warning(
+                f"Batch {batch_num} JSON parse failed: {e}\n"
+                f"Raw output (first 2000 chars):\n{cleaned[:2000]}"
+            )
+
+            # Repair attempt: find the outermost { } and try again
+            try:
+                brace_start = cleaned.index("{")
+                brace_end = cleaned.rindex("}") + 1
+                repaired = cleaned[brace_start:brace_end]
+                data = _json.loads(repaired, strict=False)
+                assignments = data.get("assignments", {})
+                n_clusters = len(data.get("clusters", []))
+                _log.info(f"Batch {batch_num} repaired successfully")
+            except Exception as e2:
+                _log.error(f"Batch {batch_num} repair also failed: {e2}")
+                with _state_lock:
+                    _batch_state[batch_num]["status"] = "failed"
+                console.print(f"[red]Batch {batch_num} failed:[/red] {e}")
+                return batch_num, {}, 0
         finally:
             with _state_lock:
                 if _batch_state[batch_num]["status"] == "generating":
@@ -675,18 +695,28 @@ def cluster(
     status_thread = threading.Thread(target=_status_printer, daemon=True)
     status_thread.start()
 
+    # Track which papers failed so we can retry with smaller batches.
+    failed_papers: list[dict] = []
+
     try:
         with ThreadPoolExecutor(max_workers=workers) as pool:
+            batch_paper_map: dict[int, list[dict]] = {}
             futures = []
             for batch_start in range(0, len(papers), batch):
                 batch_papers = papers[batch_start:batch_start + batch]
                 batch_num = batch_start // batch + 1
+                batch_paper_map[batch_num] = batch_papers
                 futures.append(pool.submit(_run_batch, batch_num, batch_papers))
 
             for fut in as_completed(futures):
                 batch_num, doc_assignments, n_clusters = fut.result()
                 all_assignments.update(doc_assignments)
                 completed_batches += 1
+
+                bp = batch_paper_map[batch_num]
+                if not doc_assignments and len(bp) > 0:
+                    failed_papers.extend(bp)
+
                 console.print(
                     f"  Batch {batch_num}/{total_batches}: "
                     f"{len(doc_assignments)} assignments, {n_clusters} clusters"
@@ -694,6 +724,40 @@ def cluster(
     finally:
         _status_stop.set()
         status_thread.join(timeout=2)
+
+    # ── Auto-retry failed batches with halved batch size ─────────────────
+    # The main failure mode is the LLM producing invalid JSON on large
+    # batches. Halving the batch size gives the model less to generate,
+    # dramatically improving JSON validity.
+    if failed_papers:
+        retry_batch = max(batch // 2, 25)
+        retry_total = (len(failed_papers) + retry_batch - 1) // retry_batch
+        console.print(
+            f"\n[yellow]Retrying {len(failed_papers)} papers from failed batches "
+            f"(batch size {batch} → {retry_batch}, {retry_total} batches)…[/yellow]"
+        )
+
+        with _state_lock:
+            _batch_state.clear()
+        _status_stop.clear()
+        status_thread = threading.Thread(target=_status_printer, daemon=True)
+        status_thread.start()
+        completed_batches = 0
+
+        try:
+            for retry_start in range(0, len(failed_papers), retry_batch):
+                retry_papers = failed_papers[retry_start:retry_start + retry_batch]
+                retry_num = retry_start // retry_batch + 1
+                bn, doc_assignments, n_clusters = _run_batch(retry_num + 100, retry_papers)
+                all_assignments.update(doc_assignments)
+                completed_batches += 1
+                console.print(
+                    f"  Retry {retry_num}/{retry_total}: "
+                    f"{len(doc_assignments)} assignments, {n_clusters} clusters"
+                )
+        finally:
+            _status_stop.set()
+            status_thread.join(timeout=2)
 
     console.print(f"\nTotal assignments: [bold]{len(all_assignments)}[/bold] / {len(papers)}")
 
