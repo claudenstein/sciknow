@@ -507,6 +507,7 @@ def cluster(
                                help="Papers per LLM batch."),
     model: str | None = typer.Option(None, "--model", help="Override LLM model name (Ollama)."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print proposed clusters without saving."),
+    resume: bool = typer.Option(False, "--resume", help="Only cluster papers that don't have a topic_cluster yet (skips already-clustered)."),
 ):
     """
     Assign topic clusters to all papers using an LLM.
@@ -533,10 +534,11 @@ def cluster(
     from sciknow.rag.llm import stream as llm_stream
 
     with get_session() as session:
-        rows = session.execute(text("""
+        where_extra = "AND pm.topic_cluster IS NULL" if resume else ""
+        rows = session.execute(text(f"""
             SELECT pm.document_id::text, pm.title, pm.year
             FROM paper_metadata pm
-            WHERE pm.title IS NOT NULL
+            WHERE pm.title IS NOT NULL {where_extra}
             ORDER BY pm.year DESC NULLS LAST, pm.title
         """)).fetchall()
 
@@ -546,7 +548,10 @@ def cluster(
         papers = papers[:limit]
 
     if not papers:
-        console.print("[yellow]No papers with titles found.[/yellow]")
+        if resume:
+            console.print("[green]All papers already have topic clusters.[/green]")
+        else:
+            console.print("[yellow]No papers with titles found.[/yellow]")
         raise typer.Exit(0)
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
