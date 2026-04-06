@@ -816,6 +816,68 @@ Add IPCC-style calibrated uncertainty language to the claims in this section. \
 Output the complete revised text."""
 
 
+# ── Structured review scoring (for autowrite convergence) ────────────────
+
+SCORE_SYSTEM = """\
+You are a scientific peer reviewer scoring a draft section. Evaluate on these \
+five dimensions, each scored 0.0–1.0:
+
+1. **groundedness** — What fraction of claims cite a source [N] that actually supports them?
+2. **completeness** — Does the section cover all major aspects of the topic given the available evidence?
+3. **coherence** — Does the argument flow logically? Are transitions smooth? No contradictions?
+4. **citation_accuracy** — Are the [N] references used correctly and not misrepresenting their sources?
+5. **overall** — Holistic quality score considering all dimensions.
+
+Also identify the **weakest_dimension** (the one with the lowest score) and provide \
+a specific **revision_instruction** (1–2 sentences) that would most improve the draft \
+if applied as a targeted revision.
+
+If evidence is missing on a topic, include it in **missing_topics** (list of short phrases \
+that could be used as search queries to find relevant papers).
+
+Respond ONLY with valid JSON:
+{
+  "groundedness": 0.85,
+  "completeness": 0.72,
+  "coherence": 0.90,
+  "citation_accuracy": 0.88,
+  "overall": 0.84,
+  "weakest_dimension": "completeness",
+  "revision_instruction": "Add discussion of proxy calibration methods, citing Smith2020 and Jones2019.",
+  "missing_topics": ["proxy calibration uncertainty", "tree ring standardization methods"]
+}"""
+
+SCORE_USER = """\
+Section type: {section_type}
+Topic: {topic}
+
+Draft to score:
+{draft_content}
+
+---
+
+Source passages the draft was based on:
+{context}
+
+---
+
+Score the draft."""
+
+
+def score_draft(
+    section_type: str,
+    topic: str,
+    draft_content: str,
+    results: list,
+) -> tuple[str, str]:
+    return SCORE_SYSTEM, SCORE_USER.format(
+        section_type=section_type or "text",
+        topic=topic or "",
+        draft_content=draft_content[:12000],
+        context=format_context(results),
+    )
+
+
 def ipcc_uncertainty(
     draft_content: str,
     results: list,

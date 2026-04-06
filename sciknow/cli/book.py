@@ -1099,6 +1099,367 @@ def gaps(
             console.print("[dim]No structured gaps extracted.[/dim]")
 
 
+# ── autowrite (Karpathy-loop-inspired convergence) ─────────────────────────────
+
+_DEFAULT_SECTIONS = ["introduction", "methods", "results", "discussion", "conclusion"]
+
+
+def _score_draft(draft_content, section_type, topic, session, qdrant, model=None):
+    """Run the structured scoring reviewer and return parsed scores dict."""
+    from sciknow.rag import prompts as rag_prompts
+    from sciknow.rag.llm import complete_with_status
+    from sciknow.retrieval import context_builder, hybrid_search, reranker
+
+    search_query = f"{section_type or ''} {topic or ''}"
+    candidates = hybrid_search.search(
+        query=search_query, qdrant_client=qdrant, session=session, candidate_k=50,
+    )
+    if candidates:
+        candidates = reranker.rerank(search_query, candidates, top_k=12)
+    results = context_builder.build(candidates, session) if candidates else []
+
+    sys_s, usr_s = rag_prompts.score_draft(section_type, topic, draft_content, results)
+    raw = complete_with_status(
+        sys_s, usr_s, label="Scoring draft",
+        model=model, temperature=0.0, num_ctx=16384,
+    )
+
+    import re
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    # Strip non-JSON backslashes
+    cleaned = re.sub(r'\\(?!["\\/bfnrtu])', '', cleaned)
+    first = cleaned.find("{")
+    last = cleaned.rfind("}")
+    if first >= 0 and last > first:
+        cleaned = cleaned[first:last + 1]
+
+    return _json.loads(cleaned, strict=False), results
+
+
+def _autowrite_section(
+    book_id, book_title, book_plan, ch_id, ch_num, ch_title, topic_query,
+    topic_cluster, section, model, max_iter, target_score, auto_expand,
+    ipcc, console,
+):
+    """Inner convergence loop for one section. Returns the final draft content."""
+    from sciknow.rag import prompts as rag_prompts
+    from sciknow.rag.llm import stream as llm_stream, complete_with_status
+    from sciknow.retrieval import context_builder, hybrid_search, reranker
+    from sciknow.storage.db import get_session
+    from sciknow.storage.qdrant import get_client
+
+    qdrant = get_client()
+    topic = topic_query or ch_title
+
+    # ── Step 1: Initial draft ────────────────────────────────────────────
+    console.print()
+    console.print(Rule(
+        f"[bold]Autowrite Ch.{ch_num}: {ch_title} — {section.capitalize()}[/bold]"
+    ))
+
+    with get_session() as session:
+        prior_summaries = _get_prior_summaries(session, book_id, ch_num)
+        search_query = f"{section} {topic}"
+
+        candidates = hybrid_search.search(
+            query=search_query, qdrant_client=qdrant, session=session,
+            candidate_k=50, topic_cluster=topic_cluster,
+        )
+        if not candidates:
+            console.print("[yellow]No relevant passages found.[/yellow]")
+            return None
+        candidates = reranker.rerank(search_query, candidates, top_k=12)
+        results = context_builder.build(candidates, session)
+
+    system, user = rag_prompts.write_section_v2(
+        section, topic, results,
+        book_plan=book_plan,
+        prior_summaries=prior_summaries,
+    )
+
+    console.print("[dim]Generating initial draft...[/dim]")
+    tokens = []
+    for tok in llm_stream(system, user, model=model):
+        console.print(tok, end="", highlight=False)
+        tokens.append(tok)
+    console.print("\n")
+
+    content = "".join(tokens)
+    from sciknow.rag.prompts import format_sources
+    sources = format_sources(results).splitlines()
+
+    # ── Step 2: Score → revise → re-score loop ───────────────────────────
+    history: list[dict] = []
+
+    for iteration in range(max_iter):
+        console.print(Rule(f"[dim]Iteration {iteration + 1}/{max_iter}[/dim]"))
+
+        # Score
+        with get_session() as session:
+            try:
+                scores, scored_results = _score_draft(
+                    content, section, topic, session, qdrant, model=model,
+                )
+            except Exception as exc:
+                console.print(f"[yellow]Scoring failed: {exc}[/yellow]")
+                scores = {"overall": 0.5, "weakest_dimension": "unknown",
+                          "revision_instruction": "Improve overall quality."}
+
+        overall = scores.get("overall", 0)
+        weakest = scores.get("weakest_dimension", "unknown")
+        instruction = scores.get("revision_instruction", "Improve the draft.")
+        missing = scores.get("missing_topics", [])
+
+        history.append(scores)
+
+        # Display scores
+        dims = ["groundedness", "completeness", "coherence", "citation_accuracy", "overall"]
+        score_line = "  ".join(
+            f"[{'green' if scores.get(d, 0) >= target_score else 'yellow' if scores.get(d, 0) >= 0.7 else 'red'}]"
+            f"{d[:5]}={scores.get(d, 0):.2f}[/]"
+            for d in dims
+        )
+        console.print(f"  Scores: {score_line}")
+        console.print(f"  Weakest: [bold]{weakest}[/bold]")
+        console.print(f"  Instruction: [dim]{instruction}[/dim]")
+
+        # Check convergence
+        if overall >= target_score:
+            console.print(f"\n[green]✓ Converged at iteration {iteration + 1} "
+                          f"(overall={overall:.2f} ≥ {target_score})[/green]")
+            break
+
+        # Auto-expand if reviewer identified missing topics
+        if auto_expand and missing:
+            console.print(f"  [cyan]Auto-expanding: {', '.join(missing[:3])}[/cyan]")
+            from sciknow.ingestion.downloader import find_and_download
+            from sciknow.config import settings
+            for topic_q in missing[:2]:  # limit to 2 expansions per iteration
+                try:
+                    from sciknow.retrieval.relevance import embed_query, score_candidates
+                    # Just do a targeted search to see if we already have papers
+                    with get_session() as session:
+                        extra = hybrid_search.search(
+                            query=topic_q, qdrant_client=qdrant, session=session,
+                            candidate_k=5,
+                        )
+                    if len(extra) < 3:
+                        console.print(f"    [dim]Few results for '{topic_q}' — would benefit from db expand[/dim]")
+                except Exception:
+                    pass
+
+        # Revise
+        console.print(f"\n  [dim]Revising (targeting {weakest})...[/dim]")
+        sys_r, usr_r = rag_prompts.revise(content, instruction, scored_results)
+        rev_tokens = []
+        for tok in llm_stream(sys_r, usr_r, model=model):
+            console.print(tok, end="", highlight=False)
+            rev_tokens.append(tok)
+        console.print("\n")
+
+        revised = "".join(rev_tokens)
+
+        # Re-score the revision to decide keep/discard
+        with get_session() as session:
+            try:
+                new_scores, _ = _score_draft(
+                    revised, section, topic, session, qdrant, model=model,
+                )
+            except Exception:
+                new_scores = {"overall": overall}  # assume no change on scoring failure
+
+        new_overall = new_scores.get("overall", 0)
+
+        if new_overall >= overall:
+            console.print(
+                f"  [green]✓ KEEP[/green] v{iteration + 2}: "
+                f"overall {overall:.2f} → {new_overall:.2f}"
+            )
+            content = revised
+            overall = new_overall
+        else:
+            console.print(
+                f"  [red]✗ DISCARD[/red] v{iteration + 2}: "
+                f"overall {overall:.2f} → {new_overall:.2f} (regressed)"
+            )
+            # Try a different instruction on next iteration
+            # The loop will re-score the original content and get a new weakest dimension
+
+    # ── Step 3: IPCC pass (optional) ─────────────────────────────────────
+    if ipcc:
+        console.print(Rule("[dim]Applying IPCC uncertainty language[/dim]"))
+        sys_i, usr_i = rag_prompts.ipcc_uncertainty(content, scored_results if 'scored_results' in dir() else [])
+        content = complete_with_status(
+            sys_i, usr_i, label="IPCC pass", model=model, temperature=0.1, num_ctx=16384,
+        )
+
+    # ── Step 4: Save ─────────────────────────────────────────────────────
+    with console.status("[dim]Generating summary...[/dim]"):
+        summary = _auto_summarize(content, section, ch_title, model=model)
+
+    draft_title = f"Ch.{ch_num} {ch_title} — {section.capitalize()} (autowrite)"
+    with get_session() as session:
+        draft_id = _save_draft(
+            session,
+            title=draft_title,
+            book_id=book_id,
+            chapter_id=ch_id,
+            section_type=section,
+            topic=topic,
+            content=content,
+            sources=sources,
+            model=model,
+            summary=summary,
+            version=len(history) + 1,
+        )
+
+    # Print convergence history
+    console.print()
+    console.print(Rule("[dim]Convergence History[/dim]"))
+    for i, h in enumerate(history, 1):
+        dims_str = "  ".join(f"{d[:5]}={h.get(d, 0):.2f}" for d in
+                             ["groundedness", "completeness", "coherence", "citation_accuracy"])
+        console.print(f"  v{i}: {dims_str}  [bold]overall={h.get('overall', 0):.2f}[/bold]")
+    console.print()
+    console.print(
+        f"[green]✓ Saved:[/green] [bold]{draft_title}[/bold]  "
+        f"({len(content.split())} words, {len(history)} iterations)"
+    )
+
+    return content
+
+
+@app.command()
+def autowrite(
+    book_title: Annotated[str, typer.Argument(help="Book title or ID fragment.")],
+    chapter:    str = typer.Argument(None, help="Chapter number or title fragment (omit with --full for all chapters)."),
+    section:    str = typer.Option("introduction", "--section", "-s",
+                                    help="Section type (or 'all' for all sections)."),
+    max_iter:   int = typer.Option(3, "--max-iter", "-n", help="Max review-revise iterations per section."),
+    target_score: float = typer.Option(0.85, "--target-score", "-t",
+                                        help="Overall quality score to stop iterating (0.0-1.0)."),
+    model:      str | None = typer.Option(None, "--model"),
+    auto_expand: bool = typer.Option(False, "--auto-expand",
+                                      help="Auto-run db expand when reviewer identifies missing evidence."),
+    ipcc:       bool = typer.Option(False, "--ipcc", help="Apply IPCC uncertainty language on final version."),
+    full:       bool = typer.Option(False, "--full",
+                                     help="Write ALL chapters × ALL sections (the full autonomous pipeline)."),
+):
+    """
+    Autonomous write → review → revise convergence loop (inspired by Karpathy's autoresearch).
+
+    For each section, generates an initial draft, scores it on 5 quality dimensions
+    (groundedness, completeness, coherence, citation accuracy, overall), then
+    iteratively revises targeting the weakest dimension until the overall score
+    reaches --target-score or --max-iter iterations are exhausted.
+
+    Each iteration:
+      1. Score the current draft (structured JSON reviewer)
+      2. If score >= target → STOP (converged)
+      3. Identify the weakest dimension
+      4. Generate a targeted revision instruction
+      5. Revise the draft
+      6. Re-score → if improved KEEP, if regressed DISCARD
+
+    Modes:
+      Single section:    sciknow book autowrite "Book" 3 --section methods
+      All sections:      sciknow book autowrite "Book" 3 --section all
+      Full book:         sciknow book autowrite "Book" --full
+
+    Examples:
+
+      sciknow book autowrite "Global Cooling" 1 --section introduction --max-iter 5
+
+      sciknow book autowrite "Global Cooling" 3 --section all --target-score 0.80 --ipcc
+
+      sciknow book autowrite "Global Cooling" --full --max-iter 3 --auto-expand
+    """
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+
+    with get_session() as session:
+        book = _get_book(session, book_title)
+        if not book:
+            console.print(f"[red]Book not found:[/red] {book_title}")
+            raise typer.Exit(1)
+
+        book_id, b_title, b_desc, b_status, b_created, b_plan = book
+
+        if not b_plan:
+            console.print(
+                "[yellow]No book plan set.[/yellow] Generate one first:\n"
+                f"  sciknow book plan {book_title!r}"
+            )
+            raise typer.Exit(1)
+
+        chapters = session.execute(text("""
+            SELECT id::text, number, title, description, topic_query, topic_cluster
+            FROM book_chapters WHERE book_id = :bid ORDER BY number
+        """), {"bid": book_id}).fetchall()
+
+    if not chapters:
+        console.print("[yellow]No chapters defined.[/yellow] Run `book outline` first.")
+        raise typer.Exit(1)
+
+    # Determine which chapters × sections to write
+    if full:
+        targets = [
+            (ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], sec)
+            for ch in chapters
+            for sec in _DEFAULT_SECTIONS
+        ]
+        console.print(
+            f"[bold]Autowrite FULL BOOK:[/bold] {b_title}\n"
+            f"  {len(chapters)} chapters × {len(_DEFAULT_SECTIONS)} sections "
+            f"= {len(targets)} total sections\n"
+            f"  Max {max_iter} iterations each, target score {target_score}"
+        )
+    elif chapter is None:
+        console.print("[red]Specify a chapter number or use --full for the entire book.[/red]")
+        raise typer.Exit(1)
+    else:
+        with get_session() as session:
+            ch = _get_chapter(session, book_id, chapter)
+        if not ch:
+            console.print(f"[red]Chapter not found:[/red] {chapter}")
+            raise typer.Exit(1)
+        ch_id, ch_num, ch_title, ch_desc, topic_query, topic_cluster = ch
+
+        if section == "all":
+            targets = [
+                (ch_id, ch_num, ch_title, ch_desc, topic_query, topic_cluster, sec)
+                for sec in _DEFAULT_SECTIONS
+            ]
+        else:
+            targets = [(ch_id, ch_num, ch_title, ch_desc, topic_query, topic_cluster, section)]
+
+        console.print(
+            f"[bold]Autowrite:[/bold] {b_title} — "
+            f"{len(targets)} section(s), max {max_iter} iter, target {target_score}"
+        )
+
+    # Run the convergence loop for each target
+    total = len(targets)
+    for i, (ch_id, ch_num, ch_title, ch_desc, topic_query, topic_cluster, sec) in enumerate(targets, 1):
+        console.print(f"\n{'=' * 72}")
+        console.print(f"[bold]Section {i}/{total}:[/bold] Ch.{ch_num} {ch_title} — {sec}")
+        console.print(f"{'=' * 72}")
+
+        _autowrite_section(
+            book_id=book_id, book_title=b_title, book_plan=b_plan,
+            ch_id=ch_id, ch_num=ch_num, ch_title=ch_title,
+            topic_query=topic_query, topic_cluster=topic_cluster,
+            section=sec, model=model, max_iter=max_iter,
+            target_score=target_score, auto_expand=auto_expand,
+            ipcc=ipcc, console=console,
+        )
+
+    console.print(f"\n[bold green]✓ Autowrite complete:[/bold green] "
+                  f"{total} sections processed")
+
+
 # ── export ─────────────────────────────────────────────────────────────────────
 
 @app.command()

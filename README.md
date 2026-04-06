@@ -540,6 +540,23 @@ sciknow book argue "cosmic rays modulate cloud cover" --save
 sciknow book gaps "Global Cooling"
 sciknow book gaps "Global Cooling" --no-save   # informational only
 
+# ── Autowrite (autonomous convergence loop) ───────────────────────────────
+
+# Autowrite one section: write → score → revise → re-score → keep/discard → repeat
+sciknow book autowrite "Global Cooling" 1 --section introduction
+
+# More iterations and higher quality target
+sciknow book autowrite "Global Cooling" 3 --section methods --max-iter 5 --target-score 0.90
+
+# All sections of a chapter
+sciknow book autowrite "Global Cooling" 3 --section all --ipcc
+
+# FULL BOOK: all chapters × all sections (the ultimate autonomous pipeline)
+sciknow book autowrite "Global Cooling" --full --max-iter 3 --target-score 0.85
+
+# With auto-expand: fetches new papers when reviewer identifies evidence gaps
+sciknow book autowrite "Global Cooling" --full --auto-expand --ipcc
+
 # ── Export ────────────────────────────────────────────────────────────────
 
 # Markdown (default)
@@ -1164,6 +1181,41 @@ sciknow book export "Global Cooling" --format bibtex -o refs.bib
 # DOCX for collaborators
 sciknow book export "Global Cooling" --format docx -o manuscript.docx
 ```
+
+### Autowrite: autonomous convergence (inspired by Karpathy's autoresearch)
+
+The `book autowrite` command implements an autonomous **write → score → revise → re-score** loop that iteratively converges on a high-quality draft. Inspired by [Karpathy's autoresearch](https://github.com/karpathy/autoresearch), which runs propose → train → evaluate → keep/discard loops for ML experiments.
+
+**How it works:**
+
+1. Generates an initial draft (with book plan + cross-chapter summaries for coherence)
+2. Scores the draft on 5 dimensions (0.0–1.0): groundedness, completeness, coherence, citation accuracy, overall
+3. If overall ≥ target score → **converged**, stop
+4. Identifies the **weakest dimension** and generates a targeted revision instruction
+5. Revises the draft targeting that specific weakness
+6. Re-scores the revision: if improved → **keep**, if regressed → **discard**
+7. Repeats until converged or max iterations exhausted
+
+**Convergence example:**
+```
+v1: groun=0.65  compl=0.60  coher=0.80  citat=0.70  overall=0.69
+    Weakest: completeness → "Add discussion of proxy calibration methods"
+v2: groun=0.72  compl=0.78  coher=0.82  citat=0.75  overall=0.77  ✓ KEEP
+    Weakest: groundedness → "Cite primary sources for claims in paragraph 3"
+v3: groun=0.85  compl=0.80  coher=0.85  citat=0.82  overall=0.83  ✓ KEEP
+v4: groun=0.88  compl=0.83  coher=0.87  citat=0.85  overall=0.86  ✓ CONVERGED
+```
+
+**Modes:**
+- Single section: `book autowrite "Book" 3 --section methods`
+- All sections of one chapter: `book autowrite "Book" 3 --section all`
+- Full book (all chapters × all sections): `book autowrite "Book" --full`
+
+**Flags:**
+- `--max-iter N` — max iterations per section (default 3)
+- `--target-score 0.85` — quality threshold to stop (default 0.85)
+- `--auto-expand` — when the reviewer identifies missing evidence, checks if the corpus has coverage and flags topics for expansion
+- `--ipcc` — applies IPCC uncertainty language to the final converged version
 
 ### Tips for effective book writing with sciknow
 
