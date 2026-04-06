@@ -438,42 +438,101 @@ sciknow catalog topics
 
 ### `sciknow book`
 
-The book system organises writing projects. Each book has chapters; each chapter can have multiple draft sections.
+The book system organises writing projects with an iterative, coherent pipeline:
+
+```
+plan → outline → (per chapter) sentence plan → write → review → revise → verify → export
+```
+
+Each step is grounded in retrieved papers and maintains cross-chapter coherence via a persistent book plan and auto-generated chapter summaries.
 
 ```bash
+# ── Project setup ─────────────────────────────────────────────────────────
+
 # Create a new book project
 sciknow book create "Global Cooling"
-sciknow book create "Solar Cycle Mechanisms" --description "Overview of solar variability and climate links"
+sciknow book create "Solar Cycle Mechanisms" --description "Overview of solar variability"
 
-# List all books
-sciknow book list
+sciknow book list                       # List all books
+sciknow book show "Global Cooling"      # Chapters, drafts, gaps, progress
 
-# Show a book's chapters and draft progress
-sciknow book show "Global Cooling"
-
-# Add a chapter manually
+# Add chapters manually or auto-generate with LLM
 sciknow book chapter add "Global Cooling" "The Maunder Minimum"
-sciknow book chapter add "Global Cooling" "Ocean Heat Uptake and Thermal Lag" --number 5
+sciknow book outline "Global Cooling"   # LLM proposes 6–12 chapters from your library
 
-# Generate a full chapter outline with the LLM (proposes 6–12 chapters based on your paper library)
-sciknow book outline "Global Cooling"
+# ── Book plan (thesis + scope) ────────────────────────────────────────────
 
-# Draft a chapter section (streams output + saves to drafts table)
-sciknow book write "Global Cooling" 2                       # Chapter 2, default section = introduction
-sciknow book write "Global Cooling" 3 --section methods
-sciknow book write "Global Cooling" 1 --context-k 15       # More context passages
+# Generate the book plan — defines central argument, scope, audience, key terms.
+# Injected into every `book write` call for cross-chapter consistency.
+sciknow book plan "Global Cooling"
+sciknow book plan "Global Cooling" --edit   # Regenerate
 
-# Map evidence for/against a claim (argument analysis)
-sciknow book argue "Global cooling is primarily driven by solar variability"
-sciknow book argue "Aerosol forcing exceeds solar forcing since 1980" --save
+# ── Writing ───────────────────────────────────────────────────────────────
 
-# Identify gaps in the book: missing topics, weak chapters, unwritten sections
+# Draft a chapter section (with cross-chapter coherence: injects book plan +
+# summaries of prior chapters so the LLM maintains consistency)
+sciknow book write "Global Cooling" 2 --section methods
+
+# Show a sentence plan before drafting (paragraph-by-paragraph skeleton)
+sciknow book write "Global Cooling" 3 --section results --plan
+
+# Run claim verification after drafting (checks each [N] citation)
+sciknow book write "Global Cooling" 1 --section introduction --verify
+
+# Add IPCC-style calibrated uncertainty language (very likely, high confidence, etc.)
+sciknow book write "Global Cooling" 4 --section discussion --ipcc
+
+# Combine all flags for maximum quality
+sciknow book write "Global Cooling" 5 --section conclusion --plan --verify --ipcc --expand
+
+# ── Review + revise loop ──────────────────────────────────────────────────
+
+# Run a critic pass over a saved draft (groundedness, completeness, accuracy,
+# coherence, redundancy). Feedback saved to the draft.
+sciknow book review 3f2a1b4c
+
+# Revise based on instructions (creates version N+1, preserves original)
+sciknow book revise 3f2a1b4c -i "expand the section on solar cycles with more evidence"
+sciknow book revise 3f2a1b4c -i "add counterarguments from the skeptic literature"
+sciknow book revise 3f2a1b4c         # applies saved review feedback automatically
+
+# ── Evidence analysis ─────────────────────────────────────────────────────
+
+# Map evidence for/against a claim (SUPPORTS / CONTRADICTS / NEUTRAL)
+sciknow book argue "solar activity is the primary driver of 20th century warming"
+sciknow book argue "cosmic rays modulate cloud cover" --save
+
+# ── Gap analysis ──────────────────────────────────────────────────────────
+
+# Identify + persist gaps (topic, evidence, argument, draft gaps → saved to DB)
 sciknow book gaps "Global Cooling"
+sciknow book gaps "Global Cooling" --no-save   # informational only
 
-# Compile all chapter drafts into a single Markdown document
+# ── Export ────────────────────────────────────────────────────────────────
+
+# Markdown (default)
 sciknow book export "Global Cooling"
-sciknow book export "Global Cooling" --output global_cooling_manuscript.md
+sciknow book export "Global Cooling" -o manuscript.md
+
+# BibTeX bibliography from all cited papers
+sciknow book export "Global Cooling" --format bibtex -o refs.bib
+
+# LaTeX via Pandoc (requires pandoc installed)
+sciknow book export "Global Cooling" --format latex -o book.tex
+
+# DOCX via Pandoc
+sciknow book export "Global Cooling" --format docx -o book.docx
 ```
+
+**Writing workflow in practice:**
+1. `book plan` — set the thesis. All subsequent chapters will reference it.
+2. `book outline` — LLM proposes chapters from your corpus.
+3. For each chapter: `book write <book> <ch> --section X --plan --verify`
+4. Review: `book review <draft_id>`
+5. Revise: `book revise <draft_id>` (uses saved review feedback) or `book revise <draft_id> -i "your instruction"`
+6. Repeat steps 3-5 until satisfied.
+7. `book gaps` — identify what's still missing.
+8. `book export --format latex` — compile for publication.
 
 ### `sciknow draft`
 
