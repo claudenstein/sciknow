@@ -711,11 +711,15 @@ def cluster(
                 if _batch_state[batch_num]["status"] not in ("done", "failed"):
                     _batch_state[batch_num]["status"] = "done"
 
-        # Match LLM titles to doc_ids
-        title_to_doc = {p["title"]: p["doc_id"] for p in batch_papers}
-        # Also map sanitized titles (LLM sees stripped-LaTeX titles)
+        # Match LLM output to doc_ids.
+        # The prompt uses P1, P2, ... IDs so the LLM returns those as keys.
+        # Build a P-number → doc_id map, plus fallback title matching.
+        id_to_doc = {}
+        title_to_doc = {}
         from sciknow.rag.prompts import _strip_latex
-        for p in batch_papers:
+        for i, p in enumerate(batch_papers, 1):
+            id_to_doc[f"P{i}"] = p["doc_id"]
+            title_to_doc[p["title"]] = p["doc_id"]
             stripped = _strip_latex(p["title"])
             if stripped != p["title"]:
                 title_to_doc[stripped] = p["doc_id"]
@@ -723,15 +727,19 @@ def cluster(
         norm_cache: dict[str, str] = {}
         doc_assignments: dict[str, str] = {}
         unmatched = 0
-        for t, c in assignments.items():
-            doc_id = _fuzzy_title_match(t, title_to_doc, norm_cache)
+        for key, cluster_name in assignments.items():
+            # Try P-number ID first (primary)
+            doc_id = id_to_doc.get(key)
+            # Fallback to title matching
+            if not doc_id:
+                doc_id = _fuzzy_title_match(key, title_to_doc, norm_cache)
             if doc_id:
-                doc_assignments[doc_id] = c
+                doc_assignments[doc_id] = cluster_name
             else:
                 unmatched += 1
 
         if unmatched > 0:
-            _log.info("Batch %d: %d/%d titles unmatched",
+            _log.info("Batch %d: %d/%d keys unmatched",
                       batch_num, unmatched, len(assignments))
 
         with _state_lock:

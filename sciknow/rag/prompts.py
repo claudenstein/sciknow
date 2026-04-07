@@ -303,8 +303,10 @@ Papers ({n} total):
 Group these papers into thematic clusters. Return JSON:
 {{
   "clusters": ["Cluster Name 1", "Cluster Name 2", ...],
-  "assignments": {{"Paper title": "Cluster Name", ...}}
-}}"""
+  "assignments": {{"P1": "Cluster Name", "P2": "Cluster Name", ...}}
+}}
+
+IMPORTANT: In the "assignments" dict, use the paper ID (P1, P2, ...) as the key, NOT the title."""
 
 
 def _strip_latex(title: str) -> str:
@@ -328,12 +330,16 @@ def _strip_latex(title: str) -> str:
 
 
 def cluster(papers: list[dict]) -> tuple[str, str]:
-    """papers: list of {title, year}"""
+    """papers: list of {title, year, doc_id}
+
+    Uses P1, P2, ... IDs so the LLM returns IDs (not titles) in the
+    assignments dict — avoids fuzzy title matching failures.
+    """
     lines = []
-    for p in papers[:200]:
+    for i, p in enumerate(papers[:200], 1):
         yr = f" ({p['year']})" if p.get("year") else ""
         clean_title = _strip_latex(p['title'])
-        lines.append(f"- {clean_title}{yr}")
+        lines.append(f"P{i}: {clean_title}{yr}")
     return CLUSTER_SYSTEM, CLUSTER_USER.format(
         n=len(papers),
         paper_list="\n".join(lines),
