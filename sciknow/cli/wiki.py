@@ -102,32 +102,67 @@ def compile(
                 console.print(f"[green]✓ Updated {result2.get('concepts_updated', 0)} concept pages[/green]")
     else:
         import time as _time
+        from rich.live import Live
+        from rich.table import Table
+        from rich.text import Text
         from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn, MofNCompleteColumn
 
         gen = wiki_ops.compile_all(model=model, force=rebuild, rewrite_stale=rewrite_stale)
 
         result = None
+        total = 0
+        paper_tok_count = 0
+        paper_t0 = _time.monotonic()
+        compile_t0 = _time.monotonic()
+        last_paper_tps = 0.0
+        last_paper_title = ""
+        last_paper_elapsed = 0.0
+        last_paper_tokens = 0
+
         with Progress(
             SpinnerColumn(),
             TextColumn("[bold]{task.description}"),
-            BarColumn(bar_width=30),
+            BarColumn(bar_width=25),
             MofNCompleteColumn(),
             TimeElapsedColumn(),
             TextColumn("{task.fields[status]}"),
             console=console,
-            refresh_per_second=2,
+            refresh_per_second=4,
         ) as progress:
             task_id = None
+            tok_task = None
+
             for event in gen:
                 t = event.get("type")
 
                 if t == "compile_start":
                     total = event["total"]
+                    compile_t0 = _time.monotonic()
                     task_id = progress.add_task(
                         "Compiling wiki", total=total, status="starting...")
+                    tok_task = progress.add_task(
+                        "[dim]LLM", total=None, status="[dim]waiting...[/dim]")
 
                 elif t == "paper_start":
-                    progress.update(task_id, status=f"[dim]{event['title']}[/dim]")
+                    paper_tok_count = 0
+                    paper_t0 = _time.monotonic()
+                    last_paper_title = event["title"]
+                    progress.update(task_id,
+                        status=f"[dim]{event['title'][:45]}[/dim]")
+                    progress.update(tok_task,
+                        status=f"[dim]{event['title'][:35]}...[/dim]")
+
+                elif t == "token":
+                    paper_tok_count += 1
+                    elapsed = _time.monotonic() - paper_t0
+                    tps = paper_tok_count / elapsed if elapsed > 0 else 0
+                    total_toks = event.get("total_tokens", paper_tok_count)
+                    progress.update(tok_task,
+                        status=(
+                            f"[green]{paper_tok_count} tok[/green]  "
+                            f"[cyan]{tps:.1f} tok/s[/cyan]  "
+                            f"[dim]{total_toks} total[/dim]"
+                        ))
 
                 elif t == "paper_done":
                     progress.advance(task_id)
@@ -136,26 +171,71 @@ def compile(
                     s = event.get("skipped", 0)
                     f = event.get("failed", 0)
                     concepts = event.get("concepts", 0)
+                    p_toks = event.get("tokens", 0)
+                    p_elapsed = event.get("elapsed", 0)
+
+                    last_paper_tokens = p_toks
+                    last_paper_elapsed = p_elapsed
+                    last_paper_tps = p_toks / p_elapsed if p_elapsed > 0 else 0
+
+                    # Estimate remaining time
+                    done = c + s + f
+                    remaining = total - done
+                    if c > 0 and p_elapsed > 0:
+                        total_elapsed = _time.monotonic() - compile_t0
+                        avg_per_compiled = total_elapsed / max(done, 1)
+                        eta_s = remaining * avg_per_compiled
+                        if eta_s > 3600:
+                            eta_str = f"{eta_s/3600:.1f}h"
+                        elif eta_s > 60:
+                            eta_str = f"{eta_s/60:.0f}m"
+                        else:
+                            eta_str = f"{eta_s:.0f}s"
+                        eta_part = f"  [yellow]~{eta_str} left[/yellow]"
+                    else:
+                        eta_part = ""
+
                     status_text = f"[green]{c} new[/green]  [dim]{s} skip[/dim]"
                     if f:
                         status_text += f"  [red]{f} fail[/red]"
-                    if st == "compiled" and concepts:
-                        status_text += f"  [cyan]+{concepts} concepts[/cyan]"
+                    status_text += eta_part
+
                     progress.update(task_id, status=status_text)
+
+                    if st == "compiled" and p_toks > 0:
+                        progress.update(tok_task,
+                            status=(
+                                f"[green]{p_toks} tok in {p_elapsed:.0f}s "
+                                f"({last_paper_tps:.1f} t/s)[/green]"
+                                + (f"  [cyan]+{concepts} concepts[/cyan]" if concepts else "")
+                            ))
+                    elif st == "skipped":
+                        progress.update(tok_task, status="[dim]skipped[/dim]")
 
                 elif t == "error":
                     console.print(f"[red]Error:[/red] {event.get('message', '')}")
 
                 elif t == "completed":
                     result = event
+                    if tok_task:
+                        progress.remove_task(tok_task)
 
         if result:
+            total_elapsed = _time.monotonic() - compile_t0
+            if total_elapsed > 3600:
+                elapsed_str = f"{total_elapsed/3600:.1f} hours"
+            elif total_elapsed > 60:
+                elapsed_str = f"{total_elapsed/60:.0f} minutes"
+            else:
+                elapsed_str = f"{total_elapsed:.0f} seconds"
+
             console.print(
                 f"\n[green]✓ Wiki compiled:[/green] "
                 f"{result.get('compiled', 0)} new, "
                 f"{result.get('skipped', 0)} skipped, "
                 f"{result.get('failed', 0)} failed "
-                f"/ {result.get('total', 0)} total papers"
+                f"/ {result.get('total', 0)} total papers "
+                f"in {elapsed_str}"
             )
 
 

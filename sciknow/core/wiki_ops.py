@@ -465,22 +465,33 @@ def compile_all(
     compiled = 0
     skipped = 0
     failed = 0
+    total_tokens = 0
     for i, (doc_id, title) in enumerate(rows, 1):
         short_title = (title or doc_id[:8])[:60]
+        paper_t0 = time.monotonic()
+        paper_tokens = 0
 
         yield {"type": "paper_start", "index": i, "total": total,
                "title": short_title, "doc_id": doc_id}
 
-        # Compile paper summary
+        # Compile paper summary — pass through token events for live display
         paper_ok = False
         paper_skipped = False
         concepts_updated = 0
         for event in compile_paper_summary(doc_id, model=model, force=force):
-            if event.get("type") == "error":
+            if event.get("type") == "token":
+                paper_tokens += 1
+                total_tokens += 1
+                yield {"type": "token", "text": event["text"],
+                       "paper_tokens": paper_tokens, "total_tokens": total_tokens}
+            elif event.get("type") == "error":
                 failed += 1
                 yield {"type": "paper_done", "index": i, "total": total,
                        "title": short_title, "status": "error",
-                       "detail": event.get("message", "")}
+                       "detail": event.get("message", ""),
+                       "tokens": paper_tokens, "elapsed": time.monotonic() - paper_t0,
+                       "compiled": compiled, "skipped": skipped, "failed": failed,
+                       "total_tokens": total_tokens}
                 break
             elif event.get("type") == "completed":
                 if event.get("skipped"):
@@ -493,22 +504,29 @@ def compile_all(
         if paper_skipped:
             yield {"type": "paper_done", "index": i, "total": total,
                    "title": short_title, "status": "skipped",
-                   "compiled": compiled, "skipped": skipped, "failed": failed}
+                   "compiled": compiled, "skipped": skipped, "failed": failed,
+                   "tokens": 0, "elapsed": 0, "total_tokens": total_tokens}
             continue
 
         # Update concept pages
         if paper_ok:
             for event in update_concepts_for_paper(doc_id, model=model):
-                if event.get("type") == "completed":
+                if event.get("type") == "token":
+                    paper_tokens += 1
+                    total_tokens += 1
+                elif event.get("type") == "completed":
                     concepts_updated = event.get("concepts_updated", 0)
                 elif event.get("type") == "error":
                     pass  # non-fatal
 
+        paper_elapsed = time.monotonic() - paper_t0
         yield {"type": "paper_done", "index": i, "total": total,
                "title": short_title,
                "status": "compiled" if paper_ok else "error",
                "concepts": concepts_updated,
-               "compiled": compiled, "skipped": skipped, "failed": failed}
+               "compiled": compiled, "skipped": skipped, "failed": failed,
+               "tokens": paper_tokens, "elapsed": paper_elapsed,
+               "total_tokens": total_tokens}
 
     _update_index()
     _append_log(f"compile-all | {compiled} new, {skipped} skipped, {failed} failed from {total} papers")
