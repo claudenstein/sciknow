@@ -28,6 +28,11 @@ Event = dict
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+def _strip_thinking(text: str) -> str:
+    """Strip Qwen 3.x <think>...</think> blocks from LLM output."""
+    return re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL).strip()
+
+
 def _slugify(text: str) -> str:
     """Convert text to a URL-safe slug."""
     s = text.lower().strip()
@@ -82,14 +87,14 @@ def _save_page(session, *, slug: str, title: str, page_type: str,
     if existing:
         session.execute(text("""
             UPDATE wiki_pages SET title = :title, word_count = :wc,
-                   source_doc_ids = :src::uuid[], needs_rewrite = 'false',
+                   source_doc_ids = CAST(:src AS uuid[]), needs_rewrite = 'false',
                    updated_at = now()
             WHERE slug = :slug
         """), {"title": title, "wc": wc, "src": src_ids, "slug": slug})
     else:
         session.execute(text("""
             INSERT INTO wiki_pages (slug, title, page_type, source_doc_ids, word_count)
-            VALUES (:slug, :title, :ptype, :src::uuid[], :wc)
+            VALUES (:slug, :title, :ptype, CAST(:src AS uuid[]), :wc)
         """), {"slug": slug, "title": title, "ptype": page_type,
                "src": src_ids, "wc": wc})
     session.commit()
@@ -142,7 +147,7 @@ def _embed_wiki_page(slug: str, content: str, page_type: str,
         from sqlalchemy import text
         with get_session() as session:
             session.execute(text(
-                "UPDATE wiki_pages SET qdrant_point_id = :pid::uuid WHERE slug = :slug"
+                "UPDATE wiki_pages SET qdrant_point_id = CAST(:pid AS uuid) WHERE slug = :slug"
             ), {"pid": point_id, "slug": slug})
             session.commit()
 
@@ -275,7 +280,7 @@ def compile_paper_summary(
         tokens.append(tok)
         yield {"type": "token", "text": tok}
 
-    content = "".join(tokens).strip()
+    content = _strip_thinking("".join(tokens))
 
     # Save
     with get_session() as session:
@@ -285,8 +290,11 @@ def compile_paper_summary(
             source_doc_ids=[doc_id], subdir="papers",
         )
 
-    # Embed
-    _embed_wiki_page(slug, content, "paper_summary")
+    # Embed (may fail if GPU VRAM is full — non-fatal)
+    point_id = _embed_wiki_page(slug, content, "paper_summary")
+    if not point_id:
+        yield {"type": "progress", "stage": "warning",
+               "detail": "Embedding skipped (GPU VRAM full — run sciknow db init later to embed)"}
 
     _append_log(f"ingest | Paper summary: {title} → [[{slug}]]")
 
@@ -340,7 +348,7 @@ def update_concepts_for_paper(
     )
 
     try:
-        raw = llm_complete(sys_e, usr_e, model=fast_model, temperature=0.0, num_ctx=8192)
+        raw = _strip_thinking(llm_complete(sys_e, usr_e, model=fast_model, temperature=0.0, num_ctx=8192))
         entities = json.loads(_clean_json(raw), strict=False)
     except Exception as exc:
         yield {"type": "error", "message": f"Entity extraction failed: {exc}"}
@@ -385,8 +393,8 @@ def update_concepts_for_paper(
                 passage=passage,
             )
             try:
-                addition = llm_complete(sys_a, usr_a, model=fast_model,
-                                        temperature=0.1, num_ctx=4096)
+                addition = _strip_thinking(llm_complete(sys_a, usr_a, model=fast_model,
+                                        temperature=0.1, num_ctx=4096))
                 # Append to existing file
                 existing_content = concept_path.read_text(encoding="utf-8")
                 updated_content = existing_content.rstrip() + "\n\n" + addition.strip() + "\n"
@@ -397,7 +405,7 @@ def update_concepts_for_paper(
                     session.execute(text("""
                         UPDATE wiki_pages SET
                             word_count = :wc,
-                            source_doc_ids = array_append(source_doc_ids, :did::uuid),
+                            source_doc_ids = array_append(source_doc_ids, CAST(:did AS uuid)),
                             updated_at = now()
                         WHERE slug = :slug
                     """), {"wc": len(updated_content.split()), "did": doc_id, "slug": slug})
@@ -531,7 +539,7 @@ def compile_synthesis(
         tokens.append(tok)
         yield {"type": "token", "text": tok}
 
-    content = "".join(tokens).strip()
+    content = _strip_thinking("".join(tokens))
 
     with get_session() as session:
         _save_page(
@@ -749,8 +757,8 @@ def lint_wiki(
                     claims=content[:8000],
                 )
                 try:
-                    raw = llm_complete(sys_l, usr_l, model=model,
-                                       temperature=0.0, num_ctx=8192)
+                    raw = _strip_thinking(llm_complete(sys_l, usr_l, model=model,
+                                       temperature=0.0, num_ctx=8192))
                     data = json.loads(_clean_json(raw), strict=False)
                     for c in data.get("contradictions", []):
                         issues.append({
