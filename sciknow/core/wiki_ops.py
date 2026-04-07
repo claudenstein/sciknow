@@ -621,7 +621,6 @@ def compile_all(
         yield {"type": "paper_done", "index": i, "total": total,
                "title": short_title,
                "status": "compiled" if paper_ok else "error",
-               "concepts": concepts_updated,
                "compiled": compiled, "skipped": skipped, "failed": failed,
                "tokens": paper_tokens, "elapsed": paper_elapsed,
                "total_tokens": total_tokens}
