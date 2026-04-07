@@ -1067,17 +1067,35 @@ sciknow book write "Global Cooling" 1 --section introduction    # uses chapter's
 
 `sciknow book serve "Global Cooling"` launches a local web application at `http://127.0.0.1:8765` with:
 
-- **Sidebar navigation** — chapters and sections with word counts and version numbers
-- **Live rendering** — content served from PostgreSQL, refreshes on each page load (sees autowrite progress in real-time)
+- **Sidebar navigation** — SPA-style chapter/section navigation without page reloads, with word counts and version numbers
+- **Action toolbar** — Write, Review, Revise, Autowrite, Argue, and Gaps buttons directly in the browser. Every operation streams LLM output live via SSE (Server-Sent Events)
+- **Live streaming** — when the LLM is writing or reviewing, tokens appear in the browser in real-time. Autowrite shows iteration scores, keep/discard decisions, and convergence progress
 - **Inline editing** — click "Edit" to modify draft text directly in the browser, saves back to DB
-- **Comments/annotations** — add comments per section, resolve them when addressed. Stored in the `draft_comments` table.
+- **Comments/annotations** — add comments per section, resolve them when addressed. Stored in the `draft_comments` table
 - **Citation links** — `[N]` references are highlighted and the source list is shown in the right panel
 - **Review feedback** — the right panel shows the latest review from `book review`
 - **Search** — search within all book content
 - **Dark/light theme** — toggle with the button in the bottom-right corner
 - **No external dependencies** — pure HTML/CSS/JS, no npm, no React, no build step
 
-The web reader is the recommended way to read and interact with the book while writing. The autowrite loop can run in one terminal while you browse the evolving book in the browser.
+The web reader is the recommended way to write and interact with the book. You can run the entire write → review → revise workflow from the browser — the CLI is optional for power users.
+
+#### Web API endpoints
+
+The web reader exposes a JSON + SSE API for all book operations:
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/write` | POST | Start a section draft (returns `{job_id}`) |
+| `/api/review/{draft_id}` | POST | Start a critic pass |
+| `/api/revise/{draft_id}` | POST | Start a revision |
+| `/api/autowrite` | POST | Start the convergence loop |
+| `/api/argue` | POST | Map evidence for/against a claim |
+| `/api/gaps` | POST | Run gap analysis |
+| `/api/stream/{job_id}` | GET | SSE endpoint — streams token/progress/score events |
+| `/api/jobs/{job_id}` | DELETE | Cancel a running job |
+| `/api/section/{draft_id}` | GET | Section data as JSON (for SPA navigation) |
+| `/api/chapters` | GET | Chapter list with sections (for sidebar) |
 
 ### Export formats
 
@@ -1247,29 +1265,34 @@ v4: groun=0.88  compl=0.83  coher=0.87  citat=0.85  overall=0.86  ✓ CONVERGED
 - **Expand targetedly when gaps appear.** If `book gaps` says chapter 7 has weak support, run `db expand -q "your topic" --limit 30` to grow the corpus in that area, then re-write.
 - **Review every section before moving on.** The `book review → book revise` loop catches groundedness issues, missing topics, and redundancy early rather than in the final manuscript.
 - **Use autowrite for hands-off convergence.** `book autowrite "Book" --full` writes, scores, and revises every section automatically until the quality target is met.
-- **Browse while writing.** Run `book serve` in a second terminal and watch the book take shape in your browser as autowrite or manual writes progress.
+- **Use the web reader for everything.** Run `book serve` and drive the entire workflow from the browser — write, review, revise, autowrite, argue, and gap analysis all stream live in the browser.
 
-### The two-terminal workflow
+### Browser-first workflow
 
 ```
-Terminal 1 (writing):                       Terminal 2 (reading):
-─────────────────────                       ─────────────────────
+sciknow book serve "Global Cooling"
+→ opens http://localhost:8765
+
+In the browser:
+  1. Click "Write" on any empty section → tokens stream live
+  2. Click "Review" → critic feedback streams into the panel
+  3. Click "Revise" → revised version appears with live progress
+  4. Click "Autowrite" → convergence loop with live scores
+  5. Click "Argue" → evidence map for any claim
+  6. Click "Gaps" → identifies missing topics with actionable suggestions
+  7. Edit any section inline, add comments, resolve them
+```
+
+### CLI workflow (alternative)
+
+You can also run everything from the CLI. The browser and CLI share the same database — changes from either side are immediately visible to the other.
+
+```
 sciknow book plan "Global Cooling"
 sciknow book outline "Global Cooling"
-                                            sciknow book serve "Global Cooling"
-                                            → opens http://localhost:8765
-sciknow book autowrite "Global Cooling" \
-    --full --max-iter 3
-                                            [browse chapters as they appear]
-                                            [add comments on sections]
-                                            [edit text inline in the browser]
-[autowrite converges per section...]
-                                            [refresh to see v2 → v3 improvements]
-sciknow book export "Global Cooling" \
-    --format latex -o manuscript.tex
+sciknow book autowrite "Global Cooling" --full --max-iter 3
+sciknow book export "Global Cooling" --format latex -o manuscript.tex
 ```
-
-The web reader at `book serve` pulls live from the database on each page load. As autowrite produces new versions, a browser refresh shows the latest content. You can also edit directly in the browser (click "Edit" on any section) — changes save back to the database immediately.
 
 ### Recommended model configuration
 

@@ -86,7 +86,9 @@ Two Qdrant collections exist: `papers` (all chunks, on-disk) and `abstracts` (pa
 ### Phases beyond ingestion/retrieval
 
 - **RAG** (`rag/llm.py`, `rag/prompts.py`) — Ollama streaming wrapper + prompt templates for `sciknow ask {question,synthesize,write}`.
+- **Service layer** (`core/book_ops.py`) — generator-based functions for all book operations (write, review, revise, autowrite, argue, gaps). Each yields typed event dicts (`token`, `progress`, `scores`, `completed`, `error`). Consumed by both the CLI (Rich console) and the web layer (SSE endpoints via `asyncio.Queue`). When adding a new book operation, add it here as a generator first, then wire it into both the CLI and web.
 - **Books/drafts** — `book` creates projects with LLM-generated chapter outlines; `book write` drafts chapter sections grounded in retrieval and persists to the drafts table; `book argue` builds SUPPORTS/CONTRADICTS/NEUTRAL argument maps; `book gaps` identifies missing topics.
+- **Web reader** (`web/app.py`) — FastAPI app with SSE streaming, SPA navigation, and action toolbar. All book operations (write/review/revise/autowrite/argue/gaps) can be triggered from the browser. LLM operations run in background threads via `_run_generator_in_thread()`, pushing events through `asyncio.Queue` to SSE endpoints. The HTML template is a self-contained f-string (no npm/build step). Job management uses a dict of `{queue, status, cancel}` — max 1 concurrent LLM job is enforced by GPU constraints, not code.
 - **Topic clustering** (`catalog cluster`) — LLM assigns papers to 6–14 named clusters, then retrieval can filter on `--topic`.
 
 ## Conventions specific to this repo
