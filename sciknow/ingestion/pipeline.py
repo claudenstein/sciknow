@@ -449,6 +449,18 @@ def ingest(
             _archive_pdf(pdf_path, settings.processed_dir)
 
             logger.info(f"INGEST OK    {pdf_path.name}  doc={doc_id}")
+
+            # Wiki post-ingest hook: update concept pages if wiki is initialized.
+            # Wrapped in try/except so wiki failures never block ingestion.
+            try:
+                if settings.wiki_dir.exists():
+                    from sciknow.core.wiki_ops import update_concepts_for_paper
+                    for event in update_concepts_for_paper(str(doc_id)):
+                        if event.get("type") == "error":
+                            logger.warning("Wiki post-ingest: %s", event.get("message"))
+            except Exception as wiki_exc:
+                logger.warning("Wiki post-ingest hook failed (non-fatal): %s", wiki_exc)
+
             return doc_id
 
         except Exception as exc:

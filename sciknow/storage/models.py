@@ -361,3 +361,29 @@ class IngestionJob(Base):
         Index("idx_jobs_document", "document_id"),
         Index("idx_jobs_created", "created_at"),
     )
+
+
+class WikiPage(Base):
+    __tablename__ = "wiki_pages"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    slug: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    page_type: Mapped[str] = mapped_column(Text, nullable=False)  # paper_summary | concept | synthesis
+    source_doc_ids: Mapped[list | None] = mapped_column(ARRAY(PG_UUID(as_uuid=True)))
+    word_count: Mapped[int | None] = mapped_column(Integer)
+    needs_rewrite: Mapped[bool] = mapped_column(
+        Text, nullable=False, server_default="false"
+    )
+    qdrant_point_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        Index("idx_wiki_slug", "slug", unique=True),
+        Index("idx_wiki_type", "page_type"),
+    )

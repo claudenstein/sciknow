@@ -121,5 +121,10 @@ class Settings(BaseSettings):
     def mineru_output_dir(self) -> Path:
         return self.data_dir / "mineru_output"
 
+    @computed_field
+    @property
+    def wiki_dir(self) -> Path:
+        return self.data_dir / "wiki"
+
 
 settings = Settings()

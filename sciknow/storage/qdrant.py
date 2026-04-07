@@ -16,6 +16,7 @@ from sciknow.config import settings
 
 PAPERS_COLLECTION = "papers"
 ABSTRACTS_COLLECTION = "abstracts"
+WIKI_COLLECTION = "wiki"
 
 
 # Module-level singleton client — QdrantClient holds an httpx session internally;
@@ -101,6 +102,27 @@ def init_collections(client: QdrantClient | None = None) -> None:
         client.create_payload_index(
             ABSTRACTS_COLLECTION, "document_id", PayloadSchemaType.KEYWORD
         )
+
+
+    if WIKI_COLLECTION not in existing:
+        client.create_collection(
+            collection_name=WIKI_COLLECTION,
+            vectors_config={
+                "dense": VectorParams(
+                    size=settings.embedding_dim,
+                    distance=Distance.COSINE,
+                    on_disk=False,  # in-memory — wiki pages are few
+                )
+            },
+            sparse_vectors_config={
+                "sparse": SparseVectorParams(),
+            },
+        )
+        for field, schema in [
+            ("page_type", PayloadSchemaType.KEYWORD),
+            ("slug", PayloadSchemaType.KEYWORD),
+        ]:
+            client.create_payload_index(WIKI_COLLECTION, field, schema)
 
 
 def check_connection(client: QdrantClient | None = None) -> bool:

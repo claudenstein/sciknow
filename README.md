@@ -15,6 +15,7 @@ All AI inference runs locally. No cloud APIs required to operate the system.
 - **Book projects** — structured book → chapter hierarchy with LLM-generated outlines, book plans (thesis + scope), cross-chapter coherence, iterative write → review → revise workflow
 - **Argument mapping** — evidence classification (SUPPORTS / CONTRADICTS / NEUTRAL) for any claim
 - **Gap analysis** — identifies missing topics, weak chapters, and unwritten sections; persists gaps for tracking
+- **Knowledge wiki** — Karpathy-style compiled wiki layer: papers are synthesized into interconnected pages (paper summaries, concept pages, synthesis overviews). Grows incrementally with each ingest. Query the wiki for pre-synthesized, cross-referenced answers instead of raw RAG
 - **Topic clustering** — LLM assigns papers to named thematic clusters for filtered search and writing
 - **Citation graph** — extracts + cross-links references during ingestion; citation-count boosted retrieval
 - **Collection expansion** — follows citations to discover + download open-access papers with semantic relevance filtering (6 OA sources: Copernicus, arXiv, Unpaywall, OpenAlex, Europe PMC, Semantic Scholar)
@@ -467,6 +468,35 @@ sciknow catalog cluster --resume
 # List all clusters with paper counts
 sciknow catalog topics
 ```
+
+### `sciknow wiki`
+
+Karpathy-style compiled knowledge wiki. Instead of RAG on raw chunks every time, the wiki pre-synthesizes papers into interconnected pages that grow incrementally.
+
+```bash
+# Build wiki from all ingested papers (paper summaries + concept pages)
+sciknow wiki compile
+sciknow wiki compile --doc-id abc123    # compile one paper
+sciknow wiki compile --force            # recompile everything
+
+# Query the compiled wiki (not raw chunks)
+sciknow wiki query "what is total solar irradiance?"
+sciknow wiki query "how do cosmic rays affect cloud formation?"
+
+# Generate a synthesis overview page
+sciknow wiki synthesize "solar forcing and climate"
+
+# Browse wiki pages
+sciknow wiki list                       # all pages
+sciknow wiki list --type concept        # only concept pages
+sciknow wiki show total-solar-irradiance
+
+# Health checks
+sciknow wiki lint                       # structural: broken links, orphans, stale
+sciknow wiki lint --deep                # + LLM contradiction detection
+```
+
+Wiki pages are stored as human-readable markdown in `data/wiki/` (git-friendly), indexed in PostgreSQL, and embedded in Qdrant for search. When new papers are ingested, relevant concept pages are automatically updated.
 
 ### `sciknow book`
 
