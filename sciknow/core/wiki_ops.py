@@ -313,9 +313,11 @@ def update_concepts_for_paper(
     from sciknow.rag import wiki_prompts
     from sciknow.rag.llm import complete as llm_complete
     from sciknow.storage.db import get_session
-    from sciknow.config import settings as _settings
 
-    fast_model = _settings.llm_fast_model
+    # Use the same model as the caller (avoids Ollama model-swap OOM).
+    # Previously used llm_fast_model, but on a single GPU the swap from
+    # 27B → 7B → 27B causes 500 errors ~20% of the time.
+    fast_model = model
 
     with get_session() as session:
         meta = session.execute(text("""
