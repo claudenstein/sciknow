@@ -48,3 +48,10 @@ Thumbs.db
 .vscode/
 *.sublime-project
 *.sublime-workspace
+
+# ── Claude Code (internal AI assistant config) ────────────────────────────────
+CLAUDE.md
+.claude/
+
+# ── Internal planning docs ─────────────────────────────────────────────────────
+OPTIMIZATION.md
