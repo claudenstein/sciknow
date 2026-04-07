@@ -782,45 +782,25 @@ def cluster(
 
         return all_sub
 
-    # ── Live status printer ──────────────────────────────────────────────
+    # ── Main execution with progress bar ─────────────────────────────────
 
-    completed_batches = 0
-    _status_stop = threading.Event()
-
-    def _status_printer():
-        from rich.live import Live
-        from rich.text import Text
-        with Live(console=console, refresh_per_second=2, transient=True) as live:
-            while not _status_stop.is_set():
-                with _state_lock:
-                    parts = []
-                    for bn in sorted(_batch_state):
-                        s = _batch_state[bn]
-                        elapsed = _time.monotonic() - s["start"]
-                        toks = s["tokens"]
-                        st = s["status"]
-                        if st == "generating":
-                            tps = toks / elapsed if elapsed > 0 else 0
-                            parts.append(f"B{bn}:[green]{toks}tok {tps:.1f}t/s[/green]")
-                        elif st == "parsing":
-                            parts.append(f"B{bn}:[yellow]parsing[/yellow]")
-                        elif st == "done":
-                            parts.append(f"B{bn}:[dim]done[/dim]")
-                        elif st == "failed":
-                            parts.append(f"B{bn}:[red]failed[/red]")
-                line = f"  [{completed_batches}/{total_batches} done]  " + "  ".join(parts)
-                live.update(Text.from_markup(line))
-                _status_stop.wait(0.5)
-
-    status_thread = threading.Thread(target=_status_printer, daemon=True)
-    status_thread.start()
-
-    # ── Main execution ───────────────────────────────────────────────────
+    from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn, MofNCompleteColumn
 
     all_assignments: dict[str, str] = {}
     total_saved = 0
 
-    try:
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold]{task.description}"),
+        BarColumn(bar_width=30),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        TextColumn("{task.fields[status]}"),
+        console=console,
+        refresh_per_second=2,
+    ) as progress:
+        task = progress.add_task("Clustering", total=total_batches, status="starting...")
+
         with ThreadPoolExecutor(max_workers=workers) as pool:
             batch_paper_map: dict[int, list[dict]] = {}
             futures = {}
@@ -840,21 +820,19 @@ def cluster(
                     doc_assignments = {}
 
                 all_assignments.update(doc_assignments)
-                completed_batches += 1
+                progress.advance(task)
 
                 # Incremental save (unless dry-run)
                 if not dry_run and doc_assignments:
                     saved = _save_assignments(doc_assignments)
                     total_saved += saved
 
-                console.print(
-                    f"  Batch {batch_num}/{total_batches}: "
-                    f"{len(doc_assignments)}/{len(batch_paper_map[batch_num])} assigned"
-                    + (f", saved {total_saved} total" if not dry_run else "")
-                )
-    finally:
-        _status_stop.set()
-        status_thread.join(timeout=2)
+                assigned = len(doc_assignments)
+                batch_size = len(batch_paper_map[batch_num])
+                progress.update(task, status=(
+                    f"[green]{total_saved} saved[/green]  "
+                    f"[dim]B{batch_num}: {assigned}/{batch_size}[/dim]"
+                ))
 
     # ── Summary ──────────────────────────────────────────────────────────
 

@@ -930,9 +930,13 @@ def autowrite(
 
     # Run the convergence loop for each target
     total = len(targets)
+    converged = 0
     for i, (ch_id, ch_num, ch_title, sec) in enumerate(targets, 1):
         console.print(f"\n{'=' * 72}")
-        console.print(f"[bold]Section {i}/{total}:[/bold] Ch.{ch_num} {ch_title} — {sec}")
+        console.print(
+            f"[bold]Section {i}/{total}:[/bold] Ch.{ch_num} {ch_title} — {sec}"
+            f"  [dim]({converged} converged so far)[/dim]"
+        )
         console.print(f"{'=' * 72}")
 
         gen = autowrite_section_stream(
@@ -940,10 +944,12 @@ def autowrite(
             model=model, max_iter=max_iter, target_score=target_score,
             auto_expand=auto_expand,
         )
-        _consume_events(gen, console)
+        result = _consume_events(gen, console)
+        if result and result.get("final_score", 0) >= target_score:
+            converged += 1
 
     console.print(f"\n[bold green]✓ Autowrite complete:[/bold green] "
-                  f"{total} sections processed")
+                  f"{total} sections, {converged} converged")
 
 
 # ── export ─────────────────────────────────────────────────────────────────────
