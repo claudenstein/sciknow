@@ -20,6 +20,8 @@ dependencies = [
     "arxiv>=2.1",
     "ollama>=0.3",
     "mineru[core]>=3.0.8",
+    "umap-learn>=0.5.11",
+    "hdbscan>=0.8.42",
 ]
 
 [project.scripts]

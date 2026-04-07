@@ -593,11 +593,15 @@ sciknow catalog export --output catalog.csv
 sciknow catalog export --format json --output catalog.json
 sciknow catalog export --author Zharkova --output zharkova.csv
 
-# Assign topic clusters (only unclustered papers by default — safe to re-run)
-sciknow catalog cluster                     # only new papers, batch 50, incremental save
+# Assign topic clusters using BERTopic (embedding-based — fast, deterministic)
+# Uses bge-m3 embeddings already in Qdrant: UMAP → HDBSCAN → c-TF-IDF → LLM naming
+sciknow catalog cluster                     # fast embedding-based clustering (seconds)
 sciknow catalog cluster --dry-run           # preview clusters without saving
-sciknow catalog cluster --batch 25          # smaller batches for extra reliability
+sciknow catalog cluster --min-cluster-size 3  # allow smaller clusters
 sciknow catalog cluster --rebuild           # re-cluster ALL papers from scratch
+
+# Legacy LLM-batch clustering (slower, kept for backward compatibility)
+sciknow catalog cluster-llm                 # old approach: LLM batches of 50 papers
 
 # List all clusters with paper counts
 sciknow catalog topics
@@ -1219,7 +1223,7 @@ Every draft goes through an iterative refinement cycle:
 
 ### Topic clustering
 
-Before writing, `sciknow catalog cluster` groups papers into 6-14 named thematic clusters. Default batch size is 50 papers (reliable JSON from most models). Each successful batch is saved immediately to the database, so `--resume` picks up where you left off if interrupted. Failed batches are automatically retried with smaller chunks (50 -> 25 -> 10 -> 5). LaTeX math and commands are stripped from titles before prompting to prevent JSON escape errors. Clusters act as pre-filters in search and writing:
+Before writing, `sciknow catalog cluster` groups papers into named thematic clusters using **BERTopic** — an embedding-based approach that uses the bge-m3 abstract vectors already in Qdrant. Pipeline: UMAP dimensionality reduction → HDBSCAN density clustering → c-TF-IDF keywords → one LLM call to name all clusters. 10-50x faster than the legacy LLM-batch approach and deterministic. HDBSCAN automatically determines the right number of clusters. Clusters act as pre-filters in search and writing:
 
 ```bash
 sciknow search query "solar cycle" --topic "Solar Irradiance"
@@ -1743,7 +1747,7 @@ Planned improvements based on state-of-the-art research in scientific paper proc
 
 ### 1. BERTopic Embedding Clustering (replace LLM clustering)
 
-**Status:** Next up
+**Status:** Done
 
 **Problem:** `catalog cluster` sends paper titles to an LLM and asks it to group them. This is slow (~10 min per batch), unreliable (title matching failures), and non-deterministic.
 
