@@ -1070,6 +1070,10 @@ sciknow book write "Global Cooling" 1 --section introduction    # uses chapter's
 - **Sidebar navigation** — SPA-style chapter/section navigation without page reloads, with word counts and version numbers
 - **Action toolbar** — Write, Review, Revise, Autowrite, Argue, and Gaps buttons directly in the browser. Every operation streams LLM output live via SSE (Server-Sent Events)
 - **Live streaming** — when the LLM is writing or reviewing, tokens appear in the browser in real-time. Autowrite shows iteration scores, keep/discard decisions, and convergence progress
+- **Book dashboard** — click "Dashboard" or the gap count to see a completion heatmap (chapters x sections, color-coded: green=reviewed, yellow=drafted, empty=click to write), stats cards (words, chapters, drafts, gaps, comments), and an actionable gap list
+- **Version history + diffs** — click "History" to see all versions of a section (v1 -> v2 -> v3). Select two versions to see a word-level diff with red deletions and green insertions
+- **Chapter management** — add chapters from the sidebar, delete chapters (hover to reveal the X button). Chapters can be reordered via the API
+- **Gap visualization** — the dashboard shows all open gaps with type badges (draft/evidence/topic/argument) and one-click actions: "Write" triggers a draft for missing sections, "Expand" shows the CLI command to grow the corpus
 - **Inline editing** — click "Edit" to modify draft text directly in the browser, saves back to DB
 - **Comments/annotations** — add comments per section, resolve them when addressed. Stored in the `draft_comments` table
 - **Citation links** — `[N]` references are highlighted and the source list is shown in the right panel
@@ -1096,6 +1100,13 @@ The web reader exposes a JSON + SSE API for all book operations:
 | `/api/jobs/{job_id}` | DELETE | Cancel a running job |
 | `/api/section/{draft_id}` | GET | Section data as JSON (for SPA navigation) |
 | `/api/chapters` | GET | Chapter list with sections (for sidebar) |
+| `/api/dashboard` | GET | Completion heatmap, stats, gaps |
+| `/api/versions/{draft_id}` | GET | Version chain for a section |
+| `/api/diff/{old_id}/{new_id}` | GET | Word-level diff as HTML |
+| `/api/chapters` | POST | Add a new chapter |
+| `/api/chapters/{id}` | PUT | Update chapter title/description |
+| `/api/chapters/{id}` | DELETE | Delete a chapter |
+| `/api/chapters/reorder` | POST | Reorder chapters (body: `{chapter_ids: [...]}`) |
 
 ### Export formats
 

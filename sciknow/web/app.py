@@ -296,6 +296,220 @@ async def api_chapters():
     return {"chapters": result, "gaps_count": len([g for g in gaps if g[3] == "open"])}
 
 
+@app.get("/api/dashboard")
+async def api_dashboard():
+    """Return dashboard data: completion heatmap, stats, gaps."""
+    book, chapters, drafts, gaps, comments = _get_book_data()
+
+    section_types = ["introduction", "methods", "results", "discussion", "conclusion"]
+
+    # Build draft lookup: chapter_id -> {section_type: {version, words, id, has_review}}
+    ch_sections: dict[str, dict] = {}
+    total_words = 0
+    for d in drafts:
+        draft_id, title, sec_type, content, wc, sources, version, summary, \
+            review_fb, ch_id, parent_id, created, ch_num, ch_title = d
+        total_words += wc or 0
+        if not ch_id:
+            continue
+        if ch_id not in ch_sections:
+            ch_sections[ch_id] = {}
+        # Keep only the latest version per section_type
+        existing = ch_sections[ch_id].get(sec_type)
+        if not existing or (version or 1) > existing["version"]:
+            ch_sections[ch_id][sec_type] = {
+                "id": draft_id, "version": version or 1, "words": wc or 0,
+                "has_review": bool(review_fb),
+            }
+
+    heatmap = []
+    for ch in chapters:
+        ch_id, ch_num, ch_title, ch_desc, tq, tc = ch
+        row = {"num": ch_num, "title": ch_title, "id": ch_id, "cells": []}
+        secs = ch_sections.get(ch_id, {})
+        for st in section_types:
+            info = secs.get(st)
+            if info:
+                status = "reviewed" if info["has_review"] else "drafted"
+                row["cells"].append({"type": st, "status": status, "draft_id": info["id"],
+                                     "version": info["version"], "words": info["words"]})
+            else:
+                row["cells"].append({"type": st, "status": "empty"})
+        heatmap.append(row)
+
+    open_gaps = [{"id": g[0], "type": g[1], "description": g[2], "status": g[3],
+                  "chapter_num": g[4]} for g in gaps if g[3] == "open"]
+
+    return {
+        "heatmap": heatmap,
+        "section_types": section_types,
+        "stats": {
+            "total_words": total_words,
+            "chapters": len(chapters),
+            "drafts": len(drafts),
+            "gaps_open": len(open_gaps),
+            "comments": len(comments),
+        },
+        "gaps": open_gaps,
+    }
+
+
+@app.get("/api/versions/{draft_id}")
+async def api_versions(draft_id: str):
+    """Return the version chain for a draft (all versions of the same section)."""
+    with get_session() as session:
+        # Find the draft to get its chapter_id and section_type
+        draft = session.execute(text("""
+            SELECT d.chapter_id::text, d.section_type, d.book_id::text
+            FROM drafts d WHERE d.id::text LIKE :q LIMIT 1
+        """), {"q": f"{draft_id}%"}).fetchone()
+        if not draft:
+            raise HTTPException(404, "Draft not found")
+
+        ch_id, sec_type, book_id = draft
+
+        # Get all drafts for this chapter + section_type (all versions)
+        rows = session.execute(text("""
+            SELECT d.id::text, d.version, d.word_count, d.created_at,
+                   d.parent_draft_id::text, d.review_feedback IS NOT NULL as has_review
+            FROM drafts d
+            WHERE d.chapter_id::text = :cid AND d.section_type = :st AND d.book_id::text = :bid
+            ORDER BY d.version ASC
+        """), {"cid": ch_id, "st": sec_type, "bid": book_id}).fetchall()
+
+    return {"versions": [
+        {"id": r[0], "version": r[1], "word_count": r[2] or 0,
+         "created_at": str(r[3]) if r[3] else "", "parent_id": r[4],
+         "has_review": bool(r[5])}
+        for r in rows
+    ]}
+
+
+@app.get("/api/diff/{old_id}/{new_id}")
+async def api_diff(old_id: str, new_id: str):
+    """Return a word-level diff between two drafts as HTML."""
+    import difflib
+
+    with get_session() as session:
+        old = session.execute(text(
+            "SELECT content FROM drafts WHERE id::text LIKE :q LIMIT 1"
+        ), {"q": f"{old_id}%"}).fetchone()
+        new = session.execute(text(
+            "SELECT content FROM drafts WHERE id::text LIKE :q LIMIT 1"
+        ), {"q": f"{new_id}%"}).fetchone()
+
+    if not old or not new:
+        raise HTTPException(404, "Draft not found")
+
+    old_words = (old[0] or "").split()
+    new_words = (new[0] or "").split()
+
+    sm = difflib.SequenceMatcher(None, old_words, new_words)
+    html_parts = []
+    for op, i1, i2, j1, j2 in sm.get_opcodes():
+        if op == "equal":
+            html_parts.append(" ".join(old_words[i1:i2]))
+        elif op == "delete":
+            html_parts.append(f'<del class="diff-del">{" ".join(old_words[i1:i2])}</del>')
+        elif op == "insert":
+            html_parts.append(f'<ins class="diff-ins">{" ".join(new_words[j1:j2])}</ins>')
+        elif op == "replace":
+            html_parts.append(f'<del class="diff-del">{" ".join(old_words[i1:i2])}</del>')
+            html_parts.append(f'<ins class="diff-ins">{" ".join(new_words[j1:j2])}</ins>')
+
+    return {"diff_html": " ".join(html_parts)}
+
+
+# ── Chapter management ───────────────────────────────────────────────────────
+
+@app.post("/api/chapters")
+async def create_chapter(
+    title: str = Form(...),
+    description: str = Form(""),
+    topic_query: str = Form(""),
+    number: int = Form(None),
+):
+    """Add a chapter to the book."""
+    with get_session() as session:
+        if number is None:
+            max_n = session.execute(text(
+                "SELECT COALESCE(MAX(number), 0) FROM book_chapters WHERE book_id = :bid"
+            ), {"bid": _book_id}).scalar()
+            number = max_n + 1
+
+        session.execute(text("""
+            INSERT INTO book_chapters (book_id, number, title, description, topic_query)
+            VALUES (:bid, :num, :title, :desc, :tq)
+        """), {"bid": _book_id, "num": number, "title": title,
+               "desc": description or None, "tq": topic_query or None})
+        session.commit()
+
+    return JSONResponse({"ok": True, "number": number})
+
+
+@app.put("/api/chapters/{chapter_id}")
+async def update_chapter(
+    chapter_id: str,
+    title: str = Form(None),
+    description: str = Form(None),
+    topic_query: str = Form(None),
+):
+    """Update a chapter's title, description, or topic_query."""
+    updates = []
+    params: dict = {"cid": chapter_id}
+    if title is not None:
+        updates.append("title = :title")
+        params["title"] = title
+    if description is not None:
+        updates.append("description = :desc")
+        params["desc"] = description
+    if topic_query is not None:
+        updates.append("topic_query = :tq")
+        params["tq"] = topic_query
+
+    if not updates:
+        return JSONResponse({"ok": True})
+
+    with get_session() as session:
+        session.execute(text(
+            f"UPDATE book_chapters SET {', '.join(updates)} WHERE id::text = :cid"
+        ), params)
+        session.commit()
+
+    return JSONResponse({"ok": True})
+
+
+@app.delete("/api/chapters/{chapter_id}")
+async def delete_chapter(chapter_id: str):
+    """Delete a chapter (drafts are preserved but unlinked)."""
+    with get_session() as session:
+        session.execute(text(
+            "UPDATE drafts SET chapter_id = NULL WHERE chapter_id::text = :cid"
+        ), {"cid": chapter_id})
+        session.execute(text(
+            "DELETE FROM book_chapters WHERE id::text = :cid"
+        ), {"cid": chapter_id})
+        session.commit()
+
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/chapters/reorder")
+async def reorder_chapters(request: Request):
+    """Reorder chapters. Body: {"chapter_ids": ["id1", "id2", ...]}"""
+    body = await request.json()
+    chapter_ids = body.get("chapter_ids", [])
+
+    with get_session() as session:
+        for i, cid in enumerate(chapter_ids, 1):
+            session.execute(text(
+                "UPDATE book_chapters SET number = :num WHERE id::text = :cid"
+            ), {"num": i, "cid": cid})
+        session.commit()
+
+    return JSONResponse({"ok": True})
+
+
 # ── SSE / Streaming endpoints ───────────────────────────────────────────────
 
 def _run_generator_in_thread(job_id: str, generator_fn, loop):
@@ -605,7 +819,10 @@ def _render_sidebar(items, active_id):
     html = ""
     for ch in items:
         html += f'<div class="ch-group" data-ch-id="{ch["id"]}">'
-        html += f'<div class="ch-title">Ch.{ch["num"]}: {ch["title"]}</div>'
+        html += (f'<div class="ch-title">Ch.{ch["num"]}: {ch["title"]}'
+                 f'<span class="ch-actions">'
+                 f'<button onclick="deleteChapter(\'{ch["id"]}\')" title="Delete chapter">\u2717</button>'
+                 f'</span></div>')
         for sec in ch["sections"]:
             active = "active" if sec["id"] == active_id else ""
             html += (
@@ -763,6 +980,68 @@ body {{ font-family: 'Georgia', serif; color: var(--fg); background: var(--bg);
 .job-indicator {{ display: none; padding: 4px 16px; font-size: 11px; color: var(--accent);
                    font-family: -apple-system, sans-serif; animation: pulse 1.5s infinite; }}
 @keyframes pulse {{ 0%,100% {{ opacity: 1; }} 50% {{ opacity: 0.4; }} }}
+/* Dashboard */
+.dashboard {{ font-family: -apple-system, sans-serif; }}
+.dashboard h2 {{ font-size: 22px; margin-bottom: 16px; }}
+.dash-stats {{ display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }}
+.stat-card {{ padding: 14px 20px; border-radius: 8px; border: 1px solid var(--border);
+              background: var(--toolbar-bg); min-width: 120px; }}
+.stat-card .num {{ font-size: 28px; font-weight: bold; color: var(--accent); }}
+.stat-card .lbl {{ font-size: 12px; opacity: 0.6; margin-top: 2px; }}
+.heatmap {{ width: 100%; border-collapse: collapse; margin-bottom: 24px; font-size: 13px; }}
+.heatmap th {{ padding: 6px 10px; text-align: center; font-weight: 600; opacity: 0.6;
+               border-bottom: 2px solid var(--border); }}
+.heatmap td {{ padding: 6px 10px; text-align: center; border: 1px solid var(--border); }}
+.heatmap .ch-label {{ text-align: left; font-weight: 600; white-space: nowrap; }}
+.hm-cell {{ border-radius: 4px; padding: 4px 8px; cursor: pointer; display: inline-block;
+            min-width: 44px; font-size: 11px; }}
+.hm-cell.reviewed {{ background: var(--success); color: white; }}
+.hm-cell.drafted {{ background: var(--warning); color: white; }}
+.hm-cell.empty {{ background: var(--border); opacity: 0.5; }}
+.hm-cell:hover {{ opacity: 0.85; }}
+/* Gaps in dashboard */
+.gap-list {{ margin-bottom: 20px; }}
+.gap-item {{ display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+             border-left: 3px solid var(--warning); background: var(--toolbar-bg);
+             border-radius: 4px; margin-bottom: 6px; font-size: 13px; }}
+.gap-item .gap-type {{ font-size: 11px; font-weight: bold; text-transform: uppercase;
+                       padding: 2px 6px; border-radius: 4px; background: var(--warning);
+                       color: white; flex-shrink: 0; }}
+.gap-item .gap-desc {{ flex: 1; }}
+.gap-item button {{ font-size: 11px; padding: 3px 10px; border: 1px solid var(--border);
+                    border-radius: 4px; cursor: pointer; background: var(--bg); color: var(--fg);
+                    white-space: nowrap; }}
+.gap-item button:hover {{ background: var(--accent); color: white; }}
+/* Version history */
+.version-panel {{ display: none; margin-bottom: 20px; border: 1px solid var(--border);
+                   border-radius: 8px; overflow: hidden; }}
+.version-header {{ padding: 8px 14px; background: var(--toolbar-bg); font-size: 12px;
+                    font-family: -apple-system, sans-serif; display: flex;
+                    justify-content: space-between; align-items: center; }}
+.version-timeline {{ display: flex; gap: 6px; padding: 10px 14px; flex-wrap: wrap;
+                      font-family: -apple-system, sans-serif; }}
+.version-badge {{ padding: 4px 12px; border-radius: 6px; font-size: 12px; cursor: pointer;
+                  border: 1px solid var(--border); background: var(--bg); }}
+.version-badge:hover {{ background: var(--accent-light); }}
+.version-badge.selected {{ background: var(--accent); color: white; border-color: var(--accent); }}
+.diff-view {{ padding: 16px; max-height: 500px; overflow-y: auto; font-size: 14px; line-height: 1.7; }}
+.diff-del {{ background: #fdd; color: #900; text-decoration: line-through; padding: 1px 2px; }}
+.diff-ins {{ background: #dfd; color: #060; padding: 1px 2px; }}
+[data-theme="dark"] .diff-del {{ background: #4a1c1c; color: #fbb; }}
+[data-theme="dark"] .diff-ins {{ background: #1c4a1c; color: #bfb; }}
+/* Chapter management */
+.ch-add-form {{ padding: 8px 16px; margin-top: 8px; }}
+.ch-add-form input {{ width: 100%; padding: 5px 8px; border: 1px solid var(--border);
+                      border-radius: 4px; font-size: 12px; background: var(--bg); color: var(--fg);
+                      margin-bottom: 4px; }}
+.ch-add-form button {{ padding: 3px 10px; font-size: 11px; background: var(--accent); color: white;
+                       border: none; border-radius: 4px; cursor: pointer; }}
+.ch-title {{ cursor: default; }}
+.ch-title .ch-actions {{ display: none; float: right; }}
+.ch-group:hover .ch-actions {{ display: inline; }}
+.ch-actions button {{ font-size: 10px; padding: 1px 6px; border: none; background: none;
+                      color: var(--fg); cursor: pointer; opacity: 0.4; }}
+.ch-actions button:hover {{ opacity: 1; }}
 </style>
 </head>
 <body>
@@ -779,9 +1058,19 @@ body {{ font-family: 'Georgia', serif; color: var(--fg); background: var(--bg);
   <div id="sidebar-sections">
     {sidebar_html}
   </div>
+  <div class="ch-add-form" id="ch-add-form" style="display:none;">
+    <input type="text" id="ch-add-title" placeholder="New chapter title...">
+    <button onclick="addChapter()">Add Chapter</button>
+    <button onclick="document.getElementById('ch-add-form').style.display='none'" style="background:var(--danger);">Cancel</button>
+  </div>
+  <div style="padding: 4px 16px;">
+    <button onclick="document.getElementById('ch-add-form').style.display='block'"
+            style="font-size:11px;padding:2px 8px;border:1px solid var(--border);border-radius:4px;cursor:pointer;background:var(--bg);color:var(--fg);">+ Add Chapter</button>
+  </div>
   <div class="job-indicator" id="job-indicator">Working...</div>
-  <div style="padding: 8px 16px; font-size: 12px; opacity: 0.5; margin-top: 16px;">
-    <span id="gaps-count">{gaps_count}</span> open gaps
+  <div style="padding: 8px 16px; font-size: 12px; opacity: 0.5; margin-top: 16px; cursor:pointer;"
+       onclick="showDashboard()">
+    <span id="gaps-count">{gaps_count}</span> open gaps — click for dashboard
   </div>
 </nav>
 
@@ -804,7 +1093,24 @@ body {{ font-family: 'Georgia', serif; color: var(--fg); background: var(--bg);
     <div class="sep"></div>
     <button onclick="promptArgue()" title="Map evidence for/against a claim">Argue</button>
     <button onclick="doGaps()" title="Analyse gaps in the book">Gaps</button>
+    <div class="sep"></div>
+    <button onclick="showVersions()" title="View version history and diffs">History</button>
+    <button onclick="showDashboard()" title="Book dashboard with completion heatmap">Dashboard</button>
   </div>
+
+  <!-- Version history panel -->
+  <div class="version-panel" id="version-panel">
+    <div class="version-header">
+      <span>Version History</span>
+      <button class="stop-btn" onclick="document.getElementById('version-panel').style.display='none'"
+              style="background:var(--border);color:var(--fg);">Close</button>
+    </div>
+    <div class="version-timeline" id="version-timeline"></div>
+    <div class="diff-view" id="diff-view"></div>
+  </div>
+
+  <!-- Dashboard (hidden by default, shown via JS) -->
+  <div id="dashboard-view" style="display:none;"></div>
 
   <!-- Streaming output panel -->
   <div class="stream-panel" id="stream-panel">
@@ -1061,7 +1367,8 @@ function rebuildSidebar(chapters, activeId) {{
   let html = '';
   chapters.forEach(ch => {{
     html += '<div class="ch-group" data-ch-id="' + ch.id + '">';
-    html += '<div class="ch-title">Ch.' + ch.num + ': ' + ch.title + '</div>';
+    html += '<div class="ch-title">Ch.' + ch.num + ': ' + ch.title +
+      '<span class="ch-actions"><button onclick="deleteChapter(\\\'' + ch.id + '\\\')" title="Delete chapter">\\u2717</button></span></div>';
     if (ch.sections.length === 0) {{
       html += '<div class="sec-link empty">No drafts yet</div>';
     }} else {{
@@ -1150,6 +1457,184 @@ async function doGaps() {{
   const res = await fetch('/api/gaps', {{method: 'POST', body: fd}});
   const data = await res.json();
   startStream(data.job_id);
+}}
+
+// ── Dashboard ─────────────────────────────────────────────────────────────
+async function showDashboard() {{
+  const res = await fetch('/api/dashboard');
+  const data = await res.json();
+  const s = data.stats;
+
+  let html = '<div class="dashboard">';
+  html += '<h2>Book Dashboard</h2>';
+
+  // Stats cards
+  html += '<div class="dash-stats">';
+  html += '<div class="stat-card"><div class="num">' + s.total_words.toLocaleString() + '</div><div class="lbl">Words</div></div>';
+  html += '<div class="stat-card"><div class="num">' + s.chapters + '</div><div class="lbl">Chapters</div></div>';
+  html += '<div class="stat-card"><div class="num">' + s.drafts + '</div><div class="lbl">Drafts</div></div>';
+  html += '<div class="stat-card"><div class="num">' + s.gaps_open + '</div><div class="lbl">Open Gaps</div></div>';
+  html += '<div class="stat-card"><div class="num">' + s.comments + '</div><div class="lbl">Comments</div></div>';
+  html += '</div>';
+
+  // Heatmap
+  html += '<h3 style="margin-bottom:8px;">Completion Heatmap</h3>';
+  html += '<table class="heatmap"><thead><tr><th></th>';
+  data.section_types.forEach(st => {{
+    html += '<th>' + st.charAt(0).toUpperCase() + st.slice(1,5) + '</th>';
+  }});
+  html += '</tr></thead><tbody>';
+  data.heatmap.forEach(row => {{
+    html += '<tr><td class="ch-label">Ch.' + row.num + ' ' + row.title.substring(0,25) + '</td>';
+    row.cells.forEach(cell => {{
+      if (cell.status === 'empty') {{
+        html += '<td><span class="hm-cell empty" onclick="writeForCell(\'' + row.id + '\',\'' + cell.type + '\')" title="Click to write">—</span></td>';
+      }} else {{
+        const label = 'v' + cell.version + ' ' + cell.words + 'w';
+        html += '<td><span class="hm-cell ' + cell.status + '" onclick="loadSection(\'' + cell.draft_id + '\')" title="' + label + '">' + label + '</span></td>';
+      }}
+    }});
+    html += '</tr>';
+  }});
+  html += '</tbody></table>';
+
+  // Gaps
+  if (data.gaps.length > 0) {{
+    html += '<h3 style="margin-bottom:8px;">Open Gaps</h3><div class="gap-list">';
+    data.gaps.forEach(g => {{
+      let btn = '';
+      if (g.type === 'draft' && g.chapter_num) {{
+        btn = '<button onclick="writeForGap(' + g.chapter_num + ')">Write</button>';
+      }} else if (g.type === 'evidence') {{
+        btn = '<button onclick="alert(\'Run: sciknow db expand -q \\x22' + g.description.substring(0,30).replace(/'/g, '') + '\\x22\')">Expand</button>';
+      }}
+      html += '<div class="gap-item">';
+      html += '<span class="gap-type">' + g.type + '</span>';
+      html += '<span class="gap-desc">' + (g.chapter_num ? 'Ch.' + g.chapter_num + ': ' : '') + g.description.substring(0, 120) + '</span>';
+      html += btn + '</div>';
+    }});
+    html += '</div>';
+  }}
+
+  html += '</div>';
+
+  // Show dashboard, hide section view
+  document.getElementById('dashboard-view').innerHTML = html;
+  document.getElementById('dashboard-view').style.display = 'block';
+  document.getElementById('read-view').style.display = 'none';
+  document.getElementById('edit-view').style.display = 'none';
+  document.getElementById('draft-title').textContent = 'Dashboard';
+  document.getElementById('draft-subtitle').style.display = 'none';
+  document.getElementById('toolbar').style.display = 'none';
+  document.getElementById('stream-panel').style.display = 'none';
+  document.getElementById('version-panel').style.display = 'none';
+
+  // Clear sidebar active
+  document.querySelectorAll('.sec-link').forEach(l => l.classList.remove('active'));
+  history.pushState({{dashboard: true}}, '', '/');
+}}
+
+function writeForCell(chapterId, sectionType) {{
+  currentChapterId = chapterId;
+  currentSectionType = sectionType;
+  // Hide dashboard, show section view
+  document.getElementById('dashboard-view').style.display = 'none';
+  document.getElementById('read-view').style.display = 'block';
+  document.getElementById('read-view').innerHTML = '<p style="opacity:0.5;">Starting write...</p>';
+  document.getElementById('draft-subtitle').style.display = 'block';
+  document.getElementById('toolbar').style.display = 'flex';
+  doWrite();
+}}
+
+function writeForGap(chapterNum) {{
+  // Find the chapter ID from chaptersData
+  const ch = chaptersData.find(c => c.num === chapterNum);
+  if (ch) writeForCell(ch.id, 'introduction');
+}}
+
+// Override loadSection to restore section view from dashboard
+const _origLoadSection = loadSection;
+loadSection = async function(draftId) {{
+  document.getElementById('dashboard-view').style.display = 'none';
+  document.getElementById('read-view').style.display = 'block';
+  document.getElementById('draft-subtitle').style.display = 'block';
+  document.getElementById('toolbar').style.display = 'flex';
+  await _origLoadSection(draftId);
+}};
+
+// ── Version History ───────────────────────────────────────────────────────
+let versionData = [];
+let selectedVersions = [];
+
+async function showVersions() {{
+  if (!currentDraftId) {{ alert('No draft selected.'); return; }}
+  const res = await fetch('/api/versions/' + currentDraftId);
+  const data = await res.json();
+  versionData = data.versions;
+
+  if (versionData.length < 1) {{ alert('No version history.'); return; }}
+
+  const panel = document.getElementById('version-panel');
+  const timeline = document.getElementById('version-timeline');
+  const diffView = document.getElementById('diff-view');
+  panel.style.display = 'block';
+  diffView.innerHTML = '<p style="opacity:0.5;">Select two versions to compare.</p>';
+  selectedVersions = [];
+
+  let html = '';
+  versionData.forEach(v => {{
+    const review = v.has_review ? ' \\u2713' : '';
+    html += '<span class="version-badge" data-vid="' + v.id + '" onclick="selectVersion(\'' + v.id + '\')">' +
+      'v' + v.version + ' (' + v.word_count + 'w)' + review + '</span>';
+  }});
+  timeline.innerHTML = html;
+}}
+
+async function selectVersion(vid) {{
+  // Toggle selection (max 2)
+  const idx = selectedVersions.indexOf(vid);
+  if (idx >= 0) {{
+    selectedVersions.splice(idx, 1);
+  }} else {{
+    if (selectedVersions.length >= 2) selectedVersions.shift();
+    selectedVersions.push(vid);
+  }}
+
+  // Update badges
+  document.querySelectorAll('.version-badge').forEach(b => {{
+    b.classList.toggle('selected', selectedVersions.includes(b.dataset.vid));
+  }});
+
+  if (selectedVersions.length === 2) {{
+    // Show diff
+    const diffView = document.getElementById('diff-view');
+    diffView.innerHTML = '<p style="opacity:0.5;">Loading diff...</p>';
+    const res = await fetch('/api/diff/' + selectedVersions[0] + '/' + selectedVersions[1]);
+    const data = await res.json();
+    diffView.innerHTML = data.diff_html;
+  }} else if (selectedVersions.length === 1) {{
+    // Navigate to that version
+    loadSection(selectedVersions[0]);
+  }}
+}}
+
+// ── Chapter Management ────────────────────────────────────────────────────
+async function addChapter() {{
+  const title = document.getElementById('ch-add-title').value.trim();
+  if (!title) return;
+
+  const fd = new FormData();
+  fd.append('title', title);
+  await fetch('/api/chapters', {{method: 'POST', body: fd}});
+  document.getElementById('ch-add-title').value = '';
+  document.getElementById('ch-add-form').style.display = 'none';
+  await refreshAfterJob(null);
+}}
+
+async function deleteChapter(chapterId) {{
+  if (!confirm('Delete this chapter? Drafts will be preserved but unlinked.')) return;
+  await fetch('/api/chapters/' + chapterId, {{method: 'DELETE'}});
+  await refreshAfterJob(null);
 }}
 </script>
 </body>
