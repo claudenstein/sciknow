@@ -465,6 +465,79 @@ def graph(
 
 
 @app.command()
+def consensus(
+    topic: Annotated[str, typer.Argument(help="Topic to map consensus for.")],
+    model: str | None = typer.Option(None, "--model"),
+):
+    """
+    Map the consensus landscape for a topic.
+
+    Uses the knowledge graph and paper summaries to identify:
+    - Key claims and which papers support/contradict them
+    - Consensus level (strong/moderate/weak/contested)
+    - Trends (growing/stable/declining/emerging)
+    - Most debated sub-topics
+
+    Saves the result as a wiki synthesis page.
+
+    Examples:
+
+      sciknow wiki consensus "solar forcing and climate"
+
+      sciknow wiki consensus "cosmic ray cloud nucleation"
+    """
+    from sciknow.cli import preflight
+    preflight(qdrant=False)
+    _check_wiki_table()
+
+    from sciknow.core.wiki_ops import consensus_map
+
+    console.print()
+    gen = consensus_map(topic, model=model)
+
+    result = None
+    for event in gen:
+        t = event.get("type")
+        if t == "progress":
+            console.print(f"[dim]{event.get('detail', '')}[/dim]")
+        elif t == "consensus":
+            data = event["data"]
+            console.print()
+            console.print(Rule(f"[bold]Consensus Map: {topic}[/bold]"))
+            console.print()
+            console.print(f"[dim]{data.get('summary', '')}[/dim]")
+            console.print()
+
+            for c in data.get("claims", []):
+                level = c.get("consensus_level", "unknown")
+                color = {"strong": "green", "moderate": "cyan", "weak": "yellow", "contested": "red"}.get(level, "dim")
+                console.print(f"  [{color}]{level.upper()}[/{color}]  {c.get('claim', '')}")
+                sup = c.get("supporting_papers", [])
+                con = c.get("contradicting_papers", [])
+                if sup:
+                    console.print(f"    [green]Supports ({len(sup)}):[/green] {', '.join(sup[:3])}")
+                if con:
+                    console.print(f"    [red]Contradicts ({len(con)}):[/red] {', '.join(con[:3])}")
+                console.print()
+
+            debated = data.get("most_debated", [])
+            if debated:
+                console.print("[bold]Most debated:[/bold]")
+                for d in debated:
+                    console.print(f"  [yellow]- {d}[/yellow]")
+        elif t == "completed":
+            result = event
+        elif t == "error":
+            console.print(f"[red]Error:[/red] {event.get('message', '')}")
+
+    if result:
+        console.print(
+            f"\n[green]✓ Consensus map saved:[/green] [[{result.get('slug', '')}]] "
+            f"({result.get('claims', 0)} claims)"
+        )
+
+
+@app.command()
 def synthesize(
     topic: Annotated[str, typer.Argument(help="Topic to synthesize.")],
     model: str | None = typer.Option(None, "--model"),

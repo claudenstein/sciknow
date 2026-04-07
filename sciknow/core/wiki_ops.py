@@ -759,6 +759,107 @@ def query_wiki(
     yield {"type": "completed", "sources": sources}
 
 
+# ── consensus_map ────────────────────────────────────────────────────────────
+
+def consensus_map(
+    topic: str,
+    *,
+    model: str | None = None,
+) -> Iterator[Event]:
+    """
+    Map the consensus landscape for a topic using the knowledge graph
+    and wiki paper summaries. Returns structured agreement/disagreement data.
+    """
+    from sciknow.rag import wiki_prompts
+    from sciknow.rag.llm import complete as llm_complete
+    from sciknow.storage.db import get_session
+    from sqlalchemy import text
+
+    yield {"type": "progress", "stage": "gathering",
+           "detail": f"Gathering evidence for: {topic}..."}
+
+    pattern = f"%{topic.lower()}%"
+
+    # Get KG triples
+    triples_text = ""
+    with get_session() as session:
+        try:
+            kg_rows = session.execute(text("""
+                SELECT subject, predicate, object
+                FROM knowledge_graph
+                WHERE LOWER(subject) LIKE :pat OR LOWER(object) LIKE :pat
+                ORDER BY predicate
+                LIMIT 50
+            """), {"pat": pattern}).fetchall()
+            triples_text = "\n".join(
+                f"({r[0]}) --{r[1]}--> ({r[2]})" for r in kg_rows
+            )
+        except Exception:
+            pass  # KG table might not exist yet
+
+    # Get paper summaries mentioning the topic
+    summaries_text = ""
+    papers_dir = settings.wiki_dir / "papers"
+    if papers_dir.exists():
+        for f in sorted(papers_dir.glob("*.md"))[:50]:
+            content = f.read_text(encoding="utf-8")
+            if topic.lower() in content.lower():
+                # Take the first 500 chars
+                summaries_text += f"\n---\n{content[:500]}"
+                if len(summaries_text) > 12000:
+                    break
+
+    if not triples_text and not summaries_text:
+        yield {"type": "error",
+               "message": f"No data found for '{topic}'. Run wiki compile first."}
+        return
+
+    yield {"type": "progress", "stage": "analyzing",
+           "detail": f"Analyzing consensus ({len(kg_rows) if triples_text else 0} triples, "
+                     f"{summaries_text.count('---')} papers)..."}
+
+    sys_c, usr_c = wiki_prompts.wiki_consensus(topic, triples_text, summaries_text)
+
+    try:
+        raw = _strip_thinking(llm_complete(sys_c, usr_c, model=model,
+                                            temperature=0.0, num_ctx=16384))
+        data = json.loads(_clean_json(raw), strict=False)
+        yield {"type": "consensus", "data": data}
+    except Exception as exc:
+        yield {"type": "error", "message": f"Consensus analysis failed: {exc}"}
+        return
+
+    # Save as a wiki synthesis page
+    slug = _slugify(f"consensus-{topic}")
+    summary = data.get("summary", "")
+    claims = data.get("claims", [])
+    content = f"# Consensus Map: {topic}\n\n{summary}\n\n"
+    for c in claims:
+        level = c.get("consensus_level", "unknown")
+        content += f"## {c.get('claim', '')}\n"
+        content += f"**Consensus:** {level} | **Trend:** {c.get('trend', 'unknown')}\n\n"
+        if c.get("supporting_papers"):
+            content += f"**Supporting:** {', '.join(c['supporting_papers'])}\n\n"
+        if c.get("contradicting_papers"):
+            content += f"**Contradicting:** {', '.join(c['contradicting_papers'])}\n\n"
+    content += f"\n## Most Debated\n" + "\n".join(
+        f"- {t}" for t in data.get("most_debated", [])
+    )
+
+    _ensure_wiki_dirs()
+    with get_session() as session:
+        _save_page(
+            session, slug=slug, title=f"Consensus: {topic}",
+            page_type="synthesis", content=content,
+            source_doc_ids=[], subdir="synthesis",
+        )
+
+    _append_log(f"consensus | {topic} → [[{slug}]]")
+
+    yield {"type": "completed", "slug": slug, "claims": len(claims),
+           "most_debated": data.get("most_debated", [])}
+
+
 # ── lint_wiki ────────────────────────────────────────────────────────────────
 
 def lint_wiki(

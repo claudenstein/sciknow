@@ -359,6 +359,61 @@ Return JSON:
 }}"""
 
 
+# ── Consensus mapping ────────────────────────────────────────────────────────
+
+CONSENSUS_SYSTEM = """\
+You are a scientific evidence analyst. Given a topic and claims from multiple \
+papers, map the consensus landscape:
+
+1. Identify the key claims or positions on this topic
+2. For each claim, list which papers support it and which contradict it
+3. Note how consensus has shifted over time (if year information is available)
+4. Identify the most debated/contested sub-topics
+
+Respond ONLY with valid JSON:
+{{
+  "topic": "...",
+  "claims": [
+    {{
+      "claim": "description of the claim",
+      "supporting_papers": ["paper1 (year)", "paper2 (year)"],
+      "contradicting_papers": ["paper3 (year)"],
+      "neutral_papers": ["paper4 (year)"],
+      "consensus_level": "strong|moderate|weak|contested",
+      "trend": "growing|stable|declining|emerging"
+    }}
+  ],
+  "most_debated": ["sub-topic 1", "sub-topic 2"],
+  "summary": "brief overall assessment of the state of consensus"
+}}"""
+
+CONSENSUS_USER = """\
+Topic: {topic}
+
+Knowledge graph triples related to this topic:
+{triples}
+
+Paper summaries mentioning this topic:
+{summaries}
+
+---
+
+Map the consensus landscape for this topic."""
+
+
+def wiki_consensus(
+    topic: str, triples: str, summaries: str,
+) -> tuple[str, str]:
+    return (
+        CONSENSUS_SYSTEM,
+        CONSENSUS_USER.format(
+            topic=topic,
+            triples=(triples or "")[:8000],
+            summaries=(summaries or "")[:12000],
+        ),
+    )
+
+
 def kg_extract_triples(
     slug: str, title: str, year: str, abstract: str, sections: str,
 ) -> tuple[str, str]:

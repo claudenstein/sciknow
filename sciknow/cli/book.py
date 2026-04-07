@@ -91,6 +91,22 @@ def _consume_events(gen, console):
         elif t == "progress":
             detail = event.get("detail", event.get("stage", ""))
             console.print(f"[dim]{detail}[/dim]")
+        elif t == "tree_plan":
+            console.print()
+            console.print(Rule("[bold]Paragraph Plan (tree)[/bold]"))
+            data = event.get("data", {})
+            for i, para in enumerate(data.get("paragraphs", []), 1):
+                point = para.get("point", "")
+                sources = ", ".join(para.get("sources", []))
+                connects = para.get("connects_to", "")
+                console.print(f"  [bold cyan]P{i}[/bold cyan] {point}")
+                if sources:
+                    console.print(f"      [dim]Sources: {sources}[/dim]")
+                if connects:
+                    console.print(f"      [dim]→ {connects}[/dim]")
+                for child in para.get("children", []):
+                    console.print(f"        [dim]- {child.get('point', '')}[/dim]")
+            console.print()
         elif t == "plan":
             console.print()
             console.print(Rule("[bold]Sentence Plan[/bold]"))

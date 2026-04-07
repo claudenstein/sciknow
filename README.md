@@ -641,6 +641,10 @@ sciknow wiki lint --deep                # + LLM contradiction detection
 # Knowledge graph — explore entity-relationship triples
 sciknow wiki graph "solar forcing"              # direct connections
 sciknow wiki graph "total solar irradiance" --depth 2   # 2-hop traversal
+
+# Consensus mapping — agreement/disagreement across corpus
+sciknow wiki consensus "solar forcing and climate"
+sciknow wiki consensus "cosmic ray cloud nucleation"
 ```
 
 Wiki pages are stored as human-readable markdown in `data/wiki/` (git-friendly), indexed in PostgreSQL, and embedded in Qdrant for search. When new papers are ingested, relevant concept pages are automatically updated.
@@ -1225,7 +1229,7 @@ Every draft goes through an iterative refinement cycle:
 
 | Flag | What it does |
 |---|---|
-| `--plan` | Shows a paragraph-by-paragraph sentence plan before drafting |
+| `--plan` | Hierarchical tree plan (TreeWriter pattern): JSON paragraph skeleton with main point, sources, and transitions before drafting |
 | `--verify` | Post-generation claim verification — checks each [N] citation against its source passage, reports a groundedness score |
 | `--expand` | LLM query expansion before retrieval |
 
@@ -1818,7 +1822,7 @@ Planned improvements based on state-of-the-art research in scientific paper proc
 
 ### 5. Hierarchical Tree Planning (TreeWriter Pattern)
 
-**Status:** Planned
+**Status:** Done
 
 **Problem:** sciknow's book system is flat: outline → write sections sequentially. No planning at the paragraph level, no ability to reorganize the tree structure mid-writing.
 
@@ -1832,7 +1836,7 @@ Planned improvements based on state-of-the-art research in scientific paper proc
 
 ### 6. Automated Consensus Mapping
 
-**Status:** Planned
+**Status:** Done
 
 **Problem:** `book argue` maps evidence for individual claims. There's no way to see "what does my entire corpus agree/disagree on?" across all topics.
 

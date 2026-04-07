@@ -202,17 +202,25 @@ def write_section_stream(
         yield {"type": "error", "message": "No relevant passages found."}
         return
 
-    # Optional sentence plan
+    # Optional hierarchical tree plan (TreeWriter pattern)
     if show_plan:
-        yield {"type": "progress", "stage": "planning", "detail": "Creating sentence plan..."}
-        sys_p, usr_p = prompts.sentence_plan(
+        yield {"type": "progress", "stage": "planning",
+               "detail": "Creating hierarchical paragraph plan..."}
+        sys_p, usr_p = prompts.tree_plan(
             section_type, topic, results,
             book_plan=b_plan, prior_summaries=prior_summaries,
         )
-        plan_text = ""
+        plan_raw = ""
         for tok in llm_stream(sys_p, usr_p, model=model):
-            plan_text += tok
-        yield {"type": "plan", "content": plan_text}
+            plan_raw += tok
+        # Strip thinking blocks and try to parse as JSON
+        import re as _re
+        plan_clean = _re.sub(r'<think>.*?</think>\s*', '', plan_raw, flags=_re.DOTALL).strip()
+        try:
+            plan_data = json.loads(_clean_json(plan_clean), strict=False)
+            yield {"type": "tree_plan", "data": plan_data, "raw": plan_clean}
+        except Exception:
+            yield {"type": "plan", "content": plan_clean}
 
     # Draft
     yield {"type": "progress", "stage": "writing",

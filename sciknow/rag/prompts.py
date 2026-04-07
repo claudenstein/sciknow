@@ -784,6 +784,71 @@ Literature passages:
 Create a paragraph-by-paragraph plan for this section."""
 
 
+# ── Hierarchical tree planning (TreeWriter pattern) ──────────────────────
+
+TREE_PLAN_SYSTEM = """\
+You are a scientific writing architect. Given a section type, topic, and \
+retrieved literature, create a hierarchical paragraph plan as a JSON tree.
+
+Each node represents a paragraph with:
+- "point": the main argument or claim this paragraph makes
+- "sources": which [N] citations support it
+- "connects_to": how it links to the next paragraph
+- "children": optional sub-points (for complex paragraphs)
+
+The tree should flow logically: each paragraph builds on the previous one.
+
+Respond ONLY with valid JSON:
+{{
+  "section_title": "...",
+  "paragraphs": [
+    {{
+      "point": "Main argument of this paragraph",
+      "sources": ["[1]", "[3]"],
+      "connects_to": "How this leads to the next paragraph",
+      "children": []
+    }},
+    ...
+  ]
+}}
+
+Aim for 5-10 paragraphs. Each paragraph should make exactly one clear point."""
+
+TREE_PLAN_USER = """\
+Section type: {section_type}
+Topic: {topic}
+
+Literature passages:
+{context}
+
+{plan_context}
+---
+
+Create a hierarchical paragraph plan for this section."""
+
+
+def tree_plan(
+    section_type: str,
+    topic: str,
+    results: list,
+    book_plan: str | None = None,
+    prior_summaries: list[dict] | None = None,
+) -> tuple[str, str]:
+    plan_ctx = ""
+    if book_plan:
+        plan_ctx += f"\nBook plan:\n{book_plan}\n"
+    if prior_summaries:
+        lines = [f"Ch.{s.get('chapter_number','?')} [{s.get('section_type','text')}]: {s['summary']}"
+                 for s in prior_summaries]
+        plan_ctx += "\nPrior chapter summaries:\n" + "\n".join(lines) + "\n"
+    return TREE_PLAN_SYSTEM, TREE_PLAN_USER.format(
+        section_type=section_type or "text",
+        topic=topic or "",
+        context=format_context(results),
+        plan_context=plan_ctx,
+    )
+
+
 def sentence_plan(
     section_type: str,
     topic: str,
