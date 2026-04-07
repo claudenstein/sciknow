@@ -63,8 +63,8 @@ def _consume_events(gen, console):
 def compile(
     doc_id: str | None = typer.Option(None, "--doc-id", "-d",
                                        help="Compile a single paper by document ID."),
-    force: bool = typer.Option(False, "--force", "-f",
-                                help="Recompile even if wiki page already exists."),
+    rebuild: bool = typer.Option(False, "--rebuild",
+                                  help="Recompile ALL pages from scratch (destructive). Default: only compile new papers."),
     rewrite_stale: bool = typer.Option(False, "--rewrite-stale",
                                         help="Rewrite pages marked as stale."),
     model: str | None = typer.Option(None, "--model"),
@@ -72,16 +72,16 @@ def compile(
     """
     Build wiki pages from ingested papers.
 
-    Without --doc-id, compiles all papers that don't have wiki pages yet.
-    Each paper gets a summary page + concept page updates.
+    By default, only compiles papers that don't have wiki pages yet
+    (safe to re-run anytime). Use --rebuild to recompile everything.
 
     Examples:
 
-      sciknow wiki compile                    # compile all new papers
+      sciknow wiki compile                    # compile only new papers (safe)
 
       sciknow wiki compile --doc-id abc123    # compile one paper
 
-      sciknow wiki compile --force            # recompile everything
+      sciknow wiki compile --rebuild          # recompile everything from scratch
     """
     from sciknow.cli import preflight
     preflight(qdrant=True)
@@ -91,7 +91,7 @@ def compile(
 
     if doc_id:
         console.print(f"Compiling wiki page for document {doc_id[:8]}...")
-        gen = wiki_ops.compile_paper_summary(doc_id, model=model, force=force)
+        gen = wiki_ops.compile_paper_summary(doc_id, model=model, force=rebuild)
         result = _consume_events(gen, console)
 
         if result and not result.get("skipped"):
@@ -102,7 +102,7 @@ def compile(
                 console.print(f"[green]✓ Updated {result2.get('concepts_updated', 0)} concept pages[/green]")
     else:
         console.print("Compiling full wiki...")
-        gen = wiki_ops.compile_all(model=model, force=force, rewrite_stale=rewrite_stale)
+        gen = wiki_ops.compile_all(model=model, force=rebuild, rewrite_stale=rewrite_stale)
         result = _consume_events(gen, console)
         if result:
             console.print(

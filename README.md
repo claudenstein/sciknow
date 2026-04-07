@@ -592,13 +592,11 @@ sciknow catalog export --output catalog.csv
 sciknow catalog export --format json --output catalog.json
 sciknow catalog export --author Zharkova --output zharkova.csv
 
-# Assign topic clusters to all papers (LLM groups papers into 6–14 named clusters)
-sciknow catalog cluster                     # Default batch 50, incremental save
-sciknow catalog cluster --dry-run           # Preview clusters without saving
-sciknow catalog cluster --batch 25          # Smaller batches for extra reliability
-
-# Resume after partial run or interruption (skips already-clustered papers)
-sciknow catalog cluster --resume
+# Assign topic clusters (only unclustered papers by default — safe to re-run)
+sciknow catalog cluster                     # only new papers, batch 50, incremental save
+sciknow catalog cluster --dry-run           # preview clusters without saving
+sciknow catalog cluster --batch 25          # smaller batches for extra reliability
+sciknow catalog cluster --rebuild           # re-cluster ALL papers from scratch
 
 # List all clusters with paper counts
 sciknow catalog topics
@@ -609,10 +607,10 @@ sciknow catalog topics
 Karpathy-style compiled knowledge wiki. Instead of RAG on raw chunks every time, the wiki pre-synthesizes papers into interconnected pages that grow incrementally.
 
 ```bash
-# Build wiki from all ingested papers (paper summaries + concept pages)
-sciknow wiki compile
+# Build wiki (only new papers by default — safe to re-run anytime)
+sciknow wiki compile                    # only papers without wiki pages yet
 sciknow wiki compile --doc-id abc123    # compile one paper
-sciknow wiki compile --force            # recompile everything
+sciknow wiki compile --rebuild          # recompile everything from scratch
 
 # Query the compiled wiki (not raw chunks)
 sciknow wiki query "what is total solar irradiance?"

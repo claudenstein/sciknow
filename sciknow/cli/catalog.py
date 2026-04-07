@@ -507,7 +507,7 @@ def cluster(
                                help="Papers per LLM batch (default 50 — reliable for most models)."),
     model: str | None = typer.Option(None, "--model", help="Override LLM model name (Ollama)."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print proposed clusters without saving."),
-    resume: bool = typer.Option(False, "--resume", help="Only cluster papers that don't have a topic_cluster yet."),
+    rebuild: bool = typer.Option(False, "--rebuild", help="Re-cluster ALL papers from scratch (default: only unclustered papers)."),
 ):
     """
     Assign topic clusters to all papers using an LLM.
@@ -516,16 +516,19 @@ def cluster(
     Clusters are stored in paper_metadata.topic_cluster and can be used as a
     filter in search and ask commands (--topic).
 
+    By default, only clusters papers that don't have a topic_cluster yet
+    (safe to re-run anytime). Use --rebuild to re-cluster everything.
+
     Incremental: each successful batch is saved immediately to the database,
-    so --resume picks up where you left off if the process is interrupted.
+    so you can interrupt and re-run safely.
 
     Examples:
 
-      sciknow catalog cluster
+      sciknow catalog cluster                 # only unclustered papers (safe)
 
       sciknow catalog cluster --batch 25 --dry-run
 
-      sciknow catalog cluster --resume   # pick up after a partial run
+      sciknow catalog cluster --rebuild       # re-cluster everything from scratch
     """
     from sciknow.cli import preflight
     preflight(qdrant=False)
@@ -546,7 +549,7 @@ def cluster(
 
     # ── Load papers ──────────────────────────────────────────────────────
     with get_session() as session:
-        where_extra = "AND pm.topic_cluster IS NULL" if resume else ""
+        where_extra = "" if rebuild else "AND pm.topic_cluster IS NULL"
         rows = session.execute(text(f"""
             SELECT pm.document_id::text, pm.title, pm.year
             FROM paper_metadata pm
@@ -559,7 +562,7 @@ def cluster(
         papers = papers[:limit]
 
     if not papers:
-        if resume:
+        if not rebuild:
             console.print("[green]All papers already have topic clusters.[/green]")
         else:
             console.print("[yellow]No papers with titles found.[/yellow]")
@@ -874,4 +877,4 @@ def cluster(
 
     console.print(f"[green]✓ Saved topic_cluster for {total_saved} papers[/green]")
     if unassigned:
-        console.print(f"[dim]Re-run with --resume to retry the {unassigned} unassigned papers.[/dim]")
+        console.print(f"[dim]Re-run to retry the {unassigned} unassigned papers (default: only unclustered).[/dim]")
