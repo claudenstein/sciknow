@@ -460,30 +460,61 @@ def compile_all(
         """)).fetchall()
 
     total = len(rows)
-    yield {"type": "progress", "stage": "setup",
-           "detail": f"Compiling wiki from {total} papers..."}
+    yield {"type": "compile_start", "total": total}
 
     compiled = 0
+    skipped = 0
+    failed = 0
     for i, (doc_id, title) in enumerate(rows, 1):
-        yield {"type": "progress", "stage": "compiling",
-               "detail": f"[{i}/{total}] {title or doc_id[:8]}..."}
+        short_title = (title or doc_id[:8])[:60]
+
+        yield {"type": "paper_start", "index": i, "total": total,
+               "title": short_title, "doc_id": doc_id}
 
         # Compile paper summary
+        paper_ok = False
+        paper_skipped = False
+        concepts_updated = 0
         for event in compile_paper_summary(doc_id, model=model, force=force):
             if event.get("type") == "error":
-                yield event
-            elif event.get("type") == "completed" and not event.get("skipped"):
-                compiled += 1
+                failed += 1
+                yield {"type": "paper_done", "index": i, "total": total,
+                       "title": short_title, "status": "error",
+                       "detail": event.get("message", "")}
+                break
+            elif event.get("type") == "completed":
+                if event.get("skipped"):
+                    skipped += 1
+                    paper_skipped = True
+                else:
+                    compiled += 1
+                    paper_ok = True
+
+        if paper_skipped:
+            yield {"type": "paper_done", "index": i, "total": total,
+                   "title": short_title, "status": "skipped",
+                   "compiled": compiled, "skipped": skipped, "failed": failed}
+            continue
 
         # Update concept pages
-        for event in update_concepts_for_paper(doc_id, model=model):
-            if event.get("type") == "error":
-                yield event
+        if paper_ok:
+            for event in update_concepts_for_paper(doc_id, model=model):
+                if event.get("type") == "completed":
+                    concepts_updated = event.get("concepts_updated", 0)
+                elif event.get("type") == "error":
+                    pass  # non-fatal
+
+        yield {"type": "paper_done", "index": i, "total": total,
+               "title": short_title,
+               "status": "compiled" if paper_ok else "error",
+               "concepts": concepts_updated,
+               "compiled": compiled, "skipped": skipped, "failed": failed}
 
     _update_index()
-    _append_log(f"compile-all | {compiled} new summaries from {total} papers")
+    _append_log(f"compile-all | {compiled} new, {skipped} skipped, {failed} failed from {total} papers")
 
-    yield {"type": "completed", "compiled": compiled, "total": total}
+    yield {"type": "completed", "compiled": compiled, "skipped": skipped,
+           "failed": failed, "total": total}
 
 
 # ── compile_synthesis ────────────────────────────────────────────────────────

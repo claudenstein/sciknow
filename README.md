@@ -608,6 +608,7 @@ Karpathy-style compiled knowledge wiki. Instead of RAG on raw chunks every time,
 
 ```bash
 # Build wiki (only new papers by default — safe to re-run anytime)
+# Shows a live progress bar: [###-------] 142/2752  0:12:35  42 new  100 skip
 sciknow wiki compile                    # only papers without wiki pages yet
 sciknow wiki compile --doc-id abc123    # compile one paper
 sciknow wiki compile --rebuild          # recompile everything from scratch

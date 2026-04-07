@@ -101,13 +101,61 @@ def compile(
             if result2:
                 console.print(f"[green]✓ Updated {result2.get('concepts_updated', 0)} concept pages[/green]")
     else:
-        console.print("Compiling full wiki...")
+        import time as _time
+        from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn, MofNCompleteColumn
+
         gen = wiki_ops.compile_all(model=model, force=rebuild, rewrite_stale=rewrite_stale)
-        result = _consume_events(gen, console)
+
+        result = None
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[bold]{task.description}"),
+            BarColumn(bar_width=30),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            TextColumn("{task.fields[status]}"),
+            console=console,
+            refresh_per_second=2,
+        ) as progress:
+            task_id = None
+            for event in gen:
+                t = event.get("type")
+
+                if t == "compile_start":
+                    total = event["total"]
+                    task_id = progress.add_task(
+                        "Compiling wiki", total=total, status="starting...")
+
+                elif t == "paper_start":
+                    progress.update(task_id, status=f"[dim]{event['title']}[/dim]")
+
+                elif t == "paper_done":
+                    progress.advance(task_id)
+                    st = event.get("status", "")
+                    c = event.get("compiled", 0)
+                    s = event.get("skipped", 0)
+                    f = event.get("failed", 0)
+                    concepts = event.get("concepts", 0)
+                    status_text = f"[green]{c} new[/green]  [dim]{s} skip[/dim]"
+                    if f:
+                        status_text += f"  [red]{f} fail[/red]"
+                    if st == "compiled" and concepts:
+                        status_text += f"  [cyan]+{concepts} concepts[/cyan]"
+                    progress.update(task_id, status=status_text)
+
+                elif t == "error":
+                    console.print(f"[red]Error:[/red] {event.get('message', '')}")
+
+                elif t == "completed":
+                    result = event
+
         if result:
             console.print(
-                f"\n[green]✓ Wiki compiled:[/green] {result.get('compiled', 0)} new pages "
-                f"from {result.get('total', 0)} papers"
+                f"\n[green]✓ Wiki compiled:[/green] "
+                f"{result.get('compiled', 0)} new, "
+                f"{result.get('skipped', 0)} skipped, "
+                f"{result.get('failed', 0)} failed "
+                f"/ {result.get('total', 0)} total papers"
             )
 
 
