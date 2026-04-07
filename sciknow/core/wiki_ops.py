@@ -297,9 +297,60 @@ def compile_paper_summary(
         yield {"type": "progress", "stage": "warning",
                "detail": "Embedding skipped (GPU VRAM full — run sciknow db init later to embed)"}
 
-    _append_log(f"ingest | Paper summary: {title} → [[{slug}]]")
+    # Extract knowledge graph triples
+    kg_count = _extract_kg_triples(doc_id, slug, title, str(year or "n.d."),
+                                    abstract or "", section_text, model=model)
 
-    yield {"type": "completed", "slug": slug, "word_count": len(content.split())}
+    _append_log(f"ingest | Paper summary: {title} → [[{slug}]] ({kg_count} triples)")
+
+    yield {"type": "completed", "slug": slug, "word_count": len(content.split()),
+           "kg_triples": kg_count}
+
+
+def _extract_kg_triples(doc_id: str, slug: str, title: str, year: str,
+                         abstract: str, sections: str,
+                         model: str | None = None) -> int:
+    """Extract knowledge graph triples from a paper and store in DB."""
+    from sciknow.rag import wiki_prompts
+    from sciknow.rag.llm import complete as llm_complete
+    from sciknow.storage.db import get_session
+    from sqlalchemy import text
+
+    sys_kg, usr_kg = wiki_prompts.kg_extract_triples(
+        slug=slug, title=title, year=year,
+        abstract=abstract, sections=sections,
+    )
+
+    try:
+        raw = _strip_thinking(llm_complete(sys_kg, usr_kg, model=model,
+                                            temperature=0.0, num_ctx=8192))
+        data = json.loads(_clean_json(raw), strict=False)
+        triples = data.get("triples", [])
+    except Exception as exc:
+        logger.warning("KG extraction failed for %s: %s", slug, exc)
+        return 0
+
+    if not triples:
+        return 0
+
+    with get_session() as session:
+        # Clear old triples for this doc
+        session.execute(text(
+            "DELETE FROM knowledge_graph WHERE source_doc_id::text = :did"
+        ), {"did": doc_id})
+
+        for t in triples:
+            subj = (t.get("subject") or "").strip().lower()[:200]
+            pred = (t.get("predicate") or "").strip().lower()[:100]
+            obj = (t.get("object") or "").strip().lower()[:200]
+            if subj and pred and obj:
+                session.execute(text("""
+                    INSERT INTO knowledge_graph (subject, predicate, object, source_doc_id)
+                    VALUES (:subj, :pred, :obj, CAST(:did AS uuid))
+                """), {"subj": subj, "pred": pred, "obj": obj, "did": doc_id})
+        session.commit()
+
+    return len(triples)
 
 
 # ── update_concepts_for_paper ────────────────────────────────────────────────

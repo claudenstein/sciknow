@@ -377,6 +377,94 @@ def show(
 
 
 @app.command()
+def graph(
+    entity: Annotated[str, typer.Argument(help="Entity to explore (e.g. 'solar forcing', a paper slug).")],
+    depth: int = typer.Option(1, "--depth", "-d", help="Graph traversal depth (1=direct, 2=two-hop)."),
+    limit: int = typer.Option(30, "--limit", "-l"),
+):
+    """
+    Explore the knowledge graph around an entity.
+
+    Shows all triples where the entity appears as subject or object,
+    plus connected entities at the specified depth.
+
+    Examples:
+
+      sciknow wiki graph "solar forcing"
+
+      sciknow wiki graph "total solar irradiance" --depth 2
+
+      sciknow wiki graph "zharkova" --limit 50
+    """
+    _check_wiki_table()
+
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+
+    # Check KG table exists
+    try:
+        with get_session() as sess:
+            sess.execute(text("SELECT 1 FROM knowledge_graph LIMIT 0"))
+    except Exception:
+        console.print(
+            "[red]The knowledge_graph table does not exist.[/red]\n"
+            "Run: [bold]uv run alembic upgrade head[/bold]"
+        )
+        raise typer.Exit(1)
+
+    pattern = f"%{entity.lower()}%"
+    with get_session() as session:
+        rows = session.execute(text("""
+            SELECT subject, predicate, object, source_doc_id::text
+            FROM knowledge_graph
+            WHERE LOWER(subject) LIKE :pat OR LOWER(object) LIKE :pat
+            ORDER BY subject, predicate
+            LIMIT :lim
+        """), {"pat": pattern, "lim": limit}).fetchall()
+
+    if not rows:
+        console.print(f"[yellow]No triples found for:[/yellow] {entity}")
+        console.print("[dim]Run `sciknow wiki compile` to extract knowledge graph triples.[/dim]")
+        raise typer.Exit(0)
+
+    table = Table(title=f"Knowledge Graph: {entity}", box=box.SIMPLE_HEAD, expand=True)
+    table.add_column("Subject", ratio=2)
+    table.add_column("Predicate", style="cyan", ratio=1)
+    table.add_column("Object", ratio=2)
+    table.add_column("Source", style="dim", width=10)
+
+    for subj, pred, obj, src in rows:
+        table.add_row(subj[:40], pred, obj[:40], (src or "")[:8])
+    console.print(table)
+    console.print(f"[dim]{len(rows)} triples[/dim]")
+
+    # Depth 2: follow connected entities
+    if depth >= 2:
+        connected = set()
+        for subj, pred, obj, _ in rows:
+            connected.add(subj)
+            connected.add(obj)
+        connected.discard(entity.lower())
+
+        hop2_rows = []
+        for ent in list(connected)[:10]:
+            with get_session() as session:
+                h2 = session.execute(text("""
+                    SELECT subject, predicate, object
+                    FROM knowledge_graph
+                    WHERE (LOWER(subject) = :ent OR LOWER(object) = :ent)
+                      AND LOWER(subject) NOT LIKE :orig AND LOWER(object) NOT LIKE :orig
+                    LIMIT 5
+                """), {"ent": ent, "orig": pattern}).fetchall()
+                hop2_rows.extend(h2)
+
+        if hop2_rows:
+            console.print(f"\n[bold]2-hop connections:[/bold]")
+            for subj, pred, obj in hop2_rows[:20]:
+                console.print(f"  {subj[:35]} [cyan]{pred}[/cyan] {obj[:35]}")
+
+
+@app.command()
 def synthesize(
     topic: Annotated[str, typer.Argument(help="Topic to synthesize.")],
     model: str | None = typer.Option(None, "--model"),

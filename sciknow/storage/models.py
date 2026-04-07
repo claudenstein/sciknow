@@ -408,3 +408,26 @@ class WikiPage(Base):
         Index("idx_wiki_slug", "slug", unique=True),
         Index("idx_wiki_type", "page_type"),
     )
+
+
+class KnowledgeGraphTriple(Base):
+    __tablename__ = "knowledge_graph"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    subject: Mapped[str] = mapped_column(Text, nullable=False)
+    predicate: Mapped[str] = mapped_column(Text, nullable=False)
+    object: Mapped[str] = mapped_column(Text, nullable=False)
+    source_doc_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=True
+    )
+    confidence: Mapped[float] = mapped_column(nullable=False, server_default="1.0")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("idx_kg_subject", "subject"),
+        Index("idx_kg_object", "object"),
+        Index("idx_kg_predicate", "predicate"),
+        Index("idx_kg_source", "source_doc_id"),
+    )

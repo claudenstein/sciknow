@@ -633,6 +633,10 @@ sciknow wiki show total-solar-irradiance
 # Health checks
 sciknow wiki lint                       # structural: broken links, orphans, stale
 sciknow wiki lint --deep                # + LLM contradiction detection
+
+# Knowledge graph — explore entity-relationship triples
+sciknow wiki graph "solar forcing"              # direct connections
+sciknow wiki graph "total solar irradiance" --depth 2   # 2-hop traversal
 ```
 
 Wiki pages are stored as human-readable markdown in `data/wiki/` (git-friendly), indexed in PostgreSQL, and embedded in Qdrant for search. When new papers are ingested, relevant concept pages are automatically updated.
@@ -1762,7 +1766,7 @@ Planned improvements based on state-of-the-art research in scientific paper proc
 
 ### 2. Knowledge Graph (GraphRAG-style)
 
-**Status:** Next up
+**Status:** Done
 
 **Problem:** sciknow's retrieval is purely vector-based — it finds similar chunks but can't traverse relationships. "Which papers contradict Smith 2020?" requires reading every paper.
 

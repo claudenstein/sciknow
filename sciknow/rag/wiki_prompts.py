@@ -317,3 +317,57 @@ def wiki_lint_contradictions(
             claims=(claims or "")[:12000],
         ),
     )
+
+
+# ── Knowledge graph triple extraction ────────────────────────────────────────
+
+KG_EXTRACT_SYSTEM = """\
+You are a scientific knowledge engineer. Given a paper's title, abstract, and \
+key sections, extract entity-relationship triples for a knowledge graph.
+
+Triple types to extract:
+- (Paper, uses_method, Method) — research methods and techniques used
+- (Paper, studies, Phenomenon) — what the paper investigates
+- (Paper, finds, Finding) — key results or conclusions
+- (Paper, supports, Claim) — claims the paper provides evidence for
+- (Paper, contradicts, Claim) — claims the paper provides counter-evidence for
+- (Concept, related_to, Concept) — conceptual relationships
+- (Method, applied_to, Domain) — method-domain connections
+- (Dataset, measures, Variable) — what datasets track
+
+Rules:
+- Extract 5-15 triples per paper
+- Use normalized entity names (lowercase, consistent naming)
+- The paper itself is always referred to by its short slug
+- Respond ONLY with valid JSON"""
+
+KG_EXTRACT_USER = """\
+Paper slug: {slug}
+Title: {title}
+Year: {year}
+Abstract: {abstract}
+
+Key sections:
+{sections}
+
+Return JSON:
+{{
+  "triples": [
+    {{"subject": "...", "predicate": "...", "object": "..."}},
+    ...
+  ]
+}}"""
+
+
+def kg_extract_triples(
+    slug: str, title: str, year: str, abstract: str, sections: str,
+) -> tuple[str, str]:
+    return (
+        KG_EXTRACT_SYSTEM,
+        KG_EXTRACT_USER.format(
+            slug=slug, title=title or "Untitled",
+            year=year or "n.d.",
+            abstract=(abstract or "")[:2000],
+            sections=(sections or "")[:8000],
+        ),
+    )
