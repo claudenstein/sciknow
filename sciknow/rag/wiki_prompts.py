@@ -86,17 +86,19 @@ def wiki_paper_summary(
 
 EXTRACT_ENTITIES_SYSTEM = """\
 You are a scientific knowledge extractor. Given a paper's metadata, extract \
-structured entities for a wiki knowledge base.
+structured entities AND knowledge graph triples in a single pass.
 
 Rules:
 - Extract 3–8 key concepts (scientific phenomena, theories, metrics)
 - Extract 1–4 methods (techniques, models, algorithms)
 - Extract 0–3 datasets (named datasets or data sources)
+- Extract 5–15 knowledge graph triples (subject, predicate, object)
 - Reuse existing concept names where applicable: {existing_slugs}
 - Use lowercase-hyphenated slug format for new concepts (e.g. "total-solar-irradiance")
 - Respond ONLY with valid JSON."""
 
 EXTRACT_ENTITIES_USER = """\
+Paper slug: {slug}
 Title: {title}
 Authors: {authors}
 Year: {year}
@@ -104,26 +106,36 @@ Keywords: {keywords}
 Domains: {domains}
 Abstract: {abstract}
 
+Key sections:
+{sections}
+
 Return JSON:
 {{
   "concepts": ["concept-slug-1", "concept-slug-2", ...],
   "methods": ["method-slug-1", ...],
-  "datasets": ["dataset-slug-1", ...]
+  "datasets": ["dataset-slug-1", ...],
+  "triples": [
+    {{"subject": "...", "predicate": "uses_method|studies|finds|supports|contradicts|related_to", "object": "..."}},
+    ...
+  ]
 }}"""
 
 
 def wiki_extract_entities(
     title: str, authors: str, year: str, keywords: str, domains: str,
     abstract: str, existing_slugs: list[str],
+    slug: str = "", sections: str = "",
 ) -> tuple[str, str]:
     slug_str = ", ".join(existing_slugs[:300]) if existing_slugs else "(none yet)"
     return (
         EXTRACT_ENTITIES_SYSTEM.format(existing_slugs=slug_str),
         EXTRACT_ENTITIES_USER.format(
+            slug=slug or "unknown",
             title=title or "Untitled", authors=authors or "Unknown",
             year=year or "n.d.", keywords=keywords or "N/A",
             domains=domains or "N/A",
             abstract=(abstract or "N/A")[:2000],
+            sections=(sections or "")[:6000],
         ),
     )
 

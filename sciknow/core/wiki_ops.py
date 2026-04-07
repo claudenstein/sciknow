@@ -295,16 +295,93 @@ def compile_paper_summary(
     point_id = _embed_wiki_page(slug, content, "paper_summary")
     if not point_id:
         yield {"type": "progress", "stage": "warning",
-               "detail": "Embedding skipped (GPU VRAM full — run sciknow db init later to embed)"}
+               "detail": "Embedding skipped (GPU VRAM full)"}
 
-    # Extract knowledge graph triples
-    kg_count = _extract_kg_triples(doc_id, slug, title, str(year or "n.d."),
-                                    abstract or "", section_text, model=model)
+    # Combined entity + KG extraction in a single LLM call (speedup: 2 calls → 1)
+    yield {"type": "progress", "stage": "extracting",
+           "detail": "Extracting entities + knowledge graph..."}
+    entities, kg_count = _extract_entities_and_kg(
+        doc_id, slug, title, author_str, str(year or "n.d."),
+        kw_str, dom_str, abstract or "", section_text,
+        existing_slugs, model=model,
+    )
 
-    _append_log(f"ingest | Paper summary: {title} → [[{slug}]] ({kg_count} triples)")
+    _append_log(f"ingest | {title} → [[{slug}]] ({kg_count} triples, {len(entities)} entities)")
 
     yield {"type": "completed", "slug": slug, "word_count": len(content.split()),
-           "kg_triples": kg_count}
+           "kg_triples": kg_count, "entities": entities}
+
+
+def _extract_entities_and_kg(
+    doc_id, slug, title, authors, year, keywords, domains,
+    abstract, sections, existing_slugs, model=None,
+) -> tuple[list[str], int]:
+    """Combined entity + KG triple extraction in one LLM call."""
+    from sciknow.rag import wiki_prompts
+    from sciknow.rag.llm import complete as llm_complete
+    from sciknow.storage.db import get_session
+    from sqlalchemy import text
+
+    sys_e, usr_e = wiki_prompts.wiki_extract_entities(
+        title=title, authors=authors, year=year,
+        keywords=keywords, domains=domains,
+        abstract=abstract, existing_slugs=existing_slugs,
+        slug=slug, sections=sections,
+    )
+
+    try:
+        raw = _strip_thinking(llm_complete(sys_e, usr_e, model=model,
+                                            temperature=0.0, num_ctx=8192))
+        data = json.loads(_clean_json(raw), strict=False)
+    except Exception as exc:
+        logger.warning("Entity+KG extraction failed for %s: %s", slug, exc)
+        return [], 0
+
+    # Save entities (concepts list)
+    all_entities = (
+        data.get("concepts", []) +
+        data.get("methods", []) +
+        data.get("datasets", [])
+    )
+
+    # Save KG triples
+    triples = data.get("triples", [])
+    kg_count = 0
+    if triples:
+        with get_session() as session:
+            session.execute(text(
+                "DELETE FROM knowledge_graph WHERE source_doc_id::text = :did"
+            ), {"did": doc_id})
+            for t in triples:
+                subj = (t.get("subject") or "").strip().lower()[:200]
+                pred = (t.get("predicate") or "").strip().lower()[:100]
+                obj = (t.get("object") or "").strip().lower()[:200]
+                if subj and pred and obj:
+                    session.execute(text("""
+                        INSERT INTO knowledge_graph (subject, predicate, object, source_doc_id)
+                        VALUES (:subj, :pred, :obj, CAST(:did AS uuid))
+                    """), {"subj": subj, "pred": pred, "obj": obj, "did": doc_id})
+                    kg_count += 1
+            session.commit()
+
+    # Create concept page stubs (no LLM call — just filesystem + DB)
+    for entity_slug_raw in all_entities:
+        eslug = _slugify(entity_slug_raw)
+        if not eslug:
+            continue
+        concept_path = settings.wiki_dir / "concepts" / f"{eslug}.md"
+        if not concept_path.exists():
+            _ensure_wiki_dirs()
+            stub = f"# {entity_slug_raw.replace('-', ' ').title()}\n\n*Mentioned in: {title} ({year})*\n"
+            with get_session() as session:
+                _save_page(
+                    session, slug=eslug,
+                    title=entity_slug_raw.replace("-", " ").title(),
+                    page_type="concept", content=stub,
+                    source_doc_ids=[doc_id], subdir="concepts",
+                )
+
+    return all_entities, kg_count
 
 
 def _extract_kg_triples(doc_id: str, slug: str, title: str, year: str,
@@ -529,7 +606,6 @@ def compile_all(
         # Compile paper summary — pass through token events for live display
         paper_ok = False
         paper_skipped = False
-        concepts_updated = 0
         for event in compile_paper_summary(doc_id, model=model, force=force):
             if event.get("type") == "token":
                 paper_tokens += 1
@@ -560,16 +636,10 @@ def compile_all(
                    "tokens": 0, "elapsed": 0, "total_tokens": total_tokens}
             continue
 
-        # Update concept pages
-        if paper_ok:
-            for event in update_concepts_for_paper(doc_id, model=model):
-                if event.get("type") == "token":
-                    paper_tokens += 1
-                    total_tokens += 1
-                elif event.get("type") == "completed":
-                    concepts_updated = event.get("concepts_updated", 0)
-                elif event.get("type") == "error":
-                    pass  # non-fatal
+        # Concept stubs + KG triples are now created inside compile_paper_summary
+        # (merged into a single LLM call). Full concept page content is deferred
+        # to keep the bulk compile fast. Run `wiki compile --rewrite-stale` later
+        # to flesh out concept pages with full LLM-written content.
 
         paper_elapsed = time.monotonic() - paper_t0
         yield {"type": "paper_done", "index": i, "total": total,
