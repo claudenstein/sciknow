@@ -672,8 +672,10 @@ def cluster(
     _batch_state: dict[int, dict] = {}
     _state_lock = threading.Lock()
 
-    def _run_batch(batch_num: int, batch_papers: list[dict]) -> tuple[int, dict[str, str], int]:
-        """Run one batch. Returns (batch_num, {doc_id: cluster}, n_clusters)."""
+    _PARSE_FAILED = object()  # sentinel to distinguish parse failure from zero matches
+
+    def _run_batch(batch_num: int, batch_papers: list[dict]) -> tuple[int, dict[str, str] | object, int]:
+        """Run one batch. Returns (batch_num, {doc_id: cluster} or _PARSE_FAILED, n_clusters)."""
         system, user = rag_prompts.cluster(batch_papers)
 
         with _state_lock:
@@ -702,7 +704,7 @@ def cluster(
             _log.warning("Batch %d JSON parse failed: %s", batch_num, e)
             with _state_lock:
                 _batch_state[batch_num]["status"] = "failed"
-            return batch_num, {}, 0
+            return batch_num, _PARSE_FAILED, 0
 
         finally:
             with _state_lock:
@@ -743,13 +745,14 @@ def cluster(
 
     def _run_with_retry(batch_num: int, batch_papers: list[dict],
                         current_size: int) -> dict[str, str]:
-        """Run a batch with automatic retry at halved size on failure."""
+        """Run a batch with automatic retry at halved size on parse failure."""
         bn, assignments, n_clusters = _run_batch(batch_num, batch_papers)
 
-        if assignments:
-            return assignments
+        # If JSON parsed OK (even if zero matches), return the result — don't retry
+        if assignments is not _PARSE_FAILED:
+            return assignments  # type: ignore[return-value]
 
-        # Batch failed — retry with smaller chunks
+        # JSON parse failed — retry with smaller chunks
         if current_size <= _MIN_BATCH:
             _log.error("Batch %d: giving up after min batch size %d",
                        batch_num, _MIN_BATCH)
