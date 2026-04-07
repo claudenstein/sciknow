@@ -457,11 +457,11 @@ sciknow catalog export --format json --output catalog.json
 sciknow catalog export --author Zharkova --output zharkova.csv
 
 # Assign topic clusters to all papers (LLM groups papers into 6–14 named clusters)
-sciknow catalog cluster
+sciknow catalog cluster                     # Default batch 50, incremental save
 sciknow catalog cluster --dry-run           # Preview clusters without saving
-sciknow catalog cluster --batch 100         # Smaller batches for large collections
+sciknow catalog cluster --batch 25          # Smaller batches for extra reliability
 
-# Resume after partial failure (only processes papers without a cluster yet)
+# Resume after partial run or interruption (skips already-clustered papers)
 sciknow catalog cluster --resume
 
 # List all clusters with paper counts
@@ -1048,7 +1048,7 @@ Every draft goes through an iterative refinement cycle:
 
 ### Topic clustering
 
-Before writing, `sciknow catalog cluster` groups papers into 6-14 named thematic clusters. Clusters act as pre-filters in search and writing:
+Before writing, `sciknow catalog cluster` groups papers into 6-14 named thematic clusters. Default batch size is 50 papers (reliable JSON from most models). Each successful batch is saved immediately to the database, so `--resume` picks up where you left off if interrupted. Failed batches are automatically retried with smaller chunks (50 -> 25 -> 10 -> 5). LaTeX math and commands are stripped from titles before prompting to prevent JSON escape errors. Clusters act as pre-filters in search and writing:
 
 ```bash
 sciknow search query "solar cycle" --topic "Solar Irradiance"
