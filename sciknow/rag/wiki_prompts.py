@@ -433,6 +433,7 @@ def wiki_consensus(
 def kg_extract_triples(
     slug: str, title: str, year: str, abstract: str, sections: str,
 ) -> tuple[str, str]:
+    """Standalone KG extraction (unused — entity+KG merged into wiki_extract_entities)."""
     return (
         KG_EXTRACT_SYSTEM,
         KG_EXTRACT_USER.format(

@@ -172,7 +172,10 @@ def _auto_summarize(content: str, section_type: str, chapter_title: str, model: 
             system, user, label="Summarizing for coherence",
             model=model, temperature=0.1, num_ctx=4096,
         ).strip()
-    except Exception:
+    except Exception as exc:
+        import logging
+        logging.getLogger("sciknow.book").warning(
+            "Auto-summarize failed for %s/%s: %s", chapter_title, section_type, exc)
         return ""
 
 

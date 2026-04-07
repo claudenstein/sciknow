@@ -393,9 +393,9 @@ class WikiPage(Base):
     page_type: Mapped[str] = mapped_column(Text, nullable=False)  # paper_summary | concept | synthesis
     source_doc_ids: Mapped[list | None] = mapped_column(ARRAY(PG_UUID(as_uuid=True)))
     word_count: Mapped[int | None] = mapped_column(Integer)
-    needs_rewrite: Mapped[bool] = mapped_column(
+    needs_rewrite: Mapped[str] = mapped_column(
         Text, nullable=False, server_default="false"
-    )
+    )  # "true" / "false" as text (migration 0006)
     qdrant_point_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

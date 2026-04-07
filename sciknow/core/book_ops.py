@@ -73,7 +73,8 @@ def _auto_summarize(content: str, section_type: str, chapter_title: str, model: 
     system, user = prompts.draft_summary(section_type, chapter_title, content)
     try:
         return complete(system, user, model=model, temperature=0.1, num_ctx=4096).strip()
-    except Exception:
+    except Exception as exc:
+        logger.warning("Auto-summarize failed for %s/%s: %s", chapter_title, section_type, exc)
         return ""
 
 
@@ -98,7 +99,10 @@ def _save_draft(session, *, title, book_id, chapter_id, section_type, topic,
         "parent_id": parent_draft_id, "review_feedback": review_feedback,
     })
     session.commit()
-    return row.fetchone()[0]
+    result = row.fetchone()
+    if not result:
+        raise RuntimeError("Failed to save draft — INSERT returned no rows")
+    return result[0]
 
 
 def _retrieve(session, qdrant, query: str, candidate_k: int = 50,
