@@ -307,12 +307,33 @@ Group these papers into thematic clusters. Return JSON:
 }}"""
 
 
+def _strip_latex(title: str) -> str:
+    """Remove LaTeX math and commands from a title to prevent JSON escape issues.
+
+    Paper titles often contain ``$\\mathsf{R}$`` or ``\\textbf{}``,
+    which produce invalid JSON escapes (``\\m``, ``\\t``, ``\\n``) when
+    the LLM echoes them back inside a JSON string.  Stripping before
+    prompting is more reliable than post-hoc repair.
+    """
+    # Remove inline math: $...$ (non-greedy)
+    title = re.sub(r'\$[^$]+\$', '', title)
+    # Remove common LaTeX commands: \command{...} or \command
+    title = re.sub(r'\\(?:mathsf|mathrm|mathbf|textbf|textit|emph|textrm|text)\b\{?([^}]*)\}?', r'\1', title)
+    # Remove remaining bare backslashes (e.g. \n, \%, \\)
+    title = re.sub(r'\\[a-zA-Z]+', '', title)
+    title = title.replace('\\', '')
+    # Collapse whitespace
+    title = re.sub(r'\s+', ' ', title).strip()
+    return title
+
+
 def cluster(papers: list[dict]) -> tuple[str, str]:
     """papers: list of {title, year}"""
     lines = []
     for p in papers[:200]:
         yr = f" ({p['year']})" if p.get("year") else ""
-        lines.append(f"- {p['title']}{yr}")
+        clean_title = _strip_latex(p['title'])
+        lines.append(f"- {clean_title}{yr}")
     return CLUSTER_SYSTEM, CLUSTER_USER.format(
         n=len(papers),
         paper_list="\n".join(lines),

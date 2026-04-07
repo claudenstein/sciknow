@@ -503,11 +503,11 @@ def topics():
 def cluster(
     limit: int = typer.Option(0, "--limit", "-l",
                                help="Max papers to cluster (0 = all). Useful for large collections."),
-    batch: int = typer.Option(200, "--batch",
-                               help="Papers per LLM batch."),
+    batch: int = typer.Option(50, "--batch",
+                               help="Papers per LLM batch (default 50 — reliable for most models)."),
     model: str | None = typer.Option(None, "--model", help="Override LLM model name (Ollama)."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print proposed clusters without saving."),
-    resume: bool = typer.Option(False, "--resume", help="Only cluster papers that don't have a topic_cluster yet (skips already-clustered)."),
+    resume: bool = typer.Option(False, "--resume", help="Only cluster papers that don't have a topic_cluster yet."),
 ):
     """
     Assign topic clusters to all papers using an LLM.
@@ -516,23 +516,35 @@ def cluster(
     Clusters are stored in paper_metadata.topic_cluster and can be used as a
     filter in search and ask commands (--topic).
 
+    Incremental: each successful batch is saved immediately to the database,
+    so --resume picks up where you left off if the process is interrupted.
+
     Examples:
 
       sciknow catalog cluster
 
-      sciknow catalog cluster --batch 100 --dry-run
+      sciknow catalog cluster --batch 25 --dry-run
+
+      sciknow catalog cluster --resume   # pick up after a partial run
     """
     from sciknow.cli import preflight
-    preflight(qdrant=False)  # cluster writes to PostgreSQL only
+    preflight(qdrant=False)
 
     import json as _json
+    import logging as _logging
+    import re as _re
     import time as _time
     import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     from sqlalchemy import text
     from sciknow.storage.db import get_session
     from sciknow.rag import prompts as rag_prompts
     from sciknow.rag.llm import stream as llm_stream
+    from sciknow.config import settings as _settings
 
+    _log = _logging.getLogger("sciknow.cluster")
+
+    # ── Load papers ──────────────────────────────────────────────────────
     with get_session() as session:
         where_extra = "AND pm.topic_cluster IS NULL" if resume else ""
         rows = session.execute(text(f"""
@@ -543,7 +555,6 @@ def cluster(
         """)).fetchall()
 
     papers = [{"doc_id": r[0], "title": r[1], "year": r[2]} for r in rows]
-
     if limit:
         papers = papers[:limit]
 
@@ -554,9 +565,6 @@ def cluster(
             console.print("[yellow]No papers with titles found.[/yellow]")
         raise typer.Exit(0)
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    from sciknow.config import settings as _settings
-
     workers = max(1, _settings.llm_parallel_workers)
     total_batches = (len(papers) + batch - 1) // batch
     console.print(
@@ -564,9 +572,10 @@ def cluster(
         f"batches of {batch} ({workers} parallel LLM calls)…"
     )
 
+    # ── JSON repair ──────────────────────────────────────────────────────
+
     def _sanitize_json(raw: str) -> str:
-        """Aggressively repair common LLM JSON output issues."""
-        import re
+        """Aggressively repair LLM JSON output."""
         cleaned = raw.strip()
 
         # Strip markdown code fences
@@ -575,69 +584,101 @@ def cluster(
         if cleaned.endswith("```"):
             cleaned = "\n".join(cleaned.split("\n")[:-1])
 
-        # Extract the outermost { } if there's preamble/postamble text
+        # Extract outermost { }
         first_brace = cleaned.find("{")
         last_brace = cleaned.rfind("}")
         if first_brace >= 0 and last_brace > first_brace:
             cleaned = cleaned[first_brace:last_brace + 1]
 
-        # Remove control characters (except \n, \r, \t which are JSON whitespace)
-        cleaned = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', cleaned)
+        # Remove control characters
+        cleaned = _re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', cleaned)
 
-        # Strip invalid \escapes entirely. Paper titles contain LaTeX (\mathbf,
-        # \textbf) and Windows paths (H:\PS\...) that produce invalid JSON
-        # escapes. For clustering, the backslash-free text is equally useful.
-        cleaned = re.sub(r'\\(?!["\\/bfnrtu])', '', cleaned)
+        # Strip ALL backslash sequences that aren't valid JSON escapes.
+        # This is the nuclear option: any \X where X is not one of the
+        # 8 valid JSON escape chars → remove the backslash entirely.
+        # This handles LaTeX \n (literal backslash + n) which is
+        # indistinguishable from a JSON newline escape in broken output.
+        # We do this character-by-character inside strings only.
+        cleaned = _re.sub(r'\\(?!["\\/bfnrtu])', '', cleaned)
 
-        # Remove trailing commas before } and ] — the #1 LLM JSON failure
-        cleaned = re.sub(r',\s*}', '}', cleaned)
-        cleaned = re.sub(r',\s*]', ']', cleaned)
+        # Now handle the tricky case: \n from LaTeX titles.
+        # If a line contains what looks like a LaTeX-origin \n (preceded
+        # by a letter, not whitespace), replace it with a space.
+        # E.g.: "Catalogue\nanalysis" → "Catalogue analysis"
+        # But preserve genuine JSON newlines in values (\n between entries).
+        cleaned = _re.sub(r'([a-zA-Z])\\n([a-zA-Z])', r'\1 \2', cleaned)
 
-        # If the JSON is truncated (unclosed), try to close it
+        # Remove trailing commas before } and ]
+        cleaned = _re.sub(r',\s*}', '}', cleaned)
+        cleaned = _re.sub(r',\s*]', ']', cleaned)
+
+        # Handle truncated JSON: close unclosed braces/brackets
         open_braces = cleaned.count('{') - cleaned.count('}')
         open_brackets = cleaned.count('[') - cleaned.count(']')
-
         if open_braces > 0 or open_brackets > 0:
-            # Truncate at the last complete entry (last line ending with comma or value)
             lines = cleaned.rstrip().rsplit('\n', 1)
             if len(lines) > 1:
                 last_line = lines[-1].strip()
-                # If the last line is incomplete (no closing quote/comma), drop it
                 if last_line and not last_line.endswith((',', '"', '}', ']')):
                     cleaned = lines[0]
-            # Close the JSON
             cleaned += ']' * max(0, open_brackets) + '}' * max(0, open_braces)
 
         return cleaned
 
-    def _fuzzy_title_match(llm_title: str, title_to_doc: dict[str, str]) -> str | None:
+    # ── Title matching ───────────────────────────────────────────────────
+
+    def _norm_title(s: str) -> str:
+        return _re.sub(r'\s+', ' ', _re.sub(r'[^\w\s]', '', s.lower())).strip()
+
+    def _fuzzy_title_match(llm_title: str, title_to_doc: dict[str, str],
+                           norm_cache: dict[str, str]) -> str | None:
+        # Exact match
         if llm_title in title_to_doc:
             return title_to_doc[llm_title]
-        import re
-        def _norm(s: str) -> str:
-            return re.sub(r'\s+', ' ', re.sub(r'[^\w\s]', '', s.lower())).strip()
-        norm_llm = _norm(llm_title)
+        # Normalized match
+        norm_llm = _norm_title(llm_title)
         for paper_title, doc_id in title_to_doc.items():
-            if _norm(paper_title) == norm_llm:
+            norm_paper = norm_cache.get(paper_title)
+            if norm_paper is None:
+                norm_paper = _norm_title(paper_title)
+                norm_cache[paper_title] = norm_paper
+            if norm_paper == norm_llm:
                 return doc_id
-        if len(norm_llm) >= 40:
+        # Prefix match (for long titles)
+        if len(norm_llm) >= 30:
+            prefix = norm_llm[:30]
             for paper_title, doc_id in title_to_doc.items():
-                if _norm(paper_title).startswith(norm_llm[:40]):
+                if norm_cache.get(paper_title, _norm_title(paper_title)).startswith(prefix):
                     return doc_id
         return None
 
-    # Shared state for the live status display. Each running batch updates
-    # its token count; the main thread prints a consolidated status line.
+    # ── DB save helper ───────────────────────────────────────────────────
+
+    def _save_assignments(assignments: dict[str, str]) -> int:
+        """Save a batch of assignments to DB immediately. Returns count."""
+        if not assignments:
+            return 0
+        with get_session() as session:
+            for doc_id, cluster_name in assignments.items():
+                session.execute(text("""
+                    UPDATE paper_metadata SET topic_cluster = :cluster
+                    WHERE document_id::text = :doc_id
+                """), {"cluster": cluster_name, "doc_id": doc_id})
+            session.commit()
+        return len(assignments)
+
+    # ── Core batch runner ────────────────────────────────────────────────
+
     _batch_state: dict[int, dict] = {}
     _state_lock = threading.Lock()
 
     def _run_batch(batch_num: int, batch_papers: list[dict]) -> tuple[int, dict[str, str], int]:
-        """Stream the LLM response, updating live token count for the status display."""
+        """Run one batch. Returns (batch_num, {doc_id: cluster}, n_clusters)."""
         system, user = rag_prompts.cluster(batch_papers)
 
         with _state_lock:
-            _batch_state[batch_num] = {"tokens": 0, "status": "generating", "start": _time.monotonic()}
-
+            _batch_state[batch_num] = {"tokens": 0, "status": "generating",
+                                       "start": _time.monotonic()}
         try:
             tokens: list[str] = []
             for tok in llm_stream(system, user, model=model, num_ctx=32768):
@@ -649,66 +690,87 @@ def cluster(
             with _state_lock:
                 _batch_state[batch_num]["status"] = "parsing"
 
+            if not raw.strip():
+                raise ValueError("LLM returned empty response")
+
             cleaned = _sanitize_json(raw)
             data = _json.loads(cleaned, strict=False)
             assignments = data.get("assignments", {})
             n_clusters = len(data.get("clusters", []))
-        except Exception as e:
-            # Log the failing output for debugging, then retry with
-            # a manual JSON repair pass before giving up.
-            import logging as _logging
-            _log = _logging.getLogger("sciknow.cluster")
-            # Log the area around the error for debugging
-            import re as _re
-            err_str = str(e)
-            char_match = _re.search(r'char (\d+)', err_str)
-            err_pos = int(char_match.group(1)) if char_match else 0
-            context_start = max(0, err_pos - 200)
-            context_end = min(len(cleaned), err_pos + 200)
-            _log.warning(
-                f"Batch {batch_num} JSON parse failed: {e}\n"
-                f"Around error (char {err_pos}):\n"
-                f"...{cleaned[context_start:context_end]}...\n"
-                f"Last 500 chars:\n{cleaned[-500:]}"
-            )
 
-            # Repair attempt: find the outermost { } and try again
-            try:
-                brace_start = cleaned.index("{")
-                brace_end = cleaned.rindex("}") + 1
-                repaired = cleaned[brace_start:brace_end]
-                data = _json.loads(repaired, strict=False)
-                assignments = data.get("assignments", {})
-                n_clusters = len(data.get("clusters", []))
-                _log.info(f"Batch {batch_num} repaired successfully")
-            except Exception as e2:
-                _log.error(f"Batch {batch_num} repair also failed: {e2}")
-                with _state_lock:
-                    _batch_state[batch_num]["status"] = "failed"
-                console.print(f"[red]Batch {batch_num} failed:[/red] {e}")
-                return batch_num, {}, 0
+        except Exception as e:
+            _log.warning("Batch %d JSON parse failed: %s", batch_num, e)
+            with _state_lock:
+                _batch_state[batch_num]["status"] = "failed"
+            return batch_num, {}, 0
+
         finally:
             with _state_lock:
-                if _batch_state[batch_num]["status"] == "generating":
+                if _batch_state[batch_num]["status"] not in ("done", "failed"):
                     _batch_state[batch_num]["status"] = "done"
 
+        # Match LLM titles to doc_ids
         title_to_doc = {p["title"]: p["doc_id"] for p in batch_papers}
-        doc_assignments = {}
+        # Also map sanitized titles (LLM sees stripped-LaTeX titles)
+        from sciknow.rag.prompts import _strip_latex
+        for p in batch_papers:
+            stripped = _strip_latex(p["title"])
+            if stripped != p["title"]:
+                title_to_doc[stripped] = p["doc_id"]
+
+        norm_cache: dict[str, str] = {}
+        doc_assignments: dict[str, str] = {}
+        unmatched = 0
         for t, c in assignments.items():
-            doc_id = _fuzzy_title_match(t, title_to_doc)
+            doc_id = _fuzzy_title_match(t, title_to_doc, norm_cache)
             if doc_id:
                 doc_assignments[doc_id] = c
+            else:
+                unmatched += 1
+
+        if unmatched > 0:
+            _log.info("Batch %d: %d/%d titles unmatched",
+                      batch_num, unmatched, len(assignments))
 
         with _state_lock:
             _batch_state[batch_num]["status"] = "done"
 
         return batch_num, doc_assignments, n_clusters
 
-    all_assignments: dict[str, str] = {}
-    completed_batches = 0
+    # ── Retry wrapper: shrinks batch on failure ──────────────────────────
 
-    # Live status printer: runs in a background thread, updates the console
-    # every second with per-batch token counts and elapsed time.
+    _MIN_BATCH = 5  # smallest batch we'll try before giving up
+
+    def _run_with_retry(batch_num: int, batch_papers: list[dict],
+                        current_size: int) -> dict[str, str]:
+        """Run a batch with automatic retry at halved size on failure."""
+        bn, assignments, n_clusters = _run_batch(batch_num, batch_papers)
+
+        if assignments:
+            return assignments
+
+        # Batch failed — retry with smaller chunks
+        if current_size <= _MIN_BATCH:
+            _log.error("Batch %d: giving up after min batch size %d",
+                       batch_num, _MIN_BATCH)
+            return {}
+
+        smaller = max(current_size // 2, _MIN_BATCH)
+        _log.info("Batch %d failed, retrying %d papers in chunks of %d",
+                  batch_num, len(batch_papers), smaller)
+
+        all_sub: dict[str, str] = {}
+        for i in range(0, len(batch_papers), smaller):
+            sub = batch_papers[i:i + smaller]
+            sub_num = batch_num * 100 + (i // smaller)
+            sub_assignments = _run_with_retry(sub_num, sub, smaller)
+            all_sub.update(sub_assignments)
+
+        return all_sub
+
+    # ── Live status printer ──────────────────────────────────────────────
+
+    completed_batches = 0
     _status_stop = threading.Event()
 
     def _status_printer():
@@ -739,74 +801,56 @@ def cluster(
     status_thread = threading.Thread(target=_status_printer, daemon=True)
     status_thread.start()
 
-    # Track which papers failed so we can retry with smaller batches.
-    failed_papers: list[dict] = []
+    # ── Main execution ───────────────────────────────────────────────────
+
+    all_assignments: dict[str, str] = {}
+    total_saved = 0
 
     try:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             batch_paper_map: dict[int, list[dict]] = {}
-            futures = []
+            futures = {}
             for batch_start in range(0, len(papers), batch):
                 batch_papers = papers[batch_start:batch_start + batch]
                 batch_num = batch_start // batch + 1
                 batch_paper_map[batch_num] = batch_papers
-                futures.append(pool.submit(_run_batch, batch_num, batch_papers))
+                fut = pool.submit(_run_with_retry, batch_num, batch_papers, batch)
+                futures[fut] = batch_num
 
             for fut in as_completed(futures):
-                batch_num, doc_assignments, n_clusters = fut.result()
+                batch_num = futures[fut]
+                try:
+                    doc_assignments = fut.result()
+                except Exception as exc:
+                    _log.error("Batch %d raised: %s", batch_num, exc)
+                    doc_assignments = {}
+
                 all_assignments.update(doc_assignments)
                 completed_batches += 1
 
-                bp = batch_paper_map[batch_num]
-                if not doc_assignments and len(bp) > 0:
-                    failed_papers.extend(bp)
+                # Incremental save (unless dry-run)
+                if not dry_run and doc_assignments:
+                    saved = _save_assignments(doc_assignments)
+                    total_saved += saved
 
                 console.print(
                     f"  Batch {batch_num}/{total_batches}: "
-                    f"{len(doc_assignments)} assignments, {n_clusters} clusters"
+                    f"{len(doc_assignments)}/{len(batch_paper_map[batch_num])} assigned"
+                    + (f", saved {total_saved} total" if not dry_run else "")
                 )
     finally:
         _status_stop.set()
         status_thread.join(timeout=2)
 
-    # ── Auto-retry failed batches with halved batch size ─────────────────
-    # The main failure mode is the LLM producing invalid JSON on large
-    # batches. Halving the batch size gives the model less to generate,
-    # dramatically improving JSON validity.
-    if failed_papers:
-        retry_batch = max(batch // 2, 25)
-        retry_total = (len(failed_papers) + retry_batch - 1) // retry_batch
-        console.print(
-            f"\n[yellow]Retrying {len(failed_papers)} papers from failed batches "
-            f"(batch size {batch} → {retry_batch}, {retry_total} batches)…[/yellow]"
-        )
+    # ── Summary ──────────────────────────────────────────────────────────
 
-        with _state_lock:
-            _batch_state.clear()
-        _status_stop.clear()
-        status_thread = threading.Thread(target=_status_printer, daemon=True)
-        status_thread.start()
-        completed_batches = 0
-
-        try:
-            for retry_start in range(0, len(failed_papers), retry_batch):
-                retry_papers = failed_papers[retry_start:retry_start + retry_batch]
-                retry_num = retry_start // retry_batch + 1
-                bn, doc_assignments, n_clusters = _run_batch(retry_num + 100, retry_papers)
-                all_assignments.update(doc_assignments)
-                completed_batches += 1
-                console.print(
-                    f"  Retry {retry_num}/{retry_total}: "
-                    f"{len(doc_assignments)} assignments, {n_clusters} clusters"
-                )
-        finally:
-            _status_stop.set()
-            status_thread.join(timeout=2)
-
-    console.print(f"\nTotal assignments: [bold]{len(all_assignments)}[/bold] / {len(papers)}")
+    unassigned = len(papers) - len(all_assignments)
+    console.print(
+        f"\nTotal: [bold]{len(all_assignments)}[/bold] / {len(papers)} assigned"
+        + (f"  [yellow]({unassigned} unassigned)[/yellow]" if unassigned else "")
+    )
 
     if dry_run:
-        # Print cluster summary
         from collections import Counter
         counts = Counter(all_assignments.values())
         table = Table(title="Proposed Clusters (dry run — not saved)", box=box.SIMPLE_HEAD)
@@ -817,15 +861,6 @@ def cluster(
         console.print(table)
         return
 
-    # Save to DB
-    with get_session() as session:
-        updated = 0
-        for doc_id, cluster_name in all_assignments.items():
-            session.execute(text("""
-                UPDATE paper_metadata SET topic_cluster = :cluster
-                WHERE document_id::text = :doc_id
-            """), {"cluster": cluster_name, "doc_id": doc_id})
-            updated += 1
-        session.commit()
-
-    console.print(f"[green]✓ Updated topic_cluster for {updated} papers[/green]")
+    console.print(f"[green]✓ Saved topic_cluster for {total_saved} papers[/green]")
+    if unassigned:
+        console.print(f"[dim]Re-run with --resume to retry the {unassigned} unassigned papers.[/dim]")
