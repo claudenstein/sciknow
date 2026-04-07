@@ -144,7 +144,9 @@ def compile(
                     paper_tok_count = 0
                     paper_t0 = _time.monotonic()
                     last_paper_title = event["title"]
+                    idx = event.get("index", 0)
                     progress.update(task_id,
+                        description=f"[bold]Wiki {idx}/{total}[/bold]",
                         status=f"[dim]{event['title'][:45]}[/dim]")
                     progress.update(tok_task,
                         status=f"[dim]{event['title'][:35]}...[/dim]")
@@ -192,6 +194,7 @@ def compile(
                     else:
                         eta_part = ""
 
+                    title_short = event.get("title", "")[:40]
                     status_text = f"[green]{c} new[/green]  [dim]{s} skip[/dim]"
                     if f:
                         status_text += f"  [red]{f} fail[/red]"
@@ -204,10 +207,10 @@ def compile(
                             status=(
                                 f"[green]{p_toks} tok in {p_elapsed:.0f}s "
                                 f"({last_paper_tps:.1f} t/s)[/green]"
-                                + (f"  [cyan]+{concepts} concepts[/cyan]" if concepts else "")
                             ))
                     elif st == "skipped":
-                        progress.update(tok_task, status="[dim]skipped[/dim]")
+                        progress.update(tok_task,
+                            status=f"[dim]skip: {title_short}[/dim]")
 
                 elif t == "error":
                     console.print(f"[red]Error:[/red] {event.get('message', '')}")
