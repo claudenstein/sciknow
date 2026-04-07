@@ -631,6 +631,63 @@ async def api_argue(
     return JSONResponse({"job_id": job_id})
 
 
+@app.post("/api/verify/{draft_id}")
+async def api_verify(draft_id: str, model: str = Form(None)):
+    """Run claim verification on a draft via SSE."""
+    from sciknow.core.book_ops import review_draft_stream
+
+    # We reuse the review infrastructure but with a verify-specific generator
+    job_id, queue = _create_job("verify")
+    loop = asyncio.get_event_loop()
+
+    def gen():
+        """Verify claims — uses the verify_claims prompt from book_ops."""
+        from sciknow.rag import prompts as rag_prompts
+        from sciknow.rag.llm import complete as llm_complete
+        from sciknow.storage.db import get_session
+        from sciknow.storage.qdrant import get_client
+        from sciknow.core.book_ops import _retrieve, _clean_json
+        import json as _json
+
+        with get_session() as session:
+            from sqlalchemy import text as sql_text
+            row = session.execute(sql_text("""
+                SELECT d.id::text, d.title, d.section_type, d.topic, d.content
+                FROM drafts d WHERE d.id::text LIKE :q LIMIT 1
+            """), {"q": f"{draft_id}%"}).fetchone()
+
+        if not row:
+            yield {"type": "error", "message": f"Draft not found: {draft_id}"}
+            return
+
+        d_id, d_title, d_section, d_topic, d_content = row
+
+        yield {"type": "progress", "stage": "retrieval", "detail": "Retrieving source passages..."}
+
+        qdrant = get_client()
+        search_query = f"{d_section or ''} {d_topic or d_title}"
+        with get_session() as session:
+            results, _ = _retrieve(session, qdrant, search_query, context_k=12)
+
+        yield {"type": "progress", "stage": "verifying", "detail": "Verifying claims..."}
+
+        sys_v, usr_v = rag_prompts.verify_claims(d_content, results)
+        try:
+            raw = llm_complete(sys_v, usr_v, model=model or None, temperature=0.0, num_ctx=16384)
+            vdata = _json.loads(_clean_json(raw), strict=False)
+            yield {"type": "verification", "data": vdata}
+        except Exception as exc:
+            yield {"type": "error", "message": f"Verification failed: {exc}"}
+
+        yield {"type": "completed", "draft_id": d_id}
+
+    thread = threading.Thread(
+        target=_run_generator_in_thread, args=(job_id, gen, loop), daemon=True)
+    thread.start()
+
+    return JSONResponse({"job_id": job_id})
+
+
 @app.post("/api/autowrite")
 async def api_autowrite(
     chapter_id: str = Form(None),
@@ -840,7 +897,12 @@ def _render_sidebar(items, active_id):
 def _render_sources(sources):
     if not sources:
         return "<em>No sources.</em>"
-    return "<ol>" + "".join(f"<li>{s}</li>" for s in sources if s) + "</ol>"
+    html = "<ol>"
+    for i, s in enumerate(sources):
+        if s:
+            html += f'<li id="source-{i+1}">{s}</li>'
+    html += "</ol>"
+    return html
 
 
 def _render_comments(comments):
@@ -1042,6 +1104,58 @@ body {{ font-family: 'Georgia', serif; color: var(--fg); background: var(--bg);
 .ch-actions button {{ font-size: 10px; padding: 1px 6px; border: none; background: none;
                       color: var(--fg); cursor: pointer; opacity: 0.4; }}
 .ch-actions button:hover {{ opacity: 1; }}
+/* Enhanced editor */
+.editor-split {{ display: flex; gap: 12px; }}
+.editor-split .editor-src {{ flex: 1; }}
+.editor-split .editor-preview {{ flex: 1; border: 1px solid var(--border); border-radius: 4px;
+                                  padding: 12px; overflow-y: auto; max-height: 600px;
+                                  font-size: 14px; line-height: 1.7; }}
+.editor-toolbar {{ display: flex; gap: 4px; margin-bottom: 6px; }}
+.editor-toolbar button {{ font-size: 11px; padding: 3px 8px; border: 1px solid var(--border);
+                          border-radius: 4px; cursor: pointer; background: var(--bg);
+                          color: var(--fg); font-family: monospace; }}
+.editor-toolbar button:hover {{ background: var(--accent-light); }}
+.editor-toolbar .autosave {{ font-size: 10px; opacity: 0.5; margin-left: auto; line-height: 24px; }}
+/* Citation popover */
+.citation {{ position: relative; }}
+.citation-popover {{ display: none; position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
+                     background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+                     padding: 10px 14px; font-size: 12px; width: 320px; z-index: 50;
+                     box-shadow: 0 4px 12px rgba(0,0,0,0.15); font-weight: normal;
+                     line-height: 1.5; text-align: left; pointer-events: none; }}
+.citation:hover .citation-popover {{ display: block; }}
+.citation-popover .cp-title {{ font-weight: 600; margin-bottom: 4px; color: var(--accent); }}
+.citation-popover .cp-authors {{ opacity: 0.7; font-size: 11px; }}
+.citation-popover .cp-meta {{ font-size: 11px; opacity: 0.6; margin-top: 4px; }}
+/* Verification indicators */
+.citation.verified-supported {{ background: #d1fae5; border-radius: 3px; }}
+.citation.verified-extrapolated {{ background: #fef3c7; border-radius: 3px; }}
+.citation.verified-misrepresented {{ background: #fee2e2; border-radius: 3px; }}
+[data-theme="dark"] .citation.verified-supported {{ background: #064e3b; }}
+[data-theme="dark"] .citation.verified-extrapolated {{ background: #78350f; }}
+[data-theme="dark"] .citation.verified-misrepresented {{ background: #7f1d1d; }}
+/* Autowrite chart */
+.aw-dashboard {{ margin-bottom: 16px; }}
+.aw-chart {{ border: 1px solid var(--border); border-radius: 6px; padding: 8px;
+             background: var(--toolbar-bg); margin-bottom: 8px; }}
+.aw-chart svg {{ width: 100%; height: 120px; }}
+.aw-chart .chart-line {{ fill: none; stroke: var(--accent); stroke-width: 2; }}
+.aw-chart .chart-target {{ stroke: var(--success); stroke-width: 1; stroke-dasharray: 4; }}
+.aw-chart .chart-dot {{ fill: var(--accent); }}
+.aw-log {{ font-size: 12px; font-family: -apple-system, sans-serif; max-height: 200px;
+           overflow-y: auto; padding: 8px 12px; background: var(--toolbar-bg);
+           border-radius: 6px; border: 1px solid var(--border); }}
+.aw-log .log-keep {{ color: var(--success); }}
+.aw-log .log-discard {{ color: var(--danger); }}
+/* Argument map */
+.argue-map {{ border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+              margin-bottom: 16px; }}
+.argue-map svg {{ width: 100%; min-height: 300px; background: var(--toolbar-bg); }}
+.argue-map .node {{ cursor: pointer; }}
+.argue-map .node text {{ font-size: 11px; fill: var(--fg); }}
+.argue-map .link-supports {{ stroke: var(--success); stroke-width: 1.5; }}
+.argue-map .link-contradicts {{ stroke: var(--danger); stroke-width: 1.5; }}
+.argue-map .link-neutral {{ stroke: var(--border); stroke-width: 1; }}
 </style>
 </head>
 <body>
@@ -1094,6 +1208,8 @@ body {{ font-family: 'Georgia', serif; color: var(--fg); background: var(--bg);
     <button onclick="promptArgue()" title="Map evidence for/against a claim">Argue</button>
     <button onclick="doGaps()" title="Analyse gaps in the book">Gaps</button>
     <div class="sep"></div>
+    <button onclick="doVerify()" title="Verify citations against sources">Verify</button>
+    <div class="sep"></div>
     <button onclick="showVersions()" title="View version history and diffs">History</button>
     <button onclick="showDashboard()" title="Book dashboard with completion heatmap">Dashboard</button>
   </div>
@@ -1124,12 +1240,29 @@ body {{ font-family: 'Georgia', serif; color: var(--fg); background: var(--bg);
 
   <div id="read-view">{content_html}</div>
 
-  <form id="edit-view" action="/edit/{active_id}" method="post" style="display:none;">
-    <textarea class="edit-area" name="content" id="edit-area"></textarea>
-    <br>
-    <button type="submit" class="edit-btn" style="margin-top:8px;">Save</button>
-    <button type="button" class="edit-btn" style="background:var(--danger);" onclick="toggleEdit()">Cancel</button>
-  </form>
+  <div id="edit-view" style="display:none;">
+    <div class="editor-toolbar">
+      <button onclick="edInsert('**','**')" title="Bold"><b>B</b></button>
+      <button onclick="edInsert('*','*')" title="Italic"><i>I</i></button>
+      <button onclick="edInsert('## ','')" title="Heading">H2</button>
+      <button onclick="edInsert('### ','')" title="Subheading">H3</button>
+      <button onclick="edInsertCite()" title="Citation">[N]</button>
+      <span class="autosave" id="autosave-status"></span>
+    </div>
+    <div class="editor-split">
+      <div class="editor-src">
+        <textarea class="edit-area" id="edit-area" oninput="edPreview()"></textarea>
+      </div>
+      <div class="editor-preview" id="edit-preview"></div>
+    </div>
+    <div style="margin-top:8px;">
+      <button class="edit-btn" onclick="edSave()">Save</button>
+      <button class="edit-btn" style="background:var(--danger);" onclick="toggleEdit()">Cancel</button>
+    </div>
+  </div>
+
+  <!-- Argument map container -->
+  <div id="argue-map-view" style="display:none;"></div>
 </main>
 
 <!-- Right panel -->
@@ -1635,6 +1768,484 @@ async function deleteChapter(chapterId) {{
   if (!confirm('Delete this chapter? Drafts will be preserved but unlinked.')) return;
   await fetch('/api/chapters/' + chapterId, {{method: 'DELETE'}});
   await refreshAfterJob(null);
+}}
+
+// ── Enhanced Editor (Phase 3a) ────────────────────────────────────────
+let _autosaveTimer = null;
+let _currentRaw = '';
+
+function toggleEdit() {{
+  const rv = document.getElementById('read-view');
+  const ev = document.getElementById('edit-view');
+  const ta = document.getElementById('edit-area');
+  if (ev.style.display === 'none') {{
+    // Load current raw content via API
+    fetch('/api/section/' + currentDraftId).then(r => r.json()).then(data => {{
+      _currentRaw = data.content_raw;
+      ta.value = _currentRaw;
+      edPreview();
+    }});
+    rv.style.display = 'none';
+    ev.style.display = 'block';
+    // Start autosave
+    _autosaveTimer = setInterval(edAutosave, 5000);
+  }} else {{
+    rv.style.display = 'block';
+    ev.style.display = 'none';
+    if (_autosaveTimer) {{ clearInterval(_autosaveTimer); _autosaveTimer = null; }}
+  }}
+}}
+
+function edPreview() {{
+  const ta = document.getElementById('edit-area');
+  const preview = document.getElementById('edit-preview');
+  let md = ta.value;
+  // Simple markdown → HTML for preview
+  md = md.replace(/^### (.+)$/gm, '<h4>$1</h4>');
+  md = md.replace(/^## (.+)$/gm, '<h3>$1</h3>');
+  md = md.replace(/^# (.+)$/gm, '<h2>$1</h2>');
+  md = md.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  md = md.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  md = md.replace(/\[(\d+)\]/g, '<span class="citation">[$1]</span>');
+  const paras = md.split('\\n\\n');
+  preview.innerHTML = paras.map(p => {{
+    p = p.trim();
+    if (!p) return '';
+    if (p.startsWith('<h')) return p;
+    return '<p>' + p + '</p>';
+  }}).join('');
+}}
+
+function edInsert(before, after) {{
+  const ta = document.getElementById('edit-area');
+  const start = ta.selectionStart;
+  const end = ta.selectionEnd;
+  const sel = ta.value.substring(start, end) || 'text';
+  ta.value = ta.value.substring(0, start) + before + sel + after + ta.value.substring(end);
+  ta.selectionStart = start + before.length;
+  ta.selectionEnd = start + before.length + sel.length;
+  ta.focus();
+  edPreview();
+}}
+
+function edInsertCite() {{
+  const n = prompt('Citation number:');
+  if (n) edInsert('[' + n + ']', '');
+}}
+
+async function edSave() {{
+  const ta = document.getElementById('edit-area');
+  const fd = new FormData();
+  fd.append('content', ta.value);
+  await fetch('/edit/' + currentDraftId, {{method: 'POST', body: fd}});
+  document.getElementById('autosave-status').textContent = 'Saved';
+  if (_autosaveTimer) {{ clearInterval(_autosaveTimer); _autosaveTimer = null; }}
+  toggleEdit();
+  loadSection(currentDraftId);
+}}
+
+async function edAutosave() {{
+  const ta = document.getElementById('edit-area');
+  if (ta.value === _currentRaw) return;
+  _currentRaw = ta.value;
+  const fd = new FormData();
+  fd.append('content', ta.value);
+  await fetch('/edit/' + currentDraftId, {{method: 'POST', body: fd}});
+  document.getElementById('autosave-status').textContent = 'Auto-saved';
+  setTimeout(() => {{ document.getElementById('autosave-status').textContent = ''; }}, 2000);
+}}
+
+// ── Claim Verification (Phase 5b) ────────────────────────────────────
+async function doVerify() {{
+  if (!currentDraftId) {{ alert('No draft selected.'); return; }}
+  showStreamPanel('Verifying citations...');
+
+  const fd = new FormData();
+  const res = await fetch('/api/verify/' + currentDraftId, {{method: 'POST', body: fd}});
+  const data = await res.json();
+
+  // Override stream handler to process verification data
+  currentJobId = data.job_id;
+  if (currentEventSource) currentEventSource.close();
+
+  const source = new EventSource('/api/stream/' + data.job_id);
+  currentEventSource = source;
+  const body = document.getElementById('stream-body');
+  const status = document.getElementById('stream-status');
+
+  source.onmessage = function(e) {{
+    const evt = JSON.parse(e.data);
+    if (evt.type === 'progress') {{
+      status.textContent = evt.detail || evt.stage;
+    }}
+    else if (evt.type === 'verification') {{
+      const vd = evt.data;
+      status.textContent = 'Groundedness: ' + (vd.groundedness_score || '?');
+
+      // Show results in stream body
+      let html = '<div style="font-family:-apple-system,sans-serif;">';
+      html += '<div style="font-size:18px;font-weight:bold;margin-bottom:12px;">Groundedness Score: ' +
+        '<span style="color:' + (vd.groundedness_score >= 0.8 ? 'var(--success)' : vd.groundedness_score >= 0.6 ? 'var(--warning)' : 'var(--danger)') + '">' +
+        (vd.groundedness_score || '?') + '</span></div>';
+
+      if (vd.claims) {{
+        vd.claims.forEach(c => {{
+          const color = c.verdict === 'SUPPORTED' ? 'var(--success)' : c.verdict === 'EXTRAPOLATED' ? 'var(--warning)' : 'var(--danger)';
+          html += '<div style="margin:6px 0;padding:6px 10px;border-left:3px solid ' + color + ';background:var(--toolbar-bg);border-radius:4px;">';
+          html += '<span style="font-weight:bold;color:' + color + ';">' + c.verdict + '</span> ';
+          html += '<span style="font-size:12px;">' + c.citation + '</span><br>';
+          html += '<span style="font-size:12px;opacity:0.7;">' + (c.text || '').substring(0, 120) + '</span>';
+          if (c.reason) html += '<br><span style="font-size:11px;opacity:0.5;">' + c.reason + '</span>';
+          html += '</div>';
+        }});
+      }}
+
+      if (vd.unsupported_claims && vd.unsupported_claims.length > 0) {{
+        html += '<div style="margin-top:12px;font-weight:bold;color:var(--danger);">Unsupported Claims:</div>';
+        vd.unsupported_claims.forEach(u => {{
+          html += '<div style="font-size:12px;color:var(--danger);margin:4px 0;">- ' + u.substring(0, 120) + '</div>';
+        }});
+      }}
+      html += '</div>';
+      body.innerHTML = html;
+
+      // Apply color indicators to citations in the read view
+      applyVerificationColors(vd);
+    }}
+    else if (evt.type === 'completed') {{
+      hideStreamPanel();
+      source.close(); currentEventSource = null; currentJobId = null;
+    }}
+    else if (evt.type === 'error') {{
+      status.textContent = 'Error: ' + evt.message;
+      body.innerHTML = '<div style="color:var(--danger);">' + evt.message + '</div>';
+      hideStreamPanel();
+      source.close(); currentEventSource = null; currentJobId = null;
+    }}
+    else if (evt.type === 'done') {{
+      hideStreamPanel();
+      source.close(); currentEventSource = null; currentJobId = null;
+    }}
+  }};
+}}
+
+function applyVerificationColors(vd) {{
+  if (!vd.claims) return;
+  const classMap = {{ 'SUPPORTED': 'verified-supported', 'EXTRAPOLATED': 'verified-extrapolated', 'MISREPRESENTED': 'verified-misrepresented' }};
+  vd.claims.forEach(c => {{
+    const ref = c.citation ? c.citation.replace(/[\[\]]/g, '') : '';
+    if (!ref) return;
+    document.querySelectorAll('.citation[data-ref="' + ref + '"]').forEach(el => {{
+      el.className = 'citation ' + (classMap[c.verdict] || '');
+    }});
+  }});
+}}
+
+// ── Citation Popovers (Phase 5a) ─────────────────────────────────────
+function buildPopovers() {{
+  // Extract source data from the sources panel
+  const sourceItems = document.querySelectorAll('#panel-sources li');
+  const sourceData = {{}};
+  sourceItems.forEach((li, i) => {{
+    sourceData[i + 1] = li.textContent;
+  }});
+
+  document.querySelectorAll('.citation').forEach(el => {{
+    const ref = el.dataset.ref;
+    if (!ref || el.querySelector('.citation-popover')) return;
+    const src = sourceData[parseInt(ref)];
+    if (!src) return;
+
+    const popover = document.createElement('div');
+    popover.className = 'citation-popover';
+
+    // Parse the APA-style citation: [N] Author (year). Title. Journal. doi:...
+    const parts = src.replace(/^\[\d+\]\s*/, '').split('. ');
+    const titlePart = parts.length > 1 ? parts[1] || '' : parts[0] || '';
+    const authorYear = parts[0] || '';
+    const rest = parts.slice(2).join('. ');
+
+    popover.innerHTML = '<div class="cp-title">' + titlePart + '</div>' +
+      '<div class="cp-authors">' + authorYear + '</div>' +
+      (rest ? '<div class="cp-meta">' + rest + '</div>' : '');
+
+    el.appendChild(popover);
+    el.style.cursor = 'pointer';
+    el.onclick = function() {{
+      const target = document.getElementById('source-' + ref);
+      if (target) target.scrollIntoView({{behavior: 'smooth', block: 'center'}});
+    }};
+  }});
+}}
+
+// Build popovers after page load and after SPA navigation
+document.addEventListener('DOMContentLoaded', buildPopovers);
+const _origLoadSection2 = loadSection;
+loadSection = async function(draftId) {{
+  await _origLoadSection2(draftId);
+  setTimeout(buildPopovers, 100);
+}};
+
+// ── Autowrite Dashboard (Phase 4) ────────────────────────────────────
+// Enhanced autowrite that shows convergence chart
+let awScores = [];
+let awTargetScore = 0.85;
+
+async function doAutowrite() {{
+  if (!currentChapterId) {{ alert('No chapter selected.'); return; }}
+  const section = currentSectionType || 'introduction';
+  const maxIter = prompt('Max iterations (default 3):', '3');
+  if (maxIter === null) return;
+  const targetStr = prompt('Target score (default 0.85):', '0.85');
+  if (targetStr === null) return;
+  awTargetScore = parseFloat(targetStr) || 0.85;
+  awScores = [];
+
+  showStreamPanel('Autowriting ' + section + '...');
+
+  // Add chart + log to the stream panel
+  const body = document.getElementById('stream-body');
+  body.innerHTML = '<div class="aw-dashboard">' +
+    '<div class="aw-chart" id="aw-chart"><svg viewBox="0 0 400 120"></svg></div>' +
+    '<div class="aw-log" id="aw-log"></div>' +
+    '</div>' +
+    '<div id="aw-content" style="margin-top:12px;white-space:pre-wrap;"></div>';
+
+  const fd = new FormData();
+  fd.append('chapter_id', currentChapterId);
+  fd.append('section_type', section);
+  fd.append('max_iter', maxIter || '3');
+  fd.append('target_score', String(awTargetScore));
+  const res = await fetch('/api/autowrite', {{method: 'POST', body: fd}});
+  const data = await res.json();
+
+  // Custom stream handler for autowrite
+  currentJobId = data.job_id;
+  if (currentEventSource) currentEventSource.close();
+  const source = new EventSource('/api/stream/' + data.job_id);
+  currentEventSource = source;
+  const status = document.getElementById('stream-status');
+  const scoresEl = document.getElementById('stream-scores');
+  const awContent = document.getElementById('aw-content');
+  const awLog = document.getElementById('aw-log');
+
+  source.onmessage = function(e) {{
+    const evt = JSON.parse(e.data);
+    if (evt.type === 'token') {{
+      awContent.innerHTML += evt.text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      awContent.scrollTop = awContent.scrollHeight;
+    }}
+    else if (evt.type === 'progress') {{
+      status.textContent = evt.detail || evt.stage;
+    }}
+    else if (evt.type === 'scores') {{
+      awScores.push(evt.scores);
+      drawConvergenceChart();
+      // Show score bars
+      scoresEl.style.display = 'block';
+      const s = evt.scores;
+      const dims = ['groundedness', 'completeness', 'coherence', 'citation_accuracy', 'overall'];
+      scoresEl.innerHTML = 'Iteration ' + evt.iteration + ': ' + dims.map(d => {{
+        const v = (s[d] || 0).toFixed(2);
+        const cls = v >= 0.85 ? 'good' : v >= 0.7 ? 'mid' : 'low';
+        return '<span class="score-bar"><span class="label">' + d.slice(0,5) + '</span> ' +
+          '<span class="value ' + cls + '">' + v + '</span></span>';
+      }}).join('');
+    }}
+    else if (evt.type === 'iteration_start') {{
+      awContent.innerHTML = '';
+      awLog.innerHTML += '<div style="opacity:0.5;border-top:1px solid var(--border);padding-top:4px;margin-top:4px;">Iteration ' + evt.iteration + '/' + evt.max + '</div>';
+    }}
+    else if (evt.type === 'revision_verdict') {{
+      const cls = evt.action === 'KEEP' ? 'log-keep' : 'log-discard';
+      const icon = evt.action === 'KEEP' ? '\\u2713' : '\\u2717';
+      awLog.innerHTML += '<div class="' + cls + '">' + icon + ' ' + evt.action +
+        ': ' + evt.old_score.toFixed(2) + ' \\u2192 ' + evt.new_score.toFixed(2) + '</div>';
+      awContent.innerHTML = '';
+    }}
+    else if (evt.type === 'converged') {{
+      status.textContent = 'Converged at iteration ' + evt.iteration + ' (score: ' + evt.final_score.toFixed(2) + ')';
+      awLog.innerHTML += '<div class="log-keep" style="font-weight:bold;">\\u2713 CONVERGED (score: ' + evt.final_score.toFixed(2) + ')</div>';
+    }}
+    else if (evt.type === 'completed') {{
+      status.textContent = 'Done';
+      hideStreamPanel();
+      source.close(); currentEventSource = null; currentJobId = null;
+      refreshAfterJob(evt.draft_id);
+    }}
+    else if (evt.type === 'error') {{
+      status.textContent = 'Error: ' + evt.message;
+      awLog.innerHTML += '<div style="color:var(--danger);">' + evt.message + '</div>';
+      hideStreamPanel();
+      source.close(); currentEventSource = null; currentJobId = null;
+    }}
+    else if (evt.type === 'done') {{
+      hideStreamPanel();
+      source.close(); currentEventSource = null; currentJobId = null;
+    }}
+  }};
+}}
+
+function drawConvergenceChart() {{
+  const svg = document.querySelector('#aw-chart svg');
+  if (!svg || awScores.length === 0) return;
+
+  const w = 400, h = 120, pad = 20;
+  const n = awScores.length;
+  const maxN = Math.max(n, 3);
+
+  let html = '';
+  // Target line
+  const ty = h - pad - (awTargetScore * (h - 2 * pad));
+  html += '<line x1="' + pad + '" y1="' + ty + '" x2="' + (w - pad) + '" y2="' + ty + '" class="chart-target"/>';
+  html += '<text x="' + (w - pad + 4) + '" y="' + (ty + 3) + '" font-size="9" fill="var(--success)">' + awTargetScore + '</text>';
+
+  // Score line
+  const points = awScores.map((s, i) => {{
+    const x = pad + (i / (maxN - 1)) * (w - 2 * pad);
+    const y = h - pad - ((s.overall || 0) * (h - 2 * pad));
+    return x + ',' + y;
+  }});
+  html += '<polyline points="' + points.join(' ') + '" class="chart-line"/>';
+
+  // Dots
+  awScores.forEach((s, i) => {{
+    const x = pad + (i / (maxN - 1)) * (w - 2 * pad);
+    const y = h - pad - ((s.overall || 0) * (h - 2 * pad));
+    html += '<circle cx="' + x + '" cy="' + y + '" r="4" class="chart-dot"/>';
+    html += '<text x="' + x + '" y="' + (y - 8) + '" font-size="10" text-anchor="middle" fill="var(--fg)">' + (s.overall || 0).toFixed(2) + '</text>';
+  }});
+
+  // Axes labels
+  html += '<text x="' + pad + '" y="' + (h - 2) + '" font-size="9" fill="var(--fg)" opacity="0.5">1</text>';
+  if (n > 1) html += '<text x="' + (w - pad) + '" y="' + (h - 2) + '" font-size="9" fill="var(--fg)" opacity="0.5" text-anchor="end">' + n + '</text>';
+
+  svg.innerHTML = html;
+}}
+
+// ── Argument Map Visualization (Phase 5c) ─────────────────────────────
+async function promptArgue() {{
+  const claim = prompt('Enter a claim to map evidence for/against:');
+  if (!claim) return;
+  showStreamPanel('Mapping argument...');
+
+  const fd = new FormData();
+  fd.append('claim', claim);
+  const res = await fetch('/api/argue', {{method: 'POST', body: fd}});
+  const data = await res.json();
+
+  // Custom handler that parses the argue output and builds a map
+  currentJobId = data.job_id;
+  if (currentEventSource) currentEventSource.close();
+  const source = new EventSource('/api/stream/' + data.job_id);
+  currentEventSource = source;
+  const body = document.getElementById('stream-body');
+  const status = document.getElementById('stream-status');
+  let fullText = '';
+
+  source.onmessage = function(e) {{
+    const evt = JSON.parse(e.data);
+    if (evt.type === 'token') {{
+      fullText += evt.text;
+      body.innerHTML = fullText.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      body.scrollTop = body.scrollHeight;
+    }}
+    else if (evt.type === 'progress') {{
+      status.textContent = evt.detail || evt.stage;
+    }}
+    else if (evt.type === 'completed') {{
+      status.textContent = 'Done';
+      hideStreamPanel();
+      source.close(); currentEventSource = null; currentJobId = null;
+      // Build visual argument map from the text
+      buildArgueMap(claim, fullText);
+      if (evt.draft_id) refreshAfterJob(evt.draft_id);
+    }}
+    else if (evt.type === 'error') {{
+      status.textContent = 'Error: ' + evt.message;
+      hideStreamPanel();
+      source.close(); currentEventSource = null; currentJobId = null;
+    }}
+    else if (evt.type === 'done') {{
+      hideStreamPanel();
+      source.close(); currentEventSource = null; currentJobId = null;
+    }}
+  }};
+}}
+
+function buildArgueMap(claim, text) {{
+  // Parse the structured argue output to extract supporting/contradicting/neutral
+  const sections = {{supporting: [], contradicting: [], neutral: []}};
+  let currentSection = null;
+
+  text.split('\\n').forEach(line => {{
+    const lower = line.toLowerCase();
+    if (lower.includes('evidence supporting') || lower.includes('supports')) currentSection = 'supporting';
+    else if (lower.includes('counterargument') || lower.includes('contradict')) currentSection = 'contradicting';
+    else if (lower.includes('methodological') || lower.includes('neutral')) currentSection = 'neutral';
+    else if (lower.includes('assessment') || lower.includes('overall')) currentSection = null;
+
+    // Extract citations from the line
+    const cites = line.match(/\[\d+\]/g);
+    if (currentSection && cites) {{
+      cites.forEach(c => {{
+        if (!sections[currentSection].includes(c)) sections[currentSection].push(c);
+      }});
+    }}
+  }});
+
+  const mapDiv = document.getElementById('argue-map-view');
+  if (sections.supporting.length === 0 && sections.contradicting.length === 0 && sections.neutral.length === 0) {{
+    mapDiv.style.display = 'none';
+    return;
+  }}
+
+  const w = 700, h = 350;
+  const cx = w / 2, cy = h / 2;
+
+  let svg = '<svg viewBox="0 0 ' + w + ' ' + h + '" xmlns="http://www.w3.org/2000/svg">';
+
+  // Central claim
+  svg += '<rect x="' + (cx - 120) + '" y="' + (cy - 20) + '" width="240" height="40" rx="8" fill="var(--accent)" opacity="0.9"/>';
+  svg += '<text x="' + cx + '" y="' + (cy + 5) + '" text-anchor="middle" fill="white" font-size="12" font-weight="bold">' +
+    claim.substring(0, 40) + (claim.length > 40 ? '...' : '') + '</text>';
+
+  // Supporting (left)
+  sections.supporting.forEach((c, i) => {{
+    const ny = 30 + i * 45;
+    const nx = 80;
+    svg += '<line x1="' + nx + '" y1="' + ny + '" x2="' + (cx - 120) + '" y2="' + cy + '" class="link-supports"/>';
+    svg += '<rect x="' + (nx - 40) + '" y="' + (ny - 14) + '" width="80" height="28" rx="6" fill="var(--success)" opacity="0.2" stroke="var(--success)"/>';
+    svg += '<text x="' + nx + '" y="' + (ny + 4) + '" text-anchor="middle" font-size="12" fill="var(--fg)">' + c + '</text>';
+  }});
+
+  // Contradicting (right)
+  sections.contradicting.forEach((c, i) => {{
+    const ny = 30 + i * 45;
+    const nx = w - 80;
+    svg += '<line x1="' + nx + '" y1="' + ny + '" x2="' + (cx + 120) + '" y2="' + cy + '" class="link-contradicts"/>';
+    svg += '<rect x="' + (nx - 40) + '" y="' + (ny - 14) + '" width="80" height="28" rx="6" fill="var(--danger)" opacity="0.2" stroke="var(--danger)"/>';
+    svg += '<text x="' + nx + '" y="' + (ny + 4) + '" text-anchor="middle" font-size="12" fill="var(--fg)">' + c + '</text>';
+  }});
+
+  // Neutral (bottom)
+  sections.neutral.forEach((c, i) => {{
+    const nx = cx - 100 + i * 70;
+    const ny = h - 40;
+    svg += '<line x1="' + nx + '" y1="' + ny + '" x2="' + cx + '" y2="' + (cy + 20) + '" class="link-neutral"/>';
+    svg += '<rect x="' + (nx - 30) + '" y="' + (ny - 14) + '" width="60" height="28" rx="6" fill="var(--border)" opacity="0.3" stroke="var(--border)"/>';
+    svg += '<text x="' + nx + '" y="' + (ny + 4) + '" text-anchor="middle" font-size="12" fill="var(--fg)">' + c + '</text>';
+  }});
+
+  // Legend
+  svg += '<text x="10" y="' + (h - 5) + '" font-size="10" fill="var(--success)">\\u25cf Supports</text>';
+  svg += '<text x="100" y="' + (h - 5) + '" font-size="10" fill="var(--danger)">\\u25cf Contradicts</text>';
+  svg += '<text x="210" y="' + (h - 5) + '" font-size="10" fill="var(--fg)" opacity="0.5">\\u25cf Neutral</text>';
+
+  svg += '</svg>';
+
+  mapDiv.innerHTML = '<div class="argue-map">' + svg + '</div>';
+  mapDiv.style.display = 'block';
 }}
 </script>
 </body>

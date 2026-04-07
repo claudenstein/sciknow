@@ -1074,9 +1074,12 @@ sciknow book write "Global Cooling" 1 --section introduction    # uses chapter's
 - **Version history + diffs** — click "History" to see all versions of a section (v1 -> v2 -> v3). Select two versions to see a word-level diff with red deletions and green insertions
 - **Chapter management** — add chapters from the sidebar, delete chapters (hover to reveal the X button). Chapters can be reordered via the API
 - **Gap visualization** — the dashboard shows all open gaps with type badges (draft/evidence/topic/argument) and one-click actions: "Write" triggers a draft for missing sections, "Expand" shows the CLI command to grow the corpus
-- **Inline editing** — click "Edit" to modify draft text directly in the browser, saves back to DB
+- **Enhanced editor** — split-pane markdown editor with live preview. Toolbar for bold, italic, headings, citation insertion. Auto-saves every 5 seconds while editing
+- **Autowrite dashboard** — the "Autowrite" button runs the full convergence loop with a live SVG convergence chart (score over iterations), color-coded score bars, a decision log (KEEP/DISCARD verdicts), and a stop button
+- **Citation popovers** — hover over any `[N]` citation to see the paper title, authors, year, and journal in a floating card. Click to scroll to the source in the right panel
+- **Claim verification** — click "Verify" to run groundedness checking. Each citation gets a green (supported), yellow (extrapolated), or red (misrepresented) indicator. Shows a groundedness score and detailed per-claim breakdown
+- **Argument map visualization** — the "Argue" button maps evidence for/against a claim and renders an SVG diagram: central claim node, green lines to supporting evidence, red lines to contradicting evidence, gray lines to neutral/methodological sources
 - **Comments/annotations** — add comments per section, resolve them when addressed. Stored in the `draft_comments` table
-- **Citation links** — `[N]` references are highlighted and the source list is shown in the right panel
 - **Review feedback** — the right panel shows the latest review from `book review`
 - **Search** — search within all book content
 - **Dark/light theme** — toggle with the button in the bottom-right corner
@@ -1095,6 +1098,7 @@ The web reader exposes a JSON + SSE API for all book operations:
 | `/api/revise/{draft_id}` | POST | Start a revision |
 | `/api/autowrite` | POST | Start the convergence loop |
 | `/api/argue` | POST | Map evidence for/against a claim |
+| `/api/verify/{draft_id}` | POST | Run claim verification (returns per-citation verdicts) |
 | `/api/gaps` | POST | Run gap analysis |
 | `/api/stream/{job_id}` | GET | SSE endpoint — streams token/progress/score events |
 | `/api/jobs/{job_id}` | DELETE | Cancel a running job |
