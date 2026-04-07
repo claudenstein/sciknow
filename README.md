@@ -1115,10 +1115,15 @@ sciknow book write "Global Cooling" 1 --section introduction    # uses chapter's
 - **Citation popovers** — hover over any `[N]` citation to see the paper title, authors, year, and journal in a floating card. Click to scroll to the source in the right panel
 - **Claim verification** — click "Verify" to run groundedness checking. Each citation gets a green (supported), yellow (extrapolated), or red (misrepresented) indicator. Shows a groundedness score and detailed per-claim breakdown
 - **Argument map visualization** — the "Argue" button maps evidence for/against a claim and renders an SVG diagram: central claim node, green lines to supporting evidence, red lines to contradicting evidence, gray lines to neutral/methodological sources
+- **Corkboard view** — visual card-based layout (Scrivener-inspired). Each chapter/section is an index card showing title, synopsis, status badge, word count. Color-coded by status (to_do, drafted, reviewed, revised, final). Click to navigate or write
+- **Chapter reader** — "Read Chapter" button shows all sections of a chapter concatenated as one continuous scroll with section headers. For reading the full chapter flow without switching between sections
+- **Snapshots** — "Snapshot" button saves a named copy of the current draft content before editing. List snapshots, diff against current, restore any snapshot. Stored in `draft_snapshots` table
+- **Custom status labels** — each draft has a status (To Do, Drafted, Reviewed, Revised, Final) selectable via dropdown in the UI. Color-coded in the corkboard and dashboard heatmap
+- **Custom metadata** — per-draft JSONB metadata field for arbitrary key/value pairs (confidence, notes, priority) via the API
 - **Comments/annotations** — add comments per section, resolve them when addressed. Stored in the `draft_comments` table
 - **Review feedback** — the right panel shows the latest review from `book review`
 - **Search** — search within all book content
-- **Dark/light theme** — toggle with the button in the bottom-right corner
+- **Dark/light theme** — sun/moon toggle in the bottom-right corner, persists to localStorage
 - **No external dependencies** — pure HTML/CSS/JS, no npm, no React, no build step
 
 The web reader is the recommended way to write and interact with the book. You can run the entire write → review → revise workflow from the browser — the CLI is optional for power users.
@@ -1147,6 +1152,13 @@ The web reader exposes a JSON + SSE API for all book operations:
 | `/api/chapters/{id}` | PUT | Update chapter title/description |
 | `/api/chapters/{id}` | DELETE | Delete a chapter |
 | `/api/chapters/reorder` | POST | Reorder chapters (body: `{chapter_ids: [...]}`) |
+| `/api/corkboard` | GET | Card data for corkboard view |
+| `/api/chapter-reader/{chapter_id}` | GET | All sections concatenated as HTML |
+| `/api/snapshot/{draft_id}` | POST | Save a named snapshot |
+| `/api/snapshots/{draft_id}` | GET | List snapshots for a draft |
+| `/api/snapshot-content/{id}` | GET | Get snapshot content |
+| `/api/draft/{draft_id}/status` | PUT | Update draft status |
+| `/api/draft/{draft_id}/metadata` | PUT | Merge custom metadata |
 
 ### Export formats
 

@@ -289,6 +289,8 @@ class Draft(Base):
         PG_UUID(as_uuid=True), ForeignKey("drafts.id", ondelete="SET NULL"), nullable=True
     )
     review_feedback: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="drafted")
+    custom_metadata: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -302,6 +304,25 @@ class Draft(Base):
     __table_args__ = (
         Index("idx_drafts_book", "book_id", postgresql_where="book_id IS NOT NULL"),
         Index("idx_drafts_chapter", "chapter_id", postgresql_where="chapter_id IS NOT NULL"),
+    )
+
+
+class DraftSnapshot(Base):
+    __tablename__ = "draft_snapshots"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    draft_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("drafts.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    word_count: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("idx_snapshots_draft", "draft_id"),
     )
 
 

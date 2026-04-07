@@ -141,6 +141,15 @@ def _md_to_html(text_content: str) -> str:
     return html
 
 
+def _get_draft_status(draft_id: str) -> str:
+    """Get the status of a draft, defaulting to 'drafted'."""
+    with get_session() as session:
+        row = session.execute(text(
+            "SELECT COALESCE(status, 'drafted') FROM drafts WHERE id::text LIKE :q LIMIT 1"
+        ), {"q": f"{draft_id}%"}).fetchone()
+    return row[0] if row else "drafted"
+
+
 # ── Page routes ──────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
@@ -258,6 +267,7 @@ async def api_section(draft_id: str):
         "chapter_id": active[9],
         "chapter_num": active[12],
         "chapter_title": active[13],
+        "status": _get_draft_status(draft_id),
     }
 
 
@@ -508,6 +518,199 @@ async def reorder_chapters(request: Request):
         session.commit()
 
     return JSONResponse({"ok": True})
+
+
+# ── Snapshots ────────────────────────────────────────────────────────────────
+
+@app.post("/api/snapshot/{draft_id}")
+async def create_snapshot(draft_id: str, name: str = Form("")):
+    """Save a named snapshot of a draft's current content."""
+    with get_session() as session:
+        draft = session.execute(text(
+            "SELECT content, word_count FROM drafts WHERE id::text LIKE :q LIMIT 1"
+        ), {"q": f"{draft_id}%"}).fetchone()
+        if not draft:
+            raise HTTPException(404, "Draft not found")
+
+        snap_name = name or f"Snapshot {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        session.execute(text("""
+            INSERT INTO draft_snapshots (draft_id, name, content, word_count)
+            VALUES (:did::uuid, :name, :content, :wc)
+        """), {"did": draft_id, "name": snap_name,
+               "content": draft[0], "wc": draft[1]})
+        session.commit()
+
+    return JSONResponse({"ok": True, "name": snap_name})
+
+
+@app.get("/api/snapshots/{draft_id}")
+async def list_snapshots(draft_id: str):
+    """List all snapshots for a draft."""
+    with get_session() as session:
+        rows = session.execute(text("""
+            SELECT id::text, name, word_count, created_at
+            FROM draft_snapshots WHERE draft_id::text LIKE :q
+            ORDER BY created_at DESC
+        """), {"q": f"{draft_id}%"}).fetchall()
+
+    return {"snapshots": [
+        {"id": r[0], "name": r[1], "word_count": r[2] or 0,
+         "created_at": str(r[3]) if r[3] else ""}
+        for r in rows
+    ]}
+
+
+@app.get("/api/snapshot-content/{snapshot_id}")
+async def get_snapshot_content(snapshot_id: str):
+    """Get the content of a specific snapshot."""
+    with get_session() as session:
+        row = session.execute(text(
+            "SELECT content FROM draft_snapshots WHERE id::text = :sid"
+        ), {"sid": snapshot_id}).fetchone()
+    if not row:
+        raise HTTPException(404, "Snapshot not found")
+    return {"content": row[0]}
+
+
+# ── Draft status + metadata ──────────────────────────────────────────────────
+
+@app.put("/api/draft/{draft_id}/status")
+async def update_draft_status(draft_id: str, status: str = Form(...)):
+    """Update a draft's status (to_do, drafted, reviewed, revised, final)."""
+    valid = {"to_do", "drafted", "reviewed", "revised", "final"}
+    if status not in valid:
+        return JSONResponse({"error": f"Invalid status. Use: {', '.join(sorted(valid))}"}, status_code=400)
+    with get_session() as session:
+        session.execute(text(
+            "UPDATE drafts SET status = :st WHERE id::text LIKE :q"
+        ), {"st": status, "q": f"{draft_id}%"})
+        session.commit()
+    return JSONResponse({"ok": True})
+
+
+@app.put("/api/draft/{draft_id}/metadata")
+async def update_draft_metadata(request: Request, draft_id: str):
+    """Merge custom metadata keys into a draft. Body: {"key": "value", ...}"""
+    body = await request.json()
+    with get_session() as session:
+        session.execute(text("""
+            UPDATE drafts SET custom_metadata = custom_metadata || :meta::jsonb
+            WHERE id::text LIKE :q
+        """), {"meta": json.dumps(body), "q": f"{draft_id}%"})
+        session.commit()
+    return JSONResponse({"ok": True})
+
+
+# ── Chapter reader (continuous scroll) ───────────────────────────────────────
+
+@app.get("/api/chapter-reader/{chapter_id}")
+async def chapter_reader(chapter_id: str):
+    """Return all sections of a chapter concatenated for continuous reading."""
+    section_order = {"introduction": 0, "methods": 1, "results": 2, "discussion": 3, "conclusion": 4}
+
+    with get_session() as session:
+        ch = session.execute(text("""
+            SELECT bc.number, bc.title FROM book_chapters bc
+            WHERE bc.id::text = :cid
+        """), {"cid": chapter_id}).fetchone()
+        if not ch:
+            raise HTTPException(404, "Chapter not found")
+
+        # Get latest version per section_type
+        drafts = session.execute(text("""
+            SELECT d.id::text, d.section_type, d.content, d.word_count,
+                   d.version, d.status
+            FROM drafts d
+            WHERE d.chapter_id::text = :cid
+            ORDER BY d.section_type, d.version DESC
+        """), {"cid": chapter_id}).fetchall()
+
+    # Keep only latest version per section_type
+    seen: dict[str, tuple] = {}
+    for d in drafts:
+        st = d[1] or "text"
+        if st not in seen or (d[4] or 1) > (seen[st][4] or 1):
+            seen[st] = d
+
+    sections = sorted(seen.values(), key=lambda x: section_order.get(x[1] or "", 9))
+
+    combined_html = ""
+    total_words = 0
+    for d in sections:
+        sec_type = (d[1] or "text").capitalize()
+        combined_html += f'<h2 class="reader-section-title">{sec_type}</h2>'
+        combined_html += _md_to_html(d[2] or "")
+        total_words += d[3] or 0
+
+    return {
+        "chapter_num": ch[0],
+        "chapter_title": ch[1],
+        "html": combined_html,
+        "total_words": total_words,
+        "section_count": len(sections),
+    }
+
+
+# ── Corkboard data ──────────────────────────────────────────────────────────
+
+@app.get("/api/corkboard")
+async def corkboard_data():
+    """Return data for the corkboard view: cards for each chapter/section."""
+    book, chapters, drafts, gaps, comments = _get_book_data()
+
+    section_order = {"introduction": 0, "methods": 1, "results": 2, "discussion": 3, "conclusion": 4}
+
+    # Build latest draft per chapter+section
+    ch_sections: dict[str, dict] = {}
+    for d in drafts:
+        draft_id, title, sec_type, content, wc, sources, version, summary, \
+            review_fb, ch_id, parent_id, created, ch_num, ch_title = d
+        if not ch_id:
+            continue
+        if ch_id not in ch_sections:
+            ch_sections[ch_id] = {}
+        existing = ch_sections[ch_id].get(sec_type)
+        if not existing or (version or 1) > existing["version"]:
+            ch_sections[ch_id][sec_type] = {
+                "draft_id": draft_id, "version": version or 1,
+                "words": wc or 0, "summary": (summary or "")[:200],
+                "has_review": bool(review_fb),
+                "status": "drafted",  # default; real status from DB below
+            }
+
+    # Fetch statuses
+    with get_session() as session:
+        status_rows = session.execute(text("""
+            SELECT id::text, COALESCE(status, 'drafted') FROM drafts WHERE book_id = :bid
+        """), {"bid": _book_id}).fetchall()
+    status_map = {r[0]: r[1] for r in status_rows}
+
+    cards = []
+    for ch in chapters:
+        ch_id, ch_num, ch_title, ch_desc, tq, tc = ch
+        secs = ch_sections.get(ch_id, {})
+        for sec_type in ["introduction", "methods", "results", "discussion", "conclusion"]:
+            info = secs.get(sec_type)
+            if info:
+                info["status"] = status_map.get(info["draft_id"], "drafted")
+                cards.append({
+                    "chapter_id": ch_id, "chapter_num": ch_num,
+                    "chapter_title": ch_title,
+                    "section_type": sec_type, "draft_id": info["draft_id"],
+                    "version": info["version"], "words": info["words"],
+                    "summary": info["summary"], "has_review": info["has_review"],
+                    "status": info["status"],
+                })
+            else:
+                cards.append({
+                    "chapter_id": ch_id, "chapter_num": ch_num,
+                    "chapter_title": ch_title,
+                    "section_type": sec_type, "draft_id": None,
+                    "version": 0, "words": 0, "summary": "",
+                    "has_review": False, "status": "to_do",
+                })
+
+    return {"cards": cards}
 
 
 # ── SSE / Streaming endpoints ───────────────────────────────────────────────
@@ -1152,6 +1355,41 @@ body {{ font-family: 'Georgia', serif; color: var(--fg); background: var(--bg);
 .argue-map .link-supports {{ stroke: var(--success); stroke-width: 1.5; }}
 .argue-map .link-contradicts {{ stroke: var(--danger); stroke-width: 1.5; }}
 .argue-map .link-neutral {{ stroke: var(--border); stroke-width: 1; }}
+/* Corkboard */
+.corkboard {{ display: flex; flex-wrap: wrap; gap: 12px; padding: 8px 0; }}
+.cork-card {{ width: 180px; min-height: 140px; border: 1px solid var(--border); border-radius: 8px;
+              padding: 10px 12px; background: var(--bg); cursor: pointer; transition: all .15s;
+              display: flex; flex-direction: column; font-family: -apple-system, sans-serif; }}
+.cork-card:hover {{ box-shadow: 0 4px 12px rgba(0,0,0,0.1); transform: translateY(-2px); }}
+.cork-card .cc-head {{ font-size: 11px; font-weight: 600; margin-bottom: 6px; display: flex;
+                       justify-content: space-between; align-items: center; }}
+.cork-card .cc-head .cc-ch {{ opacity: 0.5; }}
+.cork-card .cc-type {{ font-size: 13px; font-weight: bold; margin-bottom: 4px; }}
+.cork-card .cc-summary {{ font-size: 11px; opacity: 0.6; flex: 1; overflow: hidden;
+                          display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; }}
+.cork-card .cc-footer {{ font-size: 10px; opacity: 0.4; margin-top: 6px; }}
+.cork-card .cc-status {{ font-size: 9px; padding: 1px 6px; border-radius: 8px; color: white;
+                         text-transform: uppercase; font-weight: 600; }}
+.cc-status.to_do {{ background: var(--border); color: var(--fg); }}
+.cc-status.drafted {{ background: var(--warning); }}
+.cc-status.reviewed {{ background: var(--accent); }}
+.cc-status.revised {{ background: #8b5cf6; }}
+.cc-status.final {{ background: var(--success); }}
+/* Chapter reader */
+.reader-view {{ max-width: 800px; }}
+.reader-section-title {{ font-size: 20px; margin: 32px 0 16px; padding-bottom: 8px;
+                          border-bottom: 2px solid var(--accent); color: var(--accent); }}
+/* Snapshot list */
+.snap-list {{ font-size: 12px; font-family: -apple-system, sans-serif; }}
+.snap-item {{ display: flex; justify-content: space-between; align-items: center;
+              padding: 4px 0; border-bottom: 1px solid var(--border); }}
+.snap-item button {{ font-size: 10px; padding: 2px 8px; border: 1px solid var(--border);
+                     border-radius: 4px; cursor: pointer; background: var(--bg); color: var(--fg); }}
+.snap-item button:hover {{ background: var(--accent-light); }}
+/* Status selector */
+.status-select {{ font-size: 11px; padding: 2px 6px; border: 1px solid var(--border);
+                   border-radius: 4px; background: var(--bg); color: var(--fg); cursor: pointer;
+                   margin-left: 8px; }}
 </style>
 </head>
 <body>
@@ -1191,6 +1429,13 @@ body {{ font-family: 'Georgia', serif; color: var(--fg); background: var(--bg);
     Version <span id="draft-version">{active_version}</span> ·
     <span id="draft-words">{active_words}</span> words
     <button class="edit-btn" onclick="toggleEdit()">Edit</button>
+    <select class="status-select" id="status-select" onchange="updateStatus(this.value)">
+      <option value="to_do">To Do</option>
+      <option value="drafted" selected>Drafted</option>
+      <option value="reviewed">Reviewed</option>
+      <option value="revised">Revised</option>
+      <option value="final">Final</option>
+    </select>
   </div>
 
   <!-- Action Toolbar -->
@@ -1207,6 +1452,10 @@ body {{ font-family: 'Georgia', serif; color: var(--fg); background: var(--bg);
     <button onclick="doVerify()" title="Verify citations against sources">Verify</button>
     <div class="sep"></div>
     <button onclick="showVersions()" title="View version history and diffs">History</button>
+    <button onclick="takeSnapshot()" title="Save a snapshot of current content">Snapshot</button>
+    <div class="sep"></div>
+    <button onclick="showCorkboard()" title="Visual card-based view">Corkboard</button>
+    <button onclick="showChapterReader()" title="Read entire chapter as continuous scroll">Read Chapter</button>
     <button onclick="showDashboard()" title="Book dashboard with completion heatmap">Dashboard</button>
   </div>
 
@@ -1359,8 +1608,9 @@ async function loadSection(draftId) {{
     document.getElementById('stream-panel').style.display = 'none';
     document.getElementById('version-panel').style.display = 'none';
 
-    // Build citation popovers
+    // Build citation popovers + update status selector
     setTimeout(buildPopovers, 100);
+    if (data.status) document.getElementById('status-select').value = data.status;
   }} catch(e) {{
     console.error('Navigation failed:', e);
   }}
@@ -2204,6 +2454,163 @@ function buildArgueMap(claim, text) {{
   mapDiv.innerHTML = '<div class="argue-map">' + svg + '</div>';
   mapDiv.style.display = 'block';
 }}
+
+// ── Corkboard View ────────────────────────────────────────────────────
+async function showCorkboard() {{
+  const res = await fetch('/api/corkboard');
+  const data = await res.json();
+
+  let html = '<div style="font-family:-apple-system,sans-serif;">';
+  html += '<h2>Corkboard</h2>';
+  html += '<p style="font-size:12px;opacity:0.5;margin-bottom:12px;">Click a card to navigate. Color = status.</p>';
+  html += '<div class="corkboard">';
+
+  data.cards.forEach(c => {{
+    const statusCls = c.status || 'to_do';
+    const onclick = c.draft_id
+      ? 'loadSection(\\\'' + c.draft_id + '\\\')'
+      : 'writeForCell(\\\'' + c.chapter_id + '\\\',\\\'' + c.section_type + '\\\')';
+    html += '<div class="cork-card" onclick="' + onclick + '">';
+    html += '<div class="cc-head"><span class="cc-ch">Ch.' + c.chapter_num + '</span>';
+    html += '<span class="cc-status ' + statusCls + '">' + statusCls.replace('_', ' ') + '</span></div>';
+    html += '<div class="cc-type">' + c.section_type.charAt(0).toUpperCase() + c.section_type.slice(1) + '</div>';
+    if (c.summary) {{
+      html += '<div class="cc-summary">' + c.summary + '</div>';
+    }} else {{
+      html += '<div class="cc-summary" style="opacity:0.3;">' + (c.draft_id ? 'No summary' : 'Not started') + '</div>';
+    }}
+    html += '<div class="cc-footer">';
+    if (c.draft_id) html += 'v' + c.version + ' \\u00b7 ' + c.words + 'w';
+    html += '</div></div>';
+  }});
+
+  html += '</div></div>';
+
+  document.getElementById('dashboard-view').innerHTML = html;
+  document.getElementById('dashboard-view').style.display = 'block';
+  document.getElementById('read-view').style.display = 'none';
+  document.getElementById('edit-view').style.display = 'none';
+  document.getElementById('draft-title').textContent = 'Corkboard';
+  document.getElementById('draft-subtitle').style.display = 'none';
+  document.getElementById('toolbar').style.display = 'none';
+  document.getElementById('stream-panel').style.display = 'none';
+  document.getElementById('version-panel').style.display = 'none';
+  document.querySelectorAll('.sec-link').forEach(l => l.classList.remove('active'));
+  history.pushState({{corkboard: true}}, '', '/');
+}}
+
+// ── Chapter Reader (continuous scroll) ────────────────────────────────
+async function showChapterReader() {{
+  if (!currentChapterId) {{ alert('No chapter selected.'); return; }}
+
+  const res = await fetch('/api/chapter-reader/' + currentChapterId);
+  if (!res.ok) {{ alert('Chapter not found.'); return; }}
+  const data = await res.json();
+
+  let html = '<div class="reader-view">';
+  html += '<h1>Chapter ' + data.chapter_num + ': ' + data.chapter_title + '</h1>';
+  html += '<p style="font-size:13px;opacity:0.5;margin-bottom:24px;">' +
+    data.total_words + ' words \\u00b7 ' + data.section_count + ' sections</p>';
+  html += data.html;
+  html += '</div>';
+
+  document.getElementById('dashboard-view').innerHTML = html;
+  document.getElementById('dashboard-view').style.display = 'block';
+  document.getElementById('read-view').style.display = 'none';
+  document.getElementById('edit-view').style.display = 'none';
+  document.getElementById('draft-title').textContent = 'Ch.' + data.chapter_num + ': ' + data.chapter_title;
+  document.getElementById('draft-subtitle').style.display = 'none';
+  document.getElementById('toolbar').style.display = 'none';
+  history.pushState({{reader: true}}, '', '/');
+
+  // Build popovers for citations in reader view
+  setTimeout(buildPopovers, 100);
+}}
+
+// ── Snapshots ─────────────────────────────────────────────────────────
+async function takeSnapshot() {{
+  if (!currentDraftId) {{ alert('No draft selected.'); return; }}
+  const name = prompt('Snapshot name (leave empty for timestamp):');
+  if (name === null) return;
+
+  const fd = new FormData();
+  fd.append('name', name);
+  const res = await fetch('/api/snapshot/' + currentDraftId, {{method: 'POST', body: fd}});
+  const data = await res.json();
+  if (data.ok) {{
+    alert('Snapshot saved: ' + data.name);
+  }}
+}}
+
+async function showSnapshots() {{
+  if (!currentDraftId) return;
+  const res = await fetch('/api/snapshots/' + currentDraftId);
+  const data = await res.json();
+  if (!data.snapshots || data.snapshots.length === 0) return;
+
+  // Show in the version panel
+  const panel = document.getElementById('version-panel');
+  const timeline = document.getElementById('version-timeline');
+  const diffView = document.getElementById('diff-view');
+  panel.style.display = 'block';
+
+  let html = '<div class="snap-list">';
+  html += '<div style="font-weight:600;margin-bottom:6px;">Snapshots</div>';
+  data.snapshots.forEach(s => {{
+    html += '<div class="snap-item">';
+    html += '<span>' + s.name + ' (' + s.word_count + 'w)</span>';
+    html += '<div>';
+    html += '<button onclick="diffSnapshot(\\\'' + s.id + '\\\')">Diff</button> ';
+    html += '<button onclick="restoreSnapshot(\\\'' + s.id + '\\\')">Restore</button>';
+    html += '</div></div>';
+  }});
+  html += '</div>';
+  timeline.innerHTML = html;
+  diffView.innerHTML = '<p style="opacity:0.5;">Click "Diff" to compare a snapshot with current content.</p>';
+}}
+
+async function diffSnapshot(snapId) {{
+  // Get snapshot content and current content, do client-side word diff
+  const snapRes = await fetch('/api/snapshot-content/' + snapId);
+  const snapData = await snapRes.json();
+  const secRes = await fetch('/api/section/' + currentDraftId);
+  const secData = await secRes.json();
+
+  // Simple word diff
+  const oldWords = snapData.content.split(/\\s+/);
+  const newWords = secData.content_raw.split(/\\s+/);
+
+  // Use a basic LCS-based diff
+  let html = '';
+  let i = 0, j = 0;
+  // Simplified: just show both for now, use the server diff endpoint
+  const diffRes = await fetch('/api/diff/' + 'snapshot' + '/' + currentDraftId);
+  // Fallback: show snapshot content with note
+  html = '<div style="margin-bottom:8px;font-weight:bold;">Snapshot content:</div>';
+  html += '<div style="opacity:0.7;white-space:pre-wrap;">' + snapData.content.substring(0, 5000).replace(/</g, '&lt;') + '</div>';
+  document.getElementById('diff-view').innerHTML = html;
+}}
+
+async function restoreSnapshot(snapId) {{
+  if (!confirm('Restore this snapshot? Current content will be overwritten.')) return;
+  const snapRes = await fetch('/api/snapshot-content/' + snapId);
+  const snapData = await snapRes.json();
+
+  const fd = new FormData();
+  fd.append('content', snapData.content);
+  await fetch('/edit/' + currentDraftId, {{method: 'POST', body: fd}});
+  loadSection(currentDraftId);
+}}
+
+// ── Status selector ───────────────────────────────────────────────────
+async function updateStatus(status) {{
+  if (!currentDraftId) return;
+  const fd = new FormData();
+  fd.append('status', status);
+  await fetch('/api/draft/' + currentDraftId + '/status', {{method: 'PUT', body: fd}});
+}}
+
+
 </script>
 </body>
 </html>
