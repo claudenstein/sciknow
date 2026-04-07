@@ -25,6 +25,82 @@ All AI inference runs locally. No cloud APIs required to operate the system.
 
 ---
 
+## Workflow: From PDFs to Book
+
+This is the recommended order for using sciknow end-to-end. Each step builds on the previous one.
+
+```
+Step 1: INGEST          Papers (PDFs) → chunks in PostgreSQL + vectors in Qdrant
+Step 2: ENRICH          Fill in missing DOIs, metadata from Crossref/OpenAlex
+Step 3: EXPAND          Follow citations → discover + download related papers → re-ingest
+Step 4: CLUSTER         Group papers into thematic topics (6-14 named clusters)
+Step 5: WIKI COMPILE    Build the knowledge wiki (paper summaries + concept pages)
+Step 6: EXPLORE         Ask questions, search, synthesize — understand your corpus
+Step 7: BOOK            Create a book project → outline → plan → write → review → export
+```
+
+### Step-by-step
+
+```bash
+# ── Step 1: Ingest your papers ───────────────────────────────────────
+sciknow ingest directory ./papers/          # ingest all PDFs recursively
+sciknow db stats                            # check progress
+
+# ── Step 2: Enrich metadata (find missing DOIs) ─────────────────────
+sciknow db enrich                           # Crossref + OpenAlex + arXiv lookup
+
+# ── Step 3: Expand your library (follow citations) ──────────────────
+sciknow db expand                           # discover + download open-access papers
+sciknow db stats                            # see new papers
+
+# ── Step 4: Cluster into topics ──────────────────────────────────────
+sciknow catalog cluster                     # LLM groups papers into named clusters
+sciknow catalog topics                      # see the clusters
+
+# ── Step 5: Compile the knowledge wiki ───────────────────────────────
+sciknow wiki compile                        # build paper summaries + concept pages
+sciknow wiki list                           # see all wiki pages
+sciknow wiki lint                           # check for issues
+
+# ── Step 6: Explore your corpus ──────────────────────────────────────
+sciknow ask question "What is total solar irradiance?"
+sciknow wiki query "how do cosmic rays affect clouds?"
+sciknow ask synthesize "solar forcing and climate"
+
+# ── Step 7: Write a book ────────────────────────────────────────────
+sciknow book create "My Scientific Book"
+sciknow book outline "My Scientific Book"
+sciknow book plan "My Scientific Book"
+sciknow book serve "My Scientific Book"     # open browser, write from there
+sciknow book export "My Scientific Book" --format latex -o manuscript.tex
+```
+
+### When to use what
+
+| I want to... | Use this | Why |
+|---|---|---|
+| **Ask a quick question** about my papers | `sciknow ask question "..."` | RAG on raw chunks — fast, grounded, cites sources |
+| **Get a pre-synthesized answer** from compiled knowledge | `sciknow wiki query "..."` | Searches the wiki (not raw chunks) — answers are richer because the wiki already cross-references papers |
+| **Synthesize findings** across multiple papers on a topic | `sciknow ask synthesize "topic"` | Multi-paper synthesis with inline citations |
+| **Draft a standalone section** (not part of a book) | `sciknow ask write "topic" --section methods` | One-off section draft, optionally `--save` to DB |
+| **Write a full book** with chapters, coherence, review | `sciknow book ...` | The book system: outline → plan → write → review → revise → export |
+| **Browse compiled knowledge** about a concept | `sciknow wiki show concept-slug` | Read the wiki page synthesized from all papers on that concept |
+| **Find contradictions** in your corpus | `sciknow wiki lint --deep` | LLM checks concept pages for disagreements between papers |
+| **Map evidence for/against a claim** | `sciknow book argue "claim"` | SUPPORTS / CONTRADICTS / NEUTRAL classification |
+| **Find gaps** in a book project | `sciknow book gaps "Book"` | Identifies missing topics, weak evidence, unwritten sections |
+
+### `ask` vs `wiki query` — when to use which
+
+- **`ask question`** — searches raw paper chunks via hybrid retrieval. Best for specific factual questions where you need the exact passage from a paper. Answers cite `[N]` references to specific papers.
+
+- **`wiki query`** — searches the compiled wiki pages. Best for conceptual questions where you want a higher-level answer that's already been synthesized across papers. Faster because the wiki is pre-compiled. Requires `wiki compile` to have been run first.
+
+- **`ask synthesize`** — like `ask question` but produces a longer, structured synthesis. Good for getting an overview of a topic before writing. Searches raw chunks, not the wiki.
+
+- **`book write`** — for writing within a book project. Includes cross-chapter coherence (book plan + prior chapter summaries). Use this when you're building a structured book, not for ad-hoc questions.
+
+---
+
 ## Hardware Requirements
 
 | Component | Minimum | Recommended |
