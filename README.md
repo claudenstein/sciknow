@@ -1,43 +1,102 @@
 # SciKnow
 
-A local-first, large-scale scientific knowledge system. Ingests scientific papers (PDFs — both scanned and text-based), converts them to structured markdown, extracts metadata, chunks them section-aware, embeds them with a dense+sparse model, and stores everything in a PostgreSQL + Qdrant stack for fast hybrid retrieval.
+A local-first scientific knowledge system that ingests papers, builds a compiled knowledge wiki, and writes grounded scientific books — all running on your own hardware. No cloud APIs.
 
-All AI inference runs locally. No cloud APIs required to operate the system.
+**Ingest PDFs** (scanned or text) **&rarr; search & synthesize** across your library **&rarr; write entire books** with iterative AI review, all from the browser or CLI.
+
+---
+
+## Table of Contents
+
+- [Features](#features)
+- [Workflow: From PDFs to Book](#workflow-from-pdfs-to-book)
+  - [Step-by-step](#step-by-step)
+  - [When to use what](#when-to-use-what)
+  - [`ask` vs `wiki query`](#ask-vs-wiki-query--when-to-use-which)
+- [Hardware Requirements](#hardware-requirements)
+- [Architecture](#architecture)
+- [Installation](#installation)
+- [Configuration Reference](#configuration-reference)
+- [CLI Reference](#cli-reference)
+  - [`sciknow db`](#sciknow-db)
+  - [`sciknow ingest`](#sciknow-ingest)
+  - [`sciknow search`](#sciknow-search)
+  - [`sciknow ask`](#sciknow-ask)
+  - [`sciknow catalog`](#sciknow-catalog)
+  - [`sciknow wiki`](#sciknow-wiki)
+  - [`sciknow book`](#sciknow-book)
+  - [`sciknow draft`](#sciknow-draft)
+- [Ingestion Pipeline Details](#ingestion-pipeline-details)
+- [AI Models](#ai-models)
+- [Database Schema](#database-schema)
+- [Retrieval](#retrieval)
+- [Question Answering (RAG)](#question-answering-rag)
+- [Writing Assistant](#writing-assistant)
+- [Book Writing System](#book-writing-system)
+  - [Web Reader (`book serve`)](#web-reader-book-serve)
+  - [Autowrite](#autowrite-autonomous-convergence-inspired-by-karpathys-autoresearch)
+  - [Tips for Book Writing](#tips-for-effective-book-writing-with-sciknow)
+- [Backup & Restore](#backup--restore-db-backup--db-restore)
+- [Reference Expansion (`db expand`)](#reference-expansion-db-expand)
+- [Metadata Enrichment (`db enrich`)](#metadata-enrichment-db-enrich)
+- [Citation Graph](#citation-graph)
+- [Similar Papers](#similar-papers)
+- [Development Notes](#development-notes)
 
 ---
 
 ## Features
 
-- **Ingestion pipeline** — PDF → structured JSON (MinerU 2.5) → metadata extraction → section-aware chunking → dense+sparse embedding → PostgreSQL + Qdrant
-- **Hybrid search** — dense vector + sparse lexical + full-text search, fused with Reciprocal Rank Fusion and reranked with a cross-encoder. Citation-count boosted scoring. Optional LLM query expansion.
-- **RAG question answering** — grounded Q&A over your papers with inline citations and source attribution
+**Ingestion & Library Management**
+- **PDF ingestion** — MinerU 2.5 (SOTA for scientific papers) with Marker fallback. Handles scanned and text PDFs, tables, equations, figures
+- **Metadata extraction** — 4-layer cascade: embedded PDF → Crossref → arXiv → LLM. Fills title, authors, year, DOI, journal, keywords
+- **Citation graph** — extracts references during ingestion, cross-links to papers in your library, boosts highly-cited papers in search
+- **Collection expansion** — follows citations to discover + download open-access papers from 6 sources (Copernicus, arXiv, Unpaywall, OpenAlex, Europe PMC, Semantic Scholar)
+- **Topic clustering** — LLM assigns papers to 6-14 named thematic clusters for filtered search and writing
+
+**Search & Retrieval**
+- **Hybrid search** — dense vector + sparse lexical + full-text search, fused with Reciprocal Rank Fusion and reranked with a cross-encoder
+- **RAG question answering** — grounded Q&A with inline `[N]` citations and source attribution
 - **Writing assistant** — multi-paper synthesis, section drafting, sentence planning, claim verification
-- **Book projects** — structured book → chapter hierarchy with LLM-generated outlines, book plans (thesis + scope), cross-chapter coherence, iterative write → review → revise workflow
+
+**Knowledge Wiki** (Karpathy LLM-wiki pattern)
+- **Compiled knowledge layer** — papers synthesized into interconnected wiki pages (paper summaries, concept pages, synthesis overviews)
+- **Incremental growth** — wiki updates automatically when new papers are ingested
+- **Wiki query** — answer questions from pre-synthesized, cross-referenced knowledge instead of raw RAG
+- **Contradiction detection** — LLM-based lint finds disagreements between papers
+
+**Book Writing Platform**
+- **Structured projects** — book → chapter hierarchy with LLM-generated outlines and book plans (thesis + scope)
+- **Iterative refinement** — write → review → revise loop with 5-dimension scoring and claim verification
+- **Autowrite** — autonomous convergence loop: generates, scores, revises until quality target is met
+- **Web reader** — browser-based authoring with live LLM streaming, corkboard view, chapter reader, argument maps, citation popovers, snapshots, version diffs
 - **Argument mapping** — evidence classification (SUPPORTS / CONTRADICTS / NEUTRAL) for any claim
-- **Gap analysis** — identifies missing topics, weak chapters, and unwritten sections; persists gaps for tracking
-- **Knowledge wiki** — Karpathy-style compiled wiki layer: papers are synthesized into interconnected pages (paper summaries, concept pages, synthesis overviews). Grows incrementally with each ingest. Query the wiki for pre-synthesized, cross-referenced answers instead of raw RAG
-- **Topic clustering** — LLM assigns papers to named thematic clusters for filtered search and writing
-- **Citation graph** — extracts + cross-links references during ingestion; citation-count boosted retrieval
-- **Collection expansion** — follows citations to discover + download open-access papers with semantic relevance filtering (6 OA sources: Copernicus, arXiv, Unpaywall, OpenAlex, Europe PMC, Semantic Scholar)
-- **Multi-format export** — Markdown, BibTeX, LaTeX, and DOCX via Pandoc
+- **Gap analysis** — identifies missing topics, weak chapters, unwritten sections
+- **Global citation dedup** — export renumbers `[N]` references across all chapters into a unified bibliography
+- **Multi-format export** — Markdown, HTML, BibTeX, LaTeX, DOCX
+
+**Infrastructure**
 - **Similar papers** — find papers with similar abstracts via embedding similarity
 - **Backup & restore** — portable archives for migrating between machines
+- **All local** — PostgreSQL + Qdrant + Ollama, no cloud APIs
 
 ---
 
 ## Workflow: From PDFs to Book
 
-This is the recommended order for using sciknow end-to-end. Each step builds on the previous one.
+The recommended end-to-end order. Each step builds on the previous one — but you can start using the system after step 1.
 
 ```
-Step 1: INGEST          Papers (PDFs) → chunks in PostgreSQL + vectors in Qdrant
-Step 2: ENRICH          Fill in missing DOIs, metadata from Crossref/OpenAlex
-Step 3: EXPAND          Follow citations → discover + download related papers → re-ingest
-Step 4: CLUSTER         Group papers into thematic topics (6-14 named clusters)
-Step 5: WIKI COMPILE    Build the knowledge wiki (paper summaries + concept pages)
-Step 6: EXPLORE         Ask questions, search, synthesize — understand your corpus
-Step 7: BOOK            Create a book project → outline → plan → write → review → export
+ 1  INGEST        PDFs → chunks in PostgreSQL + vectors in Qdrant
+ 2  ENRICH        Fill missing DOIs and metadata from Crossref/OpenAlex
+ 3  EXPAND        Follow citations → download related open-access papers
+ 4  CLUSTER       Group papers into thematic topics (6-14 named clusters)
+ 5  WIKI          Build the compiled knowledge wiki (summaries + concepts)
+ 6  EXPLORE       Ask questions, search, synthesize — understand your corpus
+ 7  BOOK          Create → outline → plan → write → review → export
 ```
+
+> Steps 2-5 are optional but each one improves the quality of everything downstream. You can ask questions (`step 6`) right after ingesting (`step 1`).
 
 ### Step-by-step
 
