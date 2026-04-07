@@ -825,12 +825,10 @@ def _render_book(book, chapters, drafts, gaps, comments,
     active_review = ""
     active_id = ""
     active_title = ""
-    active_raw = ""
     if active_draft:
         active_id = active_draft[0]
         active_title = active_draft[1]
         active_html = _md_to_html(active_draft[3] or "")
-        active_raw = active_draft[3] or ""
         active_sources = json.loads(active_draft[5]) if isinstance(active_draft[5], str) else (active_draft[5] or [])
         active_review = active_draft[8] or ""
         active_comments = draft_comments.get(active_id, [])
@@ -850,7 +848,6 @@ def _render_book(book, chapters, drafts, gaps, comments,
         book_plan=(book[3] or "No plan set.") if book else "",
         sidebar_html=_render_sidebar(sidebar_items, active_id),
         content_html=active_html,
-        content_raw=_escape_for_js(active_raw),
         active_id=active_id,
         active_title=active_title,
         active_version=active_draft[6] if active_draft else 1,
@@ -865,11 +862,6 @@ def _render_book(book, chapters, drafts, gaps, comments,
         search_results_html=_render_search(search_results) if search_results else "",
         chapters_json=chapters_json,
     )
-
-
-def _escape_for_js(s: str) -> str:
-    """Escape a string for embedding in a JS template literal."""
-    return s.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
 
 
 def _render_sidebar(items, active_id):
@@ -1029,9 +1021,13 @@ body {{ font-family: 'Georgia', serif; color: var(--fg); background: var(--bg);
                   border-bottom: 1px solid var(--border); }}
 .search-result:hover {{ background: var(--accent-light); }}
 /* Theme toggle */
-.theme-toggle {{ position: fixed; bottom: 16px; right: 16px; background: var(--accent);
-                 color: white; border: none; padding: 8px 12px; border-radius: 20px;
-                 cursor: pointer; font-size: 12px; z-index: 100; }}
+.theme-toggle {{ position: fixed; bottom: 16px; right: 16px; background: var(--sidebar-bg);
+                 color: var(--fg); border: 1px solid var(--border); padding: 8px 14px;
+                 border-radius: 20px; cursor: pointer; font-size: 16px; z-index: 100;
+                 display: flex; align-items: center; gap: 6px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+                 transition: all .2s; }}
+.theme-toggle:hover {{ background: var(--accent); color: white; border-color: var(--accent); }}
+.theme-toggle .label {{ font-size: 11px; }}
 /* Edit */
 .edit-btn {{ background: var(--accent); color: white; border: none; padding: 4px 12px;
              border-radius: 4px; cursor: pointer; font-size: 12px; margin-left: 8px; }}
@@ -1282,7 +1278,10 @@ body {{ font-family: 'Georgia', serif; color: var(--fg); background: var(--bg);
   </form>
 </aside>
 
-<button class="theme-toggle" onclick="toggleTheme()">Toggle Theme</button>
+<button class="theme-toggle" onclick="toggleTheme()" id="theme-btn">
+  <span id="theme-icon">&#9788;</span>
+  <span class="label" id="theme-label">Light</span>
+</button>
 
 <script>
 // ── State ─────────────────────────────────────────────────────────────────
@@ -1298,10 +1297,17 @@ function toggleTheme() {{
   const html = document.documentElement;
   html.dataset.theme = html.dataset.theme === 'dark' ? 'light' : 'dark';
   localStorage.setItem('theme', html.dataset.theme);
+  updateThemeButton();
+}}
+function updateThemeButton() {{
+  const isDark = document.documentElement.dataset.theme === 'dark';
+  document.getElementById('theme-icon').innerHTML = isDark ? '&#9790;' : '&#9788;';
+  document.getElementById('theme-label').textContent = isDark ? 'Dark' : 'Light';
 }}
 if (localStorage.getItem('theme')) {{
   document.documentElement.dataset.theme = localStorage.getItem('theme');
 }}
+updateThemeButton();
 
 // ── SPA Navigation ────────────────────────────────────────────────────────
 function navTo(el) {{
@@ -1321,14 +1327,19 @@ async function loadSection(draftId) {{
     currentChapterId = data.chapter_id || '';
     currentSectionType = data.section_type || '';
 
+    // Restore section view (if coming from dashboard)
+    document.getElementById('dashboard-view').style.display = 'none';
+    document.getElementById('read-view').style.display = 'block';
+    document.getElementById('draft-subtitle').style.display = 'block';
+    document.getElementById('toolbar').style.display = 'flex';
+    document.getElementById('argue-map-view').style.display = 'none';
+
     // Update main content
     document.getElementById('draft-title').textContent = data.title;
     document.getElementById('draft-version').textContent = data.version;
     document.getElementById('draft-words').textContent = data.word_count;
     document.getElementById('read-view').innerHTML = data.content_html;
     document.getElementById('edit-view').style.display = 'none';
-    document.getElementById('read-view').style.display = 'block';
-    document.getElementById('edit-view').action = '/edit/' + data.id;
 
     // Update right panel
     document.getElementById('panel-sources').innerHTML = data.sources_html;
@@ -1344,8 +1355,12 @@ async function loadSection(draftId) {{
     // Update URL without reload
     history.pushState({{draftId: draftId}}, '', '/section/' + draftId);
 
-    // Hide stream panel
+    // Hide panels
     document.getElementById('stream-panel').style.display = 'none';
+    document.getElementById('version-panel').style.display = 'none';
+
+    // Build citation popovers
+    setTimeout(buildPopovers, 100);
   }} catch(e) {{
     console.error('Navigation failed:', e);
   }}
@@ -1355,21 +1370,6 @@ async function loadSection(draftId) {{
 window.addEventListener('popstate', function(e) {{
   if (e.state && e.state.draftId) loadSection(e.state.draftId);
 }});
-
-// ── Edit toggle ───────────────────────────────────────────────────────────
-function toggleEdit() {{
-  const rv = document.getElementById('read-view');
-  const ev = document.getElementById('edit-view');
-  const ta = document.getElementById('edit-area');
-  if (ev.style.display === 'none') {{
-    ta.value = `{content_raw}`;
-    rv.style.display = 'none';
-    ev.style.display = 'block';
-  }} else {{
-    rv.style.display = 'block';
-    ev.style.display = 'none';
-  }}
-}}
 
 // ── Comments ──────────────────────────────────────────────────────────────
 function resolveComment(cid) {{
@@ -1555,35 +1555,6 @@ async function doRevise() {{
   startStream(data.job_id);
 }}
 
-async function doAutowrite() {{
-  if (!currentChapterId) {{ alert('No chapter selected.'); return; }}
-  const section = currentSectionType || 'introduction';
-  const maxIter = prompt('Max iterations (default 3):', '3');
-  if (maxIter === null) return;
-  showStreamPanel('Autowriting ' + section + '...');
-
-  const fd = new FormData();
-  fd.append('chapter_id', currentChapterId);
-  fd.append('section_type', section);
-  fd.append('max_iter', maxIter || '3');
-  fd.append('target_score', '0.85');
-  const res = await fetch('/api/autowrite', {{method: 'POST', body: fd}});
-  const data = await res.json();
-  startStream(data.job_id);
-}}
-
-async function promptArgue() {{
-  const claim = prompt('Enter a claim to map evidence for/against:');
-  if (!claim) return;
-  showStreamPanel('Mapping argument...');
-
-  const fd = new FormData();
-  fd.append('claim', claim);
-  const res = await fetch('/api/argue', {{method: 'POST', body: fd}});
-  const data = await res.json();
-  startStream(data.job_id);
-}}
-
 async function doGaps() {{
   showStreamPanel('Analysing gaps...');
   const fd = new FormData();
@@ -1685,15 +1656,6 @@ function writeForGap(chapterNum) {{
   if (ch) writeForCell(ch.id, 'introduction');
 }}
 
-// Override loadSection to restore section view from dashboard
-const _origLoadSection = loadSection;
-loadSection = async function(draftId) {{
-  document.getElementById('dashboard-view').style.display = 'none';
-  document.getElementById('read-view').style.display = 'block';
-  document.getElementById('draft-subtitle').style.display = 'block';
-  document.getElementById('toolbar').style.display = 'flex';
-  await _origLoadSection(draftId);
-}};
 
 // ── Version History ───────────────────────────────────────────────────────
 let versionData = [];
@@ -1978,13 +1940,8 @@ function buildPopovers() {{
   }});
 }}
 
-// Build popovers after page load and after SPA navigation
+// Build popovers on page load
 document.addEventListener('DOMContentLoaded', buildPopovers);
-const _origLoadSection2 = loadSection;
-loadSection = async function(draftId) {{
-  await _origLoadSection2(draftId);
-  setTimeout(buildPopovers, 100);
-}};
 
 // ── Autowrite Dashboard (Phase 4) ────────────────────────────────────
 // Enhanced autowrite that shows convergence chart
