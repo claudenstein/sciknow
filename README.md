@@ -1253,6 +1253,55 @@ v4: groun=0.88  compl=0.83  coher=0.87  citat=0.85  overall=0.86  ✓ CONVERGED
 - **Argue before you write discussion sections.** Run `book argue` on your key claims first, then use those structured evidence maps to write a more nuanced discussion.
 - **Expand targetedly when gaps appear.** If `book gaps` says chapter 7 has weak support, run `db expand -q "your topic" --limit 30` to grow the corpus in that area, then re-write.
 - **Review every section before moving on.** The `book review → book revise` loop catches groundedness issues, missing topics, and redundancy early rather than in the final manuscript.
+- **Use autowrite for hands-off convergence.** `book autowrite "Book" --full` writes, scores, and revises every section automatically until the quality target is met.
+- **Browse while writing.** Run `book serve` in a second terminal and watch the book take shape in your browser as autowrite or manual writes progress.
+
+### The two-terminal workflow
+
+```
+Terminal 1 (writing):                       Terminal 2 (reading):
+─────────────────────                       ─────────────────────
+sciknow book plan "Global Cooling"
+sciknow book outline "Global Cooling"
+                                            sciknow book serve "Global Cooling"
+                                            → opens http://localhost:8765
+sciknow book autowrite "Global Cooling" \
+    --full --max-iter 3 --ipcc
+                                            [browse chapters as they appear]
+                                            [add comments on sections]
+                                            [edit text inline in the browser]
+[autowrite converges per section...]
+                                            [refresh to see v2 → v3 improvements]
+sciknow book export "Global Cooling" \
+    --format latex -o manuscript.tex
+```
+
+The web reader at `book serve` pulls live from the database on each page load. As autowrite produces new versions, a browser refresh shows the latest content. You can also edit directly in the browser (click "Edit" on any section) — changes save back to the database immediately.
+
+### Recommended model configuration
+
+For the best balance of quality and speed on an RTX 3090 (24 GB):
+
+```bash
+# In .env:
+LLM_MODEL=qwen3.5:27b              # 25-35 tok/s, highest quality for writing
+LLM_FAST_MODEL=qwen3:30b-a3b       # 40-111 tok/s (MoE), for clustering/summaries/expansion
+```
+
+With `OLLAMA_FLASH_ATTENTION=1` and `OLLAMA_KV_CACHE_TYPE=q8_0` enabled (see Ollama performance tuning section above), expected speeds:
+
+| Model | Architecture | Speed on 3090 | Best for |
+|---|---|---|---|
+| `qwen3.5:27b` (Q4_K_M) | 27B dense | 25-35 tok/s | Writing, review, revise, verify, argue |
+| `qwen3:30b-a3b` (Q4_K_M) | 30B MoE (3.3B active) | 40-111 tok/s | Clustering, summaries, metadata, expansion |
+
+Estimated autowrite times with `qwen3.5:27b`:
+
+| Mode | Sections | Time |
+|---|---|---|
+| One section (3 iterations) | 1 | ~5-8 min |
+| One chapter (all sections) | 5 | ~30-40 min |
+| Full 10-chapter book | 50 | ~4-6 hours (unattended) |
 
 ## Backup & Restore (`db backup` / `db restore`)
 
