@@ -1009,6 +1009,7 @@ def export(
         raise typer.Exit(0)
 
     # Group drafts by chapter_id
+    import re as _re
     from collections import defaultdict
     chapter_drafts: dict[str, list] = defaultdict(list)
     for d in drafts:
@@ -1020,10 +1021,66 @@ def export(
             key=lambda d: _SECTION_ORDER.get(d[2] or "", 99)
         )
 
-    # Collect all sources for bibliography
-    all_sources: list[str] = []
-    seen_sources: set[str] = set()
+    # ── Fix 2: Global citation dedup + renumbering ───────────────────────
+    # First pass: collect all unique sources across all chapters, building
+    # a global bibliography with unified [1]-[N] numbering. Then remap
+    # per-draft [N] references to the global numbers in the content.
 
+    # Build per-draft source lists and collect global bibliography
+    global_sources: list[str] = []      # deduplicated, ordered
+    global_source_set: set[str] = set()
+    draft_source_lists: dict[str, list[str]] = {}  # draft_key -> [source_str, ...]
+
+    for ch in chapters:
+        ch_id = ch[0]
+        for draft in chapter_drafts.get(ch_id, []):
+            _, d_title, d_section, d_content, d_words, d_sources, _ = draft
+            draft_key = f"{ch_id}:{d_section}"
+            local_sources = []
+            for s in (d_sources or []):
+                if s:
+                    local_sources.append(s)
+                    # Strip the "[N] " prefix for dedup (same paper may be [1] in one draft, [3] in another)
+                    clean = _re.sub(r'^\[\d+\]\s*', '', s).strip()
+                    if clean not in global_source_set:
+                        global_source_set.add(clean)
+                        global_sources.append(s)
+            draft_source_lists[draft_key] = local_sources
+
+    # Build remap: for each draft, map old [N] → new global [M]
+    def _source_key(s: str) -> str:
+        return _re.sub(r'^\[\d+\]\s*', '', s).strip()
+
+    global_num_by_key = {}
+    for i, s in enumerate(global_sources, 1):
+        global_num_by_key[_source_key(s)] = i
+
+    def _remap_citations(content: str, local_sources: list[str]) -> str:
+        """Remap [N] citations from per-draft numbering to global numbering."""
+        local_to_global = {}
+        for ls in local_sources:
+            m = _re.match(r'^\[(\d+)\]', ls)
+            if m:
+                old_num = m.group(1)
+                new_num = global_num_by_key.get(_source_key(ls))
+                if new_num and old_num != str(new_num):
+                    local_to_global[old_num] = str(new_num)
+
+        if not local_to_global:
+            return content
+
+        # Replace [old] with [new], using a placeholder to avoid double-replace
+        for old, new in local_to_global.items():
+            content = _re.sub(
+                rf'\[{old}\]',
+                f'[__CITE_{new}__]',
+                content,
+            )
+        # Remove placeholders
+        content = _re.sub(r'\[__CITE_(\d+)__\]', r'[\1]', content)
+        return content
+
+    # Second pass: build the markdown with remapped citations
     lines: list[str] = []
     lines += [f"# {book[1]}", ""]
     if book[2]:
@@ -1046,24 +1103,24 @@ def export(
             _, d_title, d_section, d_content, d_words, d_sources, _ = draft
             if d_section and d_section not in ("argument_map",):
                 lines += [f"### {d_section.capitalize()}", ""]
-            lines += [d_content, ""]
 
-            if include_sources:
-                for s in (d_sources or []):
-                    if s and s not in seen_sources:
-                        seen_sources.add(s)
-                        all_sources.append(s)
+            # Remap citations to global numbering
+            draft_key = f"{ch_id}:{d_section}"
+            remapped = _remap_citations(d_content or "", draft_source_lists.get(draft_key, []))
+            lines += [remapped, ""]
 
-    # Bibliography
-    if include_sources and all_sources:
+    # Global bibliography with unified numbering
+    if include_sources and global_sources:
         lines += ["---", "", "## Bibliography", ""]
-        for i, s in enumerate(all_sources, 1):
-            lines.append(f"{i}. {s}")
+        for i, s in enumerate(global_sources, 1):
+            # Re-number the source line itself
+            renumbered = _re.sub(r'^\[\d+\]', f'[{i}]', s)
+            lines.append(f"{i}. {renumbered}")
         lines.append("")
 
     # Word count
     total_words = sum(d[4] or 0 for d in drafts)
-    lines += ["", f"---", f"*{total_words:,} words · {len(drafts)} sections · {len(chapters)} chapters*"]
+    lines += ["", f"---", f"*{total_words:,} words · {len(drafts)} sections · {len(chapters)} chapters · {len(global_sources)} references*"]
 
     md = "\n".join(lines)
 

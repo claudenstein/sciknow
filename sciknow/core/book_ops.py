@@ -573,17 +573,34 @@ def run_argue_stream(
 DEFAULT_SECTIONS = ["introduction", "methods", "results", "discussion", "conclusion"]
 
 
-def _score_draft_inner(draft_content, section_type, topic, session, qdrant, model=None):
-    """Score a draft and return (scores_dict, results)."""
+def _score_draft_inner(draft_content, section_type, topic, results, model=None):
+    """Score a draft against provided results. Returns scores_dict.
+
+    Fix 3: the caller passes the writer's own results so the scorer
+    evaluates against the same evidence the writer used.
+    """
     from sciknow.rag import prompts as rag_prompts
     from sciknow.rag.llm import complete as llm_complete
-
-    results, _ = _retrieve(session, qdrant, f"{section_type or ''} {topic or ''}")
 
     sys_s, usr_s = rag_prompts.score_draft(section_type, topic, draft_content, results)
     raw = llm_complete(sys_s, usr_s, model=model, temperature=0.0, num_ctx=16384)
 
-    return json.loads(_clean_json(raw), strict=False), results
+    return json.loads(_clean_json(raw), strict=False)
+
+
+def _verify_draft_inner(draft_content, results, model=None):
+    """Run claim verification and return parsed verification data.
+
+    Fix 1: integrated into the autowrite scoring loop so every iteration
+    checks citation groundedness, not just when the user passes --verify.
+    """
+    from sciknow.rag import prompts as rag_prompts
+    from sciknow.rag.llm import complete as llm_complete
+
+    sys_v, usr_v = rag_prompts.verify_claims(draft_content, results)
+    raw = llm_complete(sys_v, usr_v, model=model, temperature=0.0, num_ctx=16384)
+
+    return json.loads(_clean_json(raw), strict=False)
 
 
 def autowrite_section_stream(
@@ -654,25 +671,49 @@ def autowrite_section_stream(
 
     content = "".join(tokens)
 
-    # Step 2: Score -> revise -> re-score loop
+    # Step 2: Score -> verify -> revise -> re-score loop
+    # Fix 3: `results` from the write step are passed to scorer/verifier
+    #         so they evaluate against the same evidence the writer used.
     history: list[dict] = []
 
     for iteration in range(max_iter):
         yield {"type": "iteration_start", "iteration": iteration + 1, "max": max_iter}
 
-        # Score
+        # Score (Fix 3: use writer's results, not re-retrieved)
         yield {"type": "progress", "stage": "scoring",
                "detail": f"Scoring iteration {iteration + 1}..."}
-        with get_session() as session:
-            try:
-                scores, scored_results = _score_draft_inner(
-                    content, section_type, topic, session, qdrant, model=model,
-                )
-            except Exception as exc:
-                logger.warning("Scoring failed: %s", exc)
-                scores = {"overall": 0.5, "weakest_dimension": "unknown",
-                          "revision_instruction": "Improve overall quality."}
-                scored_results = results
+        try:
+            scores = _score_draft_inner(
+                content, section_type, topic, results, model=model,
+            )
+        except Exception as exc:
+            logger.warning("Scoring failed: %s", exc)
+            scores = {"overall": 0.5, "weakest_dimension": "unknown",
+                      "revision_instruction": "Improve overall quality."}
+
+        # Fix 1: Run claim verification as part of scoring
+        yield {"type": "progress", "stage": "verifying",
+               "detail": "Verifying citations..."}
+        try:
+            vdata = _verify_draft_inner(content, results, model=model)
+            groundedness = vdata.get("groundedness_score", 1.0)
+            # Merge groundedness into scores — if verification finds issues,
+            # it can override the scorer's groundedness and force a revision
+            if groundedness < scores.get("groundedness", 1.0):
+                scores["groundedness"] = groundedness
+            # If groundedness is the weakest dimension, target it
+            if groundedness < scores.get(scores.get("weakest_dimension", ""), 1.0):
+                scores["weakest_dimension"] = "groundedness"
+                n_bad = len([c for c in vdata.get("claims", [])
+                             if c.get("verdict") in ("EXTRAPOLATED", "MISREPRESENTED")])
+                if n_bad:
+                    scores["revision_instruction"] = (
+                        f"Fix {n_bad} citation(s) flagged as extrapolated or misrepresented. "
+                        "Ensure every [N] reference accurately reflects what the cited paper states."
+                    )
+            yield {"type": "verification", "data": vdata}
+        except Exception as exc:
+            logger.warning("Verification failed: %s", exc)
 
         overall = scores.get("overall", 0)
         weakest = scores.get("weakest_dimension", "unknown")
@@ -688,11 +729,31 @@ def autowrite_section_stream(
                    "final_score": overall}
             break
 
-        # Revise
+        # Fix 4: Auto-expand — check if missing topics have weak corpus coverage
+        if auto_expand and missing:
+            yield {"type": "progress", "stage": "expanding",
+                   "detail": f"Checking corpus coverage for: {', '.join(missing[:3])}"}
+            weak_topics = []
+            with get_session() as session:
+                for topic_q in missing[:3]:
+                    try:
+                        extra_results, _ = _retrieve(
+                            session, qdrant, topic_q, candidate_k=5, context_k=3,
+                        )
+                        if len(extra_results) < 3:
+                            weak_topics.append(topic_q)
+                    except Exception:
+                        pass
+            if weak_topics:
+                yield {"type": "progress", "stage": "expanding",
+                       "detail": f"Weak coverage: {', '.join(weak_topics)}. "
+                                 f"Consider: sciknow db expand -q \"{weak_topics[0]}\""}
+
+        # Revise (Fix 3: pass writer's results to revision context)
         yield {"type": "progress", "stage": "revising",
                "detail": f"Revising (targeting {weakest})..."}
 
-        sys_r, usr_r = rag_prompts.revise(content, instruction, scored_results)
+        sys_r, usr_r = rag_prompts.revise(content, instruction, results)
         rev_tokens: list[str] = []
         for tok in llm_stream(sys_r, usr_r, model=model):
             rev_tokens.append(tok)
@@ -700,15 +761,14 @@ def autowrite_section_stream(
 
         revised = "".join(rev_tokens)
 
-        # Re-score
+        # Re-score (Fix 3: same results)
         yield {"type": "progress", "stage": "scoring", "detail": "Re-scoring revision..."}
-        with get_session() as session:
-            try:
-                new_scores, _ = _score_draft_inner(
-                    revised, section_type, topic, session, qdrant, model=model,
-                )
-            except Exception:
-                new_scores = {"overall": overall}
+        try:
+            new_scores = _score_draft_inner(
+                revised, section_type, topic, results, model=model,
+            )
+        except Exception:
+            new_scores = {"overall": overall}
 
         new_overall = new_scores.get("overall", 0)
 

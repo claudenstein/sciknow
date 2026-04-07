@@ -539,7 +539,9 @@ sciknow book gaps "Global Cooling" --no-save   # informational only
 
 # ── Autowrite (autonomous convergence loop) ───────────────────────────────
 
-# Autowrite one section: write → score → revise → re-score → keep/discard → repeat
+# Autowrite one section: write → score → verify → revise → re-score → keep/discard
+# Every iteration now includes automatic claim verification (groundedness check).
+# The scorer and verifier see the same evidence the writer used (no re-retrieval).
 sciknow book autowrite "Global Cooling" 1 --section introduction
 
 # More iterations and higher quality target
@@ -562,6 +564,10 @@ sciknow book serve "Global Cooling"
 sciknow book serve "Global Cooling" --port 9000
 
 # ── Export ────────────────────────────────────────────────────────────────
+
+# Export deduplicates citations globally across all chapters.
+# [1] in Ch.1 and [3] in Ch.5 pointing to the same paper → unified [N]
+# throughout the exported document with a single deduplicated bibliography.
 
 # Markdown (default)
 sciknow book export "Global Cooling"
