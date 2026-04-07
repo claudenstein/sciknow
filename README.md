@@ -42,6 +42,7 @@ A local-first scientific knowledge system that ingests papers, builds a compiled
 - [Citation Graph](#citation-graph)
 - [Similar Papers](#similar-papers)
 - [Development Notes](#development-notes)
+- [Research Roadmap](#research-roadmap)
 
 ---
 
@@ -1732,4 +1733,116 @@ All long-running commands (`ingest`, `expand`, `enrich`, `export`, `catalog clus
     systemctl --user status qdrant
     systemctl --user start qdrant
   And that .env has the correct QDRANT_HOST/QDRANT_PORT.
+```
+
+---
+
+## Research Roadmap
+
+Planned improvements based on state-of-the-art research in scientific paper processing, topic modeling, knowledge graphs, agentic RAG, and long-form AI-assisted writing. Each item includes the research basis and how it maps to sciknow.
+
+### 1. BERTopic Embedding Clustering (replace LLM clustering)
+
+**Status:** Next up
+
+**Problem:** `catalog cluster` sends paper titles to an LLM and asks it to group them. This is slow (~10 min per batch), unreliable (title matching failures), and non-deterministic.
+
+**Solution:** [BERTopic](https://bertopic.com/) — embed documents with the bge-m3 model already in Qdrant, reduce dimensions with UMAP, cluster with HDBSCAN, extract topic labels with c-TF-IDF. The LLM is only needed for a single call to name each cluster.
+
+**Why it's better:**
+- Uses embeddings already computed during ingestion (no extra LLM calls)
+- HDBSCAN determines the right number of clusters automatically
+- Deterministic and fast (seconds instead of hours)
+- Hierarchical — can produce nested topic trees
+- Based on: [LLM-Guided Semantic-Aware Clustering (ACL 2025)](https://aclanthology.org/2025.acl-long.902/), [BERTopic framework](https://bertopic.com/)
+
+### 2. Knowledge Graph (GraphRAG-style)
+
+**Status:** Next up
+
+**Problem:** sciknow's retrieval is purely vector-based — it finds similar chunks but can't traverse relationships. "Which papers contradict Smith 2020?" requires reading every paper.
+
+**Solution:** Extract entity-relationship triples during wiki compilation: `(Paper X, uses_method, Wavelet Analysis)`, `(Paper A, contradicts, Paper B)`, `(Concept X, related_to, Concept Y)`. Store in PostgreSQL. Use graph traversal alongside vector search for richer retrieval.
+
+**Why it's better:**
+- Enables multi-hop reasoning: "find papers that extend the methods used by papers that contradict claim X"
+- Community detection (Leiden algorithm) produces better topic hierarchies than flat clustering
+- Graph-aware retrieval finds indirect connections invisible to vector search
+- Based on: [Microsoft GraphRAG](https://github.com/microsoft/graphrag), [KG-RAG (Nature 2025)](https://www.nature.com/articles/s41598-025-21222-z), [LLM-empowered KG Construction](https://arxiv.org/abs/2510.20345)
+
+### 3. Self-Correcting RAG (Agentic Retrieval)
+
+**Status:** Planned
+
+**Problem:** `ask question` and `wiki query` are one-shot: search → generate. If the retrieved chunks are irrelevant, the answer hallucinates.
+
+**Solution:** Implement Self-RAG / CRAG pattern:
+1. Retrieve chunks
+2. LLM evaluates: "are these relevant?" → if not, reformulate query and re-search
+3. Generate answer
+4. LLM evaluates: "is this grounded in the chunks?" → if not, retry with different context
+
+**Why it's better:**
+- Self-RAG achieves 5.8% hallucination rate vs 12-14% for standard RAG ([MDPI Electronics 2025](https://arxiv.org/abs/2501.09136))
+- Adaptive routing: simple questions → direct answer; complex questions → multi-step retrieval
+- Based on: [Agentic RAG Survey (arxiv 2025)](https://arxiv.org/abs/2501.09136), [CRAG framework](https://letsdatascience.com/blog/agentic-rag-self-correcting-retrieval), [A-RAG (arxiv 2026)](https://arxiv.org/abs/2602.03442)
+
+### 4. Multimodal RAG (Figures, Tables, Equations)
+
+**Status:** Planned
+
+**Problem:** MinerU extracts tables (HTML), equations (LaTeX), and figure captions during ingestion, but sciknow discards them during chunking. They're invisible to search and writing.
+
+**Solution:** Treat tables, equations, and figures as first-class retrievable objects:
+- Store table HTML and equation LaTeX in dedicated chunk types
+- Embed them in Qdrant with type-specific payloads
+- When writing a methods section, relevant equations and data tables appear in the context
+- When writing results, relevant figures are referenced
+
+**Why it's better:**
+- Scientific papers communicate through figures and tables as much as text
+- A data table comparing solar forcing estimates is more useful than the paragraph describing it
+- Based on: [RAG-Anything (2025)](https://github.com/HKUDS/RAG-Anything), [ManuRAG (2025)](https://arxiv.org/pdf/2601.15434), [Multimodal LLM Table Understanding (ACL 2025)](https://aclanthology.org/2025.trl-1.10.pdf)
+
+### 5. Hierarchical Tree Planning (TreeWriter Pattern)
+
+**Status:** Planned
+
+**Problem:** sciknow's book system is flat: outline → write sections sequentially. No planning at the paragraph level, no ability to reorganize the tree structure mid-writing.
+
+**Solution:** Represent the book as a tree (Book → Part → Chapter → Section → Subsection → Paragraph). Plan at each level before writing the level below. The autowrite loop plans the paragraph skeleton, then drafts each paragraph grounded in specific papers.
+
+**Why it's better:**
+- TreeWriter (Jan 2025) showed improved coherence and authorial control vs flat writing
+- Dynamic Hierarchical Outlining (DOME) fuses planning and writing stages together
+- The corkboard view in the web UI maps naturally to a tree editor
+- Based on: [TreeWriter (arxiv 2025)](https://arxiv.org/abs/2601.12740), [DOME (NAACL 2025)](https://aclanthology.org/2025.naacl-long.63/), [Outline-guided Generation (NAACL 2025)](https://aclanthology.org/2025.naacl-industry.20.pdf)
+
+### 6. Automated Consensus Mapping
+
+**Status:** Planned
+
+**Problem:** `book argue` maps evidence for individual claims. There's no way to see "what does my entire corpus agree/disagree on?" across all topics.
+
+**Solution:** For each concept in the knowledge graph, automatically track:
+- Which papers support/contradict/are neutral on key claims
+- How consensus shifts over time (2010: 3 support; 2020: 15 support, 3 contradict)
+- The most debated topics in the corpus
+- Confidence levels based on evidence strength and recency
+
+**Why it's better:**
+- Transforms the wiki from a knowledge base into an evidence map
+- Directly answers "where is the science settled?" and "where is it contested?"
+- Essential for scientific book writing where the author must represent the field accurately
+- Extension of existing `book argue` and `wiki lint --deep` infrastructure
+
+### Implementation Order
+
+```
+Phase 1: BERTopic clustering      → fast, uses existing embeddings, replaces slowest command
+Phase 2: Knowledge Graph          → biggest architectural leap, transforms retrieval
+Phase 3: Self-correcting RAG      → reduces hallucination across all query commands
+Phase 4: Multimodal RAG           → MinerU already extracts the data, make it searchable
+Phase 5: TreeWriter planning      → improves book coherence, enhances web UI
+Phase 6: Consensus mapping        → builds on KG + wiki, high user value for researchers
 ```
