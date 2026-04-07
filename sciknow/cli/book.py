@@ -432,7 +432,6 @@ def write(
     expand:     bool = typer.Option(False, "--expand", "-e", help="Expand query with LLM synonyms before retrieval."),
     show_plan:  bool = typer.Option(False, "--plan", help="Show a sentence plan before drafting."),
     verify:     bool = typer.Option(False, "--verify", help="Run claim verification after drafting."),
-    ipcc:       bool = typer.Option(False, "--ipcc", help="Add IPCC-style calibrated uncertainty language."),
 ):
     """
     Draft a chapter section with cross-chapter coherence.
@@ -447,7 +446,7 @@ def write(
 
       sciknow book write "Global Cooling" 2 --section methods --plan --verify
 
-      sciknow book write "Global Cooling" 3 --section results --ipcc --expand
+      sciknow book write "Global Cooling" 3 --section results --expand
     """
     from sciknow.rag import prompts
     from sciknow.rag.llm import stream as llm_stream, complete as llm_complete, complete_with_status
@@ -529,14 +528,6 @@ def write(
     console.print()
 
     content = "".join(output_tokens)
-
-    # ── Optional: IPCC uncertainty language ───────────────────────────────
-    if ipcc:
-        console.print(Rule("[dim]Applying IPCC calibrated uncertainty language[/dim]"))
-        sys_i, usr_i = prompts.ipcc_uncertainty(content, results)
-        content = complete_with_status(sys_i, usr_i, label="IPCC pass", model=model, temperature=0.1, num_ctx=16384)
-        console.print("[green]✓ IPCC uncertainty language applied.[/green]")
-        console.print()
 
     from sciknow.rag.prompts import format_sources
     source_lines = format_sources(results).splitlines()
@@ -1182,7 +1173,7 @@ def _score_draft(draft_content, section_type, topic, session, qdrant, model=None
 def _autowrite_section(
     book_id, book_title, book_plan, ch_id, ch_num, ch_title, topic_query,
     topic_cluster, section, model, max_iter, target_score, auto_expand,
-    ipcc, console,
+    console,
 ):
     """Inner convergence loop for one section. Returns the final draft content."""
     from sciknow.rag import prompts as rag_prompts
@@ -1328,15 +1319,7 @@ def _autowrite_section(
             # Try a different instruction on next iteration
             # The loop will re-score the original content and get a new weakest dimension
 
-    # ── Step 3: IPCC pass (optional) ─────────────────────────────────────
-    if ipcc:
-        console.print(Rule("[dim]Applying IPCC uncertainty language[/dim]"))
-        sys_i, usr_i = rag_prompts.ipcc_uncertainty(content, scored_results if 'scored_results' in dir() else [])
-        content = complete_with_status(
-            sys_i, usr_i, label="IPCC pass", model=model, temperature=0.1, num_ctx=16384,
-        )
-
-    # ── Step 4: Save ─────────────────────────────────────────────────────
+    # ── Step 3: Save ─────────────────────────────────────────────────────
     with console.status("[dim]Generating summary...[/dim]"):
         summary = _auto_summarize(content, section, ch_title, model=model)
 
@@ -1384,7 +1367,6 @@ def autowrite(
     model:      str | None = typer.Option(None, "--model"),
     auto_expand: bool = typer.Option(False, "--auto-expand",
                                       help="Auto-run db expand when reviewer identifies missing evidence."),
-    ipcc:       bool = typer.Option(False, "--ipcc", help="Apply IPCC uncertainty language on final version."),
     full:       bool = typer.Option(False, "--full",
                                      help="Write ALL chapters × ALL sections (the full autonomous pipeline)."),
 ):
@@ -1413,7 +1395,7 @@ def autowrite(
 
       sciknow book autowrite "Global Cooling" 1 --section introduction --max-iter 5
 
-      sciknow book autowrite "Global Cooling" 3 --section all --target-score 0.80 --ipcc
+      sciknow book autowrite "Global Cooling" 3 --section all --target-score 0.80
 
       sciknow book autowrite "Global Cooling" --full --max-iter 3 --auto-expand
     """
@@ -1494,7 +1476,7 @@ def autowrite(
             topic_query=topic_query, topic_cluster=topic_cluster,
             section=sec, model=model, max_iter=max_iter,
             target_score=target_score, auto_expand=auto_expand,
-            ipcc=ipcc, console=console,
+            console=console,
         )
 
     console.print(f"\n[bold green]✓ Autowrite complete:[/bold green] "

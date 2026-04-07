@@ -11,7 +11,7 @@ All AI inference runs locally. No cloud APIs required to operate the system.
 - **Ingestion pipeline** — PDF → structured JSON (MinerU 2.5) → metadata extraction → section-aware chunking → dense+sparse embedding → PostgreSQL + Qdrant
 - **Hybrid search** — dense vector + sparse lexical + full-text search, fused with Reciprocal Rank Fusion and reranked with a cross-encoder. Citation-count boosted scoring. Optional LLM query expansion.
 - **RAG question answering** — grounded Q&A over your papers with inline citations and source attribution
-- **Writing assistant** — multi-paper synthesis, section drafting, sentence planning, claim verification, IPCC uncertainty language
+- **Writing assistant** — multi-paper synthesis, section drafting, sentence planning, claim verification
 - **Book projects** — structured book → chapter hierarchy with LLM-generated outlines, book plans (thesis + scope), cross-chapter coherence, iterative write → review → revise workflow
 - **Argument mapping** — evidence classification (SUPPORTS / CONTRADICTS / NEUTRAL) for any claim
 - **Gap analysis** — identifies missing topics, weak chapters, and unwritten sections; persists gaps for tracking
@@ -511,11 +511,8 @@ sciknow book write "Global Cooling" 3 --section results --plan
 # Run claim verification after drafting (checks each [N] citation)
 sciknow book write "Global Cooling" 1 --section introduction --verify
 
-# Add IPCC-style calibrated uncertainty language (very likely, high confidence, etc.)
-sciknow book write "Global Cooling" 4 --section discussion --ipcc
-
 # Combine all flags for maximum quality
-sciknow book write "Global Cooling" 5 --section conclusion --plan --verify --ipcc --expand
+sciknow book write "Global Cooling" 5 --section conclusion --plan --verify --expand
 
 # ── Review + revise loop ──────────────────────────────────────────────────
 
@@ -549,13 +546,13 @@ sciknow book autowrite "Global Cooling" 1 --section introduction
 sciknow book autowrite "Global Cooling" 3 --section methods --max-iter 5 --target-score 0.90
 
 # All sections of a chapter
-sciknow book autowrite "Global Cooling" 3 --section all --ipcc
+sciknow book autowrite "Global Cooling" 3 --section all
 
 # FULL BOOK: all chapters × all sections (the ultimate autonomous pipeline)
 sciknow book autowrite "Global Cooling" --full --max-iter 3 --target-score 0.85
 
 # With auto-expand: fetches new papers when reviewer identifies evidence gaps
-sciknow book autowrite "Global Cooling" --full --auto-expand --ipcc
+sciknow book autowrite "Global Cooling" --full --auto-expand
 
 # ── Web reader ────────────────────────────────────────────────────────────
 
@@ -778,7 +775,6 @@ Primary model for all generation, analysis, and reasoning (~5-30 s/call). Used w
 | Review (critic agent) | `sciknow book review` |
 | Revision | `sciknow book revise` |
 | Claim verification | `sciknow book write --verify` |
-| IPCC uncertainty language | `sciknow book write --ipcc` |
 | Argument mapping | `sciknow book argue` |
 | Gap analysis | `sciknow book gaps` |
 | Topic clustering | `sciknow catalog cluster` |
@@ -1048,7 +1044,6 @@ Every draft goes through an iterative refinement cycle:
 |---|---|
 | `--plan` | Shows a paragraph-by-paragraph sentence plan before drafting |
 | `--verify` | Post-generation claim verification — checks each [N] citation against its source passage, reports a groundedness score |
-| `--ipcc` | Adds IPCC-style calibrated uncertainty language (very likely, high confidence, etc.) based on evidence assessment |
 | `--expand` | LLM query expansion before retrieval |
 
 ### Topic clustering
@@ -1156,7 +1151,7 @@ sciknow book write "Global Cooling" 1 --section methods
 
 # Chapter 2 (now aware of chapter 1's content via cross-chapter summaries)
 sciknow book write "Global Cooling" 2 --section introduction --plan
-sciknow book write "Global Cooling" 2 --section results --ipcc
+sciknow book write "Global Cooling" 2 --section results
 ```
 
 #### Step 6 — Review and revise
@@ -1242,14 +1237,12 @@ v4: groun=0.88  compl=0.83  coher=0.87  citat=0.85  overall=0.86  ✓ CONVERGED
 - `--max-iter N` — max iterations per section (default 3)
 - `--target-score 0.85` — quality threshold to stop (default 0.85)
 - `--auto-expand` — when the reviewer identifies missing evidence, checks if the corpus has coverage and flags topics for expansion
-- `--ipcc` — applies IPCC uncertainty language to the final converged version
 
 ### Tips for effective book writing with sciknow
 
 - **Write sequentially** (ch1 → ch2 → ch3). Each chapter's prompt includes summaries of all prior chapters — writing out of order loses this coherence benefit.
 - **Use `--plan` on the first draft** of each section. It shows the paragraph skeleton before the full draft streams, letting you spot structural issues early.
 - **Use `--verify` on important sections.** Catches hallucinated citations before they propagate.
-- **Use `--ipcc` on results/discussion sections.** Inserts calibrated uncertainty language ("very likely", "high confidence") appropriate for climate science publications.
 - **Argue before you write discussion sections.** Run `book argue` on your key claims first, then use those structured evidence maps to write a more nuanced discussion.
 - **Expand targetedly when gaps appear.** If `book gaps` says chapter 7 has weak support, run `db expand -q "your topic" --limit 30` to grow the corpus in that area, then re-write.
 - **Review every section before moving on.** The `book review → book revise` loop catches groundedness issues, missing topics, and redundancy early rather than in the final manuscript.
@@ -1266,7 +1259,7 @@ sciknow book outline "Global Cooling"
                                             sciknow book serve "Global Cooling"
                                             → opens http://localhost:8765
 sciknow book autowrite "Global Cooling" \
-    --full --max-iter 3 --ipcc
+    --full --max-iter 3
                                             [browse chapters as they appear]
                                             [add comments on sections]
                                             [edit text inline in the browser]

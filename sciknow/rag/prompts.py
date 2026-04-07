@@ -779,43 +779,6 @@ def sentence_plan(
     )
 
 
-# ── IPCC uncertainty language ────────────────────────────────────────────────
-
-IPCC_SYSTEM = """\
-You are a climate science editor applying IPCC-style calibrated uncertainty language \
-to a draft section. For each substantive claim in the text, assess the evidence base \
-and insert appropriate IPCC calibrated language:
-
-Confidence levels (based on evidence amount + agreement):
-- Very high confidence: robust evidence, high agreement
-- High confidence: substantial evidence, good agreement
-- Medium confidence: some evidence, moderate agreement
-- Low confidence: limited evidence or low agreement
-
-Likelihood scale (for probabilistic claims):
-- Virtually certain (>99%), Very likely (>90%), Likely (>66%)
-- About as likely as not (33–66%), Unlikely (<33%)
-- Very unlikely (<10%), Exceptionally unlikely (<1%)
-
-Insert these naturally into the text (e.g., "Global mean temperature has very likely \
-increased..."). Do NOT change the substantive content or citations — only add \
-uncertainty qualifiers. Output the COMPLETE revised text."""
-
-IPCC_USER = """\
-Draft section:
-{draft_content}
-
----
-
-Source passages (for assessing evidence strength):
-{context}
-
----
-
-Add IPCC-style calibrated uncertainty language to the claims in this section. \
-Output the complete revised text."""
-
-
 # ── Structured review scoring (for autowrite convergence) ────────────────
 
 SCORE_SYSTEM = """\
@@ -873,16 +836,6 @@ def score_draft(
     return SCORE_SYSTEM, SCORE_USER.format(
         section_type=section_type or "text",
         topic=topic or "",
-        draft_content=draft_content[:12000],
-        context=format_context(results),
-    )
-
-
-def ipcc_uncertainty(
-    draft_content: str,
-    results: list,
-) -> tuple[str, str]:
-    return IPCC_SYSTEM, IPCC_USER.format(
         draft_content=draft_content[:12000],
         context=format_context(results),
     )
