@@ -277,7 +277,7 @@ def compile_paper_summary(
     )
 
     tokens: list[str] = []
-    for tok in llm_stream(system, user, model=model):
+    for tok in llm_stream(system, user, model=model, keep_alive=-1):
         tokens.append(tok)
         yield {"type": "token", "text": tok}
 
@@ -329,10 +329,32 @@ def _extract_entities_and_kg(
         slug=slug, sections=sections,
     )
 
+    # Structured output schema — Ollama guarantees valid JSON matching this
+    extraction_schema = {
+        "type": "object",
+        "properties": {
+            "concepts": {"type": "array", "items": {"type": "string"}},
+            "methods": {"type": "array", "items": {"type": "string"}},
+            "datasets": {"type": "array", "items": {"type": "string"}},
+            "triples": {"type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string"},
+                    "predicate": {"type": "string"},
+                    "object": {"type": "string"},
+                },
+                "required": ["subject", "predicate", "object"],
+            }},
+        },
+        "required": ["concepts", "methods", "datasets", "triples"],
+    }
+
     try:
-        raw = _strip_thinking(llm_complete(sys_e, usr_e, model=model,
-                                            temperature=0.0, num_ctx=8192))
-        data = json.loads(_clean_json(raw), strict=False)
+        raw = llm_complete(sys_e, usr_e, model=model,
+                           temperature=0.0, num_ctx=8192,
+                           keep_alive=-1, format=extraction_schema)
+        # With structured output, no need for _strip_thinking or _clean_json
+        data = json.loads(raw, strict=False)
     except Exception as exc:
         logger.warning("Entity+KG extraction failed for %s: %s", slug, exc)
         return [], 0

@@ -33,9 +33,16 @@ def stream(
     model: str | None = None,
     temperature: float = 0.2,
     num_ctx: int = 16384,
+    keep_alive: str | int | None = None,
+    format: dict | str | None = None,
 ) -> Iterator[str]:
     """
     Stream LLM response tokens. Yields string fragments as they arrive.
+
+    keep_alive: Ollama keep_alive parameter ("-1" = infinite, "60m", etc.).
+                Prevents model unload between calls, enabling prompt caching.
+    format:     JSON schema dict for structured output (Ollama v0.5+).
+                Guarantees valid JSON matching the schema.
     """
     client = _get_client()
     chosen_model = model or settings.llm_model
@@ -43,18 +50,24 @@ def stream(
     logger.info(
         f"LLM stream  model={chosen_model}  system={len(system)}c  "
         f"user={len(user)}c  temp={temperature}  ctx={num_ctx}"
+        f"{'  format=json_schema' if format else ''}"
     )
     token_count = 0
     try:
-        response = client.chat(
-            model=chosen_model,
-            messages=[
+        kwargs: dict = {
+            "model": chosen_model,
+            "messages": [
                 {"role": "system", "content": system},
                 {"role": "user",   "content": user},
             ],
-            stream=True,
-            options={"temperature": temperature, "num_ctx": num_ctx},
-        )
+            "stream": True,
+            "options": {"temperature": temperature, "num_ctx": num_ctx},
+        }
+        if keep_alive is not None:
+            kwargs["keep_alive"] = keep_alive
+        if format is not None:
+            kwargs["format"] = format
+        response = client.chat(**kwargs)
         for chunk in response:
             token_count += 1
             yield chunk.message.content
@@ -87,11 +100,14 @@ def complete(
     model: str | None = None,
     temperature: float = 0.1,
     num_ctx: int = 8192,
+    keep_alive: str | int | None = None,
+    format: dict | str | None = None,
 ) -> str:
     """
     Non-streaming completion. Returns the full response string.
     """
-    return "".join(stream(system, user, model=model, temperature=temperature, num_ctx=num_ctx))
+    return "".join(stream(system, user, model=model, temperature=temperature,
+                          num_ctx=num_ctx, keep_alive=keep_alive, format=format))
 
 
 def complete_with_status(

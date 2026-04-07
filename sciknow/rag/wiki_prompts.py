@@ -37,8 +37,7 @@ Link related topics using [[concept-slug]] notation.
 Rules:
 - Be precise and concise — aim for 300–600 words.
 - Use [[concept-slug]] links for key concepts, methods, and datasets.
-- Available wiki concepts you MUST reuse (do not invent new slugs when one exists): {existing_slugs}
-- If no existing slug fits, propose a new one in lowercase-hyphenated form."""
+- If a concept slug is provided in the user message, reuse it. Otherwise propose new ones in lowercase-hyphenated form."""
 
 PAPER_SUMMARY_USER = """\
 Paper: {title}
@@ -55,6 +54,8 @@ Abstract:
 Section contents:
 {sections}
 
+Existing wiki concepts (reuse these slugs where applicable): {existing_slugs}
+
 ---
 
 Write the wiki summary page for this paper."""
@@ -69,7 +70,6 @@ def wiki_paper_summary(
     return (
         PAPER_SUMMARY_SYSTEM.format(
             title=title or "Untitled", year=year or "n.d.",
-            existing_slugs=slug_str,
         ),
         PAPER_SUMMARY_USER.format(
             title=title or "Untitled", authors=authors or "Unknown",
@@ -93,7 +93,7 @@ Rules:
 - Extract 1–4 methods (techniques, models, algorithms)
 - Extract 0–3 datasets (named datasets or data sources)
 - Extract 5–15 knowledge graph triples (subject, predicate, object)
-- Reuse existing concept names where applicable: {existing_slugs}
+- Reuse existing concept names provided in the user message where applicable
 - Use lowercase-hyphenated slug format for new concepts (e.g. "total-solar-irradiance")
 - Respond ONLY with valid JSON."""
 
@@ -108,6 +108,8 @@ Abstract: {abstract}
 
 Key sections:
 {sections}
+
+Existing wiki concepts (reuse these where applicable): {existing_slugs}
 
 Return JSON:
 {{
@@ -128,7 +130,7 @@ def wiki_extract_entities(
 ) -> tuple[str, str]:
     slug_str = ", ".join(existing_slugs[:300]) if existing_slugs else "(none yet)"
     return (
-        EXTRACT_ENTITIES_SYSTEM.format(existing_slugs=slug_str),
+        EXTRACT_ENTITIES_SYSTEM,
         EXTRACT_ENTITIES_USER.format(
             slug=slug or "unknown",
             title=title or "Untitled", authors=authors or "Unknown",

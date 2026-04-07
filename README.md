@@ -618,8 +618,8 @@ Karpathy-style compiled knowledge wiki. Instead of RAG on raw chunks every time,
 ```bash
 # Build wiki (only new papers by default — safe to re-run anytime)
 # Shows live progress: bar + tok/s + ETA + running totals
-# Per paper: 1 LLM call for summary + 1 merged call for entities+KG triples
-# Tip: set OLLAMA_NUM_PARALLEL=4 on your Ollama server for 3-4x throughput
+# Per paper: 1 LLM call for summary + 1 structured output call for entities+KG
+# Optimized: prompt caching (keep_alive=-1) + JSON schema constrained output
 sciknow wiki compile                    # only papers without wiki pages yet
 sciknow wiki compile --doc-id abc123    # compile one paper
 sciknow wiki compile --rebuild          # recompile everything from scratch
