@@ -78,6 +78,7 @@ def wiki_paper_summary(
             domains=domains or "N/A",
             abstract=(abstract or "N/A")[:3000],
             sections=(sections or "")[:12000],
+            existing_slugs=slug_str,
         ),
     )
 
@@ -138,6 +139,7 @@ def wiki_extract_entities(
             domains=domains or "N/A",
             abstract=(abstract or "N/A")[:2000],
             sections=(sections or "")[:6000],
+            existing_slugs=slug_str,
         ),
     )
 

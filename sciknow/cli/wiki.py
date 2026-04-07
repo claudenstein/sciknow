@@ -93,13 +93,10 @@ def compile(
         console.print(f"Compiling wiki page for document {doc_id[:8]}...")
         gen = wiki_ops.compile_paper_summary(doc_id, model=model, force=rebuild)
         result = _consume_events(gen, console)
-
         if result and not result.get("skipped"):
-            console.print()
-            gen2 = wiki_ops.update_concepts_for_paper(doc_id, model=model)
-            result2 = _consume_events(gen2, console)
-            if result2:
-                console.print(f"[green]✓ Updated {result2.get('concepts_updated', 0)} concept pages[/green]")
+            entities = result.get("entities", [])
+            kg = result.get("kg_triples", 0)
+            console.print(f"[green]✓ {len(entities)} entities, {kg} KG triples extracted[/green]")
     else:
         import time as _time
         from rich.live import Live
