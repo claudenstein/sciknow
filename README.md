@@ -479,6 +479,7 @@ sciknow db enrich            # Find DOIs for papers that don't have one (Crossre
 sciknow db expand            # Discover and download cited papers to grow the collection
 sciknow db backup            # Back up the full collection to a portable archive
 sciknow db restore           # Restore a backup on a new machine
+sciknow db tag-multimodal    # Tag chunks with tables/equations for filtered search
 ```
 
 ### `sciknow ingest`
@@ -544,6 +545,9 @@ sciknow ask question "Explain stellar nucleosynthesis" --model mistral:7b-instru
 # Filter by year and section
 sciknow ask question "How is SST reconstructed from proxies?" \
     --year-from 2000 --section methods
+
+# Self-correcting RAG: evaluates retrieval quality, retries if poor, checks grounding
+sciknow ask question "What drives the Atlantic Meridional Overturning Circulation?" --self-correct
 
 # More context chunks (default: 8)
 sciknow ask question "Compare tree-ring proxy methods" --context-k 15
@@ -1780,7 +1784,7 @@ Planned improvements based on state-of-the-art research in scientific paper proc
 
 ### 3. Self-Correcting RAG (Agentic Retrieval)
 
-**Status:** Planned
+**Status:** Done
 
 **Problem:** `ask question` and `wiki query` are one-shot: search → generate. If the retrieved chunks are irrelevant, the answer hallucinates.
 
@@ -1797,7 +1801,7 @@ Planned improvements based on state-of-the-art research in scientific paper proc
 
 ### 4. Multimodal RAG (Figures, Tables, Equations)
 
-**Status:** Planned
+**Status:** Done
 
 **Problem:** MinerU extracts tables (HTML), equations (LaTeX), and figure captions during ingestion, but sciknow discards them during chunking. They're invisible to search and writing.
 

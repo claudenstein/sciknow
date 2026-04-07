@@ -105,6 +105,8 @@ def _build_qdrant_filter(
     domain: str | None,
     section: str | None,
     topic_cluster: str | None = None,
+    has_table: bool | None = None,
+    has_equation: bool | None = None,
 ) -> Filter | None:
     conditions = []
     if year_from is not None or year_to is not None:
@@ -123,6 +125,10 @@ def _build_qdrant_filter(
         conditions.append(FieldCondition(key="section_type", match=MatchValue(value=section)))
     if topic_cluster:
         conditions.append(FieldCondition(key="topic_cluster", match=MatchValue(value=topic_cluster)))
+    if has_table:
+        conditions.append(FieldCondition(key="has_table", match=MatchValue(value=True)))
+    if has_equation:
+        conditions.append(FieldCondition(key="has_equation", match=MatchValue(value=True)))
 
     if not conditions:
         return None
@@ -425,6 +431,8 @@ def search(
     topic_cluster: str | None = None,
     weights: tuple[float, float, float] = (1.0, 1.0, 0.5),
     use_query_expansion: bool = False,
+    has_table: bool | None = None,
+    has_equation: bool | None = None,
 ) -> list[SearchCandidate]:
     """
     Run hybrid search and return up to `candidate_k` results sorted by RRF score,
@@ -439,7 +447,10 @@ def search(
         effective_query = expand_query(query)
 
     dense_vec, sparse_vec = _embed_query(effective_query)
-    qdrant_filter = _build_qdrant_filter(year_from, year_to, domain, section, topic_cluster)
+    qdrant_filter = _build_qdrant_filter(
+        year_from, year_to, domain, section, topic_cluster,
+        has_table=has_table, has_equation=has_equation,
+    )
 
     dense_ids  = _qdrant_dense(qdrant_client, dense_vec, candidate_k, qdrant_filter)
     sparse_ids = _qdrant_sparse(qdrant_client, sparse_vec, candidate_k, qdrant_filter)

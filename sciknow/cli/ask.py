@@ -25,6 +25,7 @@ _SECTION     = typer.Option(None, "--section",    "-s",  help="Filter by section
 _TOPIC       = typer.Option(None, "--topic",      "-t",  help="Filter by topic cluster name.")
 _MODEL       = typer.Option(None, "--model",              help="Override LLM model name (Ollama).")
 _EXPAND      = typer.Option(False, "--expand/--no-expand", "-e", help="Expand query with LLM synonyms before retrieval.")
+_SELF_CORRECT = typer.Option(False, "--self-correct/--no-self-correct", help="Enable Self-RAG: evaluate retrieval relevance + check answer grounding.")
 
 
 def _retrieve(
@@ -90,9 +91,14 @@ def question(
     topic: str | None = _TOPIC,
     model: str | None = _MODEL,
     expand: bool = _EXPAND,
+    self_correct: bool = _SELF_CORRECT,
 ):
     """
     Answer a question using RAG over ingested papers.
+
+    Use --self-correct for Self-RAG: evaluates retrieval relevance before
+    answering (retries with reformulated query if poor), then checks
+    answer grounding after generation.
 
     Examples:
 
@@ -101,7 +107,7 @@ def question(
       sciknow ask question "How is sea surface temperature reconstructed from proxies?" \\
           --year-from 2000 --section methods
 
-      sciknow ask question "Explain the central dogma of molecular biology" --no-sources
+      sciknow ask question "solar forcing" --self-correct
 
       sciknow ask question "solar forcing" --expand
     """
@@ -110,6 +116,7 @@ def question(
     from sciknow.storage.qdrant import get_client
 
     qdrant = get_client()
+    effective_query = q
 
     with get_session() as session:
         with console.status("[bold green]Retrieving relevant passages...", spinner="dots"):
@@ -121,13 +128,56 @@ def question(
             console.print("[yellow]No relevant passages found in the knowledge base.[/yellow]")
             raise typer.Exit(0)
 
-        system, user = prompts.qa(q, results)
+        # Self-RAG step 1: evaluate retrieval relevance
+        if self_correct:
+            from sciknow.retrieval.self_rag import evaluate_retrieval
+            with console.status("[bold cyan]Evaluating retrieval relevance...", spinner="dots"):
+                is_relevant, rel_score, reformulated = evaluate_retrieval(
+                    q, results, model=model,
+                )
+            console.print(f"[dim]Retrieval relevance: {rel_score:.2f}[/dim]")
+
+            if not is_relevant and reformulated != q:
+                console.print(f"[yellow]Low relevance — retrying with:[/yellow] {reformulated}")
+                results = _retrieve(reformulated, context_k, candidates, no_rerank,
+                                    year_from, year_to, domain, section, session, qdrant, topic,
+                                    expand=True)
+                effective_query = reformulated
+                if not results:
+                    console.print("[yellow]Still no relevant passages after reformulation.[/yellow]")
+                    raise typer.Exit(0)
+
+        system, user = prompts.qa(effective_query, results)
 
     console.print()
     console.print(Rule("[bold]Answer[/bold]"))
     console.print()
 
-    _stream_answer(system, user, model)
+    # Capture answer for grounding check
+    if self_correct:
+        from sciknow.rag.llm import stream as llm_stream
+        answer_tokens = []
+        for tok in llm_stream(system, user, model=model):
+            console.print(tok, end="", highlight=False)
+            answer_tokens.append(tok)
+        console.print()
+        answer_text = "".join(answer_tokens)
+
+        # Self-RAG step 2: check grounding
+        from sciknow.retrieval.self_rag import check_grounding
+        with console.status("[bold cyan]Checking answer grounding...", spinner="dots"):
+            grounding_score, ungrounded = check_grounding(
+                answer_text, results, model=model,
+            )
+        console.print()
+        color = "green" if grounding_score >= 0.8 else "yellow" if grounding_score >= 0.6 else "red"
+        console.print(f"[{color}]Grounding score: {grounding_score:.2f}[/{color}]")
+        if ungrounded:
+            console.print(f"[yellow]Ungrounded claims ({len(ungrounded)}):[/yellow]")
+            for claim in ungrounded[:5]:
+                console.print(f"  [dim]- {claim[:100]}[/dim]")
+    else:
+        _stream_answer(system, user, model)
 
     if show_sources:
         from sciknow.rag.prompts import format_sources

@@ -1503,6 +1503,33 @@ def link_citations(
             console.print(table)
 
 
+@app.command(name="tag-multimodal")
+def tag_multimodal():
+    """
+    Tag chunks containing tables or equations in Qdrant.
+
+    Scans all chunks and sets has_table=True / has_equation=True payload
+    fields so they can be filtered during search (--tables / --equations).
+
+    Run once after ingestion to enable multimodal filtering.
+
+    Examples:
+
+      sciknow db tag-multimodal
+    """
+    from sciknow.cli import preflight
+    preflight(qdrant=True)
+
+    from sciknow.retrieval.multimodal import tag_multimodal_chunks
+
+    console.print("Scanning chunks for tables and equations...")
+    result = tag_multimodal_chunks()
+    console.print(
+        f"[green]✓ Tagged {result['tables_tagged']} chunks with tables, "
+        f"{result['equations_tagged']} with equations[/green]"
+    )
+
+
 @app.command()
 def export(
     output: Path = typer.Option(Path("finetune_dataset.jsonl"), "--output", "-o",
