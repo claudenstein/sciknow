@@ -23,6 +23,22 @@ app = typer.Typer(help="Compiled knowledge wiki (Karpathy LLM-wiki pattern).")
 console = Console()
 
 
+def _check_wiki_table():
+    """Verify the wiki_pages table exists, or exit with a helpful message."""
+    from sciknow.storage.db import get_session
+    from sqlalchemy import text
+    try:
+        with get_session() as sess:
+            sess.execute(text("SELECT 1 FROM wiki_pages LIMIT 0"))
+    except Exception:
+        console.print(
+            "[red]The wiki_pages table does not exist.[/red]\n"
+            "Run the migration first:\n\n"
+            "  [bold]uv run alembic upgrade head[/bold]\n"
+        )
+        raise typer.Exit(1)
+
+
 def _consume_events(gen, console):
     """Consume events from a wiki_ops generator, printing to Rich console."""
     completed = None
@@ -69,6 +85,7 @@ def compile(
     """
     from sciknow.cli import preflight
     preflight(qdrant=True)
+    _check_wiki_table()
 
     from sciknow.core import wiki_ops
 
@@ -114,6 +131,7 @@ def query(
     """
     from sciknow.cli import preflight
     preflight(qdrant=True)
+    _check_wiki_table()
 
     from sciknow.core.wiki_ops import query_wiki
 
@@ -175,6 +193,7 @@ def list_pages(
 
       sciknow wiki list --type paper_summary --limit 20
     """
+    _check_wiki_table()
     from sciknow.core.wiki_ops import list_pages as _list
 
     pages = _list(page_type=page_type)[:limit]
@@ -248,6 +267,7 @@ def synthesize(
     """
     from sciknow.cli import preflight
     preflight(qdrant=True)
+    _check_wiki_table()
 
     from sciknow.core.wiki_ops import compile_synthesis
 
