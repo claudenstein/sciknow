@@ -83,6 +83,12 @@ def compile(
 
       sciknow wiki compile --rebuild          # recompile everything from scratch
     """
+    import warnings
+    warnings.filterwarnings("ignore", message=".*urllib3.*")
+    warnings.filterwarnings("ignore", message=".*charset_normalizer.*")
+    warnings.filterwarnings("ignore", message=".*XLMRobertaTokenizerFast.*")
+    warnings.filterwarnings("ignore", message=".*fast tokenizer.*")
+
     from sciknow.cli import preflight
     preflight(qdrant=True)
     _check_wiki_table()
