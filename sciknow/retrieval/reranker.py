@@ -19,6 +19,24 @@ def _get_reranker():
     return _reranker
 
 
+def release_reranker() -> None:
+    """Drop the cached reranker model and free VRAM."""
+    global _reranker
+    if _reranker is None:
+        return
+    try:
+        del _reranker
+    finally:
+        _reranker = None
+    try:
+        import gc, torch
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
 def rerank(
     query: str,
     candidates: list[SearchCandidate],

@@ -105,11 +105,25 @@ def _save_draft(session, *, title, book_id, chapter_id, section_type, topic,
     return result[0]
 
 
+def _release_gpu_models():
+    """Free bge-m3 embedder + reranker from VRAM so Ollama can use the full GPU."""
+    from sciknow.ingestion.embedder import release_model
+    from sciknow.retrieval.hybrid_search import release_embed_model
+    from sciknow.retrieval.reranker import release_reranker
+    release_embed_model()
+    release_model()
+    release_reranker()
+
+
 def _retrieve(session, qdrant, query: str, candidate_k: int = 50,
               context_k: int = 12, topic_cluster: str | None = None,
               year_from: int | None = None, year_to: int | None = None,
               use_query_expansion: bool = False):
-    """Run hybrid search + rerank + context build. Returns (results, sources)."""
+    """Run hybrid search + rerank + context build. Returns (results, sources).
+
+    After retrieval completes, GPU models (bge-m3 + reranker) are released
+    so the LLM has full VRAM available.
+    """
     from sciknow.retrieval import context_builder, hybrid_search, reranker
     from sciknow.rag.prompts import format_sources
 
@@ -119,8 +133,10 @@ def _retrieve(session, qdrant, query: str, candidate_k: int = 50,
         topic_cluster=topic_cluster, use_query_expansion=use_query_expansion,
     )
     if not candidates:
+        _release_gpu_models()
         return [], []
     candidates = reranker.rerank(query, candidates, top_k=context_k)
+    _release_gpu_models()
     results = context_builder.build(candidates, session)
     sources = format_sources(results).splitlines()
     return results, sources

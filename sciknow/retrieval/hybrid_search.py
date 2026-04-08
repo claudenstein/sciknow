@@ -78,6 +78,24 @@ def _get_embed_model():
     return _embed_model
 
 
+def release_embed_model() -> None:
+    """Drop the cached query embedding model and free VRAM."""
+    global _embed_model
+    if _embed_model is None:
+        return
+    try:
+        del _embed_model
+    finally:
+        _embed_model = None
+    try:
+        import gc, torch
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
 def _embed_query(query: str) -> tuple[list[float], SparseVector]:
     model = _get_embed_model()
     output = model.encode(
