@@ -855,6 +855,8 @@ def autowrite(
                                       help="Auto-run db expand when reviewer identifies missing evidence."),
     full:       bool = typer.Option(False, "--full",
                                      help="Write ALL chapters × ALL sections (the full autonomous pipeline)."),
+    rebuild:    bool = typer.Option(False, "--rebuild",
+                                     help="Rewrite sections that already have drafts (default: skip existing)."),
 ):
     """
     Autonomous write → review → revise convergence loop (inspired by Karpathy's autoresearch).
@@ -946,6 +948,25 @@ def autowrite(
             f"[bold]Autowrite:[/bold] {b_title} — "
             f"{len(targets)} section(s), max {max_iter} iter, target {target_score}"
         )
+
+    # Skip sections that already have drafts (unless --rebuild)
+    if not rebuild:
+        with get_session() as session:
+            existing = session.execute(text("""
+                SELECT chapter_id::text, section_type
+                FROM drafts WHERE book_id = :bid AND chapter_id IS NOT NULL
+            """), {"bid": book_id}).fetchall()
+        existing_set = {(r[0], r[1]) for r in existing}
+
+        before = len(targets)
+        targets = [(cid, cn, ct, sec) for cid, cn, ct, sec in targets
+                    if (cid, sec) not in existing_set]
+        skipped = before - len(targets)
+        if skipped:
+            console.print(f"[dim]Skipping {skipped} sections with existing drafts (use --rebuild to overwrite)[/dim]")
+        if not targets:
+            console.print("[green]All sections already have drafts.[/green]")
+            raise typer.Exit(0)
 
     # Run the convergence loop for each target with live dashboard
     import time as _time
