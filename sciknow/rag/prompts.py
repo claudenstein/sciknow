@@ -244,12 +244,18 @@ def write_section(
 
 OUTLINE_SYSTEM = """\
 You are an expert scientific book editor. Given a list of scientific paper titles \
-and their publication years, propose a structured book outline.
+and their publication years, propose a structured book outline for a scientific \
+divulgation book (not a research paper).
 
 Rules:
-- Propose 6–12 chapters that logically build the book's argument
-- Each chapter should have a clear title and a 1–2 sentence description of what it covers
-- Order chapters so the argument flows from foundational evidence to conclusions
+- Propose 6–12 chapters that logically build the book's narrative
+- Each chapter should have a clear title and a 1–2 sentence description
+- Order chapters so the argument flows from foundational concepts to conclusions
+- For EACH chapter, propose 3–6 sections appropriate to that chapter's content. \
+  Use section names that fit a book (NOT paper-style like "methods" or "results"). \
+  Good section names: "Historical Context", "Key Evidence", "The Debate", \
+  "Mechanisms", "Observations", "Implications", "Current Understanding", \
+  "Unresolved Questions", "Future Outlook", etc.
 - Respond ONLY with valid JSON in the exact format shown"""
 
 OUTLINE_USER = """\
@@ -261,13 +267,22 @@ Available papers in the collection ({n_papers} total):
 Propose a chapter structure for this book. Return JSON:
 {{
   "chapters": [
-    {{"number": 1, "title": "...", "description": "...", "topic_query": "..."}},
+    {{
+      "number": 1,
+      "title": "...",
+      "description": "...",
+      "topic_query": "...",
+      "sections": ["Section Name 1", "Section Name 2", "Section Name 3"]
+    }},
     ...
   ]
 }}
 
 The "topic_query" should be a short search phrase (3–6 words) that retrieves the most \
-relevant papers from the collection for that chapter."""
+relevant papers from the collection for that chapter.
+The "sections" should be 3–6 section names appropriate for a scientific book chapter \
+(NOT paper-style — no "methods", "results", "discussion"). Think of how a popular \
+science book structures its chapters."""
 
 
 def outline(book_title: str, papers: list[dict]) -> tuple[str, str]:

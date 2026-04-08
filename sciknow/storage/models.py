@@ -251,6 +251,7 @@ class BookChapter(Base):
     description: Mapped[str | None] = mapped_column(Text)
     topic_query: Mapped[str | None] = mapped_column(Text)
     topic_cluster: Mapped[str | None] = mapped_column(Text)
+    sections: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

@@ -479,6 +479,8 @@ def outline(
             console.print(f"         [dim]{ch['description']}[/dim]")
         if ch.get("topic_query"):
             console.print(f"         [dim]Query: {ch['topic_query']}[/dim]")
+        if ch.get("sections"):
+            console.print(f"         Sections: {' → '.join(ch['sections'])}")
         console.print()
 
     if save:
@@ -489,15 +491,17 @@ def outline(
                 """), {"bid": book[0], "num": ch["number"]}).fetchone()
                 if existing:
                     continue
+                sections_json = _json.dumps(ch.get("sections", []))
                 session.execute(text("""
-                    INSERT INTO book_chapters (book_id, number, title, description, topic_query)
-                    VALUES (:bid, :num, :title, :desc, :tq)
+                    INSERT INTO book_chapters (book_id, number, title, description, topic_query, sections)
+                    VALUES (:bid, :num, :title, :desc, :tq, :secs::jsonb)
                 """), {
                     "bid": book[0],
                     "num": ch["number"],
                     "title": ch["title"],
                     "desc": ch.get("description"),
                     "tq": ch.get("topic_query"),
+                    "secs": sections_json,
                 })
             session.commit()
         console.print(f"[green]✓ Saved {len(chapters)} chapters to database.[/green]")
@@ -838,7 +842,19 @@ def serve(
 
 # ── autowrite (Karpathy-loop-inspired convergence) ─────────────────────────────
 
-_DEFAULT_SECTIONS = ["introduction", "methods", "results", "discussion", "conclusion"]
+_DEFAULT_SECTIONS = ["overview", "key_evidence", "current_understanding", "open_questions", "summary"]
+
+
+def _get_chapter_sections(session, chapter_id: str) -> list[str]:
+    """Get per-chapter sections from DB, or fall back to defaults."""
+    from sqlalchemy import text
+    row = session.execute(text(
+        "SELECT sections FROM book_chapters WHERE id::text = :cid"
+    ), {"cid": chapter_id}).fetchone()
+    if row and row[0] and isinstance(row[0], list) and len(row[0]) > 0:
+        # Normalize section names to lowercase slugs
+        return [s.lower().replace(" ", "_") for s in row[0]]
+    return _DEFAULT_SECTIONS
 
 
 @app.command()
@@ -917,15 +933,15 @@ def autowrite(
 
     # Determine which chapters x sections to write
     if full:
-        targets = [
-            (ch[0], ch[1], ch[2], sec)
-            for ch in chapters
-            for sec in _DEFAULT_SECTIONS
-        ]
+        targets = []
+        with get_session() as session:
+            for ch in chapters:
+                ch_secs = _get_chapter_sections(session, ch[0])
+                for sec in ch_secs:
+                    targets.append((ch[0], ch[1], ch[2], sec))
         console.print(
             f"[bold]Autowrite FULL BOOK:[/bold] {b_title}\n"
-            f"  {len(chapters)} chapters x {len(_DEFAULT_SECTIONS)} sections "
-            f"= {len(targets)} total sections\n"
+            f"  {len(chapters)} chapters, {len(targets)} total sections\n"
             f"  Max {max_iter} iterations each, target score {target_score}"
         )
     elif chapter is None:
@@ -934,15 +950,16 @@ def autowrite(
     else:
         with get_session() as session:
             ch = _get_chapter(session, book_id, chapter)
-        if not ch:
-            console.print(f"[red]Chapter not found:[/red] {chapter}")
-            raise typer.Exit(1)
-        ch_id, ch_num, ch_title = ch[0], ch[1], ch[2]
+            if not ch:
+                console.print(f"[red]Chapter not found:[/red] {chapter}")
+                raise typer.Exit(1)
+            ch_id, ch_num, ch_title = ch[0], ch[1], ch[2]
 
-        if section == "all":
-            targets = [(ch_id, ch_num, ch_title, sec) for sec in _DEFAULT_SECTIONS]
-        else:
-            targets = [(ch_id, ch_num, ch_title, section)]
+            if section == "all":
+                ch_secs = _get_chapter_sections(session, ch_id)
+                targets = [(ch_id, ch_num, ch_title, sec) for sec in ch_secs]
+            else:
+                targets = [(ch_id, ch_num, ch_title, section)]
 
         console.print(
             f"[bold]Autowrite:[/bold] {b_title} — "

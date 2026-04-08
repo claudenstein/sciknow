@@ -582,7 +582,7 @@ def run_argue_stream(
 
 # ── autowrite_section_stream ─────────────────────────────────────────────────
 
-DEFAULT_SECTIONS = ["introduction", "methods", "results", "discussion", "conclusion"]
+DEFAULT_SECTIONS = ["overview", "key_evidence", "current_understanding", "open_questions", "summary"]
 
 
 def _score_draft_inner(draft_content, section_type, topic, results, model=None):

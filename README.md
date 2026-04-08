@@ -531,7 +531,7 @@ sciknow search query "protein folding" --show-scores
 sciknow search query "galaxy formation" --candidates 100 --top-k 15
 ```
 
-Valid `--section` values: `abstract`, `introduction`, `methods`, `results`, `discussion`, `conclusion`, `related_work`, `appendix`
+Section names are per-chapter (defined during `book outline`). Default sections for a scientific book: `overview`, `key_evidence`, `current_understanding`, `open_questions`, `summary`. Each chapter can have its own custom sections — the outline LLM proposes them based on the chapter's content. Use `--section all` to write all sections of a chapter.
 
 ### `sciknow ask`
 
