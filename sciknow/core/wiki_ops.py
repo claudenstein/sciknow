@@ -207,6 +207,17 @@ def _append_log(entry: str):
 
 # ── compile_paper_summary ────────────────────────────────────────────────────
 
+def _wiki_model(model: str | None = None) -> str:
+    """Default model for wiki operations — uses llm_fast_model for speed.
+
+    Wiki pages are an exploration/browsing layer, not the final writing output.
+    Book writing always uses the full model via the separate book_ops pipeline.
+    """
+    if model:
+        return model
+    return settings.llm_fast_model or settings.llm_model
+
+
 def compile_paper_summary(
     doc_id: str,
     *,
@@ -218,6 +229,8 @@ def compile_paper_summary(
     from sciknow.rag import wiki_prompts
     from sciknow.rag.llm import stream as llm_stream
     from sciknow.storage.db import get_session
+
+    model = _wiki_model(model)
 
     with get_session() as session:
         # Load paper metadata
@@ -640,6 +653,7 @@ def compile_synthesis(
     model: str | None = None,
 ) -> Iterator[Event]:
     """Generate a synthesis page on a topic from existing wiki pages."""
+    model = _wiki_model(model)
     from sciknow.rag import wiki_prompts
     from sciknow.rag.llm import stream as llm_stream
     from sciknow.storage.db import get_session
@@ -712,6 +726,7 @@ def query_wiki(
     model: str | None = None,
 ) -> Iterator[Event]:
     """Search the wiki collection and answer from compiled pages."""
+    model = _wiki_model(model)
     from sciknow.rag.llm import stream as llm_stream
     from sciknow.storage.qdrant import WIKI_COLLECTION, get_client
 
@@ -815,6 +830,7 @@ def consensus_map(
     Map the consensus landscape for a topic using the knowledge graph
     and wiki paper summaries. Returns structured agreement/disagreement data.
     """
+    model = _wiki_model(model)
     from sciknow.rag import wiki_prompts
     from sciknow.rag.llm import complete as llm_complete
     from sciknow.storage.db import get_session
@@ -913,6 +929,7 @@ def lint_wiki(
     model: str | None = None,
 ) -> Iterator[Event]:
     """Run wiki health checks."""
+    model = _wiki_model(model)
     from sqlalchemy import text
     from sciknow.storage.db import get_session
 

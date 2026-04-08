@@ -619,7 +619,8 @@ Karpathy-style compiled knowledge wiki. Instead of RAG on raw chunks every time,
 # Build wiki (only new papers by default — safe to re-run anytime)
 # Shows live progress: bar + tok/s + ETA + running totals
 # Per paper: 1 LLM call for summary + 1 structured output call for entities+KG
-# Optimized: prompt caching (keep_alive=-1) + JSON schema constrained output
+# Uses LLM_FAST_MODEL by default (wiki is exploration, not final writing)
+# Override with --model if needed. Book writing always uses the main model.
 sciknow wiki compile                    # only papers without wiki pages yet
 sciknow wiki compile --doc-id abc123    # compile one paper
 sciknow wiki compile --rebuild          # recompile everything from scratch
