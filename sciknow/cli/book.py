@@ -947,9 +947,16 @@ def autowrite(
             f"{len(targets)} section(s), max {max_iter} iter, target {target_score}"
         )
 
-    # Run the convergence loop for each target
+    # Run the convergence loop for each target with live dashboard
+    import time as _time
+    from rich.live import Live
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+
     total = len(targets)
     converged = 0
+
     for i, (ch_id, ch_num, ch_title, sec) in enumerate(targets, 1):
         console.print(f"\n{'=' * 72}")
         console.print(
@@ -963,11 +970,140 @@ def autowrite(
             model=model, max_iter=max_iter, target_score=target_score,
             auto_expand=auto_expand,
         )
-        result = _consume_events(gen, console)
-        if result and result.get("final_score", 0) >= target_score:
-            converged += 1
 
-    console.print(f"\n[bold green]✓ Autowrite complete:[/bold green] "
+        # Live dashboard state
+        tok_count = 0
+        tok_t0 = _time.monotonic()
+        text_preview = ""
+        current_stage = "starting"
+        current_iter = 0
+        iter_max = max_iter
+        last_scores = {}
+        score_history = []
+        verdicts = []
+        grounding = ""
+        result = None
+
+        def _build_display():
+            tbl = Table.grid(padding=(0, 2))
+            tbl.add_column(ratio=1)
+
+            # Stage + tokens
+            elapsed = _time.monotonic() - tok_t0
+            tps = tok_count / elapsed if elapsed > 0 else 0
+            stage_color = {"writing": "green", "scoring": "yellow", "verifying": "cyan",
+                           "revising": "magenta", "saving": "blue"}.get(current_stage, "dim")
+            tbl.add_row(Text.from_markup(
+                f"  [{stage_color}]{current_stage.upper()}[/{stage_color}]  "
+                f"[green]{tok_count} tok[/green]  "
+                f"[cyan]{tps:.1f} tok/s[/cyan]  "
+                f"[dim]iter {current_iter}/{iter_max}[/dim]"
+            ))
+
+            # Scores bar
+            if last_scores:
+                dims = ["groundedness", "completeness", "coherence", "citation_accuracy", "overall"]
+                parts = []
+                for d in dims:
+                    v = last_scores.get(d, 0)
+                    c = "green" if v >= 0.85 else "yellow" if v >= 0.7 else "red"
+                    bar_len = int(v * 10)
+                    bar = "█" * bar_len + "░" * (10 - bar_len)
+                    parts.append(f"[{c}]{d[:5]} {bar} {v:.2f}[/{c}]")
+                tbl.add_row(Text.from_markup("  " + "  ".join(parts)))
+
+            # Verdicts
+            if verdicts:
+                v_text = "  ".join(verdicts[-5:])
+                tbl.add_row(Text.from_markup(f"  {v_text}"))
+
+            # Grounding
+            if grounding:
+                tbl.add_row(Text.from_markup(f"  {grounding}"))
+
+            # Text preview (last 200 chars)
+            if text_preview:
+                preview = text_preview[-200:].replace("\n", " ").strip()
+                if len(text_preview) > 200:
+                    preview = "..." + preview
+                tbl.add_row(Text.from_markup(f"  [dim]{preview}[/dim]"))
+
+            return Panel(tbl, title=f"Ch.{ch_num} {sec.capitalize()}", border_style="blue")
+
+        with Live(_build_display(), console=console, refresh_per_second=4, transient=True) as live:
+            for event in gen:
+                t = event.get("type")
+
+                if t == "token":
+                    tok_count += 1
+                    text_preview += event["text"]
+                    live.update(_build_display())
+
+                elif t == "progress":
+                    current_stage = event.get("stage", current_stage)
+                    live.update(_build_display())
+
+                elif t == "scores":
+                    last_scores = event.get("scores", {})
+                    score_history.append(last_scores.get("overall", 0))
+                    current_iter = event.get("iteration", current_iter)
+                    live.update(_build_display())
+
+                elif t == "iteration_start":
+                    current_iter = event.get("iteration", 1)
+                    iter_max = event.get("max", max_iter)
+                    text_preview = ""
+                    tok_count = 0
+                    tok_t0 = _time.monotonic()
+                    live.update(_build_display())
+
+                elif t == "revision_verdict":
+                    action = event["action"]
+                    icon = "\u2713" if action == "KEEP" else "\u2717"
+                    color = "green" if action == "KEEP" else "red"
+                    verdicts.append(
+                        f"[{color}]{icon} {action} "
+                        f"{event['old_score']:.2f}\u2192{event['new_score']:.2f}[/{color}]"
+                    )
+                    text_preview = ""
+                    tok_count = 0
+                    tok_t0 = _time.monotonic()
+                    live.update(_build_display())
+
+                elif t == "converged":
+                    verdicts.append(
+                        f"[bold green]\u2713 CONVERGED "
+                        f"(iter {event['iteration']}, score {event['final_score']:.2f})[/bold green]"
+                    )
+                    live.update(_build_display())
+
+                elif t == "verification":
+                    vdata = event.get("data", {})
+                    gs = vdata.get("groundedness_score", "?")
+                    color = "green" if isinstance(gs, (int, float)) and gs >= 0.8 else "yellow"
+                    grounding = f"[{color}]Groundedness: {gs}[/{color}]"
+                    live.update(_build_display())
+
+                elif t == "completed":
+                    result = event
+
+                elif t == "error":
+                    console.print(f"[red]Error:[/red] {event.get('message', '')}")
+
+        # Print final summary for this section
+        if result:
+            wc = result.get("word_count", 0)
+            fs = result.get("final_score", 0)
+            iters = result.get("iterations", 0)
+            console.print(
+                f"  [green]\u2713[/green] {sec.capitalize()}: "
+                f"{wc} words, {iters} iterations"
+                + (f", score {fs:.2f}" if fs else "")
+            )
+            if fs >= target_score:
+                converged += 1
+
+    console.print(f"\n[bold green]\u2713 Autowrite complete:[/bold green] "
                   f"{total} sections, {converged} converged")
 
 
