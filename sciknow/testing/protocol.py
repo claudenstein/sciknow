@@ -415,9 +415,38 @@ def l1_web_phase14_endpoints_registered() -> None:
         "/api/ask",
         "/api/catalog",
         "/api/stats",
+        # Phase 14.3
+        "/api/book",
+        "/api/book/plan/generate",
     }
     missing = expected - routes
     assert not missing, f"Phase 14 routes missing from app: {missing}"
+
+
+def l1_web_phase14_3_book_plan_editor() -> None:
+    """Phase 14.3 — book plan + chapter scope editors are wired in.
+
+    Verifies the toolbar button, the two new modals, the JS handlers,
+    and the empty-state chapter scope card.
+    """
+    import sciknow.web.app as web
+    t = web.TEMPLATE
+    # Toolbar
+    assert "openPlanModal()" in t, "Plan toolbar button missing"
+    # Modal HTML
+    assert 'id="plan-modal"' in t, "plan-modal element missing"
+    assert 'id="chapter-modal"' in t, "chapter-modal element missing"
+    assert 'id="plan-text-input"' in t, "plan textarea missing"
+    assert 'id="ch-desc-input"' in t, "chapter description textarea missing"
+    assert 'id="ch-tq-input"' in t, "chapter topic_query input missing"
+    # JS handlers
+    assert "function savePlan" in t, "savePlan() JS handler missing"
+    assert "function regeneratePlan" in t, "regeneratePlan() JS handler missing"
+    assert "function openChapterModal" in t, "openChapterModal() JS handler missing"
+    assert "function saveChapterInfo" in t, "saveChapterInfo() JS handler missing"
+    # Empty-state chapter scope card
+    assert "ch-scope" in t, "ch-scope CSS class missing from empty state"
+    assert "Edit chapter scope" in t, "Edit chapter scope button missing"
 
 
 def l1_web_rendered_js_is_valid() -> "TestResult":
@@ -675,6 +704,7 @@ L1_TESTS: list[Callable] = [
     l1_web_template_has_overstated,
     l1_web_template_phase14_features,
     l1_web_phase14_endpoints_registered,
+    l1_web_phase14_3_book_plan_editor,
     l1_web_rendered_js_is_valid,
     l1_research_doc_up_to_date,
 ]

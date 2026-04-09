@@ -216,13 +216,108 @@ async def search_book(q: str = ""):
 @app.get("/api/book")
 async def api_book():
     book, chapters, drafts, gaps, comments = _get_book_data()
+    # book columns: id, title, description, plan, status
     return {
+        "id": book[0] if book else "",
         "title": book[1] if book else "",
+        "description": (book[2] or "") if book else "",
+        "plan": (book[3] or "") if book else "",
+        "status": (book[4] or "draft") if book else "draft",
         "chapters": len(chapters),
         "drafts": len(drafts),
         "gaps": len(gaps),
         "comments": len(comments),
     }
+
+
+@app.put("/api/book")
+async def api_book_update(
+    title: str = Form(None),
+    description: str = Form(None),
+    plan: str = Form(None),
+):
+    """Update the book's title, description (short blurb), or plan
+    (the 200-500 word thesis/scope document used by the writer prompt).
+    All three are optional — only the fields you pass get updated."""
+    updates = []
+    params: dict = {"bid": _book_id}
+    if title is not None:
+        updates.append("title = :title")
+        params["title"] = title
+    if description is not None:
+        updates.append("description = :desc")
+        params["desc"] = description
+    if plan is not None:
+        updates.append("plan = :plan")
+        params["plan"] = plan
+    if not updates:
+        return JSONResponse({"ok": True})
+
+    with get_session() as session:
+        session.execute(text(
+            f"UPDATE books SET {', '.join(updates)} WHERE id::text = :bid"
+        ), params)
+        session.commit()
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/book/plan/generate")
+async def api_book_plan_generate(model: str = Form(None)):
+    """Generate (or regenerate) the book plan via the LLM, streaming
+    tokens to the browser via SSE. Mirrors the `sciknow book plan --edit`
+    CLI flow but persists to drafts.custom_metadata-style streaming."""
+    job_id, queue = _create_job("book_plan_generate")
+    loop = asyncio.get_event_loop()
+
+    def gen():
+        from sciknow.rag import prompts as rag_prompts
+        from sciknow.rag.llm import stream as llm_stream
+
+        with get_session() as session:
+            book = session.execute(text("""
+                SELECT id::text, title, description, plan
+                FROM books WHERE id::text = :bid
+            """), {"bid": _book_id}).fetchone()
+            if not book:
+                yield {"type": "error", "message": "Book not found."}
+                return
+            chapters = session.execute(text("""
+                SELECT number, title, description FROM book_chapters
+                WHERE book_id = :bid ORDER BY number
+            """), {"bid": _book_id}).fetchall()
+            papers = session.execute(text("""
+                SELECT pm.title, pm.year FROM paper_metadata pm
+                JOIN documents d ON d.id = pm.document_id
+                WHERE d.ingestion_status = 'complete' AND pm.title IS NOT NULL
+                ORDER BY pm.year DESC NULLS LAST LIMIT 200
+            """)).fetchall()
+
+        ch_list = [{"number": r[0], "title": r[1], "description": r[2] or ""}
+                   for r in chapters]
+        paper_list = [{"title": r[0], "year": r[1]} for r in papers]
+
+        yield {"type": "progress", "stage": "generating",
+               "detail": f"Drafting plan from {len(ch_list)} chapters and {len(paper_list)} papers..."}
+
+        sys_p, usr_p = rag_prompts.book_plan(book[1], book[2], ch_list, paper_list)
+        tokens: list[str] = []
+        for tok in llm_stream(sys_p, usr_p, model=model or None):
+            tokens.append(tok)
+            yield {"type": "token", "text": tok}
+
+        new_plan = "".join(tokens).strip()
+        # Persist
+        with get_session() as session:
+            session.execute(text(
+                "UPDATE books SET plan = :plan WHERE id::text = :bid"
+            ), {"plan": new_plan, "bid": _book_id})
+            session.commit()
+        yield {"type": "completed", "plan": new_plan, "chars": len(new_plan)}
+
+    threading.Thread(
+        target=_run_generator_in_thread, args=(job_id, gen, loop), daemon=True
+    ).start()
+    return JSONResponse({"job_id": job_id})
 
 
 @app.get("/api/section/{draft_id}")
@@ -1711,6 +1806,20 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
               border-radius: var(--r-lg); z-index: 2000; max-width: 600px;
               font-size: 13px; display: flex; align-items: center; gap: var(--sp-3);
               animation: slideUp .18s ease; }}
+/* Phase 14.3 — chapter scope card inside the empty state */
+.ch-scope {{ background: var(--bg); border: 1px solid var(--border);
+            border-radius: var(--r-md); padding: var(--sp-3) var(--sp-4);
+            margin: var(--sp-3) 0 var(--sp-4); }}
+.ch-scope-row {{ display: flex; gap: var(--sp-3); padding: var(--sp-2) 0;
+                font-size: 13px; align-items: flex-start; }}
+.ch-scope-row + .ch-scope-row {{ border-top: 1px solid var(--border); }}
+.ch-scope-label {{ font-weight: 600; color: var(--fg-muted); width: 100px;
+                  text-transform: uppercase; font-size: 10px;
+                  letter-spacing: 0.06em; padding-top: 2px; flex-shrink: 0; }}
+.ch-scope-val {{ flex: 1; color: var(--fg); line-height: 1.5; }}
+.ch-scope-val code {{ font-family: var(--font-mono); font-size: 12px;
+                     padding: 1px 6px; background: var(--toolbar-bg);
+                     border-radius: 3px; }}
 /* Streaming panel */
 .stream-panel {{ display: none; margin-bottom: 20px; border: 1px solid var(--border);
                   border-radius: 8px; overflow: hidden; }}
@@ -1994,6 +2103,7 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
     </div>
     <div class="sep"></div>
     <div class="tg">
+      <button onclick="openPlanModal()" title="View / edit / regenerate the book plan (the leitmotiv)">&#128221; Plan</button>
       <button onclick="openAskModal()" title="Full corpus RAG question (sciknow ask question)">&#128270; Ask Corpus</button>
       <button onclick="openWikiModal()" title="Query the compiled knowledge wiki (sciknow wiki query)">&#128218; Wiki Query</button>
       <button onclick="openCatalogModal()" title="Browse the paper catalog (sciknow catalog list)">&#128194; Browse Papers</button>
@@ -2144,6 +2254,79 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
   </div>
 </div>
 
+<!-- Phase 14.3 — Book Plan Modal -->
+<div class="modal-overlay" id="plan-modal" onclick="if(event.target===this)closeModal('plan-modal')">
+  <div class="modal wide">
+    <div class="modal-header">
+      <h3>&#128221; Book Plan &mdash; the leitmotiv</h3>
+      <button class="modal-close" onclick="closeModal('plan-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <p style="font-size:12px;color:var(--fg-muted);margin-bottom:12px;">
+        The book plan is a 200&ndash;500 word document defining the central thesis,
+        scope, intended audience, and key terms. It is injected into every
+        <code>book write</code> / <code>autowrite</code> call so all chapters stay
+        aligned with the same argument. Edit it manually below, or click
+        <strong>Regenerate with LLM</strong> to draft a new one from your chapters
+        and paper corpus.
+      </p>
+      <div class="field">
+        <label>Book title</label>
+        <input type="text" id="plan-title-input">
+      </div>
+      <div class="field">
+        <label>Short description (one or two sentences)</label>
+        <textarea id="plan-desc-input" style="min-height:50px;"></textarea>
+      </div>
+      <div class="field">
+        <label>Plan / leitmotiv (the full thesis &amp; scope document)</label>
+        <textarea id="plan-text-input" style="min-height:280px;font-family:var(--font-serif);font-size:14px;line-height:1.6;"></textarea>
+      </div>
+      <div id="plan-status" style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeModal('plan-modal')">Close</button>
+      <button class="btn-secondary" onclick="regeneratePlan()">&#9889; Regenerate with LLM</button>
+      <button class="btn-primary" onclick="savePlan()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Phase 14.3 — Chapter Info Modal (description + topic_query) -->
+<div class="modal-overlay" id="chapter-modal" onclick="if(event.target===this)closeModal('chapter-modal')">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>&#9881; Chapter scope</h3>
+      <button class="modal-close" onclick="closeModal('chapter-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <p style="font-size:12px;color:var(--fg-muted);margin-bottom:12px;">
+        The chapter description sets the per-chapter scope: what the chapter
+        covers and what stays out. The topic query is a 3&ndash;6 word search
+        phrase used to retrieve the most relevant papers from the corpus when
+        you click Write or Autowrite for this chapter.
+      </p>
+      <div class="field">
+        <label>Chapter title</label>
+        <input type="text" id="ch-title-input">
+      </div>
+      <div class="field">
+        <label>Description (per-chapter scope)</label>
+        <textarea id="ch-desc-input" style="min-height:120px;"></textarea>
+      </div>
+      <div class="field">
+        <label>Topic query (retrieval phrase)</label>
+        <input type="text" id="ch-tq-input" placeholder="e.g. solar irradiance satellite measurements">
+      </div>
+      <div id="chapter-modal-status" style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeModal('chapter-modal')">Close</button>
+      <button class="btn-primary" onclick="saveChapterInfo()">Save</button>
+    </div>
+  </div>
+</div>
+
 <!-- Catalog Browser Modal -->
 <div class="modal-overlay" id="catalog-modal" onclick="if(event.target===this)closeModal('catalog-modal')">
   <div class="modal wide">
@@ -2237,7 +2420,7 @@ function selectChapter(chGroupEl) {{
 function showChapterEmptyState(chLabel, chId) {{
   document.getElementById('draft-title').textContent = chLabel;
   const subtitle = document.getElementById('draft-subtitle');
-  subtitle.innerHTML = '<span style="color:var(--fg-muted);">No drafts yet — pick a section type and click Write, or use Autowrite to draft all sections.</span>';
+  subtitle.innerHTML = '<span style="color:var(--fg-muted);">No drafts yet &mdash; pick a section type and click Write, or use Autowrite to draft all sections.</span>';
   subtitle.style.display = 'block';
   // Show toolbar
   document.getElementById('toolbar').style.display = 'flex';
@@ -2247,18 +2430,35 @@ function showChapterEmptyState(chLabel, chId) {{
   document.getElementById('version-panel').style.display = 'none';
   document.getElementById('stream-panel').style.display = 'none';
   document.getElementById('scores-panel').classList.remove('open');
-  // Render empty-state card in the read view
+
+  // Phase 14.3 — look up the chapter's saved scope (description + topic_query)
+  const ch = chaptersData.find(c => c.id === chId);
+  const desc = (ch && ch.description) ? ch.description : '';
+  const tq = (ch && ch.topic_query) ? ch.topic_query : '';
+
   const sections = ['overview', 'introduction', 'key_evidence', 'methods', 'results', 'discussion', 'current_understanding', 'open_questions', 'conclusion', 'summary'];
   let html = '<div class="empty-state">';
   html += '<h3>Start writing this chapter</h3>';
-  html += '<p>This chapter has no drafts yet. Choose a section type below and click <strong>Write</strong> in the toolbar, or click <strong>Autowrite</strong> to draft a section autonomously with the convergence loop.</p>';
+
+  // Phase 14.3 — show the chapter scope right here in the empty state
+  html += '<div class="ch-scope">';
+  html += '<div class="ch-scope-row"><span class="ch-scope-label">Scope</span><div class="ch-scope-val">' +
+          (desc ? desc.replace(/</g, '&lt;') : '<em style="color:var(--fg-faint);">No description set. Click Edit chapter scope to add one.</em>') +
+          '</div></div>';
+  html += '<div class="ch-scope-row"><span class="ch-scope-label">Topic query</span><div class="ch-scope-val">' +
+          (tq ? '<code>' + tq.replace(/</g, '&lt;') + '</code>' : '<em style="color:var(--fg-faint);">Not set &mdash; the chapter title will be used as the retrieval query.</em>') +
+          '</div></div>';
+  html += '<button class="btn-secondary" style="margin-top:8px;font-size:12px;" onclick="openChapterModal(&#39;' + chId + '&#39;)">&#9881; Edit chapter scope</button>';
+  html += '</div>';
+
+  html += '<p>Once the scope feels right, choose a section type below and click <strong>Write</strong> in the toolbar, or click <strong>Autowrite</strong> to draft a section autonomously with the convergence loop.</p>';
   html += '<div class="empty-section-picker">';
   sections.forEach(s => {{
     const active = s === currentSectionType ? ' active' : '';
     html += '<button class="section-chip' + active + '" onclick="setSectionType(&#39;' + s + '&#39;, this)">' + s.replace(/_/g, ' ') + '</button>';
   }});
   html += '</div>';
-  html += '<p style="margin-top:16px;font-size:12px;color:var(--fg-muted);">Tip: you can also explore the corpus without writing anything &mdash; use <strong>Ask Corpus</strong>, <strong>Wiki Query</strong>, or <strong>Browse Papers</strong>.</p>';
+  html += '<p style="margin-top:16px;font-size:12px;color:var(--fg-muted);">Tip: you can also explore the corpus without writing anything &mdash; use <strong>Ask Corpus</strong>, <strong>Wiki Query</strong>, or <strong>Browse Papers</strong>. The book&#39;s overall <strong>&#128221; Plan</strong> is also editable from the toolbar.</p>';
   html += '</div>';
   document.getElementById('read-view').innerHTML = html;
   document.getElementById('read-view').style.display = 'block';
@@ -3578,6 +3778,142 @@ function askAboutPaper(title) {{
   openAskModal();
   document.getElementById('ask-input').value = 'In the paper "' + title + '", ';
   document.getElementById('ask-input').focus();
+}}
+
+// ── Phase 14.3: Book Plan modal (the leitmotiv) ──────────────────────
+async function openPlanModal() {{
+  openModal('plan-modal');
+  document.getElementById('plan-status').textContent = 'Loading...';
+  document.getElementById('plan-text-input').value = '';
+  try {{
+    const res = await fetch('/api/book');
+    const data = await res.json();
+    document.getElementById('plan-title-input').value = data.title || '';
+    document.getElementById('plan-desc-input').value = data.description || '';
+    document.getElementById('plan-text-input').value = data.plan || '';
+    if (!data.plan) {{
+      document.getElementById('plan-status').innerHTML =
+        '<span style="color:var(--warning);">No plan set yet.</span> Click <strong>Regenerate with LLM</strong> to draft one from your chapters and corpus, or write one manually below.';
+    }} else {{
+      document.getElementById('plan-status').textContent =
+        data.plan.split(/\\s+/).filter(Boolean).length + ' words';
+    }}
+  }} catch (e) {{
+    document.getElementById('plan-status').textContent = 'Error loading book: ' + e.message;
+  }}
+}}
+
+async function savePlan() {{
+  const title = document.getElementById('plan-title-input').value.trim();
+  const desc = document.getElementById('plan-desc-input').value.trim();
+  const plan = document.getElementById('plan-text-input').value.trim();
+  document.getElementById('plan-status').textContent = 'Saving...';
+  const fd = new FormData();
+  fd.append('title', title);
+  fd.append('description', desc);
+  fd.append('plan', plan);
+  try {{
+    const res = await fetch('/api/book', {{method: 'PUT', body: fd}});
+    if (!res.ok) throw new Error('save failed');
+    document.getElementById('plan-status').innerHTML =
+      '<span style="color:var(--success);">Saved.</span> ' +
+      plan.split(/\\s+/).filter(Boolean).length + ' words. The new plan will be injected into all future writes.';
+    // Refresh the page header to show the new title if it changed
+    if (title) document.querySelector('.sidebar h2').textContent = title;
+  }} catch (e) {{
+    document.getElementById('plan-status').textContent = 'Save failed: ' + e.message;
+  }}
+}}
+
+async function regeneratePlan() {{
+  const status = document.getElementById('plan-status');
+  const ta = document.getElementById('plan-text-input');
+  if (ta.value.trim() && !confirm('This will replace the current plan with an LLM-generated one. Continue?')) return;
+  status.textContent = 'Starting generation...';
+  ta.value = '';
+
+  const fd = new FormData();
+  const res = await fetch('/api/book/plan/generate', {{method: 'POST', body: fd}});
+  const data = await res.json();
+  currentJobId = data.job_id;
+  if (currentEventSource) currentEventSource.close();
+  const source = new EventSource('/api/stream/' + data.job_id);
+  currentEventSource = source;
+
+  source.onmessage = function(e) {{
+    const evt = JSON.parse(e.data);
+    if (evt.type === 'token') {{
+      ta.value += evt.text;
+      ta.scrollTop = ta.scrollHeight;
+    }} else if (evt.type === 'progress') {{
+      status.textContent = evt.detail || evt.stage;
+    }} else if (evt.type === 'completed') {{
+      status.innerHTML = '<span style="color:var(--success);">Generated and saved.</span> ' +
+        (evt.chars || ta.value.length) + ' chars.';
+      source.close(); currentEventSource = null; currentJobId = null;
+    }} else if (evt.type === 'error') {{
+      status.textContent = 'Error: ' + evt.message;
+      source.close(); currentEventSource = null; currentJobId = null;
+    }} else if (evt.type === 'done') {{
+      source.close(); currentEventSource = null; currentJobId = null;
+    }}
+  }};
+}}
+
+// ── Phase 14.3: Chapter scope modal (description + topic_query) ─────
+function openChapterModal(chId) {{
+  if (!chId) chId = currentChapterId;
+  if (!chId) {{
+    showEmptyHint('Select a chapter from the sidebar first.');
+    return;
+  }}
+  // Look up the chapter from chaptersData (already in JS state)
+  const ch = chaptersData.find(c => c.id === chId);
+  if (!ch) {{
+    showEmptyHint('Chapter not found.');
+    return;
+  }}
+  document.getElementById('ch-title-input').value = ch.title || '';
+  document.getElementById('ch-desc-input').value = ch.description || '';
+  document.getElementById('ch-tq-input').value = ch.topic_query || '';
+  document.getElementById('chapter-modal-status').textContent = 'Editing Ch.' + ch.num + ': ' + (ch.title || '');
+  document.getElementById('chapter-modal').dataset.chId = chId;
+  openModal('chapter-modal');
+}}
+
+async function saveChapterInfo() {{
+  const chId = document.getElementById('chapter-modal').dataset.chId;
+  if (!chId) return;
+  const title = document.getElementById('ch-title-input').value.trim();
+  const desc = document.getElementById('ch-desc-input').value;
+  const tq = document.getElementById('ch-tq-input').value.trim();
+  const status = document.getElementById('chapter-modal-status');
+  status.textContent = 'Saving...';
+
+  const fd = new FormData();
+  if (title) fd.append('title', title);
+  fd.append('description', desc);
+  fd.append('topic_query', tq);
+
+  try {{
+    const res = await fetch('/api/chapters/' + chId, {{method: 'PUT', body: fd}});
+    if (!res.ok) throw new Error('save failed');
+    // Update the in-memory chapter cache
+    const ch = chaptersData.find(c => c.id === chId);
+    if (ch) {{
+      if (title) ch.title = title;
+      ch.description = desc;
+      ch.topic_query = tq;
+    }}
+    status.innerHTML = '<span style="color:var(--success);">Saved.</span>';
+    // Refresh the sidebar so renamed chapters show new title
+    const sidebarRes = await fetch('/api/chapters');
+    const sd = await sidebarRes.json();
+    rebuildSidebar(sd.chapters, currentDraftId);
+    setTimeout(() => closeModal('chapter-modal'), 800);
+  }} catch (e) {{
+    status.textContent = 'Save failed: ' + e.message;
+  }}
 }}
 
 // ── Corkboard View ────────────────────────────────────────────────────
