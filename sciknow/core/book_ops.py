@@ -731,6 +731,106 @@ def _verify_draft_inner(draft_content, results, model=None):
     return json.loads(_clean_json(raw), strict=False)
 
 
+def _cove_verify(draft_content, results, model=None, max_questions: int = 6):
+    """Chain-of-Verification: decoupled fact-checking.
+
+    1. Ask the LLM to generate falsifiable verification questions about the
+       draft (sees ONLY the draft, not the sources).
+    2. For each question, ask the LLM to answer it from the source passages
+       alone (sees ONLY the sources, NOT the draft) — no anchoring.
+    3. Compare independent answers to the draft's claims and return a
+       structured report of mismatches.
+
+    The whole point is the *decoupling* — the answerer for each question
+    cannot be biased by the draft's framing because it never sees the draft.
+    This catches the failure mode where the standard one-shot verifier
+    rubberstamps a claim because it's reading the draft and the evidence
+    in the same context window.
+
+    Returns a dict:
+        {
+          "questions_asked": int,
+          "mismatches": [
+            {"question": ..., "draft_claim": ..., "draft_citation": ...,
+             "independent_answer": ..., "verdict": ..., "severity": ...},
+            ...
+          ],
+          "cove_score": float (1.0 - mismatches / questions_asked),
+        }
+
+    Source: Dhuliawala et al., "Chain-of-Verification Reduces Hallucination
+    in Large Language Models", Findings of ACL 2024 (arXiv:2309.11495).
+    """
+    from sciknow.rag import prompts as rag_prompts
+    from sciknow.rag.llm import complete as llm_complete
+
+    # Step 1: Generate verification questions (sees only the draft).
+    try:
+        sys_q, usr_q = rag_prompts.cove_questions(draft_content)
+        raw_q = llm_complete(sys_q, usr_q, model=model, temperature=0.1, num_ctx=16384)
+        q_clean = re.sub(r'<think>.*?</think>\s*', '', raw_q, flags=re.DOTALL).strip()
+        q_data = json.loads(_clean_json(q_clean), strict=False)
+        questions = (q_data.get("questions") or [])[:max_questions]
+    except Exception as exc:
+        logger.warning("CoVe question generation failed: %s", exc)
+        return {"questions_asked": 0, "mismatches": [], "cove_score": 1.0}
+
+    if not questions:
+        return {"questions_asked": 0, "mismatches": [], "cove_score": 1.0}
+
+    # Step 2: For each question, answer it independently from the sources.
+    # The answerer never sees the draft — that's the whole point.
+    mismatches: list[dict] = []
+    for q in questions:
+        question_text = (q.get("question") or "").strip()
+        draft_claim = (q.get("draft_claim") or "").strip()
+        draft_citation = (q.get("citation") or "").strip()
+        if not question_text:
+            continue
+
+        try:
+            sys_a, usr_a = rag_prompts.cove_answer(question_text, results)
+            raw_a = llm_complete(
+                sys_a, usr_a, model=model, temperature=0.0, num_ctx=16384,
+            )
+            a_clean = re.sub(r'<think>.*?</think>\s*', '', raw_a, flags=re.DOTALL).strip()
+            a_data = json.loads(_clean_json(a_clean), strict=False)
+        except Exception as exc:
+            logger.warning("CoVe answer failed for question %r: %s", question_text, exc)
+            continue
+
+        verdict = (a_data.get("verdict") or "").upper()
+        independent_answer = (a_data.get("answer") or "").strip()
+        notes = (a_data.get("notes") or "").strip()
+
+        # A mismatch is any verdict that isn't a clean CONFIRMED.
+        # NOT_IN_SOURCES means the draft made a claim the sources don't support.
+        # DIFFERENT_SCOPE means the draft generalised past the source's stated scope.
+        # PARTIAL means the source supports only part of what the draft asserts.
+        if verdict and verdict != "CONFIRMED":
+            severity = {
+                "NOT_IN_SOURCES": "high",
+                "DIFFERENT_SCOPE": "medium",
+                "PARTIAL": "low",
+            }.get(verdict, "medium")
+            mismatches.append({
+                "question": question_text,
+                "draft_claim": draft_claim,
+                "draft_citation": draft_citation,
+                "independent_answer": independent_answer,
+                "verdict": verdict,
+                "severity": severity,
+                "notes": notes,
+            })
+
+    cove_score = 1.0 - (len(mismatches) / max(len(questions), 1))
+    return {
+        "questions_asked": len(questions),
+        "mismatches": mismatches,
+        "cove_score": round(cove_score, 3),
+    }
+
+
 def autowrite_section_stream(
     book_id: str,
     chapter_id: str,
@@ -742,6 +842,8 @@ def autowrite_section_stream(
     auto_expand: bool = False,
     use_plan: bool = True,
     use_step_back: bool = True,
+    use_cove: bool = True,
+    cove_threshold: float = 0.85,
 ) -> Iterator[Event]:
     """
     Full convergence loop for one section: write -> score -> revise -> re-score.
@@ -897,6 +999,77 @@ def autowrite_section_stream(
                     )
 
             yield {"type": "verification", "data": vdata}
+
+            # Phase 2: Chain-of-Verification (decoupled fact check).
+            # Gated to fire only when standard verification looks weak,
+            # because CoVe issues 1 + N_questions extra LLM calls.
+            should_run_cove = (
+                use_cove
+                and (
+                    groundedness < cove_threshold
+                    or hedging < cove_threshold
+                    or scores.get("groundedness", 1.0) < cove_threshold
+                    or scores.get("hedging_fidelity", 1.0) < cove_threshold
+                )
+            )
+            if should_run_cove:
+                yield {"type": "progress", "stage": "cove",
+                       "detail": "Running Chain-of-Verification (decoupled fact check)..."}
+                try:
+                    cove = _cove_verify(content, results, model=model)
+                    yield {"type": "cove_verification", "data": cove}
+
+                    high_sev = [m for m in cove.get("mismatches", [])
+                                if m.get("severity") == "high"]
+                    med_sev = [m for m in cove.get("mismatches", [])
+                               if m.get("severity") == "medium"]
+
+                    cove_score_v = cove.get("cove_score", 1.0)
+                    # If CoVe is more pessimistic than the standard verifier
+                    # for groundedness, take CoVe's number — independent
+                    # re-answering is harder to fool.
+                    if cove_score_v < scores.get("groundedness", 1.0):
+                        scores["groundedness"] = cove_score_v
+                        scores["weakest_dimension"] = "groundedness"
+
+                    # If CoVe found high-severity mismatches, generate a
+                    # targeted revision instruction that overrides the
+                    # standard one. We name the specific claims so the
+                    # writer can address them directly.
+                    if high_sev:
+                        examples = []
+                        for m in high_sev[:3]:
+                            claim_short = (m.get("draft_claim") or "")[:140]
+                            ind_short = (m.get("independent_answer") or "")[:140]
+                            examples.append(
+                                f"CLAIM: {claim_short!r} — INDEPENDENT CHECK: {ind_short!r}"
+                            )
+                        scores["revision_instruction"] = (
+                            f"Chain-of-Verification flagged {len(high_sev)} claim(s) "
+                            "as NOT supported by the sources when checked independently. "
+                            "Either remove these claims, or replace them with what the "
+                            "sources actually say. Specific issues:\n  - "
+                            + "\n  - ".join(examples)
+                        )
+                    elif med_sev and scores.get("weakest_dimension") in (
+                        "groundedness", "hedging_fidelity",
+                    ):
+                        examples = []
+                        for m in med_sev[:3]:
+                            claim_short = (m.get("draft_claim") or "")[:140]
+                            notes_short = (m.get("notes") or "")[:140]
+                            examples.append(
+                                f"CLAIM: {claim_short!r} — SCOPE: {notes_short!r}"
+                            )
+                        scores["revision_instruction"] = (
+                            f"Chain-of-Verification flagged {len(med_sev)} claim(s) "
+                            "where the source has a NARROWER scope than the draft "
+                            "implies. Restore the source's scope qualifiers (region, "
+                            "period, conditions). Specific issues:\n  - "
+                            + "\n  - ".join(examples)
+                        )
+                except Exception as cove_exc:
+                    logger.warning("CoVe verification failed: %s", cove_exc)
         except Exception as exc:
             logger.warning("Verification failed: %s", exc)
 

@@ -377,25 +377,35 @@ This cascade ensures maximum metadata coverage regardless of PDF quality.
 
 ---
 
+## 18. Chain-of-Verification (Decoupled Fact-Checking)
+
+**Status:** Production
+
+The standard claim verifier (Section 6, also `_verify_draft_inner` in `book_ops.py`) reads the draft and the source passages **in the same context window**. This is a known anchoring failure mode: the verifier rubberstamps claims it should have flagged because the draft's framing biases its judgement of the evidence.
+
+Chain-of-Verification (CoVe) addresses this by **decoupling** fact-checking from drafting. sciknow's implementation in `_cove_verify` runs as a perpendicular signal alongside the standard verifier:
+
+1. **Question generation.** The LLM sees ONLY the draft (not the sources) and produces 5–8 falsifiable verification questions. The prompt biases toward claims with strong modal verbs (*proves*, *demonstrates*, *causes*) — those are the highest-risk overstatements.
+2. **Independent answering.** For each question, a fresh LLM call sees ONLY the source passages (not the draft, not the question's context, not the other answers). The answerer classifies its own response as `CONFIRMED` / `PARTIAL` / `NOT_IN_SOURCES` / `DIFFERENT_SCOPE`.
+3. **Mismatch report.** Anything that isn't a clean `CONFIRMED` becomes a mismatch with severity:
+   - `NOT_IN_SOURCES` → **high** (the draft made a claim the sources don't support at all)
+   - `DIFFERENT_SCOPE` → **medium** (the draft generalised past the source's stated region/period/conditions)
+   - `PARTIAL` → **low** (the source supports only part of the claim)
+4. **Targeted revision instruction.** If CoVe finds high-severity mismatches, the autowrite loop's revision instruction is *overridden* to name the specific claims and direct the writer to either remove them or restore the source's framing. Medium-severity mismatches generate scope-restoration instructions.
+5. **Score override.** If CoVe's `cove_score` (1.0 − mismatches / questions) is more pessimistic than the standard verifier's `groundedness_score`, sciknow takes CoVe's number — independent re-answering is harder to fool than single-window verification.
+
+**Cost gating.** CoVe issues 1 + N extra LLM calls per autowrite iteration (1 for question generation, N for independent answers). To keep this affordable, CoVe is **gated**: it fires only when either `groundedness` or `hedging_fidelity` is below a threshold (default 0.85). Drafts that already look clean to the standard verifier skip CoVe; drafts that look weak get the extra scrutiny. The `cove_threshold` is exposed as a kwarg on `autowrite_section_stream` and defaults to 0.85.
+
+**Why CoVe is perpendicular to the existing pipeline.** sciknow's verifier (Section 6) and the new hedging-fidelity dimension (Section 13) catch the failure modes you can detect *while* reading the draft: missing citations, lexical overstatements, modal mismatches. CoVe catches the failure mode you can only detect by *not* reading the draft: claims whose factual content has drifted from what the sources say, where re-asking the question without seeing the draft yields a different answer. The original paper reports a **50–70% hallucination reduction** on long-form generation specifically because of this decoupling.
+
+**Research basis:**
+- [Dhuliawala et al. 2024 — *Chain-of-Verification Reduces Hallucination in Large Language Models* (arXiv:2309.11495)](https://arxiv.org/abs/2309.11495) — Findings of ACL 2024
+
+---
+
 ## Planned (Researched, Implementation Pending)
 
 These techniques have been researched and validated against sciknow's stack but are not yet implemented. Each is documented here so the rationale survives across sessions.
-
-### P1. Chain-of-Verification (CoVe) in the revision loop
-
-**Status:** Planned · Cost: prompt-only, ~50 lines in `core/book_ops.py`
-
-The current verifier reads the draft and the source passages in the same context window — a known anchoring bias that lets the verifier rubberstamp claims it should have flagged. Chain-of-Verification (CoVe) addresses this by *decoupling* fact-checking from drafting:
-
-1. After each draft, generate ~5 verification *questions* about the draft's specific factual claims.
-2. Answer each question **independently** — a fresh LLM call with no access to the draft, only the original source passages.
-3. Compare the independent answers against the draft. Mismatches surface as `EXTRAPOLATED` or `OVERSTATED` flags.
-4. The next revision iteration is targeted at the specific mismatches.
-
-The original paper (Dhuliawala et al., Findings of ACL 2024) reports a **50–70% reduction in hallucinations** on long-form generation. sciknow gains a perpendicular signal to its existing scorer-and-verifier pipeline because CoVe's decoupled re-answering can't be anchored by the draft's framing.
-
-**Research basis:**
-- [Dhuliawala et al. 2024 — *Chain-of-Verification Reduces Hallucination in Large Language Models* (arXiv:2309.11495)](https://arxiv.org/abs/2309.11495)
 
 ### P2. RAPTOR — Hierarchical Tree of Summary Embeddings
 
@@ -483,8 +493,8 @@ Phase 7:  Hedging fidelity          → BioScope cue list + OVERSTATED verdict +
 Phase 8:  Centering entity bridge   → no-cold-start rule for paragraph openings
 Phase 9:  PDTB-lite discourse plan  → discourse_relation per paragraph in tree plan
 Phase 10: Step-back retrieval       → abstract reformulation augments concrete query
+Phase 11: Chain-of-Verification     → decoupled fact-check questions, gated on score thresholds
 
 Planned:
-P1:       Chain-of-Verification     → decoupled fact-check questions in revision loop
 P2:       RAPTOR hierarchical tree  → mid-level summaries on existing chunk index
 ```

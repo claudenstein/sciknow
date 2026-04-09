@@ -868,6 +868,105 @@ def verify_claims(
     )
 
 
+# ── Chain-of-Verification (Dhuliawala et al., Findings of ACL 2024) ─────────
+#
+# CoVe decouples fact-checking from drafting: the answerer for each
+# verification question never sees the draft, only the source passages.
+# This breaks the anchoring bias where a single-window verifier rubber-
+# stamps claims because it's reading the draft and the evidence in the
+# same context.
+
+COVE_QUESTIONS_SYSTEM = """\
+You are a fact-checker preparing verification questions for a draft scientific \
+section. You see ONLY the draft, not the sources. Your job is to identify the \
+most falsifiable factual claims in the draft and turn each into a precise \
+question whose answer would either confirm or refute the claim.
+
+Rules:
+- Pick 5-8 claims that are FALSIFIABLE: specific numbers, mechanisms, dates, \
+attributions, named effects, scope conditions, magnitudes, causal directions.
+- Skip vague or aesthetic claims ("the issue is complex", "researchers have \
+studied this for decades").
+- Each question should be answerable by a yes/no, a number, a date, or a short \
+factual phrase — NOT an essay.
+- For each question, quote the EXACT draft sentence the claim comes from.
+- Note the citation marker [N] from the draft, if any.
+- Bias toward claims that look CONFIDENT or use STRONG modal verbs (proves, \
+demonstrates, causes, establishes) — those are the highest-risk overstatements.
+
+Respond ONLY with valid JSON:
+{
+  "questions": [
+    {
+      "question": "What equilibrium climate sensitivity range does CMIP6 report in [3]?",
+      "draft_claim": "CMIP6 models report an equilibrium climate sensitivity range of 2.5-4.0 K [3].",
+      "citation": "[3]"
+    },
+    ...
+  ]
+}"""
+
+COVE_QUESTIONS_USER = """\
+Draft section:
+{draft_content}
+
+---
+
+Generate verification questions."""
+
+
+def cove_questions(draft_content: str) -> tuple[str, str]:
+    return COVE_QUESTIONS_SYSTEM, COVE_QUESTIONS_USER.format(
+        draft_content=draft_content[:12000],
+    )
+
+
+COVE_ANSWER_SYSTEM = """\
+You are a careful scientific researcher answering a single factual question \
+STRICTLY from the provided source passages. You have NOT seen the draft that \
+motivated this question — answer based only on what the passages say.
+
+Rules:
+- If the passages directly answer the question, give the precise answer with \
+the citation marker [N] from the passages.
+- If the passages contain partial information, give the partial answer and \
+note what is missing.
+- If the passages do not address the question at all, set verdict to \
+NOT_IN_SOURCES and answer "Not addressed in the provided passages".
+- If the passages address the question but at a DIFFERENT scope, period, \
+or with different qualifiers than the question implies (e.g. question asks \
+about "global" but the source only studies "the North Atlantic"), set verdict \
+to DIFFERENT_SCOPE and give the source's answer faithfully along with the \
+scope difference.
+- Match the source's epistemic strength — do NOT strengthen *suggests* into \
+*proves*, *associated with* into *causes*, or *may* into *does*. If the \
+source hedges, your answer must hedge.
+
+Respond ONLY with valid JSON:
+{
+  "answer": "...",
+  "verdict": "CONFIRMED|PARTIAL|NOT_IN_SOURCES|DIFFERENT_SCOPE",
+  "citation": "[N]" or null,
+  "notes": "any caveats, scope differences, or epistemic-strength notes"
+}"""
+
+COVE_ANSWER_USER = """\
+Source passages:
+
+{context}
+
+---
+
+Question: {question}"""
+
+
+def cove_answer(question: str, results: list) -> tuple[str, str]:
+    return COVE_ANSWER_SYSTEM, COVE_ANSWER_USER.format(
+        context=format_context(results),
+        question=question,
+    )
+
+
 # ── Sentence planning ───────────────────────────────────────────────────────
 
 SENTENCE_PLAN_SYSTEM = """\
