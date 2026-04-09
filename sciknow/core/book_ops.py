@@ -142,6 +142,100 @@ def _retrieve(session, qdrant, query: str, candidate_k: int = 50,
     return results, sources
 
 
+def _generate_step_back_query(query: str, model: str | None = None) -> str | None:
+    """Ask the fast LLM for an abstract reformulation of `query`.
+
+    Returns the step-back query, or None on failure. Uses the fast model
+    because the abstraction step doesn't need the main model's reasoning
+    horsepower and we want to keep latency low.
+    """
+    from sciknow.config import settings
+    from sciknow.rag import prompts as rag_prompts
+    from sciknow.rag.llm import complete as llm_complete
+    sys_p, usr_p = rag_prompts.step_back(query)
+    try:
+        raw = llm_complete(
+            sys_p, usr_p,
+            model=model or settings.llm_fast_model,
+            temperature=0.1, num_ctx=2048,
+        )
+        # Strip thinking blocks and any leading/trailing punctuation/quotes.
+        raw = re.sub(r'<think>.*?</think>\s*', '', raw, flags=re.DOTALL).strip()
+        # Take only the first non-empty line and strip wrapping quotes.
+        for line in raw.splitlines():
+            line = line.strip().strip('"\'').strip()
+            if line:
+                return line
+        return None
+    except Exception as exc:
+        logger.warning("Step-back query generation failed: %s", exc)
+        return None
+
+
+def _retrieve_with_step_back(
+    session, qdrant, query: str,
+    candidate_k: int = 50, context_k: int = 12,
+    topic_cluster: str | None = None,
+    year_from: int | None = None, year_to: int | None = None,
+    use_query_expansion: bool = False,
+    use_step_back: bool = True,
+    model: str | None = None,
+):
+    """Retrieve with optional step-back query augmentation.
+
+    Strategy: run the concrete query through hybrid search to get
+    `candidate_k` candidates. If step-back is enabled, generate an
+    abstract reformulation and retrieve `candidate_k // 2` more
+    candidates for it. Union the candidate pools (deduping by chunk_id),
+    then rerank the union against the ORIGINAL query and take top
+    `context_k`. Reranking against the original query keeps the final
+    relevance scoped to what the writer actually needs to draft, while
+    the step-back pool brings in mechanism / background chunks the
+    concrete query would have missed.
+
+    Source: Zheng et al. "Take a Step Back: Evoking Reasoning via
+    Abstraction in LLMs", ICLR 2024 (arXiv:2310.06117).
+    """
+    from sciknow.retrieval import context_builder, hybrid_search, reranker
+    from sciknow.rag.prompts import format_sources
+
+    candidates = hybrid_search.search(
+        query=query, qdrant_client=qdrant, session=session,
+        candidate_k=candidate_k, year_from=year_from, year_to=year_to,
+        topic_cluster=topic_cluster, use_query_expansion=use_query_expansion,
+    )
+
+    if use_step_back:
+        sb_query = _generate_step_back_query(query, model=model)
+        if sb_query and sb_query.lower() != query.lower():
+            logger.info("Step-back query: %r → %r", query, sb_query)
+            sb_candidates = hybrid_search.search(
+                query=sb_query, qdrant_client=qdrant, session=session,
+                candidate_k=max(candidate_k // 2, 10),
+                year_from=year_from, year_to=year_to,
+                topic_cluster=topic_cluster,
+                use_query_expansion=False,  # already abstract; don't expand again
+            )
+            # Union by chunk_id, preserving the concrete-query candidates first.
+            seen = {c.chunk_id for c in candidates}
+            for c in sb_candidates:
+                if c.chunk_id not in seen:
+                    candidates.append(c)
+                    seen.add(c.chunk_id)
+
+    if not candidates:
+        _release_gpu_models()
+        return [], []
+
+    # Rerank against the ORIGINAL (concrete) query so the final ordering
+    # reflects what the writer actually needs.
+    candidates = reranker.rerank(query, candidates, top_k=context_k)
+    _release_gpu_models()
+    results = context_builder.build(candidates, session)
+    sources = format_sources(results).splitlines()
+    return results, sources
+
+
 def _clean_json(raw: str) -> str:
     """Strip markdown fences and extract the JSON object."""
     cleaned = raw.strip()
@@ -171,6 +265,7 @@ def write_section_stream(
     show_plan: bool = False,
     verify: bool = False,
     save: bool = True,
+    use_step_back: bool = True,
 ) -> Iterator[Event]:
     """
     Draft a chapter section.  Yields events as the operation progresses.
@@ -211,11 +306,12 @@ def write_section_stream(
 
     qdrant = get_client()
     with get_session() as session:
-        results, sources = _retrieve(
+        results, sources = _retrieve_with_step_back(
             session, qdrant, search_query,
             candidate_k=candidate_k, context_k=context_k,
             topic_cluster=topic_cluster, year_from=year_from,
             year_to=year_to, use_query_expansion=expand,
+            use_step_back=use_step_back, model=model,
         )
 
     if not results:
@@ -234,13 +330,16 @@ def write_section_stream(
         for tok in llm_stream(sys_p, usr_p, model=model):
             plan_raw += tok
         # Strip thinking blocks and try to parse as JSON
-        import re as _re
-        plan_clean = _re.sub(r'<think>.*?</think>\s*', '', plan_raw, flags=_re.DOTALL).strip()
+        plan_clean = re.sub(r'<think>.*?</think>\s*', '', plan_raw, flags=re.DOTALL).strip()
         try:
             plan_data = json.loads(_clean_json(plan_clean), strict=False)
+            paragraph_plan = plan_data.get("paragraphs") or []
             yield {"type": "tree_plan", "data": plan_data, "raw": plan_clean}
         except Exception:
+            paragraph_plan = None
             yield {"type": "plan", "content": plan_clean}
+    else:
+        paragraph_plan = None
 
     # Draft
     yield {"type": "progress", "stage": "writing",
@@ -249,6 +348,7 @@ def write_section_stream(
     system, user = prompts.write_section_v2(
         section_type, topic, results,
         book_plan=b_plan, prior_summaries=prior_summaries,
+        paragraph_plan=paragraph_plan,
     )
 
     content_tokens: list[str] = []
@@ -640,6 +740,8 @@ def autowrite_section_stream(
     max_iter: int = 3,
     target_score: float = 0.85,
     auto_expand: bool = False,
+    use_plan: bool = True,
+    use_step_back: bool = True,
 ) -> Iterator[Event]:
     """
     Full convergence loop for one section: write -> score -> revise -> re-score.
@@ -677,18 +779,42 @@ def autowrite_section_stream(
     # Step 1: Initial draft
     with get_session() as session:
         prior_summaries = _get_prior_summaries(session, book_id, ch_num)
-        results, sources = _retrieve(
+        results, sources = _retrieve_with_step_back(
             session, qdrant, f"{section_type} {topic}",
-            topic_cluster=topic_cluster,
+            topic_cluster=topic_cluster, model=model,
+            use_step_back=use_step_back,
         )
 
     if not results:
         yield {"type": "error", "message": "No relevant passages found."}
         return
 
+    # Optional tree plan with PDTB-lite discourse relations.
+    paragraph_plan = None
+    if use_plan:
+        yield {"type": "progress", "stage": "planning",
+               "detail": "Building paragraph plan with discourse relations..."}
+        try:
+            sys_p, usr_p = rag_prompts.tree_plan(
+                section_type, topic, results,
+                book_plan=b_plan, prior_summaries=prior_summaries,
+            )
+            plan_raw = llm_complete(
+                sys_p, usr_p, model=model, temperature=0.2, num_ctx=16384,
+            )
+            plan_clean = re.sub(r'<think>.*?</think>\s*', '', plan_raw,
+                                flags=re.DOTALL).strip()
+            plan_data = json.loads(_clean_json(plan_clean), strict=False)
+            paragraph_plan = plan_data.get("paragraphs") or []
+            yield {"type": "tree_plan", "data": plan_data}
+        except Exception as exc:
+            logger.warning("Tree-plan failed in autowrite, continuing without: %s", exc)
+            paragraph_plan = None
+
     system, user = rag_prompts.write_section_v2(
         section_type, topic, results,
         book_plan=b_plan, prior_summaries=prior_summaries,
+        paragraph_plan=paragraph_plan,
     )
 
     yield {"type": "progress", "stage": "writing", "detail": "Generating initial draft..."}
@@ -725,20 +851,51 @@ def autowrite_section_stream(
         try:
             vdata = _verify_draft_inner(content, results, model=model)
             groundedness = vdata.get("groundedness_score", 1.0)
+            hedging = vdata.get("hedging_fidelity_score", 1.0)
+
             # Merge groundedness into scores — if verification finds issues,
-            # it can override the scorer's groundedness and force a revision
+            # it can override the scorer's groundedness and force a revision.
             if groundedness < scores.get("groundedness", 1.0):
                 scores["groundedness"] = groundedness
-            # If groundedness is the weakest dimension, target it
-            if groundedness < scores.get(scores.get("weakest_dimension", ""), 1.0):
-                scores["weakest_dimension"] = "groundedness"
-                n_bad = len([c for c in vdata.get("claims", [])
-                             if c.get("verdict") in ("EXTRAPOLATED", "MISREPRESENTED")])
-                if n_bad:
+            # Same for hedging fidelity (lexical-level groundedness).
+            if hedging < scores.get("hedging_fidelity", 1.0):
+                scores["hedging_fidelity"] = hedging
+
+            # Re-evaluate weakest dimension across the merged scores.
+            score_dims = {
+                k: scores[k] for k in (
+                    "groundedness", "completeness", "coherence",
+                    "citation_accuracy", "hedging_fidelity",
+                ) if k in scores and isinstance(scores[k], (int, float))
+            }
+            if score_dims:
+                weakest_now = min(score_dims, key=score_dims.get)
+                scores["weakest_dimension"] = weakest_now
+
+                # Generate a targeted revision instruction if verification flags issues.
+                claims = vdata.get("claims", [])
+                n_extrap = sum(1 for c in claims if c.get("verdict") == "EXTRAPOLATED")
+                n_misrep = sum(1 for c in claims if c.get("verdict") == "MISREPRESENTED")
+                n_overst = sum(1 for c in claims if c.get("verdict") == "OVERSTATED")
+
+                if weakest_now == "groundedness" and (n_extrap + n_misrep) > 0:
                     scores["revision_instruction"] = (
-                        f"Fix {n_bad} citation(s) flagged as extrapolated or misrepresented. "
-                        "Ensure every [N] reference accurately reflects what the cited paper states."
+                        f"Fix {n_extrap + n_misrep} citation(s) flagged as extrapolated or "
+                        "misrepresented. Ensure every [N] reference accurately reflects what "
+                        "the cited paper states."
                     )
+                elif weakest_now == "hedging_fidelity" and n_overst > 0:
+                    overstated_examples = [
+                        f"{c.get('citation', '[?]')}: {c.get('reason', '')[:120]}"
+                        for c in claims if c.get("verdict") == "OVERSTATED"
+                    ][:3]
+                    scores["revision_instruction"] = (
+                        f"Soften {n_overst} overstated claim(s) — restore the source's "
+                        "epistemic strength (e.g. 'suggests' instead of 'proves', 'is "
+                        "associated with' instead of 'causes'). Specific issues: "
+                        + " | ".join(overstated_examples)
+                    )
+
             yield {"type": "verification", "data": vdata}
         except Exception as exc:
             logger.warning("Verification failed: %s", exc)

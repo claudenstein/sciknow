@@ -267,7 +267,102 @@ Combined with a **semantic relevance filter** (bge-m3 similarity against corpus 
 
 ---
 
-## 13. Four-Layer Metadata Extraction
+## 13. Hedging Fidelity (Lexical-Level Groundedness)
+
+**Status:** Production
+
+Standard groundedness checking verifies that a claim's *fact* is in the source. It does not catch a much subtler failure mode: the LLM systematically *strengthens* the source's epistemic modality. The 2026 SciZoom benchmark measured a **22.8% drop** in hedge density (`may`/`might`/`could`: 1.88 → 1.45 per 1000 words) in post-LLM academic writing while assertive verbs (`demonstrate`, `prove`, `outperform`) held constant — LLMs reliably turn *suggests* into *proves*, *associated with* into *causes*, and *may* into *does*. The underlying fact is right; the certainty is wrong. This is invisible to a per-citation fact-check.
+
+sciknow now treats hedging as a first-class concern across the writer → score → verify loop:
+
+1. **Writer rule** (`WRITE_V2_SYSTEM`): an explicit transfer-modality rule with a [BioScope](https://pmc.ncbi.nlm.nih.gov/articles/PMC2586758/)-derived hedge cue list (may, might, could, suggest, indicate, appear, seem, likely, probably, tend to, consistent with, associated with, evidence for, point to, hint at). The writer is told to carry hedges and scope qualifiers verbatim from sources, never to add hedges the source did not use, and to cap booster density (clearly, undoubtedly, obviously) at two or three per section.
+2. **New verifier verdict** (`VERIFY_SYSTEM`): the existing four-way classification (`SUPPORTED`/`EXTRAPOLATED`/`MISREPRESENTED`/`MISSING`) gains a fifth label, **`OVERSTATED`** — the underlying fact is in the source, but the draft has strengthened the epistemic modality. The verifier now reports both `groundedness_score` (factually present) and `hedging_fidelity_score` (modality also right). A draft can be 1.0 grounded but 0.6 hedging-faithful if it consistently overstates.
+3. **New scoring dimension** (`SCORE_SYSTEM`): `hedging_fidelity` joins groundedness, completeness, coherence, and citation_accuracy as a sixth scoring dimension. The autowrite loop's existing weakest-dimension routing automatically targets it when it's the lowest, and `_verify_draft_inner` overrides the scorer when the verifier finds OVERSTATED claims, generating a targeted "soften N overstated claims" revision instruction.
+
+**Why this matters for climate science specifically:** the biggest reputational risk for AI-written climate communication is overclaiming. Every public-facing climate statement is scrutinised for unwarranted certainty, and standard fact-verification doesn't catch the failure mode where the model is "technically right" but rhetorically too strong.
+
+**Research basis:**
+- [Hyland 1998 — *Hedging in Scientific Research Articles*](https://jolantasinkuniene.wordpress.com/wp-content/uploads/2014/03/hyland-boosting-hedging-and-the-negotiation-of-academic-knowledge-1998.pdf) — foundational analysis of hedge function in academic writing
+- [Vincze et al. 2008 — BioScope corpus](https://pmc.ncbi.nlm.nih.gov/articles/PMC2586758/) — annotated hedge cues used as the writer's reference list
+- SciZoom (2026) — the empirical demonstration that LLMs systematically strip hedges
+- [Hyland 2005 — *Metadiscourse: What is it and where is it going*](http://www.kenhyland.org/wp-content/uploads/2020/05/Metadiscourse_What-is-it-and-where-is-it-going.pdf) — booster density bounds
+
+---
+
+## 14. Local Coherence via Centering Theory (Entity-Bridge Rule)
+
+**Status:** Production
+
+The most-reported complaint about LLM-written long-form is that paragraphs "float" — each is internally fine but the seams are abrupt. Centering Theory (Grosz, Joshi & Weinstein 1995, *Computational Linguistics* 21:2) is the strongest forty-year empirical result we have on local coherence: the most coherent transition between two utterances keeps the backward-looking center (`Cb`) the same and as the preferred entity. The inferred preference ranking is `CONTINUE > RETAIN > SMOOTH-SHIFT > ROUGH-SHIFT`.
+
+sciknow operationalises this as a single enforceable rule in the writer prompt — no parser, no Cb/Cf tracker, just the rule the parser would ultimately enforce:
+
+> The first sentence of each new paragraph must explicitly name at least one entity (concept, mechanism, region, dataset, paper, or quantity) that was the grammatical subject or most salient noun phrase of the *last* sentence of the previous paragraph. No cold-starts. If you must genuinely shift topic, open with a short bridge clause that names both the prior topic and the new one.
+
+The `coherence` scoring dimension was extended to score this explicitly, so violations are caught and routed to the revision loop. In practice this kills the "every paragraph reads like an island" failure mode at zero implementation cost.
+
+**Research basis:**
+- [Grosz, Joshi & Weinstein 1995 — Centering Theory (ACL Anthology)](https://aclanthology.org/J95-2003/)
+- [Barzilay & Lapata 2008 — Modeling Local Coherence (CL)](https://aclanthology.org/J08-1001.pdf) — entity-grid generalisation; the lightweight rule above is a deliberate simplification
+
+---
+
+## 15. PDTB-Lite Discourse Relations in Tree Planning
+
+**Status:** Production
+
+The existing tree planner (Section 8) produces a hierarchical paragraph plan but says nothing about *how* each paragraph relates to its predecessor. The empirically-documented weakness in LLM long-form is **flat rhetorical texture** — paragraph after paragraph of elaboration with no concession, contrast, cause, or synthesis.
+
+sciknow extends the `tree_plan` JSON schema with a `discourse_relation` field per paragraph, drawn from a closed PDTB-lite vocabulary of 10 labels:
+
+| Relation | When to use | Connective |
+|---|---|---|
+| `background` | Sets up context, definitions, history | "Historically …" |
+| `elaboration` | More detail on a point already made | "More specifically …" |
+| `evidence` | Supporting data for the previous claim | "Direct measurements show …" |
+| `contrast` | Opposing view or counter-evidence | "However …" / "By contrast …" |
+| `concession` | Acknowledges a limitation | "Although …" |
+| `cause` | Mechanism or reason | "As a result …" |
+| `comparison` | Parallel with another case | "Similarly …" |
+| `exemplification` | Concrete example | "For example …" |
+| `qualification` | Narrows scope | "Within these limits …" |
+| `synthesis` | Integrates multiple prior threads | "Taken together …" |
+
+The writer prompt (`WRITE_V2_SYSTEM`) receives the per-paragraph relations injected as a discourse-relation block and is told to open each paragraph with a connective appropriate to its relation. The planner is explicitly told **not** to make every paragraph "elaboration" — it must vary the relations to give the section real argumentative texture.
+
+PDTB's *shallow* philosophy — "the inference is licensed by the connective" — is a much better fit for prompt engineering than full Rhetorical Structure Theory trees, whose ~30 relations are too many to enforce reliably and whose tree structure is hard to specify in JSON.
+
+**Research basis:**
+- [Prasad et al. 2008 — Penn Discourse Treebank 2.0 (LREC)](https://catalog.ldc.upenn.edu/docs/LDC2019T05/PDTB3-Annotation-Manual.pdf)
+- [Mann & Thompson 1988 — RST: Toward a functional theory of text organization](https://www.sfu.ca/rst/pdfs/Mann_Thompson_1988.pdf) — the more elaborate RST framework which sciknow deliberately *does not* fully adopt
+- [Ruan et al. 2025 — *Align to Structure: Aligning LLMs with Structural Information* (arXiv:2504.03622)](https://arxiv.org/abs/2504.03622) — recent validation that rewarding RST/discourse motifs during training improves long-form generation; sciknow gets the same signal at inference time via the planner prompt
+
+---
+
+## 16. Step-Back Retrieval for Section Drafting
+
+**Status:** Production
+
+Standard hybrid retrieval is excellent at finding chunks that lexically and semantically match the *concrete* query, but writers drafting a chapter section often need *background* and *mechanism* context that the concrete query phrasing misses. Example: the query "ocean heat content trends in the North Atlantic since 1990" returns trend papers, but misses the underlying mechanism papers on ocean heat uptake — which the writer needs to explain *why* the trends look the way they do.
+
+Step-back prompting (Zheng et al., ICLR 2024) addresses this by having the LLM first emit a more abstract reformulation of the query and retrieving for both. sciknow's `_retrieve_with_step_back`:
+
+1. Issues the **concrete query** through the existing hybrid retrieval (dense + sparse + FTS + RRF), getting `candidate_k` candidates.
+2. Asks the **fast LLM** for a single short abstract reformulation via the new `step_back` prompt template (5–12 words; e.g., "ocean heat content trends in the North Atlantic since 1990" → "mechanisms of ocean heat uptake and transport").
+3. Retrieves `candidate_k // 2` more candidates for the abstract query.
+4. Unions the two pools by `chunk_id`, preserving the concrete-query candidates first.
+5. Reranks the unioned pool against the **original concrete query** (not the abstract one) using `bge-reranker-v2-m3`, taking top `context_k`.
+
+The reranking-against-the-original-query step is critical: the abstract pool contributes diverse mechanism / background chunks, but the final ordering still reflects what the writer actually needs to draft. Reported gains in the original paper: +27% on TimeQA, +7% on MuSiQue.
+
+Wired into both `write_section_stream` and `autowrite_section_stream` behind a `use_step_back` flag (default `True`).
+
+**Research basis:**
+- [Zheng et al. 2024 — *Take a Step Back: Evoking Reasoning via Abstraction in LLMs* (arXiv:2310.06117)](https://arxiv.org/abs/2310.06117) — ICLR 2024
+
+---
+
+## 17. Four-Layer Metadata Extraction
 
 **Status:** Production
 
@@ -282,15 +377,114 @@ This cascade ensures maximum metadata coverage regardless of PDF quality.
 
 ---
 
+## Planned (Researched, Implementation Pending)
+
+These techniques have been researched and validated against sciknow's stack but are not yet implemented. Each is documented here so the rationale survives across sessions.
+
+### P1. Chain-of-Verification (CoVe) in the revision loop
+
+**Status:** Planned · Cost: prompt-only, ~50 lines in `core/book_ops.py`
+
+The current verifier reads the draft and the source passages in the same context window — a known anchoring bias that lets the verifier rubberstamp claims it should have flagged. Chain-of-Verification (CoVe) addresses this by *decoupling* fact-checking from drafting:
+
+1. After each draft, generate ~5 verification *questions* about the draft's specific factual claims.
+2. Answer each question **independently** — a fresh LLM call with no access to the draft, only the original source passages.
+3. Compare the independent answers against the draft. Mismatches surface as `EXTRAPOLATED` or `OVERSTATED` flags.
+4. The next revision iteration is targeted at the specific mismatches.
+
+The original paper (Dhuliawala et al., Findings of ACL 2024) reports a **50–70% reduction in hallucinations** on long-form generation. sciknow gains a perpendicular signal to its existing scorer-and-verifier pipeline because CoVe's decoupled re-answering can't be anchored by the draft's framing.
+
+**Research basis:**
+- [Dhuliawala et al. 2024 — *Chain-of-Verification Reduces Hallucination in Large Language Models* (arXiv:2309.11495)](https://arxiv.org/abs/2309.11495)
+
+### P2. RAPTOR — Hierarchical Tree of Summary Embeddings
+
+**Status:** Planned · Cost: new code (~3-5 days), reindex of one Qdrant payload field, no re-ingest
+
+The current chunk index is **flat**: every retrieved chunk lives at the same level of abstraction. For chapter-level synthesis, this forces the writer to glue together 8+ disjoint single-paper findings. RAPTOR (Sarthi et al., ICLR 2024) builds a hierarchical tree on top of the existing chunks:
+
+1. Cluster bge-m3 embeddings (UMAP → GMM, BIC-selected k).
+2. For each cluster, pull the chunk texts from PostgreSQL and call `LLM_FAST_MODEL` once to produce a cluster summary.
+3. Re-embed each summary with bge-m3 and upsert into the **same** `papers` Qdrant collection with a new payload field `node_level: 1`.
+4. Repeat levels 2–4: cluster the level-1 summaries, summarise them, re-embed, upsert with `node_level: 2`, etc.
+5. At query time, "collapsed-tree retrieval" flattens all levels into one pool — the writer naturally gets a mix of fine chunks and mid-level abstractions. The reranker decides what's relevant.
+
+**Critically, no re-ingest and no wiki recompile is required.** The leaf nodes are the chunks that already exist; RAPTOR is a pure additive layer. The only schema change is a new `node_level` payload index on the existing `papers` collection (existing points default to `node_level: 0`).
+
+This is the **biggest structural improvement** in the roadmap — the writer gains access to mid-level abstractions ("CMIP6 generally underestimates Arctic amplification") that currently have to be reconstructed by gluing 8 chunks together.
+
+**Research basis:**
+- [Sarthi et al. 2024 — *RAPTOR: Recursive Abstractive Processing for Tree-Organized Retrieval* (arXiv:2401.18059)](https://arxiv.org/abs/2401.18059) — ICLR 2024
+- [Reference implementation (parthsarthi03/raptor)](https://github.com/parthsarthi03/raptor)
+
+---
+
+## Considered and Rejected
+
+These techniques were researched in the same sweep that produced sections 13–16 and the planned items above. Each is documented here with the reason it was *not* adopted, so future sessions don't relitigate the same decisions.
+
+### HyDE (Hypothetical Document Embeddings)
+[Gao et al. 2022 (arXiv:2212.10496)](https://arxiv.org/abs/2212.10496) — generate a fake answer to the query, embed it, retrieve.
+
+**Rejected:** still alive on pure dense retrievers, but on sciknow's hybrid dense + sparse + Postgres FTS stack with a strong cross-encoder reranker, the hypothetical doc usually introduces more noise than signal for scientific queries. Step-back prompting (Section 16) dominates it on the same use case.
+
+### Self-RAG and CRAG (Corrective RAG)
+[Asai et al. 2024 (arXiv:2310.11511)](https://arxiv.org/abs/2310.11511) and [Yan et al. 2024 (arXiv:2401.15884)](https://arxiv.org/abs/2401.15884) — adaptive retrieval with reflection / critic models.
+
+**Rejected as published:** both rely on *fine-tuned* reflection models. Self-RAG ships a fine-tuned Llama-2 7B/13B with reflection tokens; CRAG needs a 0.77B trained evaluator. Prompt-only emulations on local Ollama models lose most of the gains. sciknow's existing claim-verification loop (Section 6) already captures the "re-retrieve when confidence is low" spirit without needing a fine-tuned critic.
+
+### Dense X / Propositional Retrieval
+[Chen et al. 2023 (arXiv:2312.06648)](https://arxiv.org/abs/2312.06648) — index atomic propositions instead of passages.
+
+**Rejected:** the gains mostly disappear on supervised retrievers fine-tuned on passage-query pairs (bge-m3 is one), and the benefits favour unpopular-entity queries rather than scientific synthesis. The reindex cost is high and the expected lift on this stack is small.
+
+### GraphRAG Global Search
+[Edge et al., Microsoft 2024 (arXiv:2404.16130)](https://arxiv.org/abs/2404.16130) — Leiden-clustered community reports for corpus-wide synthesis.
+
+**Rejected for now:** conceptually right for "what does the corpus as a whole say about X" questions, but building Leiden-clustered community reports over the existing KG triples is a genuine new pipeline stage (new code, new tables, large indexing cost). RAPTOR (planned, P2) gets ~80% of the same benefit at ~20% of the cost on sciknow's existing chunk index. GraphRAG global search becomes interesting only if RAPTOR underperforms on corpus-wide synthesis queries.
+
+### Late Chunking (Jina)
+[Günther et al. 2024 (arXiv:2409.04701)](https://arxiv.org/abs/2409.04701) — feed full sections through the embedder once, then mean-pool token spans per chunk so each chunk embedding is conditioned on its surrounding context.
+
+**Rejected:** modest gains that only show up when chunking destroys cross-sentence references, which sciknow's section-aware chunker already mitigates. bge-m3 supports the technique mechanically (8K context, mean pooling), but the implementation requires bypassing `FlagEmbedding`'s high-level API. Cost-benefit is poor relative to RAPTOR.
+
+### Full RST Tree Parsing
+[Mann & Thompson 1988](https://www.sfu.ca/rst/pdfs/Mann_Thompson_1988.pdf) — full Rhetorical Structure Theory with ~30 relation types and recursive nucleus/satellite trees.
+
+**Rejected in favour of PDTB-lite (Section 15):** SOTA neural RST parsers are ~60% F1 on relation labelling. Asking an LLM to produce RST trees over its own long drafts is cost for noise. The shallow PDTB-lite enum captures the practical rhetorical-texture wins at 1% of the operational complexity.
+
+### Centering Theory's Full Cb/Cf/Cp Machinery
+[Grosz, Joshi & Weinstein 1995](https://aclanthology.org/J95-2003/) — backward-looking center, forward-looking centers, preferred center, full transition classification.
+
+**Rejected as a runtime checker:** would require a coreference resolver, which sciknow explicitly avoids. The CONTINUE-transition *intuition* (Section 14, the entity-bridge rule) captures ~90% of the practical value at zero infrastructure cost.
+
+### FActScore as an Online Method
+[Min et al. 2023 (arXiv:2305.14251)](https://arxiv.org/abs/2305.14251) — atomic-fact decomposition + per-fact verification.
+
+**Rejected for online use:** superseded for online use by sentence-level citation verification (LongCite-style, see runners-up in the research notes). FActScore remains useful as an *offline* eval harness if a sanity check is needed across prompt variants.
+
+### ALCE Benchmark
+[Gao et al. 2023 (arXiv:2305.14627)](https://arxiv.org/abs/2305.14627).
+
+**Not a technique:** ALCE is a benchmark on Wikipedia QA, not a method to implement. Useful as inspiration for citation-quality metrics (now partially covered by the new `hedging_fidelity_score` and the planned LongCite-style sentence citations) but not something to "adopt".
+
+---
+
 ## Implementation Timeline
 
-All innovations are complete and in production:
-
 ```
-Phase 1: BERTopic clustering       → replaced LLM batching with embedding-based clustering
-Phase 2: Knowledge Graph           → entity-relationship triples during wiki compile
-Phase 3: Self-correcting RAG       → retrieval evaluation + grounding checks
-Phase 4: Multimodal RAG            → table/equation tagging for filtered retrieval
-Phase 5: TreeWriter planning       → hierarchical paragraph plans before drafting
-Phase 6: Consensus mapping         → agreement/disagreement across corpus
+Phase 1:  BERTopic clustering       → replaced LLM batching with embedding-based clustering
+Phase 2:  Knowledge Graph           → entity-relationship triples during wiki compile
+Phase 3:  Self-correcting RAG       → retrieval evaluation + grounding checks
+Phase 4:  Multimodal RAG            → table/equation tagging for filtered retrieval
+Phase 5:  TreeWriter planning       → hierarchical paragraph plans before drafting
+Phase 6:  Consensus mapping         → agreement/disagreement across corpus
+Phase 7:  Hedging fidelity          → BioScope cue list + OVERSTATED verdict + scoring dim
+Phase 8:  Centering entity bridge   → no-cold-start rule for paragraph openings
+Phase 9:  PDTB-lite discourse plan  → discourse_relation per paragraph in tree plan
+Phase 10: Step-back retrieval       → abstract reformulation augments concrete query
+
+Planned:
+P1:       Chain-of-Verification     → decoupled fact-check questions in revision loop
+P2:       RAPTOR hierarchical tree  → mid-level summaries on existing chunk index
 ```

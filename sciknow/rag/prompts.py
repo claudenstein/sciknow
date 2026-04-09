@@ -148,6 +148,32 @@ def format_sources(results: list[SearchResult]) -> str:
     return "\n".join(lines)
 
 
+# ── Step-back query reformulation (Zheng et al., ICLR 2024) ─────────────────
+
+STEP_BACK_SYSTEM = """\
+You are a scientific research assistant. Given a concrete query about a specific \
+section of a scientific topic, produce a single more abstract / higher-level \
+"step-back" question that, if answered, would provide useful background, mechanism, \
+or principle context for answering the original question.
+
+Rules:
+- Keep the step-back question short (5–12 words).
+- It should be ABSTRACT, not a paraphrase. If the original is "ocean heat content \
+trends in the North Atlantic since 1990", a good step-back is "mechanisms of ocean \
+heat uptake and transport"; a bad step-back is "ocean heat content in the Atlantic".
+- Do NOT add citations, formatting, or explanation. Return ONLY the step-back \
+question on a single line."""
+
+STEP_BACK_USER = """\
+Original query: {query}
+
+Step-back question:"""
+
+
+def step_back(query: str) -> tuple[str, str]:
+    return STEP_BACK_SYSTEM, STEP_BACK_USER.format(query=query)
+
+
 # ── Q&A ───────────────────────────────────────────────────────────────────────
 
 QA_SYSTEM = """\
@@ -595,6 +621,32 @@ Rules:
 - Maintain consistency with the book plan and prior chapter summaries below
 - Do not repeat content already covered in prior chapters — reference it instead
 
+Hedging fidelity (CRITICAL — preserves scientific integrity):
+- For every claim drawn from a [N] source, transfer the source's epistemic strength \
+verbatim at the lexical level. If the source says *suggests*, *indicates*, *is associated \
+with*, *may*, *appears to*, write exactly the same strength — never upgrade to *shows*, \
+*proves*, *causes*, *demonstrates*, *establishes*.
+- If the source qualifies its claim ("in the tropics", "on decadal timescales", \
+"under high-emission scenarios", "for the period studied"), carry the qualifier into \
+your sentence. Do NOT generalise beyond the source's stated scope.
+- Preserve hedges from this cue list when present in the source: may, might, could, \
+suggest(s), indicate(s), appear(s), seem(s), likely, possibly, probably, tend to, \
+consistent with, associated with, evidence for, in line with, support(s) the view \
+that, point(s) to, hint(s) at.
+- Do NOT *add* hedges the source did not use; only *preserve* the ones it did.
+- Boosters (clearly, undoubtedly, obviously, definitively) should be used at most \
+two or three times per section, and only when the source itself is similarly emphatic.
+
+Local coherence (entity bridge):
+- The first sentence of each new paragraph must explicitly name at least one entity \
+(concept, mechanism, region, dataset, paper, or quantity) that was the grammatical \
+subject or most salient noun phrase of the *last* sentence of the previous paragraph. \
+No cold-starts.
+- If you must genuinely shift topic, open with a short bridge clause that names both \
+the prior topic and the new one ("Beyond the ocean heat content discussed above, the \
+atmospheric branch …").
+
+{discourse_relation_section}
 {book_plan_section}
 {prior_summaries_section}"""
 
@@ -616,6 +668,7 @@ def write_section_v2(
     results: list,
     book_plan: str | None = None,
     prior_summaries: list[dict] | None = None,
+    paragraph_plan: list[dict] | None = None,
 ) -> tuple[str, str]:
     plan_block = ""
     if book_plan:
@@ -628,8 +681,39 @@ def write_section_v2(
             lines.append(f"Ch.{s.get('chapter_number', '?')} [{s.get('section_type', 'text')}]: {s['summary']}")
         summaries_block = "\nPrior chapter summaries:\n" + "\n".join(lines) + "\n"
 
+    # Optional discourse-relation guidance from a tree plan (PDTB-lite).
+    # If the planner produced a paragraph_plan list with discourse_relation
+    # fields, surface them so the writer opens each paragraph with an
+    # appropriate connective.
+    discourse_block = ""
+    if paragraph_plan:
+        relation_lines = []
+        for i, p in enumerate(paragraph_plan, 1):
+            rel = (p.get("discourse_relation") or "").strip().lower()
+            point = (p.get("point") or p.get("main_point") or "").strip()
+            if rel and point:
+                relation_lines.append(f"  Paragraph {i} — {rel}: {point}")
+        if relation_lines:
+            discourse_block = (
+                "\nParagraph plan with discourse relations (PDTB-lite). For each "
+                "paragraph, open with a connective appropriate to its relation to "
+                "the previous paragraph:\n"
+                "  - background → 'Historically …', 'Earlier work …'\n"
+                "  - elaboration → 'More specifically …', 'In detail …'\n"
+                "  - evidence → 'Supporting this …', 'Direct measurements show …'\n"
+                "  - contrast → 'However …', 'By contrast …', 'Yet …'\n"
+                "  - concession → 'Although …', 'While X holds, …'\n"
+                "  - cause → 'As a result …', 'Because of this …'\n"
+                "  - comparison → 'Similarly …', 'Like X, Y …'\n"
+                "  - exemplification → 'For example …', 'A case in point …'\n"
+                "  - qualification → 'Within these limits …', 'For the period studied …'\n"
+                "  - synthesis → 'Taken together …', 'These lines of evidence converge on …'\n\n"
+                + "\n".join(relation_lines) + "\n"
+            )
+
     return (
         WRITE_V2_SYSTEM.format(
+            discourse_relation_section=discourse_block,
             book_plan_section=plan_block,
             prior_summaries_section=summaries_block,
         ),
@@ -729,24 +813,36 @@ def revise(
 
 VERIFY_SYSTEM = """\
 You are a fact-checker for scientific text. Given a draft and its source passages, \
-check whether each citation [N] in the draft actually supports the claim it's attached to.
+check whether each citation [N] in the draft actually supports the claim it's attached to, \
+AND whether the claim's epistemic strength matches the source.
 
 For each citation, classify it as:
-- SUPPORTED: the claim accurately reflects what the cited passage says
-- EXTRAPOLATED: the claim goes beyond what the passage states
-- MISREPRESENTED: the claim contradicts or misrepresents the passage
+- SUPPORTED: the claim accurately reflects what the cited passage says, at the same \
+epistemic strength
+- EXTRAPOLATED: the claim goes beyond what the passage states (additional facts, \
+extended scope, generalisation past the source's scope conditions)
+- OVERSTATED: the underlying fact IS in the source, but the draft has *strengthened* \
+the epistemic modality. Examples: source says "suggests a link", draft says "proves a \
+link"; source says "is associated with", draft says "causes"; source says "may", draft \
+says "does". The fact is right; the certainty is wrong.
+- MISREPRESENTED: the claim contradicts or fundamentally misrepresents the passage
 - MISSING: the claim has no citation but should have one
 
 Respond in JSON format:
 {{"claims": [
-  {{"text": "the claim text", "citation": "[N]", "verdict": "SUPPORTED|EXTRAPOLATED|MISREPRESENTED", "reason": "brief explanation"}},
+  {{"text": "the claim text", "citation": "[N]", "verdict": "SUPPORTED|EXTRAPOLATED|OVERSTATED|MISREPRESENTED", "reason": "brief explanation"}},
   ...
 ],
 "unsupported_claims": ["claim text without citation that needs one", ...],
-"groundedness_score": 0.85
+"groundedness_score": 0.85,
+"hedging_fidelity_score": 0.92
 }}
 
-The groundedness_score is the fraction of cited claims that are SUPPORTED (0.0–1.0)."""
+The groundedness_score is the fraction of cited claims that are SUPPORTED or OVERSTATED \
+(i.e., factually present in the source) — out of 0.0–1.0.
+The hedging_fidelity_score is the fraction of cited claims that are SUPPORTED (i.e., \
+the modality is also right) — out of 0.0–1.0. A draft can be 1.0 grounded but 0.6 \
+hedging-faithful if it consistently strengthens *suggests* into *proves*."""
 
 VERIFY_USER = """\
 Draft:
@@ -808,10 +904,25 @@ retrieved literature, create a hierarchical paragraph plan as a JSON tree.
 Each node represents a paragraph with:
 - "point": the main argument or claim this paragraph makes
 - "sources": which [N] citations support it
-- "connects_to": how it links to the next paragraph
+- "discourse_relation": how this paragraph relates to the PREVIOUS one — pick \
+exactly one from this fixed PDTB-lite vocabulary:
+    * background — sets up context, history, definitions
+    * elaboration — adds more detail to a point already made
+    * evidence — provides supporting data or measurements for the previous claim
+    * contrast — presents an opposing view or counter-evidence
+    * concession — acknowledges a limitation or qualification
+    * cause — explains a mechanism or reason
+    * comparison — draws a parallel with another case
+    * exemplification — gives a concrete example
+    * qualification — narrows scope or adds caveats
+    * synthesis — integrates multiple prior threads (typically near the end)
+  The FIRST paragraph's discourse_relation should be "background".
+- "connects_to": one short sentence on how it leads to the next paragraph
 - "children": optional sub-points (for complex paragraphs)
 
-The tree should flow logically: each paragraph builds on the previous one.
+The tree should flow logically: each paragraph builds on the previous one. Do NOT \
+make every paragraph "elaboration" — vary the discourse relations to give the section \
+real argumentative texture (some contrast, some concession, some synthesis).
 
 Respond ONLY with valid JSON:
 {{
@@ -820,6 +931,7 @@ Respond ONLY with valid JSON:
     {{
       "point": "Main argument of this paragraph",
       "sources": ["[1]", "[3]"],
+      "discourse_relation": "background",
       "connects_to": "How this leads to the next paragraph",
       "children": []
     }},
@@ -890,13 +1002,19 @@ def sentence_plan(
 
 SCORE_SYSTEM = """\
 You are a scientific peer reviewer scoring a draft section. Evaluate on these \
-five dimensions, each scored 0.0–1.0:
+six dimensions, each scored 0.0–1.0:
 
 1. **groundedness** — What fraction of claims cite a source [N] that actually supports them?
 2. **completeness** — Does the section cover all major aspects of the topic given the available evidence?
-3. **coherence** — Does the argument flow logically? Are transitions smooth? No contradictions?
+3. **coherence** — Does the argument flow logically? Are transitions smooth? No contradictions? \
+Does each new paragraph open by naming an entity from the previous paragraph (no cold-starts)?
 4. **citation_accuracy** — Are the [N] references used correctly and not misrepresenting their sources?
-5. **overall** — Holistic quality score considering all dimensions.
+5. **hedging_fidelity** — Does the draft preserve the source's epistemic strength? \
+Penalise upgrades from *suggests* → *proves*, *associated with* → *causes*, *may* → *does*. \
+Penalise dropped scope qualifiers ("in the tropics", "on decadal timescales"). \
+Reward drafts that carry hedges and qualifiers verbatim from sources. This is the lexical-level \
+counterpart to groundedness.
+6. **overall** — Holistic quality score considering all dimensions.
 
 Also identify the **weakest_dimension** (the one with the lowest score) and provide \
 a specific **revision_instruction** (1–2 sentences) that would most improve the draft \
@@ -911,9 +1029,10 @@ Respond ONLY with valid JSON:
   "completeness": 0.72,
   "coherence": 0.90,
   "citation_accuracy": 0.88,
-  "overall": 0.84,
-  "weakest_dimension": "completeness",
-  "revision_instruction": "Add discussion of proxy calibration methods, citing Smith2020 and Jones2019.",
+  "hedging_fidelity": 0.78,
+  "overall": 0.83,
+  "weakest_dimension": "hedging_fidelity",
+  "revision_instruction": "Soften three overstated claims: change 'proves' to 'suggests' for [2], restore the 'in the North Atlantic' qualifier on the AMOC claim citing [4], and replace 'causes' with 'is associated with' for [7].",
   "missing_topics": ["proxy calibration uncertainty", "tree ring standardization methods"]
 }"""
 
