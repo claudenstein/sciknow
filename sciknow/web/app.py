@@ -36,6 +36,34 @@ app = FastAPI(title="SciKnow Book Reader")
 _book_id: str = ""
 _book_title: str = ""
 
+# Default chapter sections for a *book* (not a paper). Used when a chapter
+# has no custom sections defined (book_chapters.sections is empty). Mirrors
+# core/book_ops.py:DEFAULT_SECTIONS so the GUI and CLI agree on the fallback.
+_DEFAULT_BOOK_SECTIONS = [
+    "overview", "key_evidence", "current_understanding",
+    "open_questions", "summary",
+]
+
+
+def _normalize_section(name: str) -> str:
+    """Lowercase + spaces-to-underscores so per-chapter custom section names
+    in book_chapters.sections (which can be 'Historical Context', 'Key Evidence')
+    match the storage convention used in drafts.section_type."""
+    return (name or "").strip().lower().replace(" ", "_")
+
+
+def _chapter_sections(ch_row) -> list[str]:
+    """Return the section template for a chapter row.
+
+    The chapter SQL row carries `bc.sections` as a JSONB list (possibly empty).
+    Falls back to _DEFAULT_BOOK_SECTIONS when empty so the GUI never shows
+    paper-style placeholders for a science book.
+    """
+    raw = ch_row[6] if len(ch_row) > 6 else None
+    if isinstance(raw, list) and raw:
+        return [_normalize_section(s) for s in raw if s]
+    return list(_DEFAULT_BOOK_SECTIONS)
+
 
 def set_book(book_id: str, book_title: str) -> None:
     global _book_id, _book_title
@@ -79,7 +107,7 @@ def _get_book_data():
 
         chapters = session.execute(text("""
             SELECT bc.id::text, bc.number, bc.title, bc.description,
-                   bc.topic_query, bc.topic_cluster
+                   bc.topic_query, bc.topic_cluster, bc.sections
             FROM book_chapters bc
             WHERE bc.book_id = :bid ORDER BY bc.number
         """), {"bid": _book_id}).fetchall()
@@ -383,11 +411,15 @@ async def api_chapters():
 
     result = []
     for ch in chapters:
-        ch_id, ch_num, ch_title, ch_desc, tq, tc = ch
+        ch_id, ch_num, ch_title, ch_desc, tq, tc, ch_sections_template = ch
         ch_ds = chapter_drafts.get(ch_id, [])
-        section_order = {"introduction": 0, "methods": 1, "results": 2, "discussion": 3, "conclusion": 4}
+        # Order drafts by their chapter's own section template if defined,
+        # otherwise by the book defaults. Falls through to alphabetical for
+        # any unknown section types.
+        template = _chapter_sections(ch)
+        section_order = {s: i for i, s in enumerate(template)}
         sections = []
-        for d in sorted(ch_ds, key=lambda x: section_order.get(x[2] or "", 9)):
+        for d in sorted(ch_ds, key=lambda x: section_order.get(_normalize_section(x[2] or ""), 99)):
             sections.append({
                 "id": d[0], "type": d[2] or "text",
                 "version": d[6] or 1, "words": d[4] or 0,
@@ -396,6 +428,10 @@ async def api_chapters():
             "id": ch_id, "num": ch_num, "title": ch_title,
             "description": ch_desc, "topic_query": tq,
             "sections": sections,
+            # Phase 14.4 — per-chapter section template (the menu of section
+            # types this chapter wants, drawn from book_chapters.sections
+            # or the book-style defaults).
+            "sections_template": template,
         })
 
     return {"chapters": result, "gaps_count": len([g for g in gaps if g[3] == "open"])}
@@ -406,32 +442,60 @@ async def api_dashboard():
     """Return dashboard data: completion heatmap, stats, gaps."""
     book, chapters, drafts, gaps, comments = _get_book_data()
 
-    section_types = ["introduction", "methods", "results", "discussion", "conclusion"]
+    # Phase 14.4 — section_types is now a UNION computed from real data
+    # rather than a hardcoded paper-style list. The columns of the
+    # heatmap reflect:
+    #   - actual section types of any saved drafts (so existing work
+    #     doesn't disappear if a draft uses an unusual section type)
+    #   - per-chapter custom sections from book_chapters.sections
+    #     (populated by `book outline` for new books)
+    #   - the book-style defaults (overview/key_evidence/.../summary)
+    #     so a fresh book always has columns to show.
+    section_types_set: set[str] = set(_DEFAULT_BOOK_SECTIONS)
+    for ch in chapters:
+        for s in _chapter_sections(ch):
+            section_types_set.add(s)
 
     # Build draft lookup: chapter_id -> {section_type: {version, words, id, has_review}}
-    ch_sections: dict[str, dict] = {}
+    ch_section_drafts: dict[str, dict] = {}
     total_words = 0
     for d in drafts:
         draft_id, title, sec_type, content, wc, sources, version, summary, \
             review_fb, ch_id, parent_id, created, ch_num, ch_title = d
         total_words += wc or 0
+        section_types_set.add(_normalize_section(sec_type or ""))
         if not ch_id:
             continue
-        if ch_id not in ch_sections:
-            ch_sections[ch_id] = {}
+        if ch_id not in ch_section_drafts:
+            ch_section_drafts[ch_id] = {}
         # Keep only the latest version per section_type
-        existing = ch_sections[ch_id].get(sec_type)
+        existing = ch_section_drafts[ch_id].get(sec_type)
         if not existing or (version or 1) > existing["version"]:
-            ch_sections[ch_id][sec_type] = {
+            ch_section_drafts[ch_id][sec_type] = {
                 "id": draft_id, "version": version or 1, "words": wc or 0,
                 "has_review": bool(review_fb),
             }
 
+    section_types_set.discard("")
+
+    # Stable ordering: book defaults first (they read in narrative order),
+    # then any extras alphabetically.
+    section_types: list[str] = [s for s in _DEFAULT_BOOK_SECTIONS if s in section_types_set]
+    extras = sorted(section_types_set - set(_DEFAULT_BOOK_SECTIONS))
+    section_types.extend(extras)
+
     heatmap = []
     for ch in chapters:
-        ch_id, ch_num, ch_title, ch_desc, tq, tc = ch
-        row = {"num": ch_num, "title": ch_title, "id": ch_id, "cells": []}
-        secs = ch_sections.get(ch_id, {})
+        ch_id, ch_num, ch_title, ch_desc, tq, tc, ch_sections_template = ch
+        row = {
+            "num": ch_num, "title": ch_title, "id": ch_id, "cells": [],
+            # Phase 14.4 — include per-chapter section template so the GUI
+            # can highlight the columns this chapter actually wants.
+            "sections_template": _chapter_sections(ch),
+            "description": ch_desc or "",
+            "topic_query": tq or "",
+        }
+        secs = ch_section_drafts.get(ch_id, {})
         for st in section_types:
             info = secs.get(st)
             if info:
@@ -782,7 +846,7 @@ async def corkboard_data():
 
     cards = []
     for ch in chapters:
-        ch_id, ch_num, ch_title, ch_desc, tq, tc = ch
+        ch_id, ch_num, ch_title, ch_desc, tq, tc, ch_sections_template = ch
         secs = ch_sections.get(ch_id, {})
         for sec_type in ["introduction", "methods", "results", "discussion", "conclusion"]:
             info = secs.get(sec_type)
@@ -1358,10 +1422,12 @@ def _render_book(book, chapters, drafts, gaps, comments,
 
     sidebar_items = []
     for ch in chapters:
-        ch_id, ch_num, ch_title, ch_desc, tq, tc = ch
+        ch_id, ch_num, ch_title, ch_desc, tq, tc, ch_sections_template = ch
         ch_ds = chapter_drafts.get(ch_id, [])
+        template = _chapter_sections(ch)
+        section_order_map = {s: i for i, s in enumerate(template)}
         sections = []
-        for d in sorted(ch_ds, key=lambda x: {"introduction": 0, "methods": 1, "results": 2, "discussion": 3, "conclusion": 4}.get(x[2] or "", 9)):
+        for d in sorted(ch_ds, key=lambda x: section_order_map.get(_normalize_section(x[2] or ""), 99)):
             sections.append({
                 "id": d[0], "type": d[2] or "text", "version": d[6] or 1,
                 "words": d[4] or 0,
@@ -1370,6 +1436,9 @@ def _render_book(book, chapters, drafts, gaps, comments,
             "num": ch_num, "title": ch_title, "id": ch_id,
             "description": ch_desc or "", "topic_query": tq or "",
             "sections": sections,
+            # Phase 14.4 — per-chapter section template for the GUI's
+            # empty-state picker and the dashboard heatmap.
+            "sections_template": template,
         })
 
     active_draft = None
@@ -1432,6 +1501,8 @@ def _render_book(book, chapters, drafts, gaps, comments,
         "id": si["id"], "num": si["num"], "title": si["title"],
         "description": si["description"], "topic_query": si["topic_query"],
         "sections": si["sections"],
+        # Phase 14.4 — per-chapter book-style section template
+        "sections_template": si["sections_template"],
     } for si in sidebar_items])
 
     return TEMPLATE.format(
@@ -1900,6 +1971,15 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
                border-bottom: 2px solid var(--border); }}
 .heatmap td {{ padding: 6px 10px; text-align: center; border: 1px solid var(--border); }}
 .heatmap .ch-label {{ text-align: left; font-weight: 600; white-space: nowrap; }}
+.heatmap .ch-label.clickable {{ cursor: pointer; transition: color .12s; }}
+.heatmap .ch-label.clickable:hover {{ color: var(--accent); }}
+.heatmap .ch-label-num {{ color: var(--fg-muted); font-weight: 500; margin-right: 4px; }}
+.heatmap .ch-label-edit {{ opacity: 0; margin-left: 4px; transition: opacity .12s; color: var(--accent); }}
+.heatmap .ch-label.clickable:hover .ch-label-edit {{ opacity: 1; }}
+.heatmap th {{ font-size: 11px; text-transform: capitalize; }}
+.hm-cell.off-template {{ background: transparent; color: var(--fg-faint); opacity: 0.4;
+                         min-width: auto; padding: 4px 6px; cursor: default; }}
+.hm-cell.empty.off-template {{ opacity: 0.2; }}
 .hm-cell {{ border-radius: 4px; padding: 4px 8px; cursor: pointer; display: inline-block;
             min-width: 44px; font-size: 11px; }}
 .hm-cell.reviewed {{ background: var(--success); color: white; }}
@@ -1960,7 +2040,15 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
                           border-radius: 4px; cursor: pointer; background: var(--bg);
                           color: var(--fg); font-family: monospace; }}
 .editor-toolbar button:hover {{ background: var(--accent-light); }}
-.editor-toolbar .autosave {{ font-size: 10px; opacity: 0.5; margin-left: auto; line-height: 24px; }}
+.editor-toolbar .autosave {{ font-size: 11px; margin-left: auto; line-height: 24px;
+                              display: flex; align-items: center; gap: 6px;
+                              padding: 2px 10px; border-radius: 999px;
+                              background: var(--toolbar-bg); border: 1px solid var(--border); }}
+.editor-toolbar .autosave .dot {{ width: 8px; height: 8px; border-radius: 50%;
+                                   background: var(--success); display: inline-block; }}
+.editor-toolbar .autosave.saving .dot {{ background: var(--warning); animation: pulse 1.2s infinite; }}
+.editor-toolbar .autosave.unsaved .dot {{ background: var(--warning); }}
+.editor-toolbar .autosave.error .dot {{ background: var(--danger); }}
 /* Citation popover */
 .citation {{ position: relative; }}
 .citation-popover {{ display: none; position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
@@ -2160,7 +2248,9 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
       <button onclick="edInsert('## ','')" title="Heading">H2</button>
       <button onclick="edInsert('### ','')" title="Subheading">H3</button>
       <button onclick="edInsertCite()" title="Citation">[N]</button>
-      <span class="autosave" id="autosave-status"></span>
+      <span class="autosave" id="autosave-status" title="Autosaves every 5 seconds while editing">
+        <span class="dot"></span><span id="autosave-text">Autosave on</span>
+      </span>
     </div>
     <div class="editor-split">
       <div class="editor-src">
@@ -2436,7 +2526,13 @@ function showChapterEmptyState(chLabel, chId) {{
   const desc = (ch && ch.description) ? ch.description : '';
   const tq = (ch && ch.topic_query) ? ch.topic_query : '';
 
-  const sections = ['overview', 'introduction', 'key_evidence', 'methods', 'results', 'discussion', 'current_understanding', 'open_questions', 'conclusion', 'summary'];
+  // Phase 14.4 — use the chapter's actual book-style section template,
+  // not a hardcoded paper-style list. Falls back to book defaults if the
+  // chapter has no template (which should never happen post-14.4 since
+  // the backend always returns at least _DEFAULT_BOOK_SECTIONS).
+  const sections = (ch && Array.isArray(ch.sections_template) && ch.sections_template.length)
+    ? ch.sections_template
+    : ['overview', 'key_evidence', 'current_understanding', 'open_questions', 'summary'];
   let html = '<div class="empty-state">';
   html += '<h3>Start writing this chapter</h3>';
 
@@ -2819,21 +2915,39 @@ async function showDashboard() {{
     html += '</div>';
   }}
 
-  // Heatmap
+  // Heatmap — Phase 14.4 — book-style section columns from real data
   html += '<h3 style="margin-bottom:8px;">Completion Heatmap</h3>';
+  html += '<p style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;">Click a chapter title to edit its scope. Click an empty cell to write that section. Click a filled cell to open the draft.</p>';
   html += '<table class="heatmap"><thead><tr><th></th>';
   data.section_types.forEach(st => {{
-    html += '<th>' + st.charAt(0).toUpperCase() + st.slice(1,5) + '</th>';
+    // Show the full section name (replacing underscores with spaces) but
+    // keep the column compact via CSS rotation if needed.
+    const display = st.replace(/_/g, ' ');
+    html += '<th title="' + display + '">' + display + '</th>';
   }});
   html += '</tr></thead><tbody>';
   data.heatmap.forEach(row => {{
-    html += '<tr><td class="ch-label">Ch.' + row.num + ' ' + row.title.substring(0,25) + '</td>';
+    // Phase 14.4 — chapter title is now clickable to open the chapter
+    // scope modal (where you can edit title / description / topic_query).
+    html += '<tr><td class="ch-label clickable" onclick="openChapterModal(&#39;' + row.id + '&#39;)" title="Click to edit chapter title and scope">';
+    html += '<span class="ch-label-num">Ch.' + row.num + '</span> ' + row.title.replace(/</g, '&lt;').substring(0, 36);
+    html += ' <span class="ch-label-edit">&#9881;</span></td>';
+    // Per-chapter section template — highlight cells whose section type
+    // is in this chapter's template, dim cells that are out-of-template.
+    const tmpl = (row.sections_template && row.sections_template.length)
+      ? new Set(row.sections_template) : null;
     row.cells.forEach(cell => {{
+      const inTemplate = !tmpl || tmpl.has(cell.type);
+      const cls = inTemplate ? '' : ' off-template';
       if (cell.status === 'empty') {{
-        html += '<td><span class="hm-cell empty" onclick="writeForCell(&#39;' + row.id + '&#39;,&#39;' + cell.type + '&#39;)" title="Click to write">—</span></td>';
+        if (inTemplate) {{
+          html += '<td><span class="hm-cell empty' + cls + '" onclick="writeForCell(&#39;' + row.id + '&#39;,&#39;' + cell.type + '&#39;)" title="Click to write ' + cell.type.replace(/_/g, ' ') + '">+</span></td>';
+        }} else {{
+          html += '<td><span class="hm-cell off-template" title="Not in this chapter\\u2019s section template">·</span></td>';
+        }}
       }} else {{
         const label = 'v' + cell.version + ' ' + cell.words + 'w';
-        html += '<td><span class="hm-cell ' + cell.status + '" onclick="loadSection(&#39;' + cell.draft_id + '&#39;)" title="' + label + '">' + label + '</span></td>';
+        html += '<td><span class="hm-cell ' + cell.status + cls + '" onclick="loadSection(&#39;' + cell.draft_id + '&#39;)" title="' + label + '">' + label + '</span></td>';
       }}
     }});
     html += '</tr>';
@@ -3000,6 +3114,9 @@ function toggleEdit() {{
 function edPreview() {{
   const ta = document.getElementById('edit-area');
   const preview = document.getElementById('edit-preview');
+  // Phase 14.4 — flag unsaved changes immediately so the user sees the
+  // amber dot the moment they type, not after the next 5s autosave tick.
+  if (ta.value !== _currentRaw) setAutosaveState('unsaved', 'Unsaved changes');
   let md = ta.value;
   // Simple markdown → HTML for preview
   md = md.replace(/^### (.+)$/gm, '<h4>$1</h4>');
@@ -3034,12 +3151,30 @@ function edInsertCite() {{
   if (n) edInsert('[' + n + ']', '');
 }}
 
+// Phase 14.4 — autosave UX: a small status pill that's always visible
+// while in edit mode. Colours: green=saved, amber-pulse=saving,
+// amber-static=unsaved, red=error.
+function setAutosaveState(state, label) {{
+  const el = document.getElementById('autosave-status');
+  if (!el) return;
+  el.classList.remove('saving', 'unsaved', 'error');
+  if (state) el.classList.add(state);
+  const text = document.getElementById('autosave-text');
+  if (text) text.textContent = label;
+}}
+
 async function edSave() {{
   const ta = document.getElementById('edit-area');
-  const fd = new FormData();
-  fd.append('content', ta.value);
-  await fetch('/edit/' + currentDraftId, {{method: 'POST', body: fd}});
-  document.getElementById('autosave-status').textContent = 'Saved';
+  setAutosaveState('saving', 'Saving...');
+  try {{
+    const fd = new FormData();
+    fd.append('content', ta.value);
+    await fetch('/edit/' + currentDraftId, {{method: 'POST', body: fd}});
+    setAutosaveState('', 'Saved');
+  }} catch (e) {{
+    setAutosaveState('error', 'Save failed');
+    return;
+  }}
   if (_autosaveTimer) {{ clearInterval(_autosaveTimer); _autosaveTimer = null; }}
   toggleEdit();
   loadSection(currentDraftId);
@@ -3048,12 +3183,17 @@ async function edSave() {{
 async function edAutosave() {{
   const ta = document.getElementById('edit-area');
   if (ta.value === _currentRaw) return;
-  _currentRaw = ta.value;
-  const fd = new FormData();
-  fd.append('content', ta.value);
-  await fetch('/edit/' + currentDraftId, {{method: 'POST', body: fd}});
-  document.getElementById('autosave-status').textContent = 'Auto-saved';
-  setTimeout(() => {{ document.getElementById('autosave-status').textContent = ''; }}, 2000);
+  setAutosaveState('saving', 'Saving...');
+  try {{
+    _currentRaw = ta.value;
+    const fd = new FormData();
+    fd.append('content', ta.value);
+    await fetch('/edit/' + currentDraftId, {{method: 'POST', body: fd}});
+    const t = new Date().toLocaleTimeString([], {{hour: '2-digit', minute: '2-digit'}});
+    setAutosaveState('', 'Saved at ' + t);
+  }} catch (e) {{
+    setAutosaveState('error', 'Save failed');
+  }}
 }}
 
 // ── Claim Verification (Phase 5b) ────────────────────────────────────

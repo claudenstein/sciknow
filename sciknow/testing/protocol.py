@@ -423,6 +423,64 @@ def l1_web_phase14_endpoints_registered() -> None:
     assert not missing, f"Phase 14 routes missing from app: {missing}"
 
 
+def l1_web_phase14_4_book_sections() -> None:
+    """Phase 14.4 — book-style sections, dashboard chapter editing, autosave UX.
+
+    Verifies:
+      - _DEFAULT_BOOK_SECTIONS contains the canonical book-style fallback
+        and does NOT contain paper-style sections (introduction/methods/etc).
+      - _chapter_sections + _normalize_section helpers exist.
+      - The dashboard heatmap renders chapter titles as .ch-label.clickable
+        with an openChapterModal() handler.
+      - Per-chapter section template is propagated through the data pipeline:
+        _get_book_data SQL selects bc.sections, chapters_json carries
+        sections_template, JS reads ch.sections_template.
+      - The hardcoded paper-style section list ['introduction','methods',
+        'results','discussion','conclusion'] is NO LONGER in the dashboard
+        section_types fallback (it was hardcoded before 14.4).
+      - The autosave indicator has the new always-visible pill markup.
+    """
+    import sciknow.web.app as web
+
+    # Helpers exist
+    assert hasattr(web, "_DEFAULT_BOOK_SECTIONS"), "_DEFAULT_BOOK_SECTIONS missing"
+    assert "overview" in web._DEFAULT_BOOK_SECTIONS, "book defaults missing 'overview'"
+    assert "key_evidence" in web._DEFAULT_BOOK_SECTIONS, "book defaults missing 'key_evidence'"
+    # Critically: the book defaults must NOT include paper-style sections.
+    paper_sections = {"methods", "results", "discussion"}
+    assert not (paper_sections & set(web._DEFAULT_BOOK_SECTIONS)), \
+        "_DEFAULT_BOOK_SECTIONS leaked paper-style entries"
+    assert hasattr(web, "_chapter_sections"), "_chapter_sections helper missing"
+    assert hasattr(web, "_normalize_section"), "_normalize_section helper missing"
+
+    # SQL loads bc.sections
+    import inspect
+    src = inspect.getsource(web._get_book_data)
+    assert "bc.sections" in src, "_get_book_data SQL missing bc.sections column"
+
+    # Template wiring
+    t = web.TEMPLATE
+    # Heatmap chapter title is clickable
+    assert "ch-label clickable" in t, \
+        "dashboard chapter title not marked clickable"
+    assert "openChapterModal(&#39;' + row.id" in t or \
+           'openChapterModal(' in t and "row.id" in t, \
+        "dashboard chapter title doesn't open the chapter scope modal"
+    # Per-chapter section template flows to the empty-state JS
+    assert "sections_template" in t, "sections_template not propagated to JS"
+    assert "ch.sections_template" in t, "JS doesn't read ch.sections_template"
+    # Off-template heatmap cells styled
+    assert ".hm-cell.off-template" in t, "off-template cell CSS missing"
+    # The hardcoded paper-style mix should be gone from showChapterEmptyState
+    assert "['overview', 'introduction', 'key_evidence', 'methods'" not in t, \
+        "hardcoded paper-style sections still present in showChapterEmptyState"
+    # Autosave indicator pill
+    assert 'id="autosave-text"' in t, "autosave-text element missing"
+    assert "setAutosaveState(" in t, "setAutosaveState helper missing"
+    assert "Autosave on" in t, "autosave default label missing from template"
+    assert ".editor-toolbar .autosave .dot" in t, "autosave dot CSS missing"
+
+
 def l1_web_phase14_3_book_plan_editor() -> None:
     """Phase 14.3 — book plan + chapter scope editors are wired in.
 
@@ -705,6 +763,7 @@ L1_TESTS: list[Callable] = [
     l1_web_template_phase14_features,
     l1_web_phase14_endpoints_registered,
     l1_web_phase14_3_book_plan_editor,
+    l1_web_phase14_4_book_sections,
     l1_web_rendered_js_is_valid,
     l1_research_doc_up_to_date,
 ]
