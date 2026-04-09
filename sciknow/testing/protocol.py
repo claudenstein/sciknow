@@ -420,6 +420,72 @@ def l1_web_phase14_endpoints_registered() -> None:
     assert not missing, f"Phase 14 routes missing from app: {missing}"
 
 
+def l1_web_rendered_js_is_valid() -> "TestResult":
+    """The rendered web template's <script> block must be syntactically
+    valid JavaScript. This is the regression test for the latent
+    `\\'` -> `'` Python escape bug that broke every onclick handler in
+    the web reader for at least three commits — fixed by Phase 14.1.
+
+    Strategy: render the template with placeholder values, extract the
+    script block, write it to a temp file, and run `node --check` on it.
+    Skips gracefully if Node isn't installed (rare on dev machines but
+    possible).
+    """
+    import shutil, subprocess, tempfile, re as _re
+    from pathlib import Path
+
+    node_bin = shutil.which("node")
+    if not node_bin:
+        return TestResult.skip(
+            name="l1_web_rendered_js_is_valid",
+            message="node not installed — skipping JS syntax check",
+        )
+
+    from sciknow.web.app import TEMPLATE
+    rendered = TEMPLATE.format(
+        book_title="Test Book", search_q="", search_results_html="",
+        sidebar_html="", gaps_count=0,
+        active_id="abc12345-6789-0000-0000-000000000000",
+        active_title="Test", active_version=1, active_words=100,
+        active_chapter_id="ch1", active_section_type="intro",
+        chapters_json="[]",
+        content_html="<p>test</p>", sources_html="",
+        review_html="", comments_html="",
+    )
+    m = _re.search(r"<script>(.*?)</script>", rendered, _re.DOTALL)
+    if not m:
+        raise AssertionError("no <script> block in rendered template")
+
+    js = m.group(1)
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".js", delete=False, encoding="utf-8",
+    ) as f:
+        f.write(js)
+        path = Path(f.name)
+
+    try:
+        result = subprocess.run(
+            [node_bin, "--check", str(path)],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            # Truncate node's error so the harness output stays readable.
+            stderr_short = (result.stderr or "").strip().splitlines()[0:2]
+            raise AssertionError(
+                f"node --check failed: {' | '.join(stderr_short)}"
+            )
+    finally:
+        try:
+            path.unlink()
+        except Exception:
+            pass
+
+    return TestResult.ok(
+        name="l1_web_rendered_js_is_valid",
+        message=f"node --check passed on {len(js):,} chars of rendered JS",
+    )
+
+
 def l1_research_doc_up_to_date() -> None:
     """docs/RESEARCH.md mentions all shipped phases."""
     from pathlib import Path
@@ -609,6 +675,7 @@ L1_TESTS: list[Callable] = [
     l1_web_template_has_overstated,
     l1_web_template_phase14_features,
     l1_web_phase14_endpoints_registered,
+    l1_web_rendered_js_is_valid,
     l1_research_doc_up_to_date,
 ]
 

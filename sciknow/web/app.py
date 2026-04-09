@@ -2474,10 +2474,10 @@ async function showDashboard() {{
     html += '<tr><td class="ch-label">Ch.' + row.num + ' ' + row.title.substring(0,25) + '</td>';
     row.cells.forEach(cell => {{
       if (cell.status === 'empty') {{
-        html += '<td><span class="hm-cell empty" onclick="writeForCell(\'' + row.id + '\',\'' + cell.type + '\')" title="Click to write">—</span></td>';
+        html += '<td><span class="hm-cell empty" onclick="writeForCell(&#39;' + row.id + '&#39;,&#39;' + cell.type + '&#39;)" title="Click to write">—</span></td>';
       }} else {{
         const label = 'v' + cell.version + ' ' + cell.words + 'w';
-        html += '<td><span class="hm-cell ' + cell.status + '" onclick="loadSection(\'' + cell.draft_id + '\')" title="' + label + '">' + label + '</span></td>';
+        html += '<td><span class="hm-cell ' + cell.status + '" onclick="loadSection(&#39;' + cell.draft_id + '&#39;)" title="' + label + '">' + label + '</span></td>';
       }}
     }});
     html += '</tr>';
@@ -2492,7 +2492,8 @@ async function showDashboard() {{
       if (g.type === 'draft' && g.chapter_num) {{
         btn = '<button onclick="writeForGap(' + g.chapter_num + ')">Write</button>';
       }} else if (g.type === 'evidence') {{
-        btn = '<button onclick="alert(\'Run: sciknow db expand -q \\x22' + g.description.substring(0,30).replace(/'/g, '') + '\\x22\')">Expand</button>';
+        const cmdHint = 'Run: sciknow db expand -q ' + g.description.substring(0,30).replace(/[&<>"\\']/g, '');
+        btn = '<button data-cmd="' + cmdHint.replace(/&/g, '&amp;').replace(/"/g, '&quot;') + '" onclick="alert(this.dataset.cmd)">Expand</button>';
       }}
       html += '<div class="gap-item">';
       html += '<span class="gap-type">' + g.type + '</span>';
@@ -2561,7 +2562,7 @@ async function showVersions() {{
   let html = '';
   versionData.forEach(v => {{
     const review = v.has_review ? ' \\u2713' : '';
-    html += '<span class="version-badge" data-vid="' + v.id + '" onclick="selectVersion(\'' + v.id + '\')">' +
+    html += '<span class="version-badge" data-vid="' + v.id + '" onclick="selectVersion(&#39;' + v.id + '&#39;)">' +
       'v' + v.version + ' (' + v.word_count + 'w)' + review + '</span>';
   }});
   timeline.innerHTML = html;
