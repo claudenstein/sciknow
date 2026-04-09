@@ -45,5 +45,60 @@ app.add_typer(draft_module.app, name="draft")
 app.add_typer(wiki_module.app, name="wiki")
 
 
+@app.command(name="test")
+def test_cmd(
+    layer: str = typer.Option(
+        "L1",
+        "--layer", "-l",
+        help="Which test layer to run: L1 (static), L2 (live integration), L3 (end-to-end), or all.",
+    ),
+    fail_fast: bool = typer.Option(
+        False,
+        "--fail-fast",
+        help="Stop on the first failure instead of running every test in the layer.",
+    ),
+):
+    """
+    Run the layered testing protocol (smoke tests, not pytest).
+
+    L1 — Static     (seconds, no deps)              imports, prompts, signatures
+    L2 — Live       (tens of sec, PG + Qdrant)      hybrid_search, raptor scrolls
+    L3 — End-to-end (minutes, PG + Qdrant + Ollama) one tiny LLM call, embedder
+
+    Run L1 on every PR. Run L2 before shipping a "Phase" feature drop or after
+    infrastructure changes. Run L3 after retrieval / LLM / embedder changes.
+    See docs/TESTING.md for the full protocol and how to add new checks.
+
+    Examples:
+
+      sciknow test                  # L1 only (default — fast)
+      sciknow test --layer L2       # live integration only
+      sciknow test --layer all      # everything (L1 + L2 + L3)
+      sciknow test -l all --fail-fast
+    """
+    from sciknow.testing import protocol
+
+    layer_norm = layer.upper().strip()
+    if layer_norm == "ALL":
+        layers = ["L1", "L2", "L3"]
+    elif layer_norm in ("L1", "L2", "L3"):
+        layers = [layer_norm]
+    else:
+        console.print(f"[red]Unknown layer: {layer!r}. Use L1, L2, L3, or all.[/red]")
+        raise typer.Exit(2)
+
+    console.print(f"[bold]sciknow test[/bold] · layers: {', '.join(layers)}")
+    console.print()
+    n_failed = protocol.run_all(layers, fail_fast=fail_fast)
+
+    console.print()
+    if n_failed == 0:
+        console.print("[bold green]✓ All tests passed[/bold green]")
+        raise typer.Exit(0)
+    else:
+        console.print(f"[bold red]✗ {n_failed} test(s) failed[/bold red]")
+        raise typer.Exit(1)
+
+
 if __name__ == "__main__":
     app()
