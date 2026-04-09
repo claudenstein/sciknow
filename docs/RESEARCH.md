@@ -590,4 +590,5 @@ Phase 10: Step-back retrieval       → abstract reformulation augments concrete
 Phase 11: Chain-of-Verification     → decoupled fact-check questions, gated on score thresholds
 Phase 12: RAPTOR hierarchical tree  → UMAP+GMM clustering, LLM cluster summaries as level-N nodes
 Phase 13: Track A measurement       → score history persistence, draft scores/compare/autowrite-bench
+Phase 14: Web reader v2             → modern UI, score history viewer, wiki/ask/catalog modals, stats dashboard
 ```

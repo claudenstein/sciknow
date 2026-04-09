@@ -369,6 +369,57 @@ def l1_web_template_has_overstated() -> None:
     assert "hedging_fidelity" in t, "hedging_fidelity dimension missing from web score bars"
 
 
+def l1_web_template_phase14_features() -> None:
+    """Phase 14 — modernized UI + new modals + score history viewer.
+
+    Verifies that the web v2 redesign is in place: new design tokens
+    (--accent: #4f46e5 indigo), modal infrastructure, the four new
+    toolbar buttons, and the score history panel.
+    """
+    import sciknow.web.app as web
+    t = web.TEMPLATE
+
+    # New design system tokens
+    assert "--font-sans:" in t, "v2 font system tokens missing from CSS"
+    assert "--sp-1:" in t, "v2 spacing scale missing from CSS"
+    assert "--shadow-md:" in t, "v2 shadow tokens missing from CSS"
+    # Modal infrastructure
+    assert ".modal-overlay" in t, "modal CSS class missing"
+    assert "openModal(" in t, "openModal JS function missing"
+    assert "closeModal(" in t, "closeModal JS function missing"
+    # Toolbar v2: four new buttons
+    assert "openWikiModal()" in t, "Wiki Query toolbar button missing"
+    assert "openAskModal()" in t, "Ask Corpus toolbar button missing"
+    assert "openCatalogModal()" in t, "Browse Papers toolbar button missing"
+    assert "showScoresPanel()" in t, "Score History toolbar button missing"
+    # Score history viewer (Phase 13 GUI integration)
+    assert 'id="scores-panel"' in t, "scores-panel container missing"
+    assert "scores-table" in t, "scores-table CSS class missing"
+    assert "/api/draft/" in t, "draft scores API call missing from JS"
+    # New modals exist
+    assert 'id="wiki-modal"' in t, "wiki-modal element missing"
+    assert 'id="ask-modal"' in t, "ask-modal element missing"
+    assert 'id="catalog-modal"' in t, "catalog-modal element missing"
+    # Stat-tile dashboard upgrade
+    assert "stat-tile" in t, "stat-tile dashboard tile class missing"
+    assert "raptor-bar" in t, "raptor-bar dashboard panel missing"
+
+
+def l1_web_phase14_endpoints_registered() -> None:
+    """Phase 14 — new FastAPI routes are registered on the app."""
+    import sciknow.web.app as web
+    routes = {r.path for r in web.app.routes if hasattr(r, "path")}
+    expected = {
+        "/api/draft/{draft_id}/scores",
+        "/api/wiki/query",
+        "/api/ask",
+        "/api/catalog",
+        "/api/stats",
+    }
+    missing = expected - routes
+    assert not missing, f"Phase 14 routes missing from app: {missing}"
+
+
 def l1_research_doc_up_to_date() -> None:
     """docs/RESEARCH.md mentions all shipped phases."""
     from pathlib import Path
@@ -556,6 +607,8 @@ L1_TESTS: list[Callable] = [
     l1_history_shape_roundtrips,
     l1_format_score_cell,
     l1_web_template_has_overstated,
+    l1_web_template_phase14_features,
+    l1_web_phase14_endpoints_registered,
     l1_research_doc_up_to_date,
 ]
 

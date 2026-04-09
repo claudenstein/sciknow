@@ -169,7 +169,21 @@ This is the variance-measurement tool. If `std` is high relative to the differen
 
 ---
 
-## Web Reader (`book serve`)
+## Web Reader v2 (Phase 14)
+
+The web reader was rewritten in Phase 14 with a modern design system and full CLI parity for the read-only / query operations. Key changes from v1:
+
+- **Modern visual design** — indigo accent with refined neutrals, hairline borders, polished dark mode. UI uses the Inter / system sans font stack; the draft body keeps Georgia for reading. New 4 / 8 / 12 / 16 / 24 / 32 px spacing scale, subtle card shadows, modal infrastructure with backdrop blur.
+- **Grouped action toolbar** — buttons now live in four labelled groups (Write actions / Quality / Browse / View) instead of being separated by raw dividers, with the primary `Autowrite` button styled as the call to action.
+- **Score History viewer** (Phase 13 GUI integration) — new toolbar button `&#9783; Scores` opens a collapsible panel showing the iteration-by-iteration convergence trajectory for any autowrite draft, including all six scoring dimensions, verification flag counts, CoVe results per iteration, an SVG sparkline for the overall score trajectory, and the keep/discard verdicts. Empty state for non-autowrite drafts.
+- **Wiki Query modal** — `&#128218; Wiki Query` opens a modal for streaming queries against the compiled knowledge wiki (`sciknow wiki query` in the browser).
+- **Corpus Ask modal** — `&#128270; Ask Corpus` opens a full-corpus RAG question modal with optional year filters. Streams the answer token-by-token with the source list rendered below — same hybrid retrieval + bge-reranker + LLM pipeline as `sciknow ask question`.
+- **Catalog Browser modal** — `&#128194; Browse Papers` opens a paginated paper list with filters (author, journal, year range). Click a row to seed an "Ask about this paper" query in the corpus modal.
+- **Enhanced Dashboard** — the existing book stats and heatmap are now joined by a **Corpus** panel showing total documents, completed papers, chunks, citations, wiki pages, topic cluster count, and a per-level RAPTOR node breakdown bar. Pulls from the new `/api/stats` endpoint.
+
+All Phase 14 modals use the same SSE infrastructure as the existing Write/Review/Revise/Autowrite operations, so cancellation, error handling, and concurrent-job management work uniformly.
+
+### Original v1 features (still available)
 
 `sciknow book serve "Global Cooling"` launches a local web application at `http://127.0.0.1:8765` with:
 
@@ -219,6 +233,11 @@ This is the variance-measurement tool. If `std` is high relative to the differen
 | `/api/snapshots/{draft_id}` | GET | List snapshots |
 | `/api/draft/{id}/status` | PUT | Update draft status |
 | `/api/draft/{id}/metadata` | PUT | Merge custom metadata |
+| `/api/draft/{id}/scores` | GET | **Phase 14** — persisted score history (Phase 13 measurement) |
+| `/api/wiki/query` | POST | **Phase 14** — stream a wiki query (CLI parity for `wiki query`) |
+| `/api/ask` | POST | **Phase 14** — full-corpus RAG question (CLI parity for `ask question`) |
+| `/api/catalog` | GET | **Phase 14** — paginated paper list with filters (CLI parity for `catalog list`) |
+| `/api/stats` | GET | **Phase 14** — corpus stats (docs, chunks, citations, RAPTOR levels, topic clusters) |
 
 ---
 

@@ -925,6 +925,267 @@ async def api_autowrite(
     return JSONResponse({"job_id": job_id})
 
 
+# ── Phase 14: Web v2 endpoints ──────────────────────────────────────────────
+#
+# These add CLI parity to the GUI: score history viewer (Phase 13), wiki
+# query, corpus RAG ask, catalog browser, and a stats panel for the
+# dashboard.
+
+
+@app.get("/api/draft/{draft_id}/scores")
+async def api_draft_scores(draft_id: str):
+    """Return the persisted score history for an autowrite draft.
+
+    Reads drafts.custom_metadata. Empty history is a valid response —
+    drafts created by `book write` (not autowrite) won't have one, and the
+    GUI shows an empty state for those.
+    """
+    with get_session() as session:
+        row = session.execute(text("""
+            SELECT id::text, title, version, word_count, model_used,
+                   custom_metadata, created_at, section_type
+            FROM drafts WHERE id::text LIKE :q
+            ORDER BY created_at DESC LIMIT 1
+        """), {"q": f"{draft_id}%"}).fetchone()
+    if not row:
+        raise HTTPException(404, "Draft not found")
+    meta = row[5] or {}
+    return JSONResponse({
+        "id": row[0],
+        "title": row[1],
+        "version": row[2],
+        "word_count": row[3],
+        "model_used": row[4],
+        "section_type": row[7],
+        "score_history": meta.get("score_history") or [],
+        "feature_versions": meta.get("feature_versions") or {},
+        "final_overall": meta.get("final_overall"),
+        "max_iter": meta.get("max_iter"),
+        "target_score": meta.get("target_score"),
+    })
+
+
+@app.post("/api/wiki/query")
+async def api_wiki_query(question: str = Form(...), model: str = Form(None)):
+    """Stream a wiki query — wraps wiki_ops.query_wiki as an SSE job."""
+    from sciknow.core.wiki_ops import query_wiki
+
+    job_id, queue = _create_job("wiki_query")
+    loop = asyncio.get_event_loop()
+
+    def gen():
+        return query_wiki(question, model=model or None)
+
+    threading.Thread(
+        target=_run_generator_in_thread, args=(job_id, gen, loop), daemon=True
+    ).start()
+    return JSONResponse({"job_id": job_id})
+
+
+@app.post("/api/ask")
+async def api_ask(
+    question: str = Form(...),
+    model: str = Form(None),
+    context_k: int = Form(8),
+    year_from: int = Form(None),
+    year_to: int = Form(None),
+):
+    """Stream a corpus-wide RAG question — full hybrid search + LLM stream.
+
+    Implemented inline as an event generator so the GUI gets the same SSE
+    contract as the other operations: progress events, token events, sources,
+    completed.
+    """
+    from sciknow.rag import prompts as rag_prompts
+    from sciknow.rag.llm import stream as llm_stream
+    from sciknow.retrieval import context_builder, hybrid_search, reranker
+    from sciknow.storage.qdrant import get_client
+
+    job_id, queue = _create_job("ask")
+    loop = asyncio.get_event_loop()
+
+    def gen():
+        qdrant = get_client()
+        yield {"type": "progress", "stage": "retrieving",
+               "detail": "Hybrid search across the corpus..."}
+        with get_session() as session:
+            candidates = hybrid_search.search(
+                query=question, qdrant_client=qdrant, session=session,
+                candidate_k=50,
+                year_from=year_from if year_from else None,
+                year_to=year_to if year_to else None,
+            )
+            if not candidates:
+                yield {"type": "error", "message": "No relevant passages found."}
+                return
+            candidates = reranker.rerank(question, candidates, top_k=context_k)
+            results = context_builder.build(candidates, session)
+
+        from sciknow.rag.prompts import format_sources
+        sources = format_sources(results).splitlines()
+        yield {"type": "sources", "sources": sources, "n": len(sources)}
+
+        system, user = rag_prompts.qa(question, results)
+        yield {"type": "progress", "stage": "generating",
+               "detail": f"Generating answer from {len(results)} passages..."}
+        for tok in llm_stream(system, user, model=model or None):
+            yield {"type": "token", "text": tok}
+        yield {"type": "completed"}
+
+    threading.Thread(
+        target=_run_generator_in_thread, args=(job_id, gen, loop), daemon=True
+    ).start()
+    return JSONResponse({"job_id": job_id})
+
+
+@app.get("/api/catalog")
+async def api_catalog(
+    page: int = 1,
+    per_page: int = 25,
+    year_from: int = None,
+    year_to: int = None,
+    author: str = None,
+    journal: str = None,
+    topic_cluster: str = None,
+):
+    """Paginated paper list with optional filters. Mirrors `sciknow catalog list`."""
+    page = max(page, 1)
+    per_page = min(max(per_page, 1), 100)
+    offset = (page - 1) * per_page
+
+    where = []
+    params: dict = {"limit": per_page, "offset": offset}
+    if year_from is not None:
+        where.append("pm.year >= :year_from")
+        params["year_from"] = year_from
+    if year_to is not None:
+        where.append("pm.year <= :year_to")
+        params["year_to"] = year_to
+    if author:
+        where.append("EXISTS (SELECT 1 FROM jsonb_array_elements(pm.authors) a WHERE a->>'name' ILIKE :author)")
+        params["author"] = f"%{author}%"
+    if journal:
+        where.append("pm.journal ILIKE :journal")
+        params["journal"] = f"%{journal}%"
+    if topic_cluster:
+        where.append("pm.topic_cluster = :topic_cluster")
+        params["topic_cluster"] = topic_cluster
+
+    where_clause = ("WHERE " + " AND ".join(where)) if where else ""
+
+    with get_session() as session:
+        total = session.execute(text(f"""
+            SELECT COUNT(*) FROM paper_metadata pm {where_clause}
+        """), {k: v for k, v in params.items() if k not in ("limit", "offset")}).scalar() or 0
+
+        rows = session.execute(text(f"""
+            SELECT pm.document_id::text, pm.title, pm.year, pm.authors,
+                   pm.journal, pm.doi, pm.abstract, pm.topic_cluster,
+                   pm.metadata_source
+            FROM paper_metadata pm
+            {where_clause}
+            ORDER BY pm.year DESC NULLS LAST, pm.title
+            LIMIT :limit OFFSET :offset
+        """), params).fetchall()
+
+    papers = [
+        {
+            "document_id": r[0],
+            "title": r[1] or "(untitled)",
+            "year": r[2],
+            "authors": r[3] or [],
+            "journal": r[4],
+            "doi": r[5],
+            "abstract": (r[6] or "")[:600],
+            "topic_cluster": r[7],
+            "metadata_source": r[8],
+        }
+        for r in rows
+    ]
+    return JSONResponse({
+        "page": page,
+        "per_page": per_page,
+        "total": total,
+        "n_pages": (total + per_page - 1) // per_page,
+        "papers": papers,
+    })
+
+
+@app.get("/api/stats")
+async def api_stats():
+    """Aggregate stats for the enhanced dashboard panel.
+
+    Mirrors a subset of `sciknow db stats` + `catalog raptor stats` +
+    `catalog topics`. Cheap to compute — runs four counts plus two
+    GROUP BYs against PostgreSQL, no Qdrant scrolls except for the
+    RAPTOR level breakdown which uses an indexed payload filter so it's
+    O(N_summary_nodes) not O(N_chunks).
+    """
+    out: dict = {}
+    with get_session() as session:
+        out["n_documents"] = session.execute(text(
+            "SELECT COUNT(*) FROM documents"
+        )).scalar() or 0
+        out["n_completed"] = session.execute(text(
+            "SELECT COUNT(*) FROM documents WHERE ingestion_status = 'complete'"
+        )).scalar() or 0
+        out["n_chunks"] = session.execute(text(
+            "SELECT COUNT(*) FROM chunks"
+        )).scalar() or 0
+        out["n_citations"] = session.execute(text(
+            "SELECT COUNT(*) FROM citations"
+        )).scalar() or 0
+
+        # Ingest source breakdown (seed vs expand)
+        rows = session.execute(text("""
+            SELECT ingest_source, COUNT(*) FROM documents
+            GROUP BY ingest_source ORDER BY COUNT(*) DESC
+        """)).fetchall()
+        out["ingest_sources"] = [{"source": r[0] or "unknown", "n": r[1]} for r in rows]
+
+        # Topic clusters
+        rows = session.execute(text("""
+            SELECT topic_cluster, COUNT(*) FROM paper_metadata
+            WHERE topic_cluster IS NOT NULL AND topic_cluster != ''
+            GROUP BY topic_cluster ORDER BY COUNT(*) DESC LIMIT 20
+        """)).fetchall()
+        out["topic_clusters"] = [{"name": r[0], "n": r[1]} for r in rows]
+
+        # Wiki page count if the table exists
+        try:
+            out["n_wiki_pages"] = session.execute(text(
+                "SELECT COUNT(*) FROM wiki_pages"
+            )).scalar() or 0
+        except Exception:
+            out["n_wiki_pages"] = 0
+
+    # RAPTOR level counts via Qdrant filter (indexed → fast).
+    raptor_levels: dict[str, int] = {}
+    try:
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
+        from sciknow.storage.qdrant import PAPERS_COLLECTION, get_client
+        qdrant = get_client()
+        for lvl in (0, 1, 2, 3, 4):
+            try:
+                info = qdrant.count(
+                    collection_name=PAPERS_COLLECTION,
+                    count_filter=Filter(must=[
+                        FieldCondition(key="node_level", match=MatchValue(value=lvl))
+                    ]),
+                    exact=False,
+                )
+                n = info.count if hasattr(info, "count") else int(info)
+                if n > 0:
+                    raptor_levels[f"L{lvl}"] = n
+            except Exception:
+                pass
+    except Exception:
+        pass
+    out["raptor_levels"] = raptor_levels
+
+    return JSONResponse(out)
+
+
 @app.get("/api/stream/{job_id}")
 async def stream_job(job_id: str):
     """SSE endpoint — streams events from a running job."""
@@ -1136,44 +1397,249 @@ TEMPLATE = """\
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{book_title} — SciKnow Reader</title>
 <style>
-:root {{ --bg: #fff; --fg: #1a1a1a; --sidebar-bg: #f5f5f5; --border: #e0e0e0;
-         --accent: #2563eb; --accent-light: #dbeafe; --success: #16a34a;
-         --warning: #d97706; --danger: #dc2626; --code-bg: #f8f8f8;
-         --toolbar-bg: #f0f4ff; }}
-[data-theme="dark"] {{ --bg: #1a1a2e; --fg: #e0e0e0; --sidebar-bg: #16213e;
-         --border: #333; --accent: #60a5fa; --accent-light: #1e3a5f;
-         --code-bg: #0f3460; --toolbar-bg: #1e2a4a; }}
+/* ── Phase 14 — Web reader v2 design system ───────────────────────────────
+   Modern indigo accent, refined neutrals, hairline borders, polished
+   dark mode. UI uses Inter / system sans; draft body keeps Georgia for
+   reading. */
+:root {{
+  /* Surfaces */
+  --bg: #ffffff;
+  --bg-elevated: #ffffff;
+  --sidebar-bg: #fafafa;
+  --toolbar-bg: #f7f8fa;
+  --code-bg: #f4f4f6;
+  --modal-overlay: rgba(15, 23, 42, 0.45);
+  /* Text */
+  --fg: #0f172a;
+  --fg-muted: #64748b;
+  --fg-faint: #94a3b8;
+  /* Borders & accents */
+  --border: #e5e7eb;
+  --border-strong: #d1d5db;
+  --accent: #4f46e5;          /* indigo-600 */
+  --accent-hover: #4338ca;    /* indigo-700 */
+  --accent-light: #eef2ff;    /* indigo-50 */
+  --accent-fg: #ffffff;
+  /* Semantic */
+  --success: #059669;         /* emerald-600 */
+  --success-light: #d1fae5;
+  --warning: #d97706;         /* amber-600 */
+  --warning-light: #fef3c7;
+  --danger: #e11d48;          /* rose-600 */
+  --danger-light: #ffe4e6;
+  --info: #0284c7;            /* sky-600 */
+  /* Spacing scale */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  /* Radius */
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 10px;
+  --r-xl: 14px;
+  /* Shadows */
+  --shadow-sm: 0 1px 2px rgba(15,23,42,0.04);
+  --shadow-md: 0 4px 12px rgba(15,23,42,0.08);
+  --shadow-lg: 0 12px 32px rgba(15,23,42,0.14);
+  /* Type */
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-serif: 'Georgia', 'Times New Roman', serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, Monaco, Consolas, monospace;
+}}
+[data-theme="dark"] {{
+  --bg: #0b1120;              /* slate-950ish */
+  --bg-elevated: #111827;
+  --sidebar-bg: #0f172a;      /* slate-900 */
+  --toolbar-bg: #131c2d;
+  --code-bg: #1e293b;
+  --modal-overlay: rgba(0, 0, 0, 0.65);
+  --fg: #e2e8f0;              /* slate-200 */
+  --fg-muted: #94a3b8;
+  --fg-faint: #64748b;
+  --border: #1f2937;          /* gray-800 */
+  --border-strong: #374151;
+  --accent: #818cf8;          /* indigo-400 */
+  --accent-hover: #a5b4fc;
+  --accent-light: #1e1b4b;    /* indigo-950 */
+  --success: #10b981;
+  --success-light: #064e3b;
+  --warning: #f59e0b;
+  --warning-light: #78350f;
+  --danger: #f43f5e;
+  --danger-light: #4c0519;
+  --info: #38bdf8;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.30);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.40);
+  --shadow-lg: 0 16px 40px rgba(0,0,0,0.55);
+}}
 * {{ margin:0; padding:0; box-sizing:border-box; }}
-body {{ font-family: 'Georgia', serif; color: var(--fg); background: var(--bg);
-        display: flex; height: 100vh; }}
+html {{ -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }}
+body {{ font-family: var(--font-sans); color: var(--fg); background: var(--bg);
+        display: flex; height: 100vh; font-size: 14px; }}
+button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 /* Sidebar */
 .sidebar {{ width: 280px; background: var(--sidebar-bg); border-right: 1px solid var(--border);
-            overflow-y: auto; flex-shrink: 0; padding: 16px 0; }}
-.sidebar h2 {{ padding: 8px 16px; font-size: 15px; color: var(--accent); }}
-.ch-group {{ margin-bottom: 8px; }}
-.ch-title {{ padding: 6px 16px; font-weight: bold; font-size: 13px; color: var(--fg); opacity: 0.7; }}
-.sec-link {{ display: block; padding: 4px 16px 4px 32px; text-decoration: none;
-             color: var(--fg); font-size: 13px; border-left: 3px solid transparent; cursor: pointer; }}
-.sec-link:hover {{ background: var(--accent-light); }}
-.sec-link.active {{ border-left-color: var(--accent); background: var(--accent-light); font-weight: bold; }}
-.sec-link .meta {{ font-size: 11px; opacity: 0.5; }}
-.sec-link.empty {{ color: var(--fg); opacity: 0.3; font-style: italic; }}
+            overflow-y: auto; flex-shrink: 0; padding: var(--sp-4) 0;
+            display: flex; flex-direction: column; }}
+.sidebar h2 {{ padding: var(--sp-2) var(--sp-4) var(--sp-3); font-size: 15px;
+              font-weight: 600; color: var(--fg); letter-spacing: -0.01em; }}
+.ch-group {{ margin-bottom: var(--sp-2); }}
+.ch-title {{ padding: var(--sp-2) var(--sp-4) var(--sp-1); font-weight: 600; font-size: 11px;
+             text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-muted); }}
+.sec-link {{ display: block; padding: 6px var(--sp-4) 6px 28px; text-decoration: none;
+             color: var(--fg); font-size: 13px; border-left: 2px solid transparent; cursor: pointer;
+             transition: background .12s ease; }}
+.sec-link:hover {{ background: var(--toolbar-bg); }}
+.sec-link.active {{ border-left-color: var(--accent); background: var(--accent-light);
+                   color: var(--accent); font-weight: 600; }}
+.sec-link .meta {{ font-size: 11px; color: var(--fg-faint); margin-left: 6px; }}
+.sec-link.empty {{ color: var(--fg-faint); font-style: italic; }}
 /* Main */
-.main {{ flex: 1; overflow-y: auto; padding: 32px 48px; max-width: 900px; }}
-.main h1 {{ font-size: 26px; margin-bottom: 4px; }}
-.main .subtitle {{ font-size: 13px; color: var(--fg); opacity: 0.5; margin-bottom: 8px; }}
-.main p {{ line-height: 1.8; margin-bottom: 12px; text-align: justify; }}
-.main h2,.main h3,.main h4 {{ margin: 24px 0 12px; }}
-.citation {{ color: var(--accent); cursor: pointer; font-weight: bold; }}
-/* Action toolbar */
-.toolbar {{ display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 20px; padding: 10px 14px;
-            background: var(--toolbar-bg); border-radius: 8px; border: 1px solid var(--border); }}
-.toolbar button {{ font-size: 12px; padding: 5px 14px; border: 1px solid var(--border);
-                   border-radius: 6px; cursor: pointer; background: var(--bg); color: var(--fg);
-                   font-family: -apple-system, sans-serif; transition: all .15s; }}
-.toolbar button:hover {{ background: var(--accent); color: white; border-color: var(--accent); }}
-.toolbar button.active {{ background: var(--accent); color: white; }}
-.toolbar .sep {{ width: 1px; background: var(--border); margin: 0 4px; }}
+.main {{ flex: 1; overflow-y: auto; padding: var(--sp-6) 48px; max-width: 980px; }}
+.main h1 {{ font-size: 28px; font-weight: 700; letter-spacing: -0.02em;
+            margin-bottom: var(--sp-1); color: var(--fg); }}
+.main .subtitle {{ font-size: 13px; color: var(--fg-muted); margin-bottom: var(--sp-3);
+                   display: flex; align-items: center; gap: var(--sp-2); }}
+.main p {{ font-family: var(--font-serif); font-size: 16px; line-height: 1.78;
+           margin-bottom: var(--sp-3); text-align: justify; color: var(--fg); }}
+.main h2,.main h3,.main h4 {{ margin: var(--sp-5) 0 var(--sp-3); font-weight: 700;
+                              letter-spacing: -0.01em; color: var(--fg); }}
+.main h2 {{ font-size: 22px; }} .main h3 {{ font-size: 18px; }} .main h4 {{ font-size: 15px; }}
+.citation {{ color: var(--accent); cursor: pointer; font-weight: 600;
+             text-decoration: none; padding: 0 1px; }}
+.citation:hover {{ background: var(--accent-light); border-radius: 2px; }}
+/* Action toolbar — grouped sections, modern pills */
+.toolbar {{ display: flex; gap: var(--sp-1); flex-wrap: wrap; margin-bottom: var(--sp-5);
+            padding: var(--sp-2); background: var(--toolbar-bg);
+            border-radius: var(--r-lg); border: 1px solid var(--border);
+            box-shadow: var(--shadow-sm); align-items: center; }}
+.toolbar .tg {{ display: flex; gap: 2px; padding: 0 4px; }}
+.toolbar button {{ font-size: 12px; font-weight: 500; padding: 6px 12px;
+                   border: 1px solid transparent; border-radius: var(--r-md);
+                   cursor: pointer; background: transparent; color: var(--fg);
+                   transition: all .12s ease; display: inline-flex; align-items: center;
+                   gap: 6px; line-height: 1; }}
+.toolbar button:hover {{ background: var(--bg-elevated); border-color: var(--border);
+                         box-shadow: var(--shadow-sm); }}
+.toolbar button:active {{ transform: translateY(1px); }}
+.toolbar button.primary {{ background: var(--accent); color: var(--accent-fg);
+                           border-color: var(--accent); }}
+.toolbar button.primary:hover {{ background: var(--accent-hover); border-color: var(--accent-hover); }}
+.toolbar button.active {{ background: var(--accent); color: var(--accent-fg);
+                          border-color: var(--accent); }}
+.toolbar .sep {{ width: 1px; align-self: stretch; background: var(--border); margin: 4px 4px; }}
+.tg-label {{ font-size: 10px; font-weight: 600; color: var(--fg-faint);
+             text-transform: uppercase; letter-spacing: 0.06em; padding: 0 6px;
+             align-self: center; }}
+/* Modal infrastructure */
+.modal-overlay {{ display: none; position: fixed; inset: 0; background: var(--modal-overlay);
+                  backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+                  z-index: 1000; align-items: flex-start; justify-content: center;
+                  padding-top: 64px; }}
+.modal-overlay.open {{ display: flex; animation: fadeIn .15s ease; }}
+.modal {{ background: var(--bg-elevated); border: 1px solid var(--border);
+          border-radius: var(--r-xl); box-shadow: var(--shadow-lg); width: 90%;
+          max-width: 720px; max-height: 80vh; display: flex; flex-direction: column;
+          overflow: hidden; animation: slideUp .18s ease; }}
+.modal.wide {{ max-width: 920px; }}
+.modal-header {{ padding: var(--sp-4) var(--sp-5); border-bottom: 1px solid var(--border);
+                display: flex; align-items: center; justify-content: space-between; }}
+.modal-header h3 {{ font-size: 16px; font-weight: 600; color: var(--fg); }}
+.modal-close {{ background: transparent; border: none; font-size: 22px; color: var(--fg-muted);
+                cursor: pointer; line-height: 1; padding: 4px 8px; border-radius: var(--r-sm); }}
+.modal-close:hover {{ background: var(--toolbar-bg); color: var(--fg); }}
+.modal-body {{ padding: var(--sp-5); overflow-y: auto; flex: 1; }}
+.modal-footer {{ padding: var(--sp-3) var(--sp-5); border-top: 1px solid var(--border);
+                background: var(--toolbar-bg); display: flex; gap: var(--sp-2);
+                justify-content: flex-end; }}
+@keyframes fadeIn {{ from {{ opacity: 0; }} to {{ opacity: 1; }} }}
+@keyframes slideUp {{ from {{ opacity: 0; transform: translateY(8px); }}
+                      to {{ opacity: 1; transform: translateY(0); }} }}
+/* Form fields */
+.field {{ margin-bottom: var(--sp-3); }}
+.field label {{ display: block; font-size: 12px; font-weight: 500;
+                color: var(--fg-muted); margin-bottom: var(--sp-1); }}
+.field input, .field textarea, .field select {{ width: 100%; padding: 8px var(--sp-3);
+                font-size: 14px; border: 1px solid var(--border); border-radius: var(--r-md);
+                background: var(--bg); color: var(--fg); transition: border-color .12s; }}
+.field input:focus, .field textarea:focus {{ outline: none; border-color: var(--accent);
+                box-shadow: 0 0 0 3px var(--accent-light); }}
+.field textarea {{ resize: vertical; min-height: 80px; font-family: var(--font-sans); }}
+.btn-primary {{ background: var(--accent); color: var(--accent-fg); border: 1px solid var(--accent);
+                padding: 8px 16px; font-size: 13px; font-weight: 500; border-radius: var(--r-md);
+                cursor: pointer; transition: all .12s; }}
+.btn-primary:hover {{ background: var(--accent-hover); border-color: var(--accent-hover); }}
+.btn-secondary {{ background: var(--bg); color: var(--fg); border: 1px solid var(--border);
+                  padding: 8px 16px; font-size: 13px; font-weight: 500; border-radius: var(--r-md);
+                  cursor: pointer; transition: all .12s; }}
+.btn-secondary:hover {{ background: var(--toolbar-bg); border-color: var(--border-strong); }}
+/* Modal-specific content classes */
+.modal-stream {{ font-family: var(--font-serif); font-size: 15px; line-height: 1.7;
+                 padding: var(--sp-3); background: var(--toolbar-bg); border-radius: var(--r-md);
+                 white-space: pre-wrap; min-height: 100px; max-height: 320px; overflow-y: auto; }}
+.modal-sources {{ font-size: 12px; color: var(--fg-muted); margin-top: var(--sp-3);
+                  padding: var(--sp-3); border-top: 1px solid var(--border); }}
+.modal-sources .src-item {{ padding: 4px 0; }}
+.catalog-table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+.catalog-table th {{ text-align: left; padding: 8px 12px; font-size: 11px; font-weight: 600;
+                     color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em;
+                     border-bottom: 1px solid var(--border); position: sticky; top: 0;
+                     background: var(--bg-elevated); }}
+.catalog-table td {{ padding: 10px 12px; border-bottom: 1px solid var(--border);
+                     vertical-align: top; }}
+.catalog-table tr:hover {{ background: var(--toolbar-bg); cursor: pointer; }}
+.catalog-table .ct-title {{ font-weight: 600; color: var(--fg); }}
+.catalog-table .ct-meta {{ font-size: 11px; color: var(--fg-muted); margin-top: 2px; }}
+.catalog-pager {{ display: flex; align-items: center; gap: var(--sp-2);
+                 justify-content: center; padding: var(--sp-3); font-size: 12px;
+                 color: var(--fg-muted); }}
+.catalog-pager button {{ padding: 4px 12px; font-size: 12px; background: var(--bg);
+                         border: 1px solid var(--border); border-radius: var(--r-sm); cursor: pointer;
+                         color: var(--fg); }}
+.catalog-pager button:hover:not(:disabled) {{ background: var(--toolbar-bg); }}
+.catalog-pager button:disabled {{ opacity: 0.3; cursor: not-allowed; }}
+/* Score history viewer */
+.scores-panel {{ display: none; margin-bottom: var(--sp-5); border: 1px solid var(--border);
+                border-radius: var(--r-lg); overflow: hidden; background: var(--bg-elevated); }}
+.scores-panel.open {{ display: block; }}
+.scores-header {{ padding: var(--sp-3) var(--sp-4); background: var(--toolbar-bg);
+                  border-bottom: 1px solid var(--border); display: flex;
+                  align-items: center; justify-content: space-between; }}
+.scores-header h4 {{ font-size: 13px; font-weight: 600; color: var(--fg); }}
+.scores-table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
+.scores-table th {{ padding: 8px 10px; font-size: 10px; text-transform: uppercase;
+                    letter-spacing: 0.04em; color: var(--fg-muted); font-weight: 600;
+                    text-align: right; border-bottom: 1px solid var(--border); }}
+.scores-table th:first-child {{ text-align: left; }}
+.scores-table td {{ padding: 8px 10px; text-align: right; font-variant-numeric: tabular-nums;
+                    border-bottom: 1px solid var(--border); }}
+.scores-table td:first-child {{ text-align: left; font-weight: 600; }}
+.scores-table .score-good {{ color: var(--success); }}
+.scores-table .score-mid {{ color: var(--warning); }}
+.scores-table .score-low {{ color: var(--danger); }}
+.scores-spark {{ padding: var(--sp-3) var(--sp-4); }}
+.scores-spark svg {{ width: 100%; height: 60px; }}
+.scores-empty {{ padding: var(--sp-5); text-align: center; color: var(--fg-muted);
+                font-size: 13px; font-style: italic; }}
+/* Stat cards (dashboard) */
+.stat-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+              gap: var(--sp-3); margin-bottom: var(--sp-5); }}
+.stat-tile {{ padding: var(--sp-4); background: var(--bg-elevated); border: 1px solid var(--border);
+              border-radius: var(--r-lg); transition: all .15s; }}
+.stat-tile:hover {{ box-shadow: var(--shadow-md); transform: translateY(-1px); }}
+.stat-tile .num {{ font-size: 26px; font-weight: 700; color: var(--accent);
+                  letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }}
+.stat-tile .lbl {{ font-size: 11px; color: var(--fg-muted); margin-top: 2px;
+                  text-transform: uppercase; letter-spacing: 0.04em; font-weight: 500; }}
+.stat-tile .sub {{ font-size: 11px; color: var(--fg-faint); margin-top: 4px; }}
+.raptor-bar {{ display: flex; gap: 4px; margin-top: var(--sp-2); }}
+.raptor-bar .raptor-lvl {{ flex: 1; padding: 4px 6px; background: var(--toolbar-bg);
+                          border-radius: var(--r-sm); font-size: 10px; text-align: center;
+                          color: var(--fg-muted); }}
+.raptor-bar .raptor-lvl strong {{ display: block; font-size: 13px; color: var(--accent); }}
 /* Streaming panel */
 .stream-panel {{ display: none; margin-bottom: 20px; border: 1px solid var(--border);
                   border-radius: 8px; overflow: hidden; }}
@@ -1440,25 +1906,44 @@ body {{ font-family: 'Georgia', serif; color: var(--fg); background: var(--bg);
     </select>
   </div>
 
-  <!-- Action Toolbar -->
+  <!-- Action Toolbar — Phase 14 v2 grouped layout -->
   <div class="toolbar" id="toolbar">
-    <button onclick="doWrite()" title="Draft this section from scratch">Write</button>
-    <button onclick="doReview()" title="Run a critic pass on this section">Review</button>
-    <button onclick="doRevise()" title="Revise based on review feedback">Revise</button>
+    <div class="tg">
+      <button class="primary" onclick="doAutowrite()" title="Autonomous write → review → revise loop">&#9889; Autowrite</button>
+      <button onclick="doWrite()" title="Draft this section from scratch">Write</button>
+      <button onclick="doReview()" title="Run a critic pass on this section">Review</button>
+      <button onclick="doRevise()" title="Revise based on review feedback">Revise</button>
+    </div>
     <div class="sep"></div>
-    <button onclick="doAutowrite()" title="Autonomous write-review-revise loop">Autowrite</button>
+    <div class="tg">
+      <button onclick="doVerify()" title="Verify citations against sources (Phases 7+11)">&#10003; Verify</button>
+      <button onclick="showScoresPanel()" title="Phase 13 — convergence trajectory for autowrite drafts">&#9783; Scores</button>
+      <button onclick="promptArgue()" title="Map evidence for/against a claim">Argue</button>
+      <button onclick="doGaps()" title="Analyse gaps in the book">Gaps</button>
+    </div>
     <div class="sep"></div>
-    <button onclick="promptArgue()" title="Map evidence for/against a claim">Argue</button>
-    <button onclick="doGaps()" title="Analyse gaps in the book">Gaps</button>
+    <div class="tg">
+      <button onclick="openAskModal()" title="Full corpus RAG question (sciknow ask question)">&#128270; Ask Corpus</button>
+      <button onclick="openWikiModal()" title="Query the compiled knowledge wiki (sciknow wiki query)">&#128218; Wiki Query</button>
+      <button onclick="openCatalogModal()" title="Browse the paper catalog (sciknow catalog list)">&#128194; Browse Papers</button>
+    </div>
     <div class="sep"></div>
-    <button onclick="doVerify()" title="Verify citations against sources">Verify</button>
-    <div class="sep"></div>
-    <button onclick="showVersions()" title="View version history and diffs">History</button>
-    <button onclick="takeSnapshot()" title="Save a snapshot of current content">Snapshot</button>
-    <div class="sep"></div>
-    <button onclick="showCorkboard()" title="Visual card-based view">Corkboard</button>
-    <button onclick="showChapterReader()" title="Read entire chapter as continuous scroll">Read Chapter</button>
-    <button onclick="showDashboard()" title="Book dashboard with completion heatmap">Dashboard</button>
+    <div class="tg">
+      <button onclick="showVersions()" title="View version history and diffs">History</button>
+      <button onclick="takeSnapshot()" title="Save a snapshot of current content">Snapshot</button>
+      <button onclick="showCorkboard()" title="Visual card-based view">Corkboard</button>
+      <button onclick="showChapterReader()" title="Read entire chapter as continuous scroll">Read</button>
+      <button onclick="showDashboard()" title="Book dashboard with stats + heatmap">Dashboard</button>
+    </div>
+  </div>
+
+  <!-- Phase 13 — Score history panel (collapsible, lazy-loaded) -->
+  <div class="scores-panel" id="scores-panel">
+    <div class="scores-header">
+      <h4>Convergence trajectory</h4>
+      <button class="modal-close" onclick="document.getElementById('scores-panel').classList.remove('open')">&times;</button>
+    </div>
+    <div id="scores-panel-body"></div>
   </div>
 
   <!-- Version history panel -->
@@ -1528,6 +2013,97 @@ body {{ font-family: 'Georgia', serif; color: var(--fg); background: var(--bg);
     <button type="submit">Add Comment</button>
   </form>
 </aside>
+
+<!-- ── Phase 14 modals ─────────────────────────────────────────────────── -->
+
+<!-- Wiki Query Modal -->
+<div class="modal-overlay" id="wiki-modal" onclick="if(event.target===this)closeModal('wiki-modal')">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>&#128218; Wiki Query</h3>
+      <button class="modal-close" onclick="closeModal('wiki-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>Question</label>
+        <input type="text" id="wiki-query-input" placeholder="What does the wiki say about ..."
+               onkeydown="if(event.key==='Enter')doWikiQuery()">
+      </div>
+      <div class="field">
+        <button class="btn-primary" onclick="doWikiQuery()">Search Wiki</button>
+      </div>
+      <div id="wiki-status" style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;"></div>
+      <div class="modal-stream" id="wiki-stream"></div>
+      <div class="modal-sources" id="wiki-sources" style="display:none;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Corpus Ask Modal -->
+<div class="modal-overlay" id="ask-modal" onclick="if(event.target===this)closeModal('ask-modal')">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>&#128270; Ask the Corpus (RAG)</h3>
+      <button class="modal-close" onclick="closeModal('ask-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>Question</label>
+        <input type="text" id="ask-input" placeholder="What are the main mechanisms of ..."
+               onkeydown="if(event.key==='Enter')doAsk()">
+      </div>
+      <div class="field" style="display:flex;gap:8px;">
+        <div style="flex:1;">
+          <label>Year from</label>
+          <input type="number" id="ask-year-from" placeholder="(optional)">
+        </div>
+        <div style="flex:1;">
+          <label>Year to</label>
+          <input type="number" id="ask-year-to" placeholder="(optional)">
+        </div>
+      </div>
+      <div class="field">
+        <button class="btn-primary" onclick="doAsk()">Ask</button>
+        <span style="font-size:11px;color:var(--fg-muted);margin-left:8px;">Hybrid retrieval + bge-reranker + LLM</span>
+      </div>
+      <div id="ask-status" style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;"></div>
+      <div class="modal-stream" id="ask-stream"></div>
+      <div class="modal-sources" id="ask-sources" style="display:none;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Catalog Browser Modal -->
+<div class="modal-overlay" id="catalog-modal" onclick="if(event.target===this)closeModal('catalog-modal')">
+  <div class="modal wide">
+    <div class="modal-header">
+      <h3>&#128194; Browse Papers</h3>
+      <button class="modal-close" onclick="closeModal('catalog-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="field" style="display:flex;gap:8px;align-items:flex-end;">
+        <div style="flex:2;">
+          <label>Author</label>
+          <input type="text" id="cat-author" placeholder="(any)">
+        </div>
+        <div style="flex:2;">
+          <label>Journal</label>
+          <input type="text" id="cat-journal" placeholder="(any)">
+        </div>
+        <div style="flex:1;">
+          <label>Year from</label>
+          <input type="number" id="cat-year-from">
+        </div>
+        <div style="flex:1;">
+          <label>Year to</label>
+          <input type="number" id="cat-year-to">
+        </div>
+        <button class="btn-primary" onclick="loadCatalog(1)">Filter</button>
+      </div>
+      <div id="catalog-results" style="margin-top:12px;"></div>
+    </div>
+  </div>
+</div>
 
 <button class="theme-toggle" onclick="toggleTheme()" id="theme-btn">
   <span id="theme-icon">&#9788;</span>
@@ -1835,21 +2411,57 @@ async function doGaps() {{
 
 // ── Dashboard ─────────────────────────────────────────────────────────────
 async function showDashboard() {{
-  const res = await fetch('/api/dashboard');
+  const [res, statsRes] = await Promise.all([
+    fetch('/api/dashboard'),
+    fetch('/api/stats').catch(() => null),
+  ]);
   const data = await res.json();
+  const corpusStats = statsRes ? await statsRes.json().catch(() => null) : null;
   const s = data.stats;
 
   let html = '<div class="dashboard">';
   html += '<h2>Book Dashboard</h2>';
 
-  // Stats cards
-  html += '<div class="dash-stats">';
-  html += '<div class="stat-card"><div class="num">' + s.total_words.toLocaleString() + '</div><div class="lbl">Words</div></div>';
-  html += '<div class="stat-card"><div class="num">' + s.chapters + '</div><div class="lbl">Chapters</div></div>';
-  html += '<div class="stat-card"><div class="num">' + s.drafts + '</div><div class="lbl">Drafts</div></div>';
-  html += '<div class="stat-card"><div class="num">' + s.gaps_open + '</div><div class="lbl">Open Gaps</div></div>';
-  html += '<div class="stat-card"><div class="num">' + s.comments + '</div><div class="lbl">Comments</div></div>';
+  // Book stats — modernized stat-tile cards
+  html += '<div class="stat-grid">';
+  html += '<div class="stat-tile"><div class="num">' + s.total_words.toLocaleString() + '</div><div class="lbl">Words</div></div>';
+  html += '<div class="stat-tile"><div class="num">' + s.chapters + '</div><div class="lbl">Chapters</div></div>';
+  html += '<div class="stat-tile"><div class="num">' + s.drafts + '</div><div class="lbl">Drafts</div></div>';
+  html += '<div class="stat-tile"><div class="num">' + s.gaps_open + '</div><div class="lbl">Open Gaps</div></div>';
+  html += '<div class="stat-tile"><div class="num">' + s.comments + '</div><div class="lbl">Comments</div></div>';
   html += '</div>';
+
+  // Phase 14 — Corpus stats panel (mirrors `db stats` + RAPTOR + topics)
+  if (corpusStats) {{
+    html += '<h3 style="margin:24px 0 12px;font-size:14px;font-weight:600;color:var(--fg-muted);text-transform:uppercase;letter-spacing:0.04em;">Corpus</h3>';
+    html += '<div class="stat-grid">';
+    html += '<div class="stat-tile"><div class="num">' + (corpusStats.n_documents || 0).toLocaleString() + '</div><div class="lbl">Documents</div>';
+    if (corpusStats.n_completed != null) {{
+      html += '<div class="sub">' + corpusStats.n_completed.toLocaleString() + ' complete</div>';
+    }}
+    html += '</div>';
+    html += '<div class="stat-tile"><div class="num">' + (corpusStats.n_chunks || 0).toLocaleString() + '</div><div class="lbl">Chunks</div></div>';
+    html += '<div class="stat-tile"><div class="num">' + (corpusStats.n_citations || 0).toLocaleString() + '</div><div class="lbl">Citations</div></div>';
+    if (corpusStats.n_wiki_pages) {{
+      html += '<div class="stat-tile"><div class="num">' + corpusStats.n_wiki_pages.toLocaleString() + '</div><div class="lbl">Wiki Pages</div></div>';
+    }}
+    if (corpusStats.topic_clusters && corpusStats.topic_clusters.length) {{
+      html += '<div class="stat-tile"><div class="num">' + corpusStats.topic_clusters.length + '</div><div class="lbl">Topic Clusters</div>';
+      html += '<div class="sub">' + corpusStats.topic_clusters[0].name + ' (' + corpusStats.topic_clusters[0].n + ')</div></div>';
+    }}
+    if (corpusStats.raptor_levels && Object.keys(corpusStats.raptor_levels).length) {{
+      const totalNodes = Object.values(corpusStats.raptor_levels).reduce((a, b) => a + b, 0);
+      html += '<div class="stat-tile"><div class="num">' + totalNodes.toLocaleString() + '</div><div class="lbl">RAPTOR Nodes</div>';
+      html += '<div class="raptor-bar">';
+      Object.entries(corpusStats.raptor_levels).forEach(([lvl, n]) => {{
+        html += '<div class="raptor-lvl"><strong>' + n.toLocaleString() + '</strong>' + lvl + '</div>';
+      }});
+      html += '</div></div>';
+    }} else {{
+      html += '<div class="stat-tile" style="opacity:0.6;"><div class="num">—</div><div class="lbl">RAPTOR</div><div class="sub">Not built</div></div>';
+    }}
+    html += '</div>';
+  }}
 
   // Heatmap
   html += '<h3 style="margin-bottom:8px;">Completion Heatmap</h3>';
@@ -2504,6 +3116,311 @@ function buildArgueMap(claim, text) {{
 
   mapDiv.innerHTML = '<div class="argue-map">' + svg + '</div>';
   mapDiv.style.display = 'block';
+}}
+
+// ── Phase 14: Modal infrastructure ────────────────────────────────────
+function openModal(id) {{
+  document.getElementById(id).classList.add('open');
+}}
+function closeModal(id) {{
+  document.getElementById(id).classList.remove('open');
+  // Stop any in-flight job that the modal launched
+  if (currentEventSource && (id === 'wiki-modal' || id === 'ask-modal')) {{
+    try {{ currentEventSource.close(); }} catch (e) {{}}
+    currentEventSource = null;
+    if (currentJobId) {{
+      fetch('/api/jobs/' + currentJobId, {{method: 'DELETE'}}).catch(() => {{}});
+      currentJobId = null;
+    }}
+  }}
+}}
+// Escape closes any open modal
+document.addEventListener('keydown', function(e) {{
+  if (e.key === 'Escape') {{
+    document.querySelectorAll('.modal-overlay.open').forEach(m => {{
+      closeModal(m.id);
+    }});
+  }}
+}});
+
+// ── Phase 14: Score history viewer (Phase 13 GUI integration) ─────────
+async function showScoresPanel() {{
+  if (!currentDraftId) {{ alert('No draft selected.'); return; }}
+  const panel = document.getElementById('scores-panel');
+  const body = document.getElementById('scores-panel-body');
+  panel.classList.add('open');
+  body.innerHTML = '<div class="scores-empty">Loading...</div>';
+
+  try {{
+    const res = await fetch('/api/draft/' + currentDraftId + '/scores');
+    if (!res.ok) {{
+      body.innerHTML = '<div class="scores-empty">Draft not found.</div>';
+      return;
+    }}
+    const data = await res.json();
+    const history = data.score_history || [];
+
+    if (history.length === 0) {{
+      body.innerHTML = '<div class="scores-empty">' +
+        'No score history persisted on this draft.<br>' +
+        '<span style="font-size:11px;">Only autowrite drafts record convergence trajectories — drafts made with `book write` only have a final state.</span>' +
+        '</div>';
+      return;
+    }}
+
+    // Build the iteration table.
+    const dims = ['groundedness', 'completeness', 'coherence', 'citation_accuracy', 'hedging_fidelity', 'overall'];
+    let html = '<table class="scores-table"><thead><tr><th>Iter</th>';
+    dims.forEach(d => {{ html += '<th>' + d.slice(0, 6) + '</th>'; }});
+    html += '<th>Weakest</th><th>Verdict</th></tr></thead><tbody>';
+
+    history.forEach(h => {{
+      const s = h.scores || {{}};
+      html += '<tr><td>' + h.iteration + '</td>';
+      dims.forEach(d => {{
+        const v = s[d];
+        if (v == null) {{ html += '<td>—</td>'; }}
+        else {{
+          const cls = v >= 0.85 ? 'score-good' : v >= 0.7 ? 'score-mid' : 'score-low';
+          html += '<td class="' + cls + '">' + Number(v).toFixed(2) + '</td>';
+        }}
+      }});
+      html += '<td>' + (s.weakest_dimension || '—') + '</td>';
+      const v = h.revision_verdict || '—';
+      const verdictColor = v === 'KEEP' ? 'var(--success)' : v === 'DISCARD' ? 'var(--danger)' : 'var(--fg-faint)';
+      html += '<td style="color:' + verdictColor + '">' + v + '</td>';
+      html += '</tr>';
+    }});
+    html += '</tbody></table>';
+
+    // CoVe + verification summary line
+    const cove_runs = history.filter(h => h.cove && h.cove.ran);
+    const total_overstated = history.reduce((acc, h) => acc + ((h.verification && h.verification.n_overstated) || 0), 0);
+    const total_extrapolated = history.reduce((acc, h) => acc + ((h.verification && h.verification.n_extrapolated) || 0), 0);
+    if (cove_runs.length || total_overstated || total_extrapolated) {{
+      html += '<div style="padding:8px 16px;font-size:11px;color:var(--fg-muted);background:var(--toolbar-bg);border-top:1px solid var(--border);">';
+      html += '<strong>Verification:</strong> ' + total_overstated + ' OVERSTATED · ' + total_extrapolated + ' EXTRAPOLATED across ' + history.length + ' iterations';
+      if (cove_runs.length) {{
+        html += '  ·  CoVe ran in ' + cove_runs.length + '/' + history.length + ' iterations';
+      }}
+      html += '</div>';
+    }}
+
+    // Sparkline for overall score trajectory
+    const overalls = history.map(h => (h.scores && h.scores.overall) || 0);
+    if (overalls.length >= 2) {{
+      const w = 380, hgt = 50, pad = 4;
+      const minV = Math.min(...overalls, 0.5);
+      const maxV = Math.max(...overalls, 1.0);
+      const range = maxV - minV || 1;
+      const points = overalls.map((v, i) => {{
+        const x = pad + (i / (overalls.length - 1)) * (w - 2 * pad);
+        const y = hgt - pad - ((v - minV) / range) * (hgt - 2 * pad);
+        return x + ',' + y;
+      }}).join(' ');
+      html += '<div class="scores-spark">';
+      html += '<div style="font-size:11px;color:var(--fg-muted);margin-bottom:4px;">Overall score trajectory</div>';
+      html += '<svg viewBox="0 0 ' + w + ' ' + hgt + '" preserveAspectRatio="none">';
+      html += '<polyline points="' + points + '" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>';
+      overalls.forEach((v, i) => {{
+        const x = pad + (i / (overalls.length - 1)) * (w - 2 * pad);
+        const y = hgt - pad - ((v - minV) / range) * (hgt - 2 * pad);
+        html += '<circle cx="' + x + '" cy="' + y + '" r="3" fill="var(--accent)"/>';
+      }});
+      html += '</svg></div>';
+    }}
+
+    // Final overall + features active
+    if (data.final_overall != null) {{
+      html += '<div style="padding:8px 16px;font-size:11px;color:var(--fg-muted);">';
+      html += 'Final overall: <strong>' + Number(data.final_overall).toFixed(3) + '</strong>';
+      if (data.target_score) html += '  ·  target: ' + data.target_score;
+      if (data.max_iter) html += '  ·  max_iter: ' + data.max_iter;
+      html += '</div>';
+    }}
+
+    body.innerHTML = html;
+  }} catch (e) {{
+    body.innerHTML = '<div class="scores-empty" style="color:var(--danger);">Error loading score history: ' + e.message + '</div>';
+  }}
+}}
+
+// ── Phase 14: Wiki Query modal ────────────────────────────────────────
+function openWikiModal() {{
+  openModal('wiki-modal');
+  setTimeout(() => document.getElementById('wiki-query-input').focus(), 100);
+}}
+
+async function doWikiQuery() {{
+  const q = document.getElementById('wiki-query-input').value.trim();
+  if (!q) return;
+  const status = document.getElementById('wiki-status');
+  const stream = document.getElementById('wiki-stream');
+  const sources = document.getElementById('wiki-sources');
+
+  status.textContent = 'Querying wiki...';
+  stream.textContent = '';
+  sources.style.display = 'none';
+  sources.innerHTML = '';
+
+  const fd = new FormData();
+  fd.append('question', q);
+  const res = await fetch('/api/wiki/query', {{method: 'POST', body: fd}});
+  const data = await res.json();
+  currentJobId = data.job_id;
+  if (currentEventSource) currentEventSource.close();
+
+  const source = new EventSource('/api/stream/' + data.job_id);
+  currentEventSource = source;
+
+  source.onmessage = function(e) {{
+    const evt = JSON.parse(e.data);
+    if (evt.type === 'token') {{
+      stream.textContent += evt.text;
+      stream.scrollTop = stream.scrollHeight;
+    }} else if (evt.type === 'progress') {{
+      status.textContent = evt.detail || evt.stage;
+    }} else if (evt.type === 'completed') {{
+      status.textContent = 'Done';
+      if (evt.sources && evt.sources.length) {{
+        let html = '<div style="font-weight:600;color:var(--fg);margin-bottom:6px;">Sources</div>';
+        evt.sources.forEach(s => {{ html += '<div class="src-item">' + s + '</div>'; }});
+        sources.innerHTML = html;
+        sources.style.display = 'block';
+      }}
+      source.close(); currentEventSource = null; currentJobId = null;
+    }} else if (evt.type === 'error') {{
+      status.textContent = 'Error: ' + evt.message;
+      source.close(); currentEventSource = null; currentJobId = null;
+    }} else if (evt.type === 'done') {{
+      source.close(); currentEventSource = null; currentJobId = null;
+    }}
+  }};
+}}
+
+// ── Phase 14: Corpus Ask modal (RAG question) ─────────────────────────
+function openAskModal() {{
+  openModal('ask-modal');
+  setTimeout(() => document.getElementById('ask-input').focus(), 100);
+}}
+
+async function doAsk() {{
+  const q = document.getElementById('ask-input').value.trim();
+  if (!q) return;
+  const status = document.getElementById('ask-status');
+  const stream = document.getElementById('ask-stream');
+  const sources = document.getElementById('ask-sources');
+
+  status.textContent = 'Retrieving and generating...';
+  stream.textContent = '';
+  sources.style.display = 'none';
+  sources.innerHTML = '';
+
+  const fd = new FormData();
+  fd.append('question', q);
+  const yf = document.getElementById('ask-year-from').value;
+  const yt = document.getElementById('ask-year-to').value;
+  if (yf) fd.append('year_from', yf);
+  if (yt) fd.append('year_to', yt);
+
+  const res = await fetch('/api/ask', {{method: 'POST', body: fd}});
+  const data = await res.json();
+  currentJobId = data.job_id;
+  if (currentEventSource) currentEventSource.close();
+
+  const source = new EventSource('/api/stream/' + data.job_id);
+  currentEventSource = source;
+  let collectedSources = null;
+
+  source.onmessage = function(e) {{
+    const evt = JSON.parse(e.data);
+    if (evt.type === 'token') {{
+      stream.textContent += evt.text;
+      stream.scrollTop = stream.scrollHeight;
+    }} else if (evt.type === 'progress') {{
+      status.textContent = evt.detail || evt.stage;
+    }} else if (evt.type === 'sources') {{
+      collectedSources = evt.sources;
+    }} else if (evt.type === 'completed') {{
+      status.textContent = 'Done';
+      if (collectedSources && collectedSources.length) {{
+        let html = '<div style="font-weight:600;color:var(--fg);margin-bottom:6px;">Sources (' + collectedSources.length + ')</div>';
+        collectedSources.forEach(s => {{ html += '<div class="src-item">' + s + '</div>'; }});
+        sources.innerHTML = html;
+        sources.style.display = 'block';
+      }}
+      source.close(); currentEventSource = null; currentJobId = null;
+    }} else if (evt.type === 'error') {{
+      status.textContent = 'Error: ' + evt.message;
+      source.close(); currentEventSource = null; currentJobId = null;
+    }} else if (evt.type === 'done') {{
+      source.close(); currentEventSource = null; currentJobId = null;
+    }}
+  }};
+}}
+
+// ── Phase 14: Catalog Browser modal ───────────────────────────────────
+let catalogPage = 1;
+
+function openCatalogModal() {{
+  openModal('catalog-modal');
+  loadCatalog(1);
+}}
+
+async function loadCatalog(page) {{
+  catalogPage = page || 1;
+  const params = new URLSearchParams({{page: catalogPage, per_page: 25}});
+  const author = document.getElementById('cat-author').value.trim();
+  const journal = document.getElementById('cat-journal').value.trim();
+  const yf = document.getElementById('cat-year-from').value;
+  const yt = document.getElementById('cat-year-to').value;
+  if (author) params.set('author', author);
+  if (journal) params.set('journal', journal);
+  if (yf) params.set('year_from', yf);
+  if (yt) params.set('year_to', yt);
+
+  const results = document.getElementById('catalog-results');
+  results.innerHTML = '<div style="padding:24px;text-align:center;color:var(--fg-muted);">Loading...</div>';
+
+  try {{
+    const res = await fetch('/api/catalog?' + params.toString());
+    const data = await res.json();
+    if (!data.papers || data.papers.length === 0) {{
+      results.innerHTML = '<div style="padding:24px;text-align:center;color:var(--fg-muted);">No papers match.</div>';
+      return;
+    }}
+
+    let html = '<table class="catalog-table"><thead><tr><th>Title</th><th>Year</th><th>Journal</th><th>Authors</th></tr></thead><tbody>';
+    data.papers.forEach(p => {{
+      const authorStr = (p.authors || []).slice(0, 2).map(a => (a.name || '').split(/\\s+/).slice(-1)[0]).filter(Boolean).join(', ') + (p.authors && p.authors.length > 2 ? ' et al.' : '');
+      html += '<tr onclick="askAboutPaper(' + JSON.stringify(p.title || '').replace(/"/g, '&quot;') + ')">';
+      html += '<td><div class="ct-title">' + (p.title || '').replace(/</g, '&lt;') + '</div>';
+      if (p.abstract) html += '<div class="ct-meta">' + p.abstract.substring(0, 160).replace(/</g, '&lt;') + '...</div>';
+      html += '</td>';
+      html += '<td>' + (p.year || '—') + '</td>';
+      html += '<td>' + (p.journal || '—').substring(0, 30) + '</td>';
+      html += '<td>' + authorStr + '</td>';
+      html += '</tr>';
+    }});
+    html += '</tbody></table>';
+
+    html += '<div class="catalog-pager">';
+    html += '<button onclick="loadCatalog(' + (catalogPage - 1) + ')" ' + (catalogPage <= 1 ? 'disabled' : '') + '>‹ Prev</button>';
+    html += '<span>Page ' + data.page + ' of ' + data.n_pages + '  ·  ' + data.total + ' papers</span>';
+    html += '<button onclick="loadCatalog(' + (catalogPage + 1) + ')" ' + (catalogPage >= data.n_pages ? 'disabled' : '') + '>Next ›</button>';
+    html += '</div>';
+
+    results.innerHTML = html;
+  }} catch (e) {{
+    results.innerHTML = '<div style="padding:24px;text-align:center;color:var(--danger);">Error: ' + e.message + '</div>';
+  }}
+}}
+
+function askAboutPaper(title) {{
+  closeModal('catalog-modal');
+  openAskModal();
+  document.getElementById('ask-input').value = 'In the paper "' + title + '", ';
+  document.getElementById('ask-input').focus();
 }}
 
 // ── Corkboard View ────────────────────────────────────────────────────
