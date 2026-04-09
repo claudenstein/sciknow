@@ -460,6 +460,49 @@ def l1_web_phase15_wiki_browse_and_stats() -> None:
     assert 'id="plan-stream-stats"' in t, "plan-stream-stats footer missing"
 
 
+def l1_retrieval_device_helper() -> None:
+    """Phase 15.2 — bge-m3 + reranker have a CPU fallback for the case
+    where the LLM has filled VRAM.
+
+    Verifies the device helper module exists, the env var override works,
+    the cache can be reset, and all three loaders (hybrid_search,
+    embedder, reranker) call load_with_cpu_fallback.
+    """
+    import inspect, os
+
+    # Helper module exists
+    from sciknow.retrieval import device
+    assert hasattr(device, "get_retrieval_device"), "get_retrieval_device missing"
+    assert hasattr(device, "load_with_cpu_fallback"), "load_with_cpu_fallback missing"
+    assert hasattr(device, "reset_device_cache"), "reset_device_cache missing"
+
+    # Env var override works
+    device.reset_device_cache()
+    os.environ["SCIKNOW_RETRIEVAL_DEVICE"] = "cpu"
+    try:
+        assert device.get_retrieval_device() == "cpu", "cpu override didn't apply"
+    finally:
+        os.environ.pop("SCIKNOW_RETRIEVAL_DEVICE", None)
+        device.reset_device_cache()
+
+    # Auto mode returns something sensible (cpu or cuda)
+    assert device.get_retrieval_device() in ("cpu", "cuda"), \
+        "auto mode returned unexpected value"
+    device.reset_device_cache()
+
+    # All three loaders use the helper
+    from sciknow.retrieval import hybrid_search, reranker
+    from sciknow.ingestion import embedder
+    for mod_name, fn in [
+        ("hybrid_search", hybrid_search._get_embed_model),
+        ("reranker", reranker._get_reranker),
+        ("embedder", embedder._get_model),
+    ]:
+        src = inspect.getsource(fn)
+        assert "load_with_cpu_fallback" in src, \
+            f"{mod_name} loader doesn't use load_with_cpu_fallback — CUDA OOM is unguarded"
+
+
 def l1_autowrite_incremental_save() -> None:
     """Phase 15.1 — autowrite must save incrementally so cancelling
     mid-generation doesn't lose all the work.
@@ -909,6 +952,7 @@ L1_TESTS: list[Callable] = [
     l1_writer_uses_flagship_model,
     l1_web_phase15_wiki_browse_and_stats,
     l1_autowrite_incremental_save,
+    l1_retrieval_device_helper,
     l1_web_rendered_js_is_valid,
     l1_research_doc_up_to_date,
 ]

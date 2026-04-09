@@ -74,7 +74,11 @@ def _get_embed_model():
     if _embed_model is None:
         from FlagEmbedding import BGEM3FlagModel
         from sciknow.config import settings
-        _embed_model = BGEM3FlagModel(settings.embedding_model, use_fp16=True)
+        from sciknow.retrieval.device import load_with_cpu_fallback
+        # Phase 15.2 — falls back to CPU when the GPU is mostly full of LLM.
+        _embed_model = load_with_cpu_fallback(
+            BGEM3FlagModel, settings.embedding_model, use_fp16=True,
+        )
     return _embed_model
 
 

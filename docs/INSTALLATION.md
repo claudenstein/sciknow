@@ -195,8 +195,28 @@ systemctl --user restart ollama
 
 **VRAM budget on 3090 (24 GB):**
 - bge-m3 embedding model: ~2.2 GB
-- qwen3.5:27b-q4_K_M (LLM): ~18-19 GB
+- qwen3.5:27b-q4_K_M (LLM, weights only): ~14 GB
+- KV cache for the LLM at 16K context: ~7-9 GB (with `OLLAMA_KV_CACHE_TYPE=q8_0`)
 - bge-reranker-v2-m3: ~0.5 GB
-- Total: fits comfortably within 24 GB
+- **Realistic total with the LLM warm: ~22-23 GB** — leaves only ~1 GB headroom
 
-**Remote GPU server:** Set `OLLAMA_HOST=http://your-gpu-server:11434` in `.env`. Zero code changes needed.
+**The 16K context wrinkle.** With `num_ctx=16384` (sciknow's default for `score`/`verify`/`cove`/`raptor` calls), the KV cache alone is 7-9 GB even with `q8_0` cache. Combined with model weights, qwen3.5:27b at Q4_K_M uses **~23 GB of VRAM all by itself** while it's loaded by Ollama. There is **no room left** for sciknow's bge-m3 + bge-reranker (~3 GB combined). That's why you may have seen intermittent CUDA OOM errors during retrieval.
+
+**Phase 15.2 fix (automatic).** sciknow now auto-detects this situation: at retrieval time, `sciknow/retrieval/device.py` queries `torch.cuda.mem_get_info()` and falls back to **CPU** for bge-m3 + reranker when less than 4 GB of VRAM is free. The cost is small (~2 seconds extra per retrieval — bge-m3 query encoding on CPU is ~1 s and reranking 50 candidates is ~5 s) and the LLM stays warm in VRAM throughout the autowrite session, which is far better than the alternative of evicting and reloading the model on every retrieval (~30-60 s per reload).
+
+You can override the auto-detection with an env var:
+
+```bash
+SCIKNOW_RETRIEVAL_DEVICE=cpu       # always CPU (most conservative)
+SCIKNOW_RETRIEVAL_DEVICE=cuda      # always GPU (will OOM if LLM is loaded)
+SCIKNOW_RETRIEVAL_DEVICE=auto      # default — probes free VRAM
+```
+
+If you still hit OOM after the 15.2 fix, your options in order of effort:
+
+1. **Reduce `num_ctx`** in sciknow's flagship calls (e.g. score/verify from 16384 → 8192). Cuts the KV cache in half. Cost: less context for scoring/verification, which can hurt quality on long sections.
+2. **Use a smaller LLM**: `qwen3:14b` at Q4 = ~9 GB, leaves ~14 GB for everything else.
+3. **Lower the keep-alive**: `OLLAMA_KEEP_ALIVE=30s` in your environment. The LLM gets evicted between retrieval phases. Cost: ~30-60 s reload before each LLM call.
+4. **Move the LLM to a remote GPU**: `OLLAMA_HOST=http://your-gpu-server:11434` (see below).
+
+**Remote GPU server:** Set `OLLAMA_HOST=http://your-gpu-server:11434` in `.env`. Zero code changes needed. With the LLM offloaded to a remote box, the local 24 GB GPU is free for bge-m3 + reranker at full speed.

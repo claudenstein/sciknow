@@ -15,7 +15,11 @@ def _get_reranker():
     if _reranker is None:
         from FlagEmbedding import FlagReranker
         from sciknow.config import settings
-        _reranker = FlagReranker(settings.reranker_model, use_fp16=True)
+        from sciknow.retrieval.device import load_with_cpu_fallback
+        # Phase 15.2 — CPU fallback when the GPU is full of LLM weights.
+        _reranker = load_with_cpu_fallback(
+            FlagReranker, settings.reranker_model, use_fp16=True,
+        )
     return _reranker
 
 

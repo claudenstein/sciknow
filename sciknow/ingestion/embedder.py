@@ -21,8 +21,14 @@ def _get_model():
     global _model
     if _model is None:
         from FlagEmbedding import BGEM3FlagModel
+        from sciknow.retrieval.device import load_with_cpu_fallback
 
-        _model = BGEM3FlagModel(settings.embedding_model, use_fp16=True)
+        # Phase 15.2 — CPU fallback when the GPU is mostly full of an LLM.
+        # Falls back transparently if CUDA OOMs during load. The cache in
+        # device.py remembers the choice for the rest of the session.
+        _model = load_with_cpu_fallback(
+            BGEM3FlagModel, settings.embedding_model, use_fp16=True,
+        )
     return _model
 
 
