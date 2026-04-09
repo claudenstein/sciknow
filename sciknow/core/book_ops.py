@@ -119,6 +119,33 @@ def _release_gpu_models():
     release_reranker()
 
 
+def _stream_phase(system: str, user: str, phase: str, *, model=None, **kw):
+    """Phase 15.3 — generator that streams an LLM call as token events.
+
+    Wraps llm.stream() so each token becomes
+    {"type": "token", "text": tok, "phase": phase}, and returns the full
+    accumulated text via the generator's StopIteration.value (captured by
+    `yield from`).
+
+    Used by autowrite_section_stream to make scoring/verification/CoVe/
+    tree-plan calls visible to the GUI's live token counter. Without this,
+    those phases use the synchronous llm.complete() and emit zero token
+    events even though the LLM is working hard — the user sees a stuck
+    "0 tok / 0 tok/s" while the timer counts up.
+
+    Usage in a generator (re-yields events to consumer):
+        raw = yield from _stream_phase(sys, usr, "scoring",
+                                       model=model, num_ctx=16384)
+        scores = json.loads(_clean_json(raw))
+    """
+    from sciknow.rag.llm import stream as llm_stream
+    tokens: list[str] = []
+    for tok in llm_stream(system, user, model=model, **kw):
+        tokens.append(tok)
+        yield {"type": "token", "text": tok, "phase": phase}
+    return "".join(tokens)
+
+
 def _update_draft_content(draft_id, content, *, summary=None, custom_metadata=None,
                           review_feedback=None, version=None):
     """Phase 15.1 — incremental update of an existing draft.
@@ -897,6 +924,84 @@ def _cove_verify(draft_content, results, model=None, max_questions: int = 6):
     }
 
 
+def _cove_verify_streaming(draft_content, results, model=None, max_questions: int = 6):
+    """Phase 15.3 — generator variant of _cove_verify that yields token
+    events for both the question generation pass and each independent
+    answer pass. Returns the final mismatch report dict via
+    StopIteration.value (captured by `yield from` in autowrite).
+
+    Without this, CoVe runs 1 + N silent llm_complete calls and the GUI's
+    token counter sits at 0 for the entire CoVe phase (often the longest
+    silent stretch in autowrite).
+    """
+    from sciknow.rag import prompts as rag_prompts
+
+    # Step 1 — generate verification questions, streamed
+    try:
+        sys_q, usr_q = rag_prompts.cove_questions(draft_content)
+        raw_q = yield from _stream_phase(
+            sys_q, usr_q, "cove_questions",
+            model=model, temperature=0.1, num_ctx=16384,
+        )
+        q_clean = re.sub(r'<think>.*?</think>\s*', '', raw_q, flags=re.DOTALL).strip()
+        q_data = json.loads(_clean_json(q_clean), strict=False)
+        questions = (q_data.get("questions") or [])[:max_questions]
+    except Exception as exc:
+        logger.warning("CoVe question generation failed: %s", exc)
+        return {"questions_asked": 0, "mismatches": [], "cove_score": 1.0}
+
+    if not questions:
+        return {"questions_asked": 0, "mismatches": [], "cove_score": 1.0}
+
+    # Step 2 — independent answers, also streamed.
+    mismatches: list[dict] = []
+    for q_idx, q in enumerate(questions, 1):
+        question_text = (q.get("question") or "").strip()
+        draft_claim = (q.get("draft_claim") or "").strip()
+        draft_citation = (q.get("citation") or "").strip()
+        if not question_text:
+            continue
+
+        try:
+            sys_a, usr_a = rag_prompts.cove_answer(question_text, results)
+            raw_a = yield from _stream_phase(
+                sys_a, usr_a, f"cove_answer_{q_idx}",
+                model=model, temperature=0.0, num_ctx=16384,
+            )
+            a_clean = re.sub(r'<think>.*?</think>\s*', '', raw_a, flags=re.DOTALL).strip()
+            a_data = json.loads(_clean_json(a_clean), strict=False)
+        except Exception as exc:
+            logger.warning("CoVe answer failed for question %r: %s", question_text, exc)
+            continue
+
+        verdict = (a_data.get("verdict") or "").upper()
+        independent_answer = (a_data.get("answer") or "").strip()
+        notes = (a_data.get("notes") or "").strip()
+
+        if verdict and verdict != "CONFIRMED":
+            severity = {
+                "NOT_IN_SOURCES": "high",
+                "DIFFERENT_SCOPE": "medium",
+                "PARTIAL": "low",
+            }.get(verdict, "medium")
+            mismatches.append({
+                "question": question_text,
+                "draft_claim": draft_claim,
+                "draft_citation": draft_citation,
+                "independent_answer": independent_answer,
+                "verdict": verdict,
+                "severity": severity,
+                "notes": notes,
+            })
+
+    cove_score = 1.0 - (len(mismatches) / max(len(questions), 1))
+    return {
+        "questions_asked": len(questions),
+        "mismatches": mismatches,
+        "cove_score": round(cove_score, 3),
+    }
+
+
 def autowrite_section_stream(
     book_id: str,
     chapter_id: str,
@@ -978,8 +1083,10 @@ def autowrite_section_stream(
                 section_type, topic, results,
                 book_plan=b_plan, prior_summaries=prior_summaries,
             )
-            plan_raw = llm_complete(
-                sys_p, usr_p, model=model, temperature=0.2, num_ctx=16384,
+            # Phase 15.3 — stream so the token counter sees activity
+            plan_raw = yield from _stream_phase(
+                sys_p, usr_p, "planning",
+                model=model, temperature=0.2, num_ctx=16384,
             )
             plan_clean = re.sub(r'<think>.*?</think>\s*', '', plan_raw,
                                 flags=re.DOTALL).strip()
@@ -1000,7 +1107,7 @@ def autowrite_section_stream(
     tokens: list[str] = []
     for tok in llm_stream(system, user, model=model):
         tokens.append(tok)
-        yield {"type": "token", "text": tok}
+        yield {"type": "token", "text": tok, "phase": "writing"}
 
     content = "".join(tokens)
 
@@ -1046,12 +1153,18 @@ def autowrite_section_stream(
         yield {"type": "iteration_start", "iteration": iteration + 1, "max": max_iter}
 
         # Score (Fix 3: use writer's results, not re-retrieved)
+        # Phase 15.3: streamed via _stream_phase so the GUI's token counter
+        # stays alive during this 30+ second phase. The output is JSON; the
+        # user sees it flowing instead of staring at "0 tok / 0 tok/s".
         yield {"type": "progress", "stage": "scoring",
                "detail": f"Scoring iteration {iteration + 1}..."}
         try:
-            scores = _score_draft_inner(
-                content, section_type, topic, results, model=model,
+            sys_s, usr_s = rag_prompts.score_draft(section_type, topic, content, results)
+            score_raw = yield from _stream_phase(
+                sys_s, usr_s, "scoring",
+                model=model, temperature=0.0, num_ctx=16384,
             )
+            scores = json.loads(_clean_json(score_raw), strict=False)
         except Exception as exc:
             logger.warning("Scoring failed: %s", exc)
             scores = {"overall": 0.5, "weakest_dimension": "unknown",
@@ -1061,7 +1174,12 @@ def autowrite_section_stream(
         yield {"type": "progress", "stage": "verifying",
                "detail": "Verifying citations..."}
         try:
-            vdata = _verify_draft_inner(content, results, model=model)
+            sys_v, usr_v = rag_prompts.verify_claims(content, results)
+            verify_raw = yield from _stream_phase(
+                sys_v, usr_v, "verifying",
+                model=model, temperature=0.0, num_ctx=16384,
+            )
+            vdata = json.loads(_clean_json(verify_raw), strict=False)
             groundedness = vdata.get("groundedness_score", 1.0)
             hedging = vdata.get("hedging_fidelity_score", 1.0)
 
@@ -1126,7 +1244,11 @@ def autowrite_section_stream(
                 yield {"type": "progress", "stage": "cove",
                        "detail": "Running Chain-of-Verification (decoupled fact check)..."}
                 try:
-                    cove = _cove_verify(content, results, model=model)
+                    # Phase 15.3: streamed CoVe so the GUI sees question
+                    # generation + each independent answer flow as token
+                    # events instead of going dark for 1 + N silent
+                    # llm_complete calls.
+                    cove = yield from _cove_verify_streaming(content, results, model=model)
                     yield {"type": "cove_verification", "data": cove}
 
                     high_sev = [m for m in cove.get("mismatches", [])
@@ -1268,16 +1390,19 @@ def autowrite_section_stream(
         rev_tokens: list[str] = []
         for tok in llm_stream(sys_r, usr_r, model=model):
             rev_tokens.append(tok)
-            yield {"type": "token", "text": tok}
+            yield {"type": "token", "text": tok, "phase": "revising"}
 
         revised = "".join(rev_tokens)
 
-        # Re-score (Fix 3: same results)
+        # Re-score (Fix 3: same results) — Phase 15.3 streamed
         yield {"type": "progress", "stage": "scoring", "detail": "Re-scoring revision..."}
         try:
-            new_scores = _score_draft_inner(
-                revised, section_type, topic, results, model=model,
+            sys_rs, usr_rs = rag_prompts.score_draft(section_type, topic, revised, results)
+            rescore_raw = yield from _stream_phase(
+                sys_rs, usr_rs, "rescoring",
+                model=model, temperature=0.0, num_ctx=16384,
             )
+            new_scores = json.loads(_clean_json(rescore_raw), strict=False)
         except Exception:
             new_scores = {"overall": overall}
 

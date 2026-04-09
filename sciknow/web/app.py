@@ -2123,6 +2123,10 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .stream-stats .ss-stat {{ display: flex; align-items: center; gap: 4px; }}
 .stream-stats .ss-stat strong {{ color: var(--fg); font-weight: 600; }}
 .stream-stats .ss-sep {{ color: var(--border-strong); }}
+.stream-stats .ss-phase {{ padding: 1px 8px; border-radius: 999px;
+                          background: var(--accent-light); color: var(--accent);
+                          font-weight: 600; font-size: 10px;
+                          text-transform: uppercase; letter-spacing: 0.04em; }}
 .stream-cursor {{ display: inline-block; width: 6px; height: 14px;
                  background: var(--accent); margin-left: 2px;
                  animation: blink 1.1s steps(2, jump-none) infinite;
@@ -3595,11 +3599,20 @@ async function doAutowrite() {{
   source.onmessage = function(e) {{
     const evt = JSON.parse(e.data);
     if (evt.type === 'token') {{
-      setStreamCursor(awContent, false);
-      awContent.innerHTML += evt.text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      setStreamCursor(awContent, true);
-      awContent.scrollTop = awContent.scrollHeight;
+      // Phase 15.3 — route tokens by phase. Writing/revising tokens go
+      // to the visible draft area; scoring/verify/CoVe/planning JSON
+      // tokens only feed the stats counter (they'd be ugly to show in
+      // the draft pane). Tokens without a phase are treated as draft
+      // tokens for backward compatibility.
+      const phase = evt.phase || 'writing';
       stats.update(evt.text);
+      stats.setPhase(phase);
+      if (phase === 'writing' || phase === 'revising') {{
+        setStreamCursor(awContent, false);
+        awContent.innerHTML += evt.text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        setStreamCursor(awContent, true);
+        awContent.scrollTop = awContent.scrollHeight;
+      }}
     }}
     else if (evt.type === 'progress') {{
       status.textContent = evt.detail || evt.stage;
@@ -3993,11 +4006,12 @@ async function showScoresPanel() {{
 // but accurate enough for live feedback).
 function createStreamStats(containerId, modelName) {{
   const el = document.getElementById(containerId);
-  if (!el) return {{ start: ()=>{{}}, update: ()=>{{}}, done: ()=>{{}}, setModel: ()=>{{}} }};
+  if (!el) return {{ start: ()=>{{}}, update: ()=>{{}}, done: ()=>{{}}, setModel: ()=>{{}}, setPhase: ()=>{{}} }};
   let started = 0, firstTok = 0, lastTok = 0, count = 0;
   let recentTokens = []; // sliding window for rolling tok/s
   let timer = null;
   let currentModel = modelName || '?';
+  let currentPhase = '';
 
   function fmtTime(ms) {{
     const s = ms / 1000;
@@ -4019,6 +4033,7 @@ function createStreamStats(containerId, modelName) {{
     el.innerHTML =
       '<span class="ss-dot"></span>' +
       '<span class="ss-stat"><strong>' + currentModel + '</strong></span>' +
+      (currentPhase ? '<span class="ss-sep">·</span><span class="ss-stat ss-phase">' + currentPhase + '</span>' : '') +
       '<span class="ss-sep">·</span>' +
       '<span class="ss-stat"><strong>' + count + '</strong>&nbsp;tok</span>' +
       '<span class="ss-sep">·</span>' +
@@ -4054,6 +4069,9 @@ function createStreamStats(containerId, modelName) {{
     }},
     setModel(m) {{
       if (m) currentModel = m;
+    }},
+    setPhase(p) {{
+      currentPhase = p || '';
     }},
   }};
 }}

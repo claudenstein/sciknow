@@ -460,6 +460,44 @@ def l1_web_phase15_wiki_browse_and_stats() -> None:
     assert 'id="plan-stream-stats"' in t, "plan-stream-stats footer missing"
 
 
+def l1_autowrite_streams_all_phases() -> None:
+    """Phase 15.3 — non-writing phases (scoring/verification/CoVe/tree-plan)
+    must stream tokens so the GUI's token counter stays alive.
+
+    Verifies:
+      - _stream_phase generator helper exists
+      - _cove_verify_streaming generator exists (for streamed CoVe)
+      - autowrite_section_stream uses `yield from _stream_phase` for the
+        scoring + verifying + planning + rescoring phases
+      - autowrite uses `yield from _cove_verify_streaming` for CoVe
+      - The token events have a 'phase' field so the GUI can route them
+    """
+    import inspect
+    from sciknow.core import book_ops
+
+    assert hasattr(book_ops, "_stream_phase"), "_stream_phase helper missing"
+    assert hasattr(book_ops, "_cove_verify_streaming"), \
+        "_cove_verify_streaming helper missing"
+
+    aw_src = inspect.getsource(book_ops.autowrite_section_stream)
+    # Score / verify / planning / rescore call sites use yield from _stream_phase
+    assert "yield from _stream_phase(" in aw_src, \
+        "autowrite doesn't use yield from _stream_phase — non-writing phases will be silent"
+    assert aw_src.count("yield from _stream_phase(") >= 4, (
+        f"expected at least 4 _stream_phase yield-from sites in autowrite "
+        f"(planning/scoring/verifying/rescoring), found "
+        f"{aw_src.count('yield from _stream_phase(')}"
+    )
+    assert "yield from _cove_verify_streaming(" in aw_src, \
+        "autowrite doesn't use streaming CoVe — CoVe phase will be silent"
+
+    # Token events should carry a phase field
+    assert '"phase": "writing"' in aw_src, \
+        "writing tokens should be tagged with phase"
+    assert '"phase": "revising"' in aw_src, \
+        "revising tokens should be tagged with phase"
+
+
 def l1_retrieval_device_helper() -> None:
     """Phase 15.2 — bge-m3 + reranker have a CPU fallback for the case
     where the LLM has filled VRAM.
@@ -952,6 +990,7 @@ L1_TESTS: list[Callable] = [
     l1_writer_uses_flagship_model,
     l1_web_phase15_wiki_browse_and_stats,
     l1_autowrite_incremental_save,
+    l1_autowrite_streams_all_phases,
     l1_retrieval_device_helper,
     l1_web_rendered_js_is_valid,
     l1_research_doc_up_to_date,
