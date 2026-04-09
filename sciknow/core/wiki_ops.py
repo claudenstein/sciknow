@@ -574,7 +574,8 @@ def compile_all(
             FROM documents d
             JOIN paper_metadata pm ON pm.document_id = d.id
             WHERE d.ingestion_status = 'complete' AND pm.title IS NOT NULL
-            ORDER BY pm.year DESC NULLS LAST
+            ORDER BY CASE WHEN d.ingest_source = 'seed' THEN 0 ELSE 1 END,
+                     pm.year DESC NULLS LAST
         """)).fetchall()
 
     total = len(rows)
