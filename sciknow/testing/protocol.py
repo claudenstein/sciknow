@@ -498,6 +498,62 @@ def l1_autowrite_streams_all_phases() -> None:
         "revising tokens should be tagged with phase"
 
 
+def l1_author_search_rejects_non_author() -> None:
+    """Phase 16.2 — search_author must drop papers where the searched
+    surname isn't in the author list.
+
+    The motivating risk: a future API change or off-by-one bug could
+    let `search_author("Zharkova")` return a paper whose only mention
+    of "Zharkova" is in the references/citations, not in the authors.
+    The defensive `_surname_in_authors` last-pass check guarantees this
+    can never happen silently.
+
+    This test calls _surname_in_authors directly with crafted Reference
+    objects covering:
+      - paper authored by "Valentina V. Zharkova"  → KEEP
+      - paper authored by "V. Zharkova"            → KEEP (token match)
+      - paper authored by "Zharkova, V. V."        → KEEP (Last, First)
+      - paper authored only by other people       → DROP
+      - paper authored only by "Zhang"            → DROP (substring trap)
+    """
+    from sciknow.ingestion.author_search import _surname_in_authors
+    from sciknow.ingestion.references import Reference
+
+    keep_cases = [
+        ["Valentina V. Zharkova", "Mykola Gordovskyy"],
+        ["V. Zharkova", "S. Zharkov"],
+        ["Zharkova, V. V."],
+        ["Mykola Gordovskyy", "Valentina Zharkova"],  # second author
+    ]
+    for authors in keep_cases:
+        ref = Reference(raw_text="t", doi="10.0/x", title="t", year=2020, authors=authors)
+        assert _surname_in_authors(ref, "Zharkova"), \
+            f"should KEEP paper with authors={authors}"
+
+    drop_cases = [
+        ["Smith, John", "Jones, Jane"],            # no Zharkova
+        ["Stanley Ipson", "Ali Benkhalil"],        # also no Zharkova
+        ["Zhang Wei", "Liu Min"],                  # 'Zhang' is not 'Zharkova'
+        [],                                        # empty author list
+    ]
+    for authors in drop_cases:
+        ref = Reference(raw_text="t", doi="10.0/x", title="t", year=2020, authors=authors)
+        assert not _surname_in_authors(ref, "Zharkova"), \
+            f"should DROP paper with authors={authors}"
+
+    # Confirm the bug class is closed: a paper that "cites" Zharkova in its
+    # title but is authored by other people gets dropped.
+    citation_only = Reference(
+        raw_text="t",
+        doi="10.0/x",
+        title="A Critique of Zharkova's Solar Activity Predictions",
+        year=2020,
+        authors=["Mark Smith", "Jane Doe"],
+    )
+    assert not _surname_in_authors(citation_only, "Zharkova"), \
+        "papers that merely cite Zharkova in the title must be dropped"
+
+
 def l1_relevance_filter_imports_resolve() -> None:
     """Phase 16.1 — every name imported from sciknow.retrieval.relevance
     inside cli/db.py must actually exist in that module.
@@ -1077,6 +1133,7 @@ L1_TESTS: list[Callable] = [
     l1_autowrite_streams_all_phases,
     l1_retrieval_device_helper,
     l1_phase16_expand_author,
+    l1_author_search_rejects_non_author,
     l1_relevance_filter_imports_resolve,
     l1_web_rendered_js_is_valid,
     l1_research_doc_up_to_date,

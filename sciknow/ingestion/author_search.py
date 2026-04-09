@@ -414,6 +414,37 @@ def search_crossref_by_author(
 # ── Unified API ─────────────────────────────────────────────────────────────
 
 
+def _surname_in_authors(ref: Reference, surname: str) -> bool:
+    """True if the lowered surname appears as a token in any of the
+    Reference's author display strings.
+
+    Defensive last-pass check used by search_author — guarantees the
+    final result list never contains a paper where the searched surname
+    isn't actually in the author list. This is a hard floor against:
+      - Crossref API drift (e.g. if query.author ever changed semantics)
+      - Future bugs where someone confuses author-search with citation-search
+      - Author list missing entirely (treated as failing the check)
+    """
+    if not surname:
+        return True  # nothing to verify
+    surname_lc = surname.strip().lower()
+    if not surname_lc:
+        return True
+    for a in ref.authors or []:
+        a_lc = (a or "").lower()
+        # Match as a token: " surname", "surname ", or exact equality
+        if a_lc == surname_lc:
+            return True
+        if surname_lc in a_lc.split():
+            return True
+        # Also tolerate "Last, First" format
+        if a_lc.startswith(surname_lc + ","):
+            return True
+        if a_lc.endswith(" " + surname_lc):
+            return True
+    return False
+
+
 def search_author(
     name: str,
     *,
@@ -423,8 +454,16 @@ def search_author(
     limit: int | None = None,
     require_doi: bool = True,
     all_matches: bool = False,
+    strict_author: bool = False,
 ) -> tuple[list[Reference], dict]:
     """Search both OpenAlex and Crossref, dedup by DOI, return merged list.
+
+    Args:
+        strict_author: if True, drop Crossref results entirely. Only the
+            OpenAlex canonical-author-ID matches are kept. Use this when
+            you want zero ambiguity (no chance of papers by other people
+            with the same surname slipping in via Crossref's looser
+            search).
 
     Returns:
         (refs, info) where info is:
@@ -434,11 +473,12 @@ def search_author(
             "merged": int,
             "candidates": list[dict],  # author records found by /authors?search
             "picked": list[dict],      # which subset was used for the works query
+            "dropped_no_surname": int, # papers dropped by the surname final check
           }
     """
     info: dict = {
         "openalex": 0, "crossref_extra": 0, "merged": 0,
-        "candidates": [], "picked": [],
+        "candidates": [], "picked": [], "dropped_no_surname": 0,
     }
 
     # OpenAlex first — better metadata, ORCID-aware
@@ -454,10 +494,12 @@ def search_author(
         info["picked"] = oa_candidates if all_matches else oa_candidates[:1]
     by_doi: dict[str, Reference] = {r.doi: r for r in oa_refs if r.doi}
 
-    # Only call Crossref if we haven't already hit the limit, since Crossref
-    # author search is fuzzier and the polite pool is shared.
+    # Only call Crossref if (a) we haven't already hit the limit, and
+    # (b) strict_author is False. Crossref's author search is looser
+    # than OpenAlex's canonical-author-ID match, so under strict mode we
+    # rely entirely on OpenAlex.
     remaining = (limit - len(by_doi)) if limit else None
-    if remaining is None or remaining > 0:
+    if not strict_author and (remaining is None or remaining > 0):
         cr_refs = search_crossref_by_author(
             name, year_from=year_from, year_to=year_to, limit=remaining,
         )
@@ -467,6 +509,28 @@ def search_author(
                 info["crossref_extra"] += 1
                 if limit and len(by_doi) >= limit:
                     break
+
+    # Defensive final pass: drop anything where the searched surname
+    # isn't actually in the author list. The OpenAlex path's canonical
+    # author ID filter and the Crossref path's family-name post-filter
+    # should already handle this — but a hard assertion at the boundary
+    # means a future API change or regression can never silently let
+    # through a "paper that mentions Zharkova" instead of "paper authored
+    # by Zharkova". Mostly redundant in practice; very cheap to run.
+    if name:
+        # Use the last whitespace-separated token as the canonical surname
+        surname = name.strip().split()[-1] if name.strip() else ""
+        verified: dict[str, Reference] = {}
+        for doi, ref in by_doi.items():
+            if _surname_in_authors(ref, surname):
+                verified[doi] = ref
+            else:
+                info["dropped_no_surname"] += 1
+                logger.warning(
+                    "Dropping %s — surname %r not found in author list %r",
+                    doi, surname, ref.authors,
+                )
+        by_doi = verified
 
     merged = sorted(by_doi.values(), key=lambda r: r.year or 0, reverse=True)
     info["merged"] = len(merged)

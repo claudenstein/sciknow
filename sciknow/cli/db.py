@@ -1694,6 +1694,10 @@ def expand_author(
     all_matches: bool = typer.Option(False, "--all-matches",
         help="Use ALL authors with the matching surname (default: only the most-published one). "
              "Useful when 'Smith' really means every Smith and you'll filter via --relevance-query."),
+    strict_author: bool = typer.Option(False, "--strict-author",
+        help="Drop Crossref results entirely. Only OpenAlex's canonical-author-ID matches "
+             "are kept — zero ambiguity, but smaller result set. Use when you want to be "
+             "100%% sure no papers by other people with the same surname slip in."),
     relevance: bool = typer.Option(True, "--relevance/--no-relevance",
         help="Filter candidates by semantic relevance to the corpus before downloading."),
     relevance_query: str = typer.Option("", "--relevance-query", "-q",
@@ -1780,6 +1784,7 @@ def expand_author(
                 year_from=year_from, year_to=year_to,
                 limit=limit if limit > 0 else None,
                 all_matches=all_matches,
+                strict_author=strict_author,
             )
         except Exception as exc:
             console.print(f"[red]Search failed: {exc}[/red]")
@@ -1828,6 +1833,18 @@ def expand_author(
         f"([green]{info['openalex']} from OpenAlex[/green], "
         f"[cyan]{info['crossref_extra']} extra from Crossref[/cyan])"
     )
+    if info.get("dropped_no_surname"):
+        console.print(
+            f"  [dim](dropped {info['dropped_no_surname']} where the surname "
+            f"wasn't actually in the author list — defensive check)[/dim]"
+        )
+    if info["crossref_extra"] > info["openalex"] * 2:
+        console.print(
+            "  [yellow]⚠ Crossref contributed many more results than OpenAlex.[/yellow]"
+            "\n    [dim]Crossref's surname search is looser than OpenAlex's canonical-author-ID match,"
+            "\n    so some of these may be by different people with the same surname."
+            "\n    Use [bold]--strict-author[/bold] to drop Crossref entirely (OpenAlex only).[/dim]"
+        )
 
     # ── Step 3: dedup against existing corpus ───────────────────────────────
     with get_session() as session:
