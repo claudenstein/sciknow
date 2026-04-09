@@ -82,6 +82,10 @@ def init_collections(client: QdrantClient | None = None) -> None:
             ("year", PayloadSchemaType.INTEGER),
             ("domains", PayloadSchemaType.KEYWORD),
             ("journal", PayloadSchemaType.KEYWORD),
+            # node_level is the RAPTOR tree level: 0 = leaf chunk,
+            # 1+ = cluster summary at that hierarchical level. Indexed
+            # so retrieval can opt in/out of summary nodes via filter.
+            ("node_level", PayloadSchemaType.INTEGER),
         ]:
             client.create_payload_index(PAPERS_COLLECTION, field, schema)
 
@@ -123,6 +127,41 @@ def init_collections(client: QdrantClient | None = None) -> None:
             ("slug", PayloadSchemaType.KEYWORD),
         ]:
             client.create_payload_index(WIKI_COLLECTION, field, schema)
+
+
+def ensure_node_level_index(client: QdrantClient | None = None) -> bool:
+    """
+    Ensure the `node_level` payload index exists on the papers collection.
+
+    init_collections() only creates the index when the collection itself is
+    being created, so existing installations from before the RAPTOR work
+    will not have it. This helper is idempotent and safe to call from
+    `sciknow catalog raptor build` to make sure the index is in place
+    before any RAPTOR upserts.
+
+    Returns True if the index exists (either was already present or was
+    created), False if creation failed for an unexpected reason.
+    """
+    if client is None:
+        client = get_client()
+    try:
+        client.create_payload_index(
+            PAPERS_COLLECTION,
+            "node_level",
+            PayloadSchemaType.INTEGER,
+        )
+        return True
+    except Exception as exc:
+        # Qdrant raises if the index already exists; that's fine.
+        msg = str(exc).lower()
+        if "already exists" in msg or "already created" in msg:
+            return True
+        # Anything else is a real failure.
+        import logging
+        logging.getLogger(__name__).warning(
+            "ensure_node_level_index failed: %s", exc,
+        )
+        return False
 
 
 def check_connection(client: QdrantClient | None = None) -> bool:

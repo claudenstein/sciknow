@@ -148,6 +148,63 @@ def format_sources(results: list[SearchResult]) -> str:
     return "\n".join(lines)
 
 
+# ── RAPTOR cluster summarisation (Sarthi et al., ICLR 2024) ─────────────────
+#
+# Used by sciknow.ingestion.raptor to compress a cluster of related chunks
+# into a single retrievable summary. The summary becomes a level-N node in
+# the same Qdrant collection as the leaf chunks; the writer's retriever
+# then sees a mix of fine-grained chunks AND mid-level summaries.
+
+RAPTOR_SUMMARY_SYSTEM = """\
+You are a scientific knowledge synthesizer. You receive a cluster of {n} text \
+excerpts that have been grouped because they are semantically related. Write ONE \
+compact synthesis (250-450 words) that captures what these excerpts collectively say.
+
+Rules:
+- Open with one sentence stating the central topic of the cluster ("These N \
+excerpts cover [topic]." or similar — no preamble).
+- Identify the recurring claims, methods, datasets, and findings. Group related \
+claims together.
+- Where excerpts disagree or qualify each other, note BOTH positions explicitly \
+("Some studies argue X, while others find Y under different conditions.").
+- Preserve scope qualifiers verbatim — regions ("North Atlantic", "tropical \
+Pacific"), time periods ("since 1979", "the satellite era"), datasets ("CMIP6", \
+"ERA5"), conditions ("under high-emission scenarios"). Do NOT generalise past \
+what the excerpts say.
+- Preserve epistemic strength: if the source says "suggests", "may", "is associated \
+with", "appears to", use the same words. NEVER upgrade to "proves", "causes", \
+"demonstrates".
+- Use concrete technical vocabulary, named methods, named datasets, named effects, \
+and specific numbers where present. This summary will be embedded and added to a \
+search index — keywords matter for retrieval.
+- Do NOT use [N] citation markers — the writer who later retrieves this summary \
+has no numbering context. Instead, refer to source studies in prose: "Studies of \
+ENSO using CMIP6 …", "Recent satellite observations of stratospheric water vapor …", \
+"Several palaeoclimate reconstructions …".
+- Do NOT include filler like "it is interesting to note that" or "this raises the \
+question of". Just report the synthesis.
+
+This summary will be embedded by bge-m3 and stored in the search index alongside \
+the original excerpts. When a future writer retrieves it, they will use it as a \
+higher-level synthesis that complements the individual chunks."""
+
+RAPTOR_SUMMARY_USER = """\
+Cluster of {n} excerpts from the corpus:
+
+{chunks_text}
+
+---
+
+Write the synthesis."""
+
+
+def raptor_summary(chunks_text: str, n: int) -> tuple[str, str]:
+    return (
+        RAPTOR_SUMMARY_SYSTEM.format(n=n),
+        RAPTOR_SUMMARY_USER.format(n=n, chunks_text=chunks_text),
+    )
+
+
 # ── Step-back query reformulation (Zheng et al., ICLR 2024) ─────────────────
 
 STEP_BACK_SYSTEM = """\

@@ -264,6 +264,16 @@ def _hydrate(
 ) -> list[SearchCandidate]:
     """
     Fetch payload from Qdrant + paper metadata from PostgreSQL for the merged list.
+
+    Handles two kinds of points:
+
+    - Leaf chunks (`node_level == 0` or unset): join to paper_metadata for
+      title / year / authors / journal / doi.
+    - RAPTOR summary nodes (`node_level >= 1`): populate the candidate's
+      title / year / section_type directly from the Qdrant payload, and put
+      the full `summary_text` into `content_preview` so context_builder.build
+      uses it as the chunk content (these nodes have no row in the chunks
+      table, so the build() join falls through to content_preview).
     """
     if not ranked:
         return []
@@ -280,9 +290,17 @@ def _hydrate(
     )
     payload_map = {str(p.id): p.payload for p in points}
 
-    # Collect unique document_ids
-    doc_ids = {p.payload.get("document_id") for p in points if p.payload}
-    doc_ids.discard(None)
+    # Collect unique document_ids — but ONLY from leaf nodes. RAPTOR
+    # summary nodes don't have a single source document.
+    doc_ids = set()
+    for p in points:
+        if not p.payload:
+            continue
+        if int(p.payload.get("node_level") or 0) >= 1:
+            continue  # skip summary nodes
+        did = p.payload.get("document_id")
+        if did:
+            doc_ids.add(did)
 
     # Fetch metadata from PostgreSQL
     from sqlalchemy import text
@@ -311,6 +329,39 @@ def _hydrate(
     candidates = []
     for chunk_id in ids:
         payload = payload_map.get(chunk_id) or {}
+        node_level = int(payload.get("node_level") or 0)
+
+        if node_level >= 1:
+            # RAPTOR summary node — read everything from payload, no PG join.
+            summary_text = payload.get("summary_text") or payload.get("content_preview", "")
+            n_docs = payload.get("n_documents") or len(payload.get("document_ids") or [])
+            year_max = payload.get("year_max")
+            year_min = payload.get("year_min")
+            # Display year: prefer the max year so the citation reflects "as of".
+            year_disp = year_max or year_min or None
+            # Display title: f"RAPTOR L{n} ({n_docs} papers): {topic_hint}".
+            # We don't always have a topic hint, but the section_title from the
+            # builder will be set to the cluster's central concept where possible.
+            title = payload.get("title") or (
+                f"RAPTOR L{node_level} ({n_docs} papers)"
+                if n_docs else f"RAPTOR L{node_level} synthesis"
+            )
+            candidates.append(SearchCandidate(
+                chunk_id=chunk_id,
+                document_id=payload.get("document_id") or "",
+                section_type=payload.get("section_type") or f"raptor_l{node_level}",
+                section_title=payload.get("section_title") or "",
+                content_preview=summary_text,  # full summary text goes here
+                rrf_score=score_map[chunk_id],
+                title=title,
+                year=year_disp,
+                authors=[],
+                journal=None,
+                doi=None,
+            ))
+            continue
+
+        # Leaf chunk: standard PG metadata join.
         doc_id = payload.get("document_id", "")
         meta = meta_rows.get(doc_id, {})
         candidates.append(SearchCandidate(
@@ -360,7 +411,8 @@ def _apply_citation_boost(
     if not candidates:
         return candidates
 
-    doc_ids = {c.document_id for c in candidates}
+    # RAPTOR summary nodes have empty document_id — skip them entirely.
+    doc_ids = {c.document_id for c in candidates if c.document_id}
     if not doc_ids:
         return candidates
 

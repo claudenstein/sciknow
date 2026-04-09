@@ -23,6 +23,10 @@ from rich import box
 app = typer.Typer(help="Browse and export the paper catalog.")
 console = Console()
 
+# Sub-Typer for RAPTOR commands: `sciknow catalog raptor build`, etc.
+raptor_app = typer.Typer(help="RAPTOR hierarchical retrieval tree management.")
+app.add_typer(raptor_app, name="raptor")
+
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -968,3 +972,237 @@ def cluster_llm(
     console.print(f"[green]✓ Saved topic_cluster for {total_saved} papers[/green]")
     if unassigned:
         console.print(f"[dim]Re-run to retry the {unassigned} unassigned papers (default: only unclustered).[/dim]")
+
+
+# ── raptor (hierarchical RAPTOR retrieval tree) ──────────────────────────────
+
+
+@raptor_app.command(name="build")
+def raptor_build(
+    max_levels: int = typer.Option(4, "--max-levels",
+                                    help="Maximum tree depth (level 0 = leaf chunks)."),
+    min_cluster_size: int = typer.Option(2, "--min-cluster-size",
+                                          help="Drop clusters smaller than this."),
+    min_top_level: int = typer.Option(4, "--min-top-level",
+                                       help="Stop building when fewer than this many summaries remain at a level."),
+    rebuild: bool = typer.Option(False, "--rebuild",
+                                  help="Wipe existing RAPTOR summary nodes (level >= 1) before building."),
+    dry_run: bool = typer.Option(False, "--dry-run",
+                                  help="Cluster but do not summarise or upsert. Reports cluster sizes only."),
+    model: str | None = typer.Option(None, "--model",
+                                      help="LLM for cluster summarisation. Defaults to LLM_FAST_MODEL."),
+):
+    """
+    Build the RAPTOR hierarchical retrieval tree on top of the existing chunk index.
+
+    Adds a hierarchy of LLM-summarised cluster nodes to the same Qdrant
+    collection as the leaf chunks, so the writer's retriever sees a mix of
+    fine-grained chunks AND mid-level abstractions. No re-ingest, no wiki
+    recompile — RAPTOR is a pure additive layer.
+
+    The build is one-time-batch: when new papers are ingested, the existing
+    summary nodes are still useful but slightly stale. Re-run with --rebuild
+    periodically (e.g. weekly) or after a significant ingest to refresh.
+
+    Examples:
+
+      sciknow catalog raptor build                    # first build
+      sciknow catalog raptor build --dry-run          # preview cluster sizes
+      sciknow catalog raptor build --rebuild          # wipe and rebuild from scratch
+      sciknow catalog raptor build --max-levels 3     # shallower tree (faster)
+      sciknow catalog raptor build --model qwen3.5:27b  # use main model for summaries
+    """
+    from sciknow.cli import preflight
+    preflight(qdrant=True)
+
+    from sciknow.ingestion.raptor import build_raptor_tree
+    from rich.progress import (
+        BarColumn,
+        MofNCompleteColumn,
+        Progress,
+        SpinnerColumn,
+        TextColumn,
+        TimeElapsedColumn,
+    )
+
+    console.print("[bold]RAPTOR build[/bold] — hierarchical synthesis tree on top of chunks")
+    if dry_run:
+        console.print("[yellow]DRY RUN — no Qdrant writes will be made[/yellow]")
+    if rebuild:
+        console.print("[yellow]--rebuild — existing summary nodes (level >= 1) will be deleted[/yellow]")
+
+    total_summaries = 0
+    levels_built = 0
+    last_error = None
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold]{task.description}"),
+        BarColumn(bar_width=25),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        TextColumn("{task.fields[status]}"),
+        console=console,
+        refresh_per_second=4,
+    ) as progress:
+        task_id = progress.add_task("RAPTOR build", total=max_levels, status="starting...")
+
+        try:
+            for ev in build_raptor_tree(
+                max_levels=max_levels,
+                min_cluster_size=min_cluster_size,
+                min_top_level=min_top_level,
+                model=model,
+                rebuild=rebuild,
+                dry_run=dry_run,
+            ):
+                t = ev.get("type")
+
+                if t == "progress":
+                    detail = ev.get("detail", "")
+                    progress.update(task_id, status=f"[dim]{detail[:60]}[/dim]")
+
+                elif t == "level_start":
+                    lvl = ev["level"]
+                    pc = ev["parent_count"]
+                    progress.update(
+                        task_id,
+                        description=f"[bold]Building L{lvl}[/bold]",
+                        status=f"[cyan]{pc} parent nodes[/cyan]",
+                    )
+
+                elif t == "cluster_progress":
+                    i = ev["i"]
+                    of = ev["of"]
+                    sz = ev["size"]
+                    lvl = ev["level"]
+                    progress.update(
+                        task_id,
+                        status=f"L{lvl}: cluster [cyan]{i}/{of}[/cyan] (size {sz})",
+                    )
+
+                elif t == "level_done":
+                    lvl = ev["level"]
+                    n_sum = ev["n_summaries"]
+                    n_clust = ev["n_clusters"]
+                    elapsed = ev.get("elapsed", 0)
+                    total_summaries += n_sum
+                    levels_built += 1
+                    progress.advance(task_id)
+                    progress.update(
+                        task_id,
+                        status=(
+                            f"[green]L{lvl}: {n_sum} summaries from {n_clust} clusters "
+                            f"in {elapsed:.0f}s[/green]"
+                        ),
+                    )
+                    console.print(
+                        f"  [green]✓ L{lvl}[/green]: "
+                        f"{n_sum}/{n_clust} clusters summarised in {elapsed:.0f}s"
+                    )
+
+                elif t == "level_skipped":
+                    lvl = ev["level"]
+                    reason = ev.get("reason", "")
+                    console.print(f"  [yellow]L{lvl} skipped: {reason}[/yellow]")
+                    progress.advance(task_id)
+
+                elif t == "dry_run_summary":
+                    lvl = ev["level"]
+                    sizes = ev["cluster_sizes"]
+                    k = ev["k_selected"]
+                    console.print(
+                        f"  [cyan]L{lvl} dry run[/cyan]: BIC k={k}, "
+                        f"cluster sizes={sizes[:10]}{'…' if len(sizes) > 10 else ''}"
+                    )
+
+                elif t == "tree_complete":
+                    lvl = ev.get("stopped_at_level", 0)
+                    reason = ev.get("reason", "")
+                    console.print(
+                        f"\n[bold green]Tree complete[/bold green] — "
+                        f"stopped at level {lvl} ({reason})"
+                    )
+
+                elif t == "cluster_skipped":
+                    pass  # too noisy to print every cluster skip
+
+                elif t == "error":
+                    last_error = ev.get("message", "unknown error")
+                    console.print(f"[red]Error:[/red] {last_error}")
+
+        except Exception as exc:
+            console.print(f"[red]RAPTOR build crashed:[/red] {exc}")
+            raise
+
+    if last_error:
+        console.print(f"\n[red]Build ended with error: {last_error}[/red]")
+        raise typer.Exit(1)
+
+    if dry_run:
+        console.print("\n[yellow]Dry run complete — no Qdrant writes were made.[/yellow]")
+    else:
+        console.print(
+            f"\n[green]✓ RAPTOR build complete:[/green] "
+            f"{total_summaries} summary nodes added across {levels_built} levels."
+        )
+        console.print(
+            "[dim]Retrieval automatically uses the new nodes — no config change "
+            "needed. The reranker decides when summaries beat raw chunks.[/dim]"
+        )
+
+
+@raptor_app.command(name="stats")
+def raptor_stats():
+    """Show how many RAPTOR nodes exist at each level."""
+    from sciknow.cli import preflight
+    preflight(qdrant=True)
+
+    from collections import Counter
+    from sciknow.storage.qdrant import PAPERS_COLLECTION, get_client
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+    qdrant = get_client()
+
+    counts: Counter = Counter()
+    # Cheap path: scroll the whole collection asking only for the node_level
+    # payload field. For multi-thousand corpora this is fast enough.
+    offset = None
+    while True:
+        result, next_offset = qdrant.scroll(
+            collection_name=PAPERS_COLLECTION,
+            limit=2000,
+            offset=offset,
+            with_vectors=False,
+            with_payload=True,
+        )
+        for pt in result:
+            lvl = (pt.payload or {}).get("node_level")
+            if lvl is None:
+                counts["unset"] += 1
+            else:
+                counts[f"L{int(lvl)}"] += 1
+        if next_offset is None:
+            break
+        offset = next_offset
+
+    if not counts:
+        console.print("[yellow]Papers collection is empty.[/yellow]")
+        return
+
+    table = Table(title="RAPTOR tree levels", box=box.SIMPLE_HEAD)
+    table.add_column("Level", style="bold")
+    table.add_column("Nodes", justify="right", style="cyan")
+    table.add_column("Description", style="dim")
+    descriptions = {
+        "unset": "leaf chunks NOT yet tagged (run `raptor build` to fix)",
+        "L0": "leaf chunks (raw paper sections)",
+        "L1": "first-level cluster summaries",
+        "L2": "second-level cluster summaries",
+        "L3": "third-level cluster summaries",
+        "L4": "fourth-level cluster summaries",
+    }
+    for key in ("unset", "L0", "L1", "L2", "L3", "L4"):
+        if key in counts:
+            table.add_row(key, str(counts[key]), descriptions.get(key, ""))
+    console.print(table)

@@ -151,6 +151,18 @@ sciknow catalog cluster-llm                 # old approach: LLM batches of 50 pa
 
 # List all clusters with paper counts
 sciknow catalog topics
+
+# RAPTOR hierarchical retrieval tree (Sarthi et al., ICLR 2024)
+# Adds a tree of LLM-summarised cluster nodes on top of the existing
+# chunk index. Pure additive layer — NO re-ingest, NO wiki recompile.
+# After build, the writer's retriever automatically returns a mix of
+# fine chunks AND mid-level summaries, with the reranker deciding.
+sciknow catalog raptor build              # first build (uses LLM_FAST_MODEL by default)
+sciknow catalog raptor build --dry-run    # preview cluster sizes without writing
+sciknow catalog raptor build --rebuild    # wipe all level >= 1 nodes and rebuild
+sciknow catalog raptor build --max-levels 3 --min-cluster-size 4
+sciknow catalog raptor build --model qwen3.5:27b   # main model for higher-quality summaries
+sciknow catalog raptor stats              # show node counts per RAPTOR level
 ```
 
 ---

@@ -123,6 +123,55 @@ def embed_chunks(
     return point_ids
 
 
+def embed_summary_text(
+    summary_text: str,
+    payload: dict,
+    qdrant_client: QdrantClient,
+) -> UUID | None:
+    """
+    Embed an arbitrary text into the `papers` collection with the given payload.
+
+    Used by sciknow.ingestion.raptor to add hierarchical summary nodes to the
+    same collection as the leaf chunks. The caller is responsible for setting
+    `node_level`, `summary_text`, `child_chunk_ids`, etc. in `payload`.
+
+    Returns the new Qdrant point UUID, or None if the text was empty.
+    """
+    if not summary_text or not summary_text.strip():
+        return None
+
+    model = _get_model()
+    output = model.encode(
+        [summary_text],
+        batch_size=1,
+        max_length=8192,
+        return_dense=True,
+        return_sparse=True,
+        return_colbert_vecs=False,
+    )
+
+    point_id = uuid4()
+    full_payload = {
+        **payload,
+        "chunk_id": str(point_id),
+        "embedding_model": settings.embedding_model,
+    }
+    qdrant_client.upsert(
+        collection_name=PAPERS_COLLECTION,
+        points=[
+            PointStruct(
+                id=str(point_id),
+                vector={
+                    "dense": output["dense_vecs"][0].tolist(),
+                    "sparse": _to_sparse(output["lexical_weights"][0]),
+                },
+                payload=full_payload,
+            )
+        ],
+    )
+    return point_id
+
+
 def embed_abstract(
     abstract_text: str,
     document_id: UUID,

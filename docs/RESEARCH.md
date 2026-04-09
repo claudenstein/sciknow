@@ -403,29 +403,73 @@ Chain-of-Verification (CoVe) addresses this by **decoupling** fact-checking from
 
 ---
 
-## Planned (Researched, Implementation Pending)
+## 19. RAPTOR — Hierarchical Tree of Summary Embeddings
 
-These techniques have been researched and validated against sciknow's stack but are not yet implemented. Each is documented here so the rationale survives across sessions.
+**Status:** Production
 
-### P2. RAPTOR — Hierarchical Tree of Summary Embeddings
+The standard chunk index is **flat**: every retrieved chunk lives at the same level of abstraction. For chapter-level synthesis, this forces the writer to glue together 8+ disjoint single-paper findings. RAPTOR (Sarthi et al., ICLR 2024) addresses this by building a hierarchical tree of LLM-summarised cluster nodes on top of the existing chunks, all stored in the same `papers` Qdrant collection.
 
-**Status:** Planned · Cost: new code (~3-5 days), reindex of one Qdrant payload field, no re-ingest
+### How it works
 
-The current chunk index is **flat**: every retrieved chunk lives at the same level of abstraction. For chapter-level synthesis, this forces the writer to glue together 8+ disjoint single-paper findings. RAPTOR (Sarthi et al., ICLR 2024) builds a hierarchical tree on top of the existing chunks:
+1. **Backfill** `node_level: 0` on every existing leaf chunk (idempotent — only touches points that don't have the field yet).
+2. **For each level 1..max_levels:**
+   1. **Fetch** the parent-level vectors from Qdrant (level 0 = leaf chunks; level N = level-(N-1) summaries).
+   2. **UMAP-reduce** to ~10 dimensions with cosine metric (matches bge-m3's training).
+   3. **GMM cluster** with BIC-selected k. RAPTOR's paper specifically argues for soft clustering — chunks can contribute to multiple cluster summaries by membership probability. v1 uses hard assignment (argmax) for simplicity, but the GMM `proba` matrix is computed and available for future soft-assignment upgrades.
+   4. **Summarise** each cluster with the LLM via the `RAPTOR_SUMMARY` prompt — a 250-450 word retrievable synthesis that preserves scope qualifiers and epistemic strength (honors hedging fidelity from Section 13). Defaults to `LLM_FAST_MODEL` since RAPTOR is a one-shot batch op and 7B-class models produce adequate summaries; override with `--model`.
+   5. **Embed** the summary with bge-m3 (dense + sparse, same as leaves) and **upsert** into the same `papers` Qdrant collection with a payload that includes `node_level: N`, `summary_text`, `child_chunk_ids`, `child_count`, `document_ids`, `n_documents`, `year_min`/`year_max`, `section_types`, `topic_clusters`, plus display fields (`title`, `section_type=f"raptor_l{N}"`, `section_title`).
+3. **Stop early** when fewer than `min_top_level` summaries (default 4) remain at a level, or when `max_levels` is reached.
 
-1. Cluster bge-m3 embeddings (UMAP → GMM, BIC-selected k).
-2. For each cluster, pull the chunk texts from PostgreSQL and call `LLM_FAST_MODEL` once to produce a cluster summary.
-3. Re-embed each summary with bge-m3 and upsert into the **same** `papers` Qdrant collection with a new payload field `node_level: 1`.
-4. Repeat levels 2–4: cluster the level-1 summaries, summarise them, re-embed, upsert with `node_level: 2`, etc.
-5. At query time, "collapsed-tree retrieval" flattens all levels into one pool — the writer naturally gets a mix of fine chunks and mid-level abstractions. The reranker decides what's relevant.
+### Retrieval integration (zero config)
 
-**Critically, no re-ingest and no wiki recompile is required.** The leaf nodes are the chunks that already exist; RAPTOR is a pure additive layer. The only schema change is a new `node_level` payload index on the existing `papers` collection (existing points default to `node_level: 0`).
+`hybrid_search._hydrate` now recognises RAPTOR nodes by their `node_level` payload field and reads their metadata (title / year / content) directly from the payload, bypassing the `paper_metadata` PostgreSQL join (these nodes have no source document). The full `summary_text` is placed into `content_preview`, so `context_builder.build`'s fallback uses it as the chunk's content (RAPTOR nodes have no row in the `chunks` table).
 
-This is the **biggest structural improvement** in the roadmap — the writer gains access to mid-level abstractions ("CMIP6 generally underestimates Arctic amplification") that currently have to be reconstructed by gluing 8 chunks together.
+The result: when RAPTOR summary nodes exist in the collection, the writer's hybrid retrieval (dense + sparse + Postgres FTS, RRF-fused, then bge-reranker-v2-m3) automatically returns a **mix of fine-grained chunks and mid-level summaries**. The reranker decides — if a level-1 summary is more relevant to the query than any individual chunk, it surfaces; if the writer needs a specific equation or table, the leaf chunks still win. **No retrieval-side flag is needed.**
+
+### Why no re-ingest and no wiki recompile
+
+RAPTOR's leaf nodes are precisely the chunks that already exist in `papers`. The build is a **pure additive layer**:
+
+- No changes to `documents`, `paper_metadata`, `paper_sections`, or `chunks` tables.
+- The only schema change is a single new payload index on the existing Qdrant collection (`node_level`, INTEGER). `init_collections()` creates it for fresh collections; `ensure_node_level_index()` is an idempotent helper that adds it to pre-existing collections (called automatically by `raptor build`).
+- Existing leaf points get `node_level: 0` set via Qdrant's bulk `set_payload` API — a one-time backfill that takes seconds for thousands of points.
+- The wiki layer (Section 4) is completely orthogonal — RAPTOR summaries are *retrieval artifacts* living in Qdrant; wiki pages are *human-readable markdown* in `data/wiki/`. Different data path, different purpose.
+
+### Operating model
+
+The build is **one-time-batch**: when new papers are ingested, the existing summary nodes are still useful but slightly stale. The recommended pattern is to re-run with `--rebuild` periodically (weekly, or after a significant ingest like a full `db expand` cycle). For incremental updates, `--rebuild` deletes every point with `node_level >= 1` and rebuilds from scratch — an A/B-safe approach because the leaves are never touched.
+
+The CLI command lives under `sciknow catalog raptor` (a Typer sub-namespace):
+
+```bash
+sciknow catalog raptor build              # first build
+sciknow catalog raptor build --dry-run    # preview cluster sizes without writing
+sciknow catalog raptor build --rebuild    # wipe all level >= 1 nodes and rebuild
+sciknow catalog raptor build --max-levels 3 --min-cluster-size 4
+sciknow catalog raptor build --model qwen3.5:27b   # main model for higher-quality summaries
+sciknow catalog raptor stats              # show node counts per level
+```
+
+### Expected impact
+
+The writer gains access to mid-level abstractions ("CMIP6 generally underestimates Arctic amplification", "ENSO–monsoon teleconnections weakened in the satellite era") that previously had to be reconstructed inside the prompt by gluing 8+ chunks together. For chapter intros and cross-paper synthesis paragraphs, this is the difference between a list of disjoint single-paper findings and proper synthesised prose. RAPTOR's published gains on multi-document QA are 5–20% absolute on cross-document tasks; for sciknow's book-writing use case the practical impact is mostly on completeness and coherence (the chapter "feels" connected) rather than groundedness.
+
+### Caveats
+
+- GMM is stochastic; the build uses a fixed `random_state=42` for reproducibility. Re-runs with the same corpus produce the same tree.
+- BIC-selected k can be high on small clusters, leading to many tiny groups; `--min-cluster-size` filters them out.
+- Higher levels can be sparse — the build stops early when fewer than `min_top_level` (default 4) summaries remain. On a small corpus you may only get level 1.
+- `_hydrate`'s RAPTOR branch returns no `authors` or `journal`, so prompts that depend on author-style citations should fall back gracefully (the existing APA formatter does — it skips empty fields).
 
 **Research basis:**
 - [Sarthi et al. 2024 — *RAPTOR: Recursive Abstractive Processing for Tree-Organized Retrieval* (arXiv:2401.18059)](https://arxiv.org/abs/2401.18059) — ICLR 2024
-- [Reference implementation (parthsarthi03/raptor)](https://github.com/parthsarthi03/raptor)
+- [Reference implementation (parthsarthi03/raptor)](https://github.com/parthsarthi03/raptor) — sciknow's GMM+BIC clustering follows this implementation closely
+
+---
+
+## Planned (Researched, Implementation Pending)
+
+The roadmap items from the 2026-04 lit sweep are now all shipped (Phases 7–12). Future research notes will land here as they accumulate.
 
 ---
 
@@ -494,7 +538,5 @@ Phase 8:  Centering entity bridge   → no-cold-start rule for paragraph opening
 Phase 9:  PDTB-lite discourse plan  → discourse_relation per paragraph in tree plan
 Phase 10: Step-back retrieval       → abstract reformulation augments concrete query
 Phase 11: Chain-of-Verification     → decoupled fact-check questions, gated on score thresholds
-
-Planned:
-P2:       RAPTOR hierarchical tree  → mid-level summaries on existing chunk index
+Phase 12: RAPTOR hierarchical tree  → UMAP+GMM clustering, LLM cluster summaries as level-N nodes
 ```
