@@ -753,7 +753,7 @@ async def update_draft_metadata(request: Request, draft_id: str):
     body = await request.json()
     with get_session() as session:
         session.execute(text("""
-            UPDATE drafts SET custom_metadata = custom_metadata || :meta::jsonb
+            UPDATE drafts SET custom_metadata = custom_metadata || CAST(:meta AS jsonb)
             WHERE id::text LIKE :q
         """), {"meta": json.dumps(body), "q": f"{draft_id}%"})
         session.commit()
@@ -875,11 +875,19 @@ async def corkboard_data():
 # ── SSE / Streaming endpoints ───────────────────────────────────────────────
 
 def _run_generator_in_thread(job_id: str, generator_fn, loop):
-    """Run a blocking generator in a thread, pushing events to the job queue."""
+    """Run a blocking generator in a thread, pushing events to the job queue.
+
+    Phase 15.1 — when the job is cancelled, we explicitly close the
+    generator (`gen.close()`) so any try/finally blocks inside it can
+    flush partial state. The generator functions in book_ops use
+    incremental save at every checkpoint, so the worst case is the
+    in-flight iteration's tokens being lost — never the whole draft.
+    """
     queue = _jobs[job_id]["queue"]
     cancel = _jobs[job_id]["cancel"]
+    gen = generator_fn()
     try:
-        for event in generator_fn():
+        for event in gen:
             if cancel.is_set():
                 loop.call_soon_threadsafe(queue.put_nowait, {"type": "cancelled"})
                 break
@@ -888,6 +896,10 @@ def _run_generator_in_thread(job_id: str, generator_fn, loop):
         logger.exception("Job %s failed", job_id)
         loop.call_soon_threadsafe(queue.put_nowait, {"type": "error", "message": str(exc)})
     finally:
+        try:
+            gen.close()  # raises GeneratorExit at the current yield point
+        except Exception:
+            pass
         loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel
         _finish_job(job_id)
 
@@ -2917,6 +2929,12 @@ function startStream(jobId) {{
         '<strong>writer model:</strong> <code>' + (evt.writer_model || '?') + '</code></div>';
       stats.setModel(evt.writer_model || 'qwen3.5:27b');
     }}
+    else if (evt.type === 'checkpoint') {{
+      // Phase 15.1 — incremental save reached. Briefly note in the body.
+      body.innerHTML += '<div style="font-size:11px;color:var(--success);padding:4px 0;">' +
+        '\\u2693 checkpoint saved · ' + (evt.stage || '') + ' · ' +
+        (evt.word_count || 0) + ' words</div>';
+    }}
     else if (evt.type === 'completed') {{
       status.textContent = 'Done';
       stats.done('done');
@@ -3619,6 +3637,14 @@ async function doAutowrite() {{
         '<strong>writer:</strong> <code>' + (evt.writer_model || '?') + '</code>  ·  ' +
         '<strong>fast:</strong> <code>' + (evt.fast_model || '?') + '</code> (utility only)</div>';
       stats.setModel(evt.writer_model || 'qwen3.5:27b');
+    }}
+    else if (evt.type === 'checkpoint') {{
+      // Phase 15.1 — incremental save checkpoint reached. Show a brief
+      // green note in the log so the user knows their work is persisted
+      // and Stop won't lose anything past this point.
+      awLog.innerHTML += '<div class="log-keep" style="font-size:11px;">' +
+        '\\u2693 checkpoint saved · ' + (evt.stage || '') + ' · ' +
+        (evt.word_count || 0) + ' words</div>';
     }}
     else if (evt.type === 'verification') {{
       // Standard verifier in the autowrite stream — emit a brief log line.

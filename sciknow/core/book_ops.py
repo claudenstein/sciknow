@@ -82,13 +82,16 @@ def _save_draft(session, *, title, book_id, chapter_id, section_type, topic,
                 content, sources, model, summary=None, parent_draft_id=None,
                 review_feedback=None, version=1, custom_metadata=None):
     from sqlalchemy import text
+    # Note: use CAST(:x AS jsonb) instead of :x::jsonb because SQLAlchemy's
+    # parameter parser confuses `::jsonb` with the bound-param name and
+    # passes it through unparameterized. CAST(...) is unambiguous.
     row = session.execute(text("""
         INSERT INTO drafts (title, book_id, chapter_id, section_type, topic, content,
                             word_count, sources, model_used, version, summary,
                             parent_draft_id, review_feedback, custom_metadata)
         VALUES (:title, :book_id, :chapter_id, :section, :topic, :content,
-                :wc, :sources::jsonb, :model, :version, :summary,
-                :parent_id, :review_feedback, :metadata::jsonb)
+                :wc, CAST(:sources AS jsonb), :model, :version, :summary,
+                :parent_id, :review_feedback, CAST(:metadata AS jsonb))
         RETURNING id::text
     """), {
         "title": title, "book_id": book_id, "chapter_id": chapter_id,
@@ -114,6 +117,47 @@ def _release_gpu_models():
     release_embed_model()
     release_model()
     release_reranker()
+
+
+def _update_draft_content(draft_id, content, *, summary=None, custom_metadata=None,
+                          review_feedback=None, version=None):
+    """Phase 15.1 — incremental update of an existing draft.
+
+    Used by autowrite_section_stream and write_section_stream to persist
+    intermediate state at each checkpoint, so a user clicking Stop never
+    loses more than the in-flight iteration's tokens.
+
+    Only fields you pass get updated; the rest are left untouched. The
+    word_count is recomputed from the new content.
+    """
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+    if not draft_id:
+        return
+    updates = ["content = :content", "word_count = :wc"]
+    params: dict = {
+        "did": draft_id, "content": content,
+        "wc": len(content.split()),
+    }
+    if summary is not None:
+        updates.append("summary = :summary")
+        params["summary"] = summary
+    if custom_metadata is not None:
+        updates.append("custom_metadata = CAST(:metadata AS jsonb)")
+        params["metadata"] = json.dumps(custom_metadata)
+    if review_feedback is not None:
+        updates.append("review_feedback = :rf")
+        params["rf"] = review_feedback
+    if version is not None:
+        updates.append("version = :version")
+        params["version"] = version
+
+    with get_session() as session:
+        session.execute(
+            text(f"UPDATE drafts SET {', '.join(updates)} WHERE id::text = :did"),
+            params,
+        )
+        session.commit()
 
 
 def _retrieve(session, qdrant, query: str, candidate_k: int = 50,
@@ -366,6 +410,23 @@ def write_section_stream(
 
     content = "".join(content_tokens)
 
+    # Phase 15.1 — INCREMENTAL SAVE: persist the draft IMMEDIATELY after
+    # token collection, before verification. If the user clicks Stop
+    # during the verify step (which can take 30+ seconds for a 30B model),
+    # the draft is already in the DB. The verification feedback gets
+    # appended via _update_draft_content below.
+    draft_id = None
+    if save:
+        draft_title = f"Ch.{ch_num} {ch_title} — {section_type.capitalize()}"
+        with get_session() as session:
+            draft_id = _save_draft(
+                session, title=draft_title, book_id=book_id, chapter_id=ch_id,
+                section_type=section_type, topic=topic, content=content,
+                sources=sources, model=model, summary=None,
+            )
+        yield {"type": "checkpoint", "draft_id": draft_id, "stage": "draft",
+               "word_count": len(content.split())}
+
     # Optional claim verification
     verify_feedback = None
     if verify:
@@ -380,19 +441,16 @@ def write_section_stream(
             yield {"type": "progress", "stage": "verifying",
                    "detail": f"Verification failed: {exc}"}
 
-    # Save
-    draft_id = None
-    if save:
-        yield {"type": "progress", "stage": "saving", "detail": "Generating summary and saving..."}
+    # Generate summary + finalize the draft (phases 15.1 — UPDATE existing
+    # row instead of inserting a new one; the draft was already saved above).
+    if save and draft_id:
+        yield {"type": "progress", "stage": "saving", "detail": "Generating summary..."}
         summary = _auto_summarize(content, section_type, ch_title, model=model)
-        draft_title = f"Ch.{ch_num} {ch_title} — {section_type.capitalize()}"
-        with get_session() as session:
-            draft_id = _save_draft(
-                session, title=draft_title, book_id=book_id, chapter_id=ch_id,
-                section_type=section_type, topic=topic, content=content,
-                sources=sources, model=model, summary=summary,
-                review_feedback=verify_feedback,
-            )
+        _update_draft_content(
+            draft_id, content,
+            summary=summary,
+            review_feedback=verify_feedback,
+        )
 
     yield {
         "type": "completed",
@@ -693,7 +751,7 @@ def run_argue_stream(
                 INSERT INTO drafts (title, book_id, section_type, topic, content,
                                     word_count, sources, model_used)
                 VALUES (:title, :book_id, 'argument_map', :topic, :content,
-                        :wc, :sources::jsonb, :model)
+                        :wc, CAST(:sources AS jsonb), :model)
             """), {
                 "title": draft_title, "book_id": book_id, "topic": claim,
                 "content": content, "wc": len(content.split()),
@@ -946,10 +1004,43 @@ def autowrite_section_stream(
 
     content = "".join(tokens)
 
-    # Step 2: Score -> verify -> revise -> re-score loop
-    # Fix 3: `results` from the write step are passed to scorer/verifier
-    #         so they evaluate against the same evidence the writer used.
+    # Phase 15.1 — INCREMENTAL SAVE checkpoint #0: persist the initial draft
+    # immediately, before any scoring/verification/revision. If the user
+    # clicks Stop now (or the connection drops), at least the initial draft
+    # is in the DB. The draft_id created here is reused by all subsequent
+    # checkpoint updates so we always have one row per autowrite run.
+    draft_title = f"Ch.{ch_num} {ch_title} — {section_type.capitalize()} (autowrite)"
+    feature_versions = {
+        "use_plan": use_plan,
+        "use_step_back": use_step_back,
+        "use_cove": use_cove,
+        "cove_threshold": cove_threshold,
+        "phase7_hedging_fidelity": True,
+        "phase8_entity_bridge": True,
+        "phase9_pdtb_discourse_relations": True,
+        "phase10_step_back_retrieval": True,
+        "phase11_chain_of_verification": True,
+        "phase12_raptor_retrieval": True,
+    }
     history: list[dict] = []
+    initial_metadata = {
+        "score_history": history,
+        "feature_versions": feature_versions,
+        "final_overall": None,
+        "max_iter": max_iter,
+        "target_score": target_score,
+        "checkpoint": "initial",
+    }
+    with get_session() as session:
+        draft_id = _save_draft(
+            session, title=draft_title, book_id=book_id, chapter_id=ch_id,
+            section_type=section_type, topic=topic, content=content,
+            sources=sources, model=model, summary=None,
+            version=1,
+            custom_metadata=initial_metadata,
+        )
+    yield {"type": "checkpoint", "draft_id": draft_id, "stage": "initial",
+           "word_count": len(content.split())}
 
     for iteration in range(max_iter):
         yield {"type": "iteration_start", "iteration": iteration + 1, "max": max_iter}
@@ -1200,52 +1291,60 @@ def autowrite_section_stream(
             if history:
                 history[-1]["revision_verdict"] = "KEEP"
                 history[-1]["post_revision_overall"] = new_overall
+            # Phase 15.1 — INCREMENTAL SAVE checkpoint #N: persist the
+            # accepted revision so the user never loses more than the
+            # in-flight iteration's tokens if they click Stop.
+            checkpoint_metadata = {
+                "score_history": history,
+                "feature_versions": feature_versions,
+                "final_overall": overall,
+                "max_iter": max_iter,
+                "target_score": target_score,
+                "checkpoint": f"iteration_{iteration + 1}_keep",
+            }
+            _update_draft_content(
+                draft_id, content,
+                custom_metadata=checkpoint_metadata,
+                version=iteration + 2,
+            )
+            yield {"type": "checkpoint", "draft_id": draft_id,
+                   "stage": f"iteration_{iteration + 1}_keep",
+                   "word_count": len(content.split())}
         else:
             yield {"type": "revision_verdict", "action": "DISCARD",
                    "old_score": overall, "new_score": new_overall}
             if history:
                 history[-1]["revision_verdict"] = "DISCARD"
                 history[-1]["post_revision_overall"] = new_overall
+            # Update metadata only — content stays at previous KEEP state.
+            discard_metadata = {
+                "score_history": history,
+                "feature_versions": feature_versions,
+                "final_overall": overall,
+                "max_iter": max_iter,
+                "target_score": target_score,
+                "checkpoint": f"iteration_{iteration + 1}_discard",
+            }
+            _update_draft_content(draft_id, content, custom_metadata=discard_metadata)
 
-    # Step 3: Save
-    yield {"type": "progress", "stage": "saving", "detail": "Saving final draft..."}
+    # Step 3: Final polish — auto-summarize and finalize the existing draft.
+    # No new INSERT here because the draft was created at checkpoint #0 above.
+    yield {"type": "progress", "stage": "saving", "detail": "Finalizing draft..."}
     summary = _auto_summarize(content, section_type, ch_title, model=model)
-
-    # Track A: persist the full score history + which features were enabled
-    # so that `book draft scores` can replay the convergence trajectory and
-    # `book draft compare` can attribute improvements to specific features.
-    feature_versions = {
-        "use_plan": use_plan,
-        "use_step_back": use_step_back,
-        "use_cove": use_cove,
-        "cove_threshold": cove_threshold,
-        # The phase markers below are static — they identify which prompt-level
-        # features were active at the time of writing. Bumping them is the
-        # signal that a draft predates a particular phase.
-        "phase7_hedging_fidelity": True,
-        "phase8_entity_bridge": True,
-        "phase9_pdtb_discourse_relations": True,
-        "phase10_step_back_retrieval": True,
-        "phase11_chain_of_verification": True,
-        "phase12_raptor_retrieval": True,
-    }
     persisted_metadata = {
         "score_history": history,
         "feature_versions": feature_versions,
         "final_overall": overall,
         "max_iter": max_iter,
         "target_score": target_score,
+        "checkpoint": "final",
     }
-
-    draft_title = f"Ch.{ch_num} {ch_title} — {section_type.capitalize()} (autowrite)"
-    with get_session() as session:
-        draft_id = _save_draft(
-            session, title=draft_title, book_id=book_id, chapter_id=ch_id,
-            section_type=section_type, topic=topic, content=content,
-            sources=sources, model=model, summary=summary,
-            version=len(history) + 1,
-            custom_metadata=persisted_metadata,
-        )
+    _update_draft_content(
+        draft_id, content,
+        summary=summary,
+        custom_metadata=persisted_metadata,
+        version=len(history) + 1,
+    )
 
     yield {
         "type": "completed",

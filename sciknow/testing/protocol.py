@@ -460,6 +460,54 @@ def l1_web_phase15_wiki_browse_and_stats() -> None:
     assert 'id="plan-stream-stats"' in t, "plan-stream-stats footer missing"
 
 
+def l1_autowrite_incremental_save() -> None:
+    """Phase 15.1 — autowrite must save incrementally so cancelling
+    mid-generation doesn't lose all the work.
+
+    Verifies that autowrite_section_stream:
+      - Calls _save_draft BEFORE the iteration loop (initial checkpoint)
+      - Calls _update_draft_content inside the iteration loop (per-iter
+        checkpoint after KEEP/DISCARD verdicts)
+      - Yields 'checkpoint' events so the GUI can show feedback
+      - The final save is an UPDATE not a new INSERT (no second
+        _save_draft call after the iteration loop)
+
+    And that write_section_stream:
+      - Calls _save_draft right after token collection (before verify)
+      - Calls _update_draft_content after verification to add the
+        review feedback (so verify-failure doesn't lose the draft)
+
+    Plus _update_draft_content helper exists.
+    """
+    import inspect
+    from sciknow.core import book_ops
+
+    # Helper exists
+    assert hasattr(book_ops, "_update_draft_content"), \
+        "_update_draft_content helper missing"
+
+    # autowrite has incremental save
+    aw_src = inspect.getsource(book_ops.autowrite_section_stream)
+    assert "_save_draft" in aw_src, "autowrite never saves anything"
+    assert "_update_draft_content" in aw_src, \
+        "autowrite doesn't update existing draft (only one save = no incremental)"
+    assert '"checkpoint"' in aw_src or "'checkpoint'" in aw_src, \
+        "autowrite missing checkpoint events"
+    # Make sure there's only ONE _save_draft call (the initial checkpoint),
+    # not two (which would mean the old end-of-loop save still exists).
+    assert aw_src.count("_save_draft(") == 1, (
+        f"autowrite has {aw_src.count('_save_draft(')} _save_draft calls — "
+        f"should be exactly 1 (initial checkpoint). Multiple inserts mean "
+        f"the cancel-safety fix wasn't applied cleanly."
+    )
+
+    # write_section_stream has incremental save too
+    ws_src = inspect.getsource(book_ops.write_section_stream)
+    assert "_save_draft" in ws_src, "write_section_stream never saves"
+    assert "_update_draft_content" in ws_src, \
+        "write_section_stream doesn't update after verification — verify failure loses content"
+
+
 def l1_writer_uses_flagship_model() -> None:
     """Phase 14.6 — assert the writing/scoring/verification path NEVER
     accidentally uses settings.llm_fast_model.
@@ -860,6 +908,7 @@ L1_TESTS: list[Callable] = [
     l1_web_phase14_4_book_sections,
     l1_writer_uses_flagship_model,
     l1_web_phase15_wiki_browse_and_stats,
+    l1_autowrite_incremental_save,
     l1_web_rendered_js_is_valid,
     l1_research_doc_up_to_date,
 ]
