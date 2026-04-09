@@ -1329,9 +1329,11 @@ body {{ font-family: 'Georgia', serif; color: var(--fg); background: var(--bg);
 /* Verification indicators */
 .citation.verified-supported {{ background: #d1fae5; border-radius: 3px; }}
 .citation.verified-extrapolated {{ background: #fef3c7; border-radius: 3px; }}
+.citation.verified-overstated {{ background: #ffedd5; border-radius: 3px; }}
 .citation.verified-misrepresented {{ background: #fee2e2; border-radius: 3px; }}
 [data-theme="dark"] .citation.verified-supported {{ background: #064e3b; }}
 [data-theme="dark"] .citation.verified-extrapolated {{ background: #78350f; }}
+[data-theme="dark"] .citation.verified-overstated {{ background: #7c2d12; }}
 [data-theme="dark"] .citation.verified-misrepresented {{ background: #7f1d1d; }}
 /* Autowrite chart */
 .aw-dashboard {{ margin-bottom: 16px; }}
@@ -1669,13 +1671,31 @@ function startStream(jobId) {{
     else if (evt.type === 'scores') {{
       scoresEl.style.display = 'block';
       const s = evt.scores;
-      const dims = ['groundedness', 'completeness', 'coherence', 'citation_accuracy', 'overall'];
+      const dims = ['groundedness', 'completeness', 'coherence', 'citation_accuracy', 'hedging_fidelity', 'overall'];
       scoresEl.innerHTML = 'Iteration ' + evt.iteration + ': ' + dims.map(d => {{
         const v = (s[d] || 0).toFixed(2);
         const cls = v >= 0.85 ? 'good' : v >= 0.7 ? 'mid' : 'low';
-        return '<span class="score-bar"><span class="label">' + d.slice(0,5) + '</span> ' +
+        return '<span class="score-bar"><span class="label">' + d.slice(0,6) + '</span> ' +
                '<span class="value ' + cls + '">' + v + '</span></span>';
       }}).join('');
+    }}
+    else if (evt.type === 'cove_verification') {{
+      // Phase 11 — Chain-of-Verification (decoupled fact check). Only fires
+      // when standard groundedness or hedging_fidelity is below threshold.
+      const cd = evt.data || {{}};
+      const score = (cd.cove_score != null) ? cd.cove_score.toFixed(2) : '?';
+      const mismatches = cd.mismatches || [];
+      const high = mismatches.filter(m => m.severity === 'high');
+      const med = mismatches.filter(m => m.severity === 'medium');
+      let html = '<div style="margin:10px 0;padding:8px;border-left:3px solid var(--warning);background:var(--toolbar-bg);">';
+      html += '<div style="font-weight:bold;">Chain-of-Verification: ' + score + '</div>';
+      if (high.length || med.length) {{
+        html += '<div style="font-size:12px;opacity:0.8;">' +
+                '<span style="color:var(--danger);">' + high.length + ' NOT_IN_SOURCES</span> · ' +
+                '<span style="color:var(--warning);">' + med.length + ' DIFFERENT_SCOPE</span></div>';
+      }}
+      html += '</div>';
+      body.innerHTML += html;
     }}
     else if (evt.type === 'revision_verdict') {{
       const icon = evt.action === 'KEEP' ? '\\u2713' : '\\u2717';
@@ -2092,17 +2112,29 @@ async function doVerify() {{
     }}
     else if (evt.type === 'verification') {{
       const vd = evt.data;
-      status.textContent = 'Groundedness: ' + (vd.groundedness_score || '?');
+      const grStr = (vd.groundedness_score != null) ? vd.groundedness_score.toFixed(2) : '?';
+      const hfStr = (vd.hedging_fidelity_score != null) ? vd.hedging_fidelity_score.toFixed(2) : '?';
+      status.textContent = 'Groundedness: ' + grStr + '  ·  Hedging fidelity: ' + hfStr;
 
       // Show results in stream body
       let html = '<div style="font-family:-apple-system,sans-serif;">';
-      html += '<div style="font-size:18px;font-weight:bold;margin-bottom:12px;">Groundedness Score: ' +
+      html += '<div style="font-size:18px;font-weight:bold;margin-bottom:12px;">Groundedness: ' +
         '<span style="color:' + (vd.groundedness_score >= 0.8 ? 'var(--success)' : vd.groundedness_score >= 0.6 ? 'var(--warning)' : 'var(--danger)') + '">' +
-        (vd.groundedness_score || '?') + '</span></div>';
+        grStr + '</span>' +
+        '   <span style="font-size:14px;font-weight:normal;opacity:0.7;">Hedging fidelity: ' +
+        '<span style="color:' + (vd.hedging_fidelity_score >= 0.8 ? 'var(--success)' : vd.hedging_fidelity_score >= 0.6 ? 'var(--warning)' : 'var(--danger)') + '">' +
+        hfStr + '</span></span></div>';
 
       if (vd.claims) {{
         vd.claims.forEach(c => {{
-          const color = c.verdict === 'SUPPORTED' ? 'var(--success)' : c.verdict === 'EXTRAPOLATED' ? 'var(--warning)' : 'var(--danger)';
+          // Phase 11 — OVERSTATED is the lexical-modality counterpart to
+          // EXTRAPOLATED. Render in orange to distinguish from yellow
+          // (extrapolated) and red (misrepresented).
+          let color;
+          if (c.verdict === 'SUPPORTED') color = 'var(--success)';
+          else if (c.verdict === 'EXTRAPOLATED') color = 'var(--warning)';
+          else if (c.verdict === 'OVERSTATED') color = '#f97316';  // orange-500
+          else color = 'var(--danger)';
           html += '<div style="margin:6px 0;padding:6px 10px;border-left:3px solid ' + color + ';background:var(--toolbar-bg);border-radius:4px;">';
           html += '<span style="font-weight:bold;color:' + color + ';">' + c.verdict + '</span> ';
           html += '<span style="font-size:12px;">' + c.citation + '</span><br>';
@@ -2143,7 +2175,7 @@ async function doVerify() {{
 
 function applyVerificationColors(vd) {{
   if (!vd.claims) return;
-  const classMap = {{ 'SUPPORTED': 'verified-supported', 'EXTRAPOLATED': 'verified-extrapolated', 'MISREPRESENTED': 'verified-misrepresented' }};
+  const classMap = {{ 'SUPPORTED': 'verified-supported', 'EXTRAPOLATED': 'verified-extrapolated', 'OVERSTATED': 'verified-overstated', 'MISREPRESENTED': 'verified-misrepresented' }};
   vd.claims.forEach(c => {{
     const ref = c.citation ? c.citation.replace(/[\[\]]/g, '') : '';
     if (!ref) return;
@@ -2251,13 +2283,32 @@ async function doAutowrite() {{
       // Show score bars
       scoresEl.style.display = 'block';
       const s = evt.scores;
-      const dims = ['groundedness', 'completeness', 'coherence', 'citation_accuracy', 'overall'];
+      const dims = ['groundedness', 'completeness', 'coherence', 'citation_accuracy', 'hedging_fidelity', 'overall'];
       scoresEl.innerHTML = 'Iteration ' + evt.iteration + ': ' + dims.map(d => {{
         const v = (s[d] || 0).toFixed(2);
         const cls = v >= 0.85 ? 'good' : v >= 0.7 ? 'mid' : 'low';
-        return '<span class="score-bar"><span class="label">' + d.slice(0,5) + '</span> ' +
+        return '<span class="score-bar"><span class="label">' + d.slice(0,6) + '</span> ' +
           '<span class="value ' + cls + '">' + v + '</span></span>';
       }}).join('');
+    }}
+    else if (evt.type === 'cove_verification') {{
+      // Phase 11 — Chain-of-Verification mismatches in the autowrite stream.
+      const cd = evt.data || {{}};
+      const score = (cd.cove_score != null) ? cd.cove_score.toFixed(2) : '?';
+      const mismatches = cd.mismatches || [];
+      const high = mismatches.filter(m => m.severity === 'high');
+      const med = mismatches.filter(m => m.severity === 'medium');
+      let icon = high.length ? '\\u2717' : med.length ? '\\u26a0' : '\\u2713';
+      let cls = high.length ? 'log-discard' : 'log-keep';
+      awLog.innerHTML += '<div class="' + cls + '">' + icon + ' CoVe ' + score +
+        ' · ' + high.length + 'H/' + med.length + 'M mismatches</div>';
+    }}
+    else if (evt.type === 'verification') {{
+      // Standard verifier in the autowrite stream — emit a brief log line.
+      const vd = evt.data || {{}};
+      const grStr = (vd.groundedness_score != null) ? vd.groundedness_score.toFixed(2) : '?';
+      const hfStr = (vd.hedging_fidelity_score != null) ? vd.hedging_fidelity_score.toFixed(2) : '?';
+      awLog.innerHTML += '<div style="opacity:0.7;font-size:11px;">verify: gr=' + grStr + ' · hf=' + hfStr + '</div>';
     }}
     else if (evt.type === 'iteration_start') {{
       awContent.innerHTML = '';

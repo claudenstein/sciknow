@@ -31,6 +31,13 @@ app = typer.Typer(help="Manage book projects and chapter writing.")
 chapter_app = typer.Typer(help="Manage chapters within a book.")
 app.add_typer(chapter_app, name="chapter")
 
+# Track A measurement & observability commands.
+# `book draft scores <id>`, `book draft compare <a> <b>` — read autowrite
+# score history persisted to drafts.custom_metadata. `book autowrite-bench`
+# is a top-level command since it's a multi-run experiment, not a draft op.
+draft_app = typer.Typer(help="Inspect and compare saved drafts (Track A measurement).")
+app.add_typer(draft_app, name="draft")
+
 console = Console()
 
 
@@ -1456,3 +1463,462 @@ def _generate_bibtex(session, book_id: str) -> str:
         entries.append(entry)
 
     return "\n".join(entries)
+
+
+# ── Track A: draft inspection (scores, compare) ───────────────────────────────
+
+
+def _load_draft_metadata(draft_id: str) -> dict | None:
+    """Fetch a draft's row + custom_metadata. Accepts a UUID prefix."""
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+    with get_session() as session:
+        row = session.execute(text("""
+            SELECT id::text, title, section_type, topic, content, word_count,
+                   custom_metadata, created_at, version, model_used,
+                   book_id::text, chapter_id::text
+            FROM drafts WHERE id::text LIKE :q
+            ORDER BY created_at DESC
+            LIMIT 1
+        """), {"q": f"{draft_id}%"}).fetchone()
+    if not row:
+        return None
+    return {
+        "id": row[0], "title": row[1], "section_type": row[2],
+        "topic": row[3], "content": row[4], "word_count": row[5],
+        "custom_metadata": row[6] or {}, "created_at": row[7],
+        "version": row[8], "model_used": row[9],
+        "book_id": row[10], "chapter_id": row[11],
+    }
+
+
+def _format_score_cell(value, threshold_good: float = 0.85, threshold_mid: float = 0.7) -> str:
+    """Render a 0-1 score with color tags for Rich tables."""
+    if value is None or not isinstance(value, (int, float)):
+        return "[dim]—[/dim]"
+    color = "green" if value >= threshold_good else "yellow" if value >= threshold_mid else "red"
+    return f"[{color}]{value:.2f}[/{color}]"
+
+
+@draft_app.command(name="scores")
+def draft_scores(
+    draft_id: Annotated[str, typer.Argument(help="Draft ID or prefix.")],
+):
+    """
+    Show the iteration-by-iteration score history for an autowrite draft.
+
+    Reads custom_metadata.score_history (populated by autowrite_section_stream)
+    and prints a Rich table with one row per iteration showing all six scoring
+    dimensions, verification flag counts (extrapolated/overstated/missing),
+    Chain-of-Verification score if it ran, and the keep/discard verdict.
+
+    Drafts created by `book write` (not autowrite) won't have a score history —
+    only autowrite persists this data.
+
+    Example:
+
+      sciknow book draft scores 3f2a1b4c
+    """
+    from sciknow.cli import preflight
+    preflight(qdrant=False)
+
+    d = _load_draft_metadata(draft_id)
+    if not d:
+        console.print(f"[red]Draft not found: {draft_id}[/red]")
+        raise typer.Exit(1)
+
+    meta = d["custom_metadata"] or {}
+    history = meta.get("score_history") or []
+    feature_versions = meta.get("feature_versions") or {}
+
+    console.print(Rule(f"[bold]{d['title']}[/bold]"))
+    console.print(f"[dim]ID: {d['id']}  ·  v{d['version']}  ·  {d['word_count']} words  ·  {d['section_type']}[/dim]")
+    if feature_versions:
+        active = [k.replace("phase", "P").replace("_", " ")
+                  for k, v in feature_versions.items()
+                  if k.startswith("phase") and v]
+        if active:
+            console.print(f"[dim]Features active: {', '.join(active)}[/dim]")
+
+    if not history:
+        console.print(
+            "\n[yellow]No score history persisted on this draft.[/yellow]\n"
+            "[dim]Only autowrite drafts have a score history. Drafts created by "
+            "`book write` (without autowrite) record only the final state.[/dim]"
+        )
+        return
+
+    # Score table — one row per iteration.
+    table = Table(
+        title=f"Convergence trajectory · {len(history)} iteration(s)",
+        box=box.SIMPLE_HEAD,
+        expand=True,
+    )
+    table.add_column("Iter", style="bold", width=4)
+    table.add_column("Ground", justify="right", width=7)
+    table.add_column("Compl", justify="right", width=7)
+    table.add_column("Coher", justify="right", width=7)
+    table.add_column("CitAcc", justify="right", width=7)
+    table.add_column("HedFid", justify="right", width=7)
+    table.add_column("Overall", justify="right", width=8, style="bold")
+    table.add_column("Weakest", style="cyan", width=14)
+    table.add_column("Verify", style="dim", width=18)
+    table.add_column("CoVe", style="dim", width=12)
+    table.add_column("Verdict", width=10)
+
+    for h in history:
+        s = h.get("scores") or {}
+        v = h.get("verification") or {}
+        cove = h.get("cove") or {}
+        verify_short = ""
+        if v.get("n_extrapolated") or v.get("n_overstated") or v.get("n_misrepresented"):
+            parts = []
+            if v.get("n_extrapolated"):
+                parts.append(f"[yellow]{v['n_extrapolated']}E[/yellow]")
+            if v.get("n_overstated"):
+                parts.append(f"[orange1]{v['n_overstated']}O[/orange1]")
+            if v.get("n_misrepresented"):
+                parts.append(f"[red]{v['n_misrepresented']}M[/red]")
+            verify_short = " ".join(parts)
+        elif v.get("n_supported"):
+            verify_short = f"[green]{v['n_supported']}S[/green]"
+        cove_short = ""
+        if cove.get("ran"):
+            score = cove.get("score")
+            n_high = cove.get("n_high_severity", 0)
+            n_med = cove.get("n_medium_severity", 0)
+            score_s = f"{score:.2f}" if isinstance(score, (int, float)) else "?"
+            cove_short = score_s
+            if n_high or n_med:
+                cove_short += f" [red]{n_high}H[/red]/[yellow]{n_med}M[/yellow]"
+        verdict = h.get("revision_verdict") or ""
+        verdict_color = "green" if verdict == "KEEP" else "red" if verdict == "DISCARD" else "dim"
+        weakest = s.get("weakest_dimension", "")
+        table.add_row(
+            str(h.get("iteration", "?")),
+            _format_score_cell(s.get("groundedness")),
+            _format_score_cell(s.get("completeness")),
+            _format_score_cell(s.get("coherence")),
+            _format_score_cell(s.get("citation_accuracy")),
+            _format_score_cell(s.get("hedging_fidelity")),
+            _format_score_cell(s.get("overall")),
+            weakest[:14],
+            verify_short or "[dim]—[/dim]",
+            cove_short or "[dim]—[/dim]",
+            f"[{verdict_color}]{verdict or '—'}[/{verdict_color}]",
+        )
+
+    console.print(table)
+
+    # Improvement summary across iterations.
+    if len(history) >= 2:
+        first = history[0].get("scores") or {}
+        last = history[-1].get("scores") or {}
+        deltas = []
+        for dim in ("groundedness", "completeness", "coherence", "citation_accuracy",
+                    "hedging_fidelity", "overall"):
+            f, l = first.get(dim), last.get(dim)
+            if isinstance(f, (int, float)) and isinstance(l, (int, float)):
+                d = l - f
+                arrow = "↑" if d > 0.001 else "↓" if d < -0.001 else "="
+                color = "green" if d > 0.001 else "red" if d < -0.001 else "dim"
+                deltas.append(f"[{color}]{dim[:8]}: {f:.2f} {arrow} {l:.2f}[/{color}]")
+        if deltas:
+            console.print()
+            console.print("[bold]Δ first → last:[/bold]  " + "  ·  ".join(deltas))
+
+    final = meta.get("final_overall")
+    if final is not None:
+        console.print(f"\n[dim]Final overall: {final:.3f}  ·  target: {meta.get('target_score', '?')}  ·  max_iter: {meta.get('max_iter', '?')}[/dim]")
+
+
+@draft_app.command(name="compare")
+def draft_compare(
+    draft_a: Annotated[str, typer.Argument(help="First draft ID or prefix.")],
+    draft_b: Annotated[str, typer.Argument(help="Second draft ID or prefix.")],
+    rescore: bool = typer.Option(
+        False, "--rescore",
+        help="Re-run the scorer + verifier against fresh retrieval. Slow but accurate.",
+    ),
+    model: str | None = typer.Option(None, "--model", help="LLM for rescoring."),
+):
+    """
+    Compare two drafts side-by-side.
+
+    By default reads the persisted score history from custom_metadata
+    (no LLM calls). With --rescore, re-runs the scorer + verifier against
+    fresh retrieval for both drafts so the comparison reflects the CURRENT
+    rubric (useful for comparing pre- and post-Phase-7 drafts).
+
+    Example:
+
+      sciknow book draft compare 3f2a1b 8d4c2f          # fast, persisted only
+      sciknow book draft compare 3f2a1b 8d4c2f --rescore  # accurate, runs LLM
+    """
+    from sciknow.cli import preflight
+    preflight(qdrant=False)
+
+    a = _load_draft_metadata(draft_a)
+    b = _load_draft_metadata(draft_b)
+    if not a:
+        console.print(f"[red]Draft A not found: {draft_a}[/red]")
+        raise typer.Exit(1)
+    if not b:
+        console.print(f"[red]Draft B not found: {draft_b}[/red]")
+        raise typer.Exit(1)
+
+    def _final_scores(d: dict) -> dict:
+        meta = d.get("custom_metadata") or {}
+        history = meta.get("score_history") or []
+        if history:
+            return (history[-1] or {}).get("scores") or {}
+        return {}
+
+    if rescore:
+        preflight(qdrant=True)
+        from sciknow.core import book_ops
+        from sciknow.rag import prompts as rag_prompts
+        from sciknow.rag.llm import complete as llm_complete
+        from sciknow.storage.db import get_session
+        from sciknow.storage.qdrant import get_client
+        qdrant = get_client()
+
+        def _rescore(d: dict) -> dict:
+            console.print(f"[dim]Rescoring {d['title'][:60]}...[/dim]")
+            with get_session() as session:
+                results, _sources = book_ops._retrieve(
+                    session, qdrant,
+                    f"{d['section_type'] or ''} {d['topic'] or d['title']}",
+                    candidate_k=50, context_k=12,
+                )
+            if not results:
+                return {}
+            sys_s, usr_s = rag_prompts.score_draft(
+                d['section_type'] or "text", d['topic'] or d['title'],
+                d['content'], results,
+            )
+            try:
+                raw = llm_complete(sys_s, usr_s, model=model, temperature=0.0, num_ctx=16384)
+                return _json.loads(book_ops._clean_json(raw), strict=False)
+            except Exception as exc:
+                console.print(f"[red]Rescoring failed: {exc}[/red]")
+                return {}
+
+        a_scores = _rescore(a)
+        b_scores = _rescore(b)
+    else:
+        a_scores = _final_scores(a)
+        b_scores = _final_scores(b)
+        if not a_scores and not b_scores:
+            console.print(
+                "[yellow]Neither draft has persisted score history.[/yellow]  "
+                "Re-run with [bold]--rescore[/bold] to evaluate them with the current rubric."
+            )
+            return
+
+    console.print(Rule("[bold]Draft comparison[/bold]"))
+    table = Table(box=box.SIMPLE_HEAD, expand=True)
+    table.add_column("Dimension", style="bold", width=18)
+    table.add_column(f"A: {a['title'][:28]}", justify="right")
+    table.add_column(f"B: {b['title'][:28]}", justify="right")
+    table.add_column("Δ (B − A)", justify="right")
+
+    for dim in ("groundedness", "completeness", "coherence", "citation_accuracy",
+                "hedging_fidelity", "overall"):
+        va = a_scores.get(dim)
+        vb = b_scores.get(dim)
+        if isinstance(va, (int, float)) and isinstance(vb, (int, float)):
+            d = vb - va
+            color = "green" if d > 0.001 else "red" if d < -0.001 else "dim"
+            arrow = "↑" if d > 0.001 else "↓" if d < -0.001 else "="
+            delta_str = f"[{color}]{arrow} {d:+.3f}[/{color}]"
+        else:
+            delta_str = "[dim]—[/dim]"
+        table.add_row(
+            dim,
+            _format_score_cell(va),
+            _format_score_cell(vb),
+            delta_str,
+        )
+
+    console.print(table)
+    console.print(
+        f"\n[dim]A: {a['id'][:8]} v{a['version']} · {a['word_count']} words · {a['model_used'] or '?'}[/dim]"
+    )
+    console.print(
+        f"[dim]B: {b['id'][:8]} v{b['version']} · {b['word_count']} words · {b['model_used'] or '?'}[/dim]"
+    )
+
+    # Feature-version delta if both have it
+    a_meta = a.get("custom_metadata") or {}
+    b_meta = b.get("custom_metadata") or {}
+    a_feat = a_meta.get("feature_versions") or {}
+    b_feat = b_meta.get("feature_versions") or {}
+    if a_feat or b_feat:
+        diffs = []
+        for k in sorted(set(a_feat.keys()) | set(b_feat.keys())):
+            if a_feat.get(k) != b_feat.get(k):
+                diffs.append(f"{k}: A={a_feat.get(k)} → B={b_feat.get(k)}")
+        if diffs:
+            console.print(f"\n[dim]Feature differences:[/dim]")
+            for d in diffs:
+                console.print(f"  [dim]· {d}[/dim]")
+
+
+@app.command(name="autowrite-bench")
+def autowrite_bench(
+    book_ref: Annotated[str, typer.Argument(help="Book title fragment or ID.")],
+    chapter_ref: Annotated[str, typer.Argument(help="Chapter number or title fragment.")],
+    section_type: Annotated[str, typer.Argument(help="Section type (e.g. 'overview', 'key_evidence').")],
+    runs: int = typer.Option(3, "--runs", "-n", help="How many independent autowrite runs."),
+    max_iter: int = typer.Option(2, "--max-iter", help="max_iter passed to each autowrite run."),
+    target_score: float = typer.Option(0.85, "--target-score", help="target_score passed to each run."),
+    model: str | None = typer.Option(None, "--model", help="LLM model override."),
+    use_cove: bool = typer.Option(True, "--cove/--no-cove"),
+    use_step_back: bool = typer.Option(True, "--step-back/--no-step-back"),
+    use_plan: bool = typer.Option(True, "--plan/--no-plan"),
+):
+    """
+    Run autowrite N times under identical conditions and report variance.
+
+    Useful for measuring scorer/verifier stability and validating that the
+    convergence loop is well-calibrated. Each run's score history is saved
+    to data/bench/<timestamp>/run_N.json so you can inspect them later.
+
+    The output is a Rich table with mean ± std for each scoring dimension
+    across runs, plus per-run wall time. If the std is high relative to
+    the mean, the loop is noisy — either bump max_iter or accept the noise
+    as the floor for A/B comparisons.
+
+    Example:
+
+      sciknow book autowrite-bench "Global Cooling" 3 overview --runs 5
+      sciknow book autowrite-bench "Global Cooling" 3 overview --no-cove
+    """
+    from sciknow.cli import preflight
+    preflight()
+
+    from datetime import datetime
+    from sciknow.core import book_ops
+    from sciknow.storage.db import get_session
+
+    with get_session() as session:
+        book = _get_book(session, book_ref)
+        if not book:
+            console.print(f"[red]Book not found: {book_ref}[/red]")
+            raise typer.Exit(1)
+        ch = _get_chapter(session, book[0], chapter_ref)
+        if not ch:
+            console.print(f"[red]Chapter not found: {chapter_ref}[/red]")
+            raise typer.Exit(1)
+        book_id = book[0]
+        ch_id = ch[0]
+        ch_num = ch[1]
+        ch_title = ch[2]
+
+    bench_dir = Path("data/bench") / datetime.now().strftime("%Y%m%d-%H%M%S")
+    bench_dir.mkdir(parents=True, exist_ok=True)
+
+    console.print(Rule(f"[bold]autowrite-bench[/bold] · Ch.{ch_num} {ch_title} — {section_type}"))
+    console.print(f"[dim]{runs} runs · max_iter={max_iter} · target={target_score} · cove={use_cove} · step_back={use_step_back} · plan={use_plan}[/dim]")
+    console.print(f"[dim]Output: {bench_dir}[/dim]\n")
+
+    import time as _time
+    runs_data = []
+
+    for run_idx in range(1, runs + 1):
+        console.print(f"[bold cyan]Run {run_idx}/{runs}[/bold cyan]")
+        t0 = _time.monotonic()
+        run_history = []
+        final_scores = None
+        final_overall = None
+        last_error = None
+
+        try:
+            for ev in book_ops.autowrite_section_stream(
+                book_id=book_id,
+                chapter_id=ch_id,
+                section_type=section_type,
+                model=model,
+                max_iter=max_iter,
+                target_score=target_score,
+                use_plan=use_plan,
+                use_step_back=use_step_back,
+                use_cove=use_cove,
+                auto_expand=False,
+            ):
+                t = ev.get("type")
+                if t == "scores":
+                    final_scores = ev.get("scores", {})
+                    final_overall = final_scores.get("overall")
+                elif t == "completed":
+                    run_history = ev.get("history") or []
+                    final_overall = ev.get("final_score") or final_overall
+                elif t == "error":
+                    last_error = ev.get("message", "unknown")
+                    console.print(f"  [red]Error: {last_error}[/red]")
+                    break
+        except Exception as exc:
+            last_error = str(exc)
+            console.print(f"  [red]Run {run_idx} crashed: {exc}[/red]")
+
+        elapsed = _time.monotonic() - t0
+        run_data = {
+            "run_idx": run_idx,
+            "elapsed_sec": round(elapsed, 1),
+            "final_scores": final_scores,
+            "final_overall": final_overall,
+            "n_iterations": len(run_history),
+            "history": run_history,
+            "error": last_error,
+        }
+        runs_data.append(run_data)
+
+        # Persist this run.
+        out_file = bench_dir / f"run_{run_idx:02d}.json"
+        out_file.write_text(_json.dumps(run_data, indent=2, default=str))
+        if final_overall is not None:
+            console.print(f"  [green]→ overall {final_overall:.3f} in {elapsed:.0f}s ({len(run_history)} iter)[/green]")
+        elif last_error:
+            console.print(f"  [red]→ failed in {elapsed:.0f}s[/red]")
+
+    # Summary table — mean ± std across runs
+    import statistics
+    successful = [r for r in runs_data if r.get("final_scores")]
+    if not successful:
+        console.print("\n[red]All runs failed.[/red]")
+        return
+
+    console.print()
+    table = Table(title=f"Bench summary · {len(successful)}/{runs} runs successful",
+                  box=box.SIMPLE_HEAD, expand=True)
+    table.add_column("Dimension", style="bold")
+    table.add_column("Mean", justify="right")
+    table.add_column("Std", justify="right")
+    table.add_column("Min", justify="right")
+    table.add_column("Max", justify="right")
+
+    for dim in ("groundedness", "completeness", "coherence", "citation_accuracy",
+                "hedging_fidelity", "overall"):
+        vals = [r["final_scores"].get(dim) for r in successful if r["final_scores"]]
+        vals = [v for v in vals if isinstance(v, (int, float))]
+        if not vals:
+            table.add_row(dim, "—", "—", "—", "—")
+            continue
+        mean_v = statistics.mean(vals)
+        std_v = statistics.stdev(vals) if len(vals) > 1 else 0.0
+        table.add_row(
+            dim,
+            _format_score_cell(mean_v),
+            f"{std_v:.3f}",
+            _format_score_cell(min(vals)),
+            _format_score_cell(max(vals)),
+        )
+
+    console.print(table)
+
+    elapsed_total = sum(r["elapsed_sec"] for r in runs_data)
+    avg_elapsed = elapsed_total / max(len(runs_data), 1)
+    console.print(
+        f"\n[dim]Total wall time: {elapsed_total:.0f}s  ·  avg per run: {avg_elapsed:.0f}s  ·  results in {bench_dir}[/dim]"
+    )

@@ -99,6 +99,76 @@ v4: groun=0.88  compl=0.83  coher=0.87  citat=0.85  overall=0.86  CONVERGED
 
 ---
 
+## Measurement & Observability (Phase 13)
+
+After Phases 7–12 added six new techniques to the autowrite pipeline (hedging fidelity, entity-bridge rule, PDTB discourse plan, step-back retrieval, Chain-of-Verification, RAPTOR), Phase 13 added the tools you need to verify those features are actually moving the needle on your corpus.
+
+### Per-iteration score history is persisted automatically
+
+Every `autowrite` run now writes its full convergence trajectory to `drafts.custom_metadata` (the existing JSONB column). You don't need to enable this — it just happens. The persisted shape:
+
+```json
+{
+  "score_history": [
+    {
+      "iteration": 1,
+      "scores": {"groundedness": 0.78, "completeness": 0.65, "coherence": 0.82, "citation_accuracy": 0.85, "hedging_fidelity": 0.72, "overall": 0.76, "weakest_dimension": "completeness"},
+      "verification": {"groundedness_score": 0.78, "hedging_fidelity_score": 0.72, "n_supported": 8, "n_extrapolated": 2, "n_overstated": 3, "n_misrepresented": 0},
+      "cove": {"ran": true, "score": 0.71, "n_high_severity": 1, "n_medium_severity": 2, "questions_asked": 7},
+      "revision_verdict": "KEEP",
+      "post_revision_overall": 0.83
+    }
+  ],
+  "feature_versions": {"phase7_hedging_fidelity": true, "phase11_chain_of_verification": true, "phase12_raptor_retrieval": true, ...},
+  "final_overall": 0.85,
+  "max_iter": 3,
+  "target_score": 0.85
+}
+```
+
+### `sciknow book draft scores <draft_id>`
+
+Print the iteration-by-iteration convergence trajectory for a draft. Shows all six scoring dimensions, verification flag counts, CoVe results, and revision verdicts. The bottom line is a "Δ first → last" summary so you can see at a glance which dimensions improved.
+
+```bash
+sciknow book draft scores 3f2a1b4c
+```
+
+If the draft has no persisted history (e.g. it was made by `book write` instead of autowrite, or it predates Phase 13), the command tells you so without crashing.
+
+### `sciknow book draft compare <draft_a> <draft_b>`
+
+Side-by-side comparison of two drafts. Default mode reads the persisted final scores from `custom_metadata` (instant, no LLM calls). With `--rescore`, re-runs the scorer + verifier against fresh retrieval for both drafts so the comparison reflects the **current** rubric — useful for checking whether a new-features draft scores better than an old draft on the modern criteria.
+
+```bash
+sciknow book draft compare 3f2a1b 8d4c2f             # fast — persisted scores only
+sciknow book draft compare 3f2a1b 8d4c2f --rescore   # accurate — runs LLM
+```
+
+The output is a delta table with green/red arrows for each dimension, plus a list of feature-version differences (e.g. "B was made with phase11_chain_of_verification: true, A wasn't").
+
+### `sciknow book autowrite-bench`
+
+Run autowrite N times under identical conditions on the same chapter and section, capture every run's history to `data/bench/<timestamp>/run_NN.json`, and print a mean ± std summary table across runs.
+
+```bash
+sciknow book autowrite-bench "Global Cooling" 3 overview --runs 5
+sciknow book autowrite-bench "Global Cooling" 3 overview --no-cove   # disable CoVe
+sciknow book autowrite-bench "Global Cooling" 3 overview --no-step-back --no-plan
+```
+
+This is the variance-measurement tool. If `std` is high relative to the differences you're chasing in `book draft compare`, the autowrite loop is too noisy for confident A/B comparisons and you should bump `--max-iter` or accept that floor. If `std` is low, the loop is well-calibrated and small score deltas can be trusted.
+
+**Suggested workflow when validating a new feature:**
+
+1. Pick a chapter section that has a saved draft and stable retrieval results.
+2. `autowrite-bench --runs 5 --no-<feature>` to get the baseline mean ± std.
+3. `autowrite-bench --runs 5` (with the feature) to get the new mean ± std.
+4. If the new mean is more than 2σ above the baseline, the feature helped.
+5. If not, the feature is either ineffective on your corpus or the variance is too high — increase `--runs` or `--max-iter`.
+
+---
+
 ## Web Reader (`book serve`)
 
 `sciknow book serve "Global Cooling"` launches a local web application at `http://127.0.0.1:8765` with:
@@ -112,7 +182,8 @@ v4: groun=0.88  compl=0.83  coher=0.87  citat=0.85  overall=0.86  CONVERGED
 - **Enhanced editor** — split-pane markdown editor with live preview, toolbar for bold/italic/headings/citations, auto-saves every 5 seconds
 - **Autowrite dashboard** — live SVG convergence chart, color-coded score bars, decision log, stop button
 - **Citation popovers** — hover over `[N]` to see paper title, authors, year, journal
-- **Claim verification** — green/yellow/red per-citation indicators with groundedness score
+- **Claim verification** — green/yellow/orange/red per-citation indicators (`SUPPORTED` / `EXTRAPOLATED` / `OVERSTATED` / `MISREPRESENTED`) with groundedness score AND hedging-fidelity score (Phase 7)
+- **CoVe panel** — when Chain-of-Verification fires (Phase 11), the autowrite stream surfaces a CoVe summary line with the score and the count of high/medium-severity mismatches
 - **Argument map** — SVG diagram: central claim node, green (supports), red (contradicts), gray (neutral)
 - **Corkboard view** — Scrivener-inspired card layout, color-coded by status
 - **Chapter reader** — all sections concatenated as one continuous scroll

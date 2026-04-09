@@ -467,9 +467,59 @@ The writer gains access to mid-level abstractions ("CMIP6 generally underestimat
 
 ---
 
+## 20. Measurement & Observability (Track A)
+
+**Status:** Production
+
+After shipping six new techniques in Phases 7–12, there was no way to objectively know whether any of them were actually moving the needle on a real corpus. Track A closes that gap with three commands and a persistence change — enough to make the next round of feature decisions data-driven instead of vibes-driven.
+
+### Per-iteration score history persistence
+
+`autowrite_section_stream` now records a structured per-iteration history dict capturing:
+
+- All six scoring dimensions (groundedness, completeness, coherence, citation_accuracy, hedging_fidelity, overall)
+- The verification flag counts (`n_supported`, `n_extrapolated`, `n_overstated`, `n_misrepresented`) and the verifier's `groundedness_score` / `hedging_fidelity_score`
+- The Chain-of-Verification result if it ran (`cove_score`, `n_high_severity`, `n_medium_severity`, `questions_asked`)
+- The revision verdict (`KEEP` / `DISCARD`) and the post-revision overall score
+- A `feature_versions` dict identifying which Phase 7–12 features were active at write time
+
+This is persisted to the existing `drafts.custom_metadata` JSONB column — **no schema migration required**, the column already had `server_default="{}"`. The persistence happens in `_save_draft` via a new `custom_metadata` kwarg.
+
+### `sciknow book draft scores <draft_id>`
+
+Reads back the persisted history and prints a per-iteration Rich table with all six dimensions, verification flag counts, CoVe results, and the keep/discard verdict. Shows a "Δ first → last" line so you can see at a glance which dimensions improved across the convergence loop.
+
+### `sciknow book draft compare <draft_id_a> <draft_id_b>`
+
+Compares two drafts side-by-side. Default mode reads the persisted final scores from `custom_metadata` (instant, no LLM calls). With `--rescore`, re-runs the scorer + verifier against fresh retrieval for both drafts so the comparison reflects the **current** rubric — useful for comparing pre-Phase-7 drafts against new ones on the same modern scoring criteria. The output is a side-by-side delta table with feature-version differences listed at the bottom.
+
+### `sciknow book autowrite-bench`
+
+Runs `autowrite_section_stream` N times under identical conditions on the same chapter and section, captures every run's history to `data/bench/<timestamp>/run_NN.json`, and prints a summary table with mean ± std for each scoring dimension across runs.
+
+This is the variance-measurement tool: if `std` is high relative to the differences you're measuring in `book draft compare`, the loop is too noisy for confident A/B and you should bump `--max-iter` or accept the noise as the floor. If `std` is low, the loop is well-calibrated and small score deltas can be trusted.
+
+### Web reader
+
+`sciknow/web/app.py` now displays `hedging_fidelity_score` alongside `groundedness_score` in the verification panel, renders `OVERSTATED` claims in orange (distinct from yellow `EXTRAPOLATED` and red `MISREPRESENTED`), surfaces `cove_verification` events from the autowrite SSE stream as a CoVe summary line, and shows the new `hedging_fidelity` dimension in the convergence chart.
+
+### Why this is in the research doc
+
+Measurement isn't a research technique per se, but it's the lever that makes every future research decision sound. After this lands, "should we ship CARS chapter moves next?" stops being a guess and becomes "let's run `autowrite-bench` with and without CARS on a control chapter and see if the `coherence` mean shifts more than the variance."
+
+---
+
 ## Planned (Researched, Implementation Pending)
 
-The roadmap items from the 2026-04 lit sweep are now all shipped (Phases 7–12). Future research notes will land here as they accumulate.
+The roadmap items from the 2026-04 lit sweep are now all shipped (Phases 7–12). Track A measurement landed in Phase 13. Future research notes will accumulate here as they're identified.
+
+Likely next-up candidates (in priority order, from the original lit sweep's runners-up):
+
+1. **CARS-adapted chapter moves** (Swales 1990 + Yang & Allison 2003) — 5-move scaffold (Orient → Tension → Evidence → Qualify → Integrate). Cost: prompt + ~20 lines. Linguistics runner-up #1.
+2. **LongCite-style sentence citations** (THUDM 2024) — sentence-level grounding with span match for ALCE-compatible `citation_f1`. CS runner-up.
+3. **Toulmin scaffolds** for paragraphs the planner labels `Tension` (claim/data/warrant/qualifier/rebuttal). Linguistics runner-up #2.
+4. **MADAM-RAG** for paragraphs the argument-mapper flags as contradiction-heavy (Wang+ COLM 2025). CS runner-up.
+5. **Soft RAPTOR clustering** — use the GMM `proba` matrix the build already computes to allow chunks to contribute to multiple cluster summaries above a probability threshold. Polish on Phase 12.
 
 ---
 
@@ -539,4 +589,5 @@ Phase 9:  PDTB-lite discourse plan  → discourse_relation per paragraph in tree
 Phase 10: Step-back retrieval       → abstract reformulation augments concrete query
 Phase 11: Chain-of-Verification     → decoupled fact-check questions, gated on score thresholds
 Phase 12: RAPTOR hierarchical tree  → UMAP+GMM clustering, LLM cluster summaries as level-N nodes
+Phase 13: Track A measurement       → score history persistence, draft scores/compare/autowrite-bench
 ```

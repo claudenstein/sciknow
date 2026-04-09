@@ -80,15 +80,15 @@ def _auto_summarize(content: str, section_type: str, chapter_title: str, model: 
 
 def _save_draft(session, *, title, book_id, chapter_id, section_type, topic,
                 content, sources, model, summary=None, parent_draft_id=None,
-                review_feedback=None, version=1):
+                review_feedback=None, version=1, custom_metadata=None):
     from sqlalchemy import text
     row = session.execute(text("""
         INSERT INTO drafts (title, book_id, chapter_id, section_type, topic, content,
                             word_count, sources, model_used, version, summary,
-                            parent_draft_id, review_feedback)
+                            parent_draft_id, review_feedback, custom_metadata)
         VALUES (:title, :book_id, :chapter_id, :section, :topic, :content,
                 :wc, :sources::jsonb, :model, :version, :summary,
-                :parent_id, :review_feedback)
+                :parent_id, :review_feedback, :metadata::jsonb)
         RETURNING id::text
     """), {
         "title": title, "book_id": book_id, "chapter_id": chapter_id,
@@ -97,6 +97,7 @@ def _save_draft(session, *, title, book_id, chapter_id, section_type, topic,
         "sources": json.dumps(sources or []),
         "model": model, "version": version, "summary": summary,
         "parent_id": parent_draft_id, "review_feedback": review_feedback,
+        "metadata": json.dumps(custom_metadata or {}),
     })
     session.commit()
     result = row.fetchone()
@@ -1077,7 +1078,50 @@ def autowrite_section_stream(
         weakest = scores.get("weakest_dimension", "unknown")
         instruction = scores.get("revision_instruction", "Improve the draft.")
         missing = scores.get("missing_topics", [])
-        history.append(scores)
+        # Persist a richer history entry — not just the raw score dict, but
+        # also the verification flag counts and the iteration index. This is
+        # what `book draft scores` later reads back from custom_metadata.
+        # vdata may be undefined if verification raised; locals() check is the
+        # right way to detect that without depending on prior assignment.
+        vdata_local = locals().get("vdata") or {}
+        cove_local = locals().get("cove") or {}
+        claims_local = vdata_local.get("claims") or []
+        history_entry = {
+            "iteration": iteration + 1,
+            "scores": dict(scores),
+            "verification": {
+                "groundedness_score": vdata_local.get("groundedness_score"),
+                "hedging_fidelity_score": vdata_local.get("hedging_fidelity_score"),
+                "n_supported": sum(
+                    1 for c in claims_local if c.get("verdict") == "SUPPORTED"
+                ),
+                "n_extrapolated": sum(
+                    1 for c in claims_local if c.get("verdict") == "EXTRAPOLATED"
+                ),
+                "n_overstated": sum(
+                    1 for c in claims_local if c.get("verdict") == "OVERSTATED"
+                ),
+                "n_misrepresented": sum(
+                    1 for c in claims_local if c.get("verdict") == "MISREPRESENTED"
+                ),
+            },
+            "cove": {
+                "ran": bool(cove_local.get("questions_asked", 0)),
+                "score": cove_local.get("cove_score"),
+                "questions_asked": cove_local.get("questions_asked", 0),
+                "n_high_severity": sum(
+                    1 for m in (cove_local.get("mismatches") or [])
+                    if m.get("severity") == "high"
+                ),
+                "n_medium_severity": sum(
+                    1 for m in (cove_local.get("mismatches") or [])
+                    if m.get("severity") == "medium"
+                ),
+            },
+            "revision_verdict": None,  # filled in below if a revision happens
+            "post_revision_overall": None,
+        }
+        history.append(history_entry)
 
         yield {"type": "scores", "scores": scores, "iteration": iteration + 1}
 
@@ -1135,13 +1179,45 @@ def autowrite_section_stream(
                    "old_score": overall, "new_score": new_overall}
             content = revised
             overall = new_overall
+            if history:
+                history[-1]["revision_verdict"] = "KEEP"
+                history[-1]["post_revision_overall"] = new_overall
         else:
             yield {"type": "revision_verdict", "action": "DISCARD",
                    "old_score": overall, "new_score": new_overall}
+            if history:
+                history[-1]["revision_verdict"] = "DISCARD"
+                history[-1]["post_revision_overall"] = new_overall
 
     # Step 3: Save
     yield {"type": "progress", "stage": "saving", "detail": "Saving final draft..."}
     summary = _auto_summarize(content, section_type, ch_title, model=model)
+
+    # Track A: persist the full score history + which features were enabled
+    # so that `book draft scores` can replay the convergence trajectory and
+    # `book draft compare` can attribute improvements to specific features.
+    feature_versions = {
+        "use_plan": use_plan,
+        "use_step_back": use_step_back,
+        "use_cove": use_cove,
+        "cove_threshold": cove_threshold,
+        # The phase markers below are static — they identify which prompt-level
+        # features were active at the time of writing. Bumping them is the
+        # signal that a draft predates a particular phase.
+        "phase7_hedging_fidelity": True,
+        "phase8_entity_bridge": True,
+        "phase9_pdtb_discourse_relations": True,
+        "phase10_step_back_retrieval": True,
+        "phase11_chain_of_verification": True,
+        "phase12_raptor_retrieval": True,
+    }
+    persisted_metadata = {
+        "score_history": history,
+        "feature_versions": feature_versions,
+        "final_overall": overall,
+        "max_iter": max_iter,
+        "target_score": target_score,
+    }
 
     draft_title = f"Ch.{ch_num} {ch_title} — {section_type.capitalize()} (autowrite)"
     with get_session() as session:
@@ -1150,6 +1226,7 @@ def autowrite_section_stream(
             section_type=section_type, topic=topic, content=content,
             sources=sources, model=model, summary=summary,
             version=len(history) + 1,
+            custom_metadata=persisted_metadata,
         )
 
     yield {
