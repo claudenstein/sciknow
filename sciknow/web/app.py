@@ -1980,6 +1980,15 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .hm-cell.off-template {{ background: transparent; color: var(--fg-faint); opacity: 0.4;
                          min-width: auto; padding: 4px 6px; cursor: default; }}
 .hm-cell.empty.off-template {{ opacity: 0.2; }}
+/* Phase 14.5 — heatmap header with inline link to the book plan */
+.heatmap-header {{ display: flex; align-items: center; justify-content: space-between;
+                   margin-bottom: 4px; gap: var(--sp-3); }}
+.heatmap-header h3 {{ margin: 0; }}
+.btn-link {{ background: transparent; border: 1px solid var(--border);
+            color: var(--accent); padding: 4px 12px; font-size: 12px;
+            font-weight: 500; border-radius: var(--r-md); cursor: pointer;
+            transition: all .12s; display: inline-flex; align-items: center; gap: 4px; }}
+.btn-link:hover {{ background: var(--accent-light); border-color: var(--accent); }}
 .hm-cell {{ border-radius: 4px; padding: 4px 8px; cursor: pointer; display: inline-block;
             min-width: 44px; font-size: 11px; }}
 .hm-cell.reviewed {{ background: var(--success); color: white; }}
@@ -2916,8 +2925,13 @@ async function showDashboard() {{
   }}
 
   // Heatmap — Phase 14.4 — book-style section columns from real data
-  html += '<h3 style="margin-bottom:8px;">Completion Heatmap</h3>';
-  html += '<p style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;">Click a chapter title to edit its scope. Click an empty cell to write that section. Click a filled cell to open the draft.</p>';
+  // Phase 14.5 — heatmap header now includes a Plan link so the leitmotiv
+  // is one click away from the dashboard.
+  html += '<div class="heatmap-header">';
+  html += '<h3>Completion Heatmap</h3>';
+  html += '<button class="btn-link" onclick="openPlanModal()" title="View, edit, or regenerate the book plan (the leitmotiv)">&#128221; Book Plan</button>';
+  html += '</div>';
+  html += '<p style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;">Click a chapter title to edit its scope. Click an empty cell to write that section. Click a filled cell to open the draft. The <strong>&#128221; Book Plan</strong> link above opens the leitmotiv editor.</p>';
   html += '<table class="heatmap"><thead><tr><th></th>';
   data.section_types.forEach(st => {{
     // Show the full section name (replacing underscores with spaces) but
