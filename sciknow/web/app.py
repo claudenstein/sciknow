@@ -1296,6 +1296,39 @@ def _render_book(book, chapters, drafts, gaps, comments,
         active_sources = json.loads(active_draft[5]) if isinstance(active_draft[5], str) else (active_draft[5] or [])
         active_review = active_draft[8] or ""
         active_comments = draft_comments.get(active_id, [])
+    else:
+        # Phase 14.2 — Empty-state landing for fresh books with no drafts.
+        # Without this, users see a blank page and clicking toolbar buttons
+        # silently fails because currentDraftId / currentChapterId are empty.
+        if chapters:
+            active_title = book[1] if book else "Untitled book"
+            active_html = (
+                '<div class="empty-state">'
+                '<h3>Welcome to your book</h3>'
+                f'<p>This book has <strong>{len(chapters)} chapters</strong> outlined and '
+                '<strong>0 drafts</strong>. To start writing, click any chapter title in the sidebar '
+                '(it will highlight) and then use the toolbar above. The fastest path to a first draft '
+                'is to click the <strong>&#9889; Autowrite</strong> button after selecting a chapter '
+                '&mdash; it will run the full write &rarr; review &rarr; revise convergence loop.</p>'
+                '<p>You can also explore the corpus without writing anything: '
+                '<strong>&#128270; Ask Corpus</strong>, <strong>&#128218; Wiki Query</strong>, '
+                'and <strong>&#128194; Browse Papers</strong> all work without an active draft.</p>'
+                '<p style="font-size:12px;color:var(--fg-faint);">Tip: each chapter in the sidebar now '
+                'has a <span style="color:var(--accent);">&#9998; Start writing</span> shortcut '
+                'that selects the chapter and immediately drafts an overview.</p>'
+                '</div>'
+            )
+        else:
+            active_title = book[1] if book else "Untitled book"
+            active_html = (
+                '<div class="empty-state">'
+                '<h3>This book has no chapters yet</h3>'
+                '<p>Run <code>uv run sciknow book outline "your topic" "Book Title"</code> '
+                'in your terminal to generate a chapter outline from the literature, '
+                'or use <code>sciknow book chapter add</code> to add chapters one at a time. '
+                'Then refresh this page.</p>'
+                '</div>'
+            )
 
     open_gaps = [g for g in gaps if g[3] == "open"]
 
@@ -1332,9 +1365,13 @@ def _render_sidebar(items, active_id):
     html = ""
     for ch in items:
         html += f'<div class="ch-group" data-ch-id="{ch["id"]}">'
-        html += (f'<div class="ch-title">Ch.{ch["num"]}: {ch["title"]}'
+        # Phase 14.2 — chapter title is now clickable to SELECT the chapter
+        # (sets currentChapterId so toolbar buttons like Write work even
+        # when there are no drafts yet).
+        html += (f'<div class="ch-title clickable" onclick="selectChapter(this.parentElement)">'
+                 f'Ch.{ch["num"]}: {ch["title"]}'
                  f'<span class="ch-actions">'
-                 f'<button onclick="deleteChapter(\'{ch["id"]}\')" title="Delete chapter">\u2717</button>'
+                 f'<button onclick="event.stopPropagation();deleteChapter(this.closest(&quot;.ch-group&quot;).dataset.chId)" title="Delete chapter">\u2717</button>'
                  f'</span></div>')
         for sec in ch["sections"]:
             active = "active" if sec["id"] == active_id else ""
@@ -1345,7 +1382,13 @@ def _render_sidebar(items, active_id):
                 f'<span class="meta">v{sec["version"]} \u00b7 {sec["words"]}w</span></a>'
             )
         if not ch["sections"]:
-            html += '<div class="sec-link empty">No drafts yet</div>'
+            # Phase 14.2 — explicit "Start writing" CTA so empty chapters
+            # have a one-click path to create a first draft.
+            html += (
+                f'<div class="sec-link sec-empty-cta" '
+                f'onclick="startWritingChapter(&quot;{ch["id"]}&quot;)">'
+                f'\u270e Start writing</div>'
+            )
         html += '</div>'
     return html
 
@@ -1640,6 +1683,34 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
                           border-radius: var(--r-sm); font-size: 10px; text-align: center;
                           color: var(--fg-muted); }}
 .raptor-bar .raptor-lvl strong {{ display: block; font-size: 13px; color: var(--accent); }}
+/* Phase 14.2 — empty-state UX for chapters without drafts */
+.ch-title.clickable {{ cursor: pointer; transition: color .12s; }}
+.ch-title.clickable:hover {{ color: var(--accent); }}
+.ch-group.selected .ch-title {{ color: var(--accent); }}
+.ch-group.selected {{ background: var(--accent-light); border-radius: var(--r-sm); }}
+[data-theme="dark"] .ch-group.selected {{ background: rgba(129, 140, 248, 0.08); }}
+.sec-link.sec-empty-cta {{ color: var(--accent); font-style: normal; cursor: pointer;
+                           font-weight: 500; opacity: 0.85; }}
+.sec-link.sec-empty-cta:hover {{ background: var(--accent-light); opacity: 1; }}
+.empty-state {{ padding: var(--sp-6) var(--sp-5); border: 1px dashed var(--border-strong);
+                border-radius: var(--r-xl); background: var(--toolbar-bg); margin-top: var(--sp-3); }}
+.empty-state h3 {{ font-size: 18px; font-weight: 600; margin-bottom: var(--sp-3);
+                  color: var(--fg); }}
+.empty-state p {{ font-family: var(--font-sans); font-size: 14px; line-height: 1.6;
+                 color: var(--fg-muted); margin-bottom: var(--sp-3); text-align: left; }}
+.empty-section-picker {{ display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-top: var(--sp-4); }}
+.section-chip {{ font-size: 12px; padding: 6px 14px; border: 1px solid var(--border);
+                background: var(--bg); color: var(--fg); border-radius: 999px;
+                cursor: pointer; transition: all .12s; }}
+.section-chip:hover {{ border-color: var(--accent); color: var(--accent); }}
+.section-chip.active {{ background: var(--accent); color: var(--accent-fg);
+                        border-color: var(--accent); }}
+.empty-hint {{ position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+              background: var(--bg-elevated); color: var(--fg); border: 1px solid var(--border);
+              box-shadow: var(--shadow-lg); padding: var(--sp-3) var(--sp-4);
+              border-radius: var(--r-lg); z-index: 2000; max-width: 600px;
+              font-size: 13px; display: flex; align-items: center; gap: var(--sp-3);
+              animation: slideUp .18s ease; }}
 /* Streaming panel */
 .stream-panel {{ display: none; margin-bottom: 20px; border: 1px solid var(--border);
                   border-radius: 8px; overflow: hidden; }}
@@ -2144,6 +2215,88 @@ function navTo(el) {{
   return false;  // prevent default <a> navigation
 }}
 
+// Phase 14.2 — empty-state UX: select a chapter without needing a draft.
+function selectChapter(chGroupEl) {{
+  if (!chGroupEl) return;
+  const chId = chGroupEl.dataset.chId;
+  if (!chId) return;
+  currentChapterId = chId;
+  currentDraftId = '';
+  currentSectionType = '';
+  // Visual highlight
+  document.querySelectorAll('.ch-group').forEach(g => g.classList.remove('selected'));
+  chGroupEl.classList.add('selected');
+  document.querySelectorAll('.sec-link.active').forEach(l => l.classList.remove('active'));
+  // Look up the chapter title for the breadcrumb
+  const chTitleEl = chGroupEl.querySelector('.ch-title');
+  const chLabel = chTitleEl ? chTitleEl.textContent.replace(/\\s*\u2717\\s*$/, '').trim() : 'Chapter';
+  // Show the empty state in the main area
+  showChapterEmptyState(chLabel, chId);
+}}
+
+function showChapterEmptyState(chLabel, chId) {{
+  document.getElementById('draft-title').textContent = chLabel;
+  const subtitle = document.getElementById('draft-subtitle');
+  subtitle.innerHTML = '<span style="color:var(--fg-muted);">No drafts yet — pick a section type and click Write, or use Autowrite to draft all sections.</span>';
+  subtitle.style.display = 'block';
+  // Show toolbar
+  document.getElementById('toolbar').style.display = 'flex';
+  // Hide other panels
+  document.getElementById('dashboard-view').style.display = 'none';
+  document.getElementById('edit-view').style.display = 'none';
+  document.getElementById('version-panel').style.display = 'none';
+  document.getElementById('stream-panel').style.display = 'none';
+  document.getElementById('scores-panel').classList.remove('open');
+  // Render empty-state card in the read view
+  const sections = ['overview', 'introduction', 'key_evidence', 'methods', 'results', 'discussion', 'current_understanding', 'open_questions', 'conclusion', 'summary'];
+  let html = '<div class="empty-state">';
+  html += '<h3>Start writing this chapter</h3>';
+  html += '<p>This chapter has no drafts yet. Choose a section type below and click <strong>Write</strong> in the toolbar, or click <strong>Autowrite</strong> to draft a section autonomously with the convergence loop.</p>';
+  html += '<div class="empty-section-picker">';
+  sections.forEach(s => {{
+    const active = s === currentSectionType ? ' active' : '';
+    html += '<button class="section-chip' + active + '" onclick="setSectionType(&#39;' + s + '&#39;, this)">' + s.replace(/_/g, ' ') + '</button>';
+  }});
+  html += '</div>';
+  html += '<p style="margin-top:16px;font-size:12px;color:var(--fg-muted);">Tip: you can also explore the corpus without writing anything &mdash; use <strong>Ask Corpus</strong>, <strong>Wiki Query</strong>, or <strong>Browse Papers</strong>.</p>';
+  html += '</div>';
+  document.getElementById('read-view').innerHTML = html;
+  document.getElementById('read-view').style.display = 'block';
+}}
+
+function setSectionType(t, btn) {{
+  currentSectionType = t;
+  document.querySelectorAll('.section-chip').forEach(c => c.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+}}
+
+function startWritingChapter(chId) {{
+  // Find the chapter group and select it, then prompt to write the first section.
+  const grp = document.querySelector('[data-ch-id="' + chId + '"]');
+  if (grp) selectChapter(grp);
+  if (!currentSectionType) currentSectionType = 'overview';
+  // Auto-trigger write
+  doWrite();
+}}
+
+// Phase 14.2 — show an inline guidance toast instead of a JS alert.
+// Replaces the silent-failing alert() calls in doWrite/doReview/etc.
+function showEmptyHint(html) {{
+  let hint = document.getElementById('empty-hint');
+  if (!hint) {{
+    hint = document.createElement('div');
+    hint.id = 'empty-hint';
+    hint.className = 'empty-hint';
+    document.body.appendChild(hint);
+  }}
+  hint.innerHTML = html + '<button onclick="document.getElementById(&#39;empty-hint&#39;).remove()" style="margin-left:12px;background:transparent;border:1px solid var(--border);color:var(--fg);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">Dismiss</button>';
+  // Auto-dismiss after 6s
+  if (hint._timer) clearTimeout(hint._timer);
+  hint._timer = setTimeout(() => {{
+    if (hint && hint.parentElement) hint.remove();
+  }}, 6000);
+}}
+
 async function loadSection(draftId) {{
   try {{
     const res = await fetch('/api/section/' + draftId);
@@ -2366,7 +2519,10 @@ function rebuildSidebar(chapters, activeId) {{
 
 // ── Action handlers ───────────────────────────────────────────────────────
 async function doWrite() {{
-  if (!currentChapterId) {{ alert('No chapter selected.'); return; }}
+  if (!currentChapterId) {{
+    showEmptyHint('Select a chapter from the sidebar first &mdash; click any chapter title in the left panel, then come back and click Write.');
+    return;
+  }}
   const section = currentSectionType || 'introduction';
   showStreamPanel('Writing ' + section + '...');
 
@@ -2379,7 +2535,7 @@ async function doWrite() {{
 }}
 
 async function doReview() {{
-  if (!currentDraftId) {{ alert('No draft selected.'); return; }}
+  if (!currentDraftId) {{ showEmptyHint("No draft selected &mdash; click a section in the sidebar, or click <strong>Start writing</strong> under any chapter to create a first draft."); return; }}
   showStreamPanel('Reviewing...');
 
   const fd = new FormData();
@@ -2389,7 +2545,7 @@ async function doReview() {{
 }}
 
 async function doRevise() {{
-  if (!currentDraftId) {{ alert('No draft selected.'); return; }}
+  if (!currentDraftId) {{ showEmptyHint("No draft selected &mdash; click a section in the sidebar, or click <strong>Start writing</strong> under any chapter to create a first draft."); return; }}
   const instruction = prompt('Revision instruction (leave empty to use review feedback):');
   if (instruction === null) return;  // cancelled
   showStreamPanel('Revising...');
@@ -2545,7 +2701,7 @@ let versionData = [];
 let selectedVersions = [];
 
 async function showVersions() {{
-  if (!currentDraftId) {{ alert('No draft selected.'); return; }}
+  if (!currentDraftId) {{ showEmptyHint("No draft selected &mdash; click a section in the sidebar, or click <strong>Start writing</strong> under any chapter to create a first draft."); return; }}
   const res = await fetch('/api/versions/' + currentDraftId);
   const data = await res.json();
   versionData = data.versions;
@@ -2702,7 +2858,7 @@ async function edAutosave() {{
 
 // ── Claim Verification (Phase 5b) ────────────────────────────────────
 async function doVerify() {{
-  if (!currentDraftId) {{ alert('No draft selected.'); return; }}
+  if (!currentDraftId) {{ showEmptyHint("No draft selected &mdash; click a section in the sidebar, or click <strong>Start writing</strong> under any chapter to create a first draft."); return; }}
   showStreamPanel('Verifying citations...');
 
   const fd = new FormData();
@@ -2844,7 +3000,7 @@ let awScores = [];
 let awTargetScore = 0.85;
 
 async function doAutowrite() {{
-  if (!currentChapterId) {{ alert('No chapter selected.'); return; }}
+  if (!currentChapterId) {{ showEmptyHint("No chapter selected &mdash; click any chapter title in the sidebar to select it, then try again."); return; }}
   const section = currentSectionType || 'introduction';
   const maxIter = prompt('Max iterations (default 3):', '3');
   if (maxIter === null) return;
@@ -3146,7 +3302,7 @@ document.addEventListener('keydown', function(e) {{
 
 // ── Phase 14: Score history viewer (Phase 13 GUI integration) ─────────
 async function showScoresPanel() {{
-  if (!currentDraftId) {{ alert('No draft selected.'); return; }}
+  if (!currentDraftId) {{ showEmptyHint("No draft selected &mdash; click a section in the sidebar, or click <strong>Start writing</strong> under any chapter to create a first draft."); return; }}
   const panel = document.getElementById('scores-panel');
   const body = document.getElementById('scores-panel-body');
   panel.classList.add('open');
@@ -3470,7 +3626,7 @@ async function showCorkboard() {{
 
 // ── Chapter Reader (continuous scroll) ────────────────────────────────
 async function showChapterReader() {{
-  if (!currentChapterId) {{ alert('No chapter selected.'); return; }}
+  if (!currentChapterId) {{ showEmptyHint("No chapter selected &mdash; click any chapter title in the sidebar to select it, then try again."); return; }}
 
   const res = await fetch('/api/chapter-reader/' + currentChapterId);
   if (!res.ok) {{ alert('Chapter not found.'); return; }}
@@ -3498,7 +3654,7 @@ async function showChapterReader() {{
 
 // ── Snapshots ─────────────────────────────────────────────────────────
 async function takeSnapshot() {{
-  if (!currentDraftId) {{ alert('No draft selected.'); return; }}
+  if (!currentDraftId) {{ showEmptyHint("No draft selected &mdash; click a section in the sidebar, or click <strong>Start writing</strong> under any chapter to create a first draft."); return; }}
   const name = prompt('Snapshot name (leave empty for timestamp):');
   if (name === null) return;
 
