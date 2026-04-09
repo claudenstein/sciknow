@@ -498,6 +498,48 @@ def l1_autowrite_streams_all_phases() -> None:
         "revising tokens should be tagged with phase"
 
 
+def l1_relevance_filter_imports_resolve() -> None:
+    """Phase 16.1 — every name imported from sciknow.retrieval.relevance
+    inside cli/db.py must actually exist in that module.
+
+    The motivating bug: `db expand-author` had a copy-paste error that
+    imported `build_corpus_centroid` and `embed_anchor`, neither of which
+    exist (the real names are compute_corpus_centroid and embed_query).
+    The graceful try/except in the calling code hid the ImportError —
+    the relevance filter silently never ran. Only a real e2e run
+    surfaced it.
+
+    This test parses cli/db.py with ast, finds every
+    `from sciknow.retrieval.relevance import X, Y, Z` statement, and
+    asserts that each imported name resolves to a real attribute on
+    the relevance module. Catches the bug at L1 (zero deps) instead
+    of waiting for someone to run the command.
+    """
+    import ast, inspect
+    from sciknow.retrieval import relevance
+    from sciknow.cli import db as cli_db
+
+    available = set(dir(relevance))
+    src = inspect.getsource(cli_db)
+    tree = ast.parse(src)
+
+    bad: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.module != "sciknow.retrieval.relevance":
+            continue
+        for alias in node.names:
+            n = alias.name
+            if n not in available:
+                bad.append(n)
+
+    assert not bad, (
+        f"cli/db.py imports non-existent names from sciknow.retrieval.relevance: "
+        f"{bad}. Real exports: {sorted(n for n in available if not n.startswith('_'))}"
+    )
+
+
 def l1_phase16_expand_author() -> None:
     """Phase 16 — `sciknow db expand-author` author search command.
 
@@ -1035,6 +1077,7 @@ L1_TESTS: list[Callable] = [
     l1_autowrite_streams_all_phases,
     l1_retrieval_device_helper,
     l1_phase16_expand_author,
+    l1_relevance_filter_imports_resolve,
     l1_web_rendered_js_is_valid,
     l1_research_doc_up_to_date,
 ]

@@ -1854,9 +1854,8 @@ def expand_author(
     # (mirrors `db expand` — same code, just on a different candidate source)
     if relevance:
         try:
-            from sciknow.ingestion.embedder import _get_model as _get_embedder
             from sciknow.retrieval.relevance import (
-                build_corpus_centroid, embed_anchor, score_candidates,
+                compute_corpus_centroid, embed_query, score_candidates,
                 score_histogram,
             )
             eff_threshold = relevance_threshold if relevance_threshold > 0 else getattr(
@@ -1866,9 +1865,14 @@ def expand_author(
                 f"\n[dim]Applying relevance filter "
                 f"(threshold={eff_threshold:.2f})…[/dim]"
             )
+            # Phase 16.1 — fixed import names. The module exports
+            # compute_corpus_centroid (not build_corpus_centroid) and
+            # embed_query (not embed_anchor). The wrong names were a
+            # copy-paste error in the original Phase 16 ship that the
+            # graceful try/except hid until a real run surfaced it.
             anchor_vec = (
-                embed_anchor(relevance_query) if relevance_query
-                else build_corpus_centroid()
+                embed_query(relevance_query) if relevance_query
+                else compute_corpus_centroid()
             )
             titles = [c.title or "" for c in candidates]
             scores = score_candidates(titles, anchor_vec)
