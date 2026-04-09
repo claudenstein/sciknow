@@ -342,9 +342,16 @@ def write_section_stream(
     else:
         paragraph_plan = None
 
-    # Draft
+    # Draft — Phase 14.6: emit model info before the first token so the
+    # user can confirm the writer is using the flagship model.
+    from sciknow.config import settings as _settings
+    resolved_model = model or _settings.llm_model
+    yield {"type": "model_info", "writer_model": resolved_model,
+           "fast_model": _settings.llm_fast_model,
+           "writer_role": "writing this section",
+           "fast_role": "step-back retrieval (utility)"}
     yield {"type": "progress", "stage": "writing",
-           "detail": f"Drafting {section_type} for Ch.{ch_num}: {ch_title}..."}
+           "detail": f"Drafting {section_type} for Ch.{ch_num}: {ch_title} · model: {resolved_model}"}
 
     system, user = prompts.write_section_v2(
         section_type, topic, results,
@@ -876,8 +883,19 @@ def autowrite_section_stream(
     ch_id, ch_num, ch_title, ch_desc, topic_query, topic_cluster = ch
     topic = topic_query or ch_title
 
+    # Phase 14.6 — Surface which model is going to do the writing so the
+    # user never has to ask. resolved_model is what `llm.complete()` will
+    # default to when called with model=None below; this mirrors the
+    # `chosen_model = model or settings.llm_model` line in rag/llm.py.
+    from sciknow.config import settings
+    resolved_model = model or settings.llm_model
+
+    yield {"type": "model_info", "writer_model": resolved_model,
+           "fast_model": settings.llm_fast_model,
+           "writer_role": "writing/scoring/verification/CoVe (flagship)",
+           "fast_role": "step-back retrieval (utility)"}
     yield {"type": "progress", "stage": "setup",
-           "detail": f"Autowrite Ch.{ch_num}: {ch_title} — {section_type.capitalize()}"}
+           "detail": f"Autowrite Ch.{ch_num}: {ch_title} — {section_type.capitalize()} · model: {resolved_model}"}
 
     # Step 1: Initial draft
     with get_session() as session:

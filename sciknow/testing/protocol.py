@@ -423,6 +423,63 @@ def l1_web_phase14_endpoints_registered() -> None:
     assert not missing, f"Phase 14 routes missing from app: {missing}"
 
 
+def l1_writer_uses_flagship_model() -> None:
+    """Phase 14.6 — assert the writing/scoring/verification path NEVER
+    accidentally uses settings.llm_fast_model.
+
+    The fast model is only allowed in:
+      - step-back retrieval (utility)
+      - RAPTOR cluster summaries (batch op)
+      - wiki compile / metadata extraction / query expansion (utility)
+      - L3 smoke test (intentional)
+
+    All "writing-quality" call sites in book_ops.py — the actual writer,
+    the scorer, the verifier, CoVe, review, revise, gaps, argue, plan
+    generation — must use `model=model` (which defaults to settings.llm_model
+    via rag/llm.py:48), NOT `settings.llm_fast_model`.
+    """
+    import inspect
+    from sciknow.core import book_ops
+
+    # The functions that drive writing/scoring quality. None of them
+    # should reference llm_fast_model in their bodies.
+    flagship_funcs = [
+        book_ops.autowrite_section_stream,
+        book_ops.write_section_stream,
+        book_ops.review_draft_stream,
+        book_ops.revise_draft_stream,
+        book_ops._score_draft_inner,
+        book_ops._verify_draft_inner,
+        book_ops._cove_verify,
+        book_ops.run_gaps_stream,
+        book_ops.run_argue_stream,
+    ]
+
+    # Match `model=...llm_fast_model` (with optional `settings.` prefix and
+    # optional `or` fallback). This is the dangerous pattern. Bare references
+    # to `llm_fast_model` inside informational dicts (like the model_info
+    # event payload) are allowed — they don't affect which model writes.
+    import re as _re
+    dangerous = _re.compile(r"model\s*=\s*[^,\)]*llm_fast_model")
+
+    for fn in flagship_funcs:
+        try:
+            src = inspect.getsource(fn)
+        except (TypeError, OSError):
+            continue  # not introspectable, skip
+        match = dangerous.search(src)
+        assert not match, (
+            f"{fn.__name__} passes llm_fast_model as a model= argument — "
+            f"flagship-only call sites must not use the fast model. "
+            f"Match: {match.group(0)!r}"
+        )
+
+    # And the model_info events should be emitted before writing.
+    aw_src = inspect.getsource(book_ops.autowrite_section_stream)
+    assert '"model_info"' in aw_src or "'model_info'" in aw_src, \
+        "autowrite_section_stream missing model_info event for transparency"
+
+
 def l1_web_phase14_4_book_sections() -> None:
     """Phase 14.4 — book-style sections, dashboard chapter editing, autosave UX.
 
@@ -764,6 +821,7 @@ L1_TESTS: list[Callable] = [
     l1_web_phase14_endpoints_registered,
     l1_web_phase14_3_book_plan_editor,
     l1_web_phase14_4_book_sections,
+    l1_writer_uses_flagship_model,
     l1_web_rendered_js_is_valid,
     l1_research_doc_up_to_date,
 ]

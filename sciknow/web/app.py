@@ -2746,6 +2746,12 @@ function startStream(jobId) {{
       body.innerHTML += '<div style="opacity:0.5;margin:12px 0;border-top:1px solid var(--border);padding-top:8px;">' +
         'Iteration ' + evt.iteration + '/' + evt.max + '</div>';
     }}
+    else if (evt.type === 'model_info') {{
+      // Phase 14.6 — show writer model in the stream header so users can
+      // verify which model is doing the writing.
+      body.innerHTML += '<div style="font-size:11px;color:var(--fg-muted);padding:6px 0;border-bottom:1px solid var(--border);margin-bottom:8px;">' +
+        '<strong>writer model:</strong> <code>' + (evt.writer_model || '?') + '</code></div>';
+    }}
     else if (evt.type === 'completed') {{
       status.textContent = 'Done';
       hideStreamPanel();
@@ -3425,6 +3431,13 @@ async function doAutowrite() {{
       let cls = high.length ? 'log-discard' : 'log-keep';
       awLog.innerHTML += '<div class="' + cls + '">' + icon + ' CoVe ' + score +
         ' · ' + high.length + 'H/' + med.length + 'M mismatches</div>';
+    }}
+    else if (evt.type === 'model_info') {{
+      // Phase 14.6 — show which model is doing the writing so the user
+      // can verify the flagship is in use (not the fast utility model).
+      awLog.innerHTML += '<div style="font-size:11px;color:var(--fg-muted);padding:4px 0;">' +
+        '<strong>writer:</strong> <code>' + (evt.writer_model || '?') + '</code>  ·  ' +
+        '<strong>fast:</strong> <code>' + (evt.fast_model || '?') + '</code> (utility only)</div>';
     }}
     else if (evt.type === 'verification') {{
       // Standard verifier in the autowrite stream — emit a brief log line.
