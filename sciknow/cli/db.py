@@ -5,6 +5,7 @@ import subprocess
 import tarfile
 import tempfile
 from pathlib import Path
+from typing import Annotated
 
 import typer
 from rich.console import Console
@@ -1669,3 +1670,371 @@ def export(
     console.print(f"[green]✓ Wrote {written} records[/green]" +
                   (f", skipped {skipped}" if skipped else "") +
                   f" → {output}")
+
+
+# ── expand-author (Phase 16) ─────────────────────────────────────────────────
+
+
+@app.command(name="expand-author")
+def expand_author(
+    name: Annotated[str, typer.Argument(help="Author name to search (display name).")],
+    orcid: str = typer.Option(
+        None, "--orcid",
+        help="ORCID iD (preferred for common names — exact match instead of fuzzy "
+             "display-name search). Format: 0000-0002-XXXX-XXXX",
+    ),
+    year_from: int = typer.Option(None, "--from",
+        help="Inclusive earliest publication year."),
+    year_to: int = typer.Option(None, "--to",
+        help="Inclusive latest publication year."),
+    limit: int = typer.Option(0, "--limit",
+        help="Max papers to consider after dedup (0 = no limit, with safety caps in the search backends)."),
+    dry_run: bool = typer.Option(False, "--dry-run",
+        help="Show what would be downloaded without doing it."),
+    all_matches: bool = typer.Option(False, "--all-matches",
+        help="Use ALL authors with the matching surname (default: only the most-published one). "
+             "Useful when 'Smith' really means every Smith and you'll filter via --relevance-query."),
+    relevance: bool = typer.Option(True, "--relevance/--no-relevance",
+        help="Filter candidates by semantic relevance to the corpus before downloading."),
+    relevance_query: str = typer.Option("", "--relevance-query", "-q",
+        help="Free-text topic anchor for the relevance filter. If empty, the corpus centroid is used."),
+    relevance_threshold: float = typer.Option(0.0, "--relevance-threshold",
+        help="Cosine similarity threshold (0 = use EXPAND_RELEVANCE_THRESHOLD from .env, default 0.55)."),
+    download_dir: Path = typer.Option(Path("data/downloads"), "--download-dir", "-d",
+        help="Directory where new PDFs are saved before ingestion."),
+    workers: int = typer.Option(0, "--workers", "-w",
+        help="Parallel ingestion worker subprocesses (0 = use INGEST_WORKERS from .env)."),
+    ingest: bool = typer.Option(True, "--ingest/--no-ingest",
+        help="Ingest downloaded PDFs immediately."),
+):
+    """
+    Expand the catalog by searching OpenAlex + Crossref for papers BY a named author.
+
+    Different from `db expand` (which follows references in existing papers).
+    Use `expand-author` when you want to add an author's full bibliography to
+    your corpus regardless of whether anything you have currently cites them.
+
+    \b
+    The flow:
+      1. Query OpenAlex /works for papers by the author (preferred — better
+         metadata + ORCID-aware dedup across affiliations).
+      2. Query Crossref /works as a fallback for anything OpenAlex missed.
+      3. Merge results by DOI.
+      4. Drop papers already in your corpus (by DOI).
+      5. Optionally apply the relevance filter (handy for common names —
+         "John Smith" + relevance against your corpus centroid filters out
+         the unrelated John Smiths).
+      6. Download via the existing 6-source OA discovery pipeline
+         (Copernicus → arXiv → Unpaywall → OpenAlex → Europe PMC →
+         Semantic Scholar).
+      7. Ingest via the parallel worker pool (same as `db expand`).
+
+    Examples:
+
+      sciknow db expand-author "Zharkova"
+
+      sciknow db expand-author "Zharkova" --dry-run
+
+      sciknow db expand-author "Zharkova" --from 2015 --limit 30
+
+      sciknow db expand-author "Zharkova" --orcid 0000-0002-0026-2725
+
+      sciknow db expand-author "John Smith" --relevance-query "climate sensitivity"
+    """
+    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from sciknow.cli import preflight
+    preflight()
+
+    from sciknow.config import settings
+    from sciknow.ingestion.author_search import search_author
+    from sciknow.ingestion.downloader import find_and_download
+    from sciknow.storage.db import get_session
+    from sqlalchemy import text as sql_text
+
+    # ── Step 1: validate ─────────────────────────────────────────────────────
+    if year_from is not None and year_to is not None and year_from > year_to:
+        console.print(f"[red]--from {year_from} > --to {year_to}[/red]")
+        raise typer.Exit(2)
+
+    # ── Step 2: search OpenAlex + Crossref ───────────────────────────────────
+    label = f"ORCID {orcid}" if orcid else f'"{name}"'
+    year_range = ""
+    if year_from or year_to:
+        year_range = f" ({year_from or '*'}–{year_to or '*'})"
+
+    console.print(f"\n[bold]Searching for papers by {label}{year_range}[/bold]")
+    console.print("[dim]OpenAlex /works (primary) + Crossref /works (fallback)[/dim]\n")
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Searching...", total=None)
+        try:
+            candidates, info = search_author(
+                name, orcid=orcid,
+                year_from=year_from, year_to=year_to,
+                limit=limit if limit > 0 else None,
+                all_matches=all_matches,
+            )
+        except Exception as exc:
+            console.print(f"[red]Search failed: {exc}[/red]")
+            raise typer.Exit(1)
+        progress.update(task, description="Done")
+
+    # Show which author(s) OpenAlex resolved + which we picked
+    if info["candidates"] and not orcid:
+        picked_ids = {a["short_id"] for a in info["picked"]}
+        n_picked = len(picked_ids)
+        n_total = len(info["candidates"])
+        if all_matches:
+            console.print(
+                f"\n[bold]Using all {n_total} matching author(s):[/bold]"
+            )
+        else:
+            console.print(
+                f"\n[bold]Picked top match[/bold] (out of {n_total} candidates with that surname):"
+            )
+        for i, a in enumerate(info["candidates"][:8]):
+            mark = "[green]▶[/green]" if a["short_id"] in picked_ids else " "
+            aff = " · ".join(a["affiliations"][:1]) or "(no affiliation)"
+            orcid_str = (a.get("orcid") or "").replace("https://orcid.org/", "")
+            orcid_short = f"  ORCID:{orcid_str}" if orcid_str else ""
+            console.print(
+                f"  {mark} {a['display_name']:<28} {a['works_count']:>5} works  "
+                f"[dim]{aff[:45]}[/dim]{orcid_short}"
+            )
+        if n_total > 8:
+            console.print(f"    [dim]… and {n_total - 8} more[/dim]")
+        if n_picked < n_total:
+            console.print(
+                "\n  [dim]Wrong person? Use [bold]--orcid[/bold] for an exact match, "
+                "or [bold]--all-matches[/bold] to pool all matching surnames.[/dim]"
+            )
+
+    if not candidates:
+        console.print(
+            "\n[yellow]No papers found. Try a different name spelling, "
+            "or use --orcid for an exact match.[/yellow]"
+        )
+        raise typer.Exit(0)
+
+    console.print(
+        f"\nFound [bold]{info['merged']}[/bold] candidate paper(s) "
+        f"([green]{info['openalex']} from OpenAlex[/green], "
+        f"[cyan]{info['crossref_extra']} extra from Crossref[/cyan])"
+    )
+
+    # ── Step 3: dedup against existing corpus ───────────────────────────────
+    with get_session() as session:
+        existing = session.execute(sql_text("""
+            SELECT LOWER(doi) FROM paper_metadata WHERE doi IS NOT NULL
+        """)).fetchall()
+        existing_dois = {r[0] for r in existing}
+
+    before_dedup = len(candidates)
+    candidates = [c for c in candidates if c.doi and c.doi.lower() not in existing_dois]
+    deduped = before_dedup - len(candidates)
+    if deduped:
+        console.print(
+            f"[dim]Skipping [bold]{deduped}[/bold] paper(s) already in the corpus.[/dim]"
+        )
+
+    if not candidates:
+        console.print(
+            "[yellow]All matching papers are already in your corpus. Nothing to do.[/yellow]"
+        )
+        raise typer.Exit(0)
+
+    # ── Step 4: optional relevance filter ────────────────────────────────────
+    # (mirrors `db expand` — same code, just on a different candidate source)
+    if relevance:
+        try:
+            from sciknow.ingestion.embedder import _get_model as _get_embedder
+            from sciknow.retrieval.relevance import (
+                build_corpus_centroid, embed_anchor, score_candidates,
+                score_histogram,
+            )
+            eff_threshold = relevance_threshold if relevance_threshold > 0 else getattr(
+                settings, "expand_relevance_threshold", 0.55
+            )
+            console.print(
+                f"\n[dim]Applying relevance filter "
+                f"(threshold={eff_threshold:.2f})…[/dim]"
+            )
+            anchor_vec = (
+                embed_anchor(relevance_query) if relevance_query
+                else build_corpus_centroid()
+            )
+            titles = [c.title or "" for c in candidates]
+            scores = score_candidates(titles, anchor_vec)
+
+            kept_pairs = [
+                (c, s) for c, s in zip(candidates, scores) if s >= eff_threshold
+            ]
+            dropped = len(candidates) - len(kept_pairs)
+
+            hist = score_histogram(scores, bins=10)
+            if hist:
+                console.print("[dim]Relevance score distribution:[/dim]")
+                max_count = max(c for _, _, c in hist) or 1
+                for lo, hi, c in hist:
+                    bar_width = int(40 * c / max_count)
+                    marker = "  " if hi < eff_threshold else "▶ " if lo <= eff_threshold < hi else "  "
+                    console.print(
+                        f"  {marker}[dim]{lo:.2f}-{hi:.2f}[/dim] "
+                        f"{'█' * bar_width} {c}"
+                    )
+                console.print(
+                    f"  [green]kept {len(kept_pairs)}[/green]  "
+                    f"[red]dropped {dropped}[/red]  (cut at {eff_threshold:.2f})"
+                )
+
+            candidates = [c for c, _ in sorted(kept_pairs, key=lambda x: x[1], reverse=True)]
+        except Exception as exc:
+            console.print(
+                f"[yellow]⚠ Relevance filter failed ({type(exc).__name__}: {exc}); "
+                f"continuing without it. Use --no-relevance to skip explicitly.[/yellow]"
+            )
+
+    if not candidates:
+        console.print("[yellow]Nothing to download after relevance filter.[/yellow]")
+        raise typer.Exit(0)
+
+    # ── Step 5: dry-run preview ──────────────────────────────────────────────
+    if dry_run:
+        console.print(
+            f"\n[bold]Dry run — would attempt to download {len(candidates)} paper(s):[/bold]"
+        )
+        for ref in candidates[:30]:
+            year_str = f"({ref.year})" if ref.year else "(n.d.)"
+            console.print(
+                f"  [dim]{(ref.doi or '?')[:40]:<40}[/dim] "
+                f"[cyan]{year_str}[/cyan] {(ref.title or '')[:60]}"
+            )
+        if len(candidates) > 30:
+            console.print(f"  … and {len(candidates) - 30} more")
+        raise typer.Exit(0)
+
+    # ── Step 6: download phase (parallel) ────────────────────────────────────
+    download_dir.mkdir(parents=True, exist_ok=True)
+    no_oa_cache_file = download_dir / ".no_oa_cache"
+    no_oa_cache: set[str] = (
+        set(no_oa_cache_file.read_text().splitlines())
+        if no_oa_cache_file.exists() else set()
+    )
+
+    dl_workers = max(1, getattr(settings, "expand_download_workers", 4))
+    downloaded = failed_dl = 0
+    to_ingest: list[tuple[str, str, Path]] = []  # (key, title, path)
+
+    def _download_one(ref):
+        ref_key = (ref.doi or "").lower()
+        safe_name = (ref.doi or "unknown").replace("/", "_").replace(":", "_")
+        dest = download_dir / f"{safe_name}.pdf"
+        title = (ref.title or "")[:80]
+        if ref_key in no_oa_cache:
+            return ("cached", ref_key, title, dest, None)
+        if dest.exists():
+            return ("exists", ref_key, title, dest, None)
+        ok, source = find_and_download(
+            doi=ref.doi, arxiv_id=None,
+            dest_path=dest, email=settings.crossref_email,
+        )
+        return ("downloaded" if ok else "no_oa", ref_key, title, dest, source)
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task(
+            f"Downloading ({dl_workers} workers)", total=len(candidates)
+        )
+        with ThreadPoolExecutor(max_workers=dl_workers) as pool:
+            futures = {pool.submit(_download_one, ref): ref for ref in candidates}
+            for fut in as_completed(futures):
+                ref = futures[fut]
+                try:
+                    status, ref_key, title, dest, source = fut.result()
+                except Exception as exc:
+                    failed_dl += 1
+                    progress.advance(task)
+                    continue
+                label_short = (ref.title or ref.doi or "")[:50]
+                if status == "downloaded":
+                    downloaded += 1
+                    progress.update(task, description=f"[green]↓ {source}[/green] {label_short[:40]}")
+                    to_ingest.append((ref_key, title, dest))
+                elif status == "exists":
+                    to_ingest.append((ref_key, title, dest))
+                elif status == "no_oa":
+                    failed_dl += 1
+                    with no_oa_cache_file.open("a") as f:
+                        f.write(ref_key + "\n")
+                else:  # cached
+                    failed_dl += 1
+                progress.advance(task)
+
+    # ── Step 7: ingest phase (worker pool, same as db expand) ────────────────
+    ingested = failed_ingest = 0
+    if ingest and to_ingest:
+        from sciknow.cli.ingest import _run_parallel_workers
+        from sciknow.ingestion.embedder import release_model as _release_embedder
+
+        ingest_workers = workers if workers > 0 else max(1, settings.ingest_workers)
+        ingest_workers = min(ingest_workers, len(to_ingest))
+        _release_embedder()  # free main-process bge-m3 before workers fork
+
+        path_to_meta = {dest.resolve(): (k, t) for k, t, dest in to_ingest}
+
+        def _on_file_done(path, status, error):
+            nonlocal ingested, failed_ingest
+            if status in ("done", "skipped"):
+                ingested += 1
+            elif status == "failed":
+                failed_ingest += 1
+
+        ingest_results = {"done": 0, "skipped": 0, "failed": 0}
+        ingest_failed_files: list[tuple[str, str]] = []
+
+        worker_note = f" ({ingest_workers} workers)" if ingest_workers > 1 else ""
+        console.print(f"\nIngesting [bold]{len(to_ingest)}[/bold] new PDF(s){worker_note}…")
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            itask = progress.add_task("Ingesting", total=len(to_ingest))
+            _run_parallel_workers(
+                [dest for _, _, dest in to_ingest],
+                progress, itask, ingest_results, ingest_failed_files,
+                force=False, num_workers=ingest_workers,
+                ingest_source="expand",
+                on_file_done=_on_file_done,
+            )
+
+    # ── Summary ──────────────────────────────────────────────────────────────
+    console.print(
+        f"\n[bold]Summary:[/bold] "
+        f"[green]↓ {downloaded} downloaded[/green]  "
+        f"[green]✓ {ingested} ingested[/green]  "
+        f"[red]✗ {failed_dl} no OA PDF[/red]"
+        + (f"  [red]✗ {failed_ingest} ingest failed[/red]" if failed_ingest else "")
+    )
+    if downloaded:
+        console.print(
+            f"\nNew PDFs in [bold]{download_dir}[/bold]. "
+            f"Run [bold]sciknow catalog stats[/bold] to see updated counts."
+        )

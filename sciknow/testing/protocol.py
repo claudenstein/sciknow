@@ -498,6 +498,48 @@ def l1_autowrite_streams_all_phases() -> None:
         "revising tokens should be tagged with phase"
 
 
+def l1_phase16_expand_author() -> None:
+    """Phase 16 — `sciknow db expand-author` author search command.
+
+    Verifies the new author_search module exposes its public API,
+    the CLI command is registered, and the command's source references
+    both backends + dedup logic + the existing find_and_download
+    + _run_parallel_workers infrastructure (so it doesn't accidentally
+    re-implement them).
+    """
+    import inspect
+
+    # Module + public API
+    from sciknow.ingestion import author_search
+    for fn in ("search_openalex_by_author", "search_crossref_by_author", "search_author"):
+        assert hasattr(author_search, fn), f"author_search.{fn} missing"
+
+    # search_author returns (refs, source_counts) tuple
+    sig = inspect.signature(author_search.search_author)
+    for kw in ("orcid", "year_from", "year_to", "limit"):
+        assert kw in sig.parameters, f"search_author missing kwarg: {kw}"
+
+    # OpenAlex search supports orcid + year filters + require_doi
+    sig_oa = inspect.signature(author_search.search_openalex_by_author)
+    for kw in ("orcid", "year_from", "year_to", "limit", "require_doi"):
+        assert kw in sig_oa.parameters, f"search_openalex_by_author missing kwarg: {kw}"
+
+    # CLI command registered
+    from sciknow.cli import db as cli_db
+    cmds = {c.name for c in cli_db.app.registered_commands}
+    assert "expand-author" in cmds, f"expand-author not on db app — found: {sorted(cmds)}"
+
+    # Command source delegates to existing infrastructure
+    src = inspect.getsource(cli_db.expand_author)
+    assert "search_author(" in src, "command doesn't call search_author"
+    assert "find_and_download(" in src, \
+        "command doesn't reuse find_and_download — would re-implement OA discovery"
+    assert "_run_parallel_workers(" in src, \
+        "command doesn't reuse _run_parallel_workers — would re-implement ingest"
+    # Dedup against existing corpus
+    assert "existing_dois" in src, "command doesn't dedup against corpus DOIs"
+
+
 def l1_retrieval_device_helper() -> None:
     """Phase 15.2 — bge-m3 + reranker have a CPU fallback for the case
     where the LLM has filled VRAM.
@@ -992,6 +1034,7 @@ L1_TESTS: list[Callable] = [
     l1_autowrite_incremental_save,
     l1_autowrite_streams_all_phases,
     l1_retrieval_device_helper,
+    l1_phase16_expand_author,
     l1_web_rendered_js_is_valid,
     l1_research_doc_up_to_date,
 ]
