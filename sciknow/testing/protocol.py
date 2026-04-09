@@ -423,6 +423,43 @@ def l1_web_phase14_endpoints_registered() -> None:
     assert not missing, f"Phase 14 routes missing from app: {missing}"
 
 
+def l1_web_phase15_wiki_browse_and_stats() -> None:
+    """Phase 15 — wiki browsing UI + live streaming stats helper.
+
+    Verifies the new /api/wiki/pages and /api/wiki/page/{slug} routes are
+    mounted, the wiki modal has Query + Browse tabs with all the JS
+    handlers (switchWikiTab, loadWikiPages, openWikiPage), and the
+    createStreamStats helper exists with the cursor helper too.
+    """
+    import sciknow.web.app as web
+
+    # Routes
+    routes = {r.path for r in web.app.routes if hasattr(r, "path")}
+    assert "/api/wiki/pages" in routes, "/api/wiki/pages missing"
+    assert "/api/wiki/page/{slug}" in routes, "/api/wiki/page/{slug} missing"
+
+    t = web.TEMPLATE
+    # Tab UI
+    assert 'class="tabs"' in t, "modal tabs CSS class missing"
+    assert "switchWikiTab(" in t, "switchWikiTab JS missing"
+    assert 'data-tab="wiki-query"' in t, "wiki-query tab missing"
+    assert 'data-tab="wiki-browse"' in t, "wiki-browse tab missing"
+    # Browse view
+    assert "loadWikiPages(" in t, "loadWikiPages JS missing"
+    assert "openWikiPage(" in t, "openWikiPage JS missing"
+    assert "closeWikiPageDetail(" in t, "closeWikiPageDetail JS missing"
+    assert "wiki-page-detail" in t, "wiki-page-detail container missing"
+    # Stats helper + cursor
+    assert "function createStreamStats(" in t, "createStreamStats helper missing"
+    assert "function setStreamCursor(" in t, "setStreamCursor helper missing"
+    assert "stream-cursor" in t, "stream-cursor CSS class missing"
+    # Stats footers wired in
+    assert 'id="main-stream-stats"' in t, "main-stream-stats footer missing"
+    assert 'id="wiki-stream-stats"' in t, "wiki-stream-stats footer missing"
+    assert 'id="ask-stream-stats"' in t, "ask-stream-stats footer missing"
+    assert 'id="plan-stream-stats"' in t, "plan-stream-stats footer missing"
+
+
 def l1_writer_uses_flagship_model() -> None:
     """Phase 14.6 — assert the writing/scoring/verification path NEVER
     accidentally uses settings.llm_fast_model.
@@ -822,6 +859,7 @@ L1_TESTS: list[Callable] = [
     l1_web_phase14_3_book_plan_editor,
     l1_web_phase14_4_book_sections,
     l1_writer_uses_flagship_model,
+    l1_web_phase15_wiki_browse_and_stats,
     l1_web_rendered_js_is_valid,
     l1_research_doc_up_to_date,
 ]

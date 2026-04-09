@@ -1124,6 +1124,73 @@ async def api_draft_scores(draft_id: str):
     })
 
 
+@app.get("/api/wiki/pages")
+async def api_wiki_pages(page_type: str = None, page: int = 1, per_page: int = 50):
+    """Phase 15 — paginated wiki page list with optional type filter.
+
+    Wraps wiki_ops.list_pages and adds pagination so the GUI can browse
+    a corpus with thousands of compiled wiki pages without loading
+    everything into the browser at once.
+    """
+    from sciknow.core.wiki_ops import list_pages
+    try:
+        all_pages = list_pages(page_type=page_type or None)
+    except Exception as exc:
+        # If wiki_pages table doesn't exist yet, return empty list rather
+        # than 500 — the GUI shows an empty state.
+        return JSONResponse({"page": 1, "per_page": per_page, "total": 0,
+                             "n_pages": 0, "pages": [], "available_types": [],
+                             "error": str(exc)})
+
+    page = max(page, 1)
+    per_page = min(max(per_page, 1), 200)
+    total = len(all_pages)
+    start = (page - 1) * per_page
+    end = start + per_page
+
+    # Build the list of available page_types so the filter dropdown is
+    # populated dynamically (paper_summary / concept / synthesis).
+    available_types = sorted({p["page_type"] for p in all_pages if p.get("page_type")})
+
+    return JSONResponse({
+        "page": page, "per_page": per_page, "total": total,
+        "n_pages": (total + per_page - 1) // per_page,
+        "pages": all_pages[start:end],
+        "available_types": available_types,
+    })
+
+
+@app.get("/api/wiki/page/{slug}")
+async def api_wiki_page(slug: str):
+    """Phase 15 — return one wiki page's full content + metadata."""
+    from sciknow.core.wiki_ops import show_page
+
+    page = show_page(slug)
+    if not page:
+        raise HTTPException(404, f"Wiki page not found: {slug}")
+
+    # Pull metadata from the DB so the GUI can show word count, sources,
+    # last updated, page type alongside the markdown.
+    try:
+        with get_session() as session:
+            row = session.execute(text("""
+                SELECT title, page_type, word_count,
+                       array_length(source_doc_ids, 1) AS n_sources,
+                       updated_at
+                FROM wiki_pages WHERE slug = :slug
+            """), {"slug": slug}).fetchone()
+        if row:
+            page.update({
+                "title": row[0], "page_type": row[1], "word_count": row[2] or 0,
+                "n_sources": row[3] or 0, "updated_at": str(row[4]),
+            })
+    except Exception:
+        pass
+
+    page["content_html"] = _md_to_html(page.get("content", ""))
+    return JSONResponse(page)
+
+
 @app.post("/api/wiki/query")
 async def api_wiki_query(question: str = Form(...), model: str = Form(None)):
     """Stream a wiki query — wraps wiki_ops.query_wiki as an SSE job."""
@@ -1989,6 +2056,66 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
             font-weight: 500; border-radius: var(--r-md); cursor: pointer;
             transition: all .12s; display: inline-flex; align-items: center; gap: 4px; }}
 .btn-link:hover {{ background: var(--accent-light); border-color: var(--accent); }}
+/* Phase 15 — modal tabs (Wiki Query / Browse) */
+.tabs {{ display: flex; gap: 0; padding: 0 var(--sp-5); border-bottom: 1px solid var(--border);
+         background: var(--toolbar-bg); }}
+.tab {{ background: transparent; border: none; padding: 10px var(--sp-4);
+       font-size: 13px; font-weight: 500; color: var(--fg-muted); cursor: pointer;
+       border-bottom: 2px solid transparent; margin-bottom: -1px;
+       transition: all .12s; display: flex; align-items: center; gap: 6px; }}
+.tab:hover {{ color: var(--fg); }}
+.tab.active {{ color: var(--accent); border-bottom-color: var(--accent); }}
+.tab-pane {{ animation: fadeIn .15s ease; }}
+/* Phase 15 — wiki page detail rendering */
+.wiki-page-list {{ list-style: none; padding: 0; }}
+.wiki-page-row {{ display: flex; align-items: center; gap: var(--sp-3);
+                 padding: 10px var(--sp-3); border-bottom: 1px solid var(--border);
+                 cursor: pointer; transition: background .12s; }}
+.wiki-page-row:hover {{ background: var(--toolbar-bg); }}
+.wiki-page-row .wp-title {{ flex: 1; font-weight: 500; color: var(--fg); }}
+.wiki-page-row .wp-meta {{ font-size: 11px; color: var(--fg-muted);
+                           white-space: nowrap; }}
+.wiki-page-row .wp-type {{ font-size: 10px; padding: 2px 8px;
+                          border-radius: 999px; background: var(--accent-light);
+                          color: var(--accent); text-transform: uppercase;
+                          letter-spacing: 0.04em; font-weight: 600; }}
+.wiki-page-content {{ font-family: var(--font-serif); font-size: 15px;
+                     line-height: 1.7; color: var(--fg); padding: var(--sp-3);
+                     max-height: 60vh; overflow-y: auto;
+                     background: var(--toolbar-bg); border-radius: var(--r-md);
+                     border: 1px solid var(--border); }}
+.wiki-page-content h1, .wiki-page-content h2, .wiki-page-content h3, .wiki-page-content h4 {{
+    margin: var(--sp-4) 0 var(--sp-2); font-family: var(--font-sans);
+    font-weight: 600; color: var(--fg); }}
+.wiki-page-content h1 {{ font-size: 22px; }}
+.wiki-page-content h2 {{ font-size: 18px; }}
+.wiki-page-content h3 {{ font-size: 15px; }}
+.wiki-page-content p {{ margin-bottom: var(--sp-3); }}
+.wiki-page-content code {{ font-family: var(--font-mono); font-size: 13px;
+                           padding: 1px 6px; background: var(--bg);
+                           border-radius: 3px; }}
+/* Phase 15 — live streaming stats footer (tok/s, elapsed, model) */
+.stream-stats {{ display: flex; align-items: center; gap: var(--sp-3);
+                font-family: var(--font-mono); font-size: 11px;
+                color: var(--fg-muted); padding: var(--sp-2) var(--sp-3);
+                background: var(--toolbar-bg); border-radius: var(--r-md);
+                border: 1px solid var(--border); margin-top: var(--sp-2);
+                min-height: 28px; }}
+.stream-stats.idle {{ opacity: 0.4; }}
+.stream-stats .ss-dot {{ width: 8px; height: 8px; border-radius: 50%;
+                        background: var(--fg-faint); flex-shrink: 0; }}
+.stream-stats.streaming .ss-dot {{ background: var(--success);
+                                   animation: pulse 1.2s infinite; }}
+.stream-stats.done .ss-dot {{ background: var(--success); }}
+.stream-stats.error .ss-dot {{ background: var(--danger); }}
+.stream-stats .ss-stat {{ display: flex; align-items: center; gap: 4px; }}
+.stream-stats .ss-stat strong {{ color: var(--fg); font-weight: 600; }}
+.stream-stats .ss-sep {{ color: var(--border-strong); }}
+.stream-cursor {{ display: inline-block; width: 6px; height: 14px;
+                 background: var(--accent); margin-left: 2px;
+                 animation: blink 1.1s steps(2, jump-none) infinite;
+                 vertical-align: text-bottom; }}
+@keyframes blink {{ 0%, 49% {{ opacity: 1; }} 50%, 100% {{ opacity: 0.15; }} }}
 .hm-cell {{ border-radius: 4px; padding: 4px 8px; cursor: pointer; display: inline-block;
             min-width: 44px; font-size: 11px; }}
 .hm-cell.reviewed {{ background: var(--success); color: white; }}
@@ -2246,6 +2373,7 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
     </div>
     <div class="stream-scores" id="stream-scores"></div>
     <div class="stream-body" id="stream-body"></div>
+    <div id="main-stream-stats" class="stream-stats" style="margin: 0 14px 12px;"></div>
   </div>
 
   <div id="read-view">{content_html}</div>
@@ -2296,25 +2424,52 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 
 <!-- ── Phase 14 modals ─────────────────────────────────────────────────── -->
 
-<!-- Wiki Query Modal -->
+<!-- Wiki Modal — Phase 15: Query + Browse tabs -->
 <div class="modal-overlay" id="wiki-modal" onclick="if(event.target===this)closeModal('wiki-modal')">
-  <div class="modal">
+  <div class="modal wide">
     <div class="modal-header">
-      <h3>&#128218; Wiki Query</h3>
+      <h3>&#128218; Compiled Knowledge Wiki</h3>
       <button class="modal-close" onclick="closeModal('wiki-modal')">&times;</button>
     </div>
+    <div class="tabs">
+      <button class="tab active" data-tab="wiki-query" onclick="switchWikiTab('wiki-query')">&#128270; Query</button>
+      <button class="tab" data-tab="wiki-browse" onclick="switchWikiTab('wiki-browse')">&#128194; Browse pages</button>
+    </div>
     <div class="modal-body">
-      <div class="field">
-        <label>Question</label>
-        <input type="text" id="wiki-query-input" placeholder="What does the wiki say about ..."
-               onkeydown="if(event.key==='Enter')doWikiQuery()">
+      <!-- Query tab -->
+      <div class="tab-pane active" id="wiki-query-pane">
+        <div class="field">
+          <label>Question</label>
+          <input type="text" id="wiki-query-input" placeholder="What does the wiki say about ..."
+                 onkeydown="if(event.key==='Enter')doWikiQuery()">
+        </div>
+        <div class="field">
+          <button class="btn-primary" onclick="doWikiQuery()">Search Wiki</button>
+        </div>
+        <div id="wiki-status" style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;"></div>
+        <div class="modal-stream" id="wiki-stream"></div>
+        <div id="wiki-stream-stats" class="stream-stats"></div>
+        <div class="modal-sources" id="wiki-sources" style="display:none;"></div>
       </div>
-      <div class="field">
-        <button class="btn-primary" onclick="doWikiQuery()">Search Wiki</button>
+      <!-- Browse tab -->
+      <div class="tab-pane" id="wiki-browse-pane" style="display:none;">
+        <div class="field" style="display:flex;gap:8px;align-items:flex-end;">
+          <div style="flex:1;">
+            <label>Filter by type</label>
+            <select id="wiki-type-filter" onchange="loadWikiPages(1)">
+              <option value="">All types</option>
+            </select>
+          </div>
+          <button class="btn-secondary" onclick="loadWikiPages(1)">Refresh</button>
+        </div>
+        <div id="wiki-browse-list" style="margin-top:12px;"></div>
+        <!-- Detail view (hidden until a page is opened) -->
+        <div id="wiki-page-detail" style="display:none;">
+          <button class="btn-secondary" style="margin-bottom:12px;" onclick="closeWikiPageDetail()">&larr; Back to list</button>
+          <div id="wiki-page-meta" style="font-size:11px;color:var(--fg-muted);margin-bottom:12px;"></div>
+          <div id="wiki-page-content" class="wiki-page-content"></div>
+        </div>
       </div>
-      <div id="wiki-status" style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;"></div>
-      <div class="modal-stream" id="wiki-stream"></div>
-      <div class="modal-sources" id="wiki-sources" style="display:none;"></div>
     </div>
   </div>
 </div>
@@ -2348,6 +2503,7 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
       </div>
       <div id="ask-status" style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;"></div>
       <div class="modal-stream" id="ask-stream"></div>
+      <div id="ask-stream-stats" class="stream-stats"></div>
       <div class="modal-sources" id="ask-sources" style="display:none;"></div>
     </div>
   </div>
@@ -2382,6 +2538,7 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
         <textarea id="plan-text-input" style="min-height:280px;font-family:var(--font-serif);font-size:14px;line-height:1.6;"></textarea>
       </div>
       <div id="plan-status" style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;"></div>
+      <div id="plan-stream-stats" class="stream-stats"></div>
     </div>
     <div class="modal-footer">
       <button class="btn-secondary" onclick="closeModal('plan-modal')">Close</button>
@@ -2692,12 +2849,19 @@ function startStream(jobId) {{
   const status = document.getElementById('stream-status');
   const scoresEl = document.getElementById('stream-scores');
 
+  // Phase 15 — live stats footer for the main stream panel
+  const stats = createStreamStats('main-stream-stats', 'qwen3.5:27b');
+  stats.start();
+
   source.onmessage = function(e) {{
     const evt = JSON.parse(e.data);
 
     if (evt.type === 'token') {{
+      setStreamCursor(body, false);
       body.innerHTML += evt.text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      setStreamCursor(body, true);
       body.scrollTop = body.scrollHeight;
+      stats.update(evt.text);
     }}
     else if (evt.type === 'progress') {{
       status.textContent = evt.detail || evt.stage;
@@ -2751,9 +2915,12 @@ function startStream(jobId) {{
       // verify which model is doing the writing.
       body.innerHTML += '<div style="font-size:11px;color:var(--fg-muted);padding:6px 0;border-bottom:1px solid var(--border);margin-bottom:8px;">' +
         '<strong>writer model:</strong> <code>' + (evt.writer_model || '?') + '</code></div>';
+      stats.setModel(evt.writer_model || 'qwen3.5:27b');
     }}
     else if (evt.type === 'completed') {{
       status.textContent = 'Done';
+      stats.done('done');
+      setStreamCursor(body, false);
       hideStreamPanel();
       source.close();
       currentEventSource = null;
@@ -2764,12 +2931,16 @@ function startStream(jobId) {{
     else if (evt.type === 'error') {{
       status.textContent = 'Error: ' + evt.message;
       body.innerHTML += '<div style="color:var(--danger);margin:8px 0;">' + evt.message + '</div>';
+      stats.done('error');
+      setStreamCursor(body, false);
       hideStreamPanel();
       source.close();
       currentEventSource = null;
       currentJobId = null;
     }}
     else if (evt.type === 'done') {{
+      stats.done('done');
+      setStreamCursor(body, false);
       hideStreamPanel();
       source.close();
       currentEventSource = null;
@@ -2779,6 +2950,8 @@ function startStream(jobId) {{
 
   source.onerror = function() {{
     status.textContent = 'Connection lost';
+    stats.done('error');
+    setStreamCursor(body, false);
     hideStreamPanel();
     source.close();
     currentEventSource = null;
@@ -3377,7 +3550,11 @@ async function doAutowrite() {{
     '<div class="aw-chart" id="aw-chart"><svg viewBox="0 0 400 120"></svg></div>' +
     '<div class="aw-log" id="aw-log"></div>' +
     '</div>' +
-    '<div id="aw-content" style="margin-top:12px;white-space:pre-wrap;"></div>';
+    '<div id="aw-content" style="margin-top:12px;white-space:pre-wrap;line-height:1.6;font-family:var(--font-serif);font-size:15px;"></div>';
+
+  // Phase 15 — live stats footer wired to the main stream-stats element
+  const stats = createStreamStats('main-stream-stats', 'qwen3.5:27b');
+  stats.start();
 
   const fd = new FormData();
   fd.append('chapter_id', currentChapterId);
@@ -3400,8 +3577,11 @@ async function doAutowrite() {{
   source.onmessage = function(e) {{
     const evt = JSON.parse(e.data);
     if (evt.type === 'token') {{
+      setStreamCursor(awContent, false);
       awContent.innerHTML += evt.text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      setStreamCursor(awContent, true);
       awContent.scrollTop = awContent.scrollHeight;
+      stats.update(evt.text);
     }}
     else if (evt.type === 'progress') {{
       status.textContent = evt.detail || evt.stage;
@@ -3438,6 +3618,7 @@ async function doAutowrite() {{
       awLog.innerHTML += '<div style="font-size:11px;color:var(--fg-muted);padding:4px 0;">' +
         '<strong>writer:</strong> <code>' + (evt.writer_model || '?') + '</code>  ·  ' +
         '<strong>fast:</strong> <code>' + (evt.fast_model || '?') + '</code> (utility only)</div>';
+      stats.setModel(evt.writer_model || 'qwen3.5:27b');
     }}
     else if (evt.type === 'verification') {{
       // Standard verifier in the autowrite stream — emit a brief log line.
@@ -3463,6 +3644,8 @@ async function doAutowrite() {{
     }}
     else if (evt.type === 'completed') {{
       status.textContent = 'Done';
+      stats.done('done');
+      setStreamCursor(awContent, false);
       hideStreamPanel();
       source.close(); currentEventSource = null; currentJobId = null;
       refreshAfterJob(evt.draft_id);
@@ -3470,10 +3653,14 @@ async function doAutowrite() {{
     else if (evt.type === 'error') {{
       status.textContent = 'Error: ' + evt.message;
       awLog.innerHTML += '<div style="color:var(--danger);">' + evt.message + '</div>';
+      stats.done('error');
+      setStreamCursor(awContent, false);
       hideStreamPanel();
       source.close(); currentEventSource = null; currentJobId = null;
     }}
     else if (evt.type === 'done') {{
+      stats.done('done');
+      setStreamCursor(awContent, false);
       hideStreamPanel();
       source.close(); currentEventSource = null; currentJobId = null;
     }}
@@ -3769,7 +3956,196 @@ async function showScoresPanel() {{
   }}
 }}
 
+// ── Phase 15: live streaming stats helper ─────────────────────────────
+//
+// Returns an object with `start()`, `update(text)`, and `done(state)`
+// methods that maintain a small footer showing rolling tok/s, total
+// tokens, elapsed time, time-to-first-token, and the model name.
+//
+// Pure client-side — uses performance.now() timestamps and counts
+// whitespace-delimited tokens (a rough proxy for actual model tokens
+// but accurate enough for live feedback).
+function createStreamStats(containerId, modelName) {{
+  const el = document.getElementById(containerId);
+  if (!el) return {{ start: ()=>{{}}, update: ()=>{{}}, done: ()=>{{}}, setModel: ()=>{{}} }};
+  let started = 0, firstTok = 0, lastTok = 0, count = 0;
+  let recentTokens = []; // sliding window for rolling tok/s
+  let timer = null;
+  let currentModel = modelName || '?';
+
+  function fmtTime(ms) {{
+    const s = ms / 1000;
+    if (s < 60) return s.toFixed(1) + 's';
+    const m = Math.floor(s / 60);
+    return m + 'm ' + Math.floor(s % 60).toString().padStart(2, '0') + 's';
+  }}
+
+  function render(state) {{
+    const elapsed = started ? performance.now() - started : 0;
+    const ttft = firstTok ? firstTok - started : 0;
+    // Rolling tok/s over the last 3 seconds
+    const cutoff = performance.now() - 3000;
+    const recent = recentTokens.filter(t => t > cutoff);
+    const tps = recent.length / 3;
+    const avgTps = (firstTok && elapsed > 0) ? count / ((elapsed - ttft) / 1000) : 0;
+
+    el.className = 'stream-stats ' + (state || 'streaming');
+    el.innerHTML =
+      '<span class="ss-dot"></span>' +
+      '<span class="ss-stat"><strong>' + currentModel + '</strong></span>' +
+      '<span class="ss-sep">·</span>' +
+      '<span class="ss-stat"><strong>' + count + '</strong>&nbsp;tok</span>' +
+      '<span class="ss-sep">·</span>' +
+      '<span class="ss-stat"><strong>' + tps.toFixed(1) + '</strong>&nbsp;tok/s</span>' +
+      (avgTps > 0 ? '<span class="ss-sep">·</span><span class="ss-stat" title="Average since first token">avg <strong>' + avgTps.toFixed(1) + '</strong></span>' : '') +
+      '<span class="ss-sep">·</span>' +
+      '<span class="ss-stat">' + fmtTime(elapsed) + '</span>' +
+      (ttft > 0 ? '<span class="ss-sep">·</span><span class="ss-stat" title="Time to first token">ttft ' + fmtTime(ttft) + '</span>' : '');
+  }}
+
+  return {{
+    start() {{
+      started = performance.now();
+      firstTok = 0; count = 0; recentTokens = [];
+      el.style.display = 'flex';
+      render('streaming');
+      if (timer) clearInterval(timer);
+      timer = setInterval(() => render('streaming'), 200);
+    }},
+    update(text) {{
+      if (!started) this.start();
+      if (!firstTok) firstTok = performance.now();
+      // Approximate tokens via whitespace + punctuation splits.
+      const n = (text.match(/\\S+/g) || []).length;
+      count += n;
+      const now = performance.now();
+      for (let i = 0; i < n; i++) recentTokens.push(now);
+    }},
+    done(state) {{
+      lastTok = performance.now();
+      if (timer) {{ clearInterval(timer); timer = null; }}
+      render(state || 'done');
+    }},
+    setModel(m) {{
+      if (m) currentModel = m;
+    }},
+  }};
+}}
+
+// Helper that adds a blinking cursor to an element while streaming.
+function setStreamCursor(el, on) {{
+  if (!el) return;
+  let cursor = el.querySelector('.stream-cursor');
+  if (on && !cursor) {{
+    cursor = document.createElement('span');
+    cursor.className = 'stream-cursor';
+    el.appendChild(cursor);
+  }} else if (!on && cursor) {{
+    cursor.remove();
+  }}
+}}
+
 // ── Phase 14: Wiki Query modal ────────────────────────────────────────
+let wikiCurrentTab = 'wiki-query';
+function switchWikiTab(name) {{
+  wikiCurrentTab = name;
+  document.querySelectorAll('#wiki-modal .tab').forEach(t => {{
+    t.classList.toggle('active', t.dataset.tab === name);
+  }});
+  document.getElementById('wiki-query-pane').style.display = (name === 'wiki-query') ? 'block' : 'none';
+  document.getElementById('wiki-browse-pane').style.display = (name === 'wiki-browse') ? 'block' : 'none';
+  if (name === 'wiki-browse') loadWikiPages(1);
+}}
+
+let wikiBrowsePage = 1;
+async function loadWikiPages(page) {{
+  wikiBrowsePage = page || 1;
+  const filter = document.getElementById('wiki-type-filter');
+  const params = new URLSearchParams({{page: wikiBrowsePage, per_page: 50}});
+  if (filter && filter.value) params.set('page_type', filter.value);
+  const list = document.getElementById('wiki-browse-list');
+  const detail = document.getElementById('wiki-page-detail');
+  detail.style.display = 'none';
+  list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--fg-muted);">Loading...</div>';
+
+  try {{
+    const res = await fetch('/api/wiki/pages?' + params.toString());
+    const data = await res.json();
+
+    // Populate the type filter dropdown if it's still empty
+    if (filter && filter.options.length <= 1 && data.available_types) {{
+      data.available_types.forEach(t => {{
+        const opt = document.createElement('option');
+        opt.value = t;
+        opt.textContent = t.replace(/_/g, ' ');
+        filter.appendChild(opt);
+      }});
+    }}
+
+    if (!data.pages || data.pages.length === 0) {{
+      list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--fg-muted);">' +
+        'No wiki pages found.<br><span style="font-size:11px;">Run <code>uv run sciknow wiki compile</code> to build wiki pages from your corpus.</span></div>';
+      return;
+    }}
+
+    let html = '<div class="wiki-page-list">';
+    data.pages.forEach(p => {{
+      const slug = (p.slug || '').replace(/'/g, '&#39;');
+      html += '<div class="wiki-page-row" onclick="openWikiPage(&#39;' + slug + '&#39;)">';
+      html += '<div class="wp-title">' + (p.title || p.slug || '').replace(/</g, '&lt;') + '</div>';
+      html += '<div class="wp-meta">' + (p.word_count || 0).toLocaleString() + ' words · ' + (p.n_sources || 0) + ' src</div>';
+      html += '<div class="wp-type">' + (p.page_type || '').replace(/_/g, ' ') + '</div>';
+      html += '</div>';
+    }});
+    html += '</div>';
+
+    if (data.n_pages > 1) {{
+      html += '<div class="catalog-pager">';
+      html += '<button onclick="loadWikiPages(' + (wikiBrowsePage - 1) + ')" ' + (wikiBrowsePage <= 1 ? 'disabled' : '') + '>‹ Prev</button>';
+      html += '<span>Page ' + data.page + ' of ' + data.n_pages + '  ·  ' + data.total + ' pages</span>';
+      html += '<button onclick="loadWikiPages(' + (wikiBrowsePage + 1) + ')" ' + (wikiBrowsePage >= data.n_pages ? 'disabled' : '') + '>Next ›</button>';
+      html += '</div>';
+    }}
+
+    list.innerHTML = html;
+  }} catch (e) {{
+    list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--danger);">Error: ' + e.message + '</div>';
+  }}
+}}
+
+async function openWikiPage(slug) {{
+  const list = document.getElementById('wiki-browse-list');
+  const detail = document.getElementById('wiki-page-detail');
+  const meta = document.getElementById('wiki-page-meta');
+  const content = document.getElementById('wiki-page-content');
+  list.style.display = 'none';
+  detail.style.display = 'block';
+  content.innerHTML = '<div style="padding:24px;text-align:center;color:var(--fg-muted);">Loading...</div>';
+
+  try {{
+    const res = await fetch('/api/wiki/page/' + encodeURIComponent(slug));
+    if (!res.ok) {{
+      content.innerHTML = '<div style="color:var(--danger);">Page not found.</div>';
+      return;
+    }}
+    const data = await res.json();
+    const metaParts = [];
+    if (data.page_type) metaParts.push('<strong>' + data.page_type.replace(/_/g, ' ') + '</strong>');
+    if (data.word_count) metaParts.push(data.word_count.toLocaleString() + ' words');
+    if (data.n_sources) metaParts.push(data.n_sources + ' source(s)');
+    if (data.updated_at) metaParts.push('updated ' + data.updated_at.substring(0, 10));
+    meta.innerHTML = metaParts.join(' · ');
+    content.innerHTML = data.content_html || '<em>(empty page)</em>';
+  }} catch (e) {{
+    content.innerHTML = '<div style="color:var(--danger);">Error: ' + e.message + '</div>';
+  }}
+}}
+
+function closeWikiPageDetail() {{
+  document.getElementById('wiki-browse-list').style.display = 'block';
+  document.getElementById('wiki-page-detail').style.display = 'none';
+}}
+
 function openWikiModal() {{
   openModal('wiki-modal');
   setTimeout(() => document.getElementById('wiki-query-input').focus(), 100);
@@ -3787,6 +4163,11 @@ async function doWikiQuery() {{
   sources.style.display = 'none';
   sources.innerHTML = '';
 
+  // Phase 15 — live tok/s + elapsed stats footer
+  const stats = createStreamStats('wiki-stream-stats', 'wiki LLM');
+  stats.start();
+  setStreamCursor(stream, true);
+
   const fd = new FormData();
   fd.append('question', q);
   const res = await fetch('/api/wiki/query', {{method: 'POST', body: fd}});
@@ -3800,12 +4181,19 @@ async function doWikiQuery() {{
   source.onmessage = function(e) {{
     const evt = JSON.parse(e.data);
     if (evt.type === 'token') {{
+      setStreamCursor(stream, false);
       stream.textContent += evt.text;
+      setStreamCursor(stream, true);
       stream.scrollTop = stream.scrollHeight;
+      stats.update(evt.text);
+    }} else if (evt.type === 'model_info') {{
+      stats.setModel(evt.writer_model || evt.fast_model || 'wiki LLM');
     }} else if (evt.type === 'progress') {{
       status.textContent = evt.detail || evt.stage;
     }} else if (evt.type === 'completed') {{
       status.textContent = 'Done';
+      stats.done('done');
+      setStreamCursor(stream, false);
       if (evt.sources && evt.sources.length) {{
         let html = '<div style="font-weight:600;color:var(--fg);margin-bottom:6px;">Sources</div>';
         evt.sources.forEach(s => {{ html += '<div class="src-item">' + s + '</div>'; }});
@@ -3815,8 +4203,12 @@ async function doWikiQuery() {{
       source.close(); currentEventSource = null; currentJobId = null;
     }} else if (evt.type === 'error') {{
       status.textContent = 'Error: ' + evt.message;
+      stats.done('error');
+      setStreamCursor(stream, false);
       source.close(); currentEventSource = null; currentJobId = null;
     }} else if (evt.type === 'done') {{
+      stats.done('done');
+      setStreamCursor(stream, false);
       source.close(); currentEventSource = null; currentJobId = null;
     }}
   }};
@@ -3840,6 +4232,10 @@ async function doAsk() {{
   sources.style.display = 'none';
   sources.innerHTML = '';
 
+  const stats = createStreamStats('ask-stream-stats', 'qwen3.5:27b');
+  stats.start();
+  setStreamCursor(stream, true);
+
   const fd = new FormData();
   fd.append('question', q);
   const yf = document.getElementById('ask-year-from').value;
@@ -3859,14 +4255,22 @@ async function doAsk() {{
   source.onmessage = function(e) {{
     const evt = JSON.parse(e.data);
     if (evt.type === 'token') {{
+      setStreamCursor(stream, false);
       stream.textContent += evt.text;
+      setStreamCursor(stream, true);
       stream.scrollTop = stream.scrollHeight;
+      stats.update(evt.text);
+    }} else if (evt.type === 'model_info') {{
+      stats.setModel(evt.writer_model);
     }} else if (evt.type === 'progress') {{
       status.textContent = evt.detail || evt.stage;
     }} else if (evt.type === 'sources') {{
       collectedSources = evt.sources;
+      status.textContent = 'Generating from ' + (evt.n || evt.sources.length) + ' passages...';
     }} else if (evt.type === 'completed') {{
       status.textContent = 'Done';
+      stats.done('done');
+      setStreamCursor(stream, false);
       if (collectedSources && collectedSources.length) {{
         let html = '<div style="font-weight:600;color:var(--fg);margin-bottom:6px;">Sources (' + collectedSources.length + ')</div>';
         collectedSources.forEach(s => {{ html += '<div class="src-item">' + s + '</div>'; }});
@@ -3876,8 +4280,12 @@ async function doAsk() {{
       source.close(); currentEventSource = null; currentJobId = null;
     }} else if (evt.type === 'error') {{
       status.textContent = 'Error: ' + evt.message;
+      stats.done('error');
+      setStreamCursor(stream, false);
       source.close(); currentEventSource = null; currentJobId = null;
     }} else if (evt.type === 'done') {{
+      stats.done('done');
+      setStreamCursor(stream, false);
       source.close(); currentEventSource = null; currentJobId = null;
     }}
   }};
@@ -3999,6 +4407,9 @@ async function regeneratePlan() {{
   status.textContent = 'Starting generation...';
   ta.value = '';
 
+  const stats = createStreamStats('plan-stream-stats', 'qwen3.5:27b');
+  stats.start();
+
   const fd = new FormData();
   const res = await fetch('/api/book/plan/generate', {{method: 'POST', body: fd}});
   const data = await res.json();
@@ -4012,16 +4423,22 @@ async function regeneratePlan() {{
     if (evt.type === 'token') {{
       ta.value += evt.text;
       ta.scrollTop = ta.scrollHeight;
+      stats.update(evt.text);
+    }} else if (evt.type === 'model_info') {{
+      stats.setModel(evt.writer_model);
     }} else if (evt.type === 'progress') {{
       status.textContent = evt.detail || evt.stage;
     }} else if (evt.type === 'completed') {{
       status.innerHTML = '<span style="color:var(--success);">Generated and saved.</span> ' +
         (evt.chars || ta.value.length) + ' chars.';
+      stats.done('done');
       source.close(); currentEventSource = null; currentJobId = null;
     }} else if (evt.type === 'error') {{
       status.textContent = 'Error: ' + evt.message;
+      stats.done('error');
       source.close(); currentEventSource = null; currentJobId = null;
     }} else if (evt.type === 'done') {{
+      stats.done('done');
       source.close(); currentEventSource = null; currentJobId = null;
     }}
   }};
