@@ -115,26 +115,128 @@ def _get_chapter_num_sections(session, chapter_id: str) -> int:
     sections. Falls back to 1 (treat the whole target as one section's
     budget) if the sections array is missing or empty.
     """
+    return len(_get_chapter_sections_normalized(session, chapter_id)) or 1
+
+
+# Phase 18 — chapter sections as first-class entities.
+#
+# Storage shape (book_chapters.sections JSONB):
+#
+#   New: [{"slug": "solar_cycle", "title": "The 11-Year Cycle",
+#          "plan": "Cover sunspot counts, butterfly diagram, ..."},
+#         {...}]
+#
+#   Legacy: ["solar_cycle", "geomagnetic_storms", ...]
+#
+# All read paths go through _normalize_chapter_sections so legacy data
+# keeps working without a migration. New writes from the GUI always
+# produce the dict shape, so chapters auto-upgrade lazily on the
+# first edit.
+
+def _slugify_section_name(name: str) -> str:
+    """Lowercase + spaces-to-underscores so display titles like
+    'The 11-Year Solar Cycle' become drafts.section_type-friendly slugs
+    like 'the_11-year_solar_cycle'."""
+    return (name or "").strip().lower().replace(" ", "_")
+
+
+def _titleify_slug(slug: str) -> str:
+    """Best-effort display title for a legacy slug. 'key_evidence' →
+    'Key Evidence'."""
+    return (slug or "").replace("_", " ").strip().title()
+
+
+def _normalize_chapter_sections(raw) -> list[dict]:
+    """Return a list of {slug, title, plan} dicts, regardless of input shape.
+
+    Phase 18. Accepts the new dict shape, the legacy string-list shape,
+    JSON-encoded versions of either, and None/empty (returns []).
+    Items missing fields get sensible defaults: slug auto-derived from
+    title (or vice versa), plan defaults to empty string.
+
+    Example legacy input:
+        ["overview", "key_evidence"]
+    Returns:
+        [{"slug": "overview", "title": "Overview", "plan": ""},
+         {"slug": "key_evidence", "title": "Key Evidence", "plan": ""}]
+
+    Example new input:
+        [{"slug": "solar_cycle", "title": "The 11-Year Cycle", "plan": "Cover sunspot counts..."}]
+    Returns the same with any missing fields filled in.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            return []
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    for item in raw:
+        if isinstance(item, str):
+            slug = _slugify_section_name(item)
+            if not slug:
+                continue
+            out.append({
+                "slug": slug,
+                "title": _titleify_slug(slug),
+                "plan": "",
+            })
+        elif isinstance(item, dict):
+            slug = _slugify_section_name(item.get("slug") or item.get("title") or "")
+            if not slug:
+                continue
+            title = (item.get("title") or _titleify_slug(slug)).strip()
+            plan = (item.get("plan") or "").strip()
+            out.append({"slug": slug, "title": title, "plan": plan})
+    return out
+
+
+def _get_chapter_sections_normalized(session, chapter_id: str) -> list[dict]:
+    """Read book_chapters.sections and normalize to [{slug, title, plan}, ...].
+
+    Phase 18. Returns an empty list if the chapter doesn't exist or has
+    no sections set. Callers that need a non-empty fallback (e.g. the
+    GUI's empty-state CTA) should use _DEFAULT_BOOK_SECTION_SLUGS.
+    """
     from sqlalchemy import text
     try:
-        row = session.execute(text("""
-            SELECT sections FROM book_chapters WHERE id::text = :cid LIMIT 1
-        """), {"cid": chapter_id}).fetchone()
+        row = session.execute(text(
+            "SELECT sections FROM book_chapters WHERE id::text = :cid LIMIT 1"
+        ), {"cid": chapter_id}).fetchone()
     except Exception:
-        return 1
+        return []
     if not row:
-        return 1
-    sections = row[0] or []
-    if isinstance(sections, str):
-        try:
-            sections = json.loads(sections)
-        except Exception:
-            return 1
-    try:
-        n = len(sections)
-    except TypeError:
-        return 1
-    return max(1, n)
+        return []
+    return _normalize_chapter_sections(row[0])
+
+
+# Phase 18 — fallback section slugs for chapters that have no explicit
+# section list. Mirrors web/app.py's _DEFAULT_BOOK_SECTIONS so the GUI
+# and the writer agree on the empty-state shape.
+_DEFAULT_BOOK_SECTION_SLUGS = [
+    "overview", "key_evidence", "current_understanding",
+    "open_questions", "summary",
+]
+
+
+def _get_section_plan(session, chapter_id: str, section_slug: str) -> str:
+    """Return the per-section plan text for a (chapter, section) pair, or "".
+
+    Phase 18. Looks up the section in the chapter's sections JSONB and
+    returns its plan field. Used by write_section_stream and
+    autowrite_section_stream to inject the plan into the writer prompt.
+    """
+    if not section_slug:
+        return ""
+    sections = _get_chapter_sections_normalized(session, chapter_id)
+    target = _slugify_section_name(section_slug)
+    for s in sections:
+        if s["slug"] == target:
+            return s.get("plan") or ""
+    return ""
 
 
 def _get_book(session, title_or_id: str):
@@ -507,6 +609,11 @@ def write_section_stream(
         else:
             effective_target_words = target_words
 
+        # Phase 18 — pull the per-section plan if the user has set one
+        # via the chapter modal's Sections tab. Empty string is fine —
+        # write_section_v2 / tree_plan ignore an empty plan.
+        section_plan = _get_section_plan(session, ch_id, section_type)
+
     yield {"type": "progress", "stage": "retrieval", "detail": "Searching literature..."}
 
     qdrant = get_client()
@@ -531,6 +638,7 @@ def write_section_stream(
             section_type, topic, results,
             book_plan=b_plan, prior_summaries=prior_summaries,
             target_words=effective_target_words,
+            section_plan=section_plan,
         )
         plan_raw = ""
         for tok in llm_stream(sys_p, usr_p, model=model):
@@ -563,6 +671,7 @@ def write_section_stream(
         book_plan=b_plan, prior_summaries=prior_summaries,
         paragraph_plan=paragraph_plan,
         target_words=effective_target_words,
+        section_plan=section_plan,
     )
 
     yield {"type": "length_target", "target_words": effective_target_words}
@@ -1190,6 +1299,8 @@ def autowrite_section_stream(
     # configured section count. This single value is then threaded
     # through tree_plan, write_section_v2, and the length-score
     # injection inside the scoring loop.
+    #
+    # Phase 18 — also resolve the per-section plan in the same pass.
     with get_session() as session:
         if target_words is None:
             chapter_target = _get_book_length_target(session, book_id)
@@ -1197,6 +1308,7 @@ def autowrite_section_stream(
             effective_target_words = _section_target_words(chapter_target, num_sections)
         else:
             effective_target_words = target_words
+        section_plan = _get_section_plan(session, ch_id, section_type)
 
     # Phase 14.6 — Surface which model is going to do the writing so the
     # user never has to ask. resolved_model is what `llm.complete()` will
@@ -1239,6 +1351,7 @@ def autowrite_section_stream(
                 section_type, topic, results,
                 book_plan=b_plan, prior_summaries=prior_summaries,
                 target_words=effective_target_words,
+                section_plan=section_plan,
             )
             # Phase 15.3 — stream so the token counter sees activity
             plan_raw = yield from _stream_phase(
@@ -1259,6 +1372,7 @@ def autowrite_section_stream(
         book_plan=b_plan, prior_summaries=prior_summaries,
         paragraph_plan=paragraph_plan,
         target_words=effective_target_words,
+        section_plan=section_plan,
     )
 
     yield {"type": "progress", "stage": "writing",

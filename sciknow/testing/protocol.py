@@ -1345,6 +1345,246 @@ def l1_phase17_web_length_target() -> None:
     )
 
 
+# ── Phase 18 — chapter sections + citation fix ──────────────────────────────
+
+
+def l1_phase18_citation_numbering_consistent() -> None:
+    """Phase 18 — format_context and format_sources must produce IDENTICAL
+    [N] → paper mappings, even when the input contains duplicates.
+
+    The bug this catches: format_context used to use `r.rank` (the
+    pre-dedup retrieval rank) while format_sources used
+    `enumerate(start=1)` after dedup. When dedup removed any duplicate,
+    the writer's prompt contained gaps in its [N] sequence, but the
+    saved sources panel had no gaps — every citation past the gap
+    referenced a different paper than the panel said.
+    """
+    from sciknow.rag.prompts import format_context, format_sources
+    from sciknow.retrieval.context_builder import SearchResult
+    import re
+
+    def _mk(rank, doc_id, title):
+        return SearchResult(
+            rank=rank, score=0.5, chunk_id=f"c{rank}",
+            document_id=doc_id, section_type="text", section_title=None,
+            content=f"This is the body of {title}.",
+            title=title, year=2020, authors=[], journal=None, doi=None,
+        )
+
+    # 5 results, with results[1] being a duplicate of results[0].
+    # Dedup should drop the dupe; both functions should produce a
+    # 4-paper sequence numbered [1] [2] [3] [4].
+    results = [
+        _mk(1, "doc-a", "Paper A"),
+        _mk(2, "doc-a", "Paper A"),  # duplicate of #1
+        _mk(3, "doc-b", "Paper B"),
+        _mk(4, "doc-c", "Paper C"),
+        _mk(5, "doc-d", "Paper D"),
+    ]
+
+    ctx = format_context(results)
+    src = format_sources(results)
+
+    # Both should reference exactly [1], [2], [3], [4] — no gaps, no [5].
+    ctx_nums = sorted({int(m) for m in re.findall(r'\[(\d+)\]', ctx)})
+    src_nums = sorted({int(m) for m in re.findall(r'\[(\d+)\]', src)})
+    assert ctx_nums == [1, 2, 3, 4], (
+        f"format_context numbering wrong: {ctx_nums} (expected [1,2,3,4])"
+    )
+    assert src_nums == [1, 2, 3, 4], (
+        f"format_sources numbering wrong: {src_nums} (expected [1,2,3,4])"
+    )
+
+    # And critically — the same [N] must reference the SAME paper in both.
+    # The APA format used by _apa_citation puts the title right after
+    # "(year). ", so we can pull "[N] (year). Title." with one regex
+    # and build a {N: title} map for each side.
+    def _build_n_to_title(text):
+        out = {}
+        for m in re.finditer(r'\[(\d+)\]\s*\(\d+\)\.\s*([^.]+?)\.', text):
+            out[int(m.group(1))] = m.group(2).strip()
+        return out
+
+    ctx_map = _build_n_to_title(ctx)
+    src_map = _build_n_to_title(src)
+    assert ctx_map, f"Failed to extract any [N]→title from context: {ctx[:300]}"
+    assert src_map, f"Failed to extract any [N]→title from sources: {src[:300]}"
+    for n, title in src_map.items():
+        assert ctx_map.get(n) == title, (
+            f"Citation [{n}] references different papers: "
+            f"context says {ctx_map.get(n)!r}, sources says {title!r}"
+        )
+
+
+def l1_phase18_chapter_sections_normalize() -> None:
+    """Phase 18 — _normalize_chapter_sections accepts both legacy
+    string-list and new dict-list formats and returns dicts.
+    """
+    from sciknow.core.book_ops import _normalize_chapter_sections
+
+    # Empty / None → empty list
+    assert _normalize_chapter_sections(None) == []
+    assert _normalize_chapter_sections([]) == []
+
+    # Legacy: list of strings
+    legacy = ["overview", "key_evidence", "summary"]
+    out = _normalize_chapter_sections(legacy)
+    assert len(out) == 3
+    assert out[0] == {"slug": "overview", "title": "Overview", "plan": ""}
+    assert out[1]["slug"] == "key_evidence"
+    assert out[1]["title"] == "Key Evidence"
+
+    # New: list of dicts
+    new = [
+        {"slug": "solar_cycle", "title": "The 11-Year Cycle",
+         "plan": "Cover sunspot counts and butterfly diagram."},
+        {"title": "Geomagnetic Storms"},  # missing slug → derive from title
+        {"slug": "cosmic_rays"},          # missing title → titleify slug
+    ]
+    out = _normalize_chapter_sections(new)
+    assert len(out) == 3
+    assert out[0]["slug"] == "solar_cycle"
+    assert out[0]["title"] == "The 11-Year Cycle"
+    assert out[0]["plan"] == "Cover sunspot counts and butterfly diagram."
+    assert out[1]["slug"] == "geomagnetic_storms"
+    assert out[1]["title"] == "Geomagnetic Storms"
+    assert out[1]["plan"] == ""
+    assert out[2]["slug"] == "cosmic_rays"
+    assert out[2]["title"] == "Cosmic Rays"
+
+    # JSON-encoded string also works
+    out = _normalize_chapter_sections('["a", "b"]')
+    assert len(out) == 2 and out[0]["slug"] == "a"
+
+
+def l1_phase18_section_plan_threaded() -> None:
+    """Phase 18 — tree_plan and write_section_v2 accept section_plan
+    and inject it into the prompt when non-empty."""
+    import inspect
+    from sciknow.rag import prompts
+    from sciknow.core import book_ops
+
+    tp_sig = inspect.signature(prompts.tree_plan)
+    assert "section_plan" in tp_sig.parameters, (
+        "tree_plan missing section_plan kwarg"
+    )
+
+    ws_sig = inspect.signature(prompts.write_section_v2)
+    assert "section_plan" in ws_sig.parameters, (
+        "write_section_v2 missing section_plan kwarg"
+    )
+
+    # Without a section plan: no leakage
+    sys_w_empty, _ = prompts.write_section_v2(
+        "results", "x", [],
+        book_plan=None, prior_summaries=None,
+        section_plan=None,
+    )
+    assert "Section plan" not in sys_w_empty, (
+        "write_section_v2 leaks section plan block when section_plan is None"
+    )
+
+    # With a section plan: it appears verbatim
+    sys_w_filled, _ = prompts.write_section_v2(
+        "results", "x", [],
+        book_plan=None, prior_summaries=None,
+        section_plan="Cover sunspot counts and butterfly diagram.",
+    )
+    assert "Section plan" in sys_w_filled
+    assert "sunspot counts" in sys_w_filled
+
+    # tree_plan: same behaviour. Note: tree_plan injects the section
+    # plan into the USER message (via plan_context), not the system
+    # prompt — we check the full concatenated prompt.
+    sys_t_filled, usr_t_filled = prompts.tree_plan(
+        "results", "x", [],
+        section_plan="Discuss the 11-year cycle in detail.",
+    )
+    full_t = sys_t_filled + "\n" + usr_t_filled
+    assert "Section plan" in full_t, (
+        "tree_plan doesn't surface the section plan anywhere in its prompt"
+    )
+    assert "11-year cycle" in full_t
+
+    # And without a section plan, no leakage in either part
+    sys_t_empty, usr_t_empty = prompts.tree_plan(
+        "results", "x", [],
+        section_plan=None,
+    )
+    assert "Section plan — what THIS section must cover" not in (sys_t_empty + usr_t_empty), (
+        "tree_plan injects an empty Section plan block when section_plan is None"
+    )
+
+    # book_ops helpers exist
+    assert hasattr(book_ops, "_get_section_plan")
+    assert hasattr(book_ops, "_normalize_chapter_sections")
+    assert hasattr(book_ops, "_get_chapter_sections_normalized")
+
+    # write_section_stream + autowrite_section_stream pass section_plan
+    # through to write_section_v2 — verified by source inspection.
+    aw_src = inspect.getsource(book_ops.autowrite_section_stream)
+    assert "section_plan=section_plan" in aw_src, (
+        "autowrite_section_stream doesn't pass section_plan to write_section_v2/tree_plan"
+    )
+    ws_src = inspect.getsource(book_ops.write_section_stream)
+    assert "section_plan=section_plan" in ws_src, (
+        "write_section_stream doesn't pass section_plan to write_section_v2/tree_plan"
+    )
+
+
+def l1_phase18_web_endpoints_and_modal() -> None:
+    """Phase 18 — web app exposes the new sections CRUD endpoint and
+    the chapter modal has the Sections tab + supporting JS.
+    """
+    import inspect
+    from sciknow.web import app as web_app
+
+    # New endpoint registered
+    routes = {getattr(r, "path", ""): r for r in web_app.app.routes}
+    assert "/api/chapters/{chapter_id}/sections" in routes, (
+        "PUT /api/chapters/{id}/sections endpoint missing — sections CRUD won't work"
+    )
+
+    # chapter_reader returns sources_html (Phase 18 fix)
+    cr_src = inspect.getsource(web_app.chapter_reader)
+    assert "sources_html" in cr_src, (
+        "chapter_reader doesn't return sources_html — citation links in "
+        "the chapter view will be broken (no source data for popovers)"
+    )
+    assert "_register_source" in cr_src, (
+        "chapter_reader missing global source renumbering — each draft's "
+        "[N] would still collide with other drafts'"
+    )
+
+    src = inspect.getsource(web_app)
+
+    # Chapter modal has tabs + sections editor
+    assert "switchChapterTab" in src, (
+        "Chapter modal missing switchChapterTab() — Sections tab is dead"
+    )
+    assert "ch-sections-pane" in src, "Chapter modal missing #ch-sections-pane"
+    assert "ch-sections-list" in src, "Chapter modal missing #ch-sections-list container"
+    assert "addSection" in src, "Chapter modal missing addSection() helper"
+    assert "removeSection" in src, "Chapter modal missing removeSection() helper"
+    assert "moveSection" in src, "Chapter modal missing moveSection() helper"
+    assert "renderSectionEditor" in src, (
+        "Chapter modal missing renderSectionEditor() — UI never paints"
+    )
+
+    # showChapterReader populates panel-sources after fetching
+    assert "data.sources_html" in src and "panel-sources" in src, (
+        "showChapterReader doesn't populate panel-sources — popovers "
+        "won't find source data and citations will be dead"
+    )
+
+    # api_chapters surfaces sections_meta to the SPA
+    api_src = inspect.getsource(web_app.api_chapters)
+    assert "sections_meta" in api_src, (
+        "GET /api/chapters doesn't expose sections_meta — chapter modal "
+        "can't pre-fill the sections editor"
+    )
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -1385,6 +1625,11 @@ L1_TESTS: list[Callable] = [
     l1_phase17_autowrite_length_loop,
     l1_phase17_cli_length_flags,
     l1_phase17_web_length_target,
+    # Phase 18 — chapter sections as first-class entities + citation fix
+    l1_phase18_citation_numbering_consistent,
+    l1_phase18_chapter_sections_normalize,
+    l1_phase18_section_plan_threaded,
+    l1_phase18_web_endpoints_and_modal,
 ]
 
 L2_TESTS: list[Callable] = [

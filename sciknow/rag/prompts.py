@@ -124,14 +124,23 @@ def format_context(results: list[SearchResult], max_chars: int = 24000) -> str:
     Render a numbered list of passages for insertion into a prompt.
     Truncates at max_chars to stay within the model's context window.
     Deduplicates by document_id and normalised title.
+
+    Phase 18 — uses sequential `enumerate(start=1)` numbering on the
+    deduped list, IDENTICAL to format_sources(). The writer prompt and
+    the sources panel must use the same [N] → paper mapping or
+    citations link to the wrong paper (or to nothing at all). Earlier
+    versions used `r.rank` here, which is the pre-dedup retrieval
+    rank; if dedup removed any duplicate, the prompt's [N] sequence
+    had gaps while the sources panel was renumbered sequentially,
+    causing every citation past the gap to mismatch.
     """
     deduped = _dedup(results)
 
     parts: list[str] = []
     total = 0
-    for r in deduped:
+    for rank, r in enumerate(deduped, start=1):
         section = r.section_type or "text"
-        header = _apa_citation(r, r.rank) + f" [{section}]"
+        header = _apa_citation(r, rank) + f" [{section}]"
         block = f"{header}\n{r.content}"
         if total + len(block) > max_chars:
             break
@@ -141,7 +150,13 @@ def format_context(results: list[SearchResult], max_chars: int = 24000) -> str:
 
 
 def format_sources(results: list[SearchResult]) -> str:
-    """APA-style source list for printing after the answer. Deduplicates by document and title."""
+    """APA-style source list for printing after the answer. Deduplicates by
+    document and title.
+
+    Numbering MUST stay aligned with format_context() — both use
+    `enumerate(_dedup(results), start=1)`. See the Phase 18 note in
+    format_context for the bug this prevents.
+    """
     lines = []
     for rank, r in enumerate(_dedup(results), start=1):
         lines.append(_apa_citation(r, rank))
@@ -704,6 +719,7 @@ the prior topic and the new one ("Beyond the ocean heat content discussed above,
 atmospheric branch …").
 
 {length_target_section}
+{section_plan_section}
 {discourse_relation_section}
 {book_plan_section}
 {prior_summaries_section}"""
@@ -728,10 +744,23 @@ def write_section_v2(
     prior_summaries: list[dict] | None = None,
     paragraph_plan: list[dict] | None = None,
     target_words: int | None = None,
+    section_plan: str | None = None,
 ) -> tuple[str, str]:
     plan_block = ""
     if book_plan:
         plan_block = f"\nBook plan:\n{book_plan}\n"
+
+    # Phase 18 — per-section plan. The user fills this in via the
+    # chapter modal's Sections tab; it tells the writer what THIS
+    # specific section should cover, scoped narrower than the
+    # chapter-level description. Distinct from book_plan (whole-book
+    # leitmotiv) and from `topic` (the retrieval query).
+    section_plan_block = ""
+    if section_plan and section_plan.strip():
+        section_plan_block = (
+            f"\nSection plan — what THIS section must cover:\n"
+            f"{section_plan.strip()}\n"
+        )
 
     summaries_block = ""
     if prior_summaries:
@@ -795,6 +824,7 @@ def write_section_v2(
     return (
         WRITE_V2_SYSTEM.format(
             length_target_section=length_block,
+            section_plan_section=section_plan_block,
             discourse_relation_section=discourse_block,
             book_plan_section=plan_block,
             prior_summaries_section=summaries_block,
@@ -1142,10 +1172,19 @@ def tree_plan(
     book_plan: str | None = None,
     prior_summaries: list[dict] | None = None,
     target_words: int | None = None,
+    section_plan: str | None = None,
 ) -> tuple[str, str]:
     plan_ctx = ""
     if book_plan:
         plan_ctx += f"\nBook plan:\n{book_plan}\n"
+    # Phase 18 — per-section plan. Sits between the book plan and the
+    # prior chapter summaries so the planner has both the global
+    # leitmotiv and the local "this section must cover X" instruction.
+    if section_plan and section_plan.strip():
+        plan_ctx += (
+            f"\nSection plan — what THIS section must cover:\n"
+            f"{section_plan.strip()}\n"
+        )
     if prior_summaries:
         lines = [f"Ch.{s.get('chapter_number','?')} [{s.get('section_type','text')}]: {s['summary']}"
                  for s in prior_summaries]

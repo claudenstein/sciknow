@@ -52,17 +52,34 @@ def _normalize_section(name: str) -> str:
     return (name or "").strip().lower().replace(" ", "_")
 
 
-def _chapter_sections(ch_row) -> list[str]:
-    """Return the section template for a chapter row.
+def _chapter_sections_dicts(ch_row) -> list[dict]:
+    """Return the section template for a chapter row, normalized to
+    [{slug, title, plan}, ...].
 
-    The chapter SQL row carries `bc.sections` as a JSONB list (possibly empty).
-    Falls back to _DEFAULT_BOOK_SECTIONS when empty so the GUI never shows
-    paper-style placeholders for a science book.
+    Phase 18. Delegates to core.book_ops._normalize_chapter_sections so
+    the web layer and the backend agree on the legacy/new shape rules.
+    Falls back to a small default set when the chapter has no sections
+    set, so the GUI never shows an empty list for a fresh chapter.
     """
+    from sciknow.core.book_ops import _normalize_chapter_sections, _titleify_slug
     raw = ch_row[6] if len(ch_row) > 6 else None
-    if isinstance(raw, list) and raw:
-        return [_normalize_section(s) for s in raw if s]
-    return list(_DEFAULT_BOOK_SECTIONS)
+    out = _normalize_chapter_sections(raw)
+    if out:
+        return out
+    # Empty → fallback so the sidebar still has something to show.
+    return [
+        {"slug": s, "title": _titleify_slug(s), "plan": ""}
+        for s in _DEFAULT_BOOK_SECTIONS
+    ]
+
+
+def _chapter_sections(ch_row) -> list[str]:
+    """Return the section template for a chapter row as a flat list of slugs.
+
+    Kept for backward compatibility with sidebar/heatmap code that only
+    needs the slug ordering. New code should prefer _chapter_sections_dicts.
+    """
+    return [s["slug"] for s in _chapter_sections_dicts(ch_row)]
 
 
 def set_book(book_id: str, book_title: str) -> None:
@@ -454,7 +471,8 @@ async def api_chapters():
         # Order drafts by their chapter's own section template if defined,
         # otherwise by the book defaults. Falls through to alphabetical for
         # any unknown section types.
-        template = _chapter_sections(ch)
+        template_dicts = _chapter_sections_dicts(ch)
+        template = [s["slug"] for s in template_dicts]
         section_order = {s: i for i, s in enumerate(template)}
         sections = []
         for d in sorted(ch_ds, key=lambda x: section_order.get(_normalize_section(x[2] or ""), 99)):
@@ -470,6 +488,11 @@ async def api_chapters():
             # types this chapter wants, drawn from book_chapters.sections
             # or the book-style defaults).
             "sections_template": template,
+            # Phase 18 — rich {slug, title, plan} dicts for the chapter
+            # modal's Sections tab. The legacy `sections_template` (flat
+            # slug list) is kept for the sidebar / heatmap code that
+            # only needs slugs, so existing renderers don't break.
+            "sections_meta": template_dicts,
         })
 
     return {"chapters": result, "gaps_count": len([g for g in gaps if g[3] == "open"])}
@@ -686,6 +709,49 @@ async def update_chapter(
     return JSONResponse({"ok": True})
 
 
+@app.put("/api/chapters/{chapter_id}/sections")
+async def update_chapter_sections(chapter_id: str, request: Request):
+    """Replace a chapter's sections list.
+
+    Phase 18. Body: ``{"sections": [{"slug": "...", "title": "...", "plan": "..."}, ...]}``
+
+    The slug is the unique key (used as drafts.section_type). Duplicate
+    slugs are dropped (first wins). Sections with empty slug+title are
+    dropped. The list order matters: it determines the order shown in
+    the chapter reader and the sidebar.
+
+    DOES NOT delete existing drafts whose section_type no longer
+    appears in the new list. They become orphans visible only in raw
+    SQL — that's a deliberate safety choice so renaming a section
+    can't silently destroy work.
+    """
+    from sciknow.core.book_ops import _normalize_chapter_sections
+
+    body = await request.json()
+    raw_sections = body.get("sections", [])
+    normalized = _normalize_chapter_sections(raw_sections)
+
+    # Drop duplicates by slug, keeping the first occurrence — the
+    # client can theoretically send dupes, and we don't want them
+    # silently colliding with each other.
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for s in normalized:
+        if s["slug"] in seen:
+            continue
+        seen.add(s["slug"])
+        deduped.append(s)
+
+    with get_session() as session:
+        session.execute(text("""
+            UPDATE book_chapters SET sections = CAST(:secs AS jsonb)
+            WHERE id::text = :cid
+        """), {"cid": chapter_id, "secs": json.dumps(deduped)})
+        session.commit()
+
+    return JSONResponse({"ok": True, "sections": deduped})
+
+
 @app.delete("/api/chapters/{chapter_id}")
 async def delete_chapter(chapter_id: str):
     """Delete a chapter (drafts are preserved but unlinked)."""
@@ -802,12 +868,23 @@ async def update_draft_metadata(request: Request, draft_id: str):
 
 @app.get("/api/chapter-reader/{chapter_id}")
 async def chapter_reader(chapter_id: str):
-    """Return all sections of a chapter concatenated for continuous reading."""
-    section_order = {"introduction": 0, "methods": 1, "results": 2, "discussion": 3, "conclusion": 4}
+    """Return all sections of a chapter concatenated for continuous reading.
+
+    Phase 18 — major rewrite:
+    - Section order respects the chapter's `sections` JSONB list (the
+      user's chosen order), not a hardcoded paper-style map.
+    - Section headers use the user-provided title from the sections
+      meta, not the slug auto-capitalized.
+    - Sources from all drafts are stitched into a single global list
+      and citations in each draft's content are renumbered to match
+      the global list, so [N] click-to-source works in the chapter
+      view (was previously broken: each draft used [1..N] independently).
+    """
+    from sciknow.core.book_ops import _normalize_chapter_sections
 
     with get_session() as session:
         ch = session.execute(text("""
-            SELECT bc.number, bc.title FROM book_chapters bc
+            SELECT bc.number, bc.title, bc.sections FROM book_chapters bc
             WHERE bc.id::text = :cid
         """), {"cid": chapter_id}).fetchone()
         if not ch:
@@ -816,7 +893,7 @@ async def chapter_reader(chapter_id: str):
         # Get latest version per section_type
         drafts = session.execute(text("""
             SELECT d.id::text, d.section_type, d.content, d.word_count,
-                   d.version, d.status
+                   d.version, d.status, d.sources
             FROM drafts d
             WHERE d.chapter_id::text = :cid
             ORDER BY d.section_type, d.version DESC
@@ -829,33 +906,116 @@ async def chapter_reader(chapter_id: str):
         if st not in seen or (d[4] or 1) > (seen[st][4] or 1):
             seen[st] = d
 
-    sections = sorted(seen.values(), key=lambda x: section_order.get(x[1] or "", 9))
+    # Phase 18 — order by chapter's sections list (user's chosen order),
+    # not hardcoded paper-style. Sections not in the meta list go last
+    # in alphabetical order — visible but tagged as "orphaned" so the
+    # user can spot a renamed section that left a stale draft behind.
+    sections_meta = _normalize_chapter_sections(ch[2])
+    title_by_slug = {s["slug"]: s["title"] for s in sections_meta}
+    order_by_slug = {s["slug"]: i for i, s in enumerate(sections_meta)}
+
+    def _sort_key(d):
+        slug = (d[1] or "").strip().lower()
+        return (order_by_slug.get(slug, 999), slug)
+
+    section_drafts = sorted(seen.values(), key=_sort_key)
+
+    # Phase 18 — global source renumbering. Each draft's `sources` is a
+    # 1-indexed list. We build a global list, map each draft's local
+    # number to the global number, then rewrite the draft's [N] tags
+    # accordingly. Dedup is by the source string itself (the APA-rendered
+    # text); two drafts citing the same paper share one global source.
+    global_sources: list[str] = []
+    source_to_global: dict[str, int] = {}
+
+    def _register_source(src: str) -> int:
+        if src in source_to_global:
+            return source_to_global[src]
+        global_sources.append(src)
+        n = len(global_sources)
+        source_to_global[src] = n
+        return n
 
     combined_html = ""
     total_words = 0
-    for d in sections:
-        sec_type = (d[1] or "text").capitalize()
-        combined_html += f'<h2 class="reader-section-title">{sec_type}</h2>'
-        combined_html += _md_to_html(d[2] or "")
+    for d in section_drafts:
+        slug = (d[1] or "").strip().lower()
+        title = title_by_slug.get(slug) or _titleify_slug_for_display(slug)
+        is_orphan = slug not in title_by_slug and sections_meta
+        # Per-draft local→global citation map
+        srcs = d[6]
+        if isinstance(srcs, str):
+            try:
+                srcs = json.loads(srcs)
+            except Exception:
+                srcs = []
+        local_to_global: dict[int, int] = {}
+        for local_idx, src_text in enumerate(srcs or [], start=1):
+            if not src_text:
+                continue
+            local_to_global[local_idx] = _register_source(src_text)
+
+        content = d[2] or ""
+        # Rewrite [N] → [global_N]. Citations whose local N has no
+        # source (orphan citation, e.g. writer hallucinated a number)
+        # get rewritten to a clearly broken marker so the user notices.
+        def _renumber(match):
+            local = int(match.group(1))
+            global_n = local_to_global.get(local)
+            if global_n is None:
+                return f"[?]"
+            return f"[{global_n}]"
+        content = re.sub(r'\[(\d+)\]', _renumber, content)
+
+        orphan_tag = " (orphaned section)" if is_orphan else ""
+        combined_html += (
+            f'<h2 class="reader-section-title" id="reader-section-{slug}">'
+            f'{title}{orphan_tag}</h2>'
+        )
+        combined_html += _md_to_html(content)
         total_words += d[3] or 0
+
+    sources_html = _render_sources(global_sources)
 
     return {
         "chapter_num": ch[0],
         "chapter_title": ch[1],
         "html": combined_html,
         "total_words": total_words,
-        "section_count": len(sections),
+        "section_count": len(section_drafts),
+        # Phase 18 — global sources panel for the chapter view, plus a
+        # short outline so the user can jump to any section.
+        "sources_html": sources_html,
+        "outline": [
+            {"slug": (d[1] or "").strip().lower(),
+             "title": title_by_slug.get((d[1] or "").strip().lower())
+                      or _titleify_slug_for_display(d[1] or ""),
+             "words": d[3] or 0}
+            for d in section_drafts
+        ],
     }
+
+
+def _titleify_slug_for_display(slug: str) -> str:
+    """Local web fallback for unknown slugs (orphaned drafts whose
+    section was renamed/deleted). Mirrors core.book_ops._titleify_slug
+    but kept here so this module doesn't have to import lazily."""
+    return (slug or "").replace("_", " ").strip().title()
 
 
 # ── Corkboard data ──────────────────────────────────────────────────────────
 
 @app.get("/api/corkboard")
 async def corkboard_data():
-    """Return data for the corkboard view: cards for each chapter/section."""
-    book, chapters, drafts, gaps, comments = _get_book_data()
+    """Return data for the corkboard view: cards for each chapter/section.
 
-    section_order = {"introduction": 0, "methods": 1, "results": 2, "discussion": 3, "conclusion": 4}
+    Phase 18 — uses each chapter's actual sections list (the user's
+    chosen names + order) instead of the previous hardcoded paper-style
+    [introduction, methods, results, discussion, conclusion]. Chapters
+    with custom sections now show ALL their sections; chapters without
+    a sections list show the default science-book set.
+    """
+    book, chapters, drafts, gaps, comments = _get_book_data()
 
     # Build latest draft per chapter+section
     ch_sections: dict[str, dict] = {}
@@ -885,15 +1045,21 @@ async def corkboard_data():
     cards = []
     for ch in chapters:
         ch_id, ch_num, ch_title, ch_desc, tq, tc, ch_sections_template = ch
+        # Phase 18 — chapter's own sections list (with rich {slug,title,plan})
+        section_template = _chapter_sections_dicts(ch)
         secs = ch_sections.get(ch_id, {})
-        for sec_type in ["introduction", "methods", "results", "discussion", "conclusion"]:
-            info = secs.get(sec_type)
+        for tmpl in section_template:
+            slug = tmpl["slug"]
+            display_title = tmpl["title"]
+            info = secs.get(slug)
             if info:
                 info["status"] = status_map.get(info["draft_id"], "drafted")
                 cards.append({
                     "chapter_id": ch_id, "chapter_num": ch_num,
                     "chapter_title": ch_title,
-                    "section_type": sec_type, "draft_id": info["draft_id"],
+                    "section_type": slug,
+                    "section_title": display_title,
+                    "draft_id": info["draft_id"],
                     "version": info["version"], "words": info["words"],
                     "summary": info["summary"], "has_review": info["has_review"],
                     "status": info["status"],
@@ -902,7 +1068,9 @@ async def corkboard_data():
                 cards.append({
                     "chapter_id": ch_id, "chapter_num": ch_num,
                     "chapter_title": ch_title,
-                    "section_type": sec_type, "draft_id": None,
+                    "section_type": slug,
+                    "section_title": display_title,
+                    "draft_id": None,
                     "version": 0, "words": 0, "summary": "",
                     "has_review": False, "status": "to_do",
                 })
@@ -1554,13 +1722,20 @@ def _render_book(book, chapters, drafts, gaps, comments,
     for ch in chapters:
         ch_id, ch_num, ch_title, ch_desc, tq, tc, ch_sections_template = ch
         ch_ds = chapter_drafts.get(ch_id, [])
-        template = _chapter_sections(ch)
+        template_dicts = _chapter_sections_dicts(ch)
+        template = [s["slug"] for s in template_dicts]
+        title_by_slug = {s["slug"]: s["title"] for s in template_dicts}
         section_order_map = {s: i for i, s in enumerate(template)}
         sections = []
         for d in sorted(ch_ds, key=lambda x: section_order_map.get(_normalize_section(x[2] or ""), 99)):
+            slug = _normalize_section(d[2] or "")
             sections.append({
-                "id": d[0], "type": d[2] or "text", "version": d[6] or 1,
-                "words": d[4] or 0,
+                "id": d[0], "type": d[2] or "text",
+                # Phase 18 — display title from chapter sections meta,
+                # fallback to capitalized slug for orphans (drafts whose
+                # section was renamed/deleted from the chapter list).
+                "title": title_by_slug.get(slug) or _titleify_slug_for_display(slug),
+                "version": d[6] or 1, "words": d[4] or 0,
             })
         sidebar_items.append({
             "num": ch_num, "title": ch_title, "id": ch_id,
@@ -1569,6 +1744,9 @@ def _render_book(book, chapters, drafts, gaps, comments,
             # Phase 14.4 — per-chapter section template for the GUI's
             # empty-state picker and the dashboard heatmap.
             "sections_template": template,
+            # Phase 18 — rich {slug, title, plan} dicts for the chapter
+            # modal's Sections tab.
+            "sections_meta": template_dicts,
         })
 
     active_draft = None
@@ -1633,6 +1811,8 @@ def _render_book(book, chapters, drafts, gaps, comments,
         "sections": si["sections"],
         # Phase 14.4 — per-chapter book-style section template
         "sections_template": si["sections_template"],
+        # Phase 18 — rich section meta for the Sections tab editor
+        "sections_meta": si["sections_meta"],
     } for si in sidebar_items])
 
     return TEMPLATE.format(
@@ -1671,10 +1851,13 @@ def _render_sidebar(items, active_id):
                  f'</span></div>')
         for sec in ch["sections"]:
             active = "active" if sec["id"] == active_id else ""
+            # Phase 18 — show the user-supplied section title (from
+            # chapter sections meta) instead of the slug capitalized.
+            display = sec.get("title") or sec.get("type", "").capitalize()
             html += (
                 f'<a class="sec-link {active}" href="/section/{sec["id"]}" '
                 f'data-draft-id="{sec["id"]}" onclick="return navTo(this)">'
-                f'{sec["type"].capitalize()} '
+                f'{display} '
                 f'<span class="meta">v{sec["version"]} \u00b7 {sec["words"]}w</span></a>'
             )
         if not ch["sections"]:
@@ -2194,6 +2377,35 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
                      line-height: 1.78; color: var(--fg); }}
 .live-writing-body p {{ margin-bottom: var(--sp-3); text-align: justify; }}
 .live-writing-body p .citation {{ color: var(--accent); font-weight: 600; }}
+/* Phase 18 — Sections tab in chapter modal */
+.sec-row {{ display: flex; gap: var(--sp-2); align-items: flex-start;
+             padding: var(--sp-3); border: 1px solid var(--border);
+             border-radius: var(--r-md); background: var(--bg-elevated);
+             margin-bottom: var(--sp-2); }}
+.sec-row .sec-handle {{ display: flex; flex-direction: column; gap: 2px;
+                        flex-shrink: 0; padding-top: 4px; }}
+.sec-row .sec-handle button {{ background: transparent; border: 1px solid var(--border);
+                               color: var(--fg-muted); cursor: pointer;
+                               width: 22px; height: 18px; font-size: 10px;
+                               border-radius: 3px; padding: 0;
+                               display: flex; align-items: center; justify-content: center; }}
+.sec-row .sec-handle button:hover {{ color: var(--accent); border-color: var(--accent); }}
+.sec-row .sec-fields {{ flex: 1; display: flex; flex-direction: column; gap: 6px;
+                       min-width: 0; }}
+.sec-row .sec-fields input,
+.sec-row .sec-fields textarea {{ width: 100%; padding: 6px 10px; font-size: 13px;
+                                 background: var(--bg); border: 1px solid var(--border);
+                                 border-radius: var(--r-sm); color: var(--fg);
+                                 font-family: var(--font-sans); }}
+.sec-row .sec-fields textarea {{ min-height: 60px; resize: vertical;
+                                 font-family: var(--font-sans); }}
+.sec-row .sec-slug {{ font-family: var(--font-mono); font-size: 11px;
+                     color: var(--fg-muted); padding: 0 0 0 4px; }}
+.sec-row .sec-delete {{ background: transparent; border: 1px solid var(--border);
+                       color: var(--fg-muted); cursor: pointer; padding: 4px 8px;
+                       border-radius: var(--r-sm); font-size: 11px; flex-shrink: 0;
+                       align-self: flex-start; }}
+.sec-row .sec-delete:hover {{ color: var(--danger); border-color: var(--danger); }}
 .hm-cell {{ border-radius: 4px; padding: 4px 8px; cursor: pointer; display: inline-block;
             min-width: 44px; font-size: 11px; }}
 .hm-cell.reviewed {{ background: var(--success); color: white; }}
@@ -2644,33 +2856,57 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
   </div>
 </div>
 
-<!-- Phase 14.3 — Chapter Info Modal (description + topic_query) -->
+<!-- Phase 14.3 — Chapter Info Modal (description + topic_query)
+     Phase 18 — Tabs: Scope (existing) + Sections (new) -->
 <div class="modal-overlay" id="chapter-modal" onclick="if(event.target===this)closeModal('chapter-modal')">
-  <div class="modal">
+  <div class="modal wide">
     <div class="modal-header">
-      <h3>&#9881; Chapter scope</h3>
+      <h3>&#9881; Chapter</h3>
       <button class="modal-close" onclick="closeModal('chapter-modal')">&times;</button>
     </div>
+    <div class="tabs">
+      <button class="tab active" data-tab="ch-scope" onclick="switchChapterTab('ch-scope')">Scope</button>
+      <button class="tab" data-tab="ch-sections" onclick="switchChapterTab('ch-sections')">Sections</button>
+    </div>
     <div class="modal-body">
-      <p style="font-size:12px;color:var(--fg-muted);margin-bottom:12px;">
-        The chapter description sets the per-chapter scope: what the chapter
-        covers and what stays out. The topic query is a 3&ndash;6 word search
-        phrase used to retrieve the most relevant papers from the corpus when
-        you click Write or Autowrite for this chapter.
-      </p>
-      <div class="field">
-        <label>Chapter title</label>
-        <input type="text" id="ch-title-input">
+      <!-- Scope tab -->
+      <div class="tab-pane active" id="ch-scope-pane">
+        <p style="font-size:12px;color:var(--fg-muted);margin-bottom:12px;">
+          The chapter description sets the per-chapter scope: what the chapter
+          covers and what stays out. The topic query is a 3&ndash;6 word search
+          phrase used to retrieve the most relevant papers from the corpus when
+          you click Write or Autowrite for this chapter.
+        </p>
+        <div class="field">
+          <label>Chapter title</label>
+          <input type="text" id="ch-title-input">
+        </div>
+        <div class="field">
+          <label>Description (per-chapter scope)</label>
+          <textarea id="ch-desc-input" style="min-height:120px;"></textarea>
+        </div>
+        <div class="field">
+          <label>Topic query (retrieval phrase)</label>
+          <input type="text" id="ch-tq-input" placeholder="e.g. solar irradiance satellite measurements">
+        </div>
       </div>
-      <div class="field">
-        <label>Description (per-chapter scope)</label>
-        <textarea id="ch-desc-input" style="min-height:120px;"></textarea>
+      <!-- Sections tab -->
+      <div class="tab-pane" id="ch-sections-pane">
+        <p style="font-size:12px;color:var(--fg-muted);margin-bottom:12px;">
+          A chapter is broken into named sections. Each section becomes its own
+          draft when you click <strong>Write</strong> or <strong>Autowrite</strong>,
+          and gets a proportional share of the chapter&rsquo;s word target. The
+          plan tells the writer what THIS section must cover &mdash; narrower
+          than the chapter description. Reorder with the &uarr;/&darr; buttons.
+          Renaming a section <strong>does not</strong> rename existing drafts;
+          they keep their old slug until rewritten.
+        </p>
+        <div id="ch-sections-list"></div>
+        <button class="btn-secondary" onclick="addSection()" style="margin-top:8px;">
+          &#43; Add section
+        </button>
       </div>
-      <div class="field">
-        <label>Topic query (retrieval phrase)</label>
-        <input type="text" id="ch-tq-input" placeholder="e.g. solar irradiance satellite measurements">
-      </div>
-      <div id="chapter-modal-status" style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;"></div>
+      <div id="chapter-modal-status" style="font-size:12px;color:var(--fg-muted);margin:8px 0;"></div>
     </div>
     <div class="modal-footer">
       <button class="btn-secondary" onclick="closeModal('chapter-modal')">Close</button>
@@ -3103,11 +3339,22 @@ function rebuildSidebar(chapters, activeId) {{
     if (ch.sections.length === 0) {{
       html += '<div class="sec-link empty">No drafts yet</div>';
     }} else {{
+      // Phase 18 — look up display titles from sections_meta when
+      // present, fallback to capitalized slug for legacy chapters and
+      // for orphaned drafts whose section was renamed/deleted.
+      const titleBySlug = {{}};
+      if (Array.isArray(ch.sections_meta)) {{
+        ch.sections_meta.forEach(s => {{ titleBySlug[s.slug] = s.title; }});
+      }}
       ch.sections.forEach(sec => {{
         const active = sec.id === activeId ? 'active' : '';
+        const slug = (sec.type || '').toLowerCase();
+        const display = titleBySlug[slug]
+          || sec.title
+          || (sec.type.charAt(0).toUpperCase() + sec.type.slice(1));
         html += '<a class="sec-link ' + active + '" href="/section/' + sec.id +
           '" data-draft-id="' + sec.id + '" onclick="return navTo(this)">' +
-          sec.type.charAt(0).toUpperCase() + sec.type.slice(1) +
+          display +
           ' <span class="meta">v' + sec.version + ' \\u00b7 ' + sec.words + 'w</span></a>';
       }});
     }}
@@ -4717,6 +4964,12 @@ async function regeneratePlan() {{
 }}
 
 // ── Phase 14.3: Chapter scope modal (description + topic_query) ─────
+// Phase 18 — chapter modal carries an in-memory copy of the chapter's
+// sections list while the modal is open. Saved on Save, discarded on
+// Close. Each item is {{slug, title, plan}}; new rows have an empty slug
+// and the server slugifies the title on save.
+let _editingSections = [];
+
 function openChapterModal(chId) {{
   if (!chId) chId = currentChapterId;
   if (!chId) {{
@@ -4734,7 +4987,115 @@ function openChapterModal(chId) {{
   document.getElementById('ch-tq-input').value = ch.topic_query || '';
   document.getElementById('chapter-modal-status').textContent = 'Editing Ch.' + ch.num + ': ' + (ch.title || '');
   document.getElementById('chapter-modal').dataset.chId = chId;
+
+  // Phase 18 — copy the sections meta into the editor's working state.
+  // sections_meta is the rich [{{slug, title, plan}}, ...] shape; falls
+  // back to deriving from sections_template (slugs only) for legacy
+  // chapters that haven't been opened yet under the new schema.
+  if (Array.isArray(ch.sections_meta) && ch.sections_meta.length > 0) {{
+    _editingSections = ch.sections_meta.map(s => ({{
+      slug: s.slug || '', title: s.title || '', plan: s.plan || ''
+    }}));
+  }} else if (Array.isArray(ch.sections_template)) {{
+    _editingSections = ch.sections_template.map(slug => ({{
+      slug: slug, title: titleifyClient(slug), plan: ''
+    }}));
+  }} else {{
+    _editingSections = [];
+  }}
+  renderSectionEditor();
+
+  switchChapterTab('ch-scope');
   openModal('chapter-modal');
+}}
+
+// Tiny client-side titleifier mirroring _titleify_slug. Used for legacy
+// chapters that only have a flat slug list — the editor synthesizes a
+// best-effort display title so the user can immediately see + edit.
+function titleifyClient(slug) {{
+  return (slug || '').replace(/_/g, ' ').replace(/\\b\\w/g, c => c.toUpperCase());
+}}
+
+function switchChapterTab(name) {{
+  document.querySelectorAll('#chapter-modal .tab').forEach(t => {{
+    t.classList.toggle('active', t.dataset.tab === name);
+  }});
+  document.getElementById('ch-scope-pane').style.display = (name === 'ch-scope') ? 'block' : 'none';
+  document.getElementById('ch-sections-pane').style.display = (name === 'ch-sections') ? 'block' : 'none';
+}}
+
+// Phase 18 — render the working sections list into the editor.
+// Re-rendered on every change so reorder/add/delete reflect immediately.
+function renderSectionEditor() {{
+  const list = document.getElementById('ch-sections-list');
+  if (!list) return;
+  if (_editingSections.length === 0) {{
+    list.innerHTML = '<div style="font-size:12px;color:var(--fg-muted);padding:12px;text-align:center;border:1px dashed var(--border);border-radius:4px;">No sections yet. Click <strong>Add section</strong> to start.</div>';
+    return;
+  }}
+  let html = '';
+  _editingSections.forEach((s, i) => {{
+    const slugDisplay = s.slug ? s.slug : '<em>(slug auto-generated on save)</em>';
+    html += '<div class="sec-row" data-idx="' + i + '">';
+    html += '  <div class="sec-handle">';
+    html += '    <button onclick="moveSection(' + i + ', -1)" title="Move up"' + (i === 0 ? ' disabled style="opacity:0.3;cursor:default;"' : '') + '>&uarr;</button>';
+    html += '    <button onclick="moveSection(' + i + ', 1)" title="Move down"' + (i === _editingSections.length - 1 ? ' disabled style="opacity:0.3;cursor:default;"' : '') + '>&darr;</button>';
+    html += '  </div>';
+    html += '  <div class="sec-fields">';
+    html += '    <input type="text" placeholder="Section title (e.g. The 11-Year Solar Cycle)" ';
+    html += '           value="' + escapeHtml(s.title) + '" oninput="updateSection(' + i + ', \\'title\\', this.value)">';
+    html += '    <textarea placeholder="Section plan — what THIS section must cover (a few sentences)" ';
+    html += '              oninput="updateSection(' + i + ', \\'plan\\', this.value)">' + escapeHtml(s.plan) + '</textarea>';
+    html += '    <div class="sec-slug">slug: ' + slugDisplay + '</div>';
+    html += '  </div>';
+    html += '  <button class="sec-delete" onclick="removeSection(' + i + ')" title="Delete this section">&times;</button>';
+    html += '</div>';
+  }});
+  list.innerHTML = html;
+}}
+
+function escapeHtml(s) {{
+  return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                  .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}}
+
+function addSection() {{
+  _editingSections.push({{slug: '', title: '', plan: ''}});
+  renderSectionEditor();
+  // Focus the new row's title input.
+  setTimeout(() => {{
+    const rows = document.querySelectorAll('#ch-sections-list .sec-row');
+    if (rows.length > 0) {{
+      const last = rows[rows.length - 1];
+      const input = last.querySelector('input');
+      if (input) input.focus();
+    }}
+  }}, 50);
+}}
+
+function removeSection(idx) {{
+  if (idx < 0 || idx >= _editingSections.length) return;
+  const s = _editingSections[idx];
+  // Confirm if the section has content (non-empty title).
+  if (s.title || s.plan) {{
+    if (!confirm('Delete section "' + (s.title || s.slug) + '"? This will not delete any existing drafts.')) return;
+  }}
+  _editingSections.splice(idx, 1);
+  renderSectionEditor();
+}}
+
+function moveSection(idx, delta) {{
+  const j = idx + delta;
+  if (j < 0 || j >= _editingSections.length) return;
+  const tmp = _editingSections[idx];
+  _editingSections[idx] = _editingSections[j];
+  _editingSections[j] = tmp;
+  renderSectionEditor();
+}}
+
+function updateSection(idx, field, value) {{
+  if (idx < 0 || idx >= _editingSections.length) return;
+  _editingSections[idx][field] = value;
 }}
 
 async function saveChapterInfo() {{
@@ -4752,17 +5113,40 @@ async function saveChapterInfo() {{
   fd.append('topic_query', tq);
 
   try {{
+    // 1) Save scope (existing endpoint)
     const res = await fetch('/api/chapters/' + chId, {{method: 'PUT', body: fd}});
     if (!res.ok) throw new Error('save failed');
+
+    // 2) Save sections (Phase 18) — only sections with a non-empty
+    // title are persisted. The server slugifies for us.
+    const sectionsToSave = _editingSections
+      .filter(s => (s.title || '').trim() || (s.slug || '').trim())
+      .map(s => ({{
+        slug: (s.slug || '').trim() || (s.title || '').trim(),
+        title: (s.title || '').trim() || (s.slug || ''),
+        plan: (s.plan || '').trim()
+      }}));
+    const secRes = await fetch('/api/chapters/' + chId + '/sections', {{
+      method: 'PUT',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{sections: sectionsToSave}})
+    }});
+    if (!secRes.ok) throw new Error('sections save failed');
+    const secData = await secRes.json();
+
     // Update the in-memory chapter cache
     const ch = chaptersData.find(c => c.id === chId);
     if (ch) {{
       if (title) ch.title = title;
       ch.description = desc;
       ch.topic_query = tq;
+      if (secData && Array.isArray(secData.sections)) {{
+        ch.sections_meta = secData.sections;
+        ch.sections_template = secData.sections.map(s => s.slug);
+      }}
     }}
     status.innerHTML = '<span style="color:var(--success);">Saved.</span>';
-    // Refresh the sidebar so renamed chapters show new title
+    // Refresh the sidebar so renamed chapters + new sections show up
     const sidebarRes = await fetch('/api/chapters');
     const sd = await sidebarRes.json();
     rebuildSidebar(sd.chapters, currentDraftId);
@@ -4790,7 +5174,7 @@ async function showCorkboard() {{
     html += '<div class="cork-card" onclick="' + onclick + '">';
     html += '<div class="cc-head"><span class="cc-ch">Ch.' + c.chapter_num + '</span>';
     html += '<span class="cc-status ' + statusCls + '">' + statusCls.replace('_', ' ') + '</span></div>';
-    html += '<div class="cc-type">' + c.section_type.charAt(0).toUpperCase() + c.section_type.slice(1) + '</div>';
+    html += '<div class="cc-type">' + (c.section_title || (c.section_type.charAt(0).toUpperCase() + c.section_type.slice(1))) + '</div>';
     if (c.summary) {{
       html += '<div class="cc-summary">' + c.summary + '</div>';
     }} else {{
@@ -4826,8 +5210,19 @@ async function showChapterReader() {{
 
   let html = '<div class="reader-view">';
   html += '<h1>Chapter ' + data.chapter_num + ': ' + data.chapter_title + '</h1>';
-  html += '<p style="font-size:13px;opacity:0.5;margin-bottom:24px;">' +
+  html += '<p style="font-size:13px;opacity:0.5;margin-bottom:8px;">' +
     data.total_words + ' words \\u00b7 ' + data.section_count + ' sections</p>';
+  // Phase 18 — outline / table-of-contents at the top of the chapter
+  // view so the user can see the section structure at a glance and
+  // jump straight to any section.
+  if (data.outline && data.outline.length > 0) {{
+    html += '<div style="margin-bottom:24px;padding:12px 16px;background:var(--toolbar-bg);border-radius:6px;font-size:13px;">';
+    html += '<div style="font-weight:600;margin-bottom:6px;color:var(--fg-muted);font-size:11px;text-transform:uppercase;letter-spacing:0.04em;">Sections</div>';
+    data.outline.forEach((o, i) => {{
+      html += '<div style="margin:4px 0;"><a href="#reader-section-' + o.slug + '" style="color:var(--accent);text-decoration:none;">' + (i + 1) + '. ' + escapeHtml(o.title) + '</a> <span style="color:var(--fg-muted);font-size:11px;">' + o.words + 'w</span></div>';
+    }});
+    html += '</div>';
+  }}
   html += data.html;
   html += '</div>';
 
@@ -4838,6 +5233,16 @@ async function showChapterReader() {{
   document.getElementById('draft-title').textContent = 'Ch.' + data.chapter_num + ': ' + data.chapter_title;
   document.getElementById('draft-subtitle').style.display = 'none';
   document.getElementById('toolbar').style.display = 'none';
+
+  // Phase 18 — populate the right-hand sources panel with the chapter's
+  // global (renumbered) source list so [N] click-to-source works in
+  // the chapter reader view. Without this, panel-sources still has
+  // whatever section was last loaded — and the global citation
+  // numbers would point at the wrong papers.
+  if (data.sources_html) {{
+    document.getElementById('panel-sources').innerHTML = data.sources_html;
+  }}
+
   history.pushState({{reader: true}}, '', '/');
 
   // Build popovers for citations in reader view
