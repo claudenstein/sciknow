@@ -536,6 +536,89 @@ def outline(
         console.print(f"Run [bold]sciknow book show {book_title!r}[/bold] to review.")
 
 
+# ── adopt-section ─────────────────────────────────────────────────────────────
+
+@app.command(name="adopt-section")
+def adopt_section(
+    book_title: Annotated[str, typer.Argument(help="Book title or ID fragment.")],
+    chapter: Annotated[str, typer.Argument(help="Chapter number or title fragment.")],
+    section_slug: Annotated[str, typer.Argument(
+        help="Section slug to adopt (the section_type of the orphan draft).",
+    )],
+    title: str = typer.Option(
+        None, "--title", "-t",
+        help="Display title for the section. Defaults to titleified slug.",
+    ),
+    plan: str = typer.Option(
+        None, "--plan", "-p",
+        help="Section plan text. Defaults to empty.",
+    ),
+):
+    """Phase 25 — adopt an orphan draft's section_type into a chapter's
+    sections list, so it appears as a regular drafted section instead
+    of "orphan" in the GUI.
+
+    The motivating scenario: you defined 5 sections on a chapter AFTER
+    autowriting an introduction draft. The introduction draft's
+    section_type doesn't match any of the new slugs, so the GUI shows
+    it with a red "orphan" dot. This command appends the slug to the
+    chapter's sections list — the draft content stays unchanged but
+    is re-classified from "orphan" to "drafted" on the next refresh.
+
+    Idempotent: if the slug is already in the chapter's sections,
+    nothing happens.
+
+    Examples:
+
+      sciknow book adopt-section "The Global Cooling" 2 introduction
+
+      sciknow book adopt-section "The Global Cooling" 2 introduction \\
+          --title "Introduction" --plan "Brief framing of solar drivers."
+    """
+    from sciknow.core.book_ops import adopt_orphan_section
+    from sciknow.storage.db import get_session
+
+    with get_session() as session:
+        book = _get_book(session, book_title)
+        if not book:
+            console.print(f"[red]Book not found:[/red] {book_title}")
+            raise typer.Exit(1)
+        ch = _get_chapter(session, book[0], chapter)
+        if not ch:
+            console.print(f"[red]Chapter not found:[/red] {chapter}")
+            raise typer.Exit(1)
+        book_id = book[0]
+        chapter_id = ch[0]
+        ch_num = ch[1]
+        ch_title = ch[2]
+
+    try:
+        result = adopt_orphan_section(
+            book_id, chapter_id, section_slug,
+            title=title, plan=plan,
+        )
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+
+    sec = result["section"]
+    if result["added"]:
+        console.print(
+            f"[green]✓ Adopted[/green] section [bold]{sec['slug']}[/bold] "
+            f"({sec['title']}) into Ch.{ch_num}: {ch_title}"
+        )
+        console.print(f"  Total sections in chapter: {len(result['sections'])}")
+        console.print(
+            "[dim]Refresh the web reader (Ctrl+Shift+R) to see the orphan "
+            "draft re-classified as drafted.[/dim]"
+        )
+    else:
+        console.print(
+            f"[yellow]No change.[/yellow] Section [bold]{sec['slug']}[/bold] "
+            f"is already in Ch.{ch_num}: {ch_title}"
+        )
+
+
 # ── write ──────────────────────────────────────────────────────────────────────
 
 @app.command()

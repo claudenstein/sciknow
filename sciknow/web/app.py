@@ -773,6 +773,34 @@ async def update_chapter(
     return JSONResponse({"ok": True})
 
 
+@app.post("/api/chapters/{chapter_id}/sections/adopt")
+async def adopt_orphan_section_endpoint(chapter_id: str, request: Request):
+    """Phase 25 — adopt an orphan draft's section_type into the chapter's
+    sections list. Body: ``{"slug": "...", "title": "...", "plan": "..."}``
+    (title and plan are optional; defaults are titleified slug + empty
+    plan).
+
+    Idempotent: if the slug already exists in the chapter's sections,
+    returns the existing entry without duplication. The orphan draft
+    keeps its content unchanged — only the chapter's sections JSONB is
+    modified, which causes the GUI to re-classify the draft from
+    "orphan" to "drafted" on the next refresh.
+    """
+    from sciknow.core.book_ops import adopt_orphan_section as _adopt
+
+    body = await request.json()
+    slug = (body.get("slug") or "").strip()
+    title = body.get("title")
+    plan = body.get("plan")
+    if not slug:
+        raise HTTPException(400, "slug is required")
+    try:
+        result = _adopt(_book_id, chapter_id, slug, title=title, plan=plan)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    return JSONResponse(result)
+
+
 @app.put("/api/chapters/{chapter_id}/sections")
 async def update_chapter_sections(chapter_id: str, request: Request):
     """Replace a chapter's sections list.
@@ -2089,13 +2117,19 @@ def _render_sidebar(items, active_id):
             elif status == "orphan":
                 # Phase 22 — inline X button on orphan drafts so the
                 # user can clean up leftovers from before Phase 18.
+                # Phase 25 — also show a "+" button that adopts the
+                # slug into the chapter's sections list, re-classifying
+                # the draft from "orphan" to "drafted".
                 out += (
                     f'<a class="sec-link sec-orphan" href="/section/{sec_id}" '
                     f'data-draft-id="{sec_id}" onclick="return navTo(this)" '
-                    f'title="Orphan draft: section_type={sec_type!r} doesn&#39;t match any current template slug. Click to inspect, X to delete.">'
+                    f'title="Orphan draft: section_type={sec_type!r} doesn&#39;t match any current template slug. Click to inspect, + to adopt into sections, \u2717 to delete.">'
                     f'<span class="sec-status-dot orphan"></span>'
                     f'{display} '
                     f'<span class="meta">orphan \u00b7 v{sec_v} \u00b7 {sec_w}w</span>'
+                    f'<button class="sec-orphan-adopt" '
+                    f'onclick="event.preventDefault();event.stopPropagation();adoptOrphanSection(&quot;{ch_id}&quot;,&quot;{sec_type}&quot;)" '
+                    f'title="Add this section_type to the chapter\u2019s sections list (idempotent)">+</button>'
                     f'<button class="sec-orphan-delete" '
                     f'onclick="event.preventDefault();event.stopPropagation();deleteOrphanDraft(&quot;{sec_id}&quot;)" '
                     f'title="Delete this orphan draft permanently">\u2717</button>'
@@ -2319,24 +2353,34 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .sec-link.sec-orphan:hover {{ opacity: 1; }}
 .sec-link.sec-orphan .meta {{ color: var(--danger); flex: 1; }}
 /* Phase 22 — inline delete button on orphan drafts. Sits to the right
-   of the meta column and only becomes prominent on hover. */
-.sec-orphan-delete {{ background: transparent; border: 1px solid transparent;
-                     color: var(--fg-faint); cursor: pointer; padding: 0 6px;
-                     font-size: 13px; border-radius: 3px;
-                     margin-left: 4px; line-height: 1.4; }}
+   of the meta column and only becomes prominent on hover.
+   Phase 25 — alongside it, "+" adoption button (left of the X). */
+.sec-orphan-delete, .sec-orphan-adopt {{
+  background: transparent; border: 1px solid transparent;
+  color: var(--fg-faint); cursor: pointer; padding: 0 6px;
+  font-size: 13px; border-radius: 3px;
+  margin-left: 4px; line-height: 1.4;
+}}
 .sec-link.sec-orphan:hover .sec-orphan-delete {{ color: var(--danger);
                                                   border-color: var(--danger); }}
+.sec-link.sec-orphan:hover .sec-orphan-adopt {{ color: var(--success);
+                                                  border-color: var(--success); }}
 .sec-orphan-delete:hover {{ background: var(--danger); color: white; }}
-/* Phase 23 — collapse/expand chapter sections. Each chapter has a
-   chevron button at the start of its title; clicking toggles a
-   .collapsed class on the .ch-group, which hides the section list
-   AND the progress bar. State persists in localStorage. */
-.ch-toggle {{ background: transparent; border: none; color: var(--fg-muted);
-             font-size: 10px; cursor: pointer; padding: 0 4px;
-             margin-right: 2px; line-height: 1;
-             transition: transform 0.15s ease;
-             display: inline-block; width: 16px; }}
-.ch-toggle:hover {{ color: var(--accent); }}
+.sec-orphan-adopt:hover {{ background: var(--success); color: white; }}
+/* Phase 23 / Phase 25 — collapse/expand chapter sections. Each chapter
+   has a chevron button at the start of its title; clicking toggles a
+   .collapsed class on the .ch-group, which hides the section list AND
+   the progress bar. State persists in localStorage.
+   Phase 25: bumped from 10px/fg-muted (invisible) to 13px/fg with
+   accent on hover so the chevron is actually findable in the sidebar. */
+.ch-toggle {{ background: transparent; border: none; color: var(--fg);
+             font-size: 13px; cursor: pointer; padding: 2px 4px;
+             margin-right: 2px; line-height: 1; opacity: 0.7;
+             transition: transform 0.15s ease, opacity 0.12s ease, color 0.12s ease;
+             display: inline-block; width: 18px; height: 18px;
+             vertical-align: middle; border-radius: 3px; }}
+.ch-toggle:hover {{ color: var(--accent); opacity: 1;
+                   background: var(--accent-light); }}
 .ch-group.collapsed .ch-toggle {{ transform: rotate(-90deg); }}
 .ch-group.collapsed .sec-link,
 .ch-group.collapsed .ch-progress {{ display: none; }}
@@ -3833,12 +3877,16 @@ function rebuildSidebar(chapters, activeId) {{
       const draft = draftBySlug[slug];
       const display = escapeHtml(draft.title || (slug.charAt(0).toUpperCase() + slug.slice(1)));
       // Phase 22 — inline X button to delete the orphan
+      // Phase 25 — also "+" button to adopt the slug into sections
       html += '<a class="sec-link sec-orphan" href="/section/' + draft.id +
         '" data-draft-id="' + draft.id + '" onclick="return navTo(this)" ' +
-        'title="Orphan draft. Click to inspect, X to delete.">' +
+        'title="Orphan draft. Click to inspect, + to adopt into sections, X to delete.">' +
         '<span class="sec-status-dot orphan"></span>' +
         display +
         ' <span class="meta">orphan \\u00b7 v' + draft.version + ' \\u00b7 ' + draft.words + 'w</span>' +
+        '<button class="sec-orphan-adopt" ' +
+        'onclick="event.preventDefault();event.stopPropagation();adoptOrphanSection(\\'' + ch.id + '\\',\\'' + slug + '\\')" ' +
+        'title="Add this section_type to the chapter sections list">+</button>' +
         '<button class="sec-orphan-delete" ' +
         'onclick="event.preventDefault();event.stopPropagation();deleteOrphanDraft(\\'' + draft.id + '\\')" ' +
         'title="Delete this orphan draft permanently">\\u2717</button>' +
@@ -6088,6 +6136,39 @@ async function deleteOrphanDraft(draftId) {{
     rebuildSidebar(sd.chapters || sd, currentDraftId);
   }} catch (e) {{
     alert('Delete failed: ' + e.message);
+  }}
+}}
+
+// Phase 25 — adopt an orphan draft's slug into the chapter's sections
+// list. Idempotent: if the slug already exists, the server returns
+// added=false and we just refresh the sidebar (which is a no-op
+// visually). On success the orphan re-classifies as drafted.
+async function adoptOrphanSection(chapterId, slug) {{
+  if (!chapterId || !slug) return;
+  try {{
+    const res = await fetch('/api/chapters/' + chapterId + '/sections/adopt', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{slug: slug}}),
+    }});
+    if (!res.ok) {{
+      const text = await res.text();
+      throw new Error('adopt failed: ' + text);
+    }}
+    const data = await res.json();
+    // Update the in-memory chapter cache so the next sidebar render
+    // reflects the new section without a full /api/chapters refetch.
+    const ch = chaptersData.find(c => c.id === chapterId);
+    if (ch && data.sections) {{
+      ch.sections_meta = data.sections;
+      ch.sections_template = data.sections.map(s => s.slug);
+    }}
+    // Refresh sidebar so the row re-renders as a drafted section.
+    const sidebarRes = await fetch('/api/chapters');
+    const sd = await sidebarRes.json();
+    rebuildSidebar(sd.chapters || sd, currentDraftId);
+  }} catch (e) {{
+    alert('Adopt failed: ' + e.message);
   }}
 }}
 

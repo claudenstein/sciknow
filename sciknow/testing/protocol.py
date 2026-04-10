@@ -2387,6 +2387,128 @@ def l1_phase24_autowrite_logger() -> None:
     )
 
 
+# ── Phase 25 — visible chevron + adopt orphan sections ───────────────────
+
+
+def l1_phase25_chevron_visible() -> None:
+    """Phase 25 — chapter chevron CSS uses visible font-size + non-muted
+    color so the user can actually see it. The Phase 23 version used
+    10px / fg-muted which the user reported as invisible."""
+    import inspect
+    from sciknow.web import app as web_app
+    src = inspect.getsource(web_app)
+
+    # Find the .ch-toggle CSS rule and check for the new properties
+    # The new rule has font-size: 13px and color: var(--fg) (not muted)
+    assert ".ch-toggle " in src and "13px" in src, (
+        ".ch-toggle CSS doesn't have a visible 13px font-size"
+    )
+    assert "color: var(--fg);" in src or "color:var(--fg);" in src, (
+        ".ch-toggle CSS doesn't use the main fg color (still using fg-muted?)"
+    )
+
+
+def l1_phase25_adopt_orphan_section() -> None:
+    """Phase 25 — adopt_orphan_section helper appends a slug to a
+    chapter's sections JSONB, idempotent, raises on bad input.
+
+    Drives the helper end-to-end against an in-memory test using a
+    real DB session. Cleans up the test chapter after.
+    """
+    import inspect
+    from sqlalchemy import text
+    from sciknow.core import book_ops
+    from sciknow.storage.db import get_session
+
+    assert hasattr(book_ops, "adopt_orphan_section"), (
+        "adopt_orphan_section helper missing"
+    )
+
+    # Bad input: empty slug raises ValueError
+    try:
+        book_ops.adopt_orphan_section("any", "any", "")
+        raise AssertionError("expected ValueError for empty slug")
+    except ValueError:
+        pass
+
+    # Bad input: chapter not found raises ValueError
+    try:
+        book_ops.adopt_orphan_section(
+            "00000000-0000-0000-0000-000000000000",
+            "00000000-0000-0000-0000-000000000000",
+            "intro",
+        )
+        raise AssertionError("expected ValueError for missing chapter")
+    except ValueError:
+        pass
+
+    # Round-trip on a real chapter (cleanup after).
+    with get_session() as session:
+        row = session.execute(text("""
+            SELECT b.id::text, bc.id::text, bc.sections
+            FROM books b JOIN book_chapters bc ON bc.book_id = b.id
+            ORDER BY bc.created_at LIMIT 1
+        """)).fetchone()
+    if not row:
+        # No book/chapter to test with — skip the round-trip portion
+        return
+    book_id, chapter_id, original_sections = row
+
+    test_slug = "__phase25_test_slug__"
+    try:
+        result = book_ops.adopt_orphan_section(
+            book_id, chapter_id, test_slug,
+            title="Test Section", plan="A test plan.",
+        )
+        assert result["ok"] is True
+        assert result["added"] is True
+        assert result["section"]["slug"] == test_slug
+        assert result["section"]["title"] == "Test Section"
+        assert result["section"]["plan"] == "A test plan."
+
+        # Idempotency: second call with same slug returns added=False
+        result2 = book_ops.adopt_orphan_section(book_id, chapter_id, test_slug)
+        assert result2["ok"] is True
+        assert result2["added"] is False, "second adopt should be idempotent"
+    finally:
+        # Restore the chapter's original sections list
+        with get_session() as session:
+            import json as _json
+            session.execute(text("""
+                UPDATE book_chapters
+                SET sections = CAST(:secs AS jsonb)
+                WHERE id::text = :cid
+            """), {
+                "cid": chapter_id,
+                "secs": _json.dumps(original_sections or []),
+            })
+            session.commit()
+
+    # Verify the public surface: web endpoint + CLI command + GUI button
+    from sciknow.web import app as web_app
+    routes = {getattr(r, "path", "") for r in web_app.app.routes}
+    assert "/api/chapters/{chapter_id}/sections/adopt" in routes, (
+        "POST /api/chapters/{id}/sections/adopt endpoint not registered"
+    )
+
+    src = inspect.getsource(web_app)
+    assert "adoptOrphanSection" in src, (
+        "adoptOrphanSection JS helper missing"
+    )
+    assert "sec-orphan-adopt" in src, (
+        "missing sec-orphan-adopt CSS class for the inline + button"
+    )
+
+    # CLI: book adopt-section command registered on the typer app
+    from typer.main import get_command
+    from sciknow.cli import book as book_cli
+    cmd = get_command(book_cli.app)
+    sub_names = {c.name for c in cmd.commands.values()}
+    assert "adopt-section" in sub_names, (
+        "`sciknow book adopt-section` CLI command not registered"
+    )
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -2455,6 +2577,9 @@ L1_TESTS: list[Callable] = [
     l1_phase23_chapter_collapse_expand,
     # Phase 24 — autowrite progress log with heartbeat
     l1_phase24_autowrite_logger,
+    # Phase 25 — visible chevron + adopt orphan sections
+    l1_phase25_chevron_visible,
+    l1_phase25_adopt_orphan_section,
 ]
 
 L2_TESTS: list[Callable] = [

@@ -243,6 +243,104 @@ def _get_section_plan(session, chapter_id: str, section_slug: str) -> str:
     return ""
 
 
+def adopt_orphan_section(
+    book_id: str,
+    chapter_id: str,
+    section_slug: str,
+    *,
+    title: str | None = None,
+    plan: str | None = None,
+) -> dict:
+    """Phase 25 — append an orphan section_type slug to a chapter's
+    sections list, so a draft whose section_type didn't match any
+    template slug becomes "drafted" instead of "orphan" in the GUI.
+
+    The motivating scenario: the user defined 5 sections on a chapter
+    AFTER autowriting an introduction draft. The introduction draft's
+    section_type doesn't match any of the new slugs, so the GUI shows
+    it with a red "orphan" dot. They want to keep the draft AND have
+    it appear as a regular drafted section. This function does that
+    by appending {slug, title, plan} to book_chapters.sections.
+
+    Idempotent: if the slug is already in the sections list, returns
+    the existing entry without duplication. The title defaults to a
+    titleified version of the slug; the plan defaults to "".
+
+    Returns a dict:
+        {
+          "ok": bool,
+          "added": bool,           # True if a new entry was appended
+          "section": {slug, title, plan},  # the resulting entry
+          "sections": [...]        # the full updated sections list
+        }
+
+    Raises ValueError if the chapter doesn't exist or the slug is empty.
+    Used by both the CLI (`sciknow book section adopt`) and the web
+    endpoint (POST /api/chapters/{id}/sections/adopt).
+    """
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+
+    if not section_slug or not section_slug.strip():
+        raise ValueError("section_slug is required")
+
+    # Normalize the slug the same way the rest of the code does so
+    # "Introduction" and "introduction" both map to the same entry.
+    target = _slugify_section_name(section_slug)
+    if not target:
+        raise ValueError(f"section_slug {section_slug!r} normalizes to empty")
+
+    with get_session() as session:
+        # Verify the chapter exists and belongs to this book.
+        row = session.execute(text("""
+            SELECT bc.sections, bc.title
+            FROM book_chapters bc
+            WHERE bc.id::text = :cid
+              AND bc.book_id::text = :bid
+            LIMIT 1
+        """), {"cid": chapter_id, "bid": book_id}).fetchone()
+        if not row:
+            raise ValueError(
+                f"chapter {chapter_id!r} not found in book {book_id!r}"
+            )
+
+        sections = _normalize_chapter_sections(row[0])
+
+        # Idempotent: if the slug already exists, return without writing.
+        for s in sections:
+            if s["slug"] == target:
+                return {
+                    "ok": True,
+                    "added": False,
+                    "section": s,
+                    "sections": sections,
+                }
+
+        # Append a new entry. Title falls back to a titleified slug
+        # (e.g. "introduction" → "Introduction"), plan defaults to ""
+        # so the writer doesn't get a stale plan injected.
+        new_entry = {
+            "slug": target,
+            "title": (title or _titleify_slug(target)).strip(),
+            "plan": (plan or "").strip(),
+        }
+        sections.append(new_entry)
+
+        session.execute(text("""
+            UPDATE book_chapters
+            SET sections = CAST(:secs AS jsonb)
+            WHERE id::text = :cid
+        """), {"cid": chapter_id, "secs": json.dumps(sections)})
+        session.commit()
+
+    return {
+        "ok": True,
+        "added": True,
+        "section": new_entry,
+        "sections": sections,
+    }
+
+
 def _get_book(session, title_or_id: str):
     from sqlalchemy import text
     return session.execute(text("""
