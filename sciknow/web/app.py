@@ -224,6 +224,49 @@ def _get_draft_status(draft_id: str) -> str:
     return row[0] if row else "drafted"
 
 
+def _draft_display_title(
+    draft_title: str | None,
+    section_type: str | None,
+    chapter_num: int | None,
+    chapter_title: str | None,
+    chapter_sections_raw,
+) -> str:
+    """Phase 27 — derive the display title for a draft from the
+    chapter sections meta, falling back to drafts.title if no match.
+
+    Why: drafts.title is set ONCE at draft creation by _save_draft as
+    f"Ch.{n} {ch_title} - {section_type.capitalize()}". When the user
+    later renames the section in the chapter modal (Phase 18), the
+    chapter sections JSONB updates but the stored draft.title doesn't
+    — so the sidebar shows the new title (it reads sections_meta) but
+    the center h1 keeps showing the stale slug-based snapshot. The
+    fix is to always derive the display title from the meta on read.
+
+    Format: "Ch.{n} {chapter_title} - {section_meta_title}". Falls
+    back to draft_title for orphan drafts (where section_type doesn't
+    match any current slug in the chapter sections meta) and for any
+    other lookup failure.
+    """
+    from sciknow.core.book_ops import _normalize_chapter_sections
+    fallback = draft_title or ""
+    if not section_type or not chapter_sections_raw:
+        return fallback
+    try:
+        meta = _normalize_chapter_sections(chapter_sections_raw)
+    except Exception:
+        return fallback
+    target = (section_type or "").strip().lower()
+    matched = next((s for s in meta if s["slug"] == target), None)
+    if not matched:
+        return fallback
+    section_title = matched.get("title") or matched["slug"]
+    if chapter_num is not None and chapter_title:
+        return f"Ch.{int(chapter_num)} {chapter_title} \u2014 {section_title}"
+    if chapter_title:
+        return f"{chapter_title} \u2014 {section_title}"
+    return section_title
+
+
 # ── Page routes ──────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
@@ -450,6 +493,10 @@ async def api_section(draft_id: str):
             chapter_drafts[key] = [x for x in chapter_drafts[key] if x[2] != d[2]]
             chapter_drafts[key].append(d)
 
+    # Phase 27 — chapter_id → sections JSONB lookup so the display
+    # title can be derived from the meta even if drafts.title is stale.
+    chapter_sections_by_id = {ch[0]: ch[6] for ch in chapters}
+
     active = draft_map.get(draft_id)
     if not active:
         raise HTTPException(404, "Draft not found")
@@ -492,9 +539,24 @@ async def api_section(draft_id: str):
     except Exception as exc:
         logger.warning("target_words lookup failed: %s", exc)
 
+    # Phase 27 — display_title is derived from the chapter sections meta
+    # at every read so renaming a section in the chapter modal updates
+    # the center frame on the next navigation. Falls back to the stored
+    # drafts.title for orphans (section_type doesn't match any current
+    # slug) and any other lookup failure.
+    sections_raw = chapter_sections_by_id.get(active[9])
+    display_title = _draft_display_title(
+        draft_title=active[1],
+        section_type=active[2],
+        chapter_num=active[12],
+        chapter_title=active[13],
+        chapter_sections_raw=sections_raw,
+    )
+
     return {
         "id": active[0],
         "title": active[1],
+        "display_title": display_title,
         "section_type": active[2],
         "content_html": _md_to_html(active[3] or ""),
         "content_raw": active[3] or "",
@@ -1961,7 +2023,19 @@ def _render_book(book, chapters, drafts, gaps, comments,
     active_title = ""
     if active_draft:
         active_id = active_draft[0]
-        active_title = active_draft[1]
+        # Phase 27 — derive the display title from the chapter sections
+        # meta on read so a renamed section shows the new title in the
+        # initial page-load h1, not the stale slug-based draft.title.
+        sections_raw_for_active = next(
+            (ch[6] for ch in chapters if ch[0] == active_draft[9]), None
+        )
+        active_title = _draft_display_title(
+            draft_title=active_draft[1],
+            section_type=active_draft[2],
+            chapter_num=active_draft[12],
+            chapter_title=active_draft[13],
+            chapter_sections_raw=sections_raw_for_active,
+        )
         active_html = _md_to_html(active_draft[3] or "")
         active_sources = json.loads(active_draft[5]) if isinstance(active_draft[5], str) else (active_draft[5] or [])
         active_review = active_draft[8] or ""
@@ -3600,7 +3674,10 @@ async function loadSection(draftId) {{
     document.getElementById('argue-map-view').style.display = 'none';
 
     // Update main content
-    document.getElementById('draft-title').textContent = data.title;
+    // Phase 27 — prefer the display_title computed from the chapter
+    // sections meta so a renamed section shows the new title in the
+    // center h1 instead of the stale slug-based drafts.title snapshot.
+    document.getElementById('draft-title').textContent = data.display_title || data.title;
     document.getElementById('draft-version').textContent = data.version;
     document.getElementById('draft-words').textContent = data.word_count;
     document.getElementById('read-view').innerHTML = data.content_html;

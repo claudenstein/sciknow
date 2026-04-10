@@ -2576,6 +2576,102 @@ def l1_phase26_section_drag_drop() -> None:
     )
 
 
+# ── Phase 27 — display title derived from chapter sections meta ─────────
+
+
+def l1_phase27_display_title_from_meta() -> None:
+    """Phase 27 — _draft_display_title derives the center h1 from the
+    chapter sections JSONB instead of the stale slug-based drafts.title
+    snapshot. Renaming a section in the chapter modal should update
+    the center title on the next navigation.
+    """
+    import inspect
+    from sciknow.web import app as web_app
+
+    assert hasattr(web_app, "_draft_display_title"), (
+        "_draft_display_title helper missing"
+    )
+
+    # Drift case: meta has a different title than draft.title.
+    # The helper should return the META title.
+    sections = [
+        {"slug": "key_evidence", "title": "The Grand Solar Cycles", "plan": ""},
+        {"slug": "summary", "title": "Summary", "plan": ""},
+    ]
+    out = web_app._draft_display_title(
+        draft_title="Ch.2 Solar and Geomagnetic Drivers — Key_evidence",
+        section_type="key_evidence",
+        chapter_num=2,
+        chapter_title="Solar and Geomagnetic Drivers",
+        chapter_sections_raw=sections,
+    )
+    assert "The Grand Solar Cycles" in out, (
+        f"didn't pick up the meta title: {out!r}"
+    )
+    assert "Key_evidence" not in out, (
+        f"didn't suppress the stale slug snapshot: {out!r}"
+    )
+    assert out.startswith("Ch.2"), f"missing Ch.N prefix: {out!r}"
+
+    # Orphan case: section_type doesn't match any slug → fallback to
+    # the stored drafts.title (so we don't lose the user's view of
+    # the orphan completely).
+    out = web_app._draft_display_title(
+        draft_title="Ch.2 Solar — Introduction (autowrite)",
+        section_type="introduction",  # not in meta
+        chapter_num=2,
+        chapter_title="Solar",
+        chapter_sections_raw=sections,
+    )
+    assert out == "Ch.2 Solar — Introduction (autowrite)", (
+        f"orphan fallback wrong: {out!r}"
+    )
+
+    # Empty / None inputs: fallback to draft_title
+    out = web_app._draft_display_title(
+        draft_title="x", section_type=None, chapter_num=None,
+        chapter_title=None, chapter_sections_raw=None,
+    )
+    assert out == "x"
+    out = web_app._draft_display_title(
+        draft_title="y", section_type="key_evidence",
+        chapter_num=2, chapter_title="C",
+        chapter_sections_raw=[],
+    )
+    assert out == "y"
+
+    # JSON-encoded sections also accepted (we hand them off to
+    # _normalize_chapter_sections which handles both shapes).
+    import json as _json
+    out = web_app._draft_display_title(
+        draft_title="z", section_type="key_evidence",
+        chapter_num=1, chapter_title="C",
+        chapter_sections_raw=_json.dumps(sections),
+    )
+    assert "Grand Solar Cycles" in out
+
+    # api_section returns display_title
+    api_src = inspect.getsource(web_app.api_section)
+    assert "display_title" in api_src, (
+        "api_section doesn't return display_title"
+    )
+    assert "_draft_display_title(" in api_src, (
+        "api_section doesn't call the helper"
+    )
+
+    # _render_book also derives active_title from the helper
+    rb_src = inspect.getsource(web_app._render_book)
+    assert "_draft_display_title(" in rb_src, (
+        "_render_book doesn't derive active_title from the helper"
+    )
+
+    # JS loadSection prefers display_title
+    src = inspect.getsource(web_app)
+    assert "data.display_title || data.title" in src, (
+        "loadSection JS doesn't prefer display_title over data.title"
+    )
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -2649,6 +2745,8 @@ L1_TESTS: list[Callable] = [
     l1_phase25_adopt_orphan_section,
     # Phase 26 — drag-and-drop section reordering
     l1_phase26_section_drag_drop,
+    # Phase 27 — display title derived from chapter sections meta
+    l1_phase27_display_title_from_meta,
 ]
 
 L2_TESTS: list[Callable] = [
