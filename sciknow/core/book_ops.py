@@ -215,11 +215,26 @@ def _retrieve(session, qdrant, query: str, candidate_k: int = 50,
 
 
 def _generate_step_back_query(query: str, model: str | None = None) -> str | None:
-    """Ask the fast LLM for an abstract reformulation of `query`.
+    """Ask the LLM for an abstract reformulation of `query`.
 
-    Returns the step-back query, or None on failure. Uses the fast model
-    because the abstraction step doesn't need the main model's reasoning
-    horsepower and we want to keep latency low.
+    Phase 15.4 — uses the MAIN model (settings.llm_model), not the fast
+    one. Original Phase 1 design used llm_fast_model on the assumption
+    that "the abstraction step doesn't need the main model's reasoning
+    horsepower and we want to keep latency low." That assumption was
+    wrong on a single-GPU setup: switching from the main model to the
+    fast model forces Ollama to evict the main model and load the
+    fast one (~60s cold load for a 30B model on a 24GB GPU). Then
+    after step-back returns, switching back to the main model evicts
+    the fast model and reloads the main one (~60s again). Two model
+    swaps cost ~2 minutes — far more than the milliseconds the fast
+    model saves on a 1-line query.
+
+    Using the main model means zero swaps: the main model is already
+    loaded for the writer, the 1-line step-back query takes <1 second
+    once warm, and the writer reuses the same hot model immediately
+    after.
+
+    The caller can still pass an explicit `model=` to override.
     """
     from sciknow.config import settings
     from sciknow.rag import prompts as rag_prompts
@@ -228,7 +243,7 @@ def _generate_step_back_query(query: str, model: str | None = None) -> str | Non
     try:
         raw = llm_complete(
             sys_p, usr_p,
-            model=model or settings.llm_fast_model,
+            model=model or settings.llm_model,  # main model, not fast
             temperature=0.1, num_ctx=2048,
         )
         # Strip thinking blocks and any leading/trailing punctuation/quotes.

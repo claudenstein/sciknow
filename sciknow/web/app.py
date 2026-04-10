@@ -2637,6 +2637,11 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 </button>
 
 <script>
+// Phase 15.4 — page-load tag visible in DevTools Console.
+// If you don't see this line in the console, your browser is running
+// stale JS — hard-refresh with Ctrl+Shift+R (or Cmd+Shift+R on macOS).
+console.log('[sciknow] web reader loaded · build phase-15.4');
+
 // ── State ─────────────────────────────────────────────────────────────────
 let currentDraftId = '{active_id}';
 let currentChapterId = '{active_chapter_id}';
@@ -4004,6 +4009,11 @@ async function showScoresPanel() {{
 // Pure client-side — uses performance.now() timestamps and counts
 // whitespace-delimited tokens (a rough proxy for actual model tokens
 // but accurate enough for live feedback).
+// Phase 15.4 — build tag the user can check from the browser console:
+//   typeof STREAM_STATS_BUILD === "string" && STREAM_STATS_BUILD
+// If undefined, the page is running stale JS — hard-refresh (Ctrl+Shift+R).
+const STREAM_STATS_BUILD = "phase-15.4";
+
 function createStreamStats(containerId, modelName) {{
   const el = document.getElementById(containerId);
   if (!el) return {{ start: ()=>{{}}, update: ()=>{{}}, done: ()=>{{}}, setModel: ()=>{{}}, setPhase: ()=>{{}} }};
@@ -4012,6 +4022,10 @@ function createStreamStats(containerId, modelName) {{
   let timer = null;
   let currentModel = modelName || '?';
   let currentPhase = '';
+  // Phase 15.4 — debug logging: prints once when the FIRST token is
+  // received so the user can confirm in DevTools Console that token
+  // events are actually flowing through stats.update().
+  let _firstUpdateLogged = false;
 
   function fmtTime(ms) {{
     const s = ms / 1000;
@@ -4055,9 +4069,19 @@ function createStreamStats(containerId, modelName) {{
     }},
     update(text) {{
       if (!started) this.start();
-      if (!firstTok) firstTok = performance.now();
+      if (!firstTok) {{
+        firstTok = performance.now();
+        if (!_firstUpdateLogged) {{
+          _firstUpdateLogged = true;
+          console.log('[stream-stats] first token received',
+            {{ text: (text || '').slice(0, 40), build: STREAM_STATS_BUILD }});
+        }}
+      }}
+      // Phase 15.4 — defensive: text might be non-string if a producer
+      // emits malformed events. Coerce so the regex below doesn't throw.
+      const safeText = (typeof text === 'string') ? text : String(text || '');
       // Approximate tokens via whitespace + punctuation splits.
-      const n = (text.match(/\\S+/g) || []).length;
+      const n = (safeText.match(/\\S+/g) || []).length;
       count += n;
       const now = performance.now();
       for (let i = 0; i < n; i++) recentTokens.push(now);
