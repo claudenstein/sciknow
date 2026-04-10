@@ -1460,6 +1460,7 @@ async def api_autowrite_chapter(
     model: str = Form(None),
     target_words: int = Form(None),
     rebuild: bool = Form(False),
+    resume: bool = Form(False),
 ):
     """Phase 20 — autowrite EVERY section of a chapter in sequence.
 
@@ -1484,6 +1485,7 @@ async def api_autowrite_chapter(
             max_iter=max_iter, target_score=target_score,
             target_words=target_words if target_words and target_words > 0 else None,
             rebuild=rebuild,
+            resume=resume,
         )
 
     thread = threading.Thread(
@@ -4596,12 +4598,39 @@ async function doAutowrite() {{
   awTargetScore = parseFloat(targetStr) || 0.85;
   awScores = [];
 
-  // Confirm before kicking off a multi-section run — these can be long.
+  // Phase 28 — three-way handling for sections that already have a draft.
+  // Default = skip; alternatives = rebuild (overwrite from scratch) or
+  // resume (load existing content + run more iterations).
+  let modeRebuild = false;
+  let modeResume = false;
   if (isAllSections) {{
     const ch = chaptersData.find(c => c.id === currentChapterId);
     const nSecs = (ch && ch.sections_meta && ch.sections_meta.length) || 5;
-    if (!confirm('Autowrite all ' + nSecs + ' sections of this chapter? Sections that already have a draft will be skipped. This can take ' + (nSecs * 5) + '-' + (nSecs * 10) + ' minutes.')) {{
-      return;
+    // Count sections that already have a draft so the prompt is meaningful
+    let nDrafted = 0;
+    if (ch && Array.isArray(ch.sections)) {{
+      const draftedSlugs = new Set(ch.sections.filter(s => s.id).map(s => (s.type || '').toLowerCase()));
+      nDrafted = (ch.sections_meta || []).filter(m => draftedSlugs.has(m.slug)).length;
+    }}
+    let modeStr;
+    if (nDrafted === 0) {{
+      // No existing drafts — just confirm the long run.
+      if (!confirm('Autowrite all ' + nSecs + ' sections of this chapter? This can take ' + (nSecs * 5) + '-' + (nSecs * 10) + ' minutes.')) return;
+    }} else {{
+      modeStr = prompt(
+        nDrafted + ' of ' + nSecs + ' sections already have a draft.\\n\\n' +
+        'Pick how to handle them:\\n' +
+        '  s = skip   (default — only fill the missing sections)\\n' +
+        '  r = rebuild (overwrite drafted sections from scratch)\\n' +
+        '  i = iterate (resume from existing content, run more iterations)\\n\\n' +
+        'Type s, r, or i:',
+        's'
+      );
+      if (modeStr === null) return;
+      modeStr = (modeStr || 's').trim().toLowerCase();
+      if (modeStr === 'r' || modeStr === 'rebuild') modeRebuild = true;
+      else if (modeStr === 'i' || modeStr === 'iterate' || modeStr === 'resume') modeResume = true;
+      // else: default skip behaviour
     }}
   }}
 
@@ -4628,6 +4657,10 @@ async function doAutowrite() {{
   if (!isAllSections) fd.append('section_type', section);
   fd.append('max_iter', maxIter || '3');
   fd.append('target_score', String(awTargetScore));
+  // Phase 28 — pass the user's chosen mode (only for chapter-wide runs;
+  // single-section autowrite always rewrites the targeted section)
+  if (isAllSections && modeRebuild) fd.append('rebuild', 'true');
+  if (isAllSections && modeResume) fd.append('resume', 'true');
   const endpoint = isAllSections ? '/api/autowrite-chapter' : '/api/autowrite';
   const res = await fetch(endpoint, {{method: 'POST', body: fd}});
   const data = await res.json();

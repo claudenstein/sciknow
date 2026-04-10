@@ -1819,7 +1819,7 @@ def l1_phase20_chapter_autowrite_helper_exists() -> None:
         "actual sections list"
     )
     # Skips already-drafted sections by default
-    assert "existing_slugs" in src and "rebuild" in src, (
+    assert ("existing_slugs" in src or "existing_by_slug" in src) and "rebuild" in src, (
         "autowrite_chapter_all_sections_stream doesn't have skip-existing "
         "logic — would clobber previous work on every re-run"
     )
@@ -2672,6 +2672,117 @@ def l1_phase27_display_title_from_meta() -> None:
     )
 
 
+# ── Phase 28 — autowrite resume mode ──────────────────────────────────────
+
+
+def l1_phase28_is_resumable_draft() -> None:
+    """Phase 28 — _is_resumable_draft accepts finished checkpoints
+    and refuses partial ones.
+    """
+    from sciknow.core import book_ops
+
+    assert hasattr(book_ops, "_is_resumable_draft"), (
+        "_is_resumable_draft helper missing"
+    )
+
+    # Finished states → resumable
+    for checkpoint in ("final", "initial", "iteration_2_keep",
+                       "iteration_3_discard", "draft"):
+        ok, _ = book_ops._is_resumable_draft({"checkpoint": checkpoint}, 1500)
+        assert ok, f"expected resumable for checkpoint={checkpoint!r}"
+
+    # Pre-checkpoint era (very old drafts) → resumable with warning
+    ok, reason = book_ops._is_resumable_draft({}, 1500)
+    assert ok and "predates" in reason
+
+    # Partial states → refused
+    for checkpoint in ("writing_in_progress", "placeholder",
+                       "iteration_1_revising", "iteration_5_revising"):
+        ok, reason = book_ops._is_resumable_draft({"checkpoint": checkpoint}, 1500)
+        assert not ok, f"expected refused for checkpoint={checkpoint!r}"
+        assert reason, f"expected reason string for checkpoint={checkpoint!r}"
+
+    # Unknown checkpoint → refused (be conservative)
+    ok, reason = book_ops._is_resumable_draft({"checkpoint": "weird_state"}, 1500)
+    assert not ok and "unknown" in reason
+
+    # Word count too low → refused even with finished checkpoint
+    ok, reason = book_ops._is_resumable_draft({"checkpoint": "final"}, 50)
+    assert not ok and "too short" in reason
+
+    # JSON-encoded metadata also accepted
+    import json as _json
+    ok, _ = book_ops._is_resumable_draft(
+        _json.dumps({"checkpoint": "final"}), 1500,
+    )
+    assert ok
+
+
+def l1_phase28_resume_wired_through() -> None:
+    """Phase 28 — resume parameter wired through autowrite_section_stream,
+    _autowrite_section_body, the chapter generator, the web endpoint,
+    and the CLI.
+    """
+    import inspect
+    from sciknow.core import book_ops
+    from sciknow.web import app as web_app
+
+    # autowrite_section_stream signature
+    sig = inspect.signature(book_ops.autowrite_section_stream)
+    assert "resume_from_draft_id" in sig.parameters, (
+        "autowrite_section_stream missing resume_from_draft_id kwarg"
+    )
+
+    # _autowrite_section_body signature + actual usage
+    body_sig = inspect.signature(book_ops._autowrite_section_body)
+    assert "resume_from_draft_id" in body_sig.parameters
+    body_src = inspect.getsource(book_ops._autowrite_section_body)
+    assert "_is_resumable_draft" in body_src, (
+        "_autowrite_section_body doesn't gate resume on _is_resumable_draft"
+    )
+    assert "resume_content is None" in body_src, (
+        "_autowrite_section_body doesn't branch the writing phase on resume_content"
+    )
+
+    # Chapter generator passes resume_draft_id to the inner stream
+    ch_sig = inspect.signature(book_ops.autowrite_chapter_all_sections_stream)
+    assert "resume" in ch_sig.parameters, (
+        "autowrite_chapter_all_sections_stream missing resume kwarg"
+    )
+    ch_src = inspect.getsource(book_ops.autowrite_chapter_all_sections_stream)
+    assert "resume_from_draft_id=resume_draft_id" in ch_src, (
+        "chapter generator doesn't pass resume_draft_id to the inner generator"
+    )
+    # rebuild + resume mutually exclusive (rebuild wins)
+    assert "rebuild and resume" in ch_src, (
+        "chapter generator doesn't enforce rebuild/resume exclusivity"
+    )
+
+    # Web endpoint accepts resume form arg
+    ep_sig = inspect.signature(web_app.api_autowrite_chapter)
+    assert "resume" in ep_sig.parameters, (
+        "POST /api/autowrite-chapter missing resume form arg"
+    )
+
+    # JS doAutowrite has the three-way mode picker
+    src = inspect.getsource(web_app)
+    assert "modeRebuild" in src and "modeResume" in src, (
+        "doAutowrite JS doesn't track rebuild/resume mode separately"
+    )
+    assert "iterate" in src.lower(), (
+        "doAutowrite mode prompt doesn't mention iterate/resume option"
+    )
+
+    # CLI book autowrite has --resume flag
+    from typer.main import get_command
+    from sciknow.cli import book as book_cli
+    cmd = get_command(book_cli.app)
+    autowrite_cmd = cmd.commands.get("autowrite")
+    assert autowrite_cmd is not None
+    param_names = {p.name for p in autowrite_cmd.params}
+    assert "resume" in param_names, "`book autowrite` missing --resume flag"
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -2747,6 +2858,9 @@ L1_TESTS: list[Callable] = [
     l1_phase26_section_drag_drop,
     # Phase 27 — display title derived from chapter sections meta
     l1_phase27_display_title_from_meta,
+    # Phase 28 — autowrite resume mode
+    l1_phase28_is_resumable_draft,
+    l1_phase28_resume_wired_through,
 ]
 
 L2_TESTS: list[Callable] = [

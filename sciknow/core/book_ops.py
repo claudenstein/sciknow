@@ -563,6 +563,98 @@ def _stream_with_save(
     return "".join(tokens)
 
 
+# Phase 28 — autowrite resume eligibility.
+#
+# A draft is "resumable" if it represents a complete, coherent body
+# of text — NOT a partial token buffer left over from an interrupted
+# writing or revising stream. The criterion is the
+# custom_metadata.checkpoint string written by the autowrite generator
+# at every transition (Phase 19 + 24):
+#
+#   "writing_in_progress"   ← partial: writer was streaming, got cut off
+#   "placeholder"           ← partial: row was just inserted, no content yet
+#   "iteration_N_revising"  ← partial: a revision was streaming, got cut off
+#   "initial"               ← FINISHED: writer completed, no iterations yet
+#   "iteration_N_keep"      ← FINISHED: KEEP verdict applied, between iters
+#   "iteration_N_discard"   ← FINISHED: DISCARD verdict applied, between iters
+#   "final"                 ← FINISHED: full convergence loop completed
+#   "draft"                 ← FINISHED: manual write_section_stream done
+#
+# Drafts created BEFORE the checkpoint system was added (very old)
+# have no checkpoint key at all — we conservatively allow those if
+# they have a non-trivial word count, since they predate the partial
+# state tracking.
+
+_RESUMABLE_CHECKPOINTS = frozenset({
+    "initial", "final", "draft",
+})
+_RESUMABLE_CHECKPOINT_PREFIXES = ("iteration_",)
+_RESUMABLE_CHECKPOINT_SUFFIXES = ("_keep", "_discard")
+_PARTIAL_CHECKPOINTS = frozenset({
+    "writing_in_progress", "placeholder",
+})
+_PARTIAL_CHECKPOINT_SUFFIXES = ("_revising",)
+# Drafts shorter than this are treated as "no real content yet" and
+# refused for resume regardless of checkpoint state.
+_MIN_RESUMABLE_WORDS = 100
+
+
+def _is_resumable_draft(custom_metadata, word_count: int | None) -> tuple[bool, str]:
+    """Phase 28 — return (is_resumable, reason). Used by autowrite resume
+    mode to refuse picking up partial drafts.
+
+    The reason string is empty when ok and contains a human-readable
+    explanation otherwise (used by the CLI / GUI / log entries).
+    """
+    wc = int(word_count or 0)
+    if wc < _MIN_RESUMABLE_WORDS:
+        return False, (
+            f"draft has only {wc} words (need >= {_MIN_RESUMABLE_WORDS}); "
+            "too short to resume from — looks like an empty placeholder"
+        )
+
+    meta = custom_metadata or {}
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except Exception:
+            meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+    checkpoint = (meta.get("checkpoint") or "").strip()
+
+    if not checkpoint:
+        # Pre-checkpoint era (very old drafts). Allow with a warning
+        # baked into the reason — the caller can surface it.
+        return True, "draft predates the checkpoint system; resuming anyway"
+
+    # Reject partial states explicitly.
+    if checkpoint in _PARTIAL_CHECKPOINTS:
+        return False, (
+            f"draft is in partial state '{checkpoint}' "
+            "(writing was interrupted; not safe to resume)"
+        )
+    if any(checkpoint.endswith(s) for s in _PARTIAL_CHECKPOINT_SUFFIXES):
+        return False, (
+            f"draft is in partial revising state '{checkpoint}' "
+            "(a revision stream was interrupted; not safe to resume)"
+        )
+
+    # Accept known-finished states.
+    if checkpoint in _RESUMABLE_CHECKPOINTS:
+        return True, ""
+    if any(checkpoint.startswith(p) for p in _RESUMABLE_CHECKPOINT_PREFIXES) \
+       and any(checkpoint.endswith(s) for s in _RESUMABLE_CHECKPOINT_SUFFIXES):
+        return True, ""
+
+    # Unknown checkpoint string — be conservative and refuse with
+    # a clear message rather than guessing.
+    return False, (
+        f"draft has unknown checkpoint state '{checkpoint}' — "
+        "refusing to resume (run with --rebuild to start fresh)"
+    )
+
+
 def _next_draft_version(session, book_id: str, chapter_id: str, section_type: str) -> int:
     """Phase 19 — return the version number a new draft should claim so
     it'll be the latest visible to the GUI's max-version-per-section sort.
@@ -1790,6 +1882,7 @@ def autowrite_section_stream(
     use_cove: bool = True,
     cove_threshold: float = 0.85,
     target_words: int | None = None,
+    resume_from_draft_id: str | None = None,
 ) -> Iterator[Event]:
     """Full convergence loop for one section: write -> score -> revise -> re-score.
 
@@ -1800,6 +1893,13 @@ def autowrite_section_stream(
     a finally) and yields a log_path event so the GUI can surface where
     to tail. The body generator does the actual work and gets the log
     object passed in so it can call log.stage() at every transition.
+
+    Phase 28 — resume_from_draft_id, when set, loads the existing
+    draft's content and runs the score → verify → revise loop on it
+    WITHOUT redoing the initial writing phase. The draft must be in a
+    finished state (checkpoint in {initial, iteration_*_keep,
+    iteration_*_discard, final, draft}) — partial states from
+    interrupted runs are refused via _is_resumable_draft.
 
     Tail the log with:
 
@@ -1820,6 +1920,7 @@ def autowrite_section_stream(
             auto_expand=auto_expand, use_plan=use_plan,
             use_step_back=use_step_back, use_cove=use_cove,
             cove_threshold=cove_threshold, target_words=target_words,
+            resume_from_draft_id=resume_from_draft_id,
         )
     finally:
         log.close()
@@ -1840,6 +1941,7 @@ def _autowrite_section_body(
     use_cove: bool = True,
     cove_threshold: float = 0.85,
     target_words: int | None = None,
+    resume_from_draft_id: str | None = None,
 ) -> Iterator[Event]:
     """Phase 24 — the actual autowrite implementation, extracted from
     autowrite_section_stream so the public function can wrap it in a
@@ -1848,6 +1950,12 @@ def _autowrite_section_body(
     Receives the live _AutowriteLogger and calls log.stage(...) at
     every major transition. Token observers are passed into
     _stream_with_save so the heartbeat can show real tokens-per-second.
+
+    Phase 28 — resume_from_draft_id, when set, loads the existing
+    draft's content as the starting point and SKIPS the initial
+    writing stream. The source draft must pass _is_resumable_draft
+    (no partial states from interrupted runs); otherwise we yield
+    an error and return without doing any LLM work.
     """
     from sciknow.rag import prompts as rag_prompts
     from sciknow.rag.llm import stream as llm_stream, complete as llm_complete
@@ -1876,6 +1984,64 @@ def _autowrite_section_body(
     b_title, b_plan = book[1], book[2]
     ch_id, ch_num, ch_title, ch_desc, topic_query, topic_cluster = ch
     topic = topic_query or ch_title
+
+    # Phase 28 — load resume source NOW (before any LLM calls) so we
+    # can fail fast if it's in a partial state. resume_content stays
+    # None for fresh writes (the existing path). The eligibility check
+    # uses _is_resumable_draft which refuses writing_in_progress,
+    # iteration_*_revising, placeholder, and unknown checkpoints.
+    resume_content: str | None = None
+    resume_source_meta: dict | None = None
+    if resume_from_draft_id:
+        with get_session() as session:
+            row = session.execute(text("""
+                SELECT id::text, content, word_count, custom_metadata, section_type
+                FROM drafts
+                WHERE (id::text = :did OR id::text LIKE :prefix)
+                  AND book_id::text = :bid
+                  AND chapter_id::text = :cid
+                LIMIT 1
+            """), {
+                "did": resume_from_draft_id,
+                "prefix": f"{resume_from_draft_id}%",
+                "bid": book_id, "cid": chapter_id,
+            }).fetchone()
+        if not row:
+            msg = (
+                f"resume source draft {resume_from_draft_id!r} not found "
+                f"in this book/chapter"
+            )
+            log.event("error", message=msg)
+            yield {"type": "error", "message": msg}
+            return
+
+        ok, reason = _is_resumable_draft(row[3], row[2])
+        if not ok:
+            msg = f"cannot resume from draft {row[0][:8]}: {reason}"
+            log.event("resume_refused", reason=reason, draft_id=row[0])
+            yield {"type": "error", "message": msg}
+            return
+
+        resume_content = row[1] or ""
+        resume_source_meta = {
+            "source_draft_id": row[0],
+            "source_word_count": int(row[2] or 0),
+            "source_section_type": row[4],
+            "resume_started_at": datetime.now().isoformat(timespec="seconds"),
+            "checkpoint_warning": reason or None,
+        }
+        log.event(
+            "resume_loaded",
+            source_draft_id=row[0],
+            source_word_count=int(row[2] or 0),
+            warning=reason or None,
+        )
+        yield {
+            "type": "resume_info",
+            "source_draft_id": row[0],
+            "source_word_count": int(row[2] or 0),
+            "warning": reason or None,
+        }
 
     # Phase 17 — resolve effective per-section length target.
     # Caller override beats the book-level setting. If neither is set,
@@ -1929,9 +2095,12 @@ def _autowrite_section_body(
 
     log.event("retrieval_done", n_results=len(results), n_sources=len(sources))
 
-    # Optional tree plan with PDTB-lite discourse relations.
+    # Phase 28 — in resume mode, skip planning + writing entirely.
+    # The starting content comes from the existing draft. We still
+    # ran retrieval above so the score / verify / revise stages
+    # have fresh source passages to evaluate against.
     paragraph_plan = None
-    if use_plan:
+    if resume_content is None and use_plan:
         log.stage("planning")
         yield {"type": "progress", "stage": "planning",
                "detail": "Building paragraph plan with discourse relations..."}
@@ -1959,16 +2128,25 @@ def _autowrite_section_body(
             log.event("planning_failed", message=str(exc)[:200])
             paragraph_plan = None
 
-    system, user = rag_prompts.write_section_v2(
-        section_type, topic, results,
-        book_plan=b_plan, prior_summaries=prior_summaries,
-        paragraph_plan=paragraph_plan,
-        target_words=effective_target_words,
-        section_plan=section_plan,
-    )
-
-    yield {"type": "progress", "stage": "writing",
-           "detail": f"Generating initial draft (~{effective_target_words} words)..."}
+    if resume_content is None:
+        system, user = rag_prompts.write_section_v2(
+            section_type, topic, results,
+            book_plan=b_plan, prior_summaries=prior_summaries,
+            paragraph_plan=paragraph_plan,
+            target_words=effective_target_words,
+            section_plan=section_plan,
+        )
+        yield {"type": "progress", "stage": "writing",
+               "detail": f"Generating initial draft (~{effective_target_words} words)..."}
+    else:
+        # Resume mode — fast-path past the writing phase. The score
+        # loop below will pick up `content` and run iterations on it.
+        yield {"type": "progress", "stage": "resume",
+               "detail": (
+                   f"Resuming from existing draft "
+                   f"({resume_source_meta['source_word_count']} words) — "
+                   f"skipping initial writing, jumping straight to scoring."
+               )}
 
     # Phase 19 — INSERT the placeholder draft BEFORE the writing loop.
     # This is what makes Stop-during-writing recoverable: we have a
@@ -2003,60 +2181,77 @@ def _autowrite_section_body(
         "max_iter": max_iter,
         "target_score": target_score,
         "target_words": effective_target_words,
-        "checkpoint": "writing_in_progress",
+        # Phase 28 — start state depends on whether we're resuming.
+        # For a fresh write the placeholder is "writing_in_progress"
+        # (filled in by the writing stream). For resume the
+        # placeholder already has its full starting content, so we
+        # mark it "initial" immediately.
+        "checkpoint": "initial" if resume_content is not None else "writing_in_progress",
     }
+    if resume_source_meta is not None:
+        placeholder_metadata["resume_source"] = resume_source_meta
     with get_session() as session:
         draft_version = _next_draft_version(
             session, book_id, ch_id, section_type
         )
         draft_id = _save_draft(
             session, title=draft_title, book_id=book_id, chapter_id=ch_id,
-            section_type=section_type, topic=topic, content="",
+            section_type=section_type, topic=topic,
+            content=resume_content if resume_content is not None else "",
             sources=sources, model=model, summary=None,
             version=draft_version,
             custom_metadata=placeholder_metadata,
         )
-    yield {"type": "checkpoint", "draft_id": draft_id, "stage": "placeholder",
-           "word_count": 0}
-    log.event("placeholder_saved", draft_id=draft_id, version=draft_version)
+    yield {"type": "checkpoint", "draft_id": draft_id,
+           "stage": "resume_initial" if resume_content is not None else "placeholder",
+           "word_count": len((resume_content or "").split())}
+    log.event("placeholder_saved", draft_id=draft_id, version=draft_version,
+              resume=resume_content is not None)
 
-    # Phase 19 — incremental save during the writing stream. The
-    # callback closure references draft_id + placeholder_metadata so
-    # every flush goes to the same row. _stream_with_save flushes
-    # every ~150 tokens or 5 seconds AND in a finally block on Stop.
-    def _save_writing(text: str) -> None:
-        _update_draft_content(
-            draft_id, text,
-            custom_metadata={**placeholder_metadata, "checkpoint": "writing_in_progress"},
+    if resume_content is None:
+        # Phase 19 — incremental save during the writing stream. The
+        # callback closure references draft_id + placeholder_metadata so
+        # every flush goes to the same row. _stream_with_save flushes
+        # every ~150 tokens or 5 seconds AND in a finally block on Stop.
+        def _save_writing(text: str) -> None:
+            _update_draft_content(
+                draft_id, text,
+                custom_metadata={**placeholder_metadata, "checkpoint": "writing_in_progress"},
+            )
+
+        log.stage("writing")
+        content = yield from _stream_with_save(
+            system, user, "writing",
+            model=model, save_callback=_save_writing,
+            token_observer=log.token,
         )
 
-    log.stage("writing")
-    content = yield from _stream_with_save(
-        system, user, "writing",
-        model=model, save_callback=_save_writing,
-        token_observer=log.token,
-    )
-
-    # Promote the just-finished initial draft from "writing_in_progress"
-    # to "initial". Same draft row, just updated metadata + final flush
-    # to lock in the post-loop content (the streaming saves may have
-    # been racing the loop's last few tokens).
-    initial_metadata = {
-        "score_history": history,
-        "feature_versions": feature_versions,
-        "final_overall": None,
-        "max_iter": max_iter,
-        "target_score": target_score,
-        "target_words": effective_target_words,
-        "checkpoint": "initial",
-    }
-    _update_draft_content(
-        draft_id, content,
-        custom_metadata=initial_metadata,
-    )
-    yield {"type": "checkpoint", "draft_id": draft_id, "stage": "initial",
-           "word_count": len(content.split())}
-    log.event("initial_draft_saved", word_count=len(content.split()))
+        # Promote the just-finished initial draft from "writing_in_progress"
+        # to "initial". Same draft row, just updated metadata + final flush
+        # to lock in the post-loop content (the streaming saves may have
+        # been racing the loop's last few tokens).
+        initial_metadata = {
+            "score_history": history,
+            "feature_versions": feature_versions,
+            "final_overall": None,
+            "max_iter": max_iter,
+            "target_score": target_score,
+            "target_words": effective_target_words,
+            "checkpoint": "initial",
+        }
+        _update_draft_content(
+            draft_id, content,
+            custom_metadata=initial_metadata,
+        )
+        yield {"type": "checkpoint", "draft_id": draft_id, "stage": "initial",
+               "word_count": len(content.split())}
+        log.event("initial_draft_saved", word_count=len(content.split()))
+    else:
+        # Phase 28 resume path — content was loaded from the source
+        # draft above. Skip straight to the iteration loop. The new
+        # row already has resume_content baked in via _save_draft.
+        content = resume_content
+        log.event("resume_skipped_writing", word_count=len(content.split()))
 
     for iteration in range(max_iter):
         yield {"type": "iteration_start", "iteration": iteration + 1, "max": max_iter}
@@ -2526,6 +2721,7 @@ def autowrite_chapter_all_sections_stream(
     cove_threshold: float = 0.85,
     target_words: int | None = None,
     rebuild: bool = False,
+    resume: bool = False,
 ) -> Iterator[Event]:
     """Phase 20 — autowrite EVERY section of a chapter in sequence.
 
@@ -2537,19 +2733,25 @@ def autowrite_chapter_all_sections_stream(
     function, which iterates over the chapter's sections list and
     chains autowrite_section_stream for each.
 
-    Behaviour:
-    - Reads the chapter's sections via _get_chapter_sections_normalized.
-    - Falls back to _DEFAULT_BOOK_SECTION_SLUGS only if the chapter
-      has no sections set at all.
-    - Skips sections that already have a draft, unless rebuild=True.
-      A section is "already drafted" if any draft row exists with
-      that exact section_type slug for this (book_id, chapter_id).
-    - Yields envelope events around each section's run:
-        section_start: {"index": i, "total": N, "slug": ..., "title": ..., "skipped": bool}
-        section_done:  {"index": i, "draft_id": ..., "final_score": ...}
-      Plus all the inner events from autowrite_section_stream
-      (token, scores, checkpoint, verification, etc.).
-    - Final event: all_sections_complete with summary stats.
+    Existing-draft handling — three modes:
+
+    - **default (skip)** — sections that already have a draft are
+      skipped entirely. The existing draft is preserved unchanged.
+    - **rebuild=True** — existing drafts are ignored; a fresh
+      autowrite runs from scratch. New row gets a higher version
+      than the existing one (Phase 19).
+    - **resume=True (Phase 28)** — for sections that already have a
+      draft AND the draft is in a finished state (per
+      _is_resumable_draft), the autowrite loads it as the starting
+      content and runs the score → revise loop on it. Sections
+      whose latest draft is in a partial state (writing_in_progress
+      etc.) are SKIPPED with a warning instead of being clobbered,
+      since resuming a partial buffer would silently corrupt the
+      user's work.
+
+    rebuild and resume are mutually exclusive — if both are passed,
+    rebuild wins and resume is silently ignored (matching the CLI
+    semantic that --rebuild overwrites everything).
 
     Cancellation: clicking Stop in the GUI calls gen.close() on this
     generator, which propagates GeneratorExit through the active
@@ -2561,6 +2763,10 @@ def autowrite_chapter_all_sections_stream(
     from sqlalchemy import text
     from sciknow.storage.db import get_session
 
+    # rebuild wins over resume if both somehow get passed.
+    if rebuild and resume:
+        resume = False
+
     # Resolve the chapter's sections list (slug + title + plan).
     with get_session() as session:
         sections = _get_chapter_sections_normalized(session, chapter_id)
@@ -2570,16 +2776,26 @@ def autowrite_chapter_all_sections_stream(
                 for slug in _DEFAULT_BOOK_SECTION_SLUGS
             ]
 
-        # Find which sections already have a draft so we can skip them
-        # (unless rebuild). Phase 18 + Phase 19 both made drafts more
-        # visible after Stop, so we skip-by-default to make this
-        # operation idempotent and resume-friendly: re-running picks
-        # up where we left off.
+        # Find which sections already have a draft.
+        # Phase 28 — also fetch the latest draft id + custom_metadata
+        # + word_count per section so resume mode can pick the latest
+        # draft to use as the starting content AND check it's not in
+        # a partial state.
         existing_rows = session.execute(text("""
-            SELECT DISTINCT section_type FROM drafts
+            SELECT DISTINCT ON (section_type)
+                   section_type, id::text, custom_metadata, word_count
+            FROM drafts
             WHERE book_id::text = :bid AND chapter_id::text = :cid
+            ORDER BY section_type, version DESC, created_at DESC
         """), {"bid": book_id, "cid": chapter_id}).fetchall()
-        existing_slugs = {(r[0] or "").strip().lower() for r in existing_rows}
+        existing_by_slug: dict[str, dict] = {
+            (r[0] or "").strip().lower(): {
+                "draft_id": r[1],
+                "custom_metadata": r[2],
+                "word_count": r[3] or 0,
+            }
+            for r in existing_rows
+        }
 
     n_total = len(sections)
     n_skipped = 0
@@ -2593,29 +2809,59 @@ def autowrite_chapter_all_sections_stream(
         "n_sections": n_total,
         "sections": [{"slug": s["slug"], "title": s["title"]} for s in sections],
         "rebuild": rebuild,
+        "resume": resume,
     }
 
     for i, sec in enumerate(sections, start=1):
         slug = sec["slug"]
         title = sec["title"]
-        already_exists = slug in existing_slugs
+        existing = existing_by_slug.get(slug)
+        already_exists = existing is not None
 
-        if already_exists and not rebuild:
-            n_skipped += 1
-            yield {
-                "type": "section_start", "index": i, "total": n_total,
-                "slug": slug, "title": title, "skipped": True,
-                "reason": "draft already exists (use rebuild to overwrite)",
-            }
-            yield {
-                "type": "section_done", "index": i,
-                "slug": slug, "skipped": True,
-            }
-            continue
+        # Phase 28 — three-way handling of existing drafts.
+        resume_draft_id: str | None = None
+        if already_exists:
+            if rebuild:
+                pass  # fall through to a fresh autowrite
+            elif resume:
+                # Check resume eligibility. Refuse partial states.
+                ok, reason = _is_resumable_draft(
+                    existing["custom_metadata"], existing["word_count"],
+                )
+                if not ok:
+                    n_skipped += 1
+                    yield {
+                        "type": "section_start", "index": i, "total": n_total,
+                        "slug": slug, "title": title, "skipped": True,
+                        "reason": (
+                            f"resume refused: {reason} "
+                            f"(rerun with rebuild to overwrite from scratch)"
+                        ),
+                    }
+                    yield {
+                        "type": "section_done", "index": i,
+                        "slug": slug, "skipped": True,
+                    }
+                    continue
+                resume_draft_id = existing["draft_id"]
+            else:
+                # Default: skip existing drafts.
+                n_skipped += 1
+                yield {
+                    "type": "section_start", "index": i, "total": n_total,
+                    "slug": slug, "title": title, "skipped": True,
+                    "reason": "draft already exists (use rebuild or resume)",
+                }
+                yield {
+                    "type": "section_done", "index": i,
+                    "slug": slug, "skipped": True,
+                }
+                continue
 
         yield {
             "type": "section_start", "index": i, "total": n_total,
             "slug": slug, "title": title, "skipped": False,
+            "resume": resume_draft_id is not None,
         }
 
         # Track per-section state so the all-sections summary can
@@ -2638,6 +2884,7 @@ def autowrite_chapter_all_sections_stream(
                 use_cove=use_cove,
                 cove_threshold=cove_threshold,
                 target_words=target_words,
+                resume_from_draft_id=resume_draft_id,
             )
             for event in inner:
                 # Forward all child events; tag with section index so

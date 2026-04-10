@@ -993,6 +993,18 @@ def autowrite(
                                      help="Write ALL chapters × ALL sections (the full autonomous pipeline)."),
     rebuild:    bool = typer.Option(False, "--rebuild",
                                      help="Rewrite sections that already have drafts (default: skip existing)."),
+    resume:     bool = typer.Option(
+        False, "--resume",
+        help=(
+            "Phase 28 — for sections that already have a finished "
+            "draft, load it as the starting content and run more "
+            "iterations on it instead of skipping. Refuses to resume "
+            "from drafts in a partial state (writing_in_progress, "
+            "iteration_*_revising, placeholder) — use --rebuild to "
+            "overwrite those. Mutually exclusive with --rebuild "
+            "(rebuild wins if both are set)."
+        ),
+    ),
     target_words: int | None = typer.Option(
         None, "--target-words",
         help=(
@@ -1095,24 +1107,44 @@ def autowrite(
             f"{len(targets)} section(s), max {max_iter} iter, target {target_score}"
         )
 
-    # Skip sections that already have drafts (unless --rebuild)
+    # Phase 28 — rebuild and resume are mutually exclusive
+    if rebuild and resume:
+        console.print("[yellow]Both --rebuild and --resume given; --rebuild wins.[/yellow]")
+        resume = False
+
+    # Build a slug → latest draft id map. Used by:
+    #   - default mode: skip sections that already have a draft
+    #   - resume mode: pass the draft id to autowrite_section_stream
+    #     so it loads the existing content as the iteration starting point
+    existing_by_key: dict[tuple[str, str], dict] = {}
     if not rebuild:
         with get_session() as session:
-            existing = session.execute(text("""
-                SELECT chapter_id::text, section_type
-                FROM drafts WHERE book_id = :bid AND chapter_id IS NOT NULL
+            existing_rows = session.execute(text("""
+                SELECT DISTINCT ON (chapter_id, section_type)
+                    chapter_id::text, section_type, id::text,
+                    custom_metadata, word_count
+                FROM drafts
+                WHERE book_id = :bid AND chapter_id IS NOT NULL
+                ORDER BY chapter_id, section_type, version DESC, created_at DESC
             """), {"bid": book_id}).fetchall()
-        existing_set = {(r[0], r[1]) for r in existing}
+        for r in existing_rows:
+            existing_by_key[(r[0], r[1])] = {
+                "draft_id": r[2],
+                "custom_metadata": r[3],
+                "word_count": r[4] or 0,
+            }
 
-        before = len(targets)
-        targets = [(cid, cn, ct, sec) for cid, cn, ct, sec in targets
-                    if (cid, sec) not in existing_set]
-        skipped = before - len(targets)
-        if skipped:
-            console.print(f"[dim]Skipping {skipped} sections with existing drafts (use --rebuild to overwrite)[/dim]")
-        if not targets:
-            console.print("[green]All sections already have drafts.[/green]")
-            raise typer.Exit(0)
+        if not resume:
+            # Default: skip existing drafts
+            before = len(targets)
+            targets = [(cid, cn, ct, sec) for cid, cn, ct, sec in targets
+                        if (cid, sec) not in existing_by_key]
+            skipped = before - len(targets)
+            if skipped:
+                console.print(f"[dim]Skipping {skipped} sections with existing drafts (use --rebuild to overwrite or --resume to iterate further)[/dim]")
+            if not targets:
+                console.print("[green]All sections already have drafts.[/green]")
+                raise typer.Exit(0)
 
     # Run the convergence loop for each target with live dashboard
     import time as _time
@@ -1121,13 +1153,35 @@ def autowrite(
     from rich.table import Table
     from rich.text import Text
 
+    from sciknow.core.book_ops import _is_resumable_draft
+
     total = len(targets)
     converged = 0
 
     for i, (ch_id, ch_num, ch_title, sec) in enumerate(targets, 1):
         console.print(f"\n{'=' * 72}")
+        # Phase 28 — resolve the resume_draft_id for this section.
+        # In resume mode, refuse partial states with a clear message
+        # and skip to the next section instead of clobbering them.
+        resume_draft_id: str | None = None
+        if resume:
+            existing = existing_by_key.get((ch_id, sec))
+            if existing:
+                ok, reason = _is_resumable_draft(
+                    existing["custom_metadata"], existing["word_count"],
+                )
+                if not ok:
+                    console.print(
+                        f"[bold]Section {i}/{total}:[/bold] Ch.{ch_num} {ch_title} — {sec}\n"
+                        f"  [yellow]Skipping resume: {reason}[/yellow]"
+                    )
+                    console.print(f"{'=' * 72}")
+                    continue
+                resume_draft_id = existing["draft_id"]
+
+        mode_label = " [dim](resume)[/dim]" if resume_draft_id else ""
         console.print(
-            f"[bold]Section {i}/{total}:[/bold] Ch.{ch_num} {ch_title} — {sec}"
+            f"[bold]Section {i}/{total}:[/bold] Ch.{ch_num} {ch_title} — {sec}{mode_label}"
             f"  [dim]({converged} converged so far)[/dim]"
         )
         console.print(f"{'=' * 72}")
@@ -1137,6 +1191,7 @@ def autowrite(
             model=model, max_iter=max_iter, target_score=target_score,
             auto_expand=auto_expand,
             target_words=target_words,
+            resume_from_draft_id=resume_draft_id,
         )
 
         # Live dashboard state
