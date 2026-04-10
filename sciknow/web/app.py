@@ -18,6 +18,8 @@ import json
 import logging
 import re
 import threading
+import time
+from html import escape as _esc
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -90,19 +92,45 @@ def set_book(book_id: str, book_title: str) -> None:
 
 # ── Job management ───────────────────────────────────────────────────────────
 
-_jobs: dict[str, dict] = {}     # job_id -> {queue, status, type, cancel}
+_jobs: dict[str, dict] = {}     # job_id -> {queue, status, type, cancel, finished_at}
 _job_lock = threading.Lock()
+
+# Phase 22 — _jobs used to grow unbounded: every job ever created stayed
+# in memory with its queue object. For a writing session of an hour or
+# two that's a few hundred KB; over a long-running deployment it leaks.
+# We now sweep finished jobs older than this window on every _create_job
+# call. 5 minutes is long enough that the SSE consumer has fully drained
+# the queue, but short enough that the dict stays bounded.
+_JOB_GC_AGE_SECONDS = 300
+
+
+def _gc_old_jobs() -> int:
+    """Drop finished jobs older than _JOB_GC_AGE_SECONDS. Returns the
+    number evicted. Caller MUST hold _job_lock."""
+    now = time.monotonic()
+    stale = [
+        jid for jid, j in _jobs.items()
+        if j.get("status") == "done"
+        and (now - j.get("finished_at", now)) > _JOB_GC_AGE_SECONDS
+    ]
+    for jid in stale:
+        del _jobs[jid]
+    return len(stale)
 
 
 def _create_job(job_type: str) -> tuple[str, asyncio.Queue]:
     job_id = uuid4().hex[:12]
     queue: asyncio.Queue = asyncio.Queue()
     with _job_lock:
+        # Sweep stale finished jobs before inserting the new one. Cheap
+        # lock-protected dict scan; runs at most a few times per minute.
+        _gc_old_jobs()
         _jobs[job_id] = {
             "queue": queue,
             "status": "running",
             "type": job_type,
             "cancel": threading.Event(),
+            "finished_at": None,
         }
     return job_id, queue
 
@@ -111,6 +139,7 @@ def _finish_job(job_id: str):
     with _job_lock:
         if job_id in _jobs:
             _jobs[job_id]["status"] = "done"
+            _jobs[job_id]["finished_at"] = time.monotonic()
 
 
 # ── Data helpers ─────────────────────────────────────────────────────────────
@@ -429,6 +458,40 @@ async def api_section(draft_id: str):
     active_comments = [c for c in comments if c[1] == draft_id]
     sources = json.loads(active[5]) if isinstance(active[5], str) else (active[5] or [])
 
+    # Phase 22 — fetch the section's word target so the GUI can render
+    # a progress bar in the subtitle. The target lives on the draft's
+    # custom_metadata (set by autowrite/Phase 17). If the draft was
+    # made by a single-shot write_section_stream that pre-dates Phase 17,
+    # we fall back to deriving it from the book's chapter_target /
+    # num_sections.
+    target_words = None
+    try:
+        from sciknow.core.book_ops import (
+            _get_book_length_target, _section_target_words,
+            _get_chapter_num_sections,
+        )
+        with get_session() as _session:
+            # 1) Try the draft's own custom_metadata.target_words
+            row = _session.execute(text("""
+                SELECT custom_metadata FROM drafts WHERE id::text = :did LIMIT 1
+            """), {"did": active[0]}).fetchone()
+            meta = (row[0] if row else None) or {}
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = {}
+            tw = meta.get("target_words") if isinstance(meta, dict) else None
+            if tw and tw > 0:
+                target_words = int(tw)
+            elif active[9]:
+                # 2) Derive from book + chapter section count
+                chapter_target = _get_book_length_target(_session, _book_id)
+                num_sections = _get_chapter_num_sections(_session, str(active[9]))
+                target_words = _section_target_words(chapter_target, num_sections)
+    except Exception as exc:
+        logger.warning("target_words lookup failed: %s", exc)
+
     return {
         "id": active[0],
         "title": active[1],
@@ -446,6 +509,7 @@ async def api_section(draft_id: str):
         "chapter_num": active[12],
         "chapter_title": active[13],
         "status": _get_draft_status(draft_id),
+        "target_words": target_words,
     }
 
 
@@ -862,6 +926,29 @@ async def update_draft_metadata(request: Request, draft_id: str):
         """), {"meta": json.dumps(body), "q": f"{draft_id}%"})
         session.commit()
     return JSONResponse({"ok": True})
+
+
+@app.delete("/api/draft/{draft_id}")
+async def delete_draft(draft_id: str):
+    """Phase 22 — permanently delete a single draft. Used by the GUI's
+    inline X button on orphan drafts so users can clean up leftovers
+    from before Phase 18 (when section_type was hardcoded). Comments
+    and snapshots referencing the draft are dropped via ON DELETE
+    CASCADE if configured, or left orphaned in the DB otherwise.
+    """
+    if not draft_id:
+        raise HTTPException(400, "draft_id required")
+    with get_session() as session:
+        # Match by full id (canonical) OR prefix (matches the GUI's
+        # short id convention used elsewhere). Returns the count so
+        # the GUI knows whether anything actually happened.
+        row = session.execute(text("""
+            DELETE FROM drafts
+            WHERE id::text = :did OR id::text LIKE :prefix
+            RETURNING id::text
+        """), {"did": draft_id, "prefix": f"{draft_id}%"}).fetchall()
+        session.commit()
+    return JSONResponse({"ok": True, "deleted": [r[0] for r in row]})
 
 
 # ── Chapter reader (continuous scroll) ───────────────────────────────────────
@@ -1898,141 +1985,200 @@ def _render_book(book, chapters, drafts, gaps, comments,
         "sections_meta": si["sections_meta"],
     } for si in sidebar_items])
 
+    # Phase 22 — escape every user-controlled string that lands inside an
+    # HTML attribute or text node in the template. The *_html fields are
+    # already-rendered HTML produced by helpers that escape internally,
+    # so they pass through unchanged. Numeric fields are coerced to int
+    # so they can't smuggle markup either.
     return TEMPLATE.format(
-        book_title=book[1] if book else "Untitled",
-        book_id=_book_id,
-        book_plan=(book[3] or "No plan set.") if book else "",
+        book_title=_esc(book[1] if book else "Untitled"),
+        book_id=_esc(str(_book_id)),
+        book_plan=_esc((book[3] or "No plan set.") if book else ""),
         sidebar_html=_render_sidebar(sidebar_items, active_id),
         content_html=active_html,
-        active_id=active_id,
-        active_title=active_title,
-        active_version=active_draft[6] if active_draft else 1,
-        active_words=active_draft[4] if active_draft else 0,
-        active_chapter_id=active_draft[9] if active_draft else "",
-        active_section_type=active_draft[2] if active_draft else "",
+        active_id=_esc(str(active_id)),
+        active_title=_esc(active_title),
+        active_version=int(active_draft[6]) if active_draft and active_draft[6] is not None else 1,
+        active_words=int(active_draft[4]) if active_draft and active_draft[4] is not None else 0,
+        active_chapter_id=_esc(str(active_draft[9]) if active_draft else ""),
+        active_section_type=_esc(str(active_draft[2]) if active_draft else ""),
         sources_html=_render_sources(active_sources),
         review_html=_md_to_html(active_review) if active_review else "<em>No review yet.</em>",
         comments_html=_render_comments(active_comments),
-        gaps_count=len(open_gaps),
-        search_q=search_q,
+        gaps_count=int(len(open_gaps)),
+        search_q=_esc(search_q or ""),
         search_results_html=_render_search(search_results) if search_results else "",
         chapters_json=chapters_json,
     )
 
 
 def _render_sidebar(items, active_id):
-    html = ""
+    """Phase 22 — every user-controlled string (chapter title, section
+    title, plan tooltip, draft id) is escaped before injection.
+
+    Also adds the Phase 22 chapter completion progress bar: each
+    chapter group shows "x/N drafted" with a small CSS bar derived
+    from the section status counts.
+    """
+    out = ""
     for ch in items:
-        html += f'<div class="ch-group" data-ch-id="{ch["id"]}">'
+        ch_id = _esc(str(ch["id"]))
+        ch_num = int(ch["num"]) if ch["num"] is not None else 0
+        ch_title = _esc(ch["title"] or "")
+        out += f'<div class="ch-group" data-ch-id="{ch_id}">'
         # Phase 14.2 — chapter title is now clickable to SELECT the chapter
         # (sets currentChapterId so toolbar buttons like Write work even
         # when there are no drafts yet).
-        html += (f'<div class="ch-title clickable" onclick="selectChapter(this.parentElement)">'
-                 f'Ch.{ch["num"]}: {ch["title"]}'
-                 f'<span class="ch-actions">'
-                 f'<button onclick="event.stopPropagation();deleteChapter(this.closest(&quot;.ch-group&quot;).dataset.chId)" title="Delete chapter">\u2717</button>'
-                 f'</span></div>')
+        out += (
+            f'<div class="ch-title clickable" onclick="selectChapter(this.parentElement)">'
+            f'Ch.{ch_num}: {ch_title}'
+            f'<span class="ch-actions">'
+            f'<button onclick="event.stopPropagation();deleteChapter(this.closest(&quot;.ch-group&quot;).dataset.chId)" title="Delete chapter">\u2717</button>'
+            f'</span></div>'
+        )
+
+        # Phase 22 — chapter completion progress bar. Counts only
+        # template slots (drafted + empty), excluding orphans which
+        # represent dead drafts that shouldn't pad the denominator.
+        n_drafted = sum(1 for s in ch["sections"] if s.get("status") == "drafted")
+        n_template = sum(1 for s in ch["sections"] if s.get("status") in ("drafted", "empty"))
+        if n_template > 0:
+            pct = int(round(100 * n_drafted / n_template))
+            out += (
+                f'<div class="ch-progress" title="{n_drafted} of {n_template} sections drafted">'
+                f'<span class="ch-progress-bar"><span class="ch-progress-fill" style="width:{pct}%"></span></span>'
+                f'<span class="ch-progress-label">{n_drafted}/{n_template}</span>'
+                f'</div>'
+            )
+
         # Phase 21 — render sections from the chapter template (slot list),
         # not just from existing drafts. Each entry has a status:
         #   - drafted: clickable link to the section view
-        #   - empty:   shows the section title + an inline ✎ Write button
+        #   - empty:   shows the section title + an inline write CTA
         #              that calls writeForCell(chapter_id, slug)
         #   - orphan:  draft whose section_type no longer matches any
         #              template slug — visible so the user can clean it up
-        import html as _html_mod
         for sec in ch["sections"]:
             active = "active" if sec["id"] and sec["id"] == active_id else ""
-            display = sec.get("title") or sec.get("type", "").capitalize()
+            display = _esc(sec.get("title") or sec.get("type", "").capitalize())
             plan_text = sec.get("plan") or ""
-            # Plan text used as a tooltip — collapse newlines/quotes so
-            # it survives the title attribute. Empty string when no plan.
             plan_attr = (
-                _html_mod.escape(plan_text.replace("\n", " ")[:200])
-                if plan_text else ""
+                _esc(plan_text.replace("\n", " ")[:200]) if plan_text else ""
             )
             status = sec.get("status", "drafted")
+            sec_type = _esc(sec.get("type", "") or "")
+            sec_id = _esc(str(sec["id"]) if sec["id"] else "")
+            sec_v = int(sec.get("version") or 0)
+            sec_w = int(sec.get("words") or 0)
+
             if status == "empty":
-                # Empty template slot — show title + inline Write CTA.
-                # Clicking the slot itself selects the chapter+section
-                # so the toolbar Write/Autowrite buttons can target it.
-                slug = sec.get("type", "")
-                html += (
+                out += (
                     f'<div class="sec-link sec-empty" '
-                    f'data-section-slug="{slug}" '
+                    f'data-section-slug="{sec_type}" '
                     f'title="{plan_attr}" '
-                    f'onclick="writeForCell(&quot;{ch["id"]}&quot;,&quot;{slug}&quot;)">'
+                    f'onclick="writeForCell(&quot;{ch_id}&quot;,&quot;{sec_type}&quot;)">'
                     f'<span class="sec-status-dot empty"></span>'
                     f'{display}'
                     f'<span class="meta">empty \u00b7 \u270e</span></div>'
                 )
             elif status == "orphan":
-                # Orphan draft — visible but visually de-emphasized.
-                html += (
-                    f'<a class="sec-link sec-orphan" href="/section/{sec["id"]}" '
-                    f'data-draft-id="{sec["id"]}" onclick="return navTo(this)" '
-                    f'title="Orphan draft: section_type={sec["type"]!r} doesn\'t match any current template slug. Click to inspect or delete.">'
+                # Phase 22 — inline X button on orphan drafts so the
+                # user can clean up leftovers from before Phase 18.
+                out += (
+                    f'<a class="sec-link sec-orphan" href="/section/{sec_id}" '
+                    f'data-draft-id="{sec_id}" onclick="return navTo(this)" '
+                    f'title="Orphan draft: section_type={sec_type!r} doesn&#39;t match any current template slug. Click to inspect, X to delete.">'
                     f'<span class="sec-status-dot orphan"></span>'
                     f'{display} '
-                    f'<span class="meta">orphan \u00b7 v{sec["version"]} \u00b7 {sec["words"]}w</span></a>'
+                    f'<span class="meta">orphan \u00b7 v{sec_v} \u00b7 {sec_w}w</span>'
+                    f'<button class="sec-orphan-delete" '
+                    f'onclick="event.preventDefault();event.stopPropagation();deleteOrphanDraft(&quot;{sec_id}&quot;)" '
+                    f'title="Delete this orphan draft permanently">\u2717</button>'
+                    f'</a>'
                 )
             else:
-                html += (
-                    f'<a class="sec-link {active}" href="/section/{sec["id"]}" '
-                    f'data-draft-id="{sec["id"]}" '
+                out += (
+                    f'<a class="sec-link {active}" href="/section/{sec_id}" '
+                    f'data-draft-id="{sec_id}" '
                     f'title="{plan_attr}" '
                     f'onclick="return navTo(this)">'
                     f'<span class="sec-status-dot drafted"></span>'
                     f'{display} '
-                    f'<span class="meta">v{sec["version"]} \u00b7 {sec["words"]}w</span></a>'
+                    f'<span class="meta">v{sec_v} \u00b7 {sec_w}w</span></a>'
                 )
         if not ch["sections"]:
-            # Fallback: chapter has no sections defined AND no drafts.
-            # Use the legacy "Start writing" CTA which writes a default
-            # 'overview' draft and lets the user customise sections later.
-            html += (
+            out += (
                 f'<div class="sec-link sec-empty-cta" '
-                f'onclick="startWritingChapter(&quot;{ch["id"]}&quot;)">'
+                f'onclick="startWritingChapter(&quot;{ch_id}&quot;)">'
                 f'\u270e Start writing</div>'
             )
-        html += '</div>'
-    return html
+        out += '</div>'
+    return out
 
 
 def _render_sources(sources):
+    """Render the right-panel sources list. Phase 22 — escapes each
+    source string. Without this, an APA citation containing characters
+    like '<' or '&' (rare but possible from a paper title) would either
+    silently corrupt the page or open an XSS hole."""
     if not sources:
         return "<em>No sources.</em>"
-    html = "<ol>"
+    out = "<ol>"
     for i, s in enumerate(sources):
         if s:
-            html += f'<li id="source-{i+1}">{s}</li>'
-    html += "</ol>"
-    return html
+            out += f'<li id="source-{i+1}">{_esc(s)}</li>'
+    out += "</ol>"
+    return out
 
 
 def _render_comments(comments):
+    """Render the inline comment list. Phase 22 — every user-controlled
+    field (selected text, comment body, comment id used in onclick) is
+    escaped before injection. The status string is whitelist-only so
+    it doesn't need escaping."""
     if not comments:
         return ""
-    html = ""
+    out = ""
     for c in comments:
         cid, did, para, sel, comm, status, created = c
         cls = "resolved" if status == "resolved" else "open"
-        sel_html = f'<div class="sel-text">"{sel[:100]}"</div>' if sel else ""
-        para_html = f'<span class="para-ref">P{para}</span> ' if para is not None else ""
+        sel_html = (
+            f'<div class="sel-text">&quot;{_esc(sel[:100])}&quot;</div>'
+            if sel else ""
+        )
+        para_html = (
+            f'<span class="para-ref">P{int(para)}</span> '
+            if para is not None else ""
+        )
         resolve_btn = (
-            f'<button class="resolve-btn" onclick="resolveComment(\'{cid}\')">Resolve</button>'
+            f'<button class="resolve-btn" onclick="resolveComment(&quot;{_esc(str(cid))}&quot;)">Resolve</button>'
             if status == "open" else '<span class="resolved-tag">Resolved</span>'
         )
-        html += f'<div class="comment {cls}">{para_html}{sel_html}<div class="comm-text">{comm}</div>{resolve_btn}</div>'
-    return html
+        comm_html = _esc(comm or "").replace("\n", "<br>")
+        out += (
+            f'<div class="comment {cls}">{para_html}{sel_html}'
+            f'<div class="comm-text">{comm_html}</div>{resolve_btn}</div>'
+        )
+    return out
 
 
 def _render_search(results):
+    """Phase 22 — escape draft id (used in href + data attributes) and
+    title (used in anchor text). The id is a UUID so escaping is
+    paranoid but cheap; the title can be anything the user typed."""
     if not results:
         return "<p>No results.</p>"
-    html = ""
+    out = ""
     for d in results[:20]:
-        html += f'<a href="/section/{d[0]}" class="search-result" data-draft-id="{d[0]}" onclick="return navTo(this)"><strong>{d[1]}</strong> ({d[4] or 0} words)</a>'
-    return html
+        did = _esc(str(d[0]))
+        title = _esc(d[1] or "")
+        words = int(d[4] or 0)
+        out += (
+            f'<a href="/section/{did}" class="search-result" '
+            f'data-draft-id="{did}" onclick="return navTo(this)">'
+            f'<strong>{title}</strong> ({words} words)</a>'
+        )
+    return out
 
 
 # ── HTML Template ────────────────────────────────────────────────────────────
@@ -2163,9 +2309,43 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 /* Phase 21 — orphan draft (section_type doesn't match any current
    template slug). Visible but de-emphasized so the user can spot
    stale drafts left behind by section renames. */
-.sec-link.sec-orphan {{ color: var(--fg-muted); opacity: 0.7; }}
+.sec-link.sec-orphan {{ color: var(--fg-muted); opacity: 0.7;
+                        display: flex; align-items: center; }}
 .sec-link.sec-orphan:hover {{ opacity: 1; }}
-.sec-link.sec-orphan .meta {{ color: var(--danger); }}
+.sec-link.sec-orphan .meta {{ color: var(--danger); flex: 1; }}
+/* Phase 22 — inline delete button on orphan drafts. Sits to the right
+   of the meta column and only becomes prominent on hover. */
+.sec-orphan-delete {{ background: transparent; border: 1px solid transparent;
+                     color: var(--fg-faint); cursor: pointer; padding: 0 6px;
+                     font-size: 13px; border-radius: 3px;
+                     margin-left: 4px; line-height: 1.4; }}
+.sec-link.sec-orphan:hover .sec-orphan-delete {{ color: var(--danger);
+                                                  border-color: var(--danger); }}
+.sec-orphan-delete:hover {{ background: var(--danger); color: white; }}
+/* Phase 22 — chapter completion progress bar. Lives between the chapter
+   title and its first section in the sidebar. Greyscale so it doesn't
+   compete with the active section's accent color. */
+.ch-progress {{ display: flex; align-items: center; gap: 8px;
+               padding: 2px var(--sp-4) 6px 28px; }}
+.ch-progress-bar {{ flex: 1; height: 4px; background: var(--border);
+                   border-radius: 2px; overflow: hidden; }}
+.ch-progress-fill {{ display: block; height: 100%; background: var(--success);
+                    border-radius: 2px; transition: width .3s ease; }}
+.ch-progress-label {{ font-size: 10px; color: var(--fg-faint);
+                     font-family: var(--font-mono); flex-shrink: 0;
+                     min-width: 32px; text-align: right; }}
+/* Phase 22 — section word-target progress shown in the draft subtitle.
+   Visible only when a target is set on the active draft. */
+.word-target {{ display: inline-flex; align-items: center; gap: 6px;
+               margin-left: var(--sp-3); font-family: var(--font-mono);
+               font-size: 11px; color: var(--fg-muted); }}
+.word-target-bar {{ display: inline-block; width: 80px; height: 4px;
+                   background: var(--border); border-radius: 2px;
+                   overflow: hidden; vertical-align: middle; }}
+.word-target-fill {{ display: block; height: 100%; background: var(--accent);
+                    border-radius: 2px; transition: width .3s ease; }}
+.word-target-fill.over {{ background: var(--success); }}
+.word-target-fill.under {{ background: var(--warning); }}
 /* Main */
 .main {{ flex: 1; overflow-y: auto; padding: var(--sp-6) 48px; max-width: 980px; }}
 .main h1 {{ font-size: 28px; font-weight: 700; letter-spacing: -0.02em;
@@ -2742,8 +2922,13 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 <main class="main" id="content">
   <h1 id="draft-title">{active_title}</h1>
   <div class="subtitle" id="draft-subtitle">
-    Version <span id="draft-version">{active_version}</span> ·
+    Version <span id="draft-version">{active_version}</span> &middot;
     <span id="draft-words">{active_words}</span> words
+    <!-- Phase 22 — word target progress (shown only when a target is set) -->
+    <span class="word-target" id="word-target" style="display:none;">
+      <span id="word-target-text"></span>
+      <span class="word-target-bar"><span class="word-target-fill" id="word-target-fill"></span></span>
+    </span>
     <button class="edit-btn" onclick="toggleEdit()">Edit</button>
     <select class="status-select" id="status-select" onchange="updateStatus(this.value)">
       <option value="to_do">To Do</option>
@@ -3319,6 +3504,10 @@ async function loadSection(draftId) {{
     document.getElementById('read-view').innerHTML = data.content_html;
     document.getElementById('edit-view').style.display = 'none';
 
+    // Phase 22 — word target progress bar in the subtitle. Hidden when
+    // the section has no target set.
+    updateWordTargetBar(data.word_count, data.target_words);
+
     // Update right panel
     document.getElementById('panel-sources').innerHTML = data.sources_html;
     document.getElementById('panel-review').innerHTML = data.review_html;
@@ -3528,8 +3717,9 @@ function rebuildSidebar(chapters, activeId) {{
   const container = document.getElementById('sidebar-sections');
   let html = '';
   chapters.forEach(ch => {{
+    const safeTitle = escapeHtml(ch.title || '');
     html += '<div class="ch-group" data-ch-id="' + ch.id + '">';
-    html += '<div class="ch-title clickable" onclick="selectChapter(this.parentElement)">Ch.' + ch.num + ': ' + ch.title +
+    html += '<div class="ch-title clickable" onclick="selectChapter(this.parentElement)">Ch.' + ch.num + ': ' + safeTitle +
       '<span class="ch-actions"><button onclick="event.stopPropagation();deleteChapter(\\\'' + ch.id + '\\\')" title="Delete chapter">\\u2717</button></span></div>';
 
     // Phase 21 — render the FULL section template, not just sections
@@ -3554,27 +3744,42 @@ function rebuildSidebar(chapters, activeId) {{
       }}
     }});
 
+    // Phase 22 — chapter completion progress bar (drafted / template).
+    // Computed BEFORE rendering sections so it lives between the
+    // chapter title and the section list, mirroring _render_sidebar.
+    if (meta.length > 0) {{
+      let nDrafted = 0;
+      meta.forEach(t => {{ if (draftBySlug[t.slug]) nDrafted += 1; }});
+      const nTotal = meta.length;
+      const pct = Math.round(100 * nDrafted / nTotal);
+      html += '<div class="ch-progress" title="' + nDrafted + ' of ' + nTotal + ' sections drafted">' +
+        '<span class="ch-progress-bar"><span class="ch-progress-fill" style="width:' + pct + '%"></span></span>' +
+        '<span class="ch-progress-label">' + nDrafted + '/' + nTotal + '</span>' +
+        '</div>';
+    }}
+
     // 1) Render template slots in declared order (drafted or empty).
     const seenSlugs = new Set();
     if (meta.length > 0) {{
       meta.forEach(tmpl => {{
         seenSlugs.add(tmpl.slug);
         const draft = draftBySlug[tmpl.slug];
-        const planAttr = (tmpl.plan || '').replace(/\\n/g, ' ').replace(/"/g, '&quot;').slice(0, 200);
+        const planAttr = escapeHtml((tmpl.plan || '').replace(/\\n/g, ' ').slice(0, 200));
+        const safeTmplTitle = escapeHtml(tmpl.title || '');
         if (draft) {{
           const active = draft.id === activeId ? 'active' : '';
           html += '<a class="sec-link ' + active + '" href="/section/' + draft.id +
             '" data-draft-id="' + draft.id + '" title="' + planAttr + '" ' +
             'onclick="return navTo(this)">' +
             '<span class="sec-status-dot drafted"></span>' +
-            tmpl.title +
+            safeTmplTitle +
             ' <span class="meta">v' + draft.version + ' \\u00b7 ' + draft.words + 'w</span></a>';
         }} else {{
           html += '<div class="sec-link sec-empty" data-section-slug="' + tmpl.slug + '" ' +
             'title="' + planAttr + '" ' +
             'onclick="writeForCell(\\'' + ch.id + '\\',\\'' + tmpl.slug + '\\')">' +
             '<span class="sec-status-dot empty"></span>' +
-            tmpl.title +
+            safeTmplTitle +
             ' <span class="meta">empty \\u00b7 \\u270e</span></div>';
         }}
       }});
@@ -3584,13 +3789,18 @@ function rebuildSidebar(chapters, activeId) {{
     Object.keys(draftBySlug).forEach(slug => {{
       if (seenSlugs.has(slug)) return;
       const draft = draftBySlug[slug];
-      const display = draft.title || (slug.charAt(0).toUpperCase() + slug.slice(1));
+      const display = escapeHtml(draft.title || (slug.charAt(0).toUpperCase() + slug.slice(1)));
+      // Phase 22 — inline X button to delete the orphan
       html += '<a class="sec-link sec-orphan" href="/section/' + draft.id +
         '" data-draft-id="' + draft.id + '" onclick="return navTo(this)" ' +
-        'title="Orphan draft: section_type=\\'' + slug + '\\' doesn\\'t match any current template slug.">' +
+        'title="Orphan draft. Click to inspect, X to delete.">' +
         '<span class="sec-status-dot orphan"></span>' +
         display +
-        ' <span class="meta">orphan \\u00b7 v' + draft.version + ' \\u00b7 ' + draft.words + 'w</span></a>';
+        ' <span class="meta">orphan \\u00b7 v' + draft.version + ' \\u00b7 ' + draft.words + 'w</span>' +
+        '<button class="sec-orphan-delete" ' +
+        'onclick="event.preventDefault();event.stopPropagation();deleteOrphanDraft(\\'' + draft.id + '\\')" ' +
+        'title="Delete this orphan draft permanently">\\u2717</button>' +
+        '</a>';
     }});
 
     if (meta.length === 0 && Object.keys(draftBySlug).length === 0) {{
@@ -5710,6 +5920,50 @@ function updateSectionTitle(idx, value) {{
 function escapeHtml(s) {{
   return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
                   .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}}
+
+// Phase 22 — word target progress bar in the subtitle. Shows
+// "actual/target" plus a coloured bar (warning under 70%, accent
+// 70-100%, success over). Hidden when no target is set.
+function updateWordTargetBar(actual, target) {{
+  const wrap = document.getElementById('word-target');
+  const fill = document.getElementById('word-target-fill');
+  const txt  = document.getElementById('word-target-text');
+  if (!wrap || !fill || !txt) return;
+  if (!target || target <= 0) {{
+    wrap.style.display = 'none';
+    return;
+  }}
+  wrap.style.display = 'inline-flex';
+  const pct = Math.min(150, Math.round((actual / target) * 100));
+  fill.style.width = Math.min(100, pct) + '%';
+  fill.classList.remove('over', 'under');
+  if (pct >= 100) fill.classList.add('over');
+  else if (pct < 70) fill.classList.add('under');
+  txt.textContent = actual + ' / ' + target + 'w';
+}}
+
+// Phase 22 — delete an orphan draft from the sidebar. Confirms first
+// because deletion is permanent.
+async function deleteOrphanDraft(draftId) {{
+  if (!draftId) return;
+  if (!confirm('Permanently delete this orphan draft? This cannot be undone.')) return;
+  try {{
+    const res = await fetch('/api/draft/' + draftId, {{method: 'DELETE'}});
+    if (!res.ok) throw new Error('delete failed (' + res.status + ')');
+    // If the deleted draft was the active one, fall back to the
+    // dashboard so we don't show stale content.
+    if (currentDraftId === draftId) {{
+      currentDraftId = '';
+      showDashboard();
+    }}
+    // Refresh sidebar so the orphan disappears
+    const sidebarRes = await fetch('/api/chapters');
+    const sd = await sidebarRes.json();
+    rebuildSidebar(sd.chapters || sd, currentDraftId);
+  }} catch (e) {{
+    alert('Delete failed: ' + e.message);
+  }}
 }}
 
 function addSection() {{

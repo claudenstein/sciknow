@@ -2051,6 +2051,159 @@ def l1_phase21_plan_modal_context_aware() -> None:
     )
 
 
+# ── Phase 22 — XSS fixes + job cleanup + GUI improvements ────────────────
+
+
+def l1_phase22_render_helpers_escape_html() -> None:
+    """Phase 22 — every _render_* helper escapes user-controlled data
+    so a chapter title with `<` or a comment with a `<script>` tag
+    doesn't break the page or open an XSS hole.
+    """
+    from sciknow.web import app as web_app
+
+    # _render_sources: APA citation strings get escaped
+    out = web_app._render_sources(["[1] <script>alert(1)</script> Title."])
+    assert "<script>" not in out, "_render_sources doesn't escape source strings"
+    assert "&lt;script&gt;" in out, (
+        "_render_sources didn't HTML-escape the < character"
+    )
+
+    # _render_search: draft title gets escaped. We check that the
+    # angle brackets become entities — the literal text "onerror"
+    # surviving inside an escaped run is fine because it can't fire
+    # without the surrounding < tag.
+    out = web_app._render_search([
+        ("abc-123", "Title <img src=x onerror=alert(1)>", None, None, 100),
+    ])
+    assert "<img" not in out, (
+        "_render_search doesn't escape angle brackets in draft titles"
+    )
+    assert "&lt;img" in out, "_render_search didn't HTML-escape <img"
+
+    # _render_comments: selected text + body + cid all escaped
+    out = web_app._render_comments([
+        ("cid-1", "did-1", 1, "<b>selected</b>", "comment <script>x</script>",
+         "open", None),
+    ])
+    assert "<script>" not in out, "_render_comments leaks unescaped script tags"
+    assert "&lt;script&gt;" in out
+
+    # _render_sidebar: chapter title + section titles get escaped
+    items = [{
+        "id": "ch-1", "num": 1, "title": "Title <img src=x>",
+        "description": "", "topic_query": "",
+        "sections": [
+            {"id": "d1", "type": "intro", "title": "Sec <b>bold</b>",
+             "plan": "", "version": 1, "words": 100, "status": "drafted"},
+        ],
+        "sections_template": ["intro"],
+        "sections_meta": [{"slug": "intro", "title": "Sec <b>bold</b>", "plan": ""}],
+    }]
+    out = web_app._render_sidebar(items, "d1")
+    assert "<img" not in out, "_render_sidebar doesn't escape chapter titles"
+    assert "<b>bold</b>" not in out, "_render_sidebar doesn't escape section titles"
+    assert "&lt;b&gt;" in out
+
+
+def l1_phase22_job_cleanup() -> None:
+    """Phase 22 — _gc_old_jobs removes finished jobs older than the
+    cleanup window. Without this, the _jobs dict grows unbounded
+    over a long writing session.
+    """
+    import time as _time
+    from sciknow.web import app as web_app
+
+    assert hasattr(web_app, "_gc_old_jobs"), "_gc_old_jobs helper missing"
+    assert hasattr(web_app, "_JOB_GC_AGE_SECONDS")
+
+    # Inject a fake old finished job and a fake recent finished job
+    with web_app._job_lock:
+        web_app._jobs["fake-old"] = {
+            "queue": None, "status": "done", "type": "test",
+            "cancel": None,
+            "finished_at": _time.monotonic() - (web_app._JOB_GC_AGE_SECONDS + 100),
+        }
+        web_app._jobs["fake-recent"] = {
+            "queue": None, "status": "done", "type": "test",
+            "cancel": None,
+            "finished_at": _time.monotonic() - 1,
+        }
+        web_app._jobs["fake-running"] = {
+            "queue": None, "status": "running", "type": "test",
+            "cancel": None, "finished_at": None,
+        }
+        n = web_app._gc_old_jobs()
+    try:
+        assert n == 1, f"_gc_old_jobs evicted {n} (expected 1)"
+        assert "fake-old" not in web_app._jobs, "old finished job not evicted"
+        assert "fake-recent" in web_app._jobs, "recent finished job evicted prematurely"
+        assert "fake-running" in web_app._jobs, "running job evicted"
+    finally:
+        with web_app._job_lock:
+            web_app._jobs.pop("fake-recent", None)
+            web_app._jobs.pop("fake-running", None)
+            web_app._jobs.pop("fake-old", None)
+
+
+def l1_phase22_delete_draft_endpoint_and_orphan_cleanup() -> None:
+    """Phase 22 — DELETE /api/draft/{id} endpoint registered + JS
+    deleteOrphanDraft helper wires the inline X button on orphan
+    drafts in the sidebar."""
+    import inspect
+    from sciknow.web import app as web_app
+
+    routes = {getattr(r, "path", "") for r in web_app.app.routes}
+    assert "/api/draft/{draft_id}" in routes, (
+        "DELETE /api/draft/{draft_id} not registered"
+    )
+
+    # The JS template defines deleteOrphanDraft and the orphan row
+    # renders the X button + click handler.
+    src = inspect.getsource(web_app)
+    assert "deleteOrphanDraft" in src, (
+        "deleteOrphanDraft JS helper missing — orphan X button is dead"
+    )
+    assert "sec-orphan-delete" in src, (
+        "missing sec-orphan-delete CSS class for the inline X button"
+    )
+
+    # _render_sidebar emits the X button on orphan rows
+    render_src = inspect.getsource(web_app._render_sidebar)
+    assert "sec-orphan-delete" in render_src, (
+        "_render_sidebar doesn't emit the orphan delete button"
+    )
+
+
+def l1_phase22_chapter_progress_and_word_target() -> None:
+    """Phase 22 — chapter completion progress bar in sidebar + word
+    target progress bar in subtitle.
+    """
+    import inspect
+    from sciknow.web import app as web_app
+
+    src = inspect.getsource(web_app)
+
+    # Chapter progress bar in sidebar HTML + CSS
+    assert "ch-progress" in src, "missing ch-progress CSS class"
+    assert "ch-progress-fill" in src, "missing ch-progress-fill bar"
+    render_src = inspect.getsource(web_app._render_sidebar)
+    assert "ch-progress" in render_src, (
+        "_render_sidebar doesn't emit the chapter progress bar"
+    )
+
+    # Word target bar in subtitle + JS updater
+    assert "word-target" in src, "missing word-target CSS class"
+    assert "updateWordTargetBar" in src, (
+        "updateWordTargetBar JS helper missing"
+    )
+
+    # api_section returns target_words so the JS can populate the bar
+    api_src = inspect.getsource(web_app.api_section)
+    assert "target_words" in api_src, (
+        "api_section doesn't return target_words for the GUI bar"
+    )
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -2110,6 +2263,11 @@ L1_TESTS: list[Callable] = [
     l1_phase21_sidebar_renders_template_slots,
     l1_phase21_section_editor_live_slug_and_budget,
     l1_phase21_plan_modal_context_aware,
+    # Phase 22 — XSS fixes + job cleanup + GUI improvements
+    l1_phase22_render_helpers_escape_html,
+    l1_phase22_job_cleanup,
+    l1_phase22_delete_draft_endpoint_and_orphan_cleanup,
+    l1_phase22_chapter_progress_and_word_target,
 ]
 
 L2_TESTS: list[Callable] = [
