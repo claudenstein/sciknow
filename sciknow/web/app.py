@@ -2132,6 +2132,17 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
                  animation: blink 1.1s steps(2, jump-none) infinite;
                  vertical-align: text-bottom; }}
 @keyframes blink {{ 0%, 49% {{ opacity: 1; }} 50%, 100% {{ opacity: 0.15; }} }}
+/* Phase 15.6 — live writing preview rendered into the main read-view */
+.live-writing-banner {{ display: flex; align-items: center; gap: var(--sp-2);
+                       padding: var(--sp-2) var(--sp-3); margin-bottom: var(--sp-4);
+                       background: var(--accent-light); color: var(--accent);
+                       border: 1px solid var(--accent); border-radius: var(--r-md);
+                       font-size: 12px; font-family: var(--font-sans);
+                       font-weight: 500; }}
+.live-writing-body {{ font-family: var(--font-serif); font-size: 16px;
+                     line-height: 1.78; color: var(--fg); }}
+.live-writing-body p {{ margin-bottom: var(--sp-3); text-align: justify; }}
+.live-writing-body p .citation {{ color: var(--accent); font-weight: 600; }}
 .hm-cell {{ border-radius: 4px; padding: 4px 8px; cursor: pointer; display: inline-block;
             min-width: 44px; font-size: 11px; }}
 .hm-cell.reviewed {{ background: var(--success); color: white; }}
@@ -2782,6 +2793,10 @@ function showEmptyHint(html) {{
 
 async function loadSection(draftId) {{
   try {{
+    // Phase 15.6 — clear any in-progress live preview when navigating
+    // to a different section. The saved draft we're about to load will
+    // replace the read-view content anyway.
+    clearLiveWrite();
     const res = await fetch('/api/section/' + draftId);
     if (!res.ok) return;
     const data = await res.json();
@@ -2883,6 +2898,11 @@ function startStream(jobId) {{
       setStreamCursor(body, true);
       body.scrollTop = body.scrollHeight;
       stats.update(evt.text);
+      // Phase 15.6 — also stream into the main read-view live preview
+      // for `book write` (not just autowrite). The token has no `phase`
+      // tag here because plain `book write` doesn't have multi-phase
+      // streaming, so all tokens are writer tokens by definition.
+      appendLiveWrite(evt.text);
     }}
     else if (evt.type === 'progress') {{
       status.textContent = evt.detail || evt.stage;
@@ -3035,6 +3055,8 @@ async function doWrite() {{
   }}
   const section = currentSectionType || 'introduction';
   showStreamPanel('Writing ' + section + '...');
+  // Phase 15.6 — clear the read-view and prepare it for live writing
+  startLiveWrite();
 
   const fd = new FormData();
   fd.append('chapter_id', currentChapterId);
@@ -3569,6 +3591,8 @@ async function doAutowrite() {{
   awScores = [];
 
   showStreamPanel('Autowriting ' + section + '...');
+  // Phase 15.6 — clear the read-view and prepare it for live writing
+  startLiveWrite();
 
   // Add chart + log to the stream panel
   const body = document.getElementById('stream-body');
@@ -3604,18 +3628,24 @@ async function doAutowrite() {{
     const evt = JSON.parse(e.data);
     if (evt.type === 'token') {{
       // Phase 15.3 — route tokens by phase. Writing/revising tokens go
-      // to the visible draft area; scoring/verify/CoVe/planning JSON
-      // tokens only feed the stats counter (they'd be ugly to show in
-      // the draft pane). Tokens without a phase are treated as draft
-      // tokens for backward compatibility.
+      // to the visible draft area + main read-view live preview;
+      // scoring/verify/CoVe/planning JSON tokens only feed the stats
+      // counter (they'd be ugly to show in the draft pane).
       const phase = evt.phase || 'writing';
       stats.update(evt.text);
       stats.setPhase(phase);
       if (phase === 'writing' || phase === 'revising') {{
+        // Existing autowrite-dashboard token area (now redundant with the
+        // read-view live preview, but kept for users who want to focus on
+        // the dashboard).
         setStreamCursor(awContent, false);
         awContent.innerHTML += evt.text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
         setStreamCursor(awContent, true);
         awContent.scrollTop = awContent.scrollHeight;
+        // Phase 15.6 — also stream into the main read-view as a live
+        // markdown preview, so the user sees the writing happen in the
+        // same place they'd read the final draft.
+        appendLiveWrite(evt.text);
       }}
     }}
     else if (evt.type === 'progress') {{
@@ -3670,6 +3700,9 @@ async function doAutowrite() {{
     }}
     else if (evt.type === 'iteration_start') {{
       awContent.innerHTML = '';
+      // Phase 15.6 — clear the live preview so each new iteration shows
+      // its own writing fresh in the read-view.
+      clearLiveWrite();
       awLog.innerHTML += '<div style="opacity:0.5;border-top:1px solid var(--border);padding-top:4px;margin-top:4px;">Iteration ' + evt.iteration + '/' + evt.max + '</div>';
     }}
     else if (evt.type === 'revision_verdict') {{
@@ -4107,6 +4140,68 @@ function setStreamCursor(el, on) {{
     el.appendChild(cursor);
   }} else if (!on && cursor) {{
     cursor.remove();
+  }}
+}}
+
+// ── Phase 15.6: live writing preview in the main read-view ──────────
+//
+// As writing/revising tokens stream in, accumulate them and re-render
+// the read-view as live HTML — same Georgia serif body the final draft
+// uses, with paragraph breaks and [N] citation styling. On completion,
+// refreshAfterJob() reloads the saved draft from the API and the live
+// preview gets replaced with the proper rendered version.
+
+let _liveWriteText = '';
+let _liveWriteActive = false;
+
+function _escapeHtml(s) {{
+  return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}}
+
+function _renderLiveMarkdown(text) {{
+  // Cheap, fast HTML rendering of streaming markdown:
+  //   - Escape HTML first
+  //   - Style [N] citations like the final view
+  //   - Convert \\n\\n into paragraph boundaries
+  //   - Convert single \\n inside a paragraph into <br>
+  // This won't handle every markdown feature (no headings, no bold, no
+  // lists) but it's enough to make the streaming text look like prose
+  // instead of console output.
+  const escaped = _escapeHtml(text);
+  const withCitations = escaped.replace(/\\[(\\d+)\\]/g,
+    '<span class="citation" data-ref="$1">[$1]</span>');
+  const paragraphs = withCitations.split(/\\n\\n+/);
+  return paragraphs.map(p => '<p data-live="1">' + p.replace(/\\n/g, '<br>') + '</p>').join('');
+}}
+
+function clearLiveWrite() {{
+  _liveWriteText = '';
+  _liveWriteActive = false;
+}}
+
+function startLiveWrite() {{
+  _liveWriteText = '';
+  _liveWriteActive = true;
+  const rv = document.getElementById('read-view');
+  if (rv) {{
+    rv.innerHTML =
+      '<div class="live-writing-banner">&#9998; Writing live &mdash; this preview will be replaced with the saved draft when generation completes.</div>' +
+      '<div class="live-writing-body" id="live-writing-body"></div>';
+  }}
+}}
+
+function appendLiveWrite(text) {{
+  if (!_liveWriteActive) startLiveWrite();
+  _liveWriteText += (text || '');
+  const body = document.getElementById('live-writing-body');
+  if (body) {{
+    body.innerHTML = _renderLiveMarkdown(_liveWriteText);
+    // Add a blinking cursor to the very last paragraph
+    const lastP = body.querySelector('p:last-child');
+    if (lastP) setStreamCursor(lastP, true);
+    // Auto-scroll the read-view to follow new tokens
+    const rv = document.getElementById('read-view');
+    if (rv) rv.scrollTop = rv.scrollHeight;
   }}
 }}
 
