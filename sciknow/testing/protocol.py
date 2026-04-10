@@ -2509,6 +2509,73 @@ def l1_phase25_adopt_orphan_section() -> None:
     )
 
 
+# ── Phase 26 — drag-and-drop section reordering ──────────────────────────
+
+
+def l1_phase26_section_drag_drop() -> None:
+    """Phase 26 — sidebar section rows are draggable + drop targets,
+    with handlers wired via event delegation on #sidebar-sections.
+
+    Verifies:
+      - drafted + empty rows have draggable="true" + data-section-slug
+      - JS handlers (handleSectionDragStart/Over/Drop/End) exist
+      - reorderSections() helper PUTs to the existing endpoint
+      - setupSectionDragDrop is wired on DOMContentLoaded
+      - CSS for .dragging + .drag-over-top/bottom drop indicators
+      - Within-chapter only check (the drag handler refuses cross-chapter)
+    """
+    import inspect
+    from sciknow.web import app as web_app
+
+    # Server-side: drafted + empty rows in _render_sidebar carry the
+    # required attributes
+    render_src = inspect.getsource(web_app._render_sidebar)
+    assert 'draggable="true"' in render_src, (
+        '_render_sidebar doesn\'t emit draggable="true" on section rows'
+    )
+    assert "data-section-slug" in render_src, (
+        "_render_sidebar doesn't emit data-section-slug for the drag handler"
+    )
+
+    src = inspect.getsource(web_app)
+
+    # JS rebuildSidebar mirrors the attrs (post-autowrite refresh path)
+    assert "draggable=\"true\"" in src, (
+        "rebuildSidebar JS doesn't render draggable rows"
+    )
+
+    # Drag handlers exist
+    for fn in ("handleSectionDragStart", "handleSectionDragOver",
+               "handleSectionDrop", "handleSectionDragEnd",
+               "reorderSections", "setupSectionDragDrop"):
+        assert fn in src, f"missing JS function: {fn}"
+
+    # Wired on DOMContentLoaded so the listener is attached on page load
+    assert "setupSectionDragDrop" in src and "DOMContentLoaded" in src, (
+        "setupSectionDragDrop not wired to page load"
+    )
+
+    # Within-chapter enforcement: handler compares dataset.chId
+    assert "_draggedSection.chapterId" in src, (
+        "drop handler doesn't enforce within-chapter only"
+    )
+
+    # CSS for drag states
+    assert ".sec-link.dragging" in src, "missing .dragging CSS"
+    assert ".sec-link.drag-over-top" in src, "missing drop-indicator CSS (top)"
+    assert ".sec-link.drag-over-bottom" in src, "missing drop-indicator CSS (bottom)"
+
+    # reorderSections sends the new order to the existing PUT endpoint
+    reorder_idx = src.index("async function reorderSections")
+    reorder_block = src[reorder_idx:reorder_idx + 2000]
+    assert "/api/chapters/" in reorder_block and "/sections" in reorder_block, (
+        "reorderSections doesn't PUT to /api/chapters/{id}/sections"
+    )
+    assert "method: 'PUT'" in reorder_block, (
+        "reorderSections uses the wrong HTTP method"
+    )
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -2580,6 +2647,8 @@ L1_TESTS: list[Callable] = [
     # Phase 25 — visible chevron + adopt orphan sections
     l1_phase25_chevron_visible,
     l1_phase25_adopt_orphan_section,
+    # Phase 26 — drag-and-drop section reordering
+    l1_phase26_section_drag_drop,
 ]
 
 L2_TESTS: list[Callable] = [

@@ -2105,8 +2105,14 @@ def _render_sidebar(items, active_id):
             sec_w = int(sec.get("words") or 0)
 
             if status == "empty":
+                # Phase 26 — draggable so the user can reorder empty
+                # template slots before drafting them. data-section-slug
+                # is the key the drag handler reads to compute the new
+                # order; data-ch-id on the parent .ch-group lets the
+                # handler enforce within-chapter-only reordering.
                 out += (
                     f'<div class="sec-link sec-empty" '
+                    f'draggable="true" '
                     f'data-section-slug="{sec_type}" '
                     f'title="{plan_attr}" '
                     f'onclick="writeForCell(&quot;{ch_id}&quot;,&quot;{sec_type}&quot;)">'
@@ -2136,9 +2142,15 @@ def _render_sidebar(items, active_id):
                     f'</a>'
                 )
             else:
+                # Phase 26 — drafted rows are draggable for reordering.
+                # The click handler (navTo) still fires on plain clicks;
+                # the browser distinguishes click from drag based on
+                # whether the cursor moved during mousedown.
                 out += (
                     f'<a class="sec-link {active}" href="/section/{sec_id}" '
+                    f'draggable="true" '
                     f'data-draft-id="{sec_id}" '
+                    f'data-section-slug="{sec_type}" '
                     f'title="{plan_attr}" '
                     f'onclick="return navTo(this)">'
                     f'<span class="sec-status-dot drafted"></span>'
@@ -2367,6 +2379,15 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
                                                   border-color: var(--success); }}
 .sec-orphan-delete:hover {{ background: var(--danger); color: white; }}
 .sec-orphan-adopt:hover {{ background: var(--success); color: white; }}
+/* Phase 26 — drag-and-drop section reordering. Sections become
+   draggable=true; CSS gives the dragged row a dimmed look and the
+   target row a coloured top/bottom border to show where the drop
+   will land. Within-chapter only; the JS handler enforces that. */
+.sec-link[draggable="true"] {{ cursor: grab; }}
+.sec-link[draggable="true"]:active {{ cursor: grabbing; }}
+.sec-link.dragging {{ opacity: 0.4; cursor: grabbing; }}
+.sec-link.drag-over-top {{ box-shadow: inset 0 2px 0 0 var(--accent); }}
+.sec-link.drag-over-bottom {{ box-shadow: inset 0 -2px 0 0 var(--accent); }}
 /* Phase 23 / Phase 25 — collapse/expand chapter sections. Each chapter
    has a chevron button at the start of its title; clicking toggles a
    .collapsed class on the .ch-group, which hides the section list AND
@@ -3854,14 +3875,17 @@ function rebuildSidebar(chapters, activeId) {{
         const safeTmplTitle = escapeHtml(tmpl.title || '');
         if (draft) {{
           const active = draft.id === activeId ? 'active' : '';
+          // Phase 26 — draggable for reordering
           html += '<a class="sec-link ' + active + '" href="/section/' + draft.id +
-            '" data-draft-id="' + draft.id + '" title="' + planAttr + '" ' +
+            '" draggable="true" data-draft-id="' + draft.id + '" ' +
+            'data-section-slug="' + tmpl.slug + '" title="' + planAttr + '" ' +
             'onclick="return navTo(this)">' +
             '<span class="sec-status-dot drafted"></span>' +
             safeTmplTitle +
             ' <span class="meta">v' + draft.version + ' \\u00b7 ' + draft.words + 'w</span></a>';
         }} else {{
-          html += '<div class="sec-link sec-empty" data-section-slug="' + tmpl.slug + '" ' +
+          html += '<div class="sec-link sec-empty" draggable="true" ' +
+            'data-section-slug="' + tmpl.slug + '" ' +
             'title="' + planAttr + '" ' +
             'onclick="writeForCell(\\'' + ch.id + '\\',\\'' + tmpl.slug + '\\')">' +
             '<span class="sec-status-dot empty"></span>' +
@@ -6138,6 +6162,169 @@ async function deleteOrphanDraft(draftId) {{
     alert('Delete failed: ' + e.message);
   }}
 }}
+
+// ── Phase 26: drag-and-drop section reordering ────────────────────────
+//
+// Sections in the sidebar are HTML5-draggable. The user clicks and
+// holds a section row, drags it above or below another section in
+// the SAME chapter, and drops it. The handler computes the new
+// order, sends the full sections list to PUT /api/chapters/{{id}}/sections
+// (the existing full-replace endpoint, also used by the chapter
+// modal's Sections tab), and refreshes the sidebar.
+//
+// Cross-chapter drags are not supported — they would need to also
+// update drafts.chapter_id, which is a more dangerous operation
+// that deserves its own confirmation flow. The handler silently
+// rejects drops onto a different .ch-group.
+//
+// Click vs drag: the browser distinguishes a plain click (no
+// movement) from a drag (movement during mousedown). The existing
+// onclick handlers for navigation (navTo, writeForCell) keep
+// firing on plain clicks even though the row is draggable.
+
+let _draggedSection = null;
+
+function _findDraggableSection(target) {{
+  return target && target.closest && target.closest('.sec-link[draggable="true"]');
+}}
+
+function handleSectionDragStart(e) {{
+  const link = _findDraggableSection(e.target);
+  if (!link) return;
+  const group = link.closest('.ch-group');
+  if (!group) return;
+  _draggedSection = {{
+    chapterId: group.dataset.chId,
+    slug: link.dataset.sectionSlug,
+  }};
+  link.classList.add('dragging');
+  if (e.dataTransfer) {{
+    e.dataTransfer.effectAllowed = 'move';
+    // Required by Firefox to actually fire dragstart properly.
+    e.dataTransfer.setData('text/plain', _draggedSection.slug);
+  }}
+}}
+
+function handleSectionDragOver(e) {{
+  if (!_draggedSection) return;
+  const link = _findDraggableSection(e.target);
+  if (!link) return;
+  // Only allow drops within the same chapter.
+  const group = link.closest('.ch-group');
+  if (!group || group.dataset.chId !== _draggedSection.chapterId) return;
+  // Don't show a drop indicator on the dragged row itself.
+  if (link.dataset.sectionSlug === _draggedSection.slug) return;
+  e.preventDefault();
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+  // Compute drop position based on cursor Y vs row midpoint.
+  const rect = link.getBoundingClientRect();
+  const isAbove = e.clientY < (rect.top + rect.height / 2);
+  // Clear previous indicator on any other row, set new one.
+  document.querySelectorAll('.sec-link.drag-over-top, .sec-link.drag-over-bottom')
+    .forEach(el => el.classList.remove('drag-over-top', 'drag-over-bottom'));
+  link.classList.add(isAbove ? 'drag-over-top' : 'drag-over-bottom');
+}}
+
+function handleSectionDrop(e) {{
+  if (!_draggedSection) {{ _cleanupDrag(); return; }}
+  const link = _findDraggableSection(e.target);
+  if (!link) {{ _cleanupDrag(); return; }}
+  const group = link.closest('.ch-group');
+  if (!group || group.dataset.chId !== _draggedSection.chapterId) {{
+    _cleanupDrag();
+    return;
+  }}
+  e.preventDefault();
+  const targetSlug = link.dataset.sectionSlug;
+  if (targetSlug === _draggedSection.slug) {{
+    _cleanupDrag();
+    return;
+  }}
+  const rect = link.getBoundingClientRect();
+  const position = e.clientY < (rect.top + rect.height / 2) ? 'before' : 'after';
+  reorderSections(_draggedSection.chapterId, _draggedSection.slug, targetSlug, position);
+  _cleanupDrag();
+}}
+
+function handleSectionDragEnd() {{
+  _cleanupDrag();
+}}
+
+function _cleanupDrag() {{
+  _draggedSection = null;
+  document.querySelectorAll('.sec-link.dragging')
+    .forEach(el => el.classList.remove('dragging'));
+  document.querySelectorAll('.sec-link.drag-over-top, .sec-link.drag-over-bottom')
+    .forEach(el => el.classList.remove('drag-over-top', 'drag-over-bottom'));
+}}
+
+// Reorder a section by sending the full updated sections list to the
+// existing PUT /api/chapters/{{id}}/sections endpoint. Idempotent and
+// safe — the endpoint is full-replace, not patch.
+async function reorderSections(chapterId, draggedSlug, targetSlug, position) {{
+  const ch = chaptersData.find(c => c.id === chapterId);
+  if (!ch || !Array.isArray(ch.sections_meta)) return;
+  const sections = ch.sections_meta.slice();
+  const draggedIdx = sections.findIndex(s => s.slug === draggedSlug);
+  if (draggedIdx === -1) return;
+  const dragged = sections.splice(draggedIdx, 1)[0];
+  // After removing the dragged row, the target index may have shifted.
+  const targetIdx = sections.findIndex(s => s.slug === targetSlug);
+  if (targetIdx === -1) {{
+    sections.push(dragged);
+  }} else {{
+    const insertAt = position === 'before' ? targetIdx : targetIdx + 1;
+    sections.splice(insertAt, 0, dragged);
+  }}
+  try {{
+    const res = await fetch('/api/chapters/' + chapterId + '/sections', {{
+      method: 'PUT',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{sections: sections}}),
+    }});
+    if (!res.ok) throw new Error('reorder failed (' + res.status + ')');
+    const data = await res.json();
+    // Patch local cache so the next render uses the new order
+    // immediately (the /api/chapters refetch below is just to be sure).
+    if (data && Array.isArray(data.sections)) {{
+      ch.sections_meta = data.sections;
+      ch.sections_template = data.sections.map(s => s.slug);
+    }}
+    // Full sidebar refresh — preserves collapsed state via Phase 23
+    // restoreCollapsedChapters() at the end of rebuildSidebar.
+    const sidebarRes = await fetch('/api/chapters');
+    const sd = await sidebarRes.json();
+    rebuildSidebar(sd.chapters || sd, currentDraftId);
+  }} catch (e) {{
+    alert('Reorder failed: ' + e.message);
+  }}
+}}
+
+// Wire drag-and-drop handlers via event delegation on the sidebar
+// container. Idempotent — re-running attaches a NEW listener but the
+// old ones are still there. We only call this once on DOMContentLoaded
+// (the container element is stable; only its children get replaced
+// by rebuildSidebar, but event delegation handles that automatically).
+let _sectionDndWired = false;
+function setupSectionDragDrop() {{
+  if (_sectionDndWired) return;
+  const container = document.getElementById('sidebar-sections');
+  if (!container) return;
+  container.addEventListener('dragstart', handleSectionDragStart);
+  container.addEventListener('dragover', handleSectionDragOver);
+  container.addEventListener('drop', handleSectionDrop);
+  container.addEventListener('dragend', handleSectionDragEnd);
+  // Also clear the drop indicator if the user drags outside the container
+  container.addEventListener('dragleave', e => {{
+    // Only clear when leaving the whole sidebar, not jumping between rows
+    if (!container.contains(e.relatedTarget)) {{
+      document.querySelectorAll('.sec-link.drag-over-top, .sec-link.drag-over-bottom')
+        .forEach(el => el.classList.remove('drag-over-top', 'drag-over-bottom'));
+    }}
+  }});
+  _sectionDndWired = true;
+}}
+document.addEventListener('DOMContentLoaded', setupSectionDragDrop);
 
 // Phase 25 — adopt an orphan draft's slug into the chapter's sections
 // list. Idempotent: if the slug already exists, the server returns
