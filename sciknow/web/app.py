@@ -1766,18 +1766,60 @@ def _render_book(book, chapters, drafts, gaps, comments,
         template_dicts = _chapter_sections_dicts(ch)
         template = [s["slug"] for s in template_dicts]
         title_by_slug = {s["slug"]: s["title"] for s in template_dicts}
-        section_order_map = {s: i for i, s in enumerate(template)}
-        sections = []
-        for d in sorted(ch_ds, key=lambda x: section_order_map.get(_normalize_section(x[2] or ""), 99)):
+        plan_by_slug = {s["slug"]: s["plan"] for s in template_dicts}
+
+        # Build a slug → draft index for quick lookup. Multiple drafts
+        # per slug are reduced to the highest-version one above.
+        draft_by_slug: dict[str, tuple] = {}
+        for d in ch_ds:
             slug = _normalize_section(d[2] or "")
+            existing = draft_by_slug.get(slug)
+            if not existing or (d[6] or 1) > (existing[6] or 1):
+                draft_by_slug[slug] = d
+
+        # Phase 21 — sections list now reflects the FULL chapter
+        # template, not just sections that already have drafts. Empty
+        # template slots get a placeholder entry with id=None and a
+        # status="empty" so the sidebar renderer can show a "Write"
+        # CTA inline. This makes the chapter's planned structure
+        # visible at a glance and removes the "where do I write the
+        # next section?" friction.
+        sections = []
+        seen_slugs: set[str] = set()
+        for tmpl in template_dicts:
+            slug = tmpl["slug"]
+            seen_slugs.add(slug)
+            d = draft_by_slug.get(slug)
+            if d:
+                sections.append({
+                    "id": d[0], "type": d[2] or "text",
+                    "title": tmpl["title"],
+                    "plan": tmpl["plan"],
+                    "version": d[6] or 1, "words": d[4] or 0,
+                    "status": "drafted",
+                })
+            else:
+                sections.append({
+                    "id": None, "type": slug,
+                    "title": tmpl["title"],
+                    "plan": tmpl["plan"],
+                    "version": 0, "words": 0,
+                    "status": "empty",
+                })
+        # Append orphan drafts (drafts whose section_type doesn't match
+        # any current template slug) at the end so the user can find
+        # and clean them up. They show as "(orphaned)" in the sidebar.
+        for slug, d in draft_by_slug.items():
+            if slug in seen_slugs:
+                continue
             sections.append({
                 "id": d[0], "type": d[2] or "text",
-                # Phase 18 — display title from chapter sections meta,
-                # fallback to capitalized slug for orphans (drafts whose
-                # section was renamed/deleted from the chapter list).
-                "title": title_by_slug.get(slug) or _titleify_slug_for_display(slug),
+                "title": _titleify_slug_for_display(slug),
+                "plan": "",
                 "version": d[6] or 1, "words": d[4] or 0,
+                "status": "orphan",
             })
+
         sidebar_items.append({
             "num": ch_num, "title": ch_title, "id": ch_id,
             "description": ch_desc or "", "topic_query": tq or "",
@@ -1890,20 +1932,63 @@ def _render_sidebar(items, active_id):
                  f'<span class="ch-actions">'
                  f'<button onclick="event.stopPropagation();deleteChapter(this.closest(&quot;.ch-group&quot;).dataset.chId)" title="Delete chapter">\u2717</button>'
                  f'</span></div>')
+        # Phase 21 — render sections from the chapter template (slot list),
+        # not just from existing drafts. Each entry has a status:
+        #   - drafted: clickable link to the section view
+        #   - empty:   shows the section title + an inline ✎ Write button
+        #              that calls writeForCell(chapter_id, slug)
+        #   - orphan:  draft whose section_type no longer matches any
+        #              template slug — visible so the user can clean it up
+        import html as _html_mod
         for sec in ch["sections"]:
-            active = "active" if sec["id"] == active_id else ""
-            # Phase 18 — show the user-supplied section title (from
-            # chapter sections meta) instead of the slug capitalized.
+            active = "active" if sec["id"] and sec["id"] == active_id else ""
             display = sec.get("title") or sec.get("type", "").capitalize()
-            html += (
-                f'<a class="sec-link {active}" href="/section/{sec["id"]}" '
-                f'data-draft-id="{sec["id"]}" onclick="return navTo(this)">'
-                f'{display} '
-                f'<span class="meta">v{sec["version"]} \u00b7 {sec["words"]}w</span></a>'
+            plan_text = sec.get("plan") or ""
+            # Plan text used as a tooltip — collapse newlines/quotes so
+            # it survives the title attribute. Empty string when no plan.
+            plan_attr = (
+                _html_mod.escape(plan_text.replace("\n", " ")[:200])
+                if plan_text else ""
             )
+            status = sec.get("status", "drafted")
+            if status == "empty":
+                # Empty template slot — show title + inline Write CTA.
+                # Clicking the slot itself selects the chapter+section
+                # so the toolbar Write/Autowrite buttons can target it.
+                slug = sec.get("type", "")
+                html += (
+                    f'<div class="sec-link sec-empty" '
+                    f'data-section-slug="{slug}" '
+                    f'title="{plan_attr}" '
+                    f'onclick="writeForCell(&quot;{ch["id"]}&quot;,&quot;{slug}&quot;)">'
+                    f'<span class="sec-status-dot empty"></span>'
+                    f'{display}'
+                    f'<span class="meta">empty \u00b7 \u270e</span></div>'
+                )
+            elif status == "orphan":
+                # Orphan draft — visible but visually de-emphasized.
+                html += (
+                    f'<a class="sec-link sec-orphan" href="/section/{sec["id"]}" '
+                    f'data-draft-id="{sec["id"]}" onclick="return navTo(this)" '
+                    f'title="Orphan draft: section_type={sec["type"]!r} doesn\'t match any current template slug. Click to inspect or delete.">'
+                    f'<span class="sec-status-dot orphan"></span>'
+                    f'{display} '
+                    f'<span class="meta">orphan \u00b7 v{sec["version"]} \u00b7 {sec["words"]}w</span></a>'
+                )
+            else:
+                html += (
+                    f'<a class="sec-link {active}" href="/section/{sec["id"]}" '
+                    f'data-draft-id="{sec["id"]}" '
+                    f'title="{plan_attr}" '
+                    f'onclick="return navTo(this)">'
+                    f'<span class="sec-status-dot drafted"></span>'
+                    f'{display} '
+                    f'<span class="meta">v{sec["version"]} \u00b7 {sec["words"]}w</span></a>'
+                )
         if not ch["sections"]:
-            # Phase 14.2 — explicit "Start writing" CTA so empty chapters
-            # have a one-click path to create a first draft.
+            # Fallback: chapter has no sections defined AND no drafts.
+            # Use the legacy "Start writing" CTA which writes a default
+            # 'overview' draft and lets the user customise sections later.
             html += (
                 f'<div class="sec-link sec-empty-cta" '
                 f'onclick="startWritingChapter(&quot;{ch["id"]}&quot;)">'
@@ -2054,12 +2139,33 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
              text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-muted); }}
 .sec-link {{ display: block; padding: 6px var(--sp-4) 6px 28px; text-decoration: none;
              color: var(--fg); font-size: 13px; border-left: 2px solid transparent; cursor: pointer;
-             transition: background .12s ease; }}
+             transition: background .12s ease; position: relative; }}
 .sec-link:hover {{ background: var(--toolbar-bg); }}
 .sec-link.active {{ border-left-color: var(--accent); background: var(--accent-light);
                    color: var(--accent); font-weight: 600; }}
 .sec-link .meta {{ font-size: 11px; color: var(--fg-faint); margin-left: 6px; }}
 .sec-link.empty {{ color: var(--fg-faint); font-style: italic; }}
+/* Phase 21 — section status dots in the sidebar. A small coloured circle
+   to the LEFT of the section title indicates whether that template slot
+   has a draft yet. Empty = grey, drafted = amber, orphan = red. */
+.sec-status-dot {{ display: inline-block; width: 7px; height: 7px;
+                   border-radius: 50%; margin-right: 6px;
+                   vertical-align: middle; flex-shrink: 0; }}
+.sec-status-dot.drafted {{ background: var(--success); }}
+.sec-status-dot.empty   {{ background: var(--fg-faint); opacity: 0.4; }}
+.sec-status-dot.orphan  {{ background: var(--danger); }}
+/* Phase 21 — empty template slot in the sidebar (clickable to write).
+   Visually distinct from drafted sections so you can see chapter
+   structure at a glance: greyed text + write icon in the meta column. */
+.sec-link.sec-empty {{ color: var(--fg-muted); }}
+.sec-link.sec-empty:hover {{ background: var(--accent-light); color: var(--accent); }}
+.sec-link.sec-empty .meta {{ color: var(--fg-faint); font-style: italic; }}
+/* Phase 21 — orphan draft (section_type doesn't match any current
+   template slug). Visible but de-emphasized so the user can spot
+   stale drafts left behind by section renames. */
+.sec-link.sec-orphan {{ color: var(--fg-muted); opacity: 0.7; }}
+.sec-link.sec-orphan:hover {{ opacity: 1; }}
+.sec-link.sec-orphan .meta {{ color: var(--danger); }}
 /* Main */
 .main {{ flex: 1; overflow-y: auto; padding: var(--sp-6) 48px; max-width: 980px; }}
 .main h1 {{ font-size: 28px; font-weight: 700; letter-spacing: -0.02em;
@@ -2847,58 +2953,99 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
   </div>
 </div>
 
-<!-- Phase 14.3 — Book Plan Modal -->
+<!-- Phase 14.3 — Book Plan Modal
+     Phase 21 — context-aware: tabs for Book / Chapter / Section -->
 <div class="modal-overlay" id="plan-modal" onclick="if(event.target===this)closeModal('plan-modal')">
   <div class="modal wide">
     <div class="modal-header">
-      <h3>&#128221; Book Plan &mdash; the leitmotiv</h3>
+      <h3>&#128221; Plans</h3>
       <button class="modal-close" onclick="closeModal('plan-modal')">&times;</button>
     </div>
+    <div class="tabs">
+      <button class="tab active" data-tab="plan-book" onclick="switchPlanTab('plan-book')">Book</button>
+      <button class="tab" data-tab="plan-chapter" onclick="switchPlanTab('plan-chapter')" id="plan-tab-chapter">Chapter sections</button>
+      <button class="tab" data-tab="plan-section" onclick="switchPlanTab('plan-section')" id="plan-tab-section">Section</button>
+    </div>
     <div class="modal-body">
-      <p style="font-size:12px;color:var(--fg-muted);margin-bottom:12px;">
-        The book plan is a 200&ndash;500 word document defining the central thesis,
-        scope, intended audience, and key terms. It is injected into every
-        <code>book write</code> / <code>autowrite</code> call so all chapters stay
-        aligned with the same argument. Edit it manually below, or click
-        <strong>Regenerate with LLM</strong> to draft a new one from your chapters
-        and paper corpus.
-      </p>
-      <div class="field">
-        <label>Book title</label>
-        <input type="text" id="plan-title-input">
-      </div>
-      <div class="field">
-        <label>Short description (one or two sentences)</label>
-        <textarea id="plan-desc-input" style="min-height:50px;"></textarea>
-      </div>
-      <div class="field">
-        <label>Plan / leitmotiv (the full thesis &amp; scope document)</label>
-        <textarea id="plan-text-input" style="min-height:280px;font-family:var(--font-serif);font-size:14px;line-height:1.6;"></textarea>
-      </div>
-      <div class="field">
-        <label>Target chapter length &mdash; autowrite &amp; write aim for this many words per chapter</label>
-        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-          <button type="button" class="btn-secondary" onclick="setLengthPreset(3000)">Short &middot; 3000</button>
-          <button type="button" class="btn-secondary" onclick="setLengthPreset(6000)">Standard &middot; 6000</button>
-          <button type="button" class="btn-secondary" onclick="setLengthPreset(10000)">Long &middot; 10000</button>
-          <input type="number" id="plan-target-words-input" min="0" step="500" placeholder="custom"
-                 style="width:120px;padding:6px 8px;font-size:13px;"
-                 title="Words per chapter. Leave empty for the default (6000). Zero clears the setting.">
-          <span id="plan-length-status" style="font-size:12px;color:var(--fg-muted);"></span>
-        </div>
-        <p style="font-size:11px;color:var(--fg-muted);margin-top:6px;">
-          Each section gets a proportional share: a 4-section chapter at 6000
-          words asks the writer for ~1500 words per section. In autowrite,
-          length becomes a 7th scoring dimension &mdash; drafts under ~70% of
-          target trigger a targeted expansion revision.
+      <!-- Book tab — the leitmotiv (existing) -->
+      <div class="tab-pane active" id="plan-book-pane">
+        <p style="font-size:12px;color:var(--fg-muted);margin-bottom:12px;">
+          The book plan is a 200&ndash;500 word document defining the central thesis,
+          scope, intended audience, and key terms. It is injected into every
+          <code>book write</code> / <code>autowrite</code> call so all chapters stay
+          aligned with the same argument. Edit it manually below, or click
+          <strong>Regenerate with LLM</strong> to draft a new one from your chapters
+          and paper corpus.
         </p>
+        <div class="field">
+          <label>Book title</label>
+          <input type="text" id="plan-title-input">
+        </div>
+        <div class="field">
+          <label>Short description (one or two sentences)</label>
+          <textarea id="plan-desc-input" style="min-height:50px;"></textarea>
+        </div>
+        <div class="field">
+          <label>Plan / leitmotiv (the full thesis &amp; scope document)</label>
+          <textarea id="plan-text-input" style="min-height:280px;font-family:var(--font-serif);font-size:14px;line-height:1.6;"></textarea>
+        </div>
+        <div class="field">
+          <label>Target chapter length &mdash; autowrite &amp; write aim for this many words per chapter</label>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <button type="button" class="btn-secondary" onclick="setLengthPreset(3000)">Short &middot; 3000</button>
+            <button type="button" class="btn-secondary" onclick="setLengthPreset(6000)">Standard &middot; 6000</button>
+            <button type="button" class="btn-secondary" onclick="setLengthPreset(10000)">Long &middot; 10000</button>
+            <input type="number" id="plan-target-words-input" min="0" step="500" placeholder="custom"
+                   style="width:120px;padding:6px 8px;font-size:13px;"
+                   title="Words per chapter. Leave empty for the default (6000). Zero clears the setting.">
+            <span id="plan-length-status" style="font-size:12px;color:var(--fg-muted);"></span>
+          </div>
+          <p style="font-size:11px;color:var(--fg-muted);margin-top:6px;">
+            Each section gets a proportional share: a 4-section chapter at 6000
+            words asks the writer for ~1500 words per section. In autowrite,
+            length becomes a 7th scoring dimension &mdash; drafts under ~70% of
+            target trigger a targeted expansion revision.
+          </p>
+        </div>
+      </div>
+      <!-- Chapter tab — Phase 21: shows the active chapter's title +
+           description + the full ordered list of section plans
+           (read+edit). Save updates each section's plan via PUT
+           /api/chapters/{{id}}/sections. -->
+      <div class="tab-pane" id="plan-chapter-pane" style="display:none;">
+        <p style="font-size:12px;color:var(--fg-muted);margin-bottom:12px;">
+          The chapter view shows the book leitmotiv at the top (read-only summary)
+          plus the full plan for every section in the chapter, in order. Edit any
+          section&rsquo;s plan inline and click Save to persist.
+        </p>
+        <div id="plan-chapter-header" style="margin-bottom:14px;font-size:13px;color:var(--fg-muted);"></div>
+        <div id="plan-chapter-sections"></div>
+      </div>
+      <!-- Section tab — Phase 21: focused single-section plan editor.
+           Opens here when the user clicks Plan from a section view. -->
+      <div class="tab-pane" id="plan-section-pane" style="display:none;">
+        <p style="font-size:12px;color:var(--fg-muted);margin-bottom:12px;">
+          The section plan tells the writer what THIS specific section must cover,
+          narrower than the chapter description. Injected into the writer prompt as
+          a &ldquo;Section plan&rdquo; block above the book plan and prior chapter
+          summaries.
+        </p>
+        <div id="plan-section-context" style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;"></div>
+        <div class="field">
+          <label>Section title</label>
+          <input type="text" id="plan-section-title">
+        </div>
+        <div class="field">
+          <label>Section plan (a few sentences)</label>
+          <textarea id="plan-section-text" style="min-height:200px;"></textarea>
+        </div>
       </div>
       <div id="plan-status" style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;"></div>
       <div id="plan-stream-stats" class="stream-stats"></div>
     </div>
     <div class="modal-footer">
       <button class="btn-secondary" onclick="closeModal('plan-modal')">Close</button>
-      <button class="btn-secondary" onclick="regeneratePlan()">&#9889; Regenerate with LLM</button>
+      <button class="btn-secondary" onclick="regeneratePlan()" id="plan-regen-btn">&#9889; Regenerate with LLM</button>
       <button class="btn-primary" onclick="savePlan()">Save</button>
     </div>
   </div>
@@ -3382,29 +3529,72 @@ function rebuildSidebar(chapters, activeId) {{
   let html = '';
   chapters.forEach(ch => {{
     html += '<div class="ch-group" data-ch-id="' + ch.id + '">';
-    html += '<div class="ch-title">Ch.' + ch.num + ': ' + ch.title +
-      '<span class="ch-actions"><button onclick="deleteChapter(\\\'' + ch.id + '\\\')" title="Delete chapter">\\u2717</button></span></div>';
-    if (ch.sections.length === 0) {{
-      html += '<div class="sec-link empty">No drafts yet</div>';
-    }} else {{
-      // Phase 18 — look up display titles from sections_meta when
-      // present, fallback to capitalized slug for legacy chapters and
-      // for orphaned drafts whose section was renamed/deleted.
-      const titleBySlug = {{}};
-      if (Array.isArray(ch.sections_meta)) {{
-        ch.sections_meta.forEach(s => {{ titleBySlug[s.slug] = s.title; }});
+    html += '<div class="ch-title clickable" onclick="selectChapter(this.parentElement)">Ch.' + ch.num + ': ' + ch.title +
+      '<span class="ch-actions"><button onclick="event.stopPropagation();deleteChapter(\\\'' + ch.id + '\\\')" title="Delete chapter">\\u2717</button></span></div>';
+
+    // Phase 21 — render the FULL section template, not just sections
+    // with drafts. Empty slots become "Write" CTAs; orphan drafts
+    // (whose section_type no longer matches a template slug) appear
+    // at the end with a danger marker. This keeps the sidebar in
+    // sync with whatever the chapter modal Section editor saves.
+    const meta = Array.isArray(ch.sections_meta) ? ch.sections_meta : [];
+    const titleBySlug = {{}};
+    const planBySlug = {{}};
+    meta.forEach(s => {{
+      titleBySlug[s.slug] = s.title;
+      planBySlug[s.slug] = s.plan || '';
+    }});
+
+    // Group existing drafts by slug
+    const draftBySlug = {{}};
+    ch.sections.forEach(sec => {{
+      const slug = (sec.type || '').toLowerCase();
+      if (!draftBySlug[slug] || (sec.version > (draftBySlug[slug].version || 1))) {{
+        draftBySlug[slug] = sec;
       }}
-      ch.sections.forEach(sec => {{
-        const active = sec.id === activeId ? 'active' : '';
-        const slug = (sec.type || '').toLowerCase();
-        const display = titleBySlug[slug]
-          || sec.title
-          || (sec.type.charAt(0).toUpperCase() + sec.type.slice(1));
-        html += '<a class="sec-link ' + active + '" href="/section/' + sec.id +
-          '" data-draft-id="' + sec.id + '" onclick="return navTo(this)">' +
-          display +
-          ' <span class="meta">v' + sec.version + ' \\u00b7 ' + sec.words + 'w</span></a>';
+    }});
+
+    // 1) Render template slots in declared order (drafted or empty).
+    const seenSlugs = new Set();
+    if (meta.length > 0) {{
+      meta.forEach(tmpl => {{
+        seenSlugs.add(tmpl.slug);
+        const draft = draftBySlug[tmpl.slug];
+        const planAttr = (tmpl.plan || '').replace(/\\n/g, ' ').replace(/"/g, '&quot;').slice(0, 200);
+        if (draft) {{
+          const active = draft.id === activeId ? 'active' : '';
+          html += '<a class="sec-link ' + active + '" href="/section/' + draft.id +
+            '" data-draft-id="' + draft.id + '" title="' + planAttr + '" ' +
+            'onclick="return navTo(this)">' +
+            '<span class="sec-status-dot drafted"></span>' +
+            tmpl.title +
+            ' <span class="meta">v' + draft.version + ' \\u00b7 ' + draft.words + 'w</span></a>';
+        }} else {{
+          html += '<div class="sec-link sec-empty" data-section-slug="' + tmpl.slug + '" ' +
+            'title="' + planAttr + '" ' +
+            'onclick="writeForCell(\\'' + ch.id + '\\',\\'' + tmpl.slug + '\\')">' +
+            '<span class="sec-status-dot empty"></span>' +
+            tmpl.title +
+            ' <span class="meta">empty \\u00b7 \\u270e</span></div>';
+        }}
       }});
+    }}
+
+    // 2) Render orphan drafts (drafts whose slug isn't in the template).
+    Object.keys(draftBySlug).forEach(slug => {{
+      if (seenSlugs.has(slug)) return;
+      const draft = draftBySlug[slug];
+      const display = draft.title || (slug.charAt(0).toUpperCase() + slug.slice(1));
+      html += '<a class="sec-link sec-orphan" href="/section/' + draft.id +
+        '" data-draft-id="' + draft.id + '" onclick="return navTo(this)" ' +
+        'title="Orphan draft: section_type=\\'' + slug + '\\' doesn\\'t match any current template slug.">' +
+        '<span class="sec-status-dot orphan"></span>' +
+        display +
+        ' <span class="meta">orphan \\u00b7 v' + draft.version + ' \\u00b7 ' + draft.words + 'w</span></a>';
+    }});
+
+    if (meta.length === 0 && Object.keys(draftBySlug).length === 0) {{
+      html += '<div class="sec-link sec-empty-cta" onclick="startWritingChapter(\\'' + ch.id + '\\')">\\u270e Start writing</div>';
     }}
     html += '</div>';
   }});
@@ -4998,43 +5188,162 @@ function askAboutPaper(title) {{
   document.getElementById('ask-input').focus();
 }}
 
-// ── Phase 14.3: Book Plan modal (the leitmotiv) ──────────────────────
-async function openPlanModal() {{
+// ── Phase 14.3 + Phase 21: Plans modal (book / chapter / section) ────
+//
+// Phase 21 — context-aware. The Plan toolbar button auto-detects what's
+// selected and routes to the right tab:
+//   - section selected → Section tab focused on that section
+//   - chapter selected → Chapter tab showing the chapter's section plans
+//   - nothing selected → Book tab (the leitmotiv)
+//
+// All three tabs are always present in the DOM; openPlanModal hides
+// the chapter/section tabs when there's no relevant context, and
+// switchPlanTab is the manual override.
+
+let _planContext = {{ mode: 'book', chapterId: null, sectionSlug: null }};
+
+async function openPlanModal(context) {{
+  // Default context: derive from current selection state.
+  if (!context) {{
+    if (currentChapterId && currentSectionType) {{
+      context = {{ mode: 'section', chapterId: currentChapterId, sectionSlug: currentSectionType }};
+    }} else if (currentChapterId) {{
+      context = {{ mode: 'chapter', chapterId: currentChapterId, sectionSlug: null }};
+    }} else {{
+      context = {{ mode: 'book', chapterId: null, sectionSlug: null }};
+    }}
+  }}
+  _planContext = context;
+
   openModal('plan-modal');
   document.getElementById('plan-status').textContent = 'Loading...';
-  document.getElementById('plan-text-input').value = '';
+
+  // Show/hide context-specific tabs based on what's selected
+  const chapterTab = document.getElementById('plan-tab-chapter');
+  const sectionTab = document.getElementById('plan-tab-section');
+  if (chapterTab) chapterTab.style.display = context.chapterId ? '' : 'none';
+  if (sectionTab) sectionTab.style.display = (context.chapterId && context.sectionSlug) ? '' : 'none';
+
+  // Always populate the Book tab fields (cheap fetch + the user might
+  // switch tabs back to it).
   try {{
     const res = await fetch('/api/book');
     const data = await res.json();
     document.getElementById('plan-title-input').value = data.title || '';
     document.getElementById('plan-desc-input').value = data.description || '';
     document.getElementById('plan-text-input').value = data.plan || '';
-    // Phase 17 — populate the length target field. If the book has no
-    // custom target, we leave the input empty and show the default in
-    // the status string so the user understands what they'd inherit.
     const tcw = data.target_chapter_words;
     const dflt = data.default_target_chapter_words || 6000;
+    window._chapterWordTarget = tcw || dflt;
     const tcwInput = document.getElementById('plan-target-words-input');
     const lstatus = document.getElementById('plan-length-status');
-    if (tcwInput) {{
-      tcwInput.value = tcw ? String(tcw) : '';
-    }}
+    if (tcwInput) tcwInput.value = tcw ? String(tcw) : '';
     if (lstatus) {{
-      if (tcw) {{
-        lstatus.textContent = 'current: ' + tcw + ' words/chapter';
-      }} else {{
-        lstatus.textContent = 'using default: ' + dflt + ' words/chapter';
-      }}
+      lstatus.textContent = tcw
+        ? ('current: ' + tcw + ' words/chapter')
+        : ('using default: ' + dflt + ' words/chapter');
     }}
     if (!data.plan) {{
       document.getElementById('plan-status').innerHTML =
-        '<span style="color:var(--warning);">No plan set yet.</span> Click <strong>Regenerate with LLM</strong> to draft one from your chapters and corpus, or write one manually below.';
+        '<span style="color:var(--warning);">No book plan set yet.</span> Click <strong>Regenerate with LLM</strong> to draft one.';
     }} else {{
       document.getElementById('plan-status').textContent =
-        data.plan.split(/\\s+/).filter(Boolean).length + ' words';
+        data.plan.split(/\\s+/).filter(Boolean).length + ' words in book plan';
     }}
   }} catch (e) {{
     document.getElementById('plan-status').textContent = 'Error loading book: ' + e.message;
+  }}
+
+  // Populate the Chapter / Section tabs from the in-memory chaptersData
+  // (no extra fetch needed). Falls back to refetching /api/chapters
+  // if the local cache is missing the active chapter.
+  if (context.chapterId) {{
+    const ch = chaptersData.find(c => c.id === context.chapterId);
+    if (ch) populatePlanChapterTab(ch);
+  }}
+
+  // Open the right tab based on context
+  if (context.mode === 'section') {{
+    switchPlanTab('plan-section');
+    populatePlanSectionTab(context.chapterId, context.sectionSlug);
+  }} else if (context.mode === 'chapter') {{
+    switchPlanTab('plan-chapter');
+  }} else {{
+    switchPlanTab('plan-book');
+  }}
+}}
+
+function switchPlanTab(name) {{
+  document.querySelectorAll('#plan-modal .tab').forEach(t => {{
+    t.classList.toggle('active', t.dataset.tab === name);
+  }});
+  document.getElementById('plan-book-pane').style.display = (name === 'plan-book') ? 'block' : 'none';
+  document.getElementById('plan-chapter-pane').style.display = (name === 'plan-chapter') ? 'block' : 'none';
+  document.getElementById('plan-section-pane').style.display = (name === 'plan-section') ? 'block' : 'none';
+  // The Regenerate button only makes sense for the book leitmotiv.
+  const regenBtn = document.getElementById('plan-regen-btn');
+  if (regenBtn) regenBtn.style.display = (name === 'plan-book') ? '' : 'none';
+}}
+
+// Phase 21 — render the chapter sections view inside the Plan modal.
+// Each section gets a title input + plan textarea, just like the
+// chapter modal's Sections tab — but read-only of the title (you
+// rename via the chapter modal), editable for the plan.
+function populatePlanChapterTab(ch) {{
+  const header = document.getElementById('plan-chapter-header');
+  if (header) {{
+    header.innerHTML = '<strong>Ch.' + ch.num + ': ' + escapeHtml(ch.title) + '</strong>' +
+      (ch.description ? '<br><span style="font-size:12px;">' + escapeHtml(ch.description.substring(0, 200)) + (ch.description.length > 200 ? '\\u2026' : '') + '</span>' : '');
+  }}
+  const list = document.getElementById('plan-chapter-sections');
+  if (!list) return;
+  const meta = Array.isArray(ch.sections_meta) ? ch.sections_meta : [];
+  if (meta.length === 0) {{
+    list.innerHTML = '<div style="font-size:12px;color:var(--fg-muted);padding:12px;text-align:center;border:1px dashed var(--border);border-radius:4px;">This chapter has no sections defined. Open the chapter modal (\\u2699 icon) and use the Sections tab to add some.</div>';
+    return;
+  }}
+  let html = '';
+  meta.forEach((s, i) => {{
+    html += '<div class="sec-row" data-slug="' + s.slug + '">';
+    html += '  <div class="sec-fields">';
+    html += '    <div style="font-weight:600;font-size:13px;color:var(--fg);margin-bottom:4px;">' +
+            (i + 1) + '. ' + escapeHtml(s.title || s.slug) + '</div>';
+    html += '    <textarea data-plan-slug="' + s.slug + '" placeholder="Section plan — what THIS section must cover" ' +
+            'oninput="updatePlanChapterSection(\\'' + s.slug + '\\', this.value)">' +
+            escapeHtml(s.plan || '') + '</textarea>';
+    html += '    <div class="sec-slug">slug: <code>' + s.slug + '</code></div>';
+    html += '  </div>';
+    html += '</div>';
+  }});
+  list.innerHTML = html;
+}}
+
+// Track plan edits for the chapter tab so save can collect them.
+let _editingChapterPlans = {{}};
+function updatePlanChapterSection(slug, value) {{
+  _editingChapterPlans[slug] = value;
+}}
+
+// Phase 21 — populate the single-section editor for the Section tab.
+function populatePlanSectionTab(chapterId, sectionSlug) {{
+  const ch = chaptersData.find(c => c.id === chapterId);
+  if (!ch) return;
+  const meta = Array.isArray(ch.sections_meta) ? ch.sections_meta : [];
+  const sec = meta.find(s => s.slug === sectionSlug);
+  const ctx = document.getElementById('plan-section-context');
+  if (ctx) {{
+    ctx.innerHTML = '<strong>Ch.' + ch.num + ': ' + escapeHtml(ch.title) + '</strong> &middot; ' +
+      'section <code>' + sectionSlug + '</code>';
+  }}
+  document.getElementById('plan-section-title').value = sec ? sec.title : sectionSlug;
+  document.getElementById('plan-section-text').value = sec ? (sec.plan || '') : '';
+  // If the section is missing from the meta (orphan), warn the user.
+  if (!sec) {{
+    const status = document.getElementById('plan-status');
+    if (status) {{
+      status.innerHTML = '<span style="color:var(--warning);">This section\\'s slug \\'' +
+        sectionSlug + '\\' isn\\'t in the chapter\\'s sections list. Saving will add it.</span>';
+    }}
   }}
 }}
 
@@ -5048,6 +5357,22 @@ function setLengthPreset(words) {{
 }}
 
 async function savePlan() {{
+  // Phase 21 — savePlan dispatches based on which tab is active so a
+  // single Save button works for all three contexts. Each branch saves
+  // the relevant subset and refreshes the in-memory chaptersData cache.
+  const activeTabBtn = document.querySelector('#plan-modal .tab.active');
+  const tab = activeTabBtn ? activeTabBtn.dataset.tab : 'plan-book';
+
+  if (tab === 'plan-book') {{
+    return savePlanBook();
+  }} else if (tab === 'plan-chapter') {{
+    return savePlanChapterSections();
+  }} else if (tab === 'plan-section') {{
+    return savePlanSection();
+  }}
+}}
+
+async function savePlanBook() {{
   const title = document.getElementById('plan-title-input').value.trim();
   const desc = document.getElementById('plan-desc-input').value.trim();
   const plan = document.getElementById('plan-text-input').value.trim();
@@ -5057,9 +5382,6 @@ async function savePlan() {{
   fd.append('title', title);
   fd.append('description', desc);
   fd.append('plan', plan);
-  // Phase 17 — only send target_chapter_words if the user actually
-  // typed something. Empty input leaves the current value alone; a
-  // zero or negative value clears the setting (server-side).
   if (tcwRaw !== '') {{
     const n = parseInt(tcwRaw, 10);
     if (!isNaN(n)) fd.append('target_chapter_words', String(n));
@@ -5070,9 +5392,7 @@ async function savePlan() {{
     document.getElementById('plan-status').innerHTML =
       '<span style="color:var(--success);">Saved.</span> ' +
       plan.split(/\\s+/).filter(Boolean).length + ' words. The new plan will be injected into all future writes.';
-    // Refresh the page header to show the new title if it changed
     if (title) document.querySelector('.sidebar h2').textContent = title;
-    // Refresh length status line with the persisted value
     if (tcwRaw !== '') {{
       const n = parseInt(tcwRaw, 10);
       const lstatus = document.getElementById('plan-length-status');
@@ -5080,7 +5400,105 @@ async function savePlan() {{
         if (n > 0) lstatus.textContent = 'current: ' + n + ' words/chapter';
         else lstatus.textContent = 'cleared — using default';
       }}
+      window._chapterWordTarget = n > 0 ? n : 6000;
     }}
+  }} catch (e) {{
+    document.getElementById('plan-status').textContent = 'Save failed: ' + e.message;
+  }}
+}}
+
+// Phase 21 — save edits to all section plans for the active chapter.
+// Sends the full sections list (with merged plan edits) via PUT
+// /api/chapters/{{id}}/sections, which is a full-replace endpoint —
+// existing titles + slugs are preserved, only plans get updated.
+async function savePlanChapterSections() {{
+  const chId = _planContext.chapterId;
+  if (!chId) return;
+  const ch = chaptersData.find(c => c.id === chId);
+  if (!ch) return;
+  const meta = Array.isArray(ch.sections_meta) ? ch.sections_meta : [];
+
+  // Apply pending plan edits
+  const updated = meta.map(s => ({{
+    slug: s.slug,
+    title: s.title || s.slug,
+    plan: (s.slug in _editingChapterPlans) ? _editingChapterPlans[s.slug] : (s.plan || ''),
+  }}));
+
+  document.getElementById('plan-status').textContent = 'Saving section plans...';
+  try {{
+    const res = await fetch('/api/chapters/' + chId + '/sections', {{
+      method: 'PUT',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{sections: updated}}),
+    }});
+    if (!res.ok) throw new Error('save failed');
+    const data = await res.json();
+    if (data && Array.isArray(data.sections)) {{
+      ch.sections_meta = data.sections;
+      ch.sections_template = data.sections.map(s => s.slug);
+    }}
+    _editingChapterPlans = {{}};
+    document.getElementById('plan-status').innerHTML =
+      '<span style="color:var(--success);">Saved ' + updated.length + ' section plans.</span>';
+    // Refresh sidebar so plan tooltips update
+    const sidebarRes = await fetch('/api/chapters');
+    const sd = await sidebarRes.json();
+    rebuildSidebar(sd.chapters || sd, currentDraftId);
+  }} catch (e) {{
+    document.getElementById('plan-status').textContent = 'Save failed: ' + e.message;
+  }}
+}}
+
+// Phase 21 — save the single-section plan editor (Section tab).
+// Round-trips through the same /sections endpoint by patching the
+// chapter's full sections list with this one section's new plan.
+async function savePlanSection() {{
+  const chId = _planContext.chapterId;
+  const slug = _planContext.sectionSlug;
+  if (!chId || !slug) return;
+  const ch = chaptersData.find(c => c.id === chId);
+  if (!ch) return;
+  const newPlan = document.getElementById('plan-section-text').value;
+  const newTitle = document.getElementById('plan-section-title').value.trim();
+  const meta = Array.isArray(ch.sections_meta) ? ch.sections_meta.slice() : [];
+
+  let found = false;
+  const updated = meta.map(s => {{
+    if (s.slug === slug) {{
+      found = true;
+      return {{
+        slug: s.slug,
+        title: newTitle || s.title || s.slug,
+        plan: newPlan,
+      }};
+    }}
+    return s;
+  }});
+  // Orphan section (slug not in meta): append it.
+  if (!found) {{
+    updated.push({{slug: slug, title: newTitle || slug, plan: newPlan}});
+  }}
+
+  document.getElementById('plan-status').textContent = 'Saving section plan...';
+  try {{
+    const res = await fetch('/api/chapters/' + chId + '/sections', {{
+      method: 'PUT',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{sections: updated}}),
+    }});
+    if (!res.ok) throw new Error('save failed');
+    const data = await res.json();
+    if (data && Array.isArray(data.sections)) {{
+      ch.sections_meta = data.sections;
+      ch.sections_template = data.sections.map(s => s.slug);
+    }}
+    document.getElementById('plan-status').innerHTML =
+      '<span style="color:var(--success);">Section plan saved.</span> Will be injected into the next write/autowrite of this section.';
+    // Refresh sidebar so the tooltip updates
+    const sidebarRes = await fetch('/api/chapters');
+    const sd = await sidebarRes.json();
+    rebuildSidebar(sd.chapters || sd, currentDraftId);
   }} catch (e) {{
     document.getElementById('plan-status').textContent = 'Save failed: ' + e.message;
   }}
@@ -5155,6 +5573,18 @@ function openChapterModal(chId) {{
   document.getElementById('chapter-modal-status').textContent = 'Editing Ch.' + ch.num + ': ' + (ch.title || '');
   document.getElementById('chapter-modal').dataset.chId = chId;
 
+  // Phase 21 — fetch the book's chapter word target so the section
+  // editor can show "≈ N words per section". Cached on window so the
+  // re-renders that happen on every keystroke don't refetch.
+  if (!window._chapterWordTarget) {{
+    fetch('/api/book').then(r => r.json()).then(d => {{
+      window._chapterWordTarget = d.target_chapter_words || d.default_target_chapter_words || 6000;
+      renderSectionEditor();
+    }}).catch(() => {{
+      window._chapterWordTarget = 6000;
+    }});
+  }}
+
   // Phase 18 — copy the sections meta into the editor's working state.
   // sections_meta is the rich [{{slug, title, plan}}, ...] shape; falls
   // back to deriving from sections_template (slugs only) for legacy
@@ -5191,18 +5621,41 @@ function switchChapterTab(name) {{
   document.getElementById('ch-sections-pane').style.display = (name === 'ch-sections') ? 'block' : 'none';
 }}
 
-// Phase 18 — render the working sections list into the editor.
+// Phase 18 + Phase 21 — render the working sections list into the editor.
 // Re-rendered on every change so reorder/add/delete reflect immediately.
+// Phase 21 adds: live slug preview while typing the title, per-section
+// word-count budget (chapter target / num sections), and a header showing
+// the chapter-level target.
 function renderSectionEditor() {{
   const list = document.getElementById('ch-sections-list');
   if (!list) return;
+  // Compute the per-section word budget from the book's chapter target.
+  // This is identical to core.book_ops._section_target_words: floor 400,
+  // ceiling = chapter_target. We read the target from the cached book
+  // settings populated by openPlanModal().
+  const chapterTarget = (window._chapterWordTarget && window._chapterWordTarget > 0)
+    ? window._chapterWordTarget
+    : 6000;
+  const n = Math.max(1, _editingSections.length || 1);
+  const perSection = Math.max(400, Math.min(chapterTarget, Math.floor(chapterTarget / n)));
+
   if (_editingSections.length === 0) {{
     list.innerHTML = '<div style="font-size:12px;color:var(--fg-muted);padding:12px;text-align:center;border:1px dashed var(--border);border-radius:4px;">No sections yet. Click <strong>Add section</strong> to start.</div>';
     return;
   }}
-  let html = '';
+
+  // Header showing the budget split
+  let html = '<div style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;padding:6px 10px;background:var(--toolbar-bg);border-radius:4px;">';
+  html += '<strong>' + _editingSections.length + '</strong> section' + (_editingSections.length === 1 ? '' : 's') +
+          ' &middot; chapter target: <strong>' + chapterTarget + '</strong> words &middot; ' +
+          'per section: <strong>~' + perSection + '</strong> words';
+  html += '</div>';
+
   _editingSections.forEach((s, i) => {{
-    const slugDisplay = s.slug ? s.slug : '<em>(slug auto-generated on save)</em>';
+    // Live slug preview: derive from current slug or fall back to a
+    // slugified title (matches core.book_ops._slugify_section_name).
+    const liveSlug = (s.slug || s.title || '').trim().toLowerCase().replace(/\\s+/g, '_');
+    const slugDisplay = liveSlug || '<em>(slug auto-generated)</em>';
     html += '<div class="sec-row" data-idx="' + i + '">';
     html += '  <div class="sec-handle">';
     html += '    <button onclick="moveSection(' + i + ', -1)" title="Move up"' + (i === 0 ? ' disabled style="opacity:0.3;cursor:default;"' : '') + '>&uarr;</button>';
@@ -5210,15 +5663,48 @@ function renderSectionEditor() {{
     html += '  </div>';
     html += '  <div class="sec-fields">';
     html += '    <input type="text" placeholder="Section title (e.g. The 11-Year Solar Cycle)" ';
-    html += '           value="' + escapeHtml(s.title) + '" oninput="updateSection(' + i + ', \\'title\\', this.value)">';
+    html += '           value="' + escapeHtml(s.title) + '" oninput="updateSectionTitle(' + i + ', this.value)">';
     html += '    <textarea placeholder="Section plan — what THIS section must cover (a few sentences)" ';
     html += '              oninput="updateSection(' + i + ', \\'plan\\', this.value)">' + escapeHtml(s.plan) + '</textarea>';
-    html += '    <div class="sec-slug">slug: ' + slugDisplay + '</div>';
+    html += '    <div class="sec-slug">slug: <code>' + slugDisplay + '</code> &middot; budget: ~' + perSection + 'w</div>';
     html += '  </div>';
     html += '  <button class="sec-delete" onclick="removeSection(' + i + ')" title="Delete this section">&times;</button>';
     html += '</div>';
   }});
   list.innerHTML = html;
+}}
+
+// Phase 21 — title-input handler that ALSO updates the slug live so the
+// slug preview shows immediately instead of waiting for save. We only
+// auto-derive slug from title when slug is empty (untouched), so users
+// who manually entered a slug aren't surprised when it overwrites.
+function updateSectionTitle(idx, value) {{
+  if (idx < 0 || idx >= _editingSections.length) return;
+  const sec = _editingSections[idx];
+  sec.title = value;
+  // Live slug derivation only when slug is empty or matches the
+  // previously-derived slug (so manual slug edits stick).
+  if (!sec.slug) {{
+    sec.slug = (value || '').trim().toLowerCase().replace(/\\s+/g, '_');
+  }}
+  // Re-render to refresh the live slug preview at the bottom of the row.
+  // We preserve focus by re-finding the input and restoring the cursor
+  // position after the innerHTML rebuild.
+  const activeIdx = document.activeElement && document.activeElement.closest('.sec-row');
+  const cursorPos = document.activeElement && document.activeElement.selectionStart;
+  renderSectionEditor();
+  if (activeIdx) {{
+    const newRows = document.querySelectorAll('#ch-sections-list .sec-row');
+    if (newRows[idx]) {{
+      const newInput = newRows[idx].querySelector('input');
+      if (newInput) {{
+        newInput.focus();
+        if (typeof cursorPos === 'number') {{
+          try {{ newInput.setSelectionRange(cursorPos, cursorPos); }} catch (e) {{}}
+        }}
+      }}
+    }}
+  }}
 }}
 
 function escapeHtml(s) {{

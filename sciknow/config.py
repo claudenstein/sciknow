@@ -38,11 +38,27 @@ class Settings(BaseSettings):
     # Crossref polite pool
     crossref_email: str = "user@example.com"
 
-    # PDF converter backend. "mineru" (default) uses OpenDataLab MinerU 2.5
-    # pipeline — best quality on scientific papers per OmniDocBench. "marker"
-    # uses datalab-to/marker (legacy). "auto" tries MinerU first and falls
-    # back to Marker on failure.
+    # PDF converter backend.
+    #
+    # Values:
+    #   "auto"            — try MinerU pipeline → MinerU 2.5 Pro VLM → Marker (default)
+    #   "mineru"          — MinerU pipeline backend (legacy + CPU-friendly)
+    #   "mineru-vlm-pro"  — MinerU 2.5-Pro VLM (95.69 on OmniDocBench v1.6,
+    #                       SOTA per the Pro paper). Requires `mineru[vlm]`
+    #                       extras + a GPU with ~4GB free VRAM. Slower than
+    #                       pipeline on CPU.
+    #   "marker"          — datalab-to/marker (legacy fallback)
+    #
+    # Phase 21: MinerU 2.5-Pro is opt-in because (a) the 1.2B VLM model has
+    # only been on HuggingFace for hours and (b) it requires extra deps
+    # (vllm or transformers). Default stays at the proven pipeline backend.
     pdf_converter_backend: str = "auto"
+
+    # Phase 21 — explicit override for the VLM model name when running
+    # MinerU 2.5-Pro. Empty string falls back to the package default
+    # (currently MinerU2.5-2509-1.2B). Set to a HuggingFace identifier
+    # like "opendatalab/MinerU2.5-Pro-2604-1.2B" to use Pro.
+    mineru_vlm_model: str = "opendatalab/MinerU2.5-Pro-2604-1.2B"
 
     # Ingestion
     # Chunks per bge-m3 batch. Default 32 is safe on a 24GB GPU when the LLM is

@@ -2049,7 +2049,7 @@ wheels = [
 
 [[package]]
 name = "mineru"
-version = "3.0.8"
+version = "3.0.9"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "beautifulsoup4" },
@@ -2088,7 +2088,7 @@ dependencies = [
     { name = "uvicorn" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/78/89/341400aae53954c61bee4186fc070d55d5f749e30651790aaa90fb0467e6/mineru-3.0.8-py3-none-any.whl", hash = "sha256:785e1e22f3260ea927581130ac49407adaeb4ca6ca887fb6cbdeb03be398b6b1", size = 1447746, upload-time = "2026-04-03T10:51:22.444Z" },
+    { url = "https://files.pythonhosted.org/packages/b5/e5/178676ebb955faeb4ef423483fa5775998658db8dc42f3b540c15be587c4/mineru-3.0.9-py3-none-any.whl", hash = "sha256:90d78279fee1b4e2c762c65af389ced9c37c6c6a6d4513ecf9065e47ef53992d", size = 1447970, upload-time = "2026-04-07T13:05:03.882Z" },
 ]
 
 [package.optional-dependencies]
@@ -3995,7 +3995,7 @@ requires-dist = [
     { name = "flagembedding", specifier = ">=1.2" },
     { name = "hdbscan", specifier = ">=0.8.42" },
     { name = "httpx", specifier = ">=0.27" },
-    { name = "mineru", extras = ["core"], specifier = ">=3.0.8" },
+    { name = "mineru", extras = ["core"], specifier = ">=3.0.9" },
     { name = "ollama", specifier = ">=0.3" },
     { name = "psycopg2-binary", specifier = ">=2.9" },
     { name = "pydantic", specifier = ">=2.7" },

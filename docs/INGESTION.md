@@ -19,11 +19,13 @@ Failed PDFs are copied to `data/failed/`. Successfully processed PDFs are copied
 
 `sciknow/ingestion/pdf_converter.py` dispatches based on `PDF_CONVERTER_BACKEND`:
 
-1. **MinerU 2.5** (primary) — OpenDataLab's pipeline backend. Runs a cascade of specialised models: DocLayout-YOLO for layout, MFD (Math Formula Detection) + MFR (Math Formula Recognition) for LaTeX extraction, table OCR + structure reconstruction (HTML tables), text OCR, seal detection. Scores 86.2 on [OmniDocBench v1.5](https://arxiv.org/abs/2412.07626) — current SOTA among open-source pipeline tools on scientific papers. Runs on any GPU with ≥8 GB VRAM (Volta or newer). Models cached to `~/.cache/modelscope` on first use (~2 GB).
+1. **MinerU 2.5 pipeline** (default) — OpenDataLab's pipeline backend. Runs a cascade of specialised models: DocLayout-YOLO for layout, MFD (Math Formula Detection) + MFR (Math Formula Recognition) for LaTeX extraction, table OCR + structure reconstruction (HTML tables), text OCR, seal detection. Scores 86.2 on [OmniDocBench v1.5](https://arxiv.org/abs/2412.07626). Runs on any GPU with ≥8 GB VRAM (Volta or newer). Models cached to `~/.cache/modelscope` on first use (~2 GB).
 
-2. **Marker JSON** (fallback) — `marker-pdf`'s `JSONRenderer` produces a structured block tree (`SectionHeader`, `Text`, `Table`, `Equation`, `ListItem`, ...). Used automatically when MinerU fails, or when `PDF_CONVERTER_BACKEND=marker`.
+2. **MinerU 2.5-Pro VLM** (opt-in, Phase 21) — A 1.2B Qwen2VL model fine-tuned on MinerU's data engine, scoring **95.69 on [OmniDocBench v1.6](https://arxiv.org/abs/2604.04771)** — current SOTA among open-source PDF parsers, beating same-architecture baselines by 2.71 points and surpassing models with 200× more parameters. Set `PDF_CONVERTER_BACKEND=mineru-vlm-pro` in `.env` to enable. Requires `mineru[vlm]` extras (`uv add 'mineru[vlm]'`) and a GPU with ~4 GB free VRAM. The model identifier (`opendatalab/MinerU2.5-Pro-2604-1.2B`) is overridable via `MINERU_VLM_MODEL` if you want to pin a specific build. Slower than the pipeline backend on CPU, faster end-to-end on GPU because there's only one inference pass (vs. layout → formula → table → OCR cascade).
 
-3. **Marker markdown** (last resort) — if Marker's JSON path also fails, the markdown renderer runs as a final fallback.
+3. **Marker JSON** (fallback) — `marker-pdf`'s `JSONRenderer` produces a structured block tree (`SectionHeader`, `Text`, `Table`, `Equation`, `ListItem`, ...). Used automatically when MinerU fails, or when `PDF_CONVERTER_BACKEND=marker`.
+
+4. **Marker markdown** (last resort) — if Marker's JSON path also fails, the markdown renderer runs as a final fallback.
 
 **MinerU output format:** `content_list.json` — a flat list of typed blocks:
 - `text` with `text_level` (0 = body, 1 = title, 2 = section heading, 3+ = subheading)

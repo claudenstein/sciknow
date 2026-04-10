@@ -1889,6 +1889,168 @@ def l1_phase20_broken_citation_indicator() -> None:
     )
 
 
+# ── Phase 21 — MinerU 2.5-Pro + sections UX + plan modal context ──────────
+
+
+def l1_phase21_mineru_pro_helper() -> None:
+    """Phase 21 — MinerU 2.5-Pro VLM backend opt-in plumbing.
+
+    Verifies the helper that monkey-patches mineru.utils.enum_class.ModelPath
+    to point at the Pro model, and that pdf_converter.convert() routes
+    "mineru-vlm-pro" through that helper instead of the legacy pipeline
+    backend.
+    """
+    import inspect
+    from sciknow.ingestion import pdf_converter
+
+    assert hasattr(pdf_converter, "_patch_mineru_to_pro_model"), (
+        "_patch_mineru_to_pro_model helper missing — VLM Pro can't be selected"
+    )
+    assert hasattr(pdf_converter, "_MINERU_PRO_DEFAULT_HF"), (
+        "_MINERU_PRO_DEFAULT_HF constant missing"
+    )
+    assert "MinerU2.5-Pro" in pdf_converter._MINERU_PRO_DEFAULT_HF, (
+        f"_MINERU_PRO_DEFAULT_HF doesn't reference the Pro model: "
+        f"{pdf_converter._MINERU_PRO_DEFAULT_HF!r}"
+    )
+
+    # The convert() dispatch handles "mineru-vlm-pro" explicitly
+    convert_src = inspect.getsource(pdf_converter.convert)
+    assert '"mineru-vlm-pro"' in convert_src, (
+        "convert() doesn't handle the mineru-vlm-pro backend setting"
+    )
+    assert "use_vlm_pro=True" in convert_src, (
+        "convert() doesn't pass use_vlm_pro=True for the Pro path"
+    )
+
+    # _convert_mineru takes the use_vlm_pro kwarg
+    sig = inspect.signature(pdf_converter._convert_mineru)
+    assert "use_vlm_pro" in sig.parameters, (
+        "_convert_mineru missing use_vlm_pro kwarg"
+    )
+
+    # The Settings class exposes the new mineru_vlm_model field
+    from sciknow.config import settings
+    assert hasattr(settings, "mineru_vlm_model"), (
+        "settings.mineru_vlm_model field missing"
+    )
+
+    # The patch helper actually mutates ModelPath when called
+    try:
+        from mineru.utils.enum_class import ModelPath
+    except ImportError:
+        return  # mineru not installed in this env; skip the live patch test
+    original = ModelPath.vlm_root_hf
+    try:
+        pdf_converter._patch_mineru_to_pro_model("opendatalab/MinerU2.5-Pro-2604-1.2B")
+        assert ModelPath.vlm_root_hf == "opendatalab/MinerU2.5-Pro-2604-1.2B", (
+            "_patch_mineru_to_pro_model didn't update vlm_root_hf"
+        )
+        assert "OpenDataLab" in ModelPath.vlm_root_modelscope, (
+            "_patch_mineru_to_pro_model didn't update vlm_root_modelscope"
+        )
+    finally:
+        # Restore so other tests aren't affected
+        ModelPath.vlm_root_hf = original
+
+
+def l1_phase21_sidebar_renders_template_slots() -> None:
+    """Phase 21 — sidebar shows ALL chapter sections (template slots),
+    not just sections that already have drafts. Empty slots become
+    inline "Write" CTAs; orphan drafts are visible at the end.
+    """
+    import inspect
+    from sciknow.web import app as web_app
+
+    src = inspect.getsource(web_app)
+
+    # _render_sidebar handles 'empty', 'drafted', 'orphan' status values
+    render_src = inspect.getsource(web_app._render_sidebar)
+    assert '"empty"' in render_src or "'empty'" in render_src, (
+        "_render_sidebar doesn't render empty template slots"
+    )
+    assert '"orphan"' in render_src or "'orphan'" in render_src, (
+        "_render_sidebar doesn't render orphan drafts"
+    )
+    assert "writeForCell" in render_src, (
+        "_render_sidebar empty slots don't trigger writeForCell"
+    )
+
+    # CSS for the new states
+    assert ".sec-status-dot" in src, "section status dot CSS missing"
+    assert ".sec-link.sec-empty" in src, "empty-slot sidebar CSS missing"
+    assert ".sec-link.sec-orphan" in src, "orphan-draft sidebar CSS missing"
+
+    # The _render_book sections-list builder produces entries for the
+    # FULL template, not just drafted sections
+    rb_src = inspect.getsource(web_app._render_book)
+    assert '"status": "empty"' in rb_src, (
+        "_render_book doesn't emit empty template slot entries"
+    )
+    assert '"status": "orphan"' in rb_src, (
+        "_render_book doesn't emit orphan draft entries"
+    )
+
+    # JS rebuildSidebar mirrors the same three states so post-write
+    # sidebar refreshes show empty/orphan correctly
+    assert "sec-empty" in src and "sec-orphan" in src, (
+        "rebuildSidebar JS doesn't render the new sec-empty/sec-orphan states"
+    )
+
+
+def l1_phase21_section_editor_live_slug_and_budget() -> None:
+    """Phase 21 — chapter modal section editor shows live slug preview
+    and per-section word budget."""
+    import inspect
+    from sciknow.web import app as web_app
+
+    src = inspect.getsource(web_app)
+
+    # Live slug derivation from title in the JS
+    assert "updateSectionTitle" in src, (
+        "updateSectionTitle helper missing — slug doesn't update live"
+    )
+    # Per-section word budget computed in renderSectionEditor
+    assert "perSection" in src, (
+        "renderSectionEditor doesn't compute per-section word budget"
+    )
+    assert "_chapterWordTarget" in src, (
+        "renderSectionEditor doesn't read the chapter word target"
+    )
+
+
+def l1_phase21_plan_modal_context_aware() -> None:
+    """Phase 21 — Plan modal has Book / Chapter / Section tabs and
+    openPlanModal() accepts a context arg that auto-routes based on
+    the current selection.
+    """
+    import inspect
+    from sciknow.web import app as web_app
+
+    src = inspect.getsource(web_app)
+
+    # Tabs in the HTML
+    assert "plan-tab-chapter" in src, "Plan modal missing Chapter tab"
+    assert "plan-tab-section" in src, "Plan modal missing Section tab"
+    assert "plan-chapter-pane" in src, "Plan modal missing chapter pane"
+    assert "plan-section-pane" in src, "Plan modal missing section pane"
+
+    # JS dispatch helpers
+    assert "switchPlanTab" in src, "switchPlanTab JS helper missing"
+    assert "populatePlanChapterTab" in src, "populatePlanChapterTab missing"
+    assert "populatePlanSectionTab" in src, "populatePlanSectionTab missing"
+    assert "savePlanBook" in src, "savePlanBook missing"
+    assert "savePlanChapterSections" in src, "savePlanChapterSections missing"
+    assert "savePlanSection" in src, "savePlanSection missing"
+
+    # Context-aware open: detects section/chapter/book mode
+    assert "_planContext" in src, "openPlanModal doesn't track context state"
+    assert "currentSectionType" in src and "currentChapterId" in src, (
+        "openPlanModal doesn't read currentSectionType / currentChapterId "
+        "to derive context"
+    )
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -1943,6 +2105,11 @@ L1_TESTS: list[Callable] = [
     l1_phase20_chapter_autowrite_helper_exists,
     l1_phase20_web_endpoint_and_router,
     l1_phase20_broken_citation_indicator,
+    # Phase 21 — MinerU 2.5-Pro + sections UX + plan modal context
+    l1_phase21_mineru_pro_helper,
+    l1_phase21_sidebar_renders_template_slots,
+    l1_phase21_section_editor_live_slug_and_budget,
+    l1_phase21_plan_modal_context_aware,
 ]
 
 L2_TESTS: list[Callable] = [

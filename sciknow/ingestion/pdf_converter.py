@@ -288,55 +288,131 @@ def _load_mineru():
         )
 
 
-def _convert_mineru(pdf_path: Path, output_dir: Path) -> ConversionResult:
-    """
-    Run MinerU's pipeline backend on a single PDF and return a ConversionResult.
+# Phase 21 — MinerU 2.5-Pro VLM model identifiers. The Pro variant
+# (95.69 on OmniDocBench v1.6) was published 2026-04-09 and uses the
+# same Qwen2VL 1.2B architecture as the base 2.5 — only the training
+# data was upgraded. Drop-in compatible with vlm-auto-engine.
+_MINERU_PRO_DEFAULT_HF = "opendatalab/MinerU2.5-Pro-2604-1.2B"
 
-    MinerU writes files to `{output_dir}/{pdf_stem}/pipeline/`:
+
+def _patch_mineru_to_pro_model(model_name_hf: str) -> None:
+    """Phase 21 — monkey-patch mineru.utils.enum_class.ModelPath so the
+    VLM backend pulls Pro instead of the base 2.5 weights.
+
+    The mineru pip package (3.0.9) hardcodes the VLM model name as a
+    class attribute on ModelPath, with no env var or config-file
+    override. Until upstream exposes this, we patch the constant
+    in-place before any do_parse call. Same Qwen2VL architecture so
+    no other changes are needed.
+
+    Idempotent — safe to call multiple times.
+    """
+    try:
+        from mineru.utils.enum_class import ModelPath
+    except ImportError:
+        return  # mineru not installed; nothing to patch
+    if getattr(ModelPath, "vlm_root_hf", None) == model_name_hf:
+        return  # already patched
+    ModelPath.vlm_root_hf = model_name_hf
+    # ModelScope variant: capitalise the org name to match upstream's
+    # convention (opendatalab → OpenDataLab on ModelScope).
+    ModelPath.vlm_root_modelscope = model_name_hf.replace(
+        "opendatalab/", "OpenDataLab/"
+    )
+
+
+def _convert_mineru(
+    pdf_path: Path,
+    output_dir: Path,
+    *,
+    use_vlm_pro: bool = False,
+    vlm_model_name: str | None = None,
+) -> ConversionResult:
+    """
+    Run MinerU on a single PDF and return a ConversionResult.
+
+    Two modes:
+
+    - **pipeline (default)** — legacy MinerU 2.0 stack: layout (PP-DocLayoutV2)
+      + formula (UniMERNet) + table (SLANet+) + OCR (paddleocr_torch). CPU
+      friendly, ~6GB peak VRAM with all models loaded. OmniDocBench v1.5: 86.2.
+
+    - **vlm-pro (opt-in)** — MinerU 2.5-Pro VLM (Qwen2VL 1.2B fine-tuned on
+      MinerU's data engine). OmniDocBench v1.6: 95.69 (Phase 21). Requires a
+      GPU with ~4GB free VRAM and `mineru[vlm]` extras. Set
+      settings.pdf_converter_backend = "mineru-vlm-pro" to enable.
+
+    Both backends emit the same content_list.json schema, so the chunker's
+    parse_sections_from_mineru handles them identically.
+
+    MinerU writes files to `{output_dir}/{pdf_stem}/{pipeline|vlm}/`:
         - content_list.json  ← primary structured output (what we parse)
         - middle.json        ← intermediate rep with bboxes (kept for debugging)
         - {stem}.md          ← disabled (we parse content_list directly)
         - *_layout.pdf       ← disabled (visualisation, we don't need)
         - *_span.pdf         ← disabled (same)
 
-    The model weights download on first call (ModelScope/HuggingFace, a few GB);
-    subsequent calls reuse the cache. Models stay resident in VRAM for the
-    duration of the Python process.
+    Model weights download on first call (a few GB for VLM, ~2GB for
+    pipeline); subsequent calls reuse the cache. Models stay resident in
+    VRAM for the Python process lifetime — batching matters for throughput.
     """
     do_parse, read_fn = _load_mineru()
+
+    if use_vlm_pro:
+        _patch_mineru_to_pro_model(vlm_model_name or _MINERU_PRO_DEFAULT_HF)
+        chosen_backend = "vlm-auto-engine"
+    else:
+        chosen_backend = "pipeline"
 
     output_dir.mkdir(parents=True, exist_ok=True)
     stem = pdf_path.stem
     pdf_bytes = read_fn(str(pdf_path))
 
-    # Run MinerU — pipeline backend, English, with formula + table enabled.
+    # Run MinerU — chosen backend, English, with formula + table enabled.
     # Disable all the visualisation/dump outputs we don't use to keep the
     # per-document footprint light.
-    do_parse(
-        output_dir=str(output_dir),
-        pdf_file_names=[stem],
-        pdf_bytes_list=[pdf_bytes],
-        p_lang_list=["en"],
-        backend="pipeline",
-        parse_method="auto",
-        formula_enable=True,
-        table_enable=True,
-        f_draw_layout_bbox=False,
-        f_draw_span_bbox=False,
-        f_dump_md=False,
-        f_dump_middle_json=True,   # small + useful for debugging
-        f_dump_model_output=False,
-        f_dump_orig_pdf=False,
-        f_dump_content_list=True,  # this is the file we consume
-    )
+    try:
+        do_parse(
+            output_dir=str(output_dir),
+            pdf_file_names=[stem],
+            pdf_bytes_list=[pdf_bytes],
+            p_lang_list=["en"],
+            backend=chosen_backend,
+            parse_method="auto",
+            formula_enable=True,
+            table_enable=True,
+            f_draw_layout_bbox=False,
+            f_draw_span_bbox=False,
+            f_dump_md=False,
+            f_dump_middle_json=True,   # small + useful for debugging
+            f_dump_model_output=False,
+            f_dump_orig_pdf=False,
+            f_dump_content_list=True,  # this is the file we consume
+        )
+    except (ImportError, ModuleNotFoundError) as exc:
+        # The vlm-auto-engine path needs `mineru[vlm]` extras (vllm or
+        # transformers). Surface a useful install hint instead of a
+        # cryptic ModuleNotFoundError.
+        if use_vlm_pro:
+            raise ConversionError(
+                f"MinerU VLM backend missing dependencies ({exc}).\n"
+                f"Install with: uv add 'mineru[vlm]'\n"
+                f"Or fall back to the pipeline backend: set\n"
+                f"  PDF_CONVERTER_BACKEND=mineru\n"
+                f"in your .env file."
+            )
+        raise
 
+    # MinerU's output dir layout depends on the backend:
+    #   pipeline → {stem}/auto/  or  {stem}/pipeline/
+    #   vlm      → {stem}/vlm/   (or under /auto/ in older builds)
     content_list_path = output_dir / stem / "auto" / f"{stem}_content_list.json"
-    # Newer MinerU layouts put outputs under "pipeline/" instead of "auto/".
-    # Try both.
     if not content_list_path.exists():
-        alt = output_dir / stem / "pipeline" / f"{stem}_content_list.json"
-        if alt.exists():
-            content_list_path = alt
+        for sub in ("pipeline", "vlm"):
+            alt = output_dir / stem / sub / f"{stem}_content_list.json"
+            if alt.exists():
+                content_list_path = alt
+                break
     if not content_list_path.exists():
         # Last-resort glob: MinerU versions move things around.
         candidates = list((output_dir / stem).rglob("*content_list*.json"))
@@ -443,9 +519,18 @@ def convert(pdf_path: Path, output_dir: Path) -> ConversionResult:
     settings.pdf_converter_backend and falls back through the chain on failure.
 
     Backends:
-      - "mineru"  : MinerU pipeline only (raises on failure)
-      - "marker"  : Marker JSON → Marker markdown (legacy behaviour)
-      - "auto"    : MinerU → Marker JSON → Marker markdown (default)
+      - "mineru"          : MinerU pipeline only (raises on failure)
+      - "mineru-vlm-pro"  : MinerU 2.5-Pro VLM (raises on failure;
+                            requires `mineru[vlm]` extras + GPU)
+      - "marker"          : Marker JSON → Marker markdown (legacy)
+      - "auto"            : MinerU pipeline → Marker JSON → Marker markdown
+                            (default; SAFE — does NOT try VLM since the
+                             extras may not be installed)
+
+    Phase 21: "auto" intentionally does NOT try the VLM backend automatically
+    because (a) it needs heavy `vllm` or `transformers` extras and (b) we
+    don't want a silent fallback to corrupt batch ingestion. Set
+    PDF_CONVERTER_BACKEND=mineru-vlm-pro explicitly to opt in.
 
     Always returns a ConversionResult with `.backend` set to the backend that
     actually produced the result, and `.text` populated for metadata extraction.
@@ -453,12 +538,25 @@ def convert(pdf_path: Path, output_dir: Path) -> ConversionResult:
     from sciknow.config import settings
 
     backend_setting = getattr(settings, "pdf_converter_backend", "auto")
+    vlm_model_name = getattr(settings, "mineru_vlm_model", None)
     errors: list[str] = []
 
-    # ---- 1. MinerU (primary in "auto" and "mineru") ----
+    # ---- 0. MinerU 2.5-Pro VLM (explicit opt-in only) ----
+    if backend_setting == "mineru-vlm-pro":
+        try:
+            return _convert_mineru(
+                pdf_path, output_dir,
+                use_vlm_pro=True, vlm_model_name=vlm_model_name,
+            )
+        except Exception as exc:
+            # Explicit Pro mode: do not silently fall back to a worse
+            # backend, the user opted in to Pro for a reason.
+            raise ConversionError(f"MinerU 2.5-Pro VLM: {exc}") from exc
+
+    # ---- 1. MinerU pipeline (primary in "auto" and "mineru") ----
     if backend_setting in ("auto", "mineru"):
         try:
-            return _convert_mineru(pdf_path, output_dir)
+            return _convert_mineru(pdf_path, output_dir, use_vlm_pro=False)
         except Exception as exc:
             msg = f"MinerU: {exc}"
             errors.append(msg)
