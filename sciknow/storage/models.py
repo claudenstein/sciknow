@@ -226,6 +226,12 @@ class Book(Base):
     description: Mapped[str | None] = mapped_column(Text)
     plan: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="draft")
+    # Phase 17 — per-book settings that aren't worth a dedicated column.
+    # Currently used for target_chapter_words (length target), but
+    # intentionally kept open so we can drop new book-level knobs in
+    # here without a migration each time. Shape:
+    #   {"target_chapter_words": 6000, ...}
+    custom_metadata: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

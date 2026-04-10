@@ -30,6 +30,113 @@ Event = dict
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
 
+# Phase 17 — default chapter-length target in words. Chosen because popular
+# science / trade-science chapters typically run 5k–10k words; 6k is the
+# centre of that range and produces drafts long enough to feel like book
+# chapters rather than extended abstracts. Per-book and per-call overrides
+# live in books.custom_metadata.target_chapter_words and the --target-words
+# CLI / web flags.
+DEFAULT_TARGET_CHAPTER_WORDS = 6000
+
+# Phase 17 — minimum length score below which "length" can become the
+# weakest dimension and drive a targeted "expand" revision. 0.7 means the
+# draft is under ~70% of target words. Above 0.7 we consider length good
+# enough and let other dimensions (groundedness, hedging, etc.) drive
+# revision. This is an anti-oscillation guard: without it, length would
+# constantly win over a draft that's at 0.65 on hedging_fidelity and
+# 0.9 on length, flipping revision targets between iterations.
+LENGTH_PRIORITY_THRESHOLD = 0.7
+
+
+def _get_book_length_target(session, book_id: str) -> int:
+    """Read books.custom_metadata.target_chapter_words, fall back to default.
+
+    Phase 17. Returns an int number of words. Safe to call on any book —
+    a missing column, missing key, or non-int value all fall through to
+    DEFAULT_TARGET_CHAPTER_WORDS.
+    """
+    from sqlalchemy import text
+    try:
+        row = session.execute(text("""
+            SELECT custom_metadata FROM books WHERE id::text = :bid LIMIT 1
+        """), {"bid": book_id}).fetchone()
+    except Exception:
+        return DEFAULT_TARGET_CHAPTER_WORDS
+    if not row:
+        return DEFAULT_TARGET_CHAPTER_WORDS
+    meta = row[0] or {}
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except Exception:
+            return DEFAULT_TARGET_CHAPTER_WORDS
+    val = meta.get("target_chapter_words") if isinstance(meta, dict) else None
+    try:
+        n = int(val)
+        if n > 0:
+            return n
+    except (TypeError, ValueError):
+        pass
+    return DEFAULT_TARGET_CHAPTER_WORDS
+
+
+def _section_target_words(chapter_target: int, num_sections: int) -> int:
+    """Split a chapter-level target across its sections.
+
+    Phase 17. A chapter with 4 sections and a 6000-word target asks each
+    section for ~1500 words. We floor at 400 because a section shorter
+    than that rarely reads as a book-grade section; and ceiling at the
+    chapter target itself (1-section chapters just inherit the full
+    chapter budget).
+    """
+    if num_sections <= 0:
+        return max(400, chapter_target)
+    per = chapter_target // num_sections
+    return max(400, min(chapter_target, per))
+
+
+def _compute_length_score(content: str, target_words: int | None) -> float:
+    """Return a length score in [0, 1] = min(1, actual / target).
+
+    Phase 17. Over-length drafts are NOT penalised — the model is allowed
+    to overshoot when it genuinely has more to say. A missing/zero target
+    returns 1.0 (length is not evaluated).
+    """
+    if not target_words or target_words <= 0:
+        return 1.0
+    actual = len((content or "").split())
+    return min(1.0, actual / float(target_words))
+
+
+def _get_chapter_num_sections(session, chapter_id: str) -> int:
+    """Count the sections configured on a chapter (from book_chapters.sections).
+
+    Phase 17. Used to divide the chapter-level length target across its
+    sections. Falls back to 1 (treat the whole target as one section's
+    budget) if the sections array is missing or empty.
+    """
+    from sqlalchemy import text
+    try:
+        row = session.execute(text("""
+            SELECT sections FROM book_chapters WHERE id::text = :cid LIMIT 1
+        """), {"cid": chapter_id}).fetchone()
+    except Exception:
+        return 1
+    if not row:
+        return 1
+    sections = row[0] or []
+    if isinstance(sections, str):
+        try:
+            sections = json.loads(sections)
+        except Exception:
+            return 1
+    try:
+        n = len(sections)
+    except TypeError:
+        return 1
+    return max(1, n)
+
+
 def _get_book(session, title_or_id: str):
     from sqlalchemy import text
     return session.execute(text("""
@@ -353,6 +460,7 @@ def write_section_stream(
     verify: bool = False,
     save: bool = True,
     use_step_back: bool = True,
+    target_words: int | None = None,
 ) -> Iterator[Event]:
     """
     Draft a chapter section.  Yields events as the operation progresses.
@@ -389,6 +497,16 @@ def write_section_stream(
 
         prior_summaries = _get_prior_summaries(session, book_id, ch_num)
 
+        # Phase 17 — resolve the effective per-section length target.
+        # Priority: explicit caller target > book-level setting / default,
+        # divided by the chapter's configured section count.
+        if target_words is None:
+            chapter_target = _get_book_length_target(session, book_id)
+            num_sections = _get_chapter_num_sections(session, ch_id)
+            effective_target_words = _section_target_words(chapter_target, num_sections)
+        else:
+            effective_target_words = target_words
+
     yield {"type": "progress", "stage": "retrieval", "detail": "Searching literature..."}
 
     qdrant = get_client()
@@ -412,6 +530,7 @@ def write_section_stream(
         sys_p, usr_p = prompts.tree_plan(
             section_type, topic, results,
             book_plan=b_plan, prior_summaries=prior_summaries,
+            target_words=effective_target_words,
         )
         plan_raw = ""
         for tok in llm_stream(sys_p, usr_p, model=model):
@@ -443,7 +562,10 @@ def write_section_stream(
         section_type, topic, results,
         book_plan=b_plan, prior_summaries=prior_summaries,
         paragraph_plan=paragraph_plan,
+        target_words=effective_target_words,
     )
+
+    yield {"type": "length_target", "target_words": effective_target_words}
 
     content_tokens: list[str] = []
     for tok in llm_stream(system, user, model=model):
@@ -1030,6 +1152,7 @@ def autowrite_section_stream(
     use_step_back: bool = True,
     use_cove: bool = True,
     cove_threshold: float = 0.85,
+    target_words: int | None = None,
 ) -> Iterator[Event]:
     """
     Full convergence loop for one section: write -> score -> revise -> re-score.
@@ -1061,6 +1184,20 @@ def autowrite_section_stream(
     ch_id, ch_num, ch_title, ch_desc, topic_query, topic_cluster = ch
     topic = topic_query or ch_title
 
+    # Phase 17 — resolve effective per-section length target.
+    # Caller override beats the book-level setting. If neither is set,
+    # we use the default chapter target divided by the chapter's
+    # configured section count. This single value is then threaded
+    # through tree_plan, write_section_v2, and the length-score
+    # injection inside the scoring loop.
+    with get_session() as session:
+        if target_words is None:
+            chapter_target = _get_book_length_target(session, book_id)
+            num_sections = _get_chapter_num_sections(session, ch_id)
+            effective_target_words = _section_target_words(chapter_target, num_sections)
+        else:
+            effective_target_words = target_words
+
     # Phase 14.6 — Surface which model is going to do the writing so the
     # user never has to ask. resolved_model is what `llm.complete()` will
     # default to when called with model=None below; this mirrors the
@@ -1072,8 +1209,12 @@ def autowrite_section_stream(
            "fast_model": settings.llm_fast_model,
            "writer_role": "writing/scoring/verification/CoVe (flagship)",
            "fast_role": "step-back retrieval (utility)"}
+    yield {"type": "length_target", "target_words": effective_target_words}
     yield {"type": "progress", "stage": "setup",
-           "detail": f"Autowrite Ch.{ch_num}: {ch_title} — {section_type.capitalize()} · model: {resolved_model}"}
+           "detail": (
+               f"Autowrite Ch.{ch_num}: {ch_title} — {section_type.capitalize()} · "
+               f"model: {resolved_model} · target: ~{effective_target_words} words"
+           )}
 
     # Step 1: Initial draft
     with get_session() as session:
@@ -1097,6 +1238,7 @@ def autowrite_section_stream(
             sys_p, usr_p = rag_prompts.tree_plan(
                 section_type, topic, results,
                 book_plan=b_plan, prior_summaries=prior_summaries,
+                target_words=effective_target_words,
             )
             # Phase 15.3 — stream so the token counter sees activity
             plan_raw = yield from _stream_phase(
@@ -1116,9 +1258,11 @@ def autowrite_section_stream(
         section_type, topic, results,
         book_plan=b_plan, prior_summaries=prior_summaries,
         paragraph_plan=paragraph_plan,
+        target_words=effective_target_words,
     )
 
-    yield {"type": "progress", "stage": "writing", "detail": "Generating initial draft..."}
+    yield {"type": "progress", "stage": "writing",
+           "detail": f"Generating initial draft (~{effective_target_words} words)..."}
     tokens: list[str] = []
     for tok in llm_stream(system, user, model=model):
         tokens.append(tok)
@@ -1151,6 +1295,7 @@ def autowrite_section_stream(
         "final_overall": None,
         "max_iter": max_iter,
         "target_score": target_score,
+        "target_words": effective_target_words,
         "checkpoint": "initial",
     }
     with get_session() as session:
@@ -1320,6 +1465,47 @@ def autowrite_section_stream(
         except Exception as exc:
             logger.warning("Verification failed: %s", exc)
 
+        # Phase 17 — inject length as a 7th scoring dimension.
+        # The scorer is instructed to return 1.0 for length; we overwrite
+        # it here with a mechanical min(1, actual/target) so that the
+        # revision loop reacts to short drafts. Anti-oscillation guard:
+        # length only takes over as the weakest dimension when it's
+        # genuinely low (< LENGTH_PRIORITY_THRESHOLD, i.e. under ~70% of
+        # target) AND lower than all other dimensions. Above the
+        # threshold we leave weakest_dimension alone so hedging /
+        # groundedness revisions aren't stolen by a mild length miss.
+        length_score = _compute_length_score(content, effective_target_words)
+        scores["length"] = length_score
+
+        other_dims = {
+            k: scores[k] for k in (
+                "groundedness", "completeness", "coherence",
+                "citation_accuracy", "hedging_fidelity",
+            ) if k in scores and isinstance(scores[k], (int, float))
+        }
+        min_other = min(other_dims.values()) if other_dims else 1.0
+        if (
+            effective_target_words
+            and length_score < LENGTH_PRIORITY_THRESHOLD
+            and length_score < min_other
+        ):
+            scores["weakest_dimension"] = "length"
+            actual_words = len(content.split())
+            n_more_paragraphs = max(
+                2, (effective_target_words - actual_words) // 150
+            )
+            scores["revision_instruction"] = (
+                f"The draft is too short: {actual_words} words vs a "
+                f"target of ~{effective_target_words}. Expand with "
+                f"approximately {n_more_paragraphs} additional substantive "
+                f"paragraphs, pulling new claims and quantitative detail "
+                f"from the provided source passages. Do NOT pad with "
+                f"filler phrases or repeat existing content — every new "
+                f"paragraph must introduce distinct evidence or argument. "
+                f"Preserve existing citations and add new [N] references "
+                f"for the new claims."
+            )
+
         overall = scores.get("overall", 0)
         weakest = scores.get("weakest_dimension", "unknown")
         instruction = scores.get("revision_instruction", "Improve the draft.")
@@ -1421,6 +1607,25 @@ def autowrite_section_stream(
         except Exception:
             new_scores = {"overall": overall}
 
+        # Phase 17 — inject length into new_scores so the KEEP/DISCARD
+        # comparison is fair. Without this, a length-driven revision
+        # that genuinely expands the draft would not see its length
+        # improvement reflected in the overall score and could be
+        # discarded. We also blend length into overall when length was
+        # the driving dimension, so the KEEP verdict tracks what we
+        # asked the writer to fix.
+        new_length_score = _compute_length_score(revised, effective_target_words)
+        new_scores["length"] = new_length_score
+        if weakest == "length" and effective_target_words:
+            # When length was the revision target, fold the length
+            # improvement into overall so the KEEP comparison rewards
+            # a longer draft even if other dims stayed flat. We use a
+            # weighted blend rather than min() because a long draft
+            # that scored 0.82 on other dims but 1.0 on length should
+            # beat a short draft at 0.82 with 0.5 length.
+            base = new_scores.get("overall", overall)
+            new_scores["overall"] = 0.7 * base + 0.3 * new_length_score
+
         new_overall = new_scores.get("overall", 0)
 
         if new_overall >= overall:
@@ -1440,6 +1645,7 @@ def autowrite_section_stream(
                 "final_overall": overall,
                 "max_iter": max_iter,
                 "target_score": target_score,
+                "target_words": effective_target_words,
                 "checkpoint": f"iteration_{iteration + 1}_keep",
             }
             _update_draft_content(
@@ -1463,6 +1669,7 @@ def autowrite_section_stream(
                 "final_overall": overall,
                 "max_iter": max_iter,
                 "target_score": target_score,
+                "target_words": effective_target_words,
                 "checkpoint": f"iteration_{iteration + 1}_discard",
             }
             _update_draft_content(draft_id, content, custom_metadata=discard_metadata)
@@ -1477,6 +1684,8 @@ def autowrite_section_stream(
         "final_overall": overall,
         "max_iter": max_iter,
         "target_score": target_score,
+        "target_words": effective_target_words,
+        "final_word_count": len(content.split()),
         "checkpoint": "final",
     }
     _update_draft_content(

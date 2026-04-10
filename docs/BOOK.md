@@ -61,7 +61,7 @@ Inspired by [Karpathy's autoresearch](https://github.com/karpathy/autoresearch) 
 **How it works:**
 
 1. Generates an initial draft (with book plan + cross-chapter summaries for coherence)
-2. Scores the draft on 5 dimensions (0.0-1.0): groundedness, completeness, coherence, citation accuracy, overall
+2. Scores the draft on 7 dimensions (0.0-1.0): groundedness, completeness, coherence, citation accuracy, hedging fidelity, **length**, overall
 3. If overall ≥ target score → **converged**, stop
 4. Identifies the **weakest dimension** and generates a targeted revision instruction
 5. Revises the draft targeting that specific weakness
@@ -70,12 +70,11 @@ Inspired by [Karpathy's autoresearch](https://github.com/karpathy/autoresearch) 
 
 **Convergence example:**
 ```
-v1: groun=0.65  compl=0.60  coher=0.80  citat=0.70  overall=0.69
-    Weakest: completeness → "Add discussion of proxy calibration methods"
-v2: groun=0.72  compl=0.78  coher=0.82  citat=0.75  overall=0.77  KEEP
+v1: groun=0.65  compl=0.60  coher=0.80  citat=0.70  length=0.50  overall=0.69
+    Weakest: length → "Expand with ~15 additional substantive paragraphs"
+v2: groun=0.72  compl=0.78  coher=0.82  citat=0.75  length=0.95  overall=0.81  KEEP
     Weakest: groundedness → "Cite primary sources for claims in paragraph 3"
-v3: groun=0.85  compl=0.80  coher=0.85  citat=0.82  overall=0.83  KEEP
-v4: groun=0.88  compl=0.83  coher=0.87  citat=0.85  overall=0.86  CONVERGED
+v3: groun=0.85  compl=0.80  coher=0.85  citat=0.82  length=1.00  overall=0.86  CONVERGED
 ```
 
 **Modes:**
@@ -86,8 +85,23 @@ v4: groun=0.88  compl=0.83  coher=0.87  citat=0.85  overall=0.86  CONVERGED
 **Flags:**
 - `--max-iter N` — max iterations per section (default 3)
 - `--target-score 0.85` — quality threshold to stop (default 0.85)
+- `--target-words N` — target words per section for this run; overrides the book-level setting
 - `--auto-expand` — when the reviewer identifies missing evidence, checks corpus coverage and flags topics for expansion
 - `--rebuild` — overwrite existing drafts (default: auto-resume, skipping sections with drafts)
+
+### Chapter length targets (Phase 17)
+
+Book chapters have a configurable word-count budget that flows through both `book write` and `book autowrite`. The default is **6000 words per chapter**, in the middle of the popular-science range (5–10k words). Each section gets a proportional share (a 4-section chapter at 6000 words asks the writer for ~1500 words per section; floor is 400).
+
+**Setting the target:**
+- Per book, at creation: `sciknow book create "Long Book" --target-chapter-words 10000`
+- Per book, later: open the Plan modal in the web reader → "Target chapter length" → pick a preset (3000 / 6000 / 10000) or enter a custom number → Save.
+- Per run: `sciknow book autowrite "Book" 3 --section all --target-words 2500`
+- Per single section: `sciknow book write "Book" 3 --section methods --target-words 2500`
+
+**How length drives the loop:** In autowrite, length is a 7th scoring dimension computed as `min(1.0, actual_words / target_words)`. When a draft scores below **0.7** on length AND lower than every other dimension, the loop targets length for the next revision and asks the writer to expand with *new substantive paragraphs* (not filler) pulling fresh claims from the source passages. Above the 0.7 floor, length never steals the revision target from hedging/groundedness — this is an anti-oscillation guard.
+
+**Why this helps:** Without an explicit target, the writer defaults to ~400–800 word sections that read like extended abstracts, not book chapters. With a target, the writer plans for the right shape upfront and the scoring loop catches any undershooting in the first iteration. Over-length drafts are never penalised — the writer is allowed to genuinely have more to say.
 
 **Estimated times (qwen3.5:27b on 3090):**
 

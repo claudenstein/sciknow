@@ -224,6 +224,14 @@ def _save_draft(session, *, title, book_id, chapter_id, section_type, topic,
 def create(
     title: Annotated[str, typer.Argument(help="Book title.")],
     description: str | None = typer.Option(None, "--description", "-d"),
+    target_chapter_words: int | None = typer.Option(
+        None, "--target-chapter-words",
+        help=(
+            "Target words per chapter for autowrite/write "
+            "(default 6000). Stored on the book; sections get a "
+            "proportional share of this budget."
+        ),
+    ),
 ):
     """
     Create a new book project.
@@ -233,7 +241,10 @@ def create(
       sciknow book create "Global Cooling: The Coming Solar Minimum"
 
       sciknow book create "Solar Climate" --description "The role of the sun in climate change"
+
+      sciknow book create "Long Book" --target-chapter-words 10000
     """
+    import json as _json
     from sqlalchemy import text
     from sciknow.storage.db import get_session
 
@@ -245,11 +256,21 @@ def create(
             console.print(f"[yellow]Book already exists:[/yellow] {title}")
             raise typer.Exit(1)
 
+        custom_meta: dict = {}
+        if target_chapter_words is not None:
+            if target_chapter_words <= 0:
+                console.print("[red]--target-chapter-words must be positive[/red]")
+                raise typer.Exit(1)
+            custom_meta["target_chapter_words"] = target_chapter_words
+
         result = session.execute(text("""
-            INSERT INTO books (title, description)
-            VALUES (:title, :desc)
+            INSERT INTO books (title, description, custom_metadata)
+            VALUES (:title, :desc, CAST(:meta AS jsonb))
             RETURNING id::text
-        """), {"title": title, "desc": description})
+        """), {
+            "title": title, "desc": description,
+            "meta": _json.dumps(custom_meta),
+        })
         book_id = result.fetchone()[0]
         session.commit()
 
@@ -532,6 +553,14 @@ def write(
     expand:     bool = typer.Option(False, "--expand", "-e", help="Expand query with LLM synonyms before retrieval."),
     show_plan:  bool = typer.Option(False, "--plan", help="Show a sentence plan before drafting."),
     verify:     bool = typer.Option(False, "--verify", help="Run claim verification after drafting."),
+    target_words: int | None = typer.Option(
+        None, "--target-words",
+        help=(
+            "Target words for THIS section. Overrides the book-level "
+            "target_chapter_words setting. Default: chapter target / "
+            "number of sections in the chapter."
+        ),
+    ),
 ):
     """
     Draft a chapter section with cross-chapter coherence.
@@ -571,6 +600,7 @@ def write(
         year_from=year_from, year_to=year_to,
         model=model, expand=expand, show_plan=show_plan,
         verify=verify, save=not no_save,
+        target_words=target_words,
     )
     _consume_events(gen, console)
 
@@ -880,6 +910,15 @@ def autowrite(
                                      help="Write ALL chapters × ALL sections (the full autonomous pipeline)."),
     rebuild:    bool = typer.Option(False, "--rebuild",
                                      help="Rewrite sections that already have drafts (default: skip existing)."),
+    target_words: int | None = typer.Option(
+        None, "--target-words",
+        help=(
+            "Target words per section for this run. Overrides the "
+            "book-level target_chapter_words. Default: chapter target "
+            "/ number of sections in the chapter. Length becomes a "
+            "scoring dimension in the autowrite loop."
+        ),
+    ),
 ):
     """
     Autonomous write → review → revise convergence loop (inspired by Karpathy's autoresearch).
@@ -1014,6 +1053,7 @@ def autowrite(
             book_id=book_id, chapter_id=ch_id, section_type=sec,
             model=model, max_iter=max_iter, target_score=target_score,
             auto_expand=auto_expand,
+            target_words=target_words,
         )
 
         # Live dashboard state

@@ -1103,6 +1103,248 @@ def l3_embedder_loads() -> None:
     )
 
 
+# ── Phase 17 — length as a scoring dimension ────────────────────────────────
+
+
+def l1_phase17_prompts_length_target() -> None:
+    """Phase 17 — writer/planner/scorer prompts wire a length target.
+
+    The writer (`write_section_v2`) must produce a length instruction
+    block ONLY when a positive target_words is passed. The planner
+    (`tree_plan`) must derive a paragraph count from the target. The
+    scorer (`score_draft`) must enumerate `length` as a dimension with
+    a fixed 1.0 default so the orchestrator can inject a mechanical
+    actual/target score without fighting the LLM.
+    """
+    from sciknow.rag import prompts
+
+    # Writer with target — length instruction appears.
+    sys_w_with, _ = prompts.write_section_v2(
+        "results", "x", [],
+        book_plan=None, prior_summaries=None,
+        target_words=6000,
+    )
+    assert "Length target" in sys_w_with, (
+        "write_section_v2(target_words=6000) missing 'Length target' block"
+    )
+    assert "approximately 6000 words" in sys_w_with, (
+        "write_section_v2 doesn't embed the numeric target into the prompt"
+    )
+
+    # Writer without target — length block absent. The word "Length"
+    # shouldn't leak into the prompt when we haven't asked for one.
+    sys_w_without, _ = prompts.write_section_v2(
+        "results", "x", [],
+        book_plan=None, prior_summaries=None,
+        target_words=None,
+    )
+    assert "Length target" not in sys_w_without, (
+        "write_section_v2 should not inject a length block when target_words is None"
+    )
+
+    # Tree planner — paragraph count derived from target.
+    sys_t_with, _ = prompts.tree_plan(
+        "results", "x", [],
+        book_plan=None, prior_summaries=None,
+        target_words=6000,
+    )
+    assert "6000-word" in sys_t_with, (
+        "tree_plan doesn't surface the word target in its length block"
+    )
+    # Without target, falls back to the old 5-10 paragraphs heuristic.
+    sys_t_without, _ = prompts.tree_plan(
+        "results", "x", [],
+        book_plan=None, prior_summaries=None,
+        target_words=None,
+    )
+    assert "5-10 paragraphs" in sys_t_without, (
+        "tree_plan lost its default paragraph-count heuristic"
+    )
+
+    # Scorer — length as a 7th dimension with fixed default.
+    sys_s, _ = prompts.score_draft("results", "x", "draft", [])
+    assert "length" in sys_s, "SCORE_SYSTEM missing 'length' dimension"
+    assert "seven dimensions" in sys_s, (
+        "SCORE_SYSTEM intro still claims 'six dimensions'"
+    )
+    assert "actual_words / target_words" in sys_s, (
+        "SCORE_SYSTEM doesn't explain the mechanical length formula"
+    )
+
+
+def l1_phase17_book_ops_length_helpers() -> None:
+    """Phase 17 — book_ops exposes the length target helpers and threads
+    target_words through write/autowrite."""
+    import inspect
+    from sciknow.core import book_ops
+
+    # Public helpers exist.
+    assert hasattr(book_ops, "DEFAULT_TARGET_CHAPTER_WORDS"), (
+        "DEFAULT_TARGET_CHAPTER_WORDS missing — GUI + CLI would have no fallback"
+    )
+    assert book_ops.DEFAULT_TARGET_CHAPTER_WORDS > 0
+    assert hasattr(book_ops, "LENGTH_PRIORITY_THRESHOLD")
+    assert 0 < book_ops.LENGTH_PRIORITY_THRESHOLD < 1, (
+        "LENGTH_PRIORITY_THRESHOLD must be in (0, 1)"
+    )
+    assert hasattr(book_ops, "_section_target_words")
+    assert hasattr(book_ops, "_compute_length_score")
+    assert hasattr(book_ops, "_get_book_length_target")
+    assert hasattr(book_ops, "_get_chapter_num_sections")
+
+    # _compute_length_score behaves correctly.
+    assert book_ops._compute_length_score("word " * 3000, 6000) == 0.5
+    assert book_ops._compute_length_score("word " * 9000, 6000) == 1.0, (
+        "_compute_length_score should cap at 1.0 for over-target drafts"
+    )
+    assert book_ops._compute_length_score("anything", None) == 1.0, (
+        "_compute_length_score(target=None) must return 1.0 (length not evaluated)"
+    )
+    assert book_ops._compute_length_score("anything", 0) == 1.0
+
+    # _section_target_words divides sensibly and floors at 400.
+    assert book_ops._section_target_words(6000, 4) == 1500
+    assert book_ops._section_target_words(6000, 1) == 6000
+    assert book_ops._section_target_words(1000, 10) == 400, (
+        "_section_target_words must floor at 400 to keep sections book-grade"
+    )
+
+    # Signatures wire target_words through.
+    aw_sig = inspect.signature(book_ops.autowrite_section_stream)
+    assert "target_words" in aw_sig.parameters, (
+        "autowrite_section_stream missing target_words kwarg"
+    )
+    ws_sig = inspect.signature(book_ops.write_section_stream)
+    assert "target_words" in ws_sig.parameters, (
+        "write_section_stream missing target_words kwarg"
+    )
+
+
+def l1_phase17_autowrite_length_loop() -> None:
+    """Phase 17 — autowrite's scoring loop computes a length score,
+    injects it into the scores dict, and guards against oscillation.
+    """
+    import inspect
+    from sciknow.core import book_ops
+
+    src = inspect.getsource(book_ops.autowrite_section_stream)
+
+    # Length is computed and injected into scores.
+    assert "_compute_length_score(content" in src, (
+        "autowrite scoring loop doesn't compute a length score for the current draft"
+    )
+    assert 'scores["length"] = length_score' in src, (
+        "autowrite doesn't inject length_score into the scores dict"
+    )
+
+    # Anti-oscillation guard: length only wins when below threshold AND
+    # below all other dimensions.
+    assert "LENGTH_PRIORITY_THRESHOLD" in src, (
+        "autowrite doesn't reference LENGTH_PRIORITY_THRESHOLD — "
+        "length would dominate the loop even for mild misses"
+    )
+    assert "length_score < min_other" in src, (
+        "autowrite missing the 'length_score < min_other' anti-oscillation guard"
+    )
+
+    # When length wins, a targeted expand instruction is generated.
+    assert 'weakest_dimension"] = "length"' in src, (
+        "autowrite never sets weakest_dimension='length'"
+    )
+    assert "additional substantive" in src, (
+        "autowrite's length revision instruction doesn't demand substantive expansion"
+    )
+
+    # Re-scoring: length is computed on the revised draft too, so a
+    # successful expansion reflects in the KEEP comparison.
+    assert "_compute_length_score(revised" in src, (
+        "autowrite re-scoring doesn't recompute length on the revised draft — "
+        "length-driven revisions would be discarded even when successful"
+    )
+
+    # target_words persisted in the checkpoint metadata so `book draft
+    # scores` and the GUI can show it after the fact.
+    assert '"target_words": effective_target_words' in src, (
+        "autowrite doesn't persist target_words in checkpoint metadata"
+    )
+
+
+def l1_phase17_cli_length_flags() -> None:
+    """Phase 17 — CLI exposes --target-words on write/autowrite and
+    --target-chapter-words on create.
+    """
+    from typer.main import get_command
+    from sciknow.cli import book as book_cli
+
+    cmd = get_command(book_cli.app)
+    # Walk subcommands; each is a click.Command with .params list.
+    subs = {c.name: c for c in cmd.commands.values()}
+
+    def _param_names(cmd_obj):
+        return {p.name for p in getattr(cmd_obj, "params", [])}
+
+    assert "write" in subs, "book write command missing"
+    assert "target_words" in _param_names(subs["write"]), (
+        "`sciknow book write` missing --target-words flag"
+    )
+
+    assert "autowrite" in subs, "book autowrite command missing"
+    assert "target_words" in _param_names(subs["autowrite"]), (
+        "`sciknow book autowrite` missing --target-words flag"
+    )
+
+    assert "create" in subs, "book create command missing"
+    assert "target_chapter_words" in _param_names(subs["create"]), (
+        "`sciknow book create` missing --target-chapter-words flag"
+    )
+
+
+def l1_phase17_web_length_target() -> None:
+    """Phase 17 — web app exposes the length target: GET /api/book
+    returns target_chapter_words, PUT accepts it, api_write /
+    api_autowrite accept target_words, and the Plan modal has a
+    length preset field.
+    """
+    import inspect
+    from sciknow.web import app as web_app
+
+    # Endpoint signatures.
+    sig_put = inspect.signature(web_app.api_book_update)
+    assert "target_chapter_words" in sig_put.parameters, (
+        "PUT /api/book missing target_chapter_words form field"
+    )
+
+    sig_get = inspect.getsource(web_app.api_book)
+    assert "target_chapter_words" in sig_get, (
+        "GET /api/book doesn't return target_chapter_words"
+    )
+    assert "default_target_chapter_words" in sig_get, (
+        "GET /api/book doesn't expose the default for the GUI to display"
+    )
+
+    sig_write = inspect.signature(web_app.api_write)
+    assert "target_words" in sig_write.parameters, (
+        "POST /api/write missing target_words form field"
+    )
+
+    sig_auto = inspect.signature(web_app.api_autowrite)
+    assert "target_words" in sig_auto.parameters, (
+        "POST /api/autowrite missing target_words form field"
+    )
+
+    # HTML template has the length field + JS helpers.
+    src = inspect.getsource(web_app)
+    assert "plan-target-words-input" in src, (
+        "Plan modal missing target-words input — GUI users can't set length"
+    )
+    assert "setLengthPreset" in src, (
+        "Plan modal missing setLengthPreset() helper for preset buttons"
+    )
+    assert "Target chapter length" in src, (
+        "Plan modal missing 'Target chapter length' label"
+    )
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -1137,6 +1379,12 @@ L1_TESTS: list[Callable] = [
     l1_relevance_filter_imports_resolve,
     l1_web_rendered_js_is_valid,
     l1_research_doc_up_to_date,
+    # Phase 17 — length as a scoring dimension
+    l1_phase17_prompts_length_target,
+    l1_phase17_book_ops_length_helpers,
+    l1_phase17_autowrite_length_loop,
+    l1_phase17_cli_length_flags,
+    l1_phase17_web_length_target,
 ]
 
 L2_TESTS: list[Callable] = [

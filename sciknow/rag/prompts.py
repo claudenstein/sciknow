@@ -703,6 +703,7 @@ No cold-starts.
 the prior topic and the new one ("Beyond the ocean heat content discussed above, the \
 atmospheric branch …").
 
+{length_target_section}
 {discourse_relation_section}
 {book_plan_section}
 {prior_summaries_section}"""
@@ -726,6 +727,7 @@ def write_section_v2(
     book_plan: str | None = None,
     prior_summaries: list[dict] | None = None,
     paragraph_plan: list[dict] | None = None,
+    target_words: int | None = None,
 ) -> tuple[str, str]:
     plan_block = ""
     if book_plan:
@@ -768,8 +770,31 @@ def write_section_v2(
                 + "\n".join(relation_lines) + "\n"
             )
 
+    # Phase 17 — length target. The writer needs an explicit word-count
+    # anchor or it defaults to the model's idea of "appropriate" length
+    # (typically 400-800 words for a "section", which is way too short
+    # for a book chapter). With a target it produces drafts close to
+    # the requested length on the first try.
+    length_block = ""
+    if target_words and target_words > 0:
+        # Reasonable paragraph count derived from the target: ~150 words
+        # per paragraph for academic prose, with a floor of 4 and a
+        # ceiling of 20. Lets the model size paragraphs naturally.
+        n_paragraphs = max(4, min(20, target_words // 150))
+        length_block = (
+            f"\nLength target — IMPORTANT:\n"
+            f"- Aim for approximately {target_words} words.\n"
+            f"- Plan for around {n_paragraphs} paragraphs of substantive content.\n"
+            f"- The corpus has plenty of source material; cover the topic "
+            f"comprehensively at this length rather than producing a brief summary.\n"
+            f"- Pull genuinely new claims and quantitative detail from the "
+            f"provided passages — do not pad with filler phrases like \"it is "
+            f"worth noting\" or \"this raises the question\".\n"
+        )
+
     return (
         WRITE_V2_SYSTEM.format(
+            length_target_section=length_block,
             discourse_relation_section=discourse_block,
             book_plan_section=plan_block,
             prior_summaries_section=summaries_block,
@@ -1095,7 +1120,7 @@ Respond ONLY with valid JSON:
   ]
 }}
 
-Aim for 5-10 paragraphs. Each paragraph should make exactly one clear point."""
+{length_target_section}Each paragraph should make exactly one clear point."""
 
 TREE_PLAN_USER = """\
 Section type: {section_type}
@@ -1116,6 +1141,7 @@ def tree_plan(
     results: list,
     book_plan: str | None = None,
     prior_summaries: list[dict] | None = None,
+    target_words: int | None = None,
 ) -> tuple[str, str]:
     plan_ctx = ""
     if book_plan:
@@ -1124,7 +1150,17 @@ def tree_plan(
         lines = [f"Ch.{s.get('chapter_number','?')} [{s.get('section_type','text')}]: {s['summary']}"
                  for s in prior_summaries]
         plan_ctx += "\nPrior chapter summaries:\n" + "\n".join(lines) + "\n"
-    return TREE_PLAN_SYSTEM, TREE_PLAN_USER.format(
+    # Phase 17 — derive paragraph count from length target so the plan
+    # has the right shape for the writer to fill at the right size.
+    if target_words and target_words > 0:
+        n_paragraphs = max(4, min(20, target_words // 150))
+        length_block = (
+            f"Aim for around {n_paragraphs} paragraphs to fill an "
+            f"approximately {target_words}-word section. "
+        )
+    else:
+        length_block = "Aim for 5-10 paragraphs. "
+    return TREE_PLAN_SYSTEM.format(length_target_section=length_block), TREE_PLAN_USER.format(
         section_type=section_type or "text",
         topic=topic or "",
         context=format_context(results),
@@ -1158,7 +1194,7 @@ def sentence_plan(
 
 SCORE_SYSTEM = """\
 You are a scientific peer reviewer scoring a draft section. Evaluate on these \
-six dimensions, each scored 0.0–1.0:
+seven dimensions, each scored 0.0–1.0:
 
 1. **groundedness** — What fraction of claims cite a source [N] that actually supports them?
 2. **completeness** — Does the section cover all major aspects of the topic given the available evidence?
@@ -1170,11 +1206,17 @@ Penalise upgrades from *suggests* → *proves*, *associated with* → *causes*, 
 Penalise dropped scope qualifiers ("in the tropics", "on decadal timescales"). \
 Reward drafts that carry hedges and qualifiers verbatim from sources. This is the lexical-level \
 counterpart to groundedness.
-6. **overall** — Holistic quality score considering all dimensions.
+6. **length** — Is the draft close to its target word count? The orchestrator computes this \
+mechanically as min(1.0, actual_words / target_words) and injects it into your scores — \
+always return 1.0 here; the orchestrator will overwrite it. Do NOT penalise short drafts \
+under any other dimension: brevity is handled exclusively by this length score.
+7. **overall** — Holistic quality score considering all dimensions.
 
 Also identify the **weakest_dimension** (the one with the lowest score) and provide \
 a specific **revision_instruction** (1–2 sentences) that would most improve the draft \
-if applied as a targeted revision.
+if applied as a targeted revision. If length is the weakest dimension, the instruction \
+should tell the writer to expand with additional substantive paragraphs pulling new \
+claims and quantitative detail from the provided passages — not to pad with filler.
 
 If evidence is missing on a topic, include it in **missing_topics** (list of short phrases \
 that could be used as search queries to find relevant papers).
@@ -1186,6 +1228,7 @@ Respond ONLY with valid JSON:
   "coherence": 0.90,
   "citation_accuracy": 0.88,
   "hedging_fidelity": 0.78,
+  "length": 1.0,
   "overall": 0.83,
   "weakest_dimension": "hedging_fidelity",
   "revision_instruction": "Soften three overstated claims: change 'proves' to 'suggests' for [2], restore the 'in the North Atlantic' qualifier on the AMOC claim citing [4], and replace 'causes' with 'is associated with' for [7].",

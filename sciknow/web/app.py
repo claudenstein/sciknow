@@ -101,7 +101,7 @@ def _finish_job(job_id: str):
 def _get_book_data():
     with get_session() as session:
         book = session.execute(text("""
-            SELECT id::text, title, description, plan, status
+            SELECT id::text, title, description, plan, status, custom_metadata
             FROM books WHERE id::text = :bid
         """), {"bid": _book_id}).fetchone()
 
@@ -244,13 +244,24 @@ async def search_book(q: str = ""):
 @app.get("/api/book")
 async def api_book():
     book, chapters, drafts, gaps, comments = _get_book_data()
-    # book columns: id, title, description, plan, status
+    # book columns: id, title, description, plan, status, custom_metadata
+    meta = (book[5] if book and len(book) > 5 else None) or {}
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except Exception:
+            meta = {}
+    # Phase 17 — expose the length target so the GUI Plan modal can
+    # render it (and show the default when unset).
+    target_chapter_words = meta.get("target_chapter_words") if isinstance(meta, dict) else None
     return {
         "id": book[0] if book else "",
         "title": book[1] if book else "",
         "description": (book[2] or "") if book else "",
         "plan": (book[3] or "") if book else "",
         "status": (book[4] or "draft") if book else "draft",
+        "target_chapter_words": target_chapter_words,  # may be None → client shows default
+        "default_target_chapter_words": 6000,
         "chapters": len(chapters),
         "drafts": len(drafts),
         "gaps": len(gaps),
@@ -263,10 +274,18 @@ async def api_book_update(
     title: str = Form(None),
     description: str = Form(None),
     plan: str = Form(None),
+    target_chapter_words: int = Form(None),
 ):
-    """Update the book's title, description (short blurb), or plan
-    (the 200-500 word thesis/scope document used by the writer prompt).
-    All three are optional — only the fields you pass get updated."""
+    """Update the book's title, description (short blurb), plan
+    (the 200-500 word thesis/scope document used by the writer prompt),
+    or length target. All fields are optional — only the ones you pass
+    get updated.
+
+    Phase 17 — target_chapter_words lives in books.custom_metadata as
+    a JSONB key so we can add more book-level settings without a
+    schema change each time. Passing a zero or negative value clears
+    the setting (reverts to the default 6000).
+    """
     updates = []
     params: dict = {"bid": _book_id}
     if title is not None:
@@ -278,6 +297,25 @@ async def api_book_update(
     if plan is not None:
         updates.append("plan = :plan")
         params["plan"] = plan
+    if target_chapter_words is not None:
+        # Merge into JSONB so we preserve any other keys. We use the
+        # `||` concat operator + jsonb_build_object so the JSON shape
+        # is built server-side. For a clear/delete, we use `- key`.
+        # Note: use CAST(... AS int) instead of `:tcw::int` because
+        # SQLAlchemy's parameter parser confuses `::int` with a bound
+        # parameter name. Same gotcha as _save_draft() in book_ops.py.
+        if target_chapter_words > 0:
+            updates.append(
+                "custom_metadata = "
+                "COALESCE(custom_metadata, CAST('{}' AS jsonb)) || "
+                "jsonb_build_object('target_chapter_words', CAST(:tcw AS int))"
+            )
+            params["tcw"] = int(target_chapter_words)
+        else:
+            updates.append(
+                "custom_metadata = "
+                "COALESCE(custom_metadata, CAST('{}' AS jsonb)) - 'target_chapter_words'"
+            )
     if not updates:
         return JSONResponse({"ok": True})
 
@@ -909,8 +947,14 @@ async def api_write(
     chapter_id: str = Form(...),
     section_type: str = Form("introduction"),
     model: str = Form(None),
+    target_words: int = Form(None),
 ):
-    """Start a write operation, returns job_id for SSE streaming."""
+    """Start a write operation, returns job_id for SSE streaming.
+
+    Phase 17 — target_words is optional; when None, book_ops resolves
+    it from the book's custom_metadata.target_chapter_words (or the
+    default) divided by the chapter's section count.
+    """
     from sciknow.core.book_ops import write_section_stream
 
     job_id, queue = _create_job("write")
@@ -920,6 +964,7 @@ async def api_write(
         return write_section_stream(
             book_id=_book_id, chapter_id=chapter_id,
             section_type=section_type, model=model or None,
+            target_words=target_words if target_words and target_words > 0 else None,
         )
 
     thread = threading.Thread(
@@ -1070,7 +1115,12 @@ async def api_autowrite(
     target_score: float = Form(0.85),
     full: bool = Form(False),
     model: str = Form(None),
+    target_words: int = Form(None),
 ):
+    """Phase 17 — target_words is optional; when None, the effective
+    per-section target is resolved from the book's custom_metadata
+    (target_chapter_words / num_sections_in_chapter). When set, it
+    overrides the book-level value for this run only."""
     from sciknow.core.book_ops import autowrite_section_stream
 
     if full:
@@ -1087,6 +1137,7 @@ async def api_autowrite(
             book_id=_book_id, chapter_id=chapter_id,
             section_type=section_type, model=model or None,
             max_iter=max_iter, target_score=target_score,
+            target_words=target_words if target_words and target_words > 0 else None,
         )
 
     thread = threading.Thread(
@@ -2563,6 +2614,24 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
       <div class="field">
         <label>Plan / leitmotiv (the full thesis &amp; scope document)</label>
         <textarea id="plan-text-input" style="min-height:280px;font-family:var(--font-serif);font-size:14px;line-height:1.6;"></textarea>
+      </div>
+      <div class="field">
+        <label>Target chapter length &mdash; autowrite &amp; write aim for this many words per chapter</label>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <button type="button" class="btn-secondary" onclick="setLengthPreset(3000)">Short &middot; 3000</button>
+          <button type="button" class="btn-secondary" onclick="setLengthPreset(6000)">Standard &middot; 6000</button>
+          <button type="button" class="btn-secondary" onclick="setLengthPreset(10000)">Long &middot; 10000</button>
+          <input type="number" id="plan-target-words-input" min="0" step="500" placeholder="custom"
+                 style="width:120px;padding:6px 8px;font-size:13px;"
+                 title="Words per chapter. Leave empty for the default (6000). Zero clears the setting.">
+          <span id="plan-length-status" style="font-size:12px;color:var(--fg-muted);"></span>
+        </div>
+        <p style="font-size:11px;color:var(--fg-muted);margin-top:6px;">
+          Each section gets a proportional share: a 4-section chapter at 6000
+          words asks the writer for ~1500 words per section. In autowrite,
+          length becomes a 7th scoring dimension &mdash; drafts under ~70% of
+          target trigger a targeted expansion revision.
+        </p>
       </div>
       <div id="plan-status" style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;"></div>
       <div id="plan-stream-stats" class="stream-stats"></div>
@@ -4526,6 +4595,23 @@ async function openPlanModal() {{
     document.getElementById('plan-title-input').value = data.title || '';
     document.getElementById('plan-desc-input').value = data.description || '';
     document.getElementById('plan-text-input').value = data.plan || '';
+    // Phase 17 — populate the length target field. If the book has no
+    // custom target, we leave the input empty and show the default in
+    // the status string so the user understands what they'd inherit.
+    const tcw = data.target_chapter_words;
+    const dflt = data.default_target_chapter_words || 6000;
+    const tcwInput = document.getElementById('plan-target-words-input');
+    const lstatus = document.getElementById('plan-length-status');
+    if (tcwInput) {{
+      tcwInput.value = tcw ? String(tcw) : '';
+    }}
+    if (lstatus) {{
+      if (tcw) {{
+        lstatus.textContent = 'current: ' + tcw + ' words/chapter';
+      }} else {{
+        lstatus.textContent = 'using default: ' + dflt + ' words/chapter';
+      }}
+    }}
     if (!data.plan) {{
       document.getElementById('plan-status').innerHTML =
         '<span style="color:var(--warning);">No plan set yet.</span> Click <strong>Regenerate with LLM</strong> to draft one from your chapters and corpus, or write one manually below.';
@@ -4538,15 +4624,32 @@ async function openPlanModal() {{
   }}
 }}
 
+// Phase 17 — length preset buttons in the Plan modal. Setting a preset
+// just fills the input; the user still has to click Save to persist.
+function setLengthPreset(words) {{
+  const input = document.getElementById('plan-target-words-input');
+  if (input) input.value = String(words);
+  const lstatus = document.getElementById('plan-length-status');
+  if (lstatus) lstatus.textContent = 'preset: ' + words + ' — click Save to apply';
+}}
+
 async function savePlan() {{
   const title = document.getElementById('plan-title-input').value.trim();
   const desc = document.getElementById('plan-desc-input').value.trim();
   const plan = document.getElementById('plan-text-input').value.trim();
+  const tcwRaw = document.getElementById('plan-target-words-input').value.trim();
   document.getElementById('plan-status').textContent = 'Saving...';
   const fd = new FormData();
   fd.append('title', title);
   fd.append('description', desc);
   fd.append('plan', plan);
+  // Phase 17 — only send target_chapter_words if the user actually
+  // typed something. Empty input leaves the current value alone; a
+  // zero or negative value clears the setting (server-side).
+  if (tcwRaw !== '') {{
+    const n = parseInt(tcwRaw, 10);
+    if (!isNaN(n)) fd.append('target_chapter_words', String(n));
+  }}
   try {{
     const res = await fetch('/api/book', {{method: 'PUT', body: fd}});
     if (!res.ok) throw new Error('save failed');
@@ -4555,6 +4658,15 @@ async function savePlan() {{
       plan.split(/\\s+/).filter(Boolean).length + ' words. The new plan will be injected into all future writes.';
     // Refresh the page header to show the new title if it changed
     if (title) document.querySelector('.sidebar h2').textContent = title;
+    // Refresh length status line with the persisted value
+    if (tcwRaw !== '') {{
+      const n = parseInt(tcwRaw, 10);
+      const lstatus = document.getElementById('plan-length-status');
+      if (lstatus) {{
+        if (n > 0) lstatus.textContent = 'current: ' + n + ' words/chapter';
+        else lstatus.textContent = 'cleared — using default';
+      }}
+    }}
   }} catch (e) {{
     document.getElementById('plan-status').textContent = 'Save failed: ' + e.message;
   }}
