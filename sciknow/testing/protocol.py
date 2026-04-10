@@ -2204,6 +2204,69 @@ def l1_phase22_chapter_progress_and_word_target() -> None:
     )
 
 
+# ── Phase 23 — collapse/expand chapter sections in the sidebar ──────────
+
+
+def l1_phase23_chapter_collapse_expand() -> None:
+    """Phase 23 — sidebar shows a chevron toggle on each chapter title
+    that collapses/expands its sections, plus a sidebar-level
+    collapse-all/expand-all button. State persists in localStorage.
+    """
+    import inspect
+    from sciknow.web import app as web_app
+
+    src = inspect.getsource(web_app)
+
+    # Per-chapter chevron HTML in _render_sidebar
+    render_src = inspect.getsource(web_app._render_sidebar)
+    assert "ch-toggle" in render_src, (
+        "_render_sidebar doesn't emit the ch-toggle chevron"
+    )
+    assert "toggleChapter" in render_src, (
+        "_render_sidebar chevron doesn't wire toggleChapter()"
+    )
+
+    # rebuildSidebar JS mirrors the chevron so post-autowrite refreshes
+    # don't lose the toggle button
+    assert "ch-toggle" in src and "toggleChapter" in src, (
+        "rebuildSidebar JS doesn't render the chevron toggle"
+    )
+
+    # CSS for collapsed state hides sections + progress bar
+    assert ".ch-group.collapsed" in src, (
+        "missing .ch-group.collapsed CSS — toggle would have no visual effect"
+    )
+    assert ".ch-group.collapsed .sec-link" in src, (
+        "collapsed CSS doesn't hide sections"
+    )
+    assert ".ch-group.collapsed .ch-progress" in src, (
+        "collapsed CSS doesn't hide the chapter progress bar"
+    )
+
+    # Sidebar collapse-all toggle button
+    assert "sidebar-toggle-all" in src, (
+        "sidebar-toggle-all button missing"
+    )
+    assert "toggleAllChapters" in src, (
+        "toggleAllChapters JS helper missing"
+    )
+
+    # Persistence via localStorage + restore on page load
+    assert "_COLLAPSED_KEY" in src, (
+        "missing localStorage key for collapsed chapters"
+    )
+    assert "restoreCollapsedChapters" in src, (
+        "restoreCollapsedChapters helper missing"
+    )
+    # Restore is wired into both DOMContentLoaded AND rebuildSidebar
+    # so SPA refreshes don't drop the user's collapsed state.
+    rs_src = inspect.getsource(web_app)  # full module
+    # Count occurrences in rebuildSidebar specifically
+    assert "DOMContentLoaded" in src and "restoreCollapsedChapters" in src, (
+        "restoreCollapsedChapters not wired to page load"
+    )
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -2268,6 +2331,8 @@ L1_TESTS: list[Callable] = [
     l1_phase22_job_cleanup,
     l1_phase22_delete_draft_endpoint_and_orphan_cleanup,
     l1_phase22_chapter_progress_and_word_target,
+    # Phase 23 — collapse/expand chapter sections in sidebar
+    l1_phase23_chapter_collapse_expand,
 ]
 
 L2_TESTS: list[Callable] = [

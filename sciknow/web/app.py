@@ -2026,11 +2026,16 @@ def _render_sidebar(items, active_id):
         ch_num = int(ch["num"]) if ch["num"] is not None else 0
         ch_title = _esc(ch["title"] or "")
         out += f'<div class="ch-group" data-ch-id="{ch_id}">'
-        # Phase 14.2 — chapter title is now clickable to SELECT the chapter
-        # (sets currentChapterId so toolbar buttons like Write work even
-        # when there are no drafts yet).
+        # Phase 14.2 — chapter title is clickable to SELECT the chapter.
+        # Phase 23 — chevron at the start toggles collapse/expand of
+        # the chapter's sections (event.stopPropagation so it doesn't
+        # also fire selectChapter). Persistence + restore on page load
+        # is handled by JS via localStorage.
         out += (
             f'<div class="ch-title clickable" onclick="selectChapter(this.parentElement)">'
+            f'<button class="ch-toggle" '
+            f'onclick="event.stopPropagation();toggleChapter(this.closest(&quot;.ch-group&quot;))" '
+            f'title="Collapse or expand sections">\u25be</button>'
             f'Ch.{ch_num}: {ch_title}'
             f'<span class="ch-actions">'
             f'<button onclick="event.stopPropagation();deleteChapter(this.closest(&quot;.ch-group&quot;).dataset.chId)" title="Delete chapter">\u2717</button>'
@@ -2322,6 +2327,28 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .sec-link.sec-orphan:hover .sec-orphan-delete {{ color: var(--danger);
                                                   border-color: var(--danger); }}
 .sec-orphan-delete:hover {{ background: var(--danger); color: white; }}
+/* Phase 23 — collapse/expand chapter sections. Each chapter has a
+   chevron button at the start of its title; clicking toggles a
+   .collapsed class on the .ch-group, which hides the section list
+   AND the progress bar. State persists in localStorage. */
+.ch-toggle {{ background: transparent; border: none; color: var(--fg-muted);
+             font-size: 10px; cursor: pointer; padding: 0 4px;
+             margin-right: 2px; line-height: 1;
+             transition: transform 0.15s ease;
+             display: inline-block; width: 16px; }}
+.ch-toggle:hover {{ color: var(--accent); }}
+.ch-group.collapsed .ch-toggle {{ transform: rotate(-90deg); }}
+.ch-group.collapsed .sec-link,
+.ch-group.collapsed .ch-progress {{ display: none; }}
+/* Phase 23 — sidebar header collapse/expand-all button. */
+.sidebar-controls {{ padding: 6px var(--sp-4); border-bottom: 1px solid var(--border);
+                    display: flex; justify-content: flex-end; }}
+.sidebar-toggle-all {{ background: transparent; border: 1px solid var(--border);
+                      color: var(--fg-muted); padding: 3px 10px;
+                      border-radius: var(--r-sm); cursor: pointer;
+                      font-size: 11px; font-family: var(--font-sans);
+                      display: inline-flex; align-items: center; gap: 4px; }}
+.sidebar-toggle-all:hover {{ color: var(--accent); border-color: var(--accent); }}
 /* Phase 22 — chapter completion progress bar. Lives between the chapter
    title and its first section in the sidebar. Greyscale so it doesn't
    compete with the active section's accent color. */
@@ -2899,6 +2926,16 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
     </form>
   </div>
   {search_results_html}
+  <!-- Phase 23 — collapse / expand all chapters in the sidebar.
+       The icon flips from \u25be (down arrow, expanded) to \u25b8
+       (right arrow, collapsed) to mirror the per-chapter chevrons. -->
+  <div class="sidebar-controls">
+    <button class="sidebar-toggle-all" onclick="toggleAllChapters()"
+            title="Collapse or expand all chapter sections">
+      <span id="toggle-all-icon">\u25bd</span>
+      <span id="toggle-all-label">Collapse all</span>
+    </button>
+  </div>
   <div id="sidebar-sections">
     {sidebar_html}
   </div>
@@ -3719,7 +3756,12 @@ function rebuildSidebar(chapters, activeId) {{
   chapters.forEach(ch => {{
     const safeTitle = escapeHtml(ch.title || '');
     html += '<div class="ch-group" data-ch-id="' + ch.id + '">';
-    html += '<div class="ch-title clickable" onclick="selectChapter(this.parentElement)">Ch.' + ch.num + ': ' + safeTitle +
+    // Phase 23 — chevron toggle at the start of the chapter title.
+    html += '<div class="ch-title clickable" onclick="selectChapter(this.parentElement)">' +
+      '<button class="ch-toggle" ' +
+      'onclick="event.stopPropagation();toggleChapter(this.closest(\\'.ch-group\\'))" ' +
+      'title="Collapse or expand sections">\\u25be</button>' +
+      'Ch.' + ch.num + ': ' + safeTitle +
       '<span class="ch-actions"><button onclick="event.stopPropagation();deleteChapter(\\\'' + ch.id + '\\\')" title="Delete chapter">\\u2717</button></span></div>';
 
     // Phase 21 — render the FULL section template, not just sections
@@ -3809,6 +3851,8 @@ function rebuildSidebar(chapters, activeId) {{
     html += '</div>';
   }});
   container.innerHTML = html;
+  // Phase 23 — re-apply collapsed state after rebuilding the DOM.
+  restoreCollapsedChapters();
 }}
 
 // ── Action handlers ───────────────────────────────────────────────────────
@@ -5921,6 +5965,87 @@ function escapeHtml(s) {{
   return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
                   .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }}
+
+// Phase 23 — collapse/expand chapter sections. Per-chapter chevron
+// toggles a .collapsed class; state persists in localStorage so
+// refreshes don't reset the user's view. The collapse-all button at
+// the top of the sidebar flips every chapter at once.
+
+const _COLLAPSED_KEY = 'sciknow.collapsedChapters';
+
+function _getCollapsedChapterIds() {{
+  try {{
+    return JSON.parse(localStorage.getItem(_COLLAPSED_KEY) || '[]');
+  }} catch (e) {{
+    return [];
+  }}
+}}
+
+function _setCollapsedChapterIds(ids) {{
+  try {{
+    localStorage.setItem(_COLLAPSED_KEY, JSON.stringify(ids));
+  }} catch (e) {{ /* localStorage full or disabled — ignore */ }}
+}}
+
+function toggleChapter(group) {{
+  if (!group) return;
+  const chId = group.dataset.chId;
+  group.classList.toggle('collapsed');
+  const collapsed = _getCollapsedChapterIds();
+  const idx = collapsed.indexOf(chId);
+  if (group.classList.contains('collapsed')) {{
+    if (idx === -1) collapsed.push(chId);
+  }} else {{
+    if (idx !== -1) collapsed.splice(idx, 1);
+  }}
+  _setCollapsedChapterIds(collapsed);
+  _refreshToggleAllButton();
+}}
+
+function toggleAllChapters() {{
+  const groups = document.querySelectorAll('#sidebar-sections .ch-group');
+  // If ANY chapter is currently expanded, collapse all. Otherwise expand all.
+  let anyExpanded = false;
+  groups.forEach(g => {{ if (!g.classList.contains('collapsed')) anyExpanded = true; }});
+  const newCollapsed = [];
+  groups.forEach(g => {{
+    if (anyExpanded) {{
+      g.classList.add('collapsed');
+      newCollapsed.push(g.dataset.chId);
+    }} else {{
+      g.classList.remove('collapsed');
+    }}
+  }});
+  _setCollapsedChapterIds(newCollapsed);
+  _refreshToggleAllButton();
+}}
+
+function _refreshToggleAllButton() {{
+  const groups = document.querySelectorAll('#sidebar-sections .ch-group');
+  if (groups.length === 0) return;
+  let anyExpanded = false;
+  groups.forEach(g => {{ if (!g.classList.contains('collapsed')) anyExpanded = true; }});
+  const icon = document.getElementById('toggle-all-icon');
+  const label = document.getElementById('toggle-all-label');
+  if (icon) icon.textContent = anyExpanded ? '\\u25bd' : '\\u25b7';
+  if (label) label.textContent = anyExpanded ? 'Collapse all' : 'Expand all';
+}}
+
+// Restore the persisted collapsed state on page load + after every
+// rebuildSidebar. Idempotent — safe to call multiple times.
+function restoreCollapsedChapters() {{
+  const collapsed = _getCollapsedChapterIds();
+  collapsed.forEach(chId => {{
+    const group = document.querySelector(
+      '#sidebar-sections .ch-group[data-ch-id="' + chId + '"]'
+    );
+    if (group) group.classList.add('collapsed');
+  }});
+  _refreshToggleAllButton();
+}}
+
+// Run on initial page load (after the static sidebar HTML is parsed).
+document.addEventListener('DOMContentLoaded', restoreCollapsedChapters);
 
 // Phase 22 — word target progress bar in the subtitle. Shows
 // "actual/target" plus a coloured bar (warning under 70%, accent
