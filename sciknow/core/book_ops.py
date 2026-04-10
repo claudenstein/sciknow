@@ -355,6 +355,116 @@ def _stream_phase(system: str, user: str, phase: str, *, model=None, **kw):
     return "".join(tokens)
 
 
+# Phase 19 — incremental save during streaming. Without this, clicking
+# Stop during the writing/revising phase loses every token accumulated
+# since the last checkpoint (which can be hundreds of words). The fix:
+# every N tokens / T seconds, persist the in-flight buffer to the
+# draft row. The try/finally guarantees that even GeneratorExit
+# (raised when the consumer calls gen.close() on Stop) flushes the
+# latest buffer before unwinding.
+
+# Tunables: 150 tokens (~one paragraph at typical token granularity)
+# OR 5 seconds, whichever fires first. Picked to keep DB writes light
+# (≤12/min on slow streams, ~3/min on fast ones) while keeping the
+# worst-case data loss under one paragraph.
+_STREAM_SAVE_INTERVAL_TOKENS = 150
+_STREAM_SAVE_INTERVAL_SECONDS = 5.0
+
+
+def _stream_with_save(
+    system: str,
+    user: str,
+    phase: str,
+    *,
+    model=None,
+    save_callback,
+    save_interval_tokens: int = _STREAM_SAVE_INTERVAL_TOKENS,
+    save_interval_seconds: float = _STREAM_SAVE_INTERVAL_SECONDS,
+    **stream_kw,
+):
+    """Phase 19 — generator that streams an LLM call AND periodically
+    flushes the accumulated buffer via ``save_callback``.
+
+    The callback is invoked with a single positional arg: the full
+    accumulated text so far. It MUST be a regular function (not a
+    generator) — yields are forbidden inside the finally block of a
+    closing generator. Exceptions raised by the callback are logged
+    and swallowed so a single failed save doesn't kill the loop.
+
+    On consumer Stop:
+      1. The web layer calls gen.close() on the outer autowrite generator.
+      2. GeneratorExit propagates through `yield from` into THIS generator.
+      3. The finally block runs and calls save_callback one last time.
+      4. The user sees the latest in-flight content on next refresh.
+
+    Returns the full accumulated text via StopIteration.value, captured
+    by `yield from` in the caller — same pattern as _stream_phase.
+
+    Usage:
+        def _save(text):
+            _update_draft_content(draft_id, text, custom_metadata=meta)
+        content = yield from _stream_with_save(
+            sys, usr, "writing", model=model, save_callback=_save,
+        )
+    """
+    from sciknow.rag.llm import stream as llm_stream
+    tokens: list[str] = []
+    last_save_t = time.monotonic()
+    last_save_len = 0
+
+    def _flush() -> None:
+        if not tokens:
+            return
+        try:
+            save_callback("".join(tokens))
+        except Exception as exc:
+            logger.warning("Streaming save (%s) failed: %s", phase, exc)
+
+    try:
+        for tok in llm_stream(system, user, model=model, **stream_kw):
+            tokens.append(tok)
+            yield {"type": "token", "text": tok, "phase": phase}
+            now = time.monotonic()
+            if (
+                len(tokens) - last_save_len >= save_interval_tokens
+                or now - last_save_t >= save_interval_seconds
+            ):
+                _flush()
+                last_save_t = now
+                last_save_len = len(tokens)
+    finally:
+        # Always flush the latest buffer, even on GeneratorExit /
+        # exceptions. This is the critical bit: it's what makes Stop
+        # preserve work-in-progress instead of throwing it away.
+        _flush()
+    return "".join(tokens)
+
+
+def _next_draft_version(session, book_id: str, chapter_id: str, section_type: str) -> int:
+    """Phase 19 — return the version number a new draft should claim so
+    it'll be the latest visible to the GUI's max-version-per-section sort.
+
+    Without this, a new autowrite run starts at version=1 and gets
+    OUTRANKED in the sidebar by any previous completed draft (which
+    might be at version=4 after a few iterations). The user clicks
+    Stop, refreshes, and sees the OLD draft because the new one's
+    version=1 < old's version=4. They report it as "we reverted".
+
+    Returns max(existing version for this section) + 1, or 1 if none.
+    """
+    from sqlalchemy import text
+    if not chapter_id:
+        return 1
+    row = session.execute(text("""
+        SELECT COALESCE(MAX(version), 0)
+        FROM drafts
+        WHERE book_id::text = :bid
+          AND chapter_id::text = :cid
+          AND section_type = :st
+    """), {"bid": book_id, "cid": chapter_id, "st": section_type}).fetchone()
+    return int((row[0] if row else 0) or 0) + 1
+
+
 def _update_draft_content(draft_id, content, *, summary=None, custom_metadata=None,
                           review_feedback=None, version=None):
     """Phase 15.1 — incremental update of an existing draft.
@@ -676,29 +786,57 @@ def write_section_stream(
 
     yield {"type": "length_target", "target_words": effective_target_words}
 
-    content_tokens: list[str] = []
-    for tok in llm_stream(system, user, model=model):
-        content_tokens.append(tok)
-        yield {"type": "token", "text": tok}
-
-    content = "".join(content_tokens)
-
-    # Phase 15.1 — INCREMENTAL SAVE: persist the draft IMMEDIATELY after
-    # token collection, before verification. If the user clicks Stop
-    # during the verify step (which can take 30+ seconds for a 30B model),
-    # the draft is already in the DB. The verification feedback gets
-    # appended via _update_draft_content below.
+    # Phase 19 — INSERT placeholder draft BEFORE writing so periodic
+    # saves have a row to UPDATE. Without this, clicking Stop mid-write
+    # loses every token. New draft gets the next version above all
+    # existing drafts for this section so it always wins the GUI's
+    # latest-version sort (so refreshes during writing show the new
+    # in-flight content, not an older draft).
     draft_id = None
     if save:
         draft_title = f"Ch.{ch_num} {ch_title} — {section_type.capitalize()}"
         with get_session() as session:
+            draft_version = _next_draft_version(
+                session, book_id, ch_id, section_type
+            )
             draft_id = _save_draft(
                 session, title=draft_title, book_id=book_id, chapter_id=ch_id,
-                section_type=section_type, topic=topic, content=content,
+                section_type=section_type, topic=topic, content="",
                 sources=sources, model=model, summary=None,
+                version=draft_version,
+                custom_metadata={"checkpoint": "writing_in_progress"},
             )
+        yield {"type": "checkpoint", "draft_id": draft_id, "stage": "placeholder",
+               "word_count": 0}
+
+    # Phase 19 — incremental save during the writing stream. The
+    # callback closure captures draft_id; if save is False there's no
+    # callback and no checkpointing (single-shot in-memory write,
+    # used by callers that don't want a DB row).
+    if save and draft_id:
+        def _save_writing(text: str) -> None:
+            _update_draft_content(
+                draft_id, text,
+                custom_metadata={"checkpoint": "writing_in_progress"},
+            )
+        content = yield from _stream_with_save(
+            system, user, "writing",
+            model=model, save_callback=_save_writing,
+        )
+        # Final flush + checkpoint marker after the stream completes
+        # cleanly (Stop is handled by _stream_with_save's finally).
+        _update_draft_content(
+            draft_id, content,
+            custom_metadata={"checkpoint": "draft"},
+        )
         yield {"type": "checkpoint", "draft_id": draft_id, "stage": "draft",
                "word_count": len(content.split())}
+    else:
+        content_tokens: list[str] = []
+        for tok in llm_stream(system, user, model=model):
+            content_tokens.append(tok)
+            yield {"type": "token", "text": tok}
+        content = "".join(content_tokens)
 
     # Optional claim verification
     verify_feedback = None
@@ -1377,18 +1515,19 @@ def autowrite_section_stream(
 
     yield {"type": "progress", "stage": "writing",
            "detail": f"Generating initial draft (~{effective_target_words} words)..."}
-    tokens: list[str] = []
-    for tok in llm_stream(system, user, model=model):
-        tokens.append(tok)
-        yield {"type": "token", "text": tok, "phase": "writing"}
 
-    content = "".join(tokens)
-
-    # Phase 15.1 — INCREMENTAL SAVE checkpoint #0: persist the initial draft
-    # immediately, before any scoring/verification/revision. If the user
-    # clicks Stop now (or the connection drops), at least the initial draft
-    # is in the DB. The draft_id created here is reused by all subsequent
-    # checkpoint updates so we always have one row per autowrite run.
+    # Phase 19 — INSERT the placeholder draft BEFORE the writing loop.
+    # This is what makes Stop-during-writing recoverable: we have a
+    # row to UPDATE on every periodic save. Two safety properties:
+    #
+    #   1) version = max(existing for this section) + 1, so this new
+    #      row always wins the GUI's "latest version per section" sort.
+    #      Without this, an interrupted autowrite shows an OLDER draft
+    #      after refresh — exactly the regression the user reported as
+    #      "we reverted to an older version".
+    #   2) Created with empty content; the writing loop's _stream_with_save
+    #      will populate it incrementally and the try/finally guarantees
+    #      a final flush even on Stop / GeneratorExit.
     draft_title = f"Ch.{ch_num} {ch_title} — {section_type.capitalize()} (autowrite)"
     feature_versions = {
         "use_plan": use_plan,
@@ -1403,6 +1542,48 @@ def autowrite_section_stream(
         "phase12_raptor_retrieval": True,
     }
     history: list[dict] = []
+    placeholder_metadata = {
+        "score_history": history,
+        "feature_versions": feature_versions,
+        "final_overall": None,
+        "max_iter": max_iter,
+        "target_score": target_score,
+        "target_words": effective_target_words,
+        "checkpoint": "writing_in_progress",
+    }
+    with get_session() as session:
+        draft_version = _next_draft_version(
+            session, book_id, ch_id, section_type
+        )
+        draft_id = _save_draft(
+            session, title=draft_title, book_id=book_id, chapter_id=ch_id,
+            section_type=section_type, topic=topic, content="",
+            sources=sources, model=model, summary=None,
+            version=draft_version,
+            custom_metadata=placeholder_metadata,
+        )
+    yield {"type": "checkpoint", "draft_id": draft_id, "stage": "placeholder",
+           "word_count": 0}
+
+    # Phase 19 — incremental save during the writing stream. The
+    # callback closure references draft_id + placeholder_metadata so
+    # every flush goes to the same row. _stream_with_save flushes
+    # every ~150 tokens or 5 seconds AND in a finally block on Stop.
+    def _save_writing(text: str) -> None:
+        _update_draft_content(
+            draft_id, text,
+            custom_metadata={**placeholder_metadata, "checkpoint": "writing_in_progress"},
+        )
+
+    content = yield from _stream_with_save(
+        system, user, "writing",
+        model=model, save_callback=_save_writing,
+    )
+
+    # Promote the just-finished initial draft from "writing_in_progress"
+    # to "initial". Same draft row, just updated metadata + final flush
+    # to lock in the post-loop content (the streaming saves may have
+    # been racing the loop's last few tokens).
     initial_metadata = {
         "score_history": history,
         "feature_versions": feature_versions,
@@ -1412,14 +1593,10 @@ def autowrite_section_stream(
         "target_words": effective_target_words,
         "checkpoint": "initial",
     }
-    with get_session() as session:
-        draft_id = _save_draft(
-            session, title=draft_title, book_id=book_id, chapter_id=ch_id,
-            section_type=section_type, topic=topic, content=content,
-            sources=sources, model=model, summary=None,
-            version=1,
-            custom_metadata=initial_metadata,
-        )
+    _update_draft_content(
+        draft_id, content,
+        custom_metadata=initial_metadata,
+    )
     yield {"type": "checkpoint", "draft_id": draft_id, "stage": "initial",
            "word_count": len(content.split())}
 
@@ -1702,12 +1879,38 @@ def autowrite_section_stream(
                "detail": f"Revising (targeting {weakest})..."}
 
         sys_r, usr_r = rag_prompts.revise(content, instruction, results)
-        rev_tokens: list[str] = []
-        for tok in llm_stream(sys_r, usr_r, model=model):
-            rev_tokens.append(tok)
-            yield {"type": "token", "text": tok, "phase": "revising"}
 
-        revised = "".join(rev_tokens)
+        # Phase 19 — incremental save during the revising stream. We
+        # save the in-flight revision tokens to drafts.content directly,
+        # overwriting the last KEEP state in this row. Rationale:
+        # the user's reported pain is "I lost work when I clicked Stop"
+        # — they want to SEE the in-progress revision after refresh,
+        # not the previous (older) KEEP state. The previous KEEP is
+        # still recoverable from the snapshots table if needed.
+        #
+        # If this revision later turns out to be DISCARD, the next
+        # iteration's logic restores `content` to the prior value via
+        # _update_draft_content, so the discard path is unaffected.
+        revising_metadata = {
+            "score_history": history,
+            "feature_versions": feature_versions,
+            "final_overall": overall,
+            "max_iter": max_iter,
+            "target_score": target_score,
+            "target_words": effective_target_words,
+            "checkpoint": f"iteration_{iteration + 1}_revising",
+        }
+
+        def _save_revising(text: str) -> None:
+            _update_draft_content(
+                draft_id, text,
+                custom_metadata=revising_metadata,
+            )
+
+        revised = yield from _stream_with_save(
+            sys_r, usr_r, "revising",
+            model=model, save_callback=_save_revising,
+        )
 
         # Re-score (Fix 3: same results) — Phase 15.3 streamed
         yield {"type": "progress", "stage": "scoring", "detail": "Re-scoring revision..."}
@@ -1762,10 +1965,16 @@ def autowrite_section_stream(
                 "target_words": effective_target_words,
                 "checkpoint": f"iteration_{iteration + 1}_keep",
             }
+            # Phase 19 — version is bumped RELATIVE to the starting
+            # draft_version (set by _next_draft_version), not from 1.
+            # Otherwise a new autowrite that started above an existing
+            # draft would roll back to a lower version on first KEEP
+            # and lose the latest-version-per-section sort, putting
+            # the OLDER draft back on top.
             _update_draft_content(
                 draft_id, content,
                 custom_metadata=checkpoint_metadata,
-                version=iteration + 2,
+                version=draft_version + iteration + 1,
             )
             yield {"type": "checkpoint", "draft_id": draft_id,
                    "stage": f"iteration_{iteration + 1}_keep",
@@ -1806,7 +2015,10 @@ def autowrite_section_stream(
         draft_id, content,
         summary=summary,
         custom_metadata=persisted_metadata,
-        version=len(history) + 1,
+        # Phase 19 — same rationale as the per-iteration version bump:
+        # bump relative to the starting draft_version so a finalized
+        # draft never lands below an older draft for the same section.
+        version=draft_version + len(history),
     )
 
     yield {

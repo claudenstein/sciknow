@@ -491,10 +491,13 @@ def l1_autowrite_streams_all_phases() -> None:
     assert "yield from _cove_verify_streaming(" in aw_src, \
         "autowrite doesn't use streaming CoVe — CoVe phase will be silent"
 
-    # Token events should carry a phase field
-    assert '"phase": "writing"' in aw_src, \
+    # Token events should carry a phase field. After Phase 19, the
+    # writing/revising loops were moved into _stream_with_save which
+    # tags tokens via its `phase` positional arg, so we accept either
+    # the legacy inline-yield pattern OR the new _stream_with_save call.
+    assert '"writing"' in aw_src or '"phase": "writing"' in aw_src, \
         "writing tokens should be tagged with phase"
-    assert '"phase": "revising"' in aw_src, \
+    assert '"revising"' in aw_src or '"phase": "revising"' in aw_src, \
         "revising tokens should be tagged with phase"
 
 
@@ -1585,6 +1588,199 @@ def l1_phase18_web_endpoints_and_modal() -> None:
     )
 
 
+# ── Phase 19 — incremental save during streaming ───────────────────────────
+
+
+def l1_phase19_helpers_exist() -> None:
+    """Phase 19 — _stream_with_save and _next_draft_version helpers exist
+    with the expected shapes.
+    """
+    import inspect
+    from sciknow.core import book_ops
+
+    assert hasattr(book_ops, "_stream_with_save"), (
+        "_stream_with_save helper missing — incremental save during writing/revising "
+        "won't work, Stop will lose work as before"
+    )
+    assert hasattr(book_ops, "_next_draft_version"), (
+        "_next_draft_version helper missing — new autowrite drafts won't outrank "
+        "older completed drafts, refresh after Stop will show the OLD draft"
+    )
+
+    # _stream_with_save signature: takes save_callback as kwarg, accepts phase
+    sig = inspect.signature(book_ops._stream_with_save)
+    assert "save_callback" in sig.parameters, (
+        "_stream_with_save missing save_callback parameter"
+    )
+    # Save interval tunables exposed at module level so a future tuning
+    # change can hit a single point.
+    assert hasattr(book_ops, "_STREAM_SAVE_INTERVAL_TOKENS")
+    assert hasattr(book_ops, "_STREAM_SAVE_INTERVAL_SECONDS")
+
+
+def l1_phase19_stream_with_save_flushes_on_close() -> None:
+    """Phase 19 — _stream_with_save's try/finally MUST call save_callback
+    one last time when the generator is closed, even if no save was due
+    yet. This is what makes Stop preserve work-in-progress.
+    """
+    import sciknow.core.book_ops as book_ops
+
+    # Fake stream of 5 tokens. Token-interval and time-interval are set
+    # high so the only save that fires is the one in the finally block.
+    fake_tokens = ["alpha ", "beta ", "gamma ", "delta ", "epsilon"]
+
+    def fake_stream(*a, **kw):
+        for t in fake_tokens:
+            yield t
+
+    saved: list[str] = []
+
+    def cb(text: str) -> None:
+        saved.append(text)
+
+    # Monkey-patch llm.stream to return our fake (only inside _stream_with_save).
+    import sciknow.rag.llm as llm_mod
+    real_stream = llm_mod.stream
+    llm_mod.stream = fake_stream
+    try:
+        gen = book_ops._stream_with_save(
+            "sys", "usr", "test_phase",
+            save_callback=cb,
+            save_interval_tokens=10000,  # never trigger periodic save
+            save_interval_seconds=10000.0,
+        )
+        # Pull 2 events, then close — simulating a Stop after 2 tokens.
+        events = []
+        events.append(next(gen))
+        events.append(next(gen))
+        gen.close()  # raises GeneratorExit at the current yield point
+    finally:
+        llm_mod.stream = real_stream
+
+    # The 2 token events should have been yielded
+    assert len(events) == 2, f"expected 2 token events, got {len(events)}"
+    assert events[0]["type"] == "token"
+    assert events[0]["phase"] == "test_phase"
+
+    # Critically: the save_callback should have been called by the
+    # finally block with the buffer accumulated so far.
+    assert len(saved) >= 1, (
+        "_stream_with_save didn't flush buffer on GeneratorExit — "
+        "Stop will lose all in-flight tokens"
+    )
+    assert "alpha" in saved[-1] and "beta" in saved[-1], (
+        f"flushed text doesn't contain expected tokens: {saved[-1]!r}"
+    )
+
+
+def l1_phase19_periodic_save_fires() -> None:
+    """Phase 19 — _stream_with_save fires save_callback periodically as
+    tokens accumulate, not just at the end. With 6 fake tokens and a
+    save_interval_tokens of 2, we expect ~3 mid-stream saves PLUS the
+    final flush.
+    """
+    import sciknow.core.book_ops as book_ops
+    import sciknow.rag.llm as llm_mod
+
+    fake = ["t1 ", "t2 ", "t3 ", "t4 ", "t5 ", "t6 "]
+
+    def fake_stream(*a, **kw):
+        for t in fake:
+            yield t
+
+    saved: list[str] = []
+    def cb(text: str) -> None:
+        saved.append(text)
+
+    real = llm_mod.stream
+    llm_mod.stream = fake_stream
+    try:
+        gen = book_ops._stream_with_save(
+            "sys", "usr", "test",
+            save_callback=cb,
+            save_interval_tokens=2,
+            save_interval_seconds=10000.0,
+        )
+        # Drain the generator naturally (no Stop)
+        events = list(gen)
+    finally:
+        llm_mod.stream = real
+
+    assert len(events) == 6, f"expected 6 token events, got {len(events)}"
+    # Periodic saves at tokens 2, 4, 6 + final flush. Final flush may
+    # be a no-op duplicate of the last periodic save (same buffer), so
+    # we accept >= 3 distinct save calls.
+    assert len(saved) >= 3, (
+        f"expected >= 3 periodic saves with interval=2 over 6 tokens, "
+        f"got {len(saved)}"
+    )
+    # Last save must contain the full buffer
+    assert "t1" in saved[-1] and "t6" in saved[-1], (
+        f"last save missing expected tokens: {saved[-1]!r}"
+    )
+
+
+def l1_phase19_autowrite_uses_streaming_save() -> None:
+    """Phase 19 — autowrite_section_stream + write_section_stream wire
+    their writing/revising loops through _stream_with_save, AND insert
+    the placeholder draft BEFORE the writing loop (so periodic saves
+    have a row to UPDATE).
+    """
+    import inspect
+    from sciknow.core import book_ops
+
+    aw_src = inspect.getsource(book_ops.autowrite_section_stream)
+    ws_src = inspect.getsource(book_ops.write_section_stream)
+
+    # autowrite uses _stream_with_save for both writing and revising
+    assert aw_src.count("_stream_with_save(") >= 2, (
+        f"autowrite should use _stream_with_save twice (writing + revising), "
+        f"found {aw_src.count('_stream_with_save(')}"
+    )
+
+    # autowrite uses _next_draft_version so the placeholder outranks
+    # older drafts in the latest-version sort
+    assert "_next_draft_version(" in aw_src, (
+        "autowrite doesn't bump version above existing drafts — refresh "
+        "during writing will show an OLDER draft (the user's reported regression)"
+    )
+    # And uses draft_version (the local from _next_draft_version) when
+    # bumping on KEEP / final, not the bare iteration counter
+    assert "draft_version + iteration" in aw_src, (
+        "autowrite KEEP path doesn't bump version relative to the starting "
+        "draft_version — could roll back below an older draft"
+    )
+
+    # write_section_stream uses _stream_with_save + _next_draft_version
+    assert "_stream_with_save(" in ws_src, (
+        "write_section_stream's writing loop doesn't use _stream_with_save"
+    )
+    assert "_next_draft_version(" in ws_src, (
+        "write_section_stream doesn't bump version — same regression as autowrite"
+    )
+
+    # Both functions should have the placeholder INSERT before the
+    # writing call (i.e. _save_draft is called before _stream_with_save).
+    # Check by line position in the source.
+    aw_lines = aw_src.splitlines()
+    save_draft_line = next(
+        (i for i, ln in enumerate(aw_lines) if "_save_draft(" in ln),
+        -1,
+    )
+    sws_line = next(
+        (i for i, ln in enumerate(aw_lines) if "_stream_with_save(" in ln),
+        -1,
+    )
+    assert save_draft_line >= 0 and sws_line >= 0, (
+        "couldn't locate _save_draft and _stream_with_save in autowrite source"
+    )
+    assert save_draft_line < sws_line, (
+        "autowrite's _save_draft (placeholder INSERT) must come BEFORE the "
+        "first _stream_with_save call, otherwise periodic writing-saves have "
+        "no row to UPDATE and Stop loses everything"
+    )
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -1630,6 +1826,11 @@ L1_TESTS: list[Callable] = [
     l1_phase18_chapter_sections_normalize,
     l1_phase18_section_plan_threaded,
     l1_phase18_web_endpoints_and_modal,
+    # Phase 19 — incremental save during streaming
+    l1_phase19_helpers_exist,
+    l1_phase19_stream_with_save_flushes_on_close,
+    l1_phase19_periodic_save_fires,
+    l1_phase19_autowrite_uses_streaming_save,
 ]
 
 L2_TESTS: list[Callable] = [
