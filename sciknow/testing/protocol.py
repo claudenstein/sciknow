@@ -479,7 +479,7 @@ def l1_autowrite_streams_all_phases() -> None:
     assert hasattr(book_ops, "_cove_verify_streaming"), \
         "_cove_verify_streaming helper missing"
 
-    aw_src = inspect.getsource(book_ops.autowrite_section_stream)
+    aw_src = (inspect.getsource(book_ops.autowrite_section_stream) + "\n" + inspect.getsource(book_ops._autowrite_section_body))
     # Score / verify / planning / rescore call sites use yield from _stream_phase
     assert "yield from _stream_phase(" in aw_src, \
         "autowrite doesn't use yield from _stream_phase — non-writing phases will be silent"
@@ -711,7 +711,7 @@ def l1_autowrite_incremental_save() -> None:
         "_update_draft_content helper missing"
 
     # autowrite has incremental save
-    aw_src = inspect.getsource(book_ops.autowrite_section_stream)
+    aw_src = (inspect.getsource(book_ops.autowrite_section_stream) + "\n" + inspect.getsource(book_ops._autowrite_section_body))
     assert "_save_draft" in aw_src, "autowrite never saves anything"
     assert "_update_draft_content" in aw_src, \
         "autowrite doesn't update existing draft (only one save = no incremental)"
@@ -784,7 +784,7 @@ def l1_writer_uses_flagship_model() -> None:
         )
 
     # And the model_info events should be emitted before writing.
-    aw_src = inspect.getsource(book_ops.autowrite_section_stream)
+    aw_src = (inspect.getsource(book_ops.autowrite_section_stream) + "\n" + inspect.getsource(book_ops._autowrite_section_body))
     assert '"model_info"' in aw_src or "'model_info'" in aw_src, \
         "autowrite_section_stream missing model_info event for transparency"
 
@@ -1230,7 +1230,7 @@ def l1_phase17_autowrite_length_loop() -> None:
     import inspect
     from sciknow.core import book_ops
 
-    src = inspect.getsource(book_ops.autowrite_section_stream)
+    src = (inspect.getsource(book_ops.autowrite_section_stream) + "\n" + inspect.getsource(book_ops._autowrite_section_body))
 
     # Length is computed and injected into scores.
     assert "_compute_length_score(content" in src, (
@@ -1525,7 +1525,7 @@ def l1_phase18_section_plan_threaded() -> None:
 
     # write_section_stream + autowrite_section_stream pass section_plan
     # through to write_section_v2 — verified by source inspection.
-    aw_src = inspect.getsource(book_ops.autowrite_section_stream)
+    aw_src = (inspect.getsource(book_ops.autowrite_section_stream) + "\n" + inspect.getsource(book_ops._autowrite_section_body))
     assert "section_plan=section_plan" in aw_src, (
         "autowrite_section_stream doesn't pass section_plan to write_section_v2/tree_plan"
     )
@@ -1729,7 +1729,7 @@ def l1_phase19_autowrite_uses_streaming_save() -> None:
     import inspect
     from sciknow.core import book_ops
 
-    aw_src = inspect.getsource(book_ops.autowrite_section_stream)
+    aw_src = (inspect.getsource(book_ops.autowrite_section_stream) + "\n" + inspect.getsource(book_ops._autowrite_section_body))
     ws_src = inspect.getsource(book_ops.write_section_stream)
 
     # autowrite uses _stream_with_save for both writing and revising
@@ -2267,6 +2267,126 @@ def l1_phase23_chapter_collapse_expand() -> None:
     )
 
 
+# ── Phase 24 — autowrite progress log with heartbeat ──────────────────
+
+
+def l1_phase24_autowrite_logger() -> None:
+    """Phase 24 — _AutowriteLogger writes JSONL to disk with stage
+    transitions, token counts, and a side-thread heartbeat.
+
+    Drives the logger end-to-end with a fast (0.3s) heartbeat
+    interval so the test completes quickly while still proving the
+    heartbeat thread fires and records its state. Verifies:
+      - per-run JSONL file is created in the configured log_dir
+      - latest.jsonl symlink points at the run file
+      - stage() emits stage_start + stage_end with the right keys
+      - token() increments stage and total counters
+      - heartbeat thread writes a heartbeat entry with the current
+        stage and elapsed time
+      - close() is idempotent and stops the heartbeat thread
+    """
+    import json as _json
+    import tempfile
+    import time as _time
+    from pathlib import Path as _Path
+    from sciknow.core import book_ops
+
+    assert hasattr(book_ops, "_AutowriteLogger"), (
+        "_AutowriteLogger class missing — autowrite has no progress log"
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        log_dir = _Path(tmpdir) / "autowrite"
+        log = book_ops._AutowriteLogger(
+            "book-1", "ch-1", "overview",
+            heartbeat_seconds=0.3,
+            log_dir=log_dir,
+        )
+        try:
+            assert log.path.exists(), "log file not created on init"
+            assert log.path.parent == log_dir
+            # latest.jsonl symlink (best-effort — only assert if symlinks
+            # work on this filesystem)
+            latest = log_dir / "latest.jsonl"
+            if latest.is_symlink():
+                # Resolve the symlink target — should match our run path
+                # by basename (we use a relative target).
+                assert latest.exists()
+
+            log.stage("retrieval")
+            log.token()
+            log.token()
+            log.token()
+            assert log.state["total_tokens"] == 3
+            assert log.state["stage_tokens"] == 3
+            assert log.state["stage"] == "retrieval"
+
+            log.stage("writing", iteration=1)
+            assert log.state["stage"] == "writing"
+            assert log.state["stage_tokens"] == 0  # reset on stage transition
+            assert log.state["total_tokens"] == 3  # total carries forward
+
+            log.token()
+            log.token()
+            assert log.state["total_tokens"] == 5
+            assert log.state["stage_tokens"] == 2
+
+            # Wait long enough for at least one heartbeat to fire
+            _time.sleep(0.7)
+
+            log.event("verdict", action="KEEP", iteration=1)
+        finally:
+            log.close()
+            # close() should be idempotent
+            log.close()
+
+        # Read the file back and verify the entry kinds
+        lines = log.path.read_text(encoding="utf-8").strip().splitlines()
+        assert lines, "log file is empty after close"
+        entries = [_json.loads(line) for line in lines]
+        kinds = [e.get("kind") for e in entries]
+        assert "start" in kinds, "missing 'start' entry"
+        assert "stage_start" in kinds, "missing 'stage_start' entry"
+        assert "stage_end" in kinds, "missing 'stage_end' entry (stage transition)"
+        assert "heartbeat" in kinds, (
+            "missing 'heartbeat' entry — side thread didn't write"
+        )
+        assert "verdict" in kinds, "missing custom event entry"
+        assert "end" in kinds, "missing 'end' entry on close()"
+
+        # Verify the heartbeat entry has the expected shape
+        hb = next(e for e in entries if e.get("kind") == "heartbeat")
+        for key in ("stage", "stage_elapsed_s", "stage_tokens",
+                    "total_tokens", "tokens_per_sec"):
+            assert key in hb, f"heartbeat entry missing {key}: {hb}"
+
+    # Verify the public function autowrite_section_stream wires the
+    # logger in via the wrapper pattern (try/finally close).
+    import inspect
+    src = inspect.getsource(book_ops.autowrite_section_stream)
+    assert "_AutowriteLogger" in src, (
+        "autowrite_section_stream doesn't open the progress log"
+    )
+    assert "log.close()" in src, (
+        "autowrite_section_stream doesn't close the log in finally"
+    )
+    assert "_autowrite_section_body" in src, (
+        "autowrite_section_stream wrapper doesn't delegate to the body"
+    )
+
+    # And that the body calls log.stage / log.token at the right places
+    body_src = inspect.getsource(book_ops._autowrite_section_body)
+    for stage in ("loading_book", "retrieval", "writing", "scoring",
+                  "verifying", "revising"):
+        assert f'log.stage("{stage}"' in body_src, (
+            f"_autowrite_section_body doesn't log.stage({stage!r})"
+        )
+    assert "token_observer=log.token" in body_src, (
+        "_autowrite_section_body doesn't pass log.token as token_observer "
+        "to the streaming helpers — heartbeat won't see token throughput"
+    )
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -2333,6 +2453,8 @@ L1_TESTS: list[Callable] = [
     l1_phase22_chapter_progress_and_word_target,
     # Phase 23 — collapse/expand chapter sections in sidebar
     l1_phase23_chapter_collapse_expand,
+    # Phase 24 — autowrite progress log with heartbeat
+    l1_phase24_autowrite_logger,
 ]
 
 L2_TESTS: list[Callable] = [

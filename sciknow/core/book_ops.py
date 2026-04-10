@@ -18,9 +18,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import threading
 import time
 from collections.abc import Iterator
+from datetime import datetime
+from pathlib import Path
 
 logger = logging.getLogger("sciknow.core.book_ops")
 
@@ -328,7 +332,8 @@ def _release_gpu_models():
     release_reranker()
 
 
-def _stream_phase(system: str, user: str, phase: str, *, model=None, **kw):
+def _stream_phase(system: str, user: str, phase: str, *, model=None,
+                  token_observer=None, **kw):
     """Phase 15.3 — generator that streams an LLM call as token events.
 
     Wraps llm.stream() so each token becomes
@@ -342,6 +347,12 @@ def _stream_phase(system: str, user: str, phase: str, *, model=None, **kw):
     events even though the LLM is working hard — the user sees a stuck
     "0 tok / 0 tok/s" while the timer counts up.
 
+    Phase 24 — accepts an optional ``token_observer`` callback (e.g.
+    ``log.token``) so the autowrite progress logger can record real-
+    time token throughput per phase. Cheap (one function call per
+    token); silently swallows callback errors so a busted observer
+    can't kill the stream.
+
     Usage in a generator (re-yields events to consumer):
         raw = yield from _stream_phase(sys, usr, "scoring",
                                        model=model, num_ctx=16384)
@@ -351,6 +362,11 @@ def _stream_phase(system: str, user: str, phase: str, *, model=None, **kw):
     tokens: list[str] = []
     for tok in llm_stream(system, user, model=model, **kw):
         tokens.append(tok)
+        if token_observer is not None:
+            try:
+                token_observer()
+            except Exception:
+                pass
         yield {"type": "token", "text": tok, "phase": phase}
     return "".join(tokens)
 
@@ -380,6 +396,7 @@ def _stream_with_save(
     save_callback,
     save_interval_tokens: int = _STREAM_SAVE_INTERVAL_TOKENS,
     save_interval_seconds: float = _STREAM_SAVE_INTERVAL_SECONDS,
+    token_observer=None,
     **stream_kw,
 ):
     """Phase 19 — generator that streams an LLM call AND periodically
@@ -423,6 +440,14 @@ def _stream_with_save(
     try:
         for tok in llm_stream(system, user, model=model, **stream_kw):
             tokens.append(tok)
+            # Phase 24 — notify the autowrite logger so its heartbeat
+            # can show real-time tokens-per-sec. Cheap (lock + 2 adds)
+            # and only fires when an observer is wired in.
+            if token_observer is not None:
+                try:
+                    token_observer()
+                except Exception:
+                    pass
             yield {"type": "token", "text": tok, "phase": phase}
             now = time.monotonic()
             if (
@@ -463,6 +488,273 @@ def _next_draft_version(session, book_id: str, chapter_id: str, section_type: st
           AND section_type = :st
     """), {"bid": book_id, "cid": chapter_id, "st": section_type}).fetchone()
     return int((row[0] if row else 0) or 0) + 1
+
+
+# ── Phase 24 — autowrite progress log ───────────────────────────────────────
+#
+# Motivation: a user reported autowrite running 35 minutes with token
+# count stuck at 0 and the GPU mostly idle. With only the SSE event
+# stream as visibility, there's no way to tell whether the generator
+# is stuck in retrieval, waiting on Ollama to load a model, or
+# deadlocked between stages — the GUI just shows "writing..." with
+# no progression.
+#
+# This logger writes a JSONL file under data/autowrite/ that captures
+# every stage transition AND a periodic heartbeat (every 30s) even
+# when no LLM tokens are flowing. Tail it with:
+#
+#     tail -f data/autowrite/latest.jsonl | jq
+#
+# The heartbeat fires from a side daemon thread, so it's independent
+# of the main generator's yield cadence — even if the generator is
+# blocked inside an LLM call for minutes, the heartbeat still records
+# "stage=writing, stage_elapsed=120s, tokens=0" so you can spot the
+# stall in real time.
+
+# Heartbeat cadence in seconds. 30s is short enough to spot a stall
+# within ~1 minute, long enough that the file doesn't bloat on a
+# multi-hour run (~120 lines/hour).
+_AUTOWRITE_LOG_HEARTBEAT_SECONDS = 30.0
+
+
+def _slugify_for_filename(s: str) -> str:
+    """Make a string safe for a filename. Lowercase, alphanum + dashes."""
+    s = (s or "").lower().strip()
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    return s.strip("-")[:40] or "section"
+
+
+class _AutowriteLogger:
+    """Thread-safe append-only JSONL logger for autowrite runs.
+
+    Writes to ``{settings.data_dir}/autowrite/{run_id}.jsonl`` and
+    maintains a ``latest.jsonl`` symlink in the same directory so the
+    user can ``tail -f`` without knowing the exact run id.
+
+    A daemon heartbeat thread writes a {"kind": "heartbeat", ...}
+    entry every ``_AUTOWRITE_LOG_HEARTBEAT_SECONDS`` capturing the
+    current stage, stage elapsed time, total tokens, and tokens-per-
+    second — even when no LLM activity is happening (so a stall in
+    retrieval or model load is visible).
+
+    Use as a context manager:
+        with _AutowriteLogger(book_id, chapter_id, section_type) as log:
+            log.stage("retrieval")
+            ...
+            log.stage("writing")
+            ...
+
+    Or manually with try/finally:
+        log = _AutowriteLogger(...)
+        try:
+            log.stage("setup")
+            ...
+        finally:
+            log.close()
+    """
+
+    def __init__(
+        self,
+        book_id: str,
+        chapter_id: str,
+        section_type: str,
+        *,
+        heartbeat_seconds: float = _AUTOWRITE_LOG_HEARTBEAT_SECONDS,
+        log_dir: Path | None = None,
+    ) -> None:
+        if log_dir is None:
+            from sciknow.config import settings
+            log_dir = settings.data_dir / "autowrite"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        self.log_dir = log_dir
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        slug = _slugify_for_filename(section_type)
+        self.run_id = f"{ts}_{slug}_{(chapter_id or 'noch')[:8]}"
+        self.path = log_dir / f"{self.run_id}.jsonl"
+
+        self.fh = open(self.path, "a", encoding="utf-8")
+
+        # Thread-shared state. Lock protects state + writes.
+        self._lock = threading.Lock()
+        self._state = {
+            "stage": "init",
+            "stage_started_at": time.monotonic(),
+            "stage_tokens": 0,
+            "total_tokens": 0,
+            "section": section_type,
+            "iteration": None,
+        }
+
+        self._stop_event = threading.Event()
+        self._heartbeat_seconds = heartbeat_seconds
+        self._hb_thread = threading.Thread(
+            target=self._heartbeat_loop,
+            name=f"autowrite-hb-{self.run_id}",
+            daemon=True,
+        )
+        self._closed = False
+
+        # Initial entry — written before the heartbeat starts so the
+        # very first line of the log identifies the run.
+        self._write({
+            "kind": "start",
+            "book_id": book_id,
+            "chapter_id": chapter_id,
+            "section_type": section_type,
+            "run_id": self.run_id,
+        })
+
+        # Update the latest symlink. Best-effort; failures are logged
+        # but not fatal because the per-run file is the source of truth.
+        self._update_latest_symlink()
+
+        # Start the heartbeat last so the start entry is always first.
+        self._hb_thread.start()
+
+    # ── Context manager protocol ─────────────────────────────────────────
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc:
+            try:
+                self.event(
+                    "exception",
+                    type=exc_type.__name__ if exc_type else "unknown",
+                    message=str(exc)[:500],
+                )
+            except Exception:
+                pass
+        self.close()
+        return False  # don't suppress exceptions
+
+    # ── Public API ───────────────────────────────────────────────────────
+    def stage(self, name: str, **extra) -> None:
+        """Mark a stage transition. Writes a stage_end for the previous
+        stage (with duration + tokens) and a stage_start for the new
+        one. Resets the stage_tokens counter."""
+        with self._lock:
+            prev = self._state["stage"]
+            prev_started = self._state["stage_started_at"]
+            prev_tokens = self._state["stage_tokens"]
+        if prev != "init":
+            self._write({
+                "kind": "stage_end",
+                "stage": prev,
+                "duration_s": round(time.monotonic() - prev_started, 1),
+                "stage_tokens": prev_tokens,
+            })
+        with self._lock:
+            self._state["stage"] = name
+            self._state["stage_started_at"] = time.monotonic()
+            self._state["stage_tokens"] = 0
+            for k, v in extra.items():
+                if k in ("section", "iteration"):
+                    self._state[k] = v
+        entry = {"kind": "stage_start", "stage": name}
+        entry.update(extra)
+        self._write(entry)
+
+    def token(self) -> None:
+        """Record one streamed token. Cheap (lock + two int adds).
+        Called from _stream_with_save's per-token loop."""
+        with self._lock:
+            self._state["total_tokens"] += 1
+            self._state["stage_tokens"] += 1
+
+    def event(self, kind: str, **fields) -> None:
+        """Write a one-off structured event (e.g. error, retry, verdict).
+        Doesn't change the stage state machine."""
+        entry = {"kind": kind}
+        entry.update(fields)
+        self._write(entry)
+
+    def close(self) -> None:
+        """Stop the heartbeat thread, close the file. Idempotent."""
+        if self._closed:
+            return
+        self._closed = True
+        # Final stage_end so the last stage's duration is recorded.
+        with self._lock:
+            prev = self._state["stage"]
+            prev_started = self._state["stage_started_at"]
+            prev_tokens = self._state["stage_tokens"]
+            total = self._state["total_tokens"]
+        if prev != "init":
+            self._write({
+                "kind": "stage_end",
+                "stage": prev,
+                "duration_s": round(time.monotonic() - prev_started, 1),
+                "stage_tokens": prev_tokens,
+            })
+        self._write({"kind": "end", "total_tokens": total})
+
+        self._stop_event.set()
+        try:
+            self._hb_thread.join(timeout=2.0)
+        except Exception:
+            pass
+        try:
+            self.fh.close()
+        except Exception:
+            pass
+
+    @property
+    def state(self) -> dict:
+        """Snapshot of the current shared state (for tests/debugging)."""
+        with self._lock:
+            return dict(self._state)
+
+    # ── Internals ────────────────────────────────────────────────────────
+    def _write(self, entry: dict) -> None:
+        """Append one JSONL line. Thread-safe via the lock so the
+        heartbeat thread and the main generator don't interleave."""
+        line = {"t": datetime.now().isoformat(timespec="seconds"), **entry}
+        with self._lock:
+            try:
+                self.fh.write(json.dumps(line, default=str) + "\n")
+                self.fh.flush()
+            except Exception as exc:
+                # File closed unexpectedly; log to module logger and
+                # carry on — the heartbeat thread should not crash the
+                # autowrite if its log file disappears.
+                logger.warning("autowrite log write failed: %s", exc)
+
+    def _update_latest_symlink(self) -> None:
+        """Point data/autowrite/latest.jsonl at this run's file so the
+        user can `tail -f data/autowrite/latest.jsonl` without
+        knowing the run id. Best-effort; on systems without symlink
+        support (e.g. Windows without dev mode) we silently skip."""
+        latest = self.log_dir / "latest.jsonl"
+        try:
+            if latest.is_symlink() or latest.exists():
+                latest.unlink()
+            latest.symlink_to(self.path.name)
+        except Exception as exc:
+            logger.debug("autowrite latest symlink update failed: %s", exc)
+
+    def _heartbeat_loop(self) -> None:
+        """Daemon thread that writes a heartbeat entry every
+        ``heartbeat_seconds`` seconds until close() is called.
+
+        Reads the shared state under the lock, so a snapshot of
+        stage/tokens/elapsed is consistent within one entry."""
+        while not self._stop_event.wait(self._heartbeat_seconds):
+            with self._lock:
+                state = dict(self._state)
+            stage_elapsed = time.monotonic() - state["stage_started_at"]
+            tps = state["stage_tokens"] / stage_elapsed if stage_elapsed > 0.1 else 0.0
+            self._write({
+                "kind": "heartbeat",
+                "stage": state["stage"],
+                "stage_elapsed_s": round(stage_elapsed, 1),
+                "stage_tokens": state["stage_tokens"],
+                "total_tokens": state["total_tokens"],
+                "tokens_per_sec": round(tps, 2),
+                "section": state["section"],
+                "iteration": state["iteration"],
+            })
 
 
 def _update_draft_content(draft_id, content, *, summary=None, custom_metadata=None,
@@ -1401,9 +1693,63 @@ def autowrite_section_stream(
     cove_threshold: float = 0.85,
     target_words: int | None = None,
 ) -> Iterator[Event]:
-    """
-    Full convergence loop for one section: write -> score -> revise -> re-score.
+    """Full convergence loop for one section: write -> score -> revise -> re-score.
+
     Yields rich events for live dashboard rendering.
+
+    Phase 24 — thin wrapper around _autowrite_section_body. This level
+    just owns the per-run log file lifecycle (open at start, close in
+    a finally) and yields a log_path event so the GUI can surface where
+    to tail. The body generator does the actual work and gets the log
+    object passed in so it can call log.stage() at every transition.
+
+    Tail the log with:
+
+        tail -f data/autowrite/latest.jsonl | jq
+
+    The heartbeat thread inside the logger writes a "still here" line
+    every 30 seconds even when the LLM is silent, so stalls in
+    retrieval / model loading / inter-stage gaps are visible
+    immediately instead of after the user reports a stuck run.
+    """
+    log = _AutowriteLogger(book_id, chapter_id, section_type)
+    yield {"type": "log_path", "path": str(log.path)}
+    try:
+        yield from _autowrite_section_body(
+            log,
+            book_id, chapter_id, section_type,
+            model=model, max_iter=max_iter, target_score=target_score,
+            auto_expand=auto_expand, use_plan=use_plan,
+            use_step_back=use_step_back, use_cove=use_cove,
+            cove_threshold=cove_threshold, target_words=target_words,
+        )
+    finally:
+        log.close()
+
+
+def _autowrite_section_body(
+    log: "_AutowriteLogger",
+    book_id: str,
+    chapter_id: str,
+    section_type: str,
+    *,
+    model: str | None = None,
+    max_iter: int = 3,
+    target_score: float = 0.85,
+    auto_expand: bool = False,
+    use_plan: bool = True,
+    use_step_back: bool = True,
+    use_cove: bool = True,
+    cove_threshold: float = 0.85,
+    target_words: int | None = None,
+) -> Iterator[Event]:
+    """Phase 24 — the actual autowrite implementation, extracted from
+    autowrite_section_stream so the public function can wrap it in a
+    log lifecycle without indenting ~400 lines of body code.
+
+    Receives the live _AutowriteLogger and calls log.stage(...) at
+    every major transition. Token observers are passed into
+    _stream_with_save so the heartbeat can show real tokens-per-second.
     """
     from sciknow.rag import prompts as rag_prompts
     from sciknow.rag.llm import stream as llm_stream, complete as llm_complete
@@ -1412,6 +1758,7 @@ def autowrite_section_stream(
 
     qdrant = get_client()
 
+    log.stage("loading_book")
     # Load book/chapter data
     with get_session() as session:
         from sqlalchemy import text
@@ -1424,6 +1771,7 @@ def autowrite_section_stream(
         """), {"cid": chapter_id}).fetchone()
 
     if not book or not ch:
+        log.event("error", message="book or chapter not found")
         yield {"type": "error", "message": "Book or chapter not found."}
         return
 
@@ -1467,6 +1815,7 @@ def autowrite_section_stream(
            )}
 
     # Step 1: Initial draft
+    log.stage("retrieval")
     with get_session() as session:
         prior_summaries = _get_prior_summaries(session, book_id, ch_num)
         results, sources = _retrieve_with_step_back(
@@ -1476,12 +1825,16 @@ def autowrite_section_stream(
         )
 
     if not results:
+        log.event("error", message="no relevant passages found")
         yield {"type": "error", "message": "No relevant passages found."}
         return
+
+    log.event("retrieval_done", n_results=len(results), n_sources=len(sources))
 
     # Optional tree plan with PDTB-lite discourse relations.
     paragraph_plan = None
     if use_plan:
+        log.stage("planning")
         yield {"type": "progress", "stage": "planning",
                "detail": "Building paragraph plan with discourse relations..."}
         try:
@@ -1492,9 +1845,11 @@ def autowrite_section_stream(
                 section_plan=section_plan,
             )
             # Phase 15.3 — stream so the token counter sees activity
+            # Phase 24 — token_observer feeds the heartbeat's t/s stat
             plan_raw = yield from _stream_phase(
                 sys_p, usr_p, "planning",
                 model=model, temperature=0.2, num_ctx=16384,
+                token_observer=log.token,
             )
             plan_clean = re.sub(r'<think>.*?</think>\s*', '', plan_raw,
                                 flags=re.DOTALL).strip()
@@ -1503,6 +1858,7 @@ def autowrite_section_stream(
             yield {"type": "tree_plan", "data": plan_data}
         except Exception as exc:
             logger.warning("Tree-plan failed in autowrite, continuing without: %s", exc)
+            log.event("planning_failed", message=str(exc)[:200])
             paragraph_plan = None
 
     system, user = rag_prompts.write_section_v2(
@@ -1564,6 +1920,7 @@ def autowrite_section_stream(
         )
     yield {"type": "checkpoint", "draft_id": draft_id, "stage": "placeholder",
            "word_count": 0}
+    log.event("placeholder_saved", draft_id=draft_id, version=draft_version)
 
     # Phase 19 — incremental save during the writing stream. The
     # callback closure references draft_id + placeholder_metadata so
@@ -1575,9 +1932,11 @@ def autowrite_section_stream(
             custom_metadata={**placeholder_metadata, "checkpoint": "writing_in_progress"},
         )
 
+    log.stage("writing")
     content = yield from _stream_with_save(
         system, user, "writing",
         model=model, save_callback=_save_writing,
+        token_observer=log.token,
     )
 
     # Promote the just-finished initial draft from "writing_in_progress"
@@ -1599,14 +1958,17 @@ def autowrite_section_stream(
     )
     yield {"type": "checkpoint", "draft_id": draft_id, "stage": "initial",
            "word_count": len(content.split())}
+    log.event("initial_draft_saved", word_count=len(content.split()))
 
     for iteration in range(max_iter):
         yield {"type": "iteration_start", "iteration": iteration + 1, "max": max_iter}
+        log.event("iteration_start", iteration=iteration + 1, max=max_iter)
 
         # Score (Fix 3: use writer's results, not re-retrieved)
         # Phase 15.3: streamed via _stream_phase so the GUI's token counter
         # stays alive during this 30+ second phase. The output is JSON; the
         # user sees it flowing instead of staring at "0 tok / 0 tok/s".
+        log.stage("scoring", iteration=iteration + 1)
         yield {"type": "progress", "stage": "scoring",
                "detail": f"Scoring iteration {iteration + 1}..."}
         try:
@@ -1614,14 +1976,17 @@ def autowrite_section_stream(
             score_raw = yield from _stream_phase(
                 sys_s, usr_s, "scoring",
                 model=model, temperature=0.0, num_ctx=16384,
+                token_observer=log.token,
             )
             scores = json.loads(_clean_json(score_raw), strict=False)
         except Exception as exc:
             logger.warning("Scoring failed: %s", exc)
+            log.event("scoring_failed", message=str(exc)[:200])
             scores = {"overall": 0.5, "weakest_dimension": "unknown",
                       "revision_instruction": "Improve overall quality."}
 
         # Fix 1: Run claim verification as part of scoring
+        log.stage("verifying", iteration=iteration + 1)
         yield {"type": "progress", "stage": "verifying",
                "detail": "Verifying citations..."}
         try:
@@ -1629,6 +1994,7 @@ def autowrite_section_stream(
             verify_raw = yield from _stream_phase(
                 sys_v, usr_v, "verifying",
                 model=model, temperature=0.0, num_ctx=16384,
+                token_observer=log.token,
             )
             vdata = json.loads(_clean_json(verify_raw), strict=False)
             groundedness = vdata.get("groundedness_score", 1.0)
@@ -1692,6 +2058,7 @@ def autowrite_section_stream(
                 )
             )
             if should_run_cove:
+                log.stage("cove", iteration=iteration + 1)
                 yield {"type": "progress", "stage": "cove",
                        "detail": "Running Chain-of-Verification (decoupled fact check)..."}
                 try:
@@ -1847,11 +2214,13 @@ def autowrite_section_stream(
         history.append(history_entry)
 
         yield {"type": "scores", "scores": scores, "iteration": iteration + 1}
+        log.event("scores", iteration=iteration + 1, overall=overall, weakest=weakest)
 
         # Convergence check
         if overall >= target_score:
             yield {"type": "converged", "iteration": iteration + 1,
                    "final_score": overall}
+            log.event("converged", iteration=iteration + 1, final_score=overall)
             break
 
         # Fix 4: Auto-expand — check if missing topics have weak corpus coverage
@@ -1875,6 +2244,7 @@ def autowrite_section_stream(
                                  f"Consider: sciknow db expand -q \"{weak_topics[0]}\""}
 
         # Revise (Fix 3: pass writer's results to revision context)
+        log.stage("revising", iteration=iteration + 1)
         yield {"type": "progress", "stage": "revising",
                "detail": f"Revising (targeting {weakest})..."}
 
@@ -1910,15 +2280,18 @@ def autowrite_section_stream(
         revised = yield from _stream_with_save(
             sys_r, usr_r, "revising",
             model=model, save_callback=_save_revising,
+            token_observer=log.token,
         )
 
         # Re-score (Fix 3: same results) — Phase 15.3 streamed
+        log.stage("rescoring", iteration=iteration + 1)
         yield {"type": "progress", "stage": "scoring", "detail": "Re-scoring revision..."}
         try:
             sys_rs, usr_rs = rag_prompts.score_draft(section_type, topic, revised, results)
             rescore_raw = yield from _stream_phase(
                 sys_rs, usr_rs, "rescoring",
                 model=model, temperature=0.0, num_ctx=16384,
+                token_observer=log.token,
             )
             new_scores = json.loads(_clean_json(rescore_raw), strict=False)
         except Exception:
@@ -1948,6 +2321,8 @@ def autowrite_section_stream(
         if new_overall >= overall:
             yield {"type": "revision_verdict", "action": "KEEP",
                    "old_score": overall, "new_score": new_overall}
+            log.event("revision_verdict", action="KEEP",
+                      old=overall, new=new_overall, iteration=iteration + 1)
             content = revised
             overall = new_overall
             if history:
@@ -1982,6 +2357,8 @@ def autowrite_section_stream(
         else:
             yield {"type": "revision_verdict", "action": "DISCARD",
                    "old_score": overall, "new_score": new_overall}
+            log.event("revision_verdict", action="DISCARD",
+                      old=overall, new=new_overall, iteration=iteration + 1)
             if history:
                 history[-1]["revision_verdict"] = "DISCARD"
                 history[-1]["post_revision_overall"] = new_overall
@@ -1999,6 +2376,7 @@ def autowrite_section_stream(
 
     # Step 3: Final polish — auto-summarize and finalize the existing draft.
     # No new INSERT here because the draft was created at checkpoint #0 above.
+    log.stage("finalizing")
     yield {"type": "progress", "stage": "saving", "detail": "Finalizing draft..."}
     summary = _auto_summarize(content, section_type, ch_title, model=model)
     persisted_metadata = {
@@ -2021,6 +2399,11 @@ def autowrite_section_stream(
         version=draft_version + len(history),
     )
 
+    log.event("completed",
+              draft_id=draft_id,
+              word_count=len(content.split()),
+              iterations=len(history),
+              final_score=overall)
     yield {
         "type": "completed",
         "draft_id": draft_id,

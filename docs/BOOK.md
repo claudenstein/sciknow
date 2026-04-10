@@ -111,6 +111,22 @@ Book chapters have a configurable word-count budget that flows through both `boo
 | One chapter (all sections) | 5 | ~30-40 min |
 | Full 10-chapter book | 50 | ~4-6 hours (unattended) |
 
+### Live progress log (Phase 24)
+
+Every `autowrite` run writes a JSONL progress file under `data/autowrite/` and a side-thread heartbeat appends a "still here" line every **30 seconds** even when the LLM is silent. This is the diagnostic tool for stalls — if autowrite has been running 35 minutes with the GPU idle and no tokens flowing, the heartbeat tells you exactly what stage it's stuck in (retrieval? model load? inter-stage gap?) instead of leaving you guessing.
+
+```bash
+# Tail the latest run, prettified with jq
+tail -f data/autowrite/latest.jsonl | jq
+
+# Just stage transitions and heartbeats (skip raw token events)
+tail -f data/autowrite/latest.jsonl | jq 'select(.kind != "token")'
+```
+
+The log captures stage transitions (`stage_start` / `stage_end` with duration), token counts (per stage and total), tokens-per-second derived live, custom events (verdict, error, retrieval_done), and a clean `end` marker on shutdown. Each run gets its own file at `data/autowrite/{timestamp}_{section}_{ch_short}.jsonl` and the `latest.jsonl` symlink always points at the most recent one. Files are append-only and never rotated automatically — old runs accumulate so you can compare convergence trajectories across days.
+
+A heartbeat with `stage_elapsed_s` growing past 60 with `total_tokens` not changing is the canonical "stuck" signature. Common causes: Ollama loading a different model (~60s for a 30B q4), bge-m3 / reranker still on the GPU blocking the LLM, retrieval timeout against a slow Qdrant, or a step-back query generation hung in a context-overflow retry loop.
+
 ---
 
 ## Measurement & Observability (Phase 13)
