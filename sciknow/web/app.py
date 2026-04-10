@@ -2932,10 +2932,9 @@ function startStream(jobId) {{
         'Iteration ' + evt.iteration + '/' + evt.max + '</div>';
     }}
     else if (evt.type === 'model_info') {{
-      // Phase 14.6 — show writer model in the stream header so users can
-      // verify which model is doing the writing.
-      body.innerHTML += '<div style="font-size:11px;color:var(--fg-muted);padding:6px 0;border-bottom:1px solid var(--border);margin-bottom:8px;">' +
-        '<strong>writer model:</strong> <code>' + (evt.writer_model || '?') + '</code></div>';
+      // Phase 15.5 — model name now shown only in the stats footer (which
+      // already pulls it via setModel below). The previous in-body line
+      // duplicated the same info redundantly.
       stats.setModel(evt.writer_model || 'qwen3.5:27b');
     }}
     else if (evt.type === 'checkpoint') {{
@@ -3649,11 +3648,9 @@ async function doAutowrite() {{
         ' · ' + high.length + 'H/' + med.length + 'M mismatches</div>';
     }}
     else if (evt.type === 'model_info') {{
-      // Phase 14.6 — show which model is doing the writing so the user
-      // can verify the flagship is in use (not the fast utility model).
-      awLog.innerHTML += '<div style="font-size:11px;color:var(--fg-muted);padding:4px 0;">' +
-        '<strong>writer:</strong> <code>' + (evt.writer_model || '?') + '</code>  ·  ' +
-        '<strong>fast:</strong> <code>' + (evt.fast_model || '?') + '</code> (utility only)</div>';
+      // Phase 15.5 — model name shown only in the stats footer; the
+      // previous awLog line duplicated information that's already in
+      // the live stats pill above the dashboard.
       stats.setModel(evt.writer_model || 'qwen3.5:27b');
     }}
     else if (evt.type === 'checkpoint') {{
