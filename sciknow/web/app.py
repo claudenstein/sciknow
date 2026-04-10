@@ -1275,6 +1275,47 @@ async def api_verify(draft_id: str, model: str = Form(None)):
     return JSONResponse({"job_id": job_id})
 
 
+@app.post("/api/autowrite-chapter")
+async def api_autowrite_chapter(
+    chapter_id: str = Form(...),
+    max_iter: int = Form(3),
+    target_score: float = Form(0.85),
+    model: str = Form(None),
+    target_words: int = Form(None),
+    rebuild: bool = Form(False),
+):
+    """Phase 20 — autowrite EVERY section of a chapter in sequence.
+
+    The toolbar Autowrite button routes here when the user has a
+    chapter selected but no specific section, instead of defaulting
+    to a single 'introduction' draft (which doesn't match any of the
+    chapter's user-defined sections and creates an orphan).
+
+    The backend generator handles the section iteration, draft skip
+    logic, and per-section progress events. This endpoint just kicks
+    it off as a job and returns the job_id for SSE streaming.
+    """
+    from sciknow.core.book_ops import autowrite_chapter_all_sections_stream
+
+    job_id, queue = _create_job("autowrite_chapter")
+    loop = asyncio.get_event_loop()
+
+    def gen():
+        return autowrite_chapter_all_sections_stream(
+            book_id=_book_id, chapter_id=chapter_id,
+            model=model or None,
+            max_iter=max_iter, target_score=target_score,
+            target_words=target_words if target_words and target_words > 0 else None,
+            rebuild=rebuild,
+        )
+
+    thread = threading.Thread(
+        target=_run_generator_in_thread, args=(job_id, gen, loop), daemon=True)
+    thread.start()
+
+    return JSONResponse({"job_id": job_id})
+
+
 @app.post("/api/autowrite")
 async def api_autowrite(
     chapter_id: str = Form(None),
@@ -2487,6 +2528,13 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .citation-popover .cp-authors {{ opacity: 0.7; font-size: 11px; }}
 .citation-popover .cp-meta {{ font-size: 11px; opacity: 0.6; margin-top: 4px; }}
 /* Verification indicators */
+/* Phase 20 — orphan/broken citation: source ref doesn't exist in the
+   sources panel. Visually obvious so the user knows it's a data issue
+   not a click bug. Click is suppressed (cursor not-allowed). */
+.citation.citation-broken {{ color: var(--danger); text-decoration: line-through;
+                              background: var(--danger-light); cursor: not-allowed; }}
+.citation.citation-broken::after {{ content: " \26A0"; font-size: 10px;
+                                     vertical-align: super; }}
 .citation.verified-supported {{ background: #d1fae5; border-radius: 3px; }}
 .citation.verified-extrapolated {{ background: #fef3c7; border-radius: 3px; }}
 .citation.verified-overstated {{ background: #ffedd5; border-radius: 3px; }}
@@ -3860,32 +3908,74 @@ function buildPopovers() {{
     sourceData[i + 1] = li.textContent;
   }});
 
+  // Phase 20 — count broken citations so we can warn the user once.
+  // A broken citation is one whose ref number > number of sources;
+  // it's typically the result of a pre-Phase-18 draft (where the
+  // writer's prompt and the saved sources had inconsistent numbering)
+  // or the writer hallucinating a citation number.
+  let brokenCount = 0;
+  let brokenRefs = new Set();
+
   document.querySelectorAll('.citation').forEach(el => {{
     const ref = el.dataset.ref;
-    if (!ref || el.querySelector('.citation-popover')) return;
+    if (!ref) return;
+    // Always (re)attach click handler — buildPopovers may run multiple
+    // times on the same DOM (after section nav, after autowrite finish),
+    // and the source map could have changed in between.
     const src = sourceData[parseInt(ref)];
-    if (!src) return;
 
-    const popover = document.createElement('div');
-    popover.className = 'citation-popover';
+    if (!src) {{
+      // Phase 20 — broken citation: visually mark and short-circuit.
+      // Don't attach a click handler that scrolls to a non-existent
+      // anchor — instead, on click show a tooltip explaining the
+      // citation has no matching source.
+      el.classList.add('citation-broken');
+      el.title = 'Citation [' + ref + '] has no matching source. ' +
+                 'This usually means the draft predates the Phase 18 ' +
+                 'fix — re-run autowrite to regenerate it.';
+      el.onclick = function(e) {{
+        e.preventDefault();
+        e.stopPropagation();
+      }};
+      brokenCount += 1;
+      brokenRefs.add(ref);
+      return;
+    }}
 
-    // Parse the APA-style citation: [N] Author (year). Title. Journal. doi:...
-    const parts = src.replace(/^\[\d+\]\s*/, '').split('. ');
-    const titlePart = parts.length > 1 ? parts[1] || '' : parts[0] || '';
-    const authorYear = parts[0] || '';
-    const rest = parts.slice(2).join('. ');
+    // Healthy citation: build popover + scroll-to-source click handler.
+    if (!el.querySelector('.citation-popover')) {{
+      const popover = document.createElement('div');
+      popover.className = 'citation-popover';
 
-    popover.innerHTML = '<div class="cp-title">' + titlePart + '</div>' +
-      '<div class="cp-authors">' + authorYear + '</div>' +
-      (rest ? '<div class="cp-meta">' + rest + '</div>' : '');
+      // Parse the APA-style citation: [N] Author (year). Title. Journal. doi:...
+      const parts = src.replace(/^\[\d+\]\s*/, '').split('. ');
+      const titlePart = parts.length > 1 ? parts[1] || '' : parts[0] || '';
+      const authorYear = parts[0] || '';
+      const rest = parts.slice(2).join('. ');
 
-    el.appendChild(popover);
+      popover.innerHTML = '<div class="cp-title">' + titlePart + '</div>' +
+        '<div class="cp-authors">' + authorYear + '</div>' +
+        (rest ? '<div class="cp-meta">' + rest + '</div>' : '');
+
+      el.appendChild(popover);
+    }}
+    el.classList.remove('citation-broken');
     el.style.cursor = 'pointer';
     el.onclick = function() {{
       const target = document.getElementById('source-' + ref);
       if (target) target.scrollIntoView({{behavior: 'smooth', block: 'center'}});
     }};
   }});
+
+  // Phase 20 — surface broken citations once per page so the user knows
+  // the dead links aren't a UI bug but a data problem they can fix by
+  // re-running autowrite on the affected draft.
+  if (brokenCount > 0) {{
+    console.warn('[sciknow] ' + brokenCount + ' broken citation(s) ' +
+                 'in this draft (orphan refs: ' + Array.from(brokenRefs).sort().join(', ') +
+                 '). The draft cites source numbers that aren\\'t in the sources panel — ' +
+                 'usually a pre-Phase-18 draft. Re-run autowrite to regenerate.');
+  }}
 }}
 
 // Build popovers on page load
@@ -3898,15 +3988,33 @@ let awTargetScore = 0.85;
 
 async function doAutowrite() {{
   if (!currentChapterId) {{ showEmptyHint("No chapter selected &mdash; click any chapter title in the sidebar to select it, then try again."); return; }}
-  const section = currentSectionType || 'introduction';
-  const maxIter = prompt('Max iterations (default 3):', '3');
+
+  // Phase 20 — when no specific section is selected (the user has a
+  // chapter highlighted in the sidebar but hasn't picked a section),
+  // run autowrite for ALL of the chapter's defined sections instead
+  // of defaulting to a single 'introduction' draft (which doesn't
+  // match any user-defined section and creates an orphan).
+  const isAllSections = !currentSectionType;
+  const section = currentSectionType || '__all__';
+  const maxIter = prompt('Max iterations per section (default 3):', '3');
   if (maxIter === null) return;
   const targetStr = prompt('Target score (default 0.85):', '0.85');
   if (targetStr === null) return;
   awTargetScore = parseFloat(targetStr) || 0.85;
   awScores = [];
 
-  showStreamPanel('Autowriting ' + section + '...');
+  // Confirm before kicking off a multi-section run — these can be long.
+  if (isAllSections) {{
+    const ch = chaptersData.find(c => c.id === currentChapterId);
+    const nSecs = (ch && ch.sections_meta && ch.sections_meta.length) || 5;
+    if (!confirm('Autowrite all ' + nSecs + ' sections of this chapter? Sections that already have a draft will be skipped. This can take ' + (nSecs * 5) + '-' + (nSecs * 10) + ' minutes.')) {{
+      return;
+    }}
+  }}
+
+  showStreamPanel(isAllSections
+    ? 'Autowriting all sections...'
+    : 'Autowriting ' + section + '...');
   // Phase 15.6 — clear the read-view and prepare it for live writing
   startLiveWrite();
 
@@ -3924,10 +4032,11 @@ async function doAutowrite() {{
 
   const fd = new FormData();
   fd.append('chapter_id', currentChapterId);
-  fd.append('section_type', section);
+  if (!isAllSections) fd.append('section_type', section);
   fd.append('max_iter', maxIter || '3');
   fd.append('target_score', String(awTargetScore));
-  const res = await fetch('/api/autowrite', {{method: 'POST', body: fd}});
+  const endpoint = isAllSections ? '/api/autowrite-chapter' : '/api/autowrite';
+  const res = await fetch(endpoint, {{method: 'POST', body: fd}});
   const data = await res.json();
 
   // Custom stream handler for autowrite
@@ -4033,12 +4142,70 @@ async function doAutowrite() {{
       awLog.innerHTML += '<div class="log-keep" style="font-weight:bold;">\\u2713 CONVERGED (score: ' + evt.final_score.toFixed(2) + ')</div>';
     }}
     else if (evt.type === 'completed') {{
-      status.textContent = 'Done';
+      // Phase 20 — for multi-section runs, this fires once per section.
+      // We refresh after each section so the user sees the new draft
+      // appear in the sidebar, but DON'T close the stream — there are
+      // more sections to write. The all_sections_complete event below
+      // closes the stream when truly done.
+      if (isAllSections) {{
+        // Refresh sidebar so the new section's draft becomes clickable.
+        // Don't navigate away — the user is watching the live preview.
+        fetch('/api/chapters').then(r => r.json()).then(d => {{
+          rebuildSidebar(d.chapters || d, currentDraftId);
+        }}).catch(() => {{}});
+      }} else {{
+        status.textContent = 'Done';
+        stats.done('done');
+        setStreamCursor(awContent, false);
+        hideStreamPanel();
+        source.close(); currentEventSource = null; currentJobId = null;
+        refreshAfterJob(evt.draft_id);
+      }}
+    }}
+    // Phase 20 — multi-section autowrite envelope events
+    else if (evt.type === 'chapter_autowrite_start') {{
+      awLog.innerHTML += '<div style="font-weight:bold;border-top:1px solid var(--border);padding-top:6px;margin-top:6px;">' +
+        '\\u270e Chapter autowrite: ' + evt.n_sections + ' sections' +
+        (evt.rebuild ? ' (rebuild mode)' : '') + '</div>';
+    }}
+    else if (evt.type === 'section_start') {{
+      const skip = evt.skipped ? ' [SKIPPED — already drafted]' : '';
+      awLog.innerHTML += '<div style="font-weight:600;color:var(--accent);border-top:1px solid var(--border);padding-top:6px;margin-top:6px;">' +
+        '\\u25b6 Section ' + evt.index + '/' + evt.total + ': ' + evt.title + skip + '</div>';
+      status.textContent = 'Section ' + evt.index + '/' + evt.total + ': ' + evt.title +
+        (evt.skipped ? ' (skipping)' : '');
+      if (!evt.skipped) {{
+        // New section starting — clear the previous section's preview.
+        clearLiveWrite();
+        if (awContent) awContent.innerHTML = '';
+      }}
+    }}
+    else if (evt.type === 'section_done') {{
+      const score = (evt.final_score != null) ? ' (' + evt.final_score.toFixed(2) + ')' : '';
+      const cls = evt.error ? 'log-discard' : 'log-keep';
+      const icon = evt.error ? '\\u2717' : evt.skipped ? '\\u2014' : '\\u2713';
+      const note = evt.error ? ' error: ' + evt.error : evt.skipped ? ' skipped' : ' done' + score;
+      awLog.innerHTML += '<div class="' + cls + '">' + icon + ' Section ' + evt.index + note + '</div>';
+    }}
+    else if (evt.type === 'section_error') {{
+      awLog.innerHTML += '<div class="log-discard">\\u2717 Section ' + evt.index + ' failed: ' + evt.message + '</div>';
+    }}
+    else if (evt.type === 'all_sections_complete') {{
+      status.textContent = 'Chapter done: ' + evt.n_completed + '/' + evt.n_total +
+        ' written, ' + evt.n_skipped + ' skipped' +
+        (evt.n_failed > 0 ? ', ' + evt.n_failed + ' failed' : '');
+      awLog.innerHTML += '<div class="log-keep" style="font-weight:bold;border-top:1px solid var(--border);padding-top:6px;margin-top:6px;">' +
+        '\\u2713 Chapter complete: ' + evt.n_completed + ' written, ' +
+        evt.n_skipped + ' skipped, ' + evt.n_failed + ' failed</div>';
       stats.done('done');
       setStreamCursor(awContent, false);
-      hideStreamPanel();
+      // Don't auto-hide; let the user read the summary. Close the SSE
+      // source so we don't leak the connection.
       source.close(); currentEventSource = null; currentJobId = null;
-      refreshAfterJob(evt.draft_id);
+      // Refresh sidebar so all new section drafts are visible
+      fetch('/api/chapters').then(r => r.json()).then(d => {{
+        rebuildSidebar(d.chapters || d, currentDraftId);
+      }}).catch(() => {{}});
     }}
     else if (evt.type === 'error') {{
       status.textContent = 'Error: ' + evt.message;

@@ -1781,6 +1781,114 @@ def l1_phase19_autowrite_uses_streaming_save() -> None:
     )
 
 
+# ── Phase 20 — autowrite all chapter sections from the GUI ────────────────
+
+
+def l1_phase20_chapter_autowrite_helper_exists() -> None:
+    """Phase 20 — autowrite_chapter_all_sections_stream generator exists
+    in book_ops, takes the right kwargs, and delegates to
+    autowrite_section_stream for each section.
+    """
+    import inspect
+    from sciknow.core import book_ops
+
+    assert hasattr(book_ops, "autowrite_chapter_all_sections_stream"), (
+        "autowrite_chapter_all_sections_stream missing — toolbar Autowrite "
+        "without a section selected can't iterate over the chapter's sections"
+    )
+    fn = book_ops.autowrite_chapter_all_sections_stream
+    sig = inspect.signature(fn)
+    for kw in (
+        "book_id", "chapter_id", "model", "max_iter", "target_score",
+        "target_words", "rebuild",
+    ):
+        assert kw in sig.parameters, (
+            f"autowrite_chapter_all_sections_stream missing {kw} parameter"
+        )
+
+    src = inspect.getsource(fn)
+    # It must call the single-section generator under the hood, NOT
+    # re-implement the convergence loop (which would drift over time).
+    assert "autowrite_section_stream(" in src, (
+        "autowrite_chapter_all_sections_stream doesn't delegate to "
+        "autowrite_section_stream — would diverge over time"
+    )
+    # Reads the chapter's sections list, not a hardcoded paper-style set
+    assert "_get_chapter_sections_normalized(" in src, (
+        "autowrite_chapter_all_sections_stream isn't reading the chapter's "
+        "actual sections list"
+    )
+    # Skips already-drafted sections by default
+    assert "existing_slugs" in src and "rebuild" in src, (
+        "autowrite_chapter_all_sections_stream doesn't have skip-existing "
+        "logic — would clobber previous work on every re-run"
+    )
+    # Has section_start / section_done envelope events for the GUI to
+    # render per-section progress
+    for ev in ("chapter_autowrite_start", "section_start", "section_done",
+               "all_sections_complete"):
+        assert ev in src, (
+            f"autowrite_chapter_all_sections_stream missing {ev} event "
+            f"— GUI can't show per-section progress"
+        )
+
+
+def l1_phase20_web_endpoint_and_router() -> None:
+    """Phase 20 — POST /api/autowrite-chapter endpoint registered AND
+    the JS doAutowrite() routes "no section selected" to it instead
+    of defaulting to section_type='introduction'.
+    """
+    import inspect
+    from sciknow.web import app as web_app
+
+    routes = {getattr(r, "path", "") for r in web_app.app.routes}
+    assert "/api/autowrite-chapter" in routes, (
+        "POST /api/autowrite-chapter not registered — toolbar all-sections "
+        "autowrite has nowhere to call"
+    )
+
+    src = inspect.getsource(web_app)
+    # JS routes based on isAllSections
+    assert "isAllSections" in src, (
+        "doAutowrite() doesn't detect 'no section selected' — toolbar "
+        "Autowrite still defaults to section_type='introduction'"
+    )
+    assert "/api/autowrite-chapter" in src, (
+        "doAutowrite() never calls /api/autowrite-chapter"
+    )
+    # Handles the new envelope events
+    for ev in ("chapter_autowrite_start", "section_start", "section_done",
+               "all_sections_complete"):
+        assert "'" + ev + "'" in src or '"' + ev + '"' in src, (
+            f"JS doAutowrite() doesn't handle {ev} event"
+        )
+
+
+def l1_phase20_broken_citation_indicator() -> None:
+    """Phase 20 — buildPopovers marks orphan/broken citations with
+    .citation-broken class so the user can see which links are dead
+    (instead of clicking and getting nothing).
+    """
+    import inspect
+    from sciknow.web import app as web_app
+
+    src = inspect.getsource(web_app)
+    assert "citation-broken" in src, (
+        "buildPopovers doesn't tag broken citations — orphan refs "
+        "look identical to working ones, click silently does nothing"
+    )
+    # CSS rule exists so the broken state is visually distinct
+    assert ".citation.citation-broken" in src, (
+        "missing .citation.citation-broken CSS — broken state not visible"
+    )
+    # Click is suppressed on broken citations (no scroll-to-nowhere)
+    assert "e.preventDefault" in src or "preventDefault" in src
+    # Console warning for debugging
+    assert "broken citation" in src.lower(), (
+        "buildPopovers doesn't console.warn about broken citations"
+    )
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -1831,6 +1939,10 @@ L1_TESTS: list[Callable] = [
     l1_phase19_stream_with_save_flushes_on_close,
     l1_phase19_periodic_save_fires,
     l1_phase19_autowrite_uses_streaming_save,
+    # Phase 20 — autowrite all chapter sections from the GUI
+    l1_phase20_chapter_autowrite_helper_exists,
+    l1_phase20_web_endpoint_and_router,
+    l1_phase20_broken_citation_indicator,
 ]
 
 L2_TESTS: list[Callable] = [

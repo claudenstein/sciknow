@@ -2029,3 +2029,194 @@ def autowrite_section_stream(
         "history": history,
         "final_score": overall,
     }
+
+
+def autowrite_chapter_all_sections_stream(
+    book_id: str,
+    chapter_id: str,
+    *,
+    model: str | None = None,
+    max_iter: int = 3,
+    target_score: float = 0.85,
+    auto_expand: bool = False,
+    use_plan: bool = True,
+    use_step_back: bool = True,
+    use_cove: bool = True,
+    cove_threshold: float = 0.85,
+    target_words: int | None = None,
+    rebuild: bool = False,
+) -> Iterator[Event]:
+    """Phase 20 — autowrite EVERY section of a chapter in sequence.
+
+    The user's complaint that motivated this: clicking the toolbar
+    Autowrite from a chapter (no section pre-selected) defaulted to
+    section_type='introduction' and created exactly one orphan draft,
+    even though the chapter had 5 user-defined sections waiting. The
+    GUI now routes "no section selected + chapter selected" to this
+    function, which iterates over the chapter's sections list and
+    chains autowrite_section_stream for each.
+
+    Behaviour:
+    - Reads the chapter's sections via _get_chapter_sections_normalized.
+    - Falls back to _DEFAULT_BOOK_SECTION_SLUGS only if the chapter
+      has no sections set at all.
+    - Skips sections that already have a draft, unless rebuild=True.
+      A section is "already drafted" if any draft row exists with
+      that exact section_type slug for this (book_id, chapter_id).
+    - Yields envelope events around each section's run:
+        section_start: {"index": i, "total": N, "slug": ..., "title": ..., "skipped": bool}
+        section_done:  {"index": i, "draft_id": ..., "final_score": ...}
+      Plus all the inner events from autowrite_section_stream
+      (token, scores, checkpoint, verification, etc.).
+    - Final event: all_sections_complete with summary stats.
+
+    Cancellation: clicking Stop in the GUI calls gen.close() on this
+    generator, which propagates GeneratorExit through the active
+    `yield from autowrite_section_stream(...)` call. The Phase 19
+    streaming-save finally block in the inner generator flushes the
+    in-flight tokens before unwinding, so worst-case loss is the
+    same ≤5s window as a single-section autowrite.
+    """
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+
+    # Resolve the chapter's sections list (slug + title + plan).
+    with get_session() as session:
+        sections = _get_chapter_sections_normalized(session, chapter_id)
+        if not sections:
+            sections = [
+                {"slug": slug, "title": _titleify_slug(slug), "plan": ""}
+                for slug in _DEFAULT_BOOK_SECTION_SLUGS
+            ]
+
+        # Find which sections already have a draft so we can skip them
+        # (unless rebuild). Phase 18 + Phase 19 both made drafts more
+        # visible after Stop, so we skip-by-default to make this
+        # operation idempotent and resume-friendly: re-running picks
+        # up where we left off.
+        existing_rows = session.execute(text("""
+            SELECT DISTINCT section_type FROM drafts
+            WHERE book_id::text = :bid AND chapter_id::text = :cid
+        """), {"bid": book_id, "cid": chapter_id}).fetchall()
+        existing_slugs = {(r[0] or "").strip().lower() for r in existing_rows}
+
+    n_total = len(sections)
+    n_skipped = 0
+    n_completed = 0
+    n_failed = 0
+    final_drafts: list[dict] = []
+
+    yield {
+        "type": "chapter_autowrite_start",
+        "chapter_id": chapter_id,
+        "n_sections": n_total,
+        "sections": [{"slug": s["slug"], "title": s["title"]} for s in sections],
+        "rebuild": rebuild,
+    }
+
+    for i, sec in enumerate(sections, start=1):
+        slug = sec["slug"]
+        title = sec["title"]
+        already_exists = slug in existing_slugs
+
+        if already_exists and not rebuild:
+            n_skipped += 1
+            yield {
+                "type": "section_start", "index": i, "total": n_total,
+                "slug": slug, "title": title, "skipped": True,
+                "reason": "draft already exists (use rebuild to overwrite)",
+            }
+            yield {
+                "type": "section_done", "index": i,
+                "slug": slug, "skipped": True,
+            }
+            continue
+
+        yield {
+            "type": "section_start", "index": i, "total": n_total,
+            "slug": slug, "title": title, "skipped": False,
+        }
+
+        # Track per-section state so the all-sections summary can
+        # report which ones converged vs which errored.
+        section_completed = False
+        section_draft_id = None
+        section_final_score = None
+
+        try:
+            inner = autowrite_section_stream(
+                book_id=book_id,
+                chapter_id=chapter_id,
+                section_type=slug,
+                model=model,
+                max_iter=max_iter,
+                target_score=target_score,
+                auto_expand=auto_expand,
+                use_plan=use_plan,
+                use_step_back=use_step_back,
+                use_cove=use_cove,
+                cove_threshold=cove_threshold,
+                target_words=target_words,
+            )
+            for event in inner:
+                # Forward all child events; tag with section index so
+                # the GUI knows which section the event belongs to.
+                event = dict(event)
+                event["section_index"] = i
+                event["section_slug"] = slug
+                event["section_total"] = n_total
+                if event.get("type") == "completed":
+                    section_completed = True
+                    section_draft_id = event.get("draft_id")
+                    section_final_score = event.get("final_score")
+                yield event
+        except GeneratorExit:
+            # Propagate cancellation. The inner generator's finally
+            # block already flushed any in-flight buffer; we just
+            # unwind cleanly.
+            raise
+        except Exception as exc:
+            n_failed += 1
+            logger.exception(
+                "autowrite_chapter section %r failed: %s", slug, exc
+            )
+            yield {
+                "type": "section_error", "index": i, "slug": slug,
+                "message": str(exc),
+            }
+            yield {
+                "type": "section_done", "index": i, "slug": slug,
+                "error": str(exc),
+            }
+            continue
+
+        if section_completed:
+            n_completed += 1
+            final_drafts.append({
+                "slug": slug, "title": title,
+                "draft_id": section_draft_id,
+                "final_score": section_final_score,
+            })
+            yield {
+                "type": "section_done", "index": i, "slug": slug,
+                "draft_id": section_draft_id,
+                "final_score": section_final_score,
+            }
+        else:
+            # Inner generator returned without a 'completed' event —
+            # treat as a failed section but don't bail out of the
+            # whole chapter.
+            n_failed += 1
+            yield {
+                "type": "section_done", "index": i, "slug": slug,
+                "error": "no completed event",
+            }
+
+    yield {
+        "type": "all_sections_complete",
+        "n_total": n_total,
+        "n_completed": n_completed,
+        "n_skipped": n_skipped,
+        "n_failed": n_failed,
+        "drafts": final_drafts,
+    }
