@@ -3506,14 +3506,24 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
                                              stroke-width: 3; r: 10; }}
 /* Phase 30 — persistent global task bar (top of viewport, full width).
    Visible whenever a job is running, regardless of SPA navigation.
-   Designed to be unobtrusive: 36px tall, mono font for the numerics,
-   accent colour only for the activity dot. */
-.task-bar {{ position: sticky; top: 0; z-index: 100;
+   Designed to be unobtrusive: ~40px tall, mono font for the numerics,
+   accent colour only for the activity dot.
+   Phase 32.3 — must be `position: fixed`, NOT `position: sticky`. The
+   <body> is a horizontal flex container (sidebar + main), and a
+   sticky child of a horizontal flex container becomes a flex column
+   sibling — which is exactly what the user reported as "appears as
+   a left column instead of a top bar". `position: fixed` takes the
+   bar out of the flex flow and floats it across the top; the
+   `.task-bar-open` class on <body> adds matching padding-top so the
+   sidebar/main aren't covered by the bar. */
+.task-bar {{ position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
             display: flex; align-items: center; gap: 8px;
-            padding: 8px 16px; background: var(--bg-elevated);
+            padding: 8px 16px; min-height: 40px;
+            background: var(--bg-elevated);
             border-bottom: 1px solid var(--border-strong);
             font-family: var(--font-mono); font-size: 12px;
             color: var(--fg); box-shadow: 0 2px 8px rgba(0,0,0,0.04); }}
+body.task-bar-open {{ padding-top: 40px; }}
 .task-bar .tb-dot {{ width: 10px; height: 10px; border-radius: 50%;
                     background: var(--success); flex-shrink: 0;
                     animation: pulse 1.2s infinite; }}
@@ -4590,6 +4600,9 @@ function _renderTaskBar() {{
   const bar = document.getElementById('task-bar');
   if (!bar) return;
   bar.style.display = 'flex';
+  // Phase 32.3 — body class adds padding-top so the fixed-position
+  // task bar doesn't cover the sidebar/main top edge.
+  document.body.classList.add('task-bar-open');
   document.getElementById('tb-task').textContent = j.taskDesc || j.type || 'Working';
   document.getElementById('tb-task').title = j.taskDesc || j.type || '';
   document.getElementById('tb-model').textContent = j.modelName || 'qwen3.5:27b';
@@ -4754,6 +4767,9 @@ function stopGlobalJob() {{
 function dismissTaskBar() {{
   const bar = document.getElementById('task-bar');
   if (bar) bar.style.display = 'none';
+  // Phase 32.3 — drop the body padding so the layout returns to
+  // full height when the bar isn't visible.
+  document.body.classList.remove('task-bar-open');
   _globalJob = null;
   if (_globalJobSource) {{
     try {{ _globalJobSource.close(); }} catch (e) {{}}

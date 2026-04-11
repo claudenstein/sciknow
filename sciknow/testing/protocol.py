@@ -3630,6 +3630,55 @@ def l1_phase32_2_plan_modal_per_section_length() -> None:
     )
 
 
+def l1_phase32_3_task_bar_is_fixed_not_sticky() -> None:
+    """Phase 32.3 — the persistent task bar (Phase 30) must use
+    `position: fixed`, NOT `position: sticky`.
+
+    The <body> is a horizontal flex container (sidebar | main).
+    A `position: sticky` child of a horizontal flex container ends
+    up rendered as a flex column sibling — which is exactly what
+    the user reported: "the supposed top bar appears at the left
+    as a new left column instead of appearing as a top bar".
+
+    Fix: `.task-bar { position: fixed; top: 0; left: 0; right: 0 }`
+    + a `body.task-bar-open { padding-top: 40px }` toggle so the
+    fixed bar doesn't cover the sidebar/main top edge.
+    """
+    import inspect
+    from sciknow.web import app as web_app
+    src = inspect.getsource(web_app)
+
+    # 1) Body must remain a horizontal flex container (this is the
+    #    layout the rest of the app depends on; if someone changes
+    #    it the test should still catch task bar regressions).
+    assert "body {{ font-family: var(--font-sans)" in src or "display: flex" in src, (
+        "body layout regressed — task bar fix may not apply"
+    )
+
+    # 2) Task bar must be position: fixed, not sticky
+    #    (sticky inside horizontal flex = column sibling = the bug)
+    assert ".task-bar {{ position: fixed" in src, (
+        "task bar must be position: fixed (was sticky → rendered as left column)"
+    )
+    assert "position: sticky" not in src.split(".task-bar")[1].split("}}")[0], (
+        "task bar still references position: sticky in its rule body"
+    )
+
+    # 3) Body padding-top must be added when the bar is visible so
+    #    the bar doesn't cover the sidebar/main top edge.
+    assert "body.task-bar-open" in src, (
+        "missing body.task-bar-open class to offset the fixed bar"
+    )
+
+    # 4) The body class must be toggled by the show + hide handlers.
+    assert "classList.add('task-bar-open')" in src, (
+        "_renderTaskBar must add the task-bar-open body class on show"
+    )
+    assert "classList.remove('task-bar-open')" in src, (
+        "dismissTaskBar must remove the task-bar-open body class on hide"
+    )
+
+
 def l2_phase32_endpoint_shapes() -> None:
     """TestClient smoke test for the major read-only API endpoints.
 
@@ -3884,6 +3933,8 @@ L1_TESTS: list[Callable] = [
     l1_phase32_1_section_target_visible_and_loaded,
     # Phase 32.2 — per-section length dropdown in the Plan modal
     l1_phase32_2_plan_modal_per_section_length,
+    # Phase 32.3 — task bar must be position: fixed (not sticky)
+    l1_phase32_3_task_bar_is_fixed_not_sticky,
 ]
 
 L2_TESTS: list[Callable] = [
