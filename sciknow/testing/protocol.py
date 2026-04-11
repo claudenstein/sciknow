@@ -3533,6 +3533,41 @@ def l1_phase32_endpoint_handler_signatures_consistent() -> None:
     )
 
 
+def l1_phase32_1_section_target_visible_and_loaded() -> None:
+    """Phase 32.1 — the chapter modal's Sections tab must:
+
+    1. Copy `target_words` from `ch.sections_meta` into the editor's
+       working state when opening the modal (was being silently
+       dropped, so previously-saved per-section overrides looked
+       reset every time the modal reopened).
+    2. Render a visible target badge next to the dropdown so the user
+       can see what word budget THIS section will be written to (the
+       old "budget: ~Xw" line was buried in the muted slug row).
+    """
+    import inspect
+    from sciknow.web import app as web_app
+    src = inspect.getsource(web_app)
+
+    # 1) target_words must be copied when loading sections_meta
+    assert "target_words: (s.target_words" in src, (
+        "openChapterModal not copying target_words from sections_meta — "
+        "previously-saved per-section overrides will reset to Auto on reopen"
+    )
+
+    # 2) The visible target badge must be rendered in renderSectionEditor
+    assert "sec-target-badge" in src, (
+        "renderSectionEditor missing the per-section target badge"
+    )
+    assert "' words'" in src or "+ ' words'" in src, (
+        "target badge missing the explicit 'words' label"
+    )
+
+    # 3) The CSS class must exist
+    assert ".sec-target-badge" in src and ".sec-target-badge.override" in src, (
+        "sec-target-badge CSS missing — badge would render unstyled"
+    )
+
+
 def l2_phase32_endpoint_shapes() -> None:
     """TestClient smoke test for the major read-only API endpoints.
 
@@ -3783,6 +3818,8 @@ L1_TESTS: list[Callable] = [
     l1_phase32_render_helpers_escape_chain,
     l1_phase32_no_global_state_leak,
     l1_phase32_endpoint_handler_signatures_consistent,
+    # Phase 32.1 — per-section target visible + persisted across reopens
+    l1_phase32_1_section_target_visible_and_loaded,
 ]
 
 L2_TESTS: list[Callable] = [

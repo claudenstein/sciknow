@@ -3333,6 +3333,22 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
                                 border: 1px solid var(--border);
                                 border-radius: var(--r-sm); color: var(--fg);
                                 font-family: var(--font-sans); }}
+/* Phase 32.1 — visible per-section target badge so the user can
+   always see what word budget THIS section will be written to. */
+.sec-row .sec-target-badge {{ display: inline-flex; align-items: center;
+                              gap: 4px; padding: 2px 8px; margin-left: 6px;
+                              font-size: 11px; font-weight: 600;
+                              color: var(--fg); background: var(--toolbar-bg);
+                              border: 1px solid var(--border);
+                              border-radius: 10px; }}
+.sec-row .sec-target-badge.override {{ color: var(--accent);
+                                       border-color: var(--accent); }}
+.sec-row .sec-target-badge .badge-tag {{ font-size: 10px;
+                                         font-weight: 400;
+                                         color: var(--fg-muted);
+                                         text-transform: uppercase;
+                                         letter-spacing: 0.5px; }}
+.sec-row .sec-target-badge .badge-tag.muted {{ opacity: 0.7; }}
 .sec-row .sec-delete {{ background: transparent; border: 1px solid var(--border);
                        color: var(--fg-muted); cursor: pointer; padding: 4px 8px;
                        border-radius: var(--r-sm); font-size: 11px; flex-shrink: 0;
@@ -7216,12 +7232,18 @@ function openChapterModal(chId) {{
   }}
 
   // Phase 18 — copy the sections meta into the editor's working state.
-  // sections_meta is the rich [{{slug, title, plan}}, ...] shape; falls
-  // back to deriving from sections_template (slugs only) for legacy
-  // chapters that haven't been opened yet under the new schema.
+  // sections_meta is the rich [{{slug, title, plan, target_words}}, ...]
+  // shape; falls back to deriving from sections_template (slugs only)
+  // for legacy chapters that haven't been opened yet under the new schema.
+  // Phase 32.1 — also copy target_words so a previously-saved per-section
+  // override is restored when the modal reopens (was being silently
+  // dropped, which is why the size dropdown always reset to "Auto").
   if (Array.isArray(ch.sections_meta) && ch.sections_meta.length > 0) {{
     _editingSections = ch.sections_meta.map(s => ({{
-      slug: s.slug || '', title: s.title || '', plan: s.plan || ''
+      slug: s.slug || '',
+      title: s.title || '',
+      plan: s.plan || '',
+      target_words: (s.target_words && s.target_words > 0) ? s.target_words : null,
     }}));
   }} else if (Array.isArray(ch.sections_template)) {{
     _editingSections = ch.sections_template.map(slug => ({{
@@ -7320,18 +7342,27 @@ function renderSectionEditor() {{
     html += '           value="' + escapeHtml(s.title) + '" oninput="updateSectionTitle(' + i + ', this.value)">';
     html += '    <textarea placeholder="Section plan — what THIS section must cover (a few sentences)" ';
     html += '              oninput="updateSection(' + i + ', \\'plan\\', this.value)">' + escapeHtml(s.plan) + '</textarea>';
-    // Phase 29 — size dropdown row, just below the plan textarea
+    // Phase 29 — size dropdown row, just below the plan textarea.
+    // Phase 32.1 — show the effective target words inline next to the
+    // dropdown so the user always sees what budget THIS section will
+    // be written to (rather than burying it in the muted slug line).
+    const effectiveTw = (tw && tw > 0) ? tw : perSection;
+    const targetBadgeClass = (tw && tw > 0) ? 'sec-target-badge override' : 'sec-target-badge';
+    const targetBadgeTitle = (tw && tw > 0)
+      ? 'Per-section override (set explicitly)'
+      : 'Auto: chapter target / number of sections';
     html += '    <div class="sec-size-row">';
-    html += '      <label>Size:</label>';
+    html += '      <label>Target:</label>';
     html += '      <select onchange="updateSectionTargetWords(' + i + ', this.value)">' + optsHtml + '</select>';
     html += '      <input type="number" class="sec-size-custom" placeholder="words" min="100" step="100" ';
     html += '             value="' + customVal + '" style="' + customStyle + '" ';
     html += '             oninput="updateSectionTargetWordsCustom(' + i + ', this.value)">';
+    html += '      <span class="' + targetBadgeClass + '" title="' + targetBadgeTitle + '">';
+    html += '~' + effectiveTw + ' words';
+    html += (tw && tw > 0 ? ' <span class="badge-tag">override</span>' : ' <span class="badge-tag muted">auto</span>');
+    html += '</span>';
     html += '    </div>';
-    html += '    <div class="sec-slug">slug: <code>' + slugDisplay + '</code> &middot; ';
-    html += 'budget: ~' + (tw && tw > 0 ? tw : perSection) + 'w';
-    html += (tw && tw > 0 ? ' <span style="color:var(--accent);">(override)</span>' : '');
-    html += '</div>';
+    html += '    <div class="sec-slug">slug: <code>' + slugDisplay + '</code></div>';
     html += '  </div>';
     html += '  <button class="sec-delete" onclick="removeSection(' + i + ')" title="Delete this section">&times;</button>';
     html += '</div>';
