@@ -25,6 +25,7 @@ sciknow is built on the shoulders of excellent open-source projects and research
 | [Rich](https://github.com/Textualize/rich) | Terminal UI — live dashboards, progress bars, autowrite panels |
 | [PyMuPDF (fitz)](https://github.com/pymupdf/PyMuPDF) | PDF metadata extraction — embedded XMP, title/author fields |
 | [python-docx](https://github.com/python-openxml/python-docx) | DOCX export |
+| [WeasyPrint](https://github.com/Kozea/WeasyPrint) | HTML → PDF rendering for the Phase 31 web reader PDF export feature |
 | [difflib](https://docs.python.org/3/library/difflib.html) | In-browser version diffs between draft snapshots |
 | [uv](https://github.com/astral-sh/uv) | Fast Python package manager and virtual environment |
 

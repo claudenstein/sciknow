@@ -16,7 +16,7 @@ Move or clone the full sciknow collection to another machine.
 | Qdrant vector embeddings | always | `--skip-vectors` on restore |
 | Original ingested PDFs (`data/processed/`) | on | `--no-pdfs` |
 | Auto-downloaded PDFs (`data/downloads/`) | on | `--no-downloads` |
-| Marker markdown output (`data/mineru_output/`) | off | `--marker` |
+| PDF converter output (`data/mineru_output/`, used by both MinerU and Marker backends) | off | `--marker` |
 | `.env` config file | always | — |
 
 ### Backup
@@ -172,6 +172,20 @@ Qdrant is unreachable.
     systemctl --user status qdrant
     systemctl --user start qdrant
 ```
+
+---
+
+## Web reader: jobs, exports, debugging
+
+The web reader (`sciknow book serve`) runs every LLM operation as a job tracked in `_jobs[id]` (in-memory dict, ephemeral). Two facts worth knowing for ops:
+
+**Job GC (Phase 22).** Finished jobs are swept after 5 minutes (`_JOB_GC_AGE_SECONDS`). If you're debugging a job that "disappeared", check `data/sciknow.log` for the run id — the in-memory queue is gone but the log line is forever. Active jobs are never GC'd.
+
+**Polling stats endpoint (Phase 32.5).** `GET /api/jobs/{job_id}/stats` returns a fixed-shape JSON snapshot: `{tokens, tps, elapsed_s, model_name, task_desc, target_words, stream_state, error_message}`. The persistent task bar polls this every 500ms. The `stream_state` field is the lifecycle marker — `streaming` / `done` / `error`. A 410 response means the job was already swept by the GC.
+
+**Debugging a hung job.** Two channels: (1) `data/sciknow.log` for backend Python tracebacks, (2) for autowrite specifically, `data/autowrite/<run_id>.jsonl` for the per-iteration heartbeat log (Phase 24). The heartbeat fires from a side thread so even a stuck generator yields a "no progress in N seconds" line.
+
+**Web exports (Phase 30 / 31).** `GET /api/export/{draft,chapter,book}/{id}.{ext}` produces `txt / md / html / pdf`. PDF rendering uses WeasyPrint directly off the rendered HTML. The CLI `book export` command has a different format matrix (md / html / bibtex / latex / docx via Pandoc) — see `docs/BOOK.md` for the full split.
 
 ---
 

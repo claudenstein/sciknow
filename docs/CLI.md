@@ -268,12 +268,48 @@ sciknow book autowrite "Global Cooling" 3 --section all            # all section
 sciknow book autowrite "Global Cooling" --full --max-iter 3 --target-score 0.85  # full book
 sciknow book autowrite "Global Cooling" --full --auto-expand       # fetch papers for gaps
 
+# Phase 17 — explicit per-section word target (overrides chapter target)
+sciknow book autowrite "Global Cooling" 3 --section all --target-words 2500
+
+# Phase 28 — resume mode: load an existing FINISHED draft and continue
+# iterating on it instead of skipping. Refuses to resume from partial drafts
+# (writing_in_progress / iteration_*_revising / placeholder) — use --rebuild
+# to overwrite those.
+sciknow book autowrite "Global Cooling" 3 --section methods --resume
+
+# Force-overwrite existing drafts (mutually exclusive with --resume; rebuild wins)
+sciknow book autowrite "Global Cooling" 3 --section all --rebuild
+
+# ── Drafts inspection (Phase 13 — Track A measurement) ────────────────────
+
+sciknow book draft scores 3f2a1b4c                              # iteration-by-iteration score history
+sciknow book draft compare 3f2a1b4c 9d8e7f6a                    # side-by-side from persisted scores
+sciknow book draft compare 3f2a1b4c 9d8e7f6a --rescore          # re-run scorer + verifier (current rubric)
+
+# ── Autowrite variance bench (Phase 13) ──────────────────────────────────
+
+sciknow book autowrite-bench "Global Cooling" 3 overview --runs 5
+sciknow book autowrite-bench "Global Cooling" 3 overview --no-cove        # disable Chain-of-Verification
+sciknow book autowrite-bench "Global Cooling" 3 overview --no-step-back --no-plan
+
+# ── Chapter management ───────────────────────────────────────────────────
+
+sciknow book chapter add "Global Cooling" "The Maunder Minimum"
+# (Reorder, rename, delete, and per-section editing all live in the web reader,
+#  not the CLI — open `sciknow book serve` and use the chapter modal.)
+
+# ── Adopt orphan section (Phase 25) ───────────────────────────────────────
+
+# Re-classify a draft whose section_type no longer matches any current
+# template slug. Adds the slug to the chapter's sections list.
+sciknow book adopt-section "Global Cooling" 3 historical_context
+
 # ── Web reader ────────────────────────────────────────────────────────────
 
 sciknow book serve "Global Cooling"
 sciknow book serve "Global Cooling" --port 9000
 
-# ── Export ────────────────────────────────────────────────────────────────
+# ── Export (CLI: md / html / bibtex / latex / docx) ──────────────────────
 
 sciknow book export "Global Cooling" -o manuscript.md                    # Markdown
 sciknow book export "Global Cooling" --format html -o book.html          # HTML
@@ -281,6 +317,8 @@ sciknow book export "Global Cooling" --format bibtex -o refs.bib         # BibTe
 sciknow book export "Global Cooling" --format latex -o book.tex          # LaTeX
 sciknow book export "Global Cooling" --format docx -o book.docx          # DOCX
 ```
+
+> **PDF export** (Phase 31) is **only available in the web reader**, not in `sciknow book export`. The web reader exports `txt / md / html / pdf` via WeasyPrint at `/api/export/{draft,chapter,book}/{id}.{ext}`. CLI PDF/EPUB via Pandoc is on the roadmap (`docs/ROADMAP.md`).
 
 See [Book Writing System](BOOK.md) for the full workflow guide.
 

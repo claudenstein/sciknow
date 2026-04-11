@@ -87,7 +87,8 @@ v3: groun=0.85  compl=0.80  coher=0.85  citat=0.82  length=1.00  overall=0.86  C
 - `--target-score 0.85` — quality threshold to stop (default 0.85)
 - `--target-words N` — target words per section for this run; overrides the book-level setting
 - `--auto-expand` — when the reviewer identifies missing evidence, checks corpus coverage and flags topics for expansion
-- `--rebuild` — overwrite existing drafts (default: auto-resume, skipping sections with drafts)
+- `--rebuild` — overwrite existing drafts (default: skip sections that already have a draft)
+- `--resume` (Phase 28) — for sections that already have a *finished* draft, load it as the starting content and run more iterations on it instead of skipping. Refuses to resume from drafts in a partial state (`writing_in_progress`, `iteration_*_revising`, `placeholder`) — use `--rebuild` to overwrite those. Mutually exclusive with `--rebuild` (rebuild wins if both are set).
 
 ### Chapter length targets (Phase 17)
 
@@ -96,14 +97,17 @@ Book chapters have a configurable word-count budget that flows through both `boo
 **Setting the target:**
 - Per book, at creation: `sciknow book create "Long Book" --target-chapter-words 10000`
 - Per book, later: open the Plan modal in the web reader → "Target chapter length" → pick a preset (3000 / 6000 / 10000) or enter a custom number → Save.
+- **Per section, in the GUI** (Phase 32.2): the Plan modal's "Chapter sections" tab and "Section" tab now offer a per-section length dropdown — `Auto / Very short ~400w / Short ~800w / Medium ~1500w / Long ~3000w / Extra long ~6000w / Custom`. The override is persisted in `book_chapters.sections[i].target_words` and is respected by both `book write` and `book autowrite` next time the section runs. Each section row displays a `~Nw [override|auto]` badge so the effective target is always visible. The same dropdown also appears in the Chapter modal's Sections tab.
 - Per run: `sciknow book autowrite "Book" 3 --section all --target-words 2500`
 - Per single section: `sciknow book write "Book" 3 --section methods --target-words 2500`
+
+**Resolution order** (highest priority wins): CLI `--target-words` flag → per-section meta override (set via the GUI dropdown) → chapter-level `target_chapter_words` divided by the number of sections → fallback default 6000/N.
 
 **How length drives the loop:** In autowrite, length is a 7th scoring dimension computed as `min(1.0, actual_words / target_words)`. When a draft scores below **0.7** on length AND lower than every other dimension, the loop targets length for the next revision and asks the writer to expand with *new substantive paragraphs* (not filler) pulling fresh claims from the source passages. Above the 0.7 floor, length never steals the revision target from hedging/groundedness — this is an anti-oscillation guard.
 
 **Why this helps:** Without an explicit target, the writer defaults to ~400–800 word sections that read like extended abstracts, not book chapters. With a target, the writer plans for the right shape upfront and the scoring loop catches any undershooting in the first iteration. Over-length drafts are never penalised — the writer is allowed to genuinely have more to say.
 
-**Estimated times (qwen3.5:27b on 3090):**
+**Estimated times (qwen2.5:32b-instruct-q4_K_M on 3090):**
 
 | Mode | Sections | Time |
 |---|---|---|
@@ -213,6 +217,20 @@ The web reader was rewritten in Phase 14 with a modern design system and full CL
 
 All Phase 14 modals use the same SSE infrastructure as the existing Write/Review/Revise/Autowrite operations, so cancellation, error handling, and concurrent-job management work uniformly.
 
+### Phases 17-32 highlights
+
+Many smaller features have shipped on top of the v2 reader. The most user-visible:
+
+- **Per-chapter rich sections (Phase 18)** — sections are first-class entities with `{slug, title, plan, target_words}` per section, edited in the chapter modal Sections tab and the Plan modal Chapter sections tab. The section template drives the sidebar order, the heatmap columns, and the autowrite loop.
+- **Persistent task bar (Phase 30, fixed in 32.3 + 32.5)** — a fixed bar at the top of the viewport shows the current LLM job: model, token count, rolling tokens/sec, elapsed time, ETA (when target words is known), and a Stop button. Survives all SPA navigation. Phase 32.5 reworked the data path: the bar polls `GET /api/jobs/{id}/stats` every 500ms instead of opening a second SSE source on `/api/stream/{id}` (which used to compete with the per-section preview consumer for the same `asyncio.Queue`).
+- **Inline section delete + add (Phase 32.4)** — every section in the sidebar has a hover-revealed `X` to remove it from the chapter (any associated draft becomes an orphan, recoverable via the existing `+` adopt button), and every chapter has a `+ Add section` CTA at the bottom of its section list. Both round-trip through the same `PUT /api/chapters/{id}/sections` endpoint.
+- **Per-section length dropdown in the Plan modal (Phase 32.2)** — see "Chapter length targets" above. The dropdown lives in both the Chapter sections tab and the focused Section tab, with a live `~Nw [override|auto]` badge.
+- **Drag-and-drop section reordering (Phase 26)** — within a chapter only; cross-chapter drops are intentionally rejected to avoid silent `drafts.chapter_id` rewrites.
+- **PDF export (Phase 31)** — the export buttons can produce PDF for any draft, chapter, or the whole book via WeasyPrint.
+- **Knowledge graph browse (Phase 30 / 31)** — `/api/kg` returns the GraphRAG triples for the current corpus; the modal shows them as both a SVG force-directed graph and a sortable table.
+- **Adopt orphan sections (Phase 25)** — drafts whose `section_type` no longer matches any current template slug appear as `orphan` rows in the sidebar with a `+` button to re-classify them and an `X` to permanently delete.
+- **Heartbeat-driven autowrite log (Phase 24)** — every autowrite run writes a JSONL log to `data/autowrite/<run_id>.jsonl`, also emitted live to the task bar so a stalled job is visible.
+
 ### Original v1 features (still available)
 
 `sciknow book serve "Global Cooling"` launches a local web application at `http://127.0.0.1:8765` with:
@@ -248,8 +266,16 @@ All Phase 14 modals use the same SSE infrastructure as the existing Write/Review
 | `/api/argue` | POST | Map evidence for/against a claim |
 | `/api/verify/{draft_id}` | POST | Run claim verification |
 | `/api/gaps` | POST | Run gap analysis |
-| `/api/stream/{job_id}` | GET | SSE endpoint for live streaming |
+| `/api/stream/{job_id}` | GET | SSE endpoint for live streaming (per-section preview) |
 | `/api/jobs/{job_id}` | DELETE | Cancel a running job |
+| `/api/jobs/{job_id}/stats` | GET | **Phase 32.5** — server-side counter snapshot for the persistent task bar (tokens, tps, elapsed, model, target_words, stream_state). Polled every 500ms instead of competing with the per-section SSE consumer. |
+| `/api/jobs` | GET | List all in-flight + recently-finished jobs |
+| `/api/kg` | GET | **Phase 30** — knowledge graph triples for the corpus (browse modal: SVG graph + table) |
+| `/api/export/draft/{id}.{ext}` | GET | **Phase 30/31** — export a draft (txt / md / html / pdf) |
+| `/api/export/chapter/{id}.{ext}` | GET | **Phase 30/31** — export a chapter |
+| `/api/export/book.{ext}` | GET | **Phase 30/31** — export the whole book (PDF via WeasyPrint) |
+| `/api/chapters/{id}/sections/adopt` | POST | **Phase 25** — adopt an orphan draft's section_type into the chapter |
+| `/api/chapters/{id}/sections` | PUT | **Phase 18** — replace a chapter's full sections list (round-trip for delete/add/reorder/target_words) |
 | `/api/section/{draft_id}` | GET | Section data as JSON |
 | `/api/chapters` | GET/POST | Chapter list / add chapter |
 | `/api/chapters/{id}` | PUT/DELETE | Update / delete chapter |
@@ -273,6 +299,10 @@ All Phase 14 modals use the same SSE infrastructure as the existing Write/Review
 
 ## Export Formats
 
+There are two export paths: the **CLI** (`sciknow book export`) and the **web reader** (Phase 30 / 31 export buttons in the toolbar). They have **different format coverage** because the web path can render to PDF via WeasyPrint, while the CLI path goes through Pandoc.
+
+**CLI: `sciknow book export`** (md / html / bibtex / latex / docx)
+
 | Format | Command | Notes |
 |---|---|---|
 | Markdown | `book export "..." -o book.md` | Default. Inline [N] citations + bibliography |
@@ -281,7 +311,11 @@ All Phase 14 modals use the same SSE infrastructure as the existing Write/Review
 | LaTeX | `book export "..." --format latex -o book.tex` | Via Pandoc + `--citeproc` |
 | DOCX | `book export "..." --format docx -o book.docx` | Via Pandoc |
 
-Export deduplicates citations globally across all chapters — `[1]` in Ch.1 and `[3]` in Ch.5 pointing to the same paper become a unified `[N]` with a single bibliography entry.
+**Web reader** (txt / md / html / pdf — Phase 30 / 31)
+
+The toolbar's export button can target three scopes: a single draft, a chapter, or the whole book. The endpoint pattern is `/api/export/{draft,chapter,book}/{id}.{ext}`. PDF rendering uses [WeasyPrint](https://github.com/Kozea/WeasyPrint) directly off the rendered HTML, so the look matches what you see in the reader. PDF is **not** in the CLI export matrix yet — see `docs/ROADMAP.md` for the deferred CLI PDF/EPUB work.
+
+Both paths deduplicate citations globally across all chapters — `[1]` in Ch.1 and `[3]` in Ch.5 pointing to the same paper become a unified `[N]` with a single bibliography entry.
 
 ---
 

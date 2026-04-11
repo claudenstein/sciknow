@@ -67,7 +67,7 @@ Mostly small.
 - [ ] **Chapter drag-and-drop reordering.** The endpoint (`/api/chapters/reorder`) exists, just needs the JS — same template as Phase 26. **Effort:** 1 hour.
 - [ ] **Proper modal for the autowrite mode picker** (Phase 28). Currently uses `prompt("s/r/i")` which is ugly. A small 3-button modal would be cleaner. **Effort:** 1 hour.
 - [ ] **Log rotation for `data/autowrite/`.** Phase 24 creates a file per run; they accumulate forever. A simple "keep last 50" sweep on `_AutowriteLogger` startup would be enough. **Effort:** 30 minutes.
-- [ ] **Autowrite ETA in heartbeats.** The Phase 24 heartbeat writes tokens-per-sec but no ETA. Computing `remaining_words / tokens_per_sec` would give the user a number for the live stats. **Effort:** 30 minutes.
+- [x] **~~Autowrite ETA in heartbeats.~~** Shipped in Phase 30 — the persistent task bar shows ETA when `target_words` is known and tokens are flowing (`remaining / tps`). The polling architecture from Phase 32.5 now keeps it in lockstep with the server-side counter.
 - [ ] **Keyboard shortcuts** in the web reader — `Ctrl+S` to force save, `Ctrl+K` to focus search, arrow keys to nav between sections, `Esc` to close modals. **Effort:** half-day.
 - [ ] **Build-tag version string** in the template. Phase 25 had the "hard-refresh to see the new chevron" issue. If every render included a version string in the `<title>` or as a DevTools console line, users could instantly tell whether their browser has stale JS. **Effort:** 30 minutes.
 
@@ -78,7 +78,7 @@ Mostly small.
 Things obviously missing for a book-writing system but never explicitly
 asked for. Listed in rough priority order.
 
-- [ ] **Export to PDF / EPUB / DOCX.** The user is writing a book; at some point they'll want to hand it to someone who doesn't run sciknow. `catalog` has export but `book` doesn't. Pandoc is the obvious dependency. **Effort:** 1-2 days for the full matrix; PDF-only via pandoc is half a day.
+- [x] **~~Export to PDF (web reader)~~** — shipped in Phase 31 via WeasyPrint. The web reader's export buttons can produce PDF for an individual draft, a chapter, or the full book (`/api/export/{draft,chapter,book}/...pdf`). **Still missing:** PDF / EPUB export from the **CLI** `book export` command (only md/html/bibtex/latex/docx there). EPUB output also still planned (via pandoc, half a day).
 - [ ] **Per-book settings page.** Things like `target_chapter_words`, `mineru_vlm_model`, custom_metadata are editable but scattered across the Plan modal, Chapter modal, and `.env`. A single "Book settings" modal would consolidate. **Effort:** half-day.
 - [ ] **Autowrite stall investigation.** Phase 24 added the diagnostic logger (`tail -f data/autowrite/latest.jsonl | jq`) but didn't fix any underlying cause. The next stall is a chance to find a concrete root cause. **Effort:** depends on the root cause once it's reproduced.
 - [ ] **Per-draft and per-chapter snapshots.** The snapshots table exists for individual drafts; exposing a "snapshot the whole chapter" or "snapshot the whole book" operation would let the user roll back a bad autowrite-all run safely.
