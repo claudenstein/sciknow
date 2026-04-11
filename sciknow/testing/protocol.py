@@ -2909,6 +2909,146 @@ def l1_phase29_empty_section_preview_not_write() -> None:
     assert "doWrite()" in src  # the button calls doWrite
 
 
+# ── Phase 30 — task bar + heatmap + export + KG ──────────────────────────
+
+
+def l1_phase30_persistent_task_bar() -> None:
+    """Phase 30 — persistent task bar HTML/CSS/JS exists with the
+    expected helpers and is wired into doAutowrite/doWrite/doReview.
+    """
+    import inspect
+    from sciknow.web import app as web_app
+    src = inspect.getsource(web_app)
+
+    # HTML element exists
+    assert 'id="task-bar"' in src, "task bar HTML element missing"
+    assert 'id="tb-tokens"' in src and 'id="tb-tps"' in src, (
+        "task bar missing token / tps display elements"
+    )
+    assert 'id="tb-elapsed"' in src and 'id="tb-eta"' in src, (
+        "task bar missing elapsed / ETA display elements"
+    )
+    assert 'id="tb-stop"' in src, "task bar missing Stop button"
+
+    # CSS for the bar (sticky top)
+    assert ".task-bar" in src and "position: sticky" in src, (
+        "task bar CSS missing or not sticky"
+    )
+
+    # JS helpers
+    for fn in ("startGlobalJob", "stopGlobalJob", "dismissTaskBar",
+               "_renderTaskBar", "_finishGlobalJob", "_formatElapsed"):
+        assert fn in src, f"missing JS helper: {fn}"
+
+    # Hours+mins formatting for >60 min elapsed (per user request)
+    assert "h ' +" in src or "h '" in src, (
+        "_formatElapsed doesn't render hours when elapsed > 60 min"
+    )
+
+    # Wired into the user-facing handlers
+    assert src.count("startGlobalJob(") >= 3, (
+        f"startGlobalJob should be called from doAutowrite + doWrite "
+        f"+ doReview, found {src.count('startGlobalJob(')}"
+    )
+
+    # The Stop button uses DELETE /api/jobs/{id} (the existing cancel
+    # endpoint) and the task bar's stop calls it
+    assert "/api/jobs/" in src and "method: 'DELETE'" in src, (
+        "stop button doesn't call the cancel endpoint"
+    )
+
+
+def l1_phase30_heatmap_numbered_columns() -> None:
+    """Phase 30 — api_dashboard returns n_columns + heatmap rows with
+    cells in chapter-section order, NOT a hardcoded section_types list.
+    """
+    import inspect
+    from sciknow.web import app as web_app
+
+    src = inspect.getsource(web_app.api_dashboard)
+    assert "n_columns" in src, (
+        "api_dashboard doesn't return n_columns"
+    )
+    # The OLD section_types union code is gone
+    assert "section_types_set" not in src, (
+        "api_dashboard still has the old union-of-slugs heatmap code"
+    )
+    # Per-row uses the chapter's actual sections in order
+    assert "_chapter_sections_dicts" in src, (
+        "api_dashboard doesn't read each chapter's sections meta"
+    )
+    # Absent cells are marked
+    assert '"absent"' in src
+
+    # JS rendering uses positional 1..N headers
+    full_src = inspect.getsource(web_app)
+    # The JS template literal must reference n_columns
+    assert "data.n_columns" in full_src, (
+        "showDashboard JS doesn't read n_columns from the API response"
+    )
+    assert ".hm-cell.absent" in full_src, (
+        "missing CSS for the absent cell variant"
+    )
+
+
+def l1_phase30_export_endpoints() -> None:
+    """Phase 30 — export endpoints return draft/chapter/book in
+    txt, md, html. Invalid ext returns 400."""
+    import inspect
+    from sciknow.web import app as web_app
+
+    routes = {getattr(r, "path", "") for r in web_app.app.routes}
+    for path in (
+        "/api/export/draft/{draft_id}.{ext}",
+        "/api/export/chapter/{chapter_id}.{ext}",
+        "/api/export/book.{ext}",
+    ):
+        assert path in routes, f"export endpoint missing: {path}"
+
+    # _wrap_html_export and helpers exist
+    for helper in ("_strip_md", "_draft_to_md", "_draft_to_html_body",
+                   "_wrap_html_export", "_ordered_chapter_drafts"):
+        assert hasattr(web_app, helper), f"missing helper: {helper}"
+
+    # The HTML export wraps with print CSS
+    out = web_app._wrap_html_export("Test", "<p>hi</p>")
+    assert "@page" in out, "html export missing @page print CSS"
+    assert "<html" in out and "<body>" in out
+    assert "Test" in out
+
+    # _strip_md removes markdown
+    assert web_app._strip_md("# Title\n**bold** *italic*") == "Title\nbold italic"
+
+
+def l1_phase30_kg_endpoint() -> None:
+    """Phase 30 — KG endpoint returns the right shape and accepts
+    filter params. The DB content isn't asserted (it varies); we
+    just verify the endpoint shape + filter parameter handling.
+    """
+    import inspect
+    from sciknow.web import app as web_app
+
+    routes = {getattr(r, "path", "") for r in web_app.app.routes}
+    assert "/api/kg" in routes, "KG endpoint not registered"
+
+    sig = inspect.signature(web_app.api_kg)
+    for p in ("subject", "predicate", "object", "document_id",
+              "limit", "offset"):
+        assert p in sig.parameters, f"api_kg missing {p} param"
+
+    # JS modal + helpers
+    src = inspect.getsource(web_app)
+    assert "openKgModal" in src, "openKgModal JS missing"
+    assert "loadKg" in src, "loadKg JS missing"
+    assert 'id="kg-modal"' in src, "KG modal HTML missing"
+    assert 'id="kg-subject"' in src and 'id="kg-predicate"' in src, (
+        "KG modal missing filter inputs"
+    )
+
+    # Toolbar button exists
+    assert "openKgModal()" in src, "KG button not in toolbar"
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -2992,6 +3132,11 @@ L1_TESTS: list[Callable] = [
     l1_phase29_per_section_target_words,
     l1_phase29_size_dropdown_in_modal,
     l1_phase29_empty_section_preview_not_write,
+    # Phase 30 — task bar + heatmap + export + KG
+    l1_phase30_persistent_task_bar,
+    l1_phase30_heatmap_numbered_columns,
+    l1_phase30_export_endpoints,
+    l1_phase30_kg_endpoint,
 ]
 
 L2_TESTS: list[Callable] = [

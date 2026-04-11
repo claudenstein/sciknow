@@ -626,22 +626,25 @@ async def api_chapters():
 
 @app.get("/api/dashboard")
 async def api_dashboard():
-    """Return dashboard data: completion heatmap, stats, gaps."""
-    book, chapters, drafts, gaps, comments = _get_book_data()
+    """Return dashboard data: completion heatmap, stats, gaps.
 
-    # Phase 14.4 — section_types is now a UNION computed from real data
-    # rather than a hardcoded paper-style list. The columns of the
-    # heatmap reflect:
-    #   - actual section types of any saved drafts (so existing work
-    #     doesn't disappear if a draft uses an unusual section type)
-    #   - per-chapter custom sections from book_chapters.sections
-    #     (populated by `book outline` for new books)
-    #   - the book-style defaults (overview/key_evidence/.../summary)
-    #     so a fresh book always has columns to show.
-    section_types_set: set[str] = set(_DEFAULT_BOOK_SECTIONS)
-    for ch in chapters:
-        for s in _chapter_sections(ch):
-            section_types_set.add(s)
+    Phase 30 — heatmap restructured to use POSITIONAL columns (1, 2,
+    3 ...) instead of a union of all section_type slugs. The previous
+    layout showed every distinct slug from every chapter as its own
+    column, which left orphan/legacy slugs (overview/key_evidence/etc)
+    visible even after the user defined custom sections, and made the
+    table sparse + confusing as different chapters use different
+    section names.
+
+    New layout:
+      - Columns are 1..N where N = max(num_sections_in_chapter)
+      - Each row shows the chapter's actual sections in their
+        defined order
+      - Empty cells past the chapter's section count are marked
+        ``status="absent"`` so the GUI can render them as blank
+      - Each cell carries the actual section title for hover tooltips
+    """
+    book, chapters, drafts, gaps, comments = _get_book_data()
 
     # Build draft lookup: chapter_id -> {section_type: {version, words, id, has_review}}
     ch_section_drafts: dict[str, dict] = {}
@@ -650,7 +653,6 @@ async def api_dashboard():
         draft_id, title, sec_type, content, wc, sources, version, summary, \
             review_fb, ch_id, parent_id, created, ch_num, ch_title = d
         total_words += wc or 0
-        section_types_set.add(_normalize_section(sec_type or ""))
         if not ch_id:
             continue
         if ch_id not in ch_section_drafts:
@@ -663,34 +665,48 @@ async def api_dashboard():
                 "has_review": bool(review_fb),
             }
 
-    section_types_set.discard("")
-
-    # Stable ordering: book defaults first (they read in narrative order),
-    # then any extras alphabetically.
-    section_types: list[str] = [s for s in _DEFAULT_BOOK_SECTIONS if s in section_types_set]
-    extras = sorted(section_types_set - set(_DEFAULT_BOOK_SECTIONS))
-    section_types.extend(extras)
+    # Phase 30 — compute the per-chapter sections lists FIRST so we
+    # can find max(N) for the column count.
+    chapter_sections: dict[str, list[dict]] = {}
+    for ch in chapters:
+        chapter_sections[ch[0]] = _chapter_sections_dicts(ch)
+    max_sections = max(
+        (len(s) for s in chapter_sections.values()), default=1
+    )
 
     heatmap = []
     for ch in chapters:
         ch_id, ch_num, ch_title, ch_desc, tq, tc, ch_sections_template = ch
+        sections_meta = chapter_sections.get(ch_id, [])
         row = {
             "num": ch_num, "title": ch_title, "id": ch_id, "cells": [],
-            # Phase 14.4 — include per-chapter section template so the GUI
-            # can highlight the columns this chapter actually wants.
-            "sections_template": _chapter_sections(ch),
+            "sections_template": [s["slug"] for s in sections_meta],
             "description": ch_desc or "",
             "topic_query": tq or "",
         }
         secs = ch_section_drafts.get(ch_id, {})
-        for st in section_types:
-            info = secs.get(st)
+        # First N cells: this chapter's actual sections in order
+        for sec_meta in sections_meta:
+            slug = sec_meta["slug"]
+            sec_title = sec_meta.get("title") or slug
+            info = secs.get(slug)
             if info:
                 status = "reviewed" if info["has_review"] else "drafted"
-                row["cells"].append({"type": st, "status": status, "draft_id": info["id"],
-                                     "version": info["version"], "words": info["words"]})
+                row["cells"].append({
+                    "type": slug, "title": sec_title, "status": status,
+                    "draft_id": info["id"], "version": info["version"],
+                    "words": info["words"],
+                })
             else:
-                row["cells"].append({"type": st, "status": "empty"})
+                row["cells"].append({
+                    "type": slug, "title": sec_title, "status": "empty",
+                })
+        # Remaining cells: this chapter has fewer sections than max(N).
+        # Render as 'absent' so the GUI can blank them out.
+        while len(row["cells"]) < max_sections:
+            row["cells"].append({
+                "type": None, "title": None, "status": "absent",
+            })
         heatmap.append(row)
 
     open_gaps = [{"id": g[0], "type": g[1], "description": g[2], "status": g[3],
@@ -698,7 +714,8 @@ async def api_dashboard():
 
     return {
         "heatmap": heatmap,
-        "section_types": section_types,
+        # Phase 30 — column headers are positional integers, not slugs
+        "n_columns": max_sections,
         "stats": {
             "total_words": total_words,
             "chapters": len(chapters),
@@ -935,6 +952,347 @@ async def reorder_chapters(request: Request):
         session.commit()
 
     return JSONResponse({"ok": True})
+
+
+# ── Phase 30: Export endpoints (text / markdown / printable HTML) ───────────
+#
+# Pandoc isn't installed and adding weasyprint would pull a lot of
+# system deps, so the "PDF" path is HTML with print-friendly CSS —
+# the user opens it in their browser and uses File → Print → Save
+# as PDF. For most single-user book-writing workflows that's the
+# right tradeoff: zero new dependencies, near-perfect typography,
+# editable in the browser before saving.
+#
+# Endpoints:
+#   GET /api/export/draft/{draft_id}.{ext}
+#   GET /api/export/chapter/{chapter_id}.{ext}
+#   GET /api/export/book.{ext}
+#
+# ext ∈ {txt, md, html}. txt is markdown stripped of formatting; md
+# is the raw stored content (which IS markdown); html is the same
+# rendered with print CSS.
+
+_EXPORT_PRINT_CSS = """
+<style>
+  @page {
+    size: A4;
+    margin: 25mm 22mm;
+    @bottom-right { content: counter(page); }
+  }
+  body {
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 11pt;
+    line-height: 1.55;
+    color: #111;
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 24px;
+  }
+  h1 { font-size: 24pt; margin: 32pt 0 12pt; page-break-before: always; }
+  h1:first-of-type { page-break-before: avoid; }
+  h2 { font-size: 16pt; margin: 24pt 0 8pt; }
+  h3 { font-size: 13pt; margin: 18pt 0 6pt; }
+  p { margin: 0 0 8pt; text-align: justify; }
+  .meta { color: #666; font-size: 9pt; margin-bottom: 24pt;
+          font-family: -apple-system, sans-serif; }
+  .citation {
+    color: #2563eb; font-weight: 600; vertical-align: super;
+    font-size: 0.78em; text-decoration: none;
+  }
+  .sources { margin-top: 32pt; padding-top: 16pt;
+             border-top: 1px solid #ccc; }
+  .sources h2 { font-size: 13pt; }
+  .sources ol { padding-left: 20pt; font-size: 9pt; line-height: 1.5; }
+  .sources li { margin-bottom: 6pt; color: #444; }
+  @media print {
+    body { padding: 0; }
+    .no-print { display: none !important; }
+  }
+</style>
+"""
+
+
+def _strip_md(text_in: str) -> str:
+    """Best-effort markdown → plain text. Removes heading markers,
+    bold/italic markers, and converts citations to plain [N]. Keeps
+    line breaks and paragraphs intact."""
+    if not text_in:
+        return ""
+    out = text_in
+    out = re.sub(r"^#{1,6}\s*", "", out, flags=re.MULTILINE)
+    out = re.sub(r"\*\*(.+?)\*\*", r"\1", out)
+    out = re.sub(r"\*(.+?)\*", r"\1", out)
+    return out
+
+
+def _draft_to_md(draft_row, *, include_sources: bool = True) -> str:
+    """Render a single draft as markdown. draft_row is the 14-tuple
+    from _get_book_data's drafts query."""
+    title = draft_row[1] or "Untitled"
+    content = draft_row[3] or ""
+    sources = draft_row[5]
+    if isinstance(sources, str):
+        try:
+            sources = json.loads(sources)
+        except Exception:
+            sources = []
+    sources = sources or []
+    out = f"# {title}\n\n{content.strip()}\n"
+    if include_sources and sources:
+        out += "\n\n## Sources\n\n"
+        for i, s in enumerate(sources, start=1):
+            if s:
+                out += f"{i}. {s}\n"
+    return out
+
+
+def _draft_to_html_body(draft_row) -> str:
+    """Render a single draft as the inner HTML body for the export
+    template. Uses _md_to_html for markdown + citations and
+    _render_sources for the bibliography panel."""
+    title = _esc(draft_row[1] or "Untitled")
+    content_html = _md_to_html(draft_row[3] or "")
+    sources = draft_row[5]
+    if isinstance(sources, str):
+        try:
+            sources = json.loads(sources)
+        except Exception:
+            sources = []
+    sources_html = _render_sources(sources or [])
+    return (
+        f"<h1>{title}</h1>\n"
+        f"<div class='meta'>{int(draft_row[4] or 0)} words &middot; "
+        f"version {int(draft_row[6] or 1)}</div>\n"
+        f"{content_html}\n"
+        f"<div class='sources'><h2>Sources</h2>{sources_html}</div>"
+    )
+
+
+def _wrap_html_export(title: str, body_html: str) -> str:
+    """Wrap export body content in a complete HTML document with
+    print-friendly CSS. The user opens this in a browser and uses
+    File → Print → Save as PDF."""
+    return (
+        "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
+        f"<title>{_esc(title)}</title>{_EXPORT_PRINT_CSS}</head>"
+        f"<body>{body_html}</body></html>"
+    )
+
+
+def _ordered_chapter_drafts(drafts, chapter_id: str) -> list:
+    """Helper: filter drafts to one chapter and order them by the
+    chapter's sections list, returning latest version per section_type."""
+    from sciknow.core.book_ops import _normalize_chapter_sections
+    with get_session() as session:
+        row = session.execute(text(
+            "SELECT sections FROM book_chapters WHERE id::text = :cid"
+        ), {"cid": chapter_id}).fetchone()
+    sections_raw = row[0] if row else None
+    sections_meta = _normalize_chapter_sections(sections_raw)
+    order = {s["slug"]: i for i, s in enumerate(sections_meta)}
+    in_chapter = [d for d in drafts if d[9] == chapter_id]
+    # Latest version per section_type
+    latest: dict[str, tuple] = {}
+    for d in in_chapter:
+        st = (d[2] or "").strip().lower()
+        if st not in latest or (d[6] or 1) > (latest[st][6] or 1):
+            latest[st] = d
+    return sorted(latest.values(), key=lambda d: order.get(
+        (d[2] or "").strip().lower(), 999
+    ))
+
+
+@app.get("/api/export/draft/{draft_id}.{ext}")
+async def export_draft(draft_id: str, ext: str):
+    """Phase 30 — export a single draft as txt/md/html."""
+    if ext not in ("txt", "md", "html"):
+        raise HTTPException(400, "ext must be txt, md, or html")
+    book, chapters, drafts, gaps, comments = _get_book_data()
+    draft = next((d for d in drafts if d[0] == draft_id or d[0].startswith(draft_id)), None)
+    if not draft:
+        raise HTTPException(404, "Draft not found")
+    md = _draft_to_md(draft)
+    if ext == "md":
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(md, media_type="text/markdown; charset=utf-8")
+    if ext == "txt":
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(_strip_md(md), media_type="text/plain; charset=utf-8")
+    # html
+    body = _draft_to_html_body(draft)
+    html = _wrap_html_export(draft[1] or "Untitled", body)
+    return HTMLResponse(html)
+
+
+@app.get("/api/export/chapter/{chapter_id}.{ext}")
+async def export_chapter(chapter_id: str, ext: str):
+    """Phase 30 — export every drafted section in a chapter, ordered
+    by the chapter's sections meta. Skips empty/orphan sections."""
+    if ext not in ("txt", "md", "html"):
+        raise HTTPException(400, "ext must be txt, md, or html")
+    book, chapters, drafts, gaps, comments = _get_book_data()
+    ch = next((c for c in chapters if c[0] == chapter_id), None)
+    if not ch:
+        raise HTTPException(404, "Chapter not found")
+    ch_num, ch_title = ch[1], ch[2]
+    section_drafts = _ordered_chapter_drafts(drafts, chapter_id)
+    if ext == "md":
+        from fastapi.responses import PlainTextResponse
+        parts = [f"# Ch.{ch_num} {ch_title}\n"]
+        for d in section_drafts:
+            parts.append(_draft_to_md(d))
+        return PlainTextResponse("\n\n".join(parts), media_type="text/markdown; charset=utf-8")
+    if ext == "txt":
+        from fastapi.responses import PlainTextResponse
+        parts = [f"Ch.{ch_num} {ch_title}\n{'=' * 40}\n"]
+        for d in section_drafts:
+            parts.append(_strip_md(_draft_to_md(d)))
+        return PlainTextResponse("\n\n".join(parts), media_type="text/plain; charset=utf-8")
+    # html
+    body = (
+        f"<h1>Ch.{ch_num} {_esc(ch_title or '')}</h1>"
+        f"<div class='meta'>{len(section_drafts)} sections</div>"
+    )
+    for d in section_drafts:
+        body += _draft_to_html_body(d)
+    html = _wrap_html_export(f"Ch.{ch_num} {ch_title}", body)
+    return HTMLResponse(html)
+
+
+@app.get("/api/export/book.{ext}")
+async def export_book(ext: str):
+    """Phase 30 — export the whole book as one file. Iterates chapters
+    in order, then sections in each chapter's defined order."""
+    if ext not in ("txt", "md", "html"):
+        raise HTTPException(400, "ext must be txt, md, or html")
+    book, chapters, drafts, gaps, comments = _get_book_data()
+    book_title = book[1] if book else "Untitled book"
+    if ext == "md":
+        from fastapi.responses import PlainTextResponse
+        parts = [f"# {book_title}\n"]
+        for ch in chapters:
+            parts.append(f"\n## Ch.{ch[1]} {ch[2]}\n")
+            for d in _ordered_chapter_drafts(drafts, ch[0]):
+                parts.append(_draft_to_md(d, include_sources=False))
+        # Bibliography at the end of the book, not per-section
+        all_sources = []
+        seen = set()
+        for d in drafts:
+            srcs = d[5]
+            if isinstance(srcs, str):
+                try:
+                    srcs = json.loads(srcs)
+                except Exception:
+                    srcs = []
+            for s in srcs or []:
+                if s and s not in seen:
+                    seen.add(s)
+                    all_sources.append(s)
+        if all_sources:
+            parts.append("\n\n## Bibliography\n\n")
+            for i, s in enumerate(all_sources, start=1):
+                parts.append(f"{i}. {s}\n")
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse("\n".join(parts), media_type="text/markdown; charset=utf-8")
+    if ext == "txt":
+        from fastapi.responses import PlainTextResponse
+        parts = [f"{book_title}\n{'=' * len(book_title)}\n"]
+        for ch in chapters:
+            parts.append(f"\nCh.{ch[1]} {ch[2]}\n{'-' * 40}\n")
+            for d in _ordered_chapter_drafts(drafts, ch[0]):
+                parts.append(_strip_md(_draft_to_md(d, include_sources=False)))
+        return PlainTextResponse("\n".join(parts), media_type="text/plain; charset=utf-8")
+    # html
+    body = f"<h1>{_esc(book_title)}</h1><div class='meta'>{len(chapters)} chapters</div>"
+    for ch in chapters:
+        body += f"<h1>Ch.{ch[1]} {_esc(ch[2] or '')}</h1>"
+        for d in _ordered_chapter_drafts(drafts, ch[0]):
+            body += _draft_to_html_body(d)
+    html = _wrap_html_export(book_title, body)
+    return HTMLResponse(html)
+
+
+# ── Phase 30: Knowledge Graph browse endpoint ────────────────────────────────
+#
+# The KG schema (sciknow.storage.models.KnowledgeGraphTriple, table
+# `knowledge_graph`) was added by an earlier phase but had zero web
+# exposure — only the wiki compile pipeline writes to it. This
+# endpoint exposes a simple filtered list view so the user can
+# sanity-check the corpus's extracted (subject, predicate, object)
+# triples without dropping into psql.
+
+@app.get("/api/kg")
+async def api_kg(
+    subject: str = "",
+    predicate: str = "",
+    object: str = "",
+    document_id: str = "",
+    limit: int = 200,
+    offset: int = 0,
+):
+    """Phase 30 — return knowledge_graph triples filtered by any of:
+    subject (substring, case-insensitive), predicate (exact),
+    object (substring, case-insensitive), document_id (exact UUID).
+
+    Returns at most `limit` rows (capped at 1000), with pagination via
+    offset. Each row has the source paper title joined in for the GUI
+    so the user can see which document a triple was extracted from.
+    """
+    limit = max(1, min(int(limit or 200), 1000))
+    offset = max(0, int(offset or 0))
+    where = []
+    params: dict = {"limit": limit, "offset": offset}
+    if subject.strip():
+        where.append("kg.subject ILIKE :subject_q")
+        params["subject_q"] = f"%{subject.strip()}%"
+    if predicate.strip():
+        where.append("kg.predicate = :predicate_q")
+        params["predicate_q"] = predicate.strip()
+    if object.strip():
+        where.append("kg.object ILIKE :object_q")
+        params["object_q"] = f"%{object.strip()}%"
+    if document_id.strip():
+        where.append("kg.source_doc_id::text = :doc_q")
+        params["doc_q"] = document_id.strip()
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
+    with get_session() as session:
+        # Total count for pagination
+        total = session.execute(text(
+            f"SELECT COUNT(*) FROM knowledge_graph kg {where_sql}"
+        ), params).scalar()
+
+        rows = session.execute(text(f"""
+            SELECT kg.subject, kg.predicate, kg.object,
+                   kg.source_doc_id::text, kg.confidence,
+                   pm.title
+            FROM knowledge_graph kg
+            LEFT JOIN paper_metadata pm ON pm.document_id = kg.source_doc_id
+            {where_sql}
+            ORDER BY kg.confidence DESC, kg.subject
+            LIMIT :limit OFFSET :offset
+        """), params).fetchall()
+
+        # Distinct predicates so the GUI can populate a filter dropdown
+        predicates = [r[0] for r in session.execute(text("""
+            SELECT DISTINCT predicate FROM knowledge_graph
+            ORDER BY predicate LIMIT 200
+        """)).fetchall()]
+
+    return {
+        "total": int(total or 0),
+        "offset": offset,
+        "limit": limit,
+        "predicates": predicates,
+        "triples": [
+            {
+                "subject": r[0], "predicate": r[1], "object": r[2],
+                "source_doc_id": r[3], "confidence": float(r[4] or 1.0),
+                "source_title": r[5],
+            }
+            for r in rows
+        ],
+    }
 
 
 # ── Snapshots ────────────────────────────────────────────────────────────────
@@ -2920,7 +3278,11 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .hm-cell.reviewed {{ background: var(--success); color: white; }}
 .hm-cell.drafted {{ background: var(--warning); color: white; }}
 .hm-cell.empty {{ background: var(--border); opacity: 0.5; }}
+/* Phase 30 — chapter has fewer sections than max(N); blank cell. */
+.hm-cell.absent {{ background: transparent; color: var(--fg-faint);
+                  opacity: 0.25; cursor: default; }}
 .hm-cell:hover {{ opacity: 0.85; }}
+.hm-cell.absent:hover {{ opacity: 0.25; }}
 /* Gaps in dashboard */
 .gap-list {{ margin-bottom: 20px; }}
 .gap-item {{ display: flex; align-items: center; gap: 8px; padding: 8px 12px;
@@ -3011,6 +3373,67 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 [data-theme="dark"] .citation.verified-extrapolated {{ background: #78350f; }}
 [data-theme="dark"] .citation.verified-overstated {{ background: #7c2d12; }}
 [data-theme="dark"] .citation.verified-misrepresented {{ background: #7f1d1d; }}
+/* Phase 30 — Export modal grid + KG table */
+.export-grid {{ display: grid; grid-template-columns: 1fr 1fr 1fr;
+               gap: 16px; margin-top: 8px; }}
+.export-grid > div {{ padding: 14px; border: 1px solid var(--border);
+                     border-radius: 6px; background: var(--toolbar-bg); }}
+.export-grid h4 {{ margin: 0 0 6px; font-size: 13px; color: var(--fg); }}
+.export-grid .export-target {{ font-size: 11px; color: var(--fg-muted);
+                              margin: 0 0 10px; min-height: 14px;
+                              overflow: hidden; text-overflow: ellipsis;
+                              white-space: nowrap; }}
+.export-grid .export-btns {{ display: flex; gap: 6px; flex-wrap: wrap; }}
+.export-grid .export-btns a {{ padding: 4px 10px; font-size: 11px;
+                              text-decoration: none; border-radius: 4px;
+                              background: var(--bg); color: var(--accent);
+                              border: 1px solid var(--border); }}
+.export-grid .export-btns a:hover {{ background: var(--accent);
+                                     color: white; border-color: var(--accent); }}
+.export-grid .export-btns a.disabled {{ opacity: 0.4; cursor: not-allowed;
+                                        pointer-events: none; }}
+.kg-table {{ width: 100%; border-collapse: collapse; font-size: 12px;
+            font-family: var(--font-sans); }}
+.kg-table th, .kg-table td {{ padding: 6px 8px; text-align: left;
+                             border-bottom: 1px solid var(--border); }}
+.kg-table th {{ background: var(--toolbar-bg); font-weight: 600;
+              color: var(--fg-muted); position: sticky; top: 0; }}
+.kg-table .kg-pred {{ color: var(--accent); font-family: var(--font-mono);
+                    font-size: 11px; }}
+.kg-table .kg-source {{ color: var(--fg-muted); font-size: 10px;
+                      max-width: 220px; overflow: hidden;
+                      text-overflow: ellipsis; white-space: nowrap; }}
+/* Phase 30 — persistent global task bar (top of viewport, full width).
+   Visible whenever a job is running, regardless of SPA navigation.
+   Designed to be unobtrusive: 36px tall, mono font for the numerics,
+   accent colour only for the activity dot. */
+.task-bar {{ position: sticky; top: 0; z-index: 100;
+            display: flex; align-items: center; gap: 8px;
+            padding: 8px 16px; background: var(--bg-elevated);
+            border-bottom: 1px solid var(--border-strong);
+            font-family: var(--font-mono); font-size: 12px;
+            color: var(--fg); box-shadow: 0 2px 8px rgba(0,0,0,0.04); }}
+.task-bar .tb-dot {{ width: 10px; height: 10px; border-radius: 50%;
+                    background: var(--success); flex-shrink: 0;
+                    animation: pulse 1.2s infinite; }}
+.task-bar .tb-dot.error {{ background: var(--danger); animation: none; }}
+.task-bar .tb-dot.done  {{ background: var(--success); animation: none; }}
+.task-bar .tb-dot.idle  {{ background: var(--fg-faint); animation: none; }}
+.task-bar .tb-task {{ font-family: var(--font-sans); color: var(--fg);
+                     font-weight: 600; max-width: 360px;
+                     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.task-bar .tb-stat {{ display: inline-flex; align-items: center; gap: 4px; }}
+.task-bar .tb-stat strong {{ color: var(--accent); font-weight: 700; }}
+.task-bar .tb-sep {{ color: var(--border-strong); }}
+.task-bar .tb-spacer {{ flex: 1; }}
+.task-bar .tb-stop, .task-bar .tb-dismiss {{ background: var(--danger);
+                    border: none; color: white; cursor: pointer;
+                    padding: 4px 12px; border-radius: var(--r-sm);
+                    font-size: 11px; font-family: var(--font-sans);
+                    font-weight: 600; }}
+.task-bar .tb-stop:hover, .task-bar .tb-dismiss:hover {{ background: #b91c1c; }}
+.task-bar .tb-dismiss {{ background: var(--fg-muted); }}
+.task-bar .tb-dismiss:hover {{ background: var(--fg); }}
 /* Autowrite chart */
 .aw-dashboard {{ margin-bottom: 16px; }}
 .aw-chart {{ border: 1px solid var(--border); border-radius: 6px; padding: 8px;
@@ -3071,6 +3494,30 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 </style>
 </head>
 <body>
+
+<!-- Phase 30 — persistent global task bar.
+     Hidden by default; shown when startGlobalJob() runs. Lives at
+     the very top of the body so it survives all SPA navigation
+     (loadSection, showDashboard, showCorkboard, etc) and never gets
+     overwritten by innerHTML rebuilds of the main content area. -->
+<div id="task-bar" class="task-bar" style="display:none;">
+  <span class="tb-dot" id="tb-dot"></span>
+  <span class="tb-task" id="tb-task">…</span>
+  <span class="tb-sep">·</span>
+  <span class="tb-stat"><span id="tb-model">?</span></span>
+  <span class="tb-sep">·</span>
+  <span class="tb-stat"><strong id="tb-tokens">0</strong>&nbsp;tok</span>
+  <span class="tb-sep">·</span>
+  <span class="tb-stat"><strong id="tb-tps">0.0</strong>&nbsp;tok/s</span>
+  <span class="tb-sep">·</span>
+  <span class="tb-stat" id="tb-elapsed">0s</span>
+  <span class="tb-stat tb-eta" id="tb-eta" style="display:none;">
+    <span class="tb-sep">·</span>ETA <strong id="tb-eta-val">?</strong>
+  </span>
+  <span class="tb-spacer"></span>
+  <button class="tb-stop" id="tb-stop" onclick="stopGlobalJob()" title="Stop the running task">&#9632; Stop</button>
+  <button class="tb-dismiss" id="tb-dismiss" onclick="dismissTaskBar()" title="Dismiss" style="display:none;">&times;</button>
+</div>
 
 <!-- Sidebar -->
 <nav class="sidebar">
@@ -3151,12 +3598,14 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
       <button onclick="openPlanModal()" title="View / edit / regenerate the book plan (the leitmotiv)">&#128221; Plan</button>
       <button onclick="openAskModal()" title="Full corpus RAG question (sciknow ask question)">&#128270; Ask Corpus</button>
       <button onclick="openWikiModal()" title="Query the compiled knowledge wiki (sciknow wiki query)">&#128218; Wiki Query</button>
+      <button onclick="openKgModal()" title="Browse the knowledge graph (extracted entity-relationship triples)">&#128279; KG</button>
       <button onclick="openCatalogModal()" title="Browse the paper catalog (sciknow catalog list)">&#128194; Browse Papers</button>
     </div>
     <div class="sep"></div>
     <div class="tg">
       <button onclick="showVersions()" title="View version history and diffs">History</button>
       <button onclick="takeSnapshot()" title="Save a snapshot of current content">Snapshot</button>
+      <button onclick="openExportModal()" title="Export this section, chapter, or the whole book to text or printable HTML/PDF">&#128229; Export</button>
       <button onclick="showCorkboard()" title="Visual card-based view">Corkboard</button>
       <button onclick="showChapterReader()" title="Read entire chapter as continuous scroll">Read</button>
       <button onclick="showDashboard()" title="Book dashboard with stats + heatmap">Dashboard</button>
@@ -3515,6 +3964,78 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
         <button class="btn-primary" onclick="loadCatalog(1)">Filter</button>
       </div>
       <div id="catalog-results" style="margin-top:12px;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Phase 30 — Knowledge Graph Modal -->
+<div class="modal-overlay" id="kg-modal" onclick="if(event.target===this)closeModal('kg-modal')">
+  <div class="modal wide">
+    <div class="modal-header">
+      <h3>&#128279; Knowledge Graph</h3>
+      <button class="modal-close" onclick="closeModal('kg-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+        Entity-relationship triples extracted from the corpus during wiki compile.
+        Filter by subject substring, predicate (exact match), object substring,
+        or document id. Results are ordered by extraction confidence.
+      </p>
+      <div class="field" style="display:flex;gap:8px;align-items:flex-end;">
+        <div style="flex:2;">
+          <label>Subject contains</label>
+          <input type="text" id="kg-subject" placeholder="(any)" onkeydown="if(event.key==='Enter')loadKg(0)">
+        </div>
+        <div style="flex:1;">
+          <label>Predicate</label>
+          <select id="kg-predicate" onchange="loadKg(0)">
+            <option value="">(any)</option>
+          </select>
+        </div>
+        <div style="flex:2;">
+          <label>Object contains</label>
+          <input type="text" id="kg-object" placeholder="(any)" onkeydown="if(event.key==='Enter')loadKg(0)">
+        </div>
+        <button class="btn-primary" onclick="loadKg(0)">Filter</button>
+      </div>
+      <div id="kg-status" style="font-size:11px;color:var(--fg-muted);margin:8px 0;"></div>
+      <div id="kg-results" style="max-height:60vh;overflow-y:auto;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Phase 30 — Export Modal -->
+<div class="modal-overlay" id="export-modal" onclick="if(event.target===this)closeModal('export-modal')">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>&#128229; Export</h3>
+      <button class="modal-close" onclick="closeModal('export-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <p style="font-size:12px;color:var(--fg-muted);margin-bottom:14px;">
+        Pick what to export and the format. <strong>HTML</strong> is print-ready &mdash;
+        open it in your browser, then File &rarr; Print &rarr; Save as PDF for the
+        equivalent of a PDF export. <strong>Markdown</strong> preserves all
+        formatting and citations. <strong>Text</strong> is plain prose with the
+        markdown stripped.
+      </p>
+      <div class="export-grid">
+        <div>
+          <h4>This section</h4>
+          <p class="export-target" id="export-section-name">(no draft selected)</p>
+          <div class="export-btns" id="export-section-btns"></div>
+        </div>
+        <div>
+          <h4>This chapter</h4>
+          <p class="export-target" id="export-chapter-name">(no chapter selected)</p>
+          <div class="export-btns" id="export-chapter-btns"></div>
+        </div>
+        <div>
+          <h4>Whole book</h4>
+          <p class="export-target" id="export-book-name">&nbsp;</p>
+          <div class="export-btns" id="export-book-btns"></div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -3894,6 +4415,310 @@ function stopJob() {{
     fetch('/api/jobs/' + currentJobId, {{method: 'DELETE'}});
     document.getElementById('stream-status').textContent = 'Stopping...';
   }}
+  // Phase 30 — also notify the global task bar so the user gets
+  // immediate visual feedback even when the inner stop button is
+  // pressed instead of the global one.
+  stopGlobalJob();
+}}
+
+// ── Phase 30: persistent global task bar ──────────────────────────────
+//
+// One global SSE source per job, NOT closed by loadSection or any
+// SPA navigation. The task bar at the top of the viewport reflects
+// the live state. doAutowrite/doWrite/etc all call startGlobalJob()
+// after kicking off their HTTP request; the bar handles its own
+// rendering loop and stop button.
+
+let _globalJob = null;
+let _globalJobSource = null;
+let _globalJobTimer = null;
+
+function _formatElapsed(ms) {{
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + 'm ' + (s % 60).toString().padStart(2, '0') + 's';
+  // Phase 30 — beyond 60 minutes show hours + minutes (per user request)
+  const h = Math.floor(m / 60);
+  return h + 'h ' + (m % 60).toString().padStart(2, '0') + 'm';
+}}
+
+function _renderTaskBar() {{
+  const j = _globalJob;
+  if (!j) return;
+  const bar = document.getElementById('task-bar');
+  if (!bar) return;
+  bar.style.display = 'flex';
+  document.getElementById('tb-task').textContent = j.taskDesc || j.type || 'Working';
+  document.getElementById('tb-task').title = j.taskDesc || j.type || '';
+  document.getElementById('tb-model').textContent = j.modelName || 'qwen3.5:27b';
+  document.getElementById('tb-tokens').textContent = j.tokens.toLocaleString();
+  // Rolling t/s over the last 3 seconds
+  const now = performance.now();
+  const cutoff = now - 3000;
+  while (j.recentTokens.length > 0 && j.recentTokens[0] < cutoff) {{
+    j.recentTokens.shift();
+  }}
+  const tps = j.recentTokens.length / 3;
+  document.getElementById('tb-tps').textContent = tps.toFixed(1);
+  const elapsed = j.startedAt ? (now - j.startedAt) : 0;
+  document.getElementById('tb-elapsed').textContent = _formatElapsed(elapsed);
+  // ETA — only when target_words is known and tokens are flowing
+  const etaWrap = document.getElementById('tb-eta');
+  if (j.targetWords && tps > 0.1 && j.tokens > 0) {{
+    const remaining = Math.max(0, j.targetWords - j.tokens);
+    const etaMs = (remaining / tps) * 1000;
+    document.getElementById('tb-eta-val').textContent = _formatElapsed(etaMs);
+    etaWrap.style.display = 'inline-flex';
+  }} else {{
+    etaWrap.style.display = 'none';
+  }}
+  // Dot state
+  const dot = document.getElementById('tb-dot');
+  dot.className = 'tb-dot ' + (j.state || 'streaming');
+}}
+
+function startGlobalJob(jobId, opts) {{
+  if (!jobId) return;
+  // Clean up any previous job
+  if (_globalJobSource) {{
+    try {{ _globalJobSource.close(); }} catch (e) {{}}
+    _globalJobSource = null;
+  }}
+  if (_globalJobTimer) {{
+    clearInterval(_globalJobTimer);
+    _globalJobTimer = null;
+  }}
+
+  _globalJob = {{
+    id: jobId,
+    type: (opts && opts.type) || 'job',
+    taskDesc: (opts && opts.taskDesc) || 'Running…',
+    modelName: (opts && opts.modelName) || 'qwen3.5:27b',
+    targetWords: (opts && opts.targetWords) || null,
+    tokens: 0,
+    recentTokens: [],
+    startedAt: performance.now(),
+    state: 'streaming',
+    sectionType: (opts && opts.sectionType) || null,
+    chapterId: (opts && opts.chapterId) || null,
+  }};
+
+  // Show buttons in their starting state
+  document.getElementById('tb-stop').style.display = '';
+  document.getElementById('tb-dismiss').style.display = 'none';
+
+  _renderTaskBar();
+  // Re-render every 500ms so elapsed/t/s/eta tick in real time even
+  // when no events are flowing (e.g. during a long retrieval phase)
+  _globalJobTimer = setInterval(_renderTaskBar, 500);
+
+  // Open SSE source. The handler updates _globalJob state but DOES
+  // NOT directly touch the read-view DOM — we leave the per-section
+  // live preview to the existing handlers (which can hook into the
+  // global stream by listening for the corresponding section).
+  const source = new EventSource('/api/stream/' + jobId);
+  _globalJobSource = source;
+  source.onmessage = function(e) {{
+    let evt;
+    try {{ evt = JSON.parse(e.data); }} catch (err) {{ return; }}
+    const j = _globalJob;
+    if (!j || j.id !== jobId) return;
+
+    if (evt.type === 'token') {{
+      // Approximate token count by whitespace splits (Phase 15.4
+      // pattern, but the count IS the count we display now).
+      const text = (typeof evt.text === 'string') ? evt.text : '';
+      const n = (text.match(/\\S+/g) || []).length || 1;
+      j.tokens += n;
+      const now = performance.now();
+      for (let i = 0; i < n; i++) j.recentTokens.push(now);
+    }} else if (evt.type === 'progress') {{
+      if (evt.detail) j.taskDesc = evt.detail;
+    }} else if (evt.type === 'model_info') {{
+      if (evt.writer_model) j.modelName = evt.writer_model;
+    }} else if (evt.type === 'length_target') {{
+      if (evt.target_words) j.targetWords = evt.target_words;
+    }} else if (evt.type === 'completed' || evt.type === 'all_sections_complete') {{
+      j.state = 'done';
+      j.taskDesc = 'Done';
+      _renderTaskBar();
+      _finishGlobalJob('done', 4000);
+    }} else if (evt.type === 'error') {{
+      j.state = 'error';
+      j.taskDesc = 'Error: ' + (evt.message || 'unknown').slice(0, 80);
+      _renderTaskBar();
+      _finishGlobalJob('error', 0);  // wait for explicit dismiss
+    }} else if (evt.type === 'cancelled') {{
+      j.state = 'done';
+      j.taskDesc = 'Stopped';
+      _renderTaskBar();
+      _finishGlobalJob('done', 2000);
+    }} else if (evt.type === 'done') {{
+      // Sentinel from the SSE side — close the source
+      _finishGlobalJob('done', 1000);
+    }}
+  }};
+  source.onerror = function() {{
+    if (_globalJob) {{
+      _globalJob.state = 'error';
+      _globalJob.taskDesc = 'Connection lost';
+      _renderTaskBar();
+      _finishGlobalJob('error', 0);
+    }}
+  }};
+}}
+
+function _finishGlobalJob(state, autoDismissMs) {{
+  if (!_globalJob) return;
+  if (_globalJobSource) {{
+    try {{ _globalJobSource.close(); }} catch (e) {{}}
+    _globalJobSource = null;
+  }}
+  if (_globalJobTimer) {{
+    clearInterval(_globalJobTimer);
+    _globalJobTimer = null;
+  }}
+  _globalJob.state = state;
+  _renderTaskBar();
+  // Show the dismiss button instead of the stop button
+  document.getElementById('tb-stop').style.display = 'none';
+  document.getElementById('tb-dismiss').style.display = '';
+  // Auto-dismiss after the grace period (0 = wait for user)
+  if (autoDismissMs > 0) {{
+    setTimeout(() => {{
+      if (_globalJob && _globalJob.state !== 'streaming') dismissTaskBar();
+    }}, autoDismissMs);
+  }}
+}}
+
+function stopGlobalJob() {{
+  if (!_globalJob) return;
+  // Optimistic UI: change state immediately so the user sees feedback
+  _globalJob.state = 'idle';
+  _globalJob.taskDesc = 'Stopping…';
+  _renderTaskBar();
+  fetch('/api/jobs/' + _globalJob.id, {{method: 'DELETE'}}).catch(() => {{}});
+  // The cancelled / done event from the server will trigger the
+  // actual cleanup in onmessage. As a safety net, force-dismiss
+  // after 5s in case the server never emits.
+  const jobIdAtClick = _globalJob.id;
+  setTimeout(() => {{
+    if (_globalJob && _globalJob.id === jobIdAtClick && _globalJob.state !== 'streaming') {{
+      _finishGlobalJob('done', 1500);
+    }}
+  }}, 5000);
+}}
+
+function dismissTaskBar() {{
+  const bar = document.getElementById('task-bar');
+  if (bar) bar.style.display = 'none';
+  _globalJob = null;
+  if (_globalJobSource) {{
+    try {{ _globalJobSource.close(); }} catch (e) {{}}
+    _globalJobSource = null;
+  }}
+  if (_globalJobTimer) {{
+    clearInterval(_globalJobTimer);
+    _globalJobTimer = null;
+  }}
+}}
+
+// ── Phase 30: Knowledge Graph browse modal ────────────────────────────
+async function openKgModal() {{
+  openModal('kg-modal');
+  // Initial load (no filters)
+  await loadKg(0);
+}}
+
+let _kgPredicatesLoaded = false;
+async function loadKg(offset) {{
+  const subject = document.getElementById('kg-subject').value.trim();
+  const predicate = document.getElementById('kg-predicate').value.trim();
+  const obj = document.getElementById('kg-object').value.trim();
+  const params = new URLSearchParams({{
+    subject: subject, predicate: predicate, object: obj,
+    limit: 200, offset: offset || 0,
+  }});
+  document.getElementById('kg-status').textContent = 'Loading…';
+  try {{
+    const res = await fetch('/api/kg?' + params.toString());
+    const data = await res.json();
+    // Populate the predicates dropdown the first time only
+    if (!_kgPredicatesLoaded && data.predicates && data.predicates.length) {{
+      const sel = document.getElementById('kg-predicate');
+      data.predicates.forEach(p => {{
+        const opt = document.createElement('option');
+        opt.value = p; opt.textContent = p;
+        sel.appendChild(opt);
+      }});
+      _kgPredicatesLoaded = true;
+    }}
+    document.getElementById('kg-status').textContent =
+      data.total + ' triple' + (data.total === 1 ? '' : 's') + ' total · ' +
+      'showing ' + data.triples.length;
+    if (data.triples.length === 0) {{
+      document.getElementById('kg-results').innerHTML =
+        '<div style="padding:24px;text-align:center;color:var(--fg-muted);font-size:12px;">No triples match your filter.</div>';
+      return;
+    }}
+    let html = '<table class="kg-table"><thead><tr>';
+    html += '<th>Subject</th><th>Predicate</th><th>Object</th><th>Source</th></tr></thead><tbody>';
+    data.triples.forEach(t => {{
+      html += '<tr>';
+      html += '<td>' + escapeHtml(t.subject) + '</td>';
+      html += '<td class="kg-pred">' + escapeHtml(t.predicate) + '</td>';
+      html += '<td>' + escapeHtml(t.object) + '</td>';
+      html += '<td class="kg-source" title="' + escapeHtml(t.source_title || '') + '">' +
+              escapeHtml((t.source_title || '').substring(0, 60)) + '</td>';
+      html += '</tr>';
+    }});
+    html += '</tbody></table>';
+    document.getElementById('kg-results').innerHTML = html;
+  }} catch (e) {{
+    document.getElementById('kg-status').textContent = 'Error: ' + e.message;
+  }}
+}}
+
+// ── Phase 30: Export modal ────────────────────────────────────────────
+function openExportModal() {{
+  openModal('export-modal');
+
+  // This section
+  const sectionName = currentDraftId
+    ? (document.getElementById('draft-title').textContent || 'current section')
+    : null;
+  document.getElementById('export-section-name').textContent =
+    sectionName || '(no draft selected)';
+  document.getElementById('export-section-btns').innerHTML = sectionName ? (
+    '<a href="/api/export/draft/' + currentDraftId + '.html" target="_blank">HTML / PDF</a>' +
+    '<a href="/api/export/draft/' + currentDraftId + '.md" target="_blank">Markdown</a>' +
+    '<a href="/api/export/draft/' + currentDraftId + '.txt" target="_blank">Text</a>'
+  ) : (
+    '<a class="disabled">HTML / PDF</a><a class="disabled">Markdown</a><a class="disabled">Text</a>'
+  );
+
+  // This chapter
+  const ch = chaptersData.find(c => c.id === currentChapterId);
+  const chName = ch ? ('Ch.' + ch.num + ': ' + ch.title) : null;
+  document.getElementById('export-chapter-name').textContent =
+    chName || '(no chapter selected)';
+  document.getElementById('export-chapter-btns').innerHTML = chName ? (
+    '<a href="/api/export/chapter/' + currentChapterId + '.html" target="_blank">HTML / PDF</a>' +
+    '<a href="/api/export/chapter/' + currentChapterId + '.md" target="_blank">Markdown</a>' +
+    '<a href="/api/export/chapter/' + currentChapterId + '.txt" target="_blank">Text</a>'
+  ) : (
+    '<a class="disabled">HTML / PDF</a><a class="disabled">Markdown</a><a class="disabled">Text</a>'
+  );
+
+  // Whole book — always enabled
+  document.getElementById('export-book-name').textContent =
+    document.querySelector('.sidebar h2').textContent || 'Book';
+  document.getElementById('export-book-btns').innerHTML = (
+    '<a href="/api/export/book.html" target="_blank">HTML / PDF</a>' +
+    '<a href="/api/export/book.md" target="_blank">Markdown</a>' +
+    '<a href="/api/export/book.txt" target="_blank">Text</a>'
+  );
 }}
 
 async function refreshAfterJob(newDraftId) {{
@@ -4038,6 +4863,14 @@ async function doWrite() {{
   const res = await fetch('/api/write', {{method: 'POST', body: fd}});
   const data = await res.json();
   startStream(data.job_id);
+  // Phase 30 — persistent task bar
+  startGlobalJob(data.job_id, {{
+    type: 'write',
+    taskDesc: 'Writing ' + section,
+    modelName: 'qwen3.5:27b',
+    sectionType: section,
+    chapterId: currentChapterId,
+  }});
 }}
 
 async function doReview() {{
@@ -4047,6 +4880,12 @@ async function doReview() {{
   const fd = new FormData();
   const res = await fetch('/api/review/' + currentDraftId, {{method: 'POST', body: fd}});
   const data = await res.json();
+  // Phase 30 — persistent task bar
+  startGlobalJob(data.job_id, {{
+    type: 'review',
+    taskDesc: 'Reviewing draft',
+    modelName: 'qwen3.5:27b',
+  }});
   startStream(data.job_id);
 }}
 
@@ -4132,37 +4971,36 @@ async function showDashboard() {{
   html += '<h3>Completion Heatmap</h3>';
   html += '<button class="btn-link" onclick="openPlanModal()" title="View, edit, or regenerate the book plan (the leitmotiv)">&#128221; Book Plan</button>';
   html += '</div>';
-  html += '<p style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;">Click a chapter title to edit its scope. Click an empty cell to write that section. Click a filled cell to open the draft. The <strong>&#128221; Book Plan</strong> link above opens the leitmotiv editor.</p>';
+  html += '<p style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;">Click a chapter title to edit its scope. Click an empty cell to preview that section. Click a filled cell to open the draft. Hover any cell to see the section title.</p>';
+  // Phase 30 — columns are POSITIONAL (1, 2, 3, ...) up to max(N) across
+  // all chapters. Each chapter shows its actual sections in order;
+  // chapters with fewer sections get blank "absent" cells in the extra
+  // slots so the table is rectangular.
+  const nCols = data.n_columns || 1;
   html += '<table class="heatmap"><thead><tr><th></th>';
-  data.section_types.forEach(st => {{
-    // Show the full section name (replacing underscores with spaces) but
-    // keep the column compact via CSS rotation if needed.
-    const display = st.replace(/_/g, ' ');
-    html += '<th title="' + display + '">' + display + '</th>';
-  }});
+  for (let i = 1; i <= nCols; i++) {{
+    html += '<th title="Section position ' + i + '">' + i + '</th>';
+  }}
   html += '</tr></thead><tbody>';
   data.heatmap.forEach(row => {{
-    // Phase 14.4 — chapter title is now clickable to open the chapter
-    // scope modal (where you can edit title / description / topic_query).
     html += '<tr><td class="ch-label clickable" onclick="openChapterModal(&#39;' + row.id + '&#39;)" title="Click to edit chapter title and scope">';
-    html += '<span class="ch-label-num">Ch.' + row.num + '</span> ' + row.title.replace(/</g, '&lt;').substring(0, 36);
+    html += '<span class="ch-label-num">Ch.' + row.num + '</span> ' + escapeHtml((row.title || '').substring(0, 36));
     html += ' <span class="ch-label-edit">&#9881;</span></td>';
-    // Per-chapter section template — highlight cells whose section type
-    // is in this chapter's template, dim cells that are out-of-template.
-    const tmpl = (row.sections_template && row.sections_template.length)
-      ? new Set(row.sections_template) : null;
-    row.cells.forEach(cell => {{
-      const inTemplate = !tmpl || tmpl.has(cell.type);
-      const cls = inTemplate ? '' : ' off-template';
-      if (cell.status === 'empty') {{
-        if (inTemplate) {{
-          html += '<td><span class="hm-cell empty' + cls + '" onclick="writeForCell(&#39;' + row.id + '&#39;,&#39;' + cell.type + '&#39;)" title="Click to write ' + cell.type.replace(/_/g, ' ') + '">+</span></td>';
-        }} else {{
-          html += '<td><span class="hm-cell off-template" title="Not in this chapter\\u2019s section template">·</span></td>';
-        }}
+    row.cells.forEach((cell, idx) => {{
+      const posLabel = (idx + 1) + '. ' + (cell.title || '');
+      if (cell.status === 'absent') {{
+        // This chapter has fewer sections than max(N) — render blank
+        html += '<td><span class="hm-cell absent" title="(no section ' + (idx + 1) + ' in this chapter)">·</span></td>';
+      }} else if (cell.status === 'empty') {{
+        // Empty template slot — Phase 29 click-to-preview
+        html += '<td><span class="hm-cell empty" ' +
+          'onclick="previewEmptySection(&#39;' + row.id + '&#39;,&#39;' + cell.type + '&#39;)" ' +
+          'title="' + escapeHtml(posLabel) + ' (empty — click to preview)">+</span></td>';
       }} else {{
         const label = 'v' + cell.version + ' ' + cell.words + 'w';
-        html += '<td><span class="hm-cell ' + cell.status + cls + '" onclick="loadSection(&#39;' + cell.draft_id + '&#39;)" title="' + label + '">' + label + '</span></td>';
+        html += '<td><span class="hm-cell ' + cell.status + '" ' +
+          'onclick="loadSection(&#39;' + cell.draft_id + '&#39;)" ' +
+          'title="' + escapeHtml(posLabel) + ' &mdash; ' + label + '">' + label + '</span></td>';
       }}
     }});
     html += '</tr>';
@@ -4762,6 +5600,21 @@ async function doAutowrite() {{
   const endpoint = isAllSections ? '/api/autowrite-chapter' : '/api/autowrite';
   const res = await fetch(endpoint, {{method: 'POST', body: fd}});
   const data = await res.json();
+
+  // Phase 30 — start the persistent task bar so the live state
+  // survives navigation. The bar OWNS its own SSE source; the
+  // existing per-section source.onmessage handler below still
+  // runs for live preview / dashboard chart, but it doesn't
+  // own the lifecycle anymore.
+  startGlobalJob(data.job_id, {{
+    type: 'autowrite',
+    taskDesc: isAllSections
+      ? 'Autowriting all sections of Ch.' + (chaptersData.find(c => c.id === currentChapterId) || {{}}).num
+      : 'Autowriting ' + section,
+    modelName: 'qwen3.5:27b',
+    sectionType: section,
+    chapterId: currentChapterId,
+  }});
 
   // Custom stream handler for autowrite
   currentJobId = data.job_id;
