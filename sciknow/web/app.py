@@ -2181,17 +2181,18 @@ def _render_sidebar(items, active_id):
             sec_w = int(sec.get("words") or 0)
 
             if status == "empty":
-                # Phase 26 — draggable so the user can reorder empty
-                # template slots before drafting them. data-section-slug
-                # is the key the drag handler reads to compute the new
-                # order; data-ch-id on the parent .ch-group lets the
-                # handler enforce within-chapter-only reordering.
+                # Phase 26 — draggable for reordering empty slots before drafting.
+                # Phase 29 — clicking an empty section now PREVIEWS it
+                # (selects + shows title/plan/target in the read-view)
+                # instead of immediately triggering doWrite(). The
+                # writing only fires after a deliberate click on the
+                # "Start writing" button inside the preview.
                 out += (
                     f'<div class="sec-link sec-empty" '
                     f'draggable="true" '
                     f'data-section-slug="{sec_type}" '
                     f'title="{plan_attr}" '
-                    f'onclick="writeForCell(&quot;{ch_id}&quot;,&quot;{sec_type}&quot;)">'
+                    f'onclick="previewEmptySection(&quot;{ch_id}&quot;,&quot;{sec_type}&quot;)">'
                     f'<span class="sec-status-dot empty"></span>'
                     f'{display}'
                     f'<span class="meta">empty \u00b7 \u270e</span></div>'
@@ -2896,6 +2897,19 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
                                  font-family: var(--font-sans); }}
 .sec-row .sec-slug {{ font-family: var(--font-mono); font-size: 11px;
                      color: var(--fg-muted); padding: 0 0 0 4px; }}
+/* Phase 29 — per-section size dropdown row */
+.sec-row .sec-size-row {{ display: flex; align-items: center; gap: 6px;
+                         font-size: 12px; padding: 2px 0 0 0; }}
+.sec-row .sec-size-row label {{ color: var(--fg-muted); }}
+.sec-row .sec-size-row select {{ padding: 3px 6px; font-size: 12px;
+                                background: var(--bg); border: 1px solid var(--border);
+                                border-radius: var(--r-sm); color: var(--fg);
+                                font-family: var(--font-sans); }}
+.sec-row .sec-size-row input.sec-size-custom {{ width: 80px; padding: 3px 6px;
+                                font-size: 12px; background: var(--bg);
+                                border: 1px solid var(--border);
+                                border-radius: var(--r-sm); color: var(--fg);
+                                font-family: var(--font-sans); }}
 .sec-row .sec-delete {{ background: transparent; border: 1px solid var(--border);
                        color: var(--fg-muted); cursor: pointer; padding: 4px 8px;
                        border-radius: var(--r-sm); font-size: 11px; flex-shrink: 0;
@@ -3963,10 +3977,11 @@ function rebuildSidebar(chapters, activeId) {{
             safeTmplTitle +
             ' <span class="meta">v' + draft.version + ' \\u00b7 ' + draft.words + 'w</span></a>';
         }} else {{
+          // Phase 29 — preview-on-click instead of immediate doWrite()
           html += '<div class="sec-link sec-empty" draggable="true" ' +
             'data-section-slug="' + tmpl.slug + '" ' +
             'title="' + planAttr + '" ' +
-            'onclick="writeForCell(\\'' + ch.id + '\\',\\'' + tmpl.slug + '\\')">' +
+            'onclick="previewEmptySection(\\'' + ch.id + '\\',\\'' + tmpl.slug + '\\')">' +
             '<span class="sec-status-dot empty"></span>' +
             safeTmplTitle +
             ' <span class="meta">empty \\u00b7 \\u270e</span></div>';
@@ -4201,6 +4216,89 @@ function writeForCell(chapterId, sectionType) {{
   document.getElementById('draft-subtitle').style.display = 'block';
   document.getElementById('toolbar').style.display = 'flex';
   doWrite();
+}}
+
+// Phase 29 — clicking an empty section row in the sidebar now SHOWS
+// a preview placeholder in the read-view instead of immediately
+// triggering doWrite(). The user can:
+//   - read the section title + plan + target words
+//   - click "Start writing" to fire doWrite (single section)
+//   - click "Autowrite" to fire doAutowrite (with iterations)
+//   - click another section in the sidebar to navigate away
+// All without an LLM call happening accidentally on a single click.
+function previewEmptySection(chapterId, sectionType) {{
+  currentChapterId = chapterId;
+  currentSectionType = sectionType;
+
+  // Look up the section meta from the in-memory chapters cache
+  const ch = chaptersData.find(c => c.id === chapterId);
+  if (!ch) {{
+    showEmptyHint('Chapter not found in cache.');
+    return;
+  }}
+  const meta = Array.isArray(ch.sections_meta) ? ch.sections_meta : [];
+  const sec = meta.find(s => s.slug === sectionType);
+  const sectionTitle = sec ? sec.title : (sectionType.charAt(0).toUpperCase() + sectionType.slice(1));
+  const sectionPlan = sec ? (sec.plan || '') : '';
+  const sectionTarget = sec && sec.target_words && sec.target_words > 0
+    ? sec.target_words
+    : (window._chapterWordTarget && Math.floor(window._chapterWordTarget / Math.max(1, meta.length)));
+
+  // Switch to read-view (hide dashboard if it's showing)
+  document.getElementById('dashboard-view').style.display = 'none';
+  document.getElementById('read-view').style.display = 'block';
+  document.getElementById('draft-subtitle').style.display = 'block';
+  document.getElementById('toolbar').style.display = 'flex';
+  document.getElementById('edit-view').style.display = 'none';
+
+  // Update the title bar to reflect the section
+  document.getElementById('draft-title').textContent =
+    'Ch.' + ch.num + ': ' + ch.title + ' \\u2014 ' + sectionTitle;
+  document.getElementById('draft-version').textContent = '0';
+  document.getElementById('draft-words').textContent = '0';
+  updateWordTargetBar(0, sectionTarget);
+
+  // Clear any active state on other section rows + highlight the
+  // empty row we just clicked.
+  document.querySelectorAll('.sec-link').forEach(l => l.classList.remove('active'));
+  const link = document.querySelector(
+    '.sec-link.sec-empty[data-section-slug="' + sectionType + '"]'
+  );
+  if (link) link.classList.add('active');
+
+  // Render the preview content into the read-view
+  const planHtml = sectionPlan
+    ? '<div style="margin:16px 0;padding:12px 16px;background:var(--toolbar-bg);' +
+      'border-left:3px solid var(--accent);border-radius:4px;">' +
+      '<div style="font-size:11px;color:var(--fg-muted);text-transform:uppercase;' +
+      'letter-spacing:0.04em;margin-bottom:6px;">Section plan</div>' +
+      '<div style="font-family:var(--font-serif);font-size:14px;line-height:1.6;' +
+      'white-space:pre-wrap;">' + escapeHtml(sectionPlan) + '</div></div>'
+    : '<div style="margin:16px 0;font-size:13px;color:var(--fg-muted);font-style:italic;">' +
+      'No section plan set yet. Open the chapter modal (\\u2699 icon) and add one in the Sections tab.</div>';
+
+  const html =
+    '<div class="empty-section-preview">' +
+    '<div style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;">' +
+    '<span class="sec-status-dot empty"></span> empty section &middot; ' +
+    'target ~' + (sectionTarget || 'auto') + ' words' +
+    '</div>' +
+    planHtml +
+    '<div style="margin-top:24px;display:flex;gap:8px;flex-wrap:wrap;">' +
+    '<button class="btn-primary" onclick="doWrite()">\\u270e Start writing</button>' +
+    '<button class="btn-secondary" onclick="doAutowrite()">\\u26a1 Autowrite (with iterations)</button>' +
+    '</div>' +
+    '<p style="margin-top:24px;font-size:12px;color:var(--fg-muted);">' +
+    'This section has no draft yet. Click <strong>Start writing</strong> for a single ' +
+    'pass, or <strong>Autowrite</strong> to run the score &rarr; verify &rarr; revise loop.' +
+    ' You can also reorder this slot in the sidebar by dragging it.' +
+    '</p>' +
+    '</div>';
+  document.getElementById('read-view').innerHTML = html;
+
+  // Update URL so refresh keeps the preview state
+  history.pushState({{previewSection: sectionType, chapterId: chapterId}},
+    '', '/');
 }}
 
 function writeForGap(chapterNum) {{
@@ -6092,6 +6190,23 @@ function renderSectionEditor() {{
     // slugified title (matches core.book_ops._slugify_section_name).
     const liveSlug = (s.slug || s.title || '').trim().toLowerCase().replace(/\\s+/g, '_');
     const slugDisplay = liveSlug || '<em>(slug auto-generated)</em>';
+    // Phase 29 — per-section target_words override. The dropdown
+    // offers presets + Custom (which reveals a number input). When
+    // "Auto" is selected, target_words is null and the autowrite
+    // resolution falls through to chapter target / num_sections.
+    const tw = s.target_words;
+    const isAuto = !tw || tw <= 0;
+    const presets = [800, 1500, 3000, 6000];
+    const isCustom = !isAuto && !presets.includes(tw);
+    let optsHtml = '<option value="">Auto (~' + perSection + 'w)</option>';
+    presets.forEach(p => {{
+      const sel = (tw === p) ? ' selected' : '';
+      const labelMap = {{800: 'Short', 1500: 'Medium', 3000: 'Long', 6000: 'Extra long'}};
+      optsHtml += '<option value="' + p + '"' + sel + '>' + labelMap[p] + ' (~' + p + 'w)</option>';
+    }});
+    optsHtml += '<option value="custom"' + (isCustom ? ' selected' : '') + '>Custom\u2026</option>';
+    const customStyle = isCustom ? '' : 'display:none;';
+    const customVal = isCustom ? String(tw) : '';
     html += '<div class="sec-row" data-idx="' + i + '">';
     html += '  <div class="sec-handle">';
     html += '    <button onclick="moveSection(' + i + ', -1)" title="Move up"' + (i === 0 ? ' disabled style="opacity:0.3;cursor:default;"' : '') + '>&uarr;</button>';
@@ -6102,12 +6217,54 @@ function renderSectionEditor() {{
     html += '           value="' + escapeHtml(s.title) + '" oninput="updateSectionTitle(' + i + ', this.value)">';
     html += '    <textarea placeholder="Section plan — what THIS section must cover (a few sentences)" ';
     html += '              oninput="updateSection(' + i + ', \\'plan\\', this.value)">' + escapeHtml(s.plan) + '</textarea>';
-    html += '    <div class="sec-slug">slug: <code>' + slugDisplay + '</code> &middot; budget: ~' + perSection + 'w</div>';
+    // Phase 29 — size dropdown row, just below the plan textarea
+    html += '    <div class="sec-size-row">';
+    html += '      <label>Size:</label>';
+    html += '      <select onchange="updateSectionTargetWords(' + i + ', this.value)">' + optsHtml + '</select>';
+    html += '      <input type="number" class="sec-size-custom" placeholder="words" min="100" step="100" ';
+    html += '             value="' + customVal + '" style="' + customStyle + '" ';
+    html += '             oninput="updateSectionTargetWordsCustom(' + i + ', this.value)">';
+    html += '    </div>';
+    html += '    <div class="sec-slug">slug: <code>' + slugDisplay + '</code> &middot; ';
+    html += 'budget: ~' + (tw && tw > 0 ? tw : perSection) + 'w';
+    html += (tw && tw > 0 ? ' <span style="color:var(--accent);">(override)</span>' : '');
+    html += '</div>';
     html += '  </div>';
     html += '  <button class="sec-delete" onclick="removeSection(' + i + ')" title="Delete this section">&times;</button>';
     html += '</div>';
   }});
   list.innerHTML = html;
+}}
+
+// Phase 29 — handle the size dropdown selection. "" → Auto (clear
+// override), a numeric preset → set, "custom" → reveal the number
+// input and wait for the user to type.
+function updateSectionTargetWords(idx, value) {{
+  if (idx < 0 || idx >= _editingSections.length) return;
+  if (value === "" || value === "auto") {{
+    _editingSections[idx].target_words = null;
+  }} else if (value === "custom") {{
+    // Don't set target_words yet — wait for the custom input.
+    // Make sure we have a placeholder so the row reflects "custom mode".
+    if (!_editingSections[idx].target_words || [800, 1500, 3000, 6000].includes(_editingSections[idx].target_words)) {{
+      _editingSections[idx].target_words = 1500;
+    }}
+  }} else {{
+    const n = parseInt(value, 10);
+    _editingSections[idx].target_words = isNaN(n) ? null : n;
+  }}
+  renderSectionEditor();
+}}
+
+function updateSectionTargetWordsCustom(idx, value) {{
+  if (idx < 0 || idx >= _editingSections.length) return;
+  const n = parseInt(value, 10);
+  if (isNaN(n) || n <= 0) {{
+    _editingSections[idx].target_words = null;
+  }} else {{
+    _editingSections[idx].target_words = n;
+  }}
+  // Don't re-render here — the user is actively typing in the input.
 }}
 
 // Phase 21 — title-input handler that ALSO updates the slug live so the
@@ -6529,12 +6686,14 @@ async function saveChapterInfo() {{
 
     // 2) Save sections (Phase 18) — only sections with a non-empty
     // title are persisted. The server slugifies for us.
+    // Phase 29 — also include target_words per section.
     const sectionsToSave = _editingSections
       .filter(s => (s.title || '').trim() || (s.slug || '').trim())
       .map(s => ({{
         slug: (s.slug || '').trim() || (s.title || '').trim(),
         title: (s.title || '').trim() || (s.slug || ''),
-        plan: (s.plan || '').trim()
+        plan: (s.plan || '').trim(),
+        target_words: (s.target_words && s.target_words > 0) ? s.target_words : null,
       }}));
     const secRes = await fetch('/api/chapters/' + chId + '/sections', {{
       method: 'PUT',

@@ -1433,7 +1433,10 @@ def l1_phase18_chapter_sections_normalize() -> None:
     legacy = ["overview", "key_evidence", "summary"]
     out = _normalize_chapter_sections(legacy)
     assert len(out) == 3
-    assert out[0] == {"slug": "overview", "title": "Overview", "plan": ""}
+    assert out[0]["slug"] == "overview"
+    assert out[0]["title"] == "Overview"
+    assert out[0]["plan"] == ""
+    assert out[0].get("target_words") is None  # Phase 29 — no override by default
     assert out[1]["slug"] == "key_evidence"
     assert out[1]["title"] == "Key Evidence"
 
@@ -2783,6 +2786,129 @@ def l1_phase28_resume_wired_through() -> None:
     assert "resume" in param_names, "`book autowrite` missing --resume flag"
 
 
+# ── Phase 29 — ROADMAP + per-section size + click-to-preview ────────────
+
+
+def l1_phase29_roadmap_doc_exists() -> None:
+    """Phase 29 — docs/ROADMAP.md is checked in and contains the
+    headings expected by the user-facing doc structure.
+    """
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    roadmap = repo_root / "docs" / "ROADMAP.md"
+    assert roadmap.exists(), "docs/ROADMAP.md missing"
+    text = roadmap.read_text(encoding="utf-8")
+    # Check the major sections so we don't accidentally truncate the file
+    for heading in (
+        "Deferred QA findings",
+        "Research runners-up",
+        "Hardware-gated",
+        "Polish from recent phases",
+        "Feature gaps",
+    ):
+        assert heading in text, f"ROADMAP.md missing section: {heading}"
+
+
+def l1_phase29_per_section_target_words() -> None:
+    """Phase 29 — _normalize_chapter_sections preserves target_words,
+    _get_section_target_words returns the override or None, and the
+    autowrite/write resolution uses the per-section value when set.
+    """
+    import inspect
+    from sciknow.core import book_ops
+
+    # _normalize_chapter_sections preserves target_words
+    out = book_ops._normalize_chapter_sections([
+        {"slug": "intro", "title": "Intro", "plan": "", "target_words": 1500},
+        {"slug": "deep_dive", "title": "Deep dive", "plan": "X"},  # missing
+        {"slug": "summary", "title": "Summary", "plan": "", "target_words": 0},  # 0 → None
+    ])
+    assert len(out) == 3
+    assert out[0]["target_words"] == 1500
+    assert out[1].get("target_words") is None
+    assert out[2].get("target_words") is None  # 0 normalised to None
+
+    # Bad input types → None (don't raise)
+    out = book_ops._normalize_chapter_sections([
+        {"slug": "x", "title": "X", "plan": "", "target_words": "not-a-number"},
+        {"slug": "y", "title": "Y", "plan": "", "target_words": -50},
+    ])
+    assert out[0]["target_words"] is None
+    assert out[1]["target_words"] is None
+
+    # _get_section_target_words helper exists
+    assert hasattr(book_ops, "_get_section_target_words"), (
+        "_get_section_target_words helper missing"
+    )
+
+    # autowrite + write_section_stream resolution uses the override
+    body_src = inspect.getsource(book_ops._autowrite_section_body)
+    assert "_get_section_target_words" in body_src, (
+        "_autowrite_section_body doesn't check per-section target override"
+    )
+    ws_src = inspect.getsource(book_ops.write_section_stream)
+    assert "_get_section_target_words" in ws_src, (
+        "write_section_stream doesn't check per-section target override"
+    )
+
+
+def l1_phase29_size_dropdown_in_modal() -> None:
+    """Phase 29 — chapter modal section editor has the size dropdown
+    + JS handlers + persistence.
+    """
+    import inspect
+    from sciknow.web import app as web_app
+    src = inspect.getsource(web_app)
+
+    # Dropdown + handlers in the rendered template
+    assert "updateSectionTargetWords" in src, (
+        "updateSectionTargetWords JS handler missing"
+    )
+    assert "updateSectionTargetWordsCustom" in src, (
+        "custom-input handler missing"
+    )
+    assert "sec-size-row" in src, "missing CSS class for the size dropdown row"
+
+    # Save flow includes target_words per section
+    assert "target_words: (s.target_words" in src, (
+        "saveChapterInfo doesn't include target_words in the section save payload"
+    )
+
+
+def l1_phase29_empty_section_preview_not_write() -> None:
+    """Phase 29 — clicking an empty section row in the sidebar calls
+    previewEmptySection (non-destructive) instead of writeForCell
+    (immediately triggers a write).
+    """
+    import inspect
+    from sciknow.web import app as web_app
+
+    # Server-side render
+    render_src = inspect.getsource(web_app._render_sidebar)
+    assert "previewEmptySection" in render_src, (
+        "_render_sidebar empty rows still call writeForCell instead of previewEmptySection"
+    )
+    # Make sure the OLD writeForCell call on empty rows is gone
+    # (it's still used by the heatmap empty cells, that's fine)
+    assert 'sec-empty"' in render_src
+    # The empty row's onclick should reference previewEmptySection
+    assert (
+        "sec-empty" in render_src and
+        "previewEmptySection" in render_src
+    )
+
+    # JS rebuildSidebar mirrors the same call
+    src = inspect.getsource(web_app)
+    assert src.count("previewEmptySection") >= 3, (
+        "previewEmptySection should appear in render_sidebar + rebuildSidebar + the helper itself"
+    )
+
+    # The helper renders an explicit Start writing button (so the user
+    # has to deliberately click it — not auto-fired)
+    assert "Start writing" in src, "preview helper missing the explicit Start writing button"
+    assert "doWrite()" in src  # the button calls doWrite
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -2861,6 +2987,11 @@ L1_TESTS: list[Callable] = [
     # Phase 28 — autowrite resume mode
     l1_phase28_is_resumable_draft,
     l1_phase28_resume_wired_through,
+    # Phase 29 — ROADMAP + per-section size + click-to-preview
+    l1_phase29_roadmap_doc_exists,
+    l1_phase29_per_section_target_words,
+    l1_phase29_size_dropdown_in_modal,
+    l1_phase29_empty_section_preview_not_write,
 ]
 
 L2_TESTS: list[Callable] = [

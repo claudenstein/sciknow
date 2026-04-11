@@ -183,10 +183,14 @@ def _normalize_chapter_sections(raw) -> list[dict]:
             slug = _slugify_section_name(item)
             if not slug:
                 continue
+            # Phase 29 — target_words defaults to None (means "use the
+            # chapter target divided by num_sections"). Stored as int
+            # when set per-section via the GUI dropdown.
             out.append({
                 "slug": slug,
                 "title": _titleify_slug(slug),
                 "plan": "",
+                "target_words": None,
             })
         elif isinstance(item, dict):
             slug = _slugify_section_name(item.get("slug") or item.get("title") or "")
@@ -194,7 +198,19 @@ def _normalize_chapter_sections(raw) -> list[dict]:
                 continue
             title = (item.get("title") or _titleify_slug(slug)).strip()
             plan = (item.get("plan") or "").strip()
-            out.append({"slug": slug, "title": title, "plan": plan})
+            # Phase 29 — preserve target_words. Coerce to int when
+            # present, treat zero/None/non-int as "no override".
+            tw_raw = item.get("target_words")
+            try:
+                tw = int(tw_raw) if tw_raw not in (None, "", 0) else None
+                if tw is not None and tw <= 0:
+                    tw = None
+            except (TypeError, ValueError):
+                tw = None
+            out.append({
+                "slug": slug, "title": title, "plan": plan,
+                "target_words": tw,
+            })
     return out
 
 
@@ -241,6 +257,35 @@ def _get_section_plan(session, chapter_id: str, section_slug: str) -> str:
         if s["slug"] == target:
             return s.get("plan") or ""
     return ""
+
+
+def _get_section_target_words(
+    session, chapter_id: str, section_slug: str,
+) -> int | None:
+    """Phase 29 — return the per-section target_words override, or None
+    if no override is set on this section.
+
+    The autowrite/write target resolution is now a 3-level priority:
+        1. caller arg (--target-words / target_words form field)
+        2. per-section meta override (this function)
+        3. derived from chapter target / num_sections (default)
+
+    None at this level means "fall through to level 3". The GUI's
+    section dropdown writes this field via the existing
+    PUT /api/chapters/{id}/sections endpoint (which calls
+    _normalize_chapter_sections, which preserves target_words).
+    """
+    if not section_slug:
+        return None
+    sections = _get_chapter_sections_normalized(session, chapter_id)
+    target = _slugify_section_name(section_slug)
+    for s in sections:
+        if s["slug"] == target:
+            tw = s.get("target_words")
+            if tw and isinstance(tw, int) and tw > 0:
+                return tw
+            return None
+    return None
 
 
 def adopt_orphan_section(
@@ -1191,15 +1236,19 @@ def write_section_stream(
 
         prior_summaries = _get_prior_summaries(session, book_id, ch_num)
 
-        # Phase 17 — resolve the effective per-section length target.
-        # Priority: explicit caller target > book-level setting / default,
-        # divided by the chapter's configured section count.
-        if target_words is None:
-            chapter_target = _get_book_length_target(session, book_id)
-            num_sections = _get_chapter_num_sections(session, ch_id)
-            effective_target_words = _section_target_words(chapter_target, num_sections)
-        else:
+        # Phase 17 / 29 — resolve the effective per-section length target.
+        # 3-level priority: caller arg > per-section meta override
+        # > chapter target / num_sections.
+        if target_words is not None:
             effective_target_words = target_words
+        else:
+            section_override = _get_section_target_words(session, ch_id, section_type)
+            if section_override is not None:
+                effective_target_words = section_override
+            else:
+                chapter_target = _get_book_length_target(session, book_id)
+                num_sections = _get_chapter_num_sections(session, ch_id)
+                effective_target_words = _section_target_words(chapter_target, num_sections)
 
         # Phase 18 — pull the per-section plan if the user has set one
         # via the chapter modal's Sections tab. Empty string is fine —
@@ -2043,21 +2092,24 @@ def _autowrite_section_body(
             "warning": reason or None,
         }
 
-    # Phase 17 — resolve effective per-section length target.
-    # Caller override beats the book-level setting. If neither is set,
-    # we use the default chapter target divided by the chapter's
-    # configured section count. This single value is then threaded
-    # through tree_plan, write_section_v2, and the length-score
-    # injection inside the scoring loop.
+    # Phase 17 / 29 — resolve effective per-section length target.
+    # 3-level priority:
+    #   1. caller arg (target_words kwarg)
+    #   2. per-section meta override (_get_section_target_words, Phase 29)
+    #   3. derived from chapter target / num_sections (Phase 17 default)
     #
     # Phase 18 — also resolve the per-section plan in the same pass.
     with get_session() as session:
-        if target_words is None:
-            chapter_target = _get_book_length_target(session, book_id)
-            num_sections = _get_chapter_num_sections(session, ch_id)
-            effective_target_words = _section_target_words(chapter_target, num_sections)
-        else:
+        if target_words is not None:
             effective_target_words = target_words
+        else:
+            section_override = _get_section_target_words(session, ch_id, section_type)
+            if section_override is not None:
+                effective_target_words = section_override
+            else:
+                chapter_target = _get_book_length_target(session, book_id)
+                num_sections = _get_chapter_num_sections(session, ch_id)
+                effective_target_words = _section_target_words(chapter_target, num_sections)
         section_plan = _get_section_plan(session, ch_id, section_type)
 
     # Phase 14.6 — Surface which model is going to do the writing so the
