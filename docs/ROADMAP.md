@@ -73,6 +73,27 @@ Mostly small.
 
 ---
 
+## 4b. Compound learning — Layers 1-6 (Phase 32.6 follow-on)
+
+Layer 0 (autowrite telemetry tables + persistence helpers) shipped in
+Phase 32.6 — see `docs/RESEARCH.md` §21 for the full architecture and
+the literature review. Layers 1-6 are the actual learning passes that
+read from those tables. Each is independently shippable; later layers
+depend on earlier layers having data.
+
+- [ ] **Layer 1 — Episodic memory store (lessons).** New `autowrite_lessons` table keyed by `(book_id, chapter_id, section_slug)`; producer pass extracts 1-3-sentence lessons from each completed run via a separate prompt head (per the MAR critique — don't let the same scorer that produced the verdicts also write the reflections); consumer pass injects top-K lessons (Generative Agents `importance × recency × similarity` formula) into the next writer prompt as a *Lessons from prior runs* block. **Win condition:** measurable lift in `book autowrite-bench --runs 5` mean overall after the lessons table is populated. **Effort:** ~1 week. **Dependency:** Layer 0 (shipped).
+- [ ] **Layer 2 — Useful chunk retrieval boost.** Nightly batch job computes `useful_count = SUM(was_cited)` per `chunk_qdrant_id` from `autowrite_retrievals`, writes the count to a Qdrant payload field, and applies a `1 + factor * log2(1 + useful_count)` boost to retrieval scores — same dampened multiplicative form as the existing `citation_boost_factor`. Pure data flywheel, zero LLM cost. **Effort:** 3-4 days. **Dependency:** Layer 0.
+- [ ] **Layer 3 — Heuristic distillation (ERL-style).** Once ~50 runs have accumulated, periodically cluster Layer 1 lessons by embedding similarity and prompt the LLM to extract a *heuristic* per cluster (a generalized strategic principle that applies across many sections). Store in a `heuristics` table; prepend unconditionally to the writer prompt. Layer 1's raw lessons stay retrieved per-section. **Effort:** ~2 weeks. **Dependency:** Layer 1 + ≥50 runs of accumulated history.
+- [ ] **Layer 4 — Iterative DPO preference dataset (data only).** Each KEEP verdict is a (chosen, rejected) preference pair; export to `data/preferences/<book>.jsonl` periodically. Filter pairs where both scores are below 0.7 (low signal). Add an "approve KEEP" button in the web reader's score history viewer so only human-validated pairs become training data (mitigates the same-scorer-as-supervisor bias trap). **No training on the 3090** — pure data accumulation against the day fine-tuning becomes feasible. **Effort:** 2 days for the export job + 1 day for the GUI button. **Dependency:** Layer 0.
+- [ ] **Layer 5 — Style fingerprint extraction.** After N approved sections, extract the user's style features (median sentence length, citation density, hedging marker rate, paragraph length distribution, transition word usage) into `book.custom_metadata.style_fingerprint`. Inject as a style anchor in the writer system prompt. **Effort:** 3-4 days. **Independent of Layers 1-4** — can ship in parallel.
+- [ ] **Layer 6 — Domain LoRA on the writer (DGX Spark required).** When the Spark arrives and Layer 4 has accumulated ~2k validated preference pairs, LoRA-tune the current SOTA writer model with DPO on the user's preferences. Per Wolfe 2024, 2k pairs + 3 epochs is enough for meaningful gains. Output: a `qwen-sciknow:32b` (or successor) model. Becomes the new default `LLM_MODEL`; original stays for ablation. **Effort:** ~1 week post-Spark-arrival. **Dependency:** Layer 4 + DGX Spark + ≥2k pairs.
+
+**Validation harness:** all six layers use the same Track A measurement methodology as Phase 13 — `book autowrite-bench --runs 5` on a control chapter, before/after each layer ships. The mean shift must exceed the baseline std for the win to be real.
+
+**Anti-patterns to avoid** (full list in `docs/RESEARCH.md` §21): training a reward model from scratch instead of DPO; storing raw iteration text in the lessons table; prepending all past lessons to every prompt (the ExpeL anti-pattern that ERL specifically calls out); optimizing the writer with the same scorer as the supervisor without a human gate; trying to fine-tune on the 3090; conflating "compound learning" with "infinite context window".
+
+---
+
 ## 5. Feature gaps
 
 Things obviously missing for a book-writing system but never explicitly

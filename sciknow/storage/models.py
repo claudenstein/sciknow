@@ -3,12 +3,15 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
     SmallInteger,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR, UUID as PG_UUID
@@ -414,6 +417,133 @@ class WikiPage(Base):
     __table_args__ = (
         Index("idx_wiki_slug", "slug", unique=True),
         Index("idx_wiki_type", "page_type"),
+    )
+
+
+# ── Phase 32.6 — Compound learning Layer 0: autowrite telemetry ─────────
+#
+# These three tables capture per-run / per-iteration / per-retrieval data
+# that the autowrite loop produces but currently throws away. They are
+# the data foundation for the Layer 1+ learning system documented in
+# docs/RESEARCH.md §21 ("Compound learning from iteration history") and
+# tracked in docs/ROADMAP.md.
+#
+# Layer 0 (this migration): just persist the data. The information is
+# already in scope inside autowrite_section_stream — it's just not being
+# captured in queryable form. Subsequent layers (lessons, useful_count
+# retrieval boost, DPO preference dataset, heuristic distillation, style
+# fingerprint) all read from these tables.
+#
+# Why three tables and not one wide JSONB column on `drafts`:
+#   - JSONB on drafts hides the per-iteration structure from SQL (no
+#     "show me all iterations where weakest_dimension was 'length'")
+#   - cross-run aggregation ("which chunks were cited in >5 final
+#     drafts across this book") would have to walk every drafts row
+#   - JSONB doesn't compose with foreign keys for cascade deletes
+
+
+class AutowriteRun(Base):
+    """Phase 32.6 — one row per autowrite invocation."""
+    __tablename__ = "autowrite_runs"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    book_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("books.id", ondelete="CASCADE"), nullable=True
+    )
+    chapter_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("book_chapters.id", ondelete="SET NULL"), nullable=True
+    )
+    section_slug: Mapped[str] = mapped_column(Text, nullable=False)
+    final_draft_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("drafts.id", ondelete="SET NULL"), nullable=True
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # running | completed | error | cancelled
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="running")
+    # Configuration captured at run start
+    model: Mapped[str | None] = mapped_column(Text)
+    target_words: Mapped[int | None] = mapped_column(Integer)
+    max_iter: Mapped[int | None] = mapped_column(Integer)
+    target_score: Mapped[float | None] = mapped_column(Float)
+    feature_versions: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    # Final outcome (null until status=completed/error)
+    final_overall: Mapped[float | None] = mapped_column(Float)
+    iterations_used: Mapped[int | None] = mapped_column(Integer)
+    converged: Mapped[bool | None] = mapped_column(Boolean)
+    error_message: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        Index("idx_autowrite_runs_book", "book_id"),
+        Index("idx_autowrite_runs_section", "book_id", "chapter_id", "section_slug"),
+    )
+
+
+class AutowriteIteration(Base):
+    """Phase 32.6 — per-iteration record. Mirrors the existing
+    drafts.custom_metadata.score_history shape but in queryable columns."""
+    __tablename__ = "autowrite_iterations"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    run_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("autowrite_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    iteration: Mapped[int] = mapped_column(Integer, nullable=False)  # 1-indexed
+    scores: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    verification: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    cove: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    # KEEP | DISCARD | NULL (unset until the rescore comparison happens)
+    action: Mapped[str | None] = mapped_column(Text)
+    word_count: Mapped[int | None] = mapped_column(Integer)
+    word_count_delta: Mapped[int | None] = mapped_column(Integer)
+    weakest_dimension: Mapped[str | None] = mapped_column(Text)
+    revision_instruction: Mapped[str | None] = mapped_column(Text)
+    overall_pre: Mapped[float | None] = mapped_column(Float)
+    overall_post: Mapped[float | None] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("run_id", "iteration", name="uq_autowrite_iterations_run_iter"),
+        Index("idx_autowrite_iterations_run", "run_id"),
+    )
+
+
+class AutowriteRetrieval(Base):
+    """Phase 32.6 — one row per retrieved chunk per run.
+
+    `chunk_qdrant_id` matches `chunks.qdrant_point_id` (NOT chunks.id —
+    that's a different UUID). The retrieval pipeline keys everything by
+    qdrant_point_id, so we use the same convention here for join consistency.
+
+    `was_cited` is set in `_finalize_autowrite_run()` after the final draft
+    is parsed for `[N]` markers. This boolean is the raw signal that powers
+    Layer 2 (useful_count retrieval boost): a chunk that's been cited in
+    many final drafts is likely to be useful for similar future sections.
+    """
+    __tablename__ = "autowrite_retrievals"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    run_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("autowrite_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    source_position: Mapped[int] = mapped_column(Integer, nullable=False)  # 1-indexed [N] marker
+    chunk_qdrant_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+    document_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+    rrf_score: Mapped[float | None] = mapped_column(Float)
+    was_cited: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+
+    __table_args__ = (
+        Index("idx_autowrite_retrievals_run", "run_id"),
+        Index(
+            "idx_autowrite_retrievals_chunk_cited",
+            "chunk_qdrant_id",
+            postgresql_where="was_cited = true",
+        ),
+        Index("idx_autowrite_retrievals_doc", "document_id"),
     )
 
 

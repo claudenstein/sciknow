@@ -434,6 +434,261 @@ def _auto_summarize(content: str, section_type: str, chapter_title: str, model: 
         return ""
 
 
+# ── Phase 32.6 — Compound learning Layer 0: autowrite telemetry ─────────
+#
+# Four helpers that let autowrite_section_stream persist its full
+# trajectory into the autowrite_runs / autowrite_iterations /
+# autowrite_retrievals tables (added in migration 0011). Designed to
+# fail soft: any persistence error is logged and swallowed so it never
+# kills a running autowrite job. Read more in docs/RESEARCH.md §21.
+
+
+def _create_autowrite_run(
+    *,
+    book_id: str | None,
+    chapter_id: str | None,
+    section_slug: str,
+    model: str | None,
+    target_words: int | None,
+    max_iter: int | None,
+    target_score: float | None,
+    feature_versions: dict | None,
+) -> str | None:
+    """Phase 32.6 — open a new autowrite_runs row, return its id.
+
+    Returns None on any failure (the autowrite generator continues
+    without telemetry rather than crashing on a SQL hiccup).
+    """
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+    try:
+        with get_session() as session:
+            row = session.execute(text("""
+                INSERT INTO autowrite_runs (
+                    book_id, chapter_id, section_slug, status, model,
+                    target_words, max_iter, target_score, feature_versions
+                ) VALUES (
+                    CAST(:book_id AS uuid),
+                    CAST(:chapter_id AS uuid),
+                    :section_slug,
+                    'running',
+                    :model,
+                    :target_words,
+                    :max_iter,
+                    :target_score,
+                    CAST(:feature_versions AS jsonb)
+                )
+                RETURNING id::text
+            """), {
+                "book_id": book_id,
+                "chapter_id": chapter_id,
+                "section_slug": section_slug,
+                "model": model,
+                "target_words": target_words,
+                "max_iter": max_iter,
+                "target_score": target_score,
+                "feature_versions": json.dumps(feature_versions or {}),
+            }).fetchone()
+            session.commit()
+            return row[0] if row else None
+    except Exception as exc:
+        logger.warning("autowrite telemetry: failed to create run row: %s", exc)
+        return None
+
+
+def _persist_autowrite_retrievals(run_id: str | None, results: list) -> None:
+    """Phase 32.6 — persist all retrieved chunks for a run.
+
+    `results` is the list of SearchResult objects from
+    context_builder.build(). Each entry's `rank` becomes the 1-indexed
+    `[N]` source position the writer references; `chunk_id` is actually
+    the qdrant_point_id (the existing convention).
+    """
+    if not run_id or not results:
+        return
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+    try:
+        with get_session() as session:
+            for r in results:
+                session.execute(text("""
+                    INSERT INTO autowrite_retrievals (
+                        run_id, source_position, chunk_qdrant_id,
+                        document_id, rrf_score
+                    ) VALUES (
+                        CAST(:run_id AS uuid),
+                        :source_position,
+                        CAST(:chunk_qdrant_id AS uuid),
+                        CAST(:document_id AS uuid),
+                        :rrf_score
+                    )
+                """), {
+                    "run_id": run_id,
+                    "source_position": getattr(r, "rank", 0) or 0,
+                    "chunk_qdrant_id": getattr(r, "chunk_id", None),
+                    "document_id": getattr(r, "document_id", None),
+                    "rrf_score": float(getattr(r, "score", 0) or 0),
+                })
+            session.commit()
+    except Exception as exc:
+        logger.warning("autowrite telemetry: failed to persist retrievals: %s", exc)
+
+
+def _persist_autowrite_iteration(
+    run_id: str | None,
+    iteration: int,
+    history_entry: dict,
+    *,
+    word_count: int,
+    word_count_delta: int | None,
+    overall_pre: float,
+) -> None:
+    """Phase 32.6 — persist one iteration's pre-revision state.
+
+    Called right after `history.append(history_entry)` in the autowrite
+    loop. Uses ON CONFLICT DO UPDATE so a later call from the post-revision
+    update path can fill in `action`/`overall_post` without a separate
+    UPDATE statement.
+    """
+    if not run_id:
+        return
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+    scores = history_entry.get("scores") or {}
+    try:
+        with get_session() as session:
+            session.execute(text("""
+                INSERT INTO autowrite_iterations (
+                    run_id, iteration, scores, verification, cove,
+                    action, word_count, word_count_delta,
+                    weakest_dimension, revision_instruction,
+                    overall_pre, overall_post
+                ) VALUES (
+                    CAST(:run_id AS uuid), :iteration,
+                    CAST(:scores AS jsonb),
+                    CAST(:verification AS jsonb),
+                    CAST(:cove AS jsonb),
+                    :action, :word_count, :word_count_delta,
+                    :weakest_dimension, :revision_instruction,
+                    :overall_pre, :overall_post
+                )
+                ON CONFLICT (run_id, iteration) DO UPDATE SET
+                    scores = EXCLUDED.scores,
+                    verification = EXCLUDED.verification,
+                    cove = EXCLUDED.cove,
+                    action = EXCLUDED.action,
+                    word_count = EXCLUDED.word_count,
+                    word_count_delta = EXCLUDED.word_count_delta,
+                    weakest_dimension = EXCLUDED.weakest_dimension,
+                    revision_instruction = EXCLUDED.revision_instruction,
+                    overall_pre = EXCLUDED.overall_pre,
+                    overall_post = EXCLUDED.overall_post
+            """), {
+                "run_id": run_id,
+                "iteration": iteration,
+                "scores": json.dumps(scores),
+                "verification": json.dumps(history_entry.get("verification") or {}),
+                "cove": json.dumps(history_entry.get("cove") or {}),
+                "action": history_entry.get("revision_verdict"),
+                "word_count": word_count,
+                "word_count_delta": word_count_delta,
+                "weakest_dimension": scores.get("weakest_dimension"),
+                "revision_instruction": scores.get("revision_instruction"),
+                "overall_pre": float(overall_pre) if overall_pre is not None else None,
+                "overall_post": (
+                    float(history_entry.get("post_revision_overall"))
+                    if history_entry.get("post_revision_overall") is not None
+                    else None
+                ),
+            })
+            session.commit()
+    except Exception as exc:
+        logger.warning(
+            "autowrite telemetry: failed to persist iteration %s: %s",
+            iteration, exc,
+        )
+
+
+def _finalize_autowrite_run(
+    run_id: str | None,
+    *,
+    status: str,
+    final_draft_id: str | None,
+    final_overall: float | None,
+    iterations_used: int,
+    converged: bool,
+    error_message: str | None = None,
+) -> None:
+    """Phase 32.6 — close out a run row and back-fill `was_cited` flags.
+
+    After updating the run row, parses the final draft's content for
+    `[N]` markers and flips `was_cited=true` on the matching retrieval
+    rows. This is the link from "what we retrieved" to "what we
+    actually used" — the data Layer 2 will read.
+    """
+    if not run_id:
+        return
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+    try:
+        with get_session() as session:
+            session.execute(text("""
+                UPDATE autowrite_runs SET
+                    status = :status,
+                    finished_at = now(),
+                    final_draft_id = CAST(:final_draft_id AS uuid),
+                    final_overall = :final_overall,
+                    iterations_used = :iterations_used,
+                    converged = :converged,
+                    error_message = :error_message
+                WHERE id = CAST(:run_id AS uuid)
+            """), {
+                "run_id": run_id,
+                "status": status,
+                "final_draft_id": final_draft_id,
+                "final_overall": (
+                    float(final_overall) if final_overall is not None else None
+                ),
+                "iterations_used": iterations_used,
+                "converged": converged,
+                "error_message": (error_message or "")[:1000] or None,
+            })
+
+            # Back-fill was_cited on the retrieval rows. The final draft's
+            # text is the source of truth: any [N] marker that resolves to
+            # a source position becomes was_cited=true. Iteration-by-
+            # iteration cited tracking is intentionally NOT done — what
+            # matters for Layer 2 is whether the chunk made it into the
+            # final accepted draft, not which intermediate iterations
+            # touched it.
+            if final_draft_id:
+                row = session.execute(text("""
+                    SELECT content FROM drafts WHERE id::text = :did LIMIT 1
+                """), {"did": final_draft_id}).fetchone()
+                content = row[0] if row else None
+                if content:
+                    cited = sorted({
+                        int(m.group(1)) for m in re.finditer(r"\[(\d+)\]", content)
+                    })
+                    if cited:
+                        # Build a parameterised IN list — psycopg2 supports
+                        # tuple expansion for IN clauses with bound params.
+                        placeholders = ",".join(
+                            f":p{i}" for i, _ in enumerate(cited)
+                        )
+                        params: dict = {f"p{i}": p for i, p in enumerate(cited)}
+                        params["run_id"] = run_id
+                        session.execute(text(f"""
+                            UPDATE autowrite_retrievals SET was_cited = true
+                            WHERE run_id = CAST(:run_id AS uuid)
+                              AND source_position IN ({placeholders})
+                        """), params)
+            session.commit()
+    except Exception as exc:
+        logger.warning("autowrite telemetry: failed to finalize run %s: %s",
+                       run_id, exc)
+
+
 def _save_draft(session, *, title, book_id, chapter_id, section_type, topic,
                 content, sources, model, summary=None, parent_draft_id=None,
                 review_feedback=None, version=1, custom_metadata=None):
@@ -2147,6 +2402,43 @@ def _autowrite_section_body(
 
     log.event("retrieval_done", n_results=len(results), n_sources=len(sources))
 
+    # Phase 32.6 — Compound learning Layer 0: open the autowrite_runs row
+    # NOW (after retrieval succeeded) and persist the retrieval set with
+    # source_position = SearchResult.rank. The run_id is held in a local
+    # so the iteration loop and the final finalize block can reference
+    # it. All telemetry helpers fail soft — a SQL error here logs and
+    # returns None, the autowrite generator continues without telemetry.
+    autowrite_run_id = _create_autowrite_run(
+        book_id=book_id,
+        chapter_id=ch_id,
+        section_slug=section_type,
+        model=resolved_model,
+        target_words=effective_target_words,
+        max_iter=max_iter,
+        target_score=target_score,
+        feature_versions={
+            "use_plan": use_plan,
+            "use_step_back": use_step_back,
+            "use_cove": use_cove,
+            "cove_threshold": cove_threshold,
+            "phase7_hedging_fidelity": True,
+            "phase8_entity_bridge": True,
+            "phase9_pdtb_discourse_relations": True,
+            "phase10_step_back_retrieval": True,
+            "phase11_chain_of_verification": True,
+            "phase12_raptor_retrieval": True,
+        },
+    )
+    _persist_autowrite_retrievals(autowrite_run_id, results)
+    # Track lifecycle outcome for the finally-block finalization. These
+    # are mutated by the iteration loop and read at cleanup time.
+    _telemetry_status = "running"
+    _telemetry_error = None
+    _telemetry_converged = False
+    _telemetry_final_overall: float | None = None
+    _telemetry_final_draft_id: str | None = None
+    _telemetry_iterations_used = 0
+
     # Phase 28 — in resume mode, skip planning + writing entirely.
     # The starting content comes from the existing draft. We still
     # ran retrieval above so the score / verify / revise stages
@@ -2254,6 +2546,10 @@ def _autowrite_section_body(
             version=draft_version,
             custom_metadata=placeholder_metadata,
         )
+    # Phase 32.6 — link this draft to the run row immediately so a
+    # cancelled-mid-write run still has a recoverable draft pointer
+    # (the periodic sweep can later flip its status to 'cancelled').
+    _telemetry_final_draft_id = draft_id
     yield {"type": "checkpoint", "draft_id": draft_id,
            "stage": "resume_initial" if resume_content is not None else "placeholder",
            "word_count": len((resume_content or "").split())}
@@ -2304,6 +2600,12 @@ def _autowrite_section_body(
         # row already has resume_content baked in via _save_draft.
         content = resume_content
         log.event("resume_skipped_writing", word_count=len(content.split()))
+
+    # Phase 32.6 — Layer 0: per-iteration delta tracker. Initialized
+    # to the post-writing word count and updated on every KEEP verdict
+    # so the next iteration's word_count_delta is computed against
+    # the kept content, not a discarded revision.
+    _telemetry_prev_word_count = len(content.split())
 
     for iteration in range(max_iter):
         yield {"type": "iteration_start", "iteration": iteration + 1, "max": max_iter}
@@ -2558,6 +2860,26 @@ def _autowrite_section_body(
         }
         history.append(history_entry)
 
+        # Phase 32.6 — Layer 0: persist the iteration row immediately so
+        # a Stop / crash mid-revision still leaves the score data behind.
+        # The delta is computed against the previous iteration's word count
+        # (tracked in the local _telemetry_prev_word_count, initialized to
+        # the placeholder content above). On the FIRST iteration the delta
+        # is NULL — there's no prior iteration to compare to.
+        _word_count_now = len(content.split())
+        _word_count_delta = (
+            None if iteration == 0
+            else _word_count_now - _telemetry_prev_word_count
+        )
+        _telemetry_iterations_used = iteration + 1
+        _telemetry_final_overall = overall
+        _persist_autowrite_iteration(
+            autowrite_run_id, iteration + 1, history_entry,
+            word_count=_word_count_now,
+            word_count_delta=_word_count_delta,
+            overall_pre=overall,
+        )
+
         yield {"type": "scores", "scores": scores, "iteration": iteration + 1}
         log.event("scores", iteration=iteration + 1, overall=overall, weakest=weakest)
 
@@ -2566,6 +2888,8 @@ def _autowrite_section_body(
             yield {"type": "converged", "iteration": iteration + 1,
                    "final_score": overall}
             log.event("converged", iteration=iteration + 1, final_score=overall)
+            # Phase 32.6 — mark the run as converged for finalize.
+            _telemetry_converged = True
             break
 
         # Fix 4: Auto-expand — check if missing topics have weak corpus coverage
@@ -2668,11 +2992,26 @@ def _autowrite_section_body(
                    "old_score": overall, "new_score": new_overall}
             log.event("revision_verdict", action="KEEP",
                       old=overall, new=new_overall, iteration=iteration + 1)
+            # Phase 32.6 — capture the pre-revision overall BEFORE the
+            # `overall = new_overall` reassignment so the persist call
+            # below records the right value in the overall_pre column.
+            _overall_pre = overall
             content = revised
             overall = new_overall
+            # Phase 32.6 — track the kept content's word count for the
+            # next iteration's word_count_delta computation.
+            _telemetry_prev_word_count = len(content.split())
+            _telemetry_final_overall = overall
             if history:
                 history[-1]["revision_verdict"] = "KEEP"
                 history[-1]["post_revision_overall"] = new_overall
+                # Update the iteration row with the verdict + post-overall.
+                _persist_autowrite_iteration(
+                    autowrite_run_id, iteration + 1, history[-1],
+                    word_count=_telemetry_prev_word_count,
+                    word_count_delta=None,  # captured at the pre-revision persist
+                    overall_pre=_overall_pre,
+                )
             # Phase 15.1 — INCREMENTAL SAVE checkpoint #N: persist the
             # accepted revision so the user never loses more than the
             # in-flight iteration's tokens if they click Stop.
@@ -2707,6 +3046,15 @@ def _autowrite_section_body(
             if history:
                 history[-1]["revision_verdict"] = "DISCARD"
                 history[-1]["post_revision_overall"] = new_overall
+                # Phase 32.6 — record the DISCARD verdict in the
+                # iteration row. Word count stays the same (rejected
+                # revision was not adopted).
+                _persist_autowrite_iteration(
+                    autowrite_run_id, iteration + 1, history[-1],
+                    word_count=_telemetry_prev_word_count,
+                    word_count_delta=None,
+                    overall_pre=overall,
+                )
             # Update metadata only — content stays at previous KEEP state.
             discard_metadata = {
                 "score_history": history,
@@ -2749,6 +3097,20 @@ def _autowrite_section_body(
               word_count=len(content.split()),
               iterations=len(history),
               final_score=overall)
+
+    # Phase 32.6 — Layer 0: finalize the autowrite_runs row. This also
+    # back-fills was_cited on autowrite_retrievals based on [N] markers
+    # in the final draft text. Failure-soft: any SQL hiccup is logged
+    # and the autowrite still completes successfully for the user.
+    _finalize_autowrite_run(
+        autowrite_run_id,
+        status="completed",
+        final_draft_id=draft_id,
+        final_overall=overall,
+        iterations_used=_telemetry_iterations_used,
+        converged=_telemetry_converged,
+    )
+
     yield {
         "type": "completed",
         "draft_id": draft_id,

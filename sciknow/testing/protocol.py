@@ -952,6 +952,7 @@ def l1_research_doc_up_to_date() -> None:
         "## 18. Chain-of-Verification",
         "## 19. RAPTOR",
         "## 20. Measurement & Observability",
+        "## 21. Compound Learning from Iteration History",
     ):
         assert phase_marker in text, f"docs/RESEARCH.md missing section: {phase_marker!r}"
     # Implementation timeline should mention all phases up to 13.
@@ -3818,6 +3819,53 @@ def l1_phase32_5_task_bar_polls_stats_no_sse_competition() -> None:
     )
 
 
+def l1_phase32_6_autowrite_telemetry_layer0() -> None:
+    """Phase 32.6 — Layer 0 of compound learning: autowrite telemetry.
+
+    Verifies that:
+    - Three new ORM models exist: AutowriteRun, AutowriteIteration,
+      AutowriteRetrieval
+    - Four persistence helpers exist on book_ops: _create_autowrite_run,
+      _persist_autowrite_retrievals, _persist_autowrite_iteration,
+      _finalize_autowrite_run
+    - All four helpers are wired into autowrite_section_stream — the
+      generator can't open a run, persist a row, or finalize without
+      these calls being on the actual code path.
+    """
+    # ORM models
+    from sciknow.storage import models
+    for cls_name in ("AutowriteRun", "AutowriteIteration", "AutowriteRetrieval"):
+        assert hasattr(models, cls_name), f"missing ORM model: {cls_name}"
+
+    # Persistence helpers
+    from sciknow.core import book_ops
+    for fn in ("_create_autowrite_run", "_persist_autowrite_retrievals",
+               "_persist_autowrite_iteration", "_finalize_autowrite_run"):
+        assert hasattr(book_ops, fn), f"missing helper: book_ops.{fn}"
+
+    # Wired into _autowrite_section_body (the actual loop —
+    # autowrite_section_stream is a thin wrapper that just owns the
+    # logger lifecycle and delegates here).
+    import inspect
+    src = inspect.getsource(book_ops._autowrite_section_body)
+    for needle in (
+        "_create_autowrite_run(",
+        "_persist_autowrite_retrievals(",
+        "_persist_autowrite_iteration(",
+        "_finalize_autowrite_run(",
+    ):
+        assert needle in src, (
+            f"_autowrite_section_body is not calling {needle.strip('(')} — "
+            "Layer 0 telemetry will not be recorded"
+        )
+
+    # Sanity that the run id is held in a local across iterations
+    assert "autowrite_run_id" in src, (
+        "_autowrite_section_body missing the autowrite_run_id local that "
+        "carries the run id from create→iterate→finalize"
+    )
+
+
 def l2_phase32_endpoint_shapes() -> None:
     """TestClient smoke test for the major read-only API endpoints.
 
@@ -3891,6 +3939,152 @@ def l2_phase32_endpoint_shapes() -> None:
 
     assert not failures, (
         f"{len(failures)} endpoint failure(s): " + " | ".join(failures[:5])
+    )
+
+
+def l2_phase32_6_autowrite_telemetry_roundtrip() -> None:
+    """Phase 32.6 — end-to-end smoke test of the Layer 0 telemetry path
+    against the live PG database.
+
+    Creates a fake autowrite_runs row, persists synthetic retrievals
+    and an iteration, finalizes the run with a draft that contains
+    `[1] [3] [5]` markers, and verifies that:
+      - the run row transitioned to status='completed'
+      - the iteration row was upserted with action='KEEP'
+      - exactly the cited source_positions have was_cited=true
+
+    Cleans up after itself so the test is idempotent and safe to
+    re-run. Skipped if the chunks table is empty (fresh DB).
+    """
+    from sqlalchemy import text as _t
+    from sciknow.storage.db import get_session
+    from sciknow.core import book_ops
+
+    # Need at least 6 chunks with qdrant_point_id for the synthetic test
+    with get_session() as s:
+        n_chunks = s.execute(_t(
+            "SELECT count(*) FROM chunks WHERE qdrant_point_id IS NOT NULL"
+        )).scalar()
+        if (n_chunks or 0) < 6:
+            return TestResult.skip(
+                name="l2_phase32_6_autowrite_telemetry_roundtrip",
+                message=f"need ≥6 chunks, have {n_chunks} — skipping",
+            )
+
+    # 1) Create a synthetic draft with [1] [3] [5] markers
+    with get_session() as s:
+        draft = s.execute(_t("""
+            INSERT INTO drafts (title, content, sources, version)
+            VALUES ('phase32.6 telemetry roundtrip', 'foo [1] bar [3] baz [5].',
+                    '[]'::jsonb, 1)
+            RETURNING id::text
+        """)).fetchone()
+        draft_id = draft[0]
+        s.commit()
+
+    try:
+        # 2) Open the run
+        run_id = book_ops._create_autowrite_run(
+            book_id=None, chapter_id=None, section_slug="l2_test",
+            model="test:phase32.6", target_words=1500, max_iter=3,
+            target_score=0.85, feature_versions={"smoke": True},
+        )
+        assert run_id, "_create_autowrite_run returned None"
+
+        # 3) Persist 6 synthetic retrievals using real chunk ids
+        with get_session() as s:
+            chunk_rows = s.execute(_t("""
+                SELECT qdrant_point_id::text, document_id::text
+                FROM chunks WHERE qdrant_point_id IS NOT NULL LIMIT 6
+            """)).fetchall()
+
+        class _FakeResult:
+            def __init__(self, rank, chunk_id, document_id, score):
+                self.rank = rank
+                self.chunk_id = chunk_id
+                self.document_id = document_id
+                self.score = score
+
+        fakes = [
+            _FakeResult(i + 1, r[0], r[1], 0.9 - i * 0.1)
+            for i, r in enumerate(chunk_rows)
+        ]
+        book_ops._persist_autowrite_retrievals(run_id, fakes)
+
+        # 4) Persist an iteration row, then update it with KEEP
+        hist_entry = {
+            "iteration": 1,
+            "scores": {"overall": 0.65, "groundedness": 0.7,
+                       "weakest_dimension": "length"},
+            "verification": {"groundedness_score": 0.7},
+            "cove": {"ran": False},
+            "revision_verdict": None,
+            "post_revision_overall": None,
+        }
+        book_ops._persist_autowrite_iteration(
+            run_id, 1, hist_entry,
+            word_count=800, word_count_delta=None, overall_pre=0.65,
+        )
+        hist_entry["revision_verdict"] = "KEEP"
+        hist_entry["post_revision_overall"] = 0.78
+        book_ops._persist_autowrite_iteration(
+            run_id, 1, hist_entry,
+            word_count=1300, word_count_delta=500, overall_pre=0.65,
+        )
+
+        # 5) Finalize with the draft pointer — triggers was_cited back-fill
+        book_ops._finalize_autowrite_run(
+            run_id, status="completed", final_draft_id=draft_id,
+            final_overall=0.78, iterations_used=1, converged=False,
+        )
+
+        # 6) Verify the persisted state
+        with get_session() as s:
+            run = s.execute(_t("""
+                SELECT status, final_overall, iterations_used, converged,
+                       finished_at IS NOT NULL
+                FROM autowrite_runs WHERE id::text = :id
+            """), {"id": run_id}).fetchone()
+            assert run is not None, "run row missing after finalize"
+            assert run[0] == "completed", f"status={run[0]}, expected 'completed'"
+            assert abs(float(run[1]) - 0.78) < 0.01, f"final_overall={run[1]}"
+            assert run[2] == 1, f"iterations_used={run[2]}"
+            assert run[4] is True, "finished_at not set"
+
+            iters = s.execute(_t("""
+                SELECT action, word_count, word_count_delta
+                FROM autowrite_iterations WHERE run_id::text = :id
+                ORDER BY iteration
+            """), {"id": run_id}).fetchall()
+            assert len(iters) == 1, f"expected 1 iteration row, got {len(iters)}"
+            assert iters[0][0] == "KEEP", f"action={iters[0][0]}"
+            assert iters[0][1] == 1300, f"word_count={iters[0][1]}"
+            assert iters[0][2] == 500, f"word_count_delta={iters[0][2]}"
+
+            cited_positions = s.execute(_t("""
+                SELECT source_position FROM autowrite_retrievals
+                WHERE run_id::text = :id AND was_cited = true
+                ORDER BY source_position
+            """), {"id": run_id}).fetchall()
+            cited_set = {r[0] for r in cited_positions}
+            assert cited_set == {1, 3, 5}, (
+                f"was_cited back-fill wrong: got {sorted(cited_set)}, "
+                "expected {1, 3, 5}"
+            )
+    finally:
+        # Always clean up — even on assertion failure — so the test is
+        # idempotent and re-runnable.
+        with get_session() as s:
+            if run_id:
+                s.execute(_t("DELETE FROM autowrite_runs WHERE id::text = :id"),
+                          {"id": run_id})
+            s.execute(_t("DELETE FROM drafts WHERE id::text = :id"),
+                      {"id": draft_id})
+            s.commit()
+
+    return TestResult.ok(
+        name="l2_phase32_6_autowrite_telemetry_roundtrip",
+        message="6 retrievals + 1 iteration + finalize roundtripped, was_cited correct",
     )
 
 
@@ -4078,6 +4272,8 @@ L1_TESTS: list[Callable] = [
     l1_phase32_4_section_delete_and_add_in_sidebar,
     # Phase 32.5 — task bar polls server-side stats (no SSE competition)
     l1_phase32_5_task_bar_polls_stats_no_sse_competition,
+    # Phase 32.6 — Layer 0 of compound learning: autowrite telemetry
+    l1_phase32_6_autowrite_telemetry_layer0,
 ]
 
 L2_TESTS: list[Callable] = [
@@ -4091,6 +4287,8 @@ L2_TESTS: list[Callable] = [
     # Phase 32 — TestClient endpoint shapes + DB invariants
     l2_phase32_endpoint_shapes,
     l2_phase32_data_invariants,
+    # Phase 32.6 — Layer 0 telemetry roundtrip against live PG
+    l2_phase32_6_autowrite_telemetry_roundtrip,
 ]
 
 L3_TESTS: list[Callable] = [

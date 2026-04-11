@@ -509,6 +509,87 @@ Measurement isn't a research technique per se, but it's the lever that makes eve
 
 ---
 
+## 21. Compound Learning from Iteration History
+
+Every autowrite run produces ~30-50 LLM calls of structured signal: per-iteration scores across 6 dimensions, per-claim verification verdicts, CoVe questions and answers, retrieval queries and the top-k chunks they returned, KEEP/DISCARD verdicts on each revision, and the user's eventual approval (or rebuild). Until Phase 32.6 this signal evaporated the moment a draft was saved — only the *final* `score_history` JSONB column was kept on `drafts.custom_metadata`, and even then nothing aggregated across runs.
+
+The user's framing for this work was direct: *"do research about how to make the autowrite algorithm learn from every iteration; we want to have a database somehow with all that effort and compound it in a way that next iterations are more efficient."* This section is the answer. It's a layered plan where each layer is independently shippable and earlier layers are prerequisites for later ones. **Layer 0 shipped in Phase 32.6**; layers 1-6 are tracked in `docs/ROADMAP.md`.
+
+### The four research families
+
+Cross-run learning for LLM writing agents converged on four distinct families in 2025-2026, each addressing a different failure mode. These are NOT mutually exclusive — a mature system uses several.
+
+1. **Episodic memory & verbal reinforcement (Reflexion lineage).** [Reflexion](https://arxiv.org/abs/2303.11366) (Shinn et al., 2023) introduced the verbal-memory pattern: agent maintains a buffer of past mistakes, prepends lessons to subsequent prompts, learns without gradient updates. The 2025-2026 successors fix two known problems: [Experiential Reflective Learning (ERL)](https://arxiv.org/pdf/2603.24639) distills *heuristics* (generalized strategic principles) instead of concatenating every raw insight into every prompt — earlier work like ExpeL scaled poorly because the prompt grew with the experience buffer. ERL reports +7.8% over the ReAct baseline. [Multi-Agent Reflexion (MAR)](https://arxiv.org/html/2512.20845) (Dec 2025) addresses the single-agent confirmation bias: in vanilla Reflexion, the same model generates actions, evaluates them, and writes the reflections, which leads to repeated reasoning errors. MAR splits these roles. The position paper [Episodic Memory is the Missing Piece for Long-Term LLM Agents](https://arxiv.org/abs/2502.06975) (Pink et al., Feb 2025) is the right framing checklist: instance-specificity, single-shot encoding, contextual binding, similarity-based retrieval, and consolidation into semantic memory.
+
+2. **Preference learning (DPO and iterative variants).** Each iteration's KEEP/DISCARD verdict implicitly produces a preference pair: KEEP says "iter N+1 > iter N", DISCARD says "iter N > iter N+1". [DPO](https://arxiv.org/abs/2305.18290) (Rafailov et al., 2023) fits an implicit reward model from such pairs with a simple classification loss — no separate reward-model training. The practical floor is well-validated: ~2k preference pairs and 3 epochs already produce meaningful gains ([Wolfe 2024](https://cameronrwolfe.substack.com/p/direct-preference-optimization)). [Iterative DPO / Self-Play Fine-Tuning](https://www.philschmid.de/rl-with-llms-in-2025-dpo) and the 2024-2025 [DPO survey](https://arxiv.org/abs/2410.15595) cover the round-by-round variants designed for exactly this loop. **Critical caveat — the bias trap:** if the same scorer that grades quality is also the supervisor, DPO will reward whatever the scorer happens to like, including its biases. Two known mitigations: (a) human-in-the-loop validation of a sample, (b) ensemble of independent judges and only train on pairs where both agree.
+
+3. **Programmatic prompt optimization.** DSPy treats prompts as compiled programs and optimizes them against a metric — sciknow's existing `book autowrite-bench` (Phase 13) already produces the right metric (mean ± std overall score). [TextGrad](https://arxiv.org/abs/2406.07496) (Yuksekgonul et al., 2024) backpropagates "gradients" through text via LLM critique. Both target *prompt* improvement, not *draft* improvement, so they are orthogonal to the user's compound-learning framing — useful for the periodic optimization pass but not the daily writing path.
+
+4. **Long-term memory architectures.** [MemGPT / Letta](https://research.memgpt.ai/) introduced the OS-metaphor hierarchical memory (main-context vs archival). [Generative Agents](https://arxiv.org/abs/2304.03442) (Park et al., 2023) score memory entries by `importance × recency × relevance` — that scoring function is the right one for an autowrite "lessons" retrieval system. [LangMem](https://langchain-ai.github.io/langmem/concepts/conceptual_guide/) and the [Memory for Autonomous LLM Agents survey](https://arxiv.org/html/2603.07670v1) are the production-grade reference implementations.
+
+### The 6-layer plan
+
+Each layer is independently shippable. Earlier layers are prerequisites for later ones. Layer 0 is the data foundation; Layers 1-3 are pure prompt engineering with no fine-tuning; Layers 4-6 require the DGX Spark.
+
+#### Layer 0 — Telemetry foundation (shipped in Phase 32.6)
+
+Three new tables in PostgreSQL capture what was previously thrown away after every run:
+
+| Table | What it stores |
+|---|---|
+| `autowrite_runs` | One row per autowrite invocation: book/chapter/section, model, target_words, max_iter, target_score, feature_versions, started_at, finished_at, status, final_overall, iterations_used, converged, final_draft_id |
+| `autowrite_iterations` | One row per (run, iteration): scores JSONB, verification JSONB, cove JSONB, action (KEEP/DISCARD), word_count, word_count_delta, weakest_dimension, revision_instruction, overall_pre, overall_post |
+| `autowrite_retrievals` | One row per retrieved chunk: source_position (the `[N]` marker), chunk_qdrant_id, document_id, rrf_score, **was_cited** (set after the final draft text is parsed for `[N]` markers in `_finalize_autowrite_run`) |
+
+Persisted via four helpers in `core/book_ops.py` (`_create_autowrite_run`, `_persist_autowrite_retrievals`, `_persist_autowrite_iteration`, `_finalize_autowrite_run`), all wired into `_autowrite_section_body`. The helpers are *fail-soft*: any SQL hiccup is logged and swallowed so a database burp never kills a running autowrite job. **Run-level cancellation/error paths intentionally do not finalize**; a periodic sweep can flip stale `running` rows to `cancelled` after a timeout. The happy path (successful completion) finalizes correctly.
+
+The `was_cited` column is the architectural keystone: it's the link from "what we retrieved" to "what we actually used in the accepted final draft", and it's the data Layer 2 reads to compute a useful_count retrieval boost.
+
+#### Layer 1 — Episodic memory store (lessons)
+
+A new `autowrite_lessons` table keyed by `(book_id, chapter_id, section_slug)` stores 1-3-sentence lessons distilled from each completed run, with embeddings for similarity retrieval. Producer: a separate "reflection writer" pass (different model or prompt head than the scorer, per the MAR critique) extracts lessons from the per-iteration trajectory after the run completes. Consumer: before the next autowrite run, fetch top-K lessons by `importance × recency × similarity_to_section_plan` (Generative Agents formula) and inject as a *Lessons from prior runs* block in the writer system prompt. ERL's key insight: keep K small (3-5), distilled, not raw concatenation.
+
+**Win condition:** measurable lift in `book autowrite-bench --runs 5` mean overall score after lessons are populated, vs the baseline run with lessons disabled. Same Track A methodology as Phase 13.
+
+#### Layer 2 — Useful chunk retrieval boost
+
+Compute `useful_count = SUM(was_cited) per chunk_qdrant_id` from the `autowrite_retrievals` table on a nightly batch job. Store as a Qdrant payload field. Boost retrieval scores by `1 + factor * log2(1 + useful_count)` — same dampened multiplicative form as the existing `citation_boost_factor`. This is **transfer learning across the user's library**: chunks the system has already learned are useful for similar sections start ranking higher. Zero LLM cost; pure data flywheel.
+
+#### Layer 3 — Heuristic distillation (ERL-style)
+
+Once ~50 runs have accumulated, a periodic batch job clusters lessons from Layer 1 by embedding similarity and prompts the LLM to extract a *heuristic* per cluster — a generalized strategic principle that applies across many sections (e.g. "When the scoring loop oscillates between groundedness and length, the underlying issue is usually missing claim qualifiers — fix hedging fidelity first"). Heuristics are smaller, more general, and more context-efficient than raw lessons; they get prepended to the writer prompt unconditionally. Raw lessons stay retrieved per-section.
+
+#### Layer 4 — Iterative DPO preference dataset (data only)
+
+Every KEEP verdict in the autowrite loop produces a (chosen, rejected) preference pair *for free*. Phase 32.6's iteration table captures `overall_pre` and `overall_post`, and the autowrite generator's `_save_revising` callback already persists the in-flight revision text. A small periodic export job writes `data/preferences/<book>.jsonl` in the standard `{prompt, chosen, rejected}` shape, filtering out pairs where both scores are below 0.7 (low signal). **No training on the 3090** — a 32B writer needs the DGX Spark. This layer is pure data accumulation against the day fine-tuning becomes feasible.
+
+To avoid the bias trap, add an explicit "approve this KEEP verdict" button in the web reader (one click in the Phase 13 score history viewer); only approved pairs become training data.
+
+#### Layer 5 — Style fingerprint extraction
+
+After N approved sections, extract style features (median sentence length, citation density, hedging rate, paragraph length distribution, transition word usage). Store in `book.custom_metadata.style_fingerprint`. Inject into the writer system prompt as a style anchor. Personalizes the writer to the user's voice over time. Independent of layers 1-4; can be shipped in parallel.
+
+#### Layer 6 — Domain LoRA on the writer (DGX Spark required)
+
+When the Spark arrives and Layer 4 has accumulated ~2k validated preference pairs: LoRA-tune the current SOTA writer model using DPO on the user's preferences. Per Wolfe's analysis, 2k pairs + 3 epochs is enough for meaningful gains. Output: a `qwen-sciknow:32b` model (or whatever the SOTA writer is by then) that knows how to write *for this user, in this domain*. Becomes the new default `LLM_MODEL`; the original stays available for ablation.
+
+### Anti-patterns that 2025-2026 work has documented
+
+These approaches fail in known ways and should not be reinvented:
+
+- **Don't train a reward model from scratch.** That's old PPO/RLHF territory. DPO has obsoleted it for this scale and needs ~10× less data.
+- **Don't store raw iteration text in the lessons table.** PostgreSQL fills with low-signal noise. Distill to 1-3 sentences per lesson.
+- **Don't naively prepend ALL past lessons to every prompt** — the ExpeL anti-pattern that ERL specifically calls out. Retrieve top-K, not top-all.
+- **Don't optimize the writer using the same scorer as the supervisor without a human gate.** Sycophancy collapse is real and well documented. Either ensemble or sample-validate.
+- **Don't try to fine-tune on the 3090.** A 32B model in BF16 is ~64GB. Even Q4 + LoRA is tight, and you'd kill the inference path. Wait for the Spark.
+- **Don't conflate "compound learning" with "infinite context".** A bigger context window is not a memory system. Memory needs structure (storage + retrieval + decay), not just length.
+
+### Why this is in the research doc
+
+The first user request that produced this section came after ~30 successful autowrite runs. The user's instinct was right: each run costs ~2-5 minutes of LLM time and produces structured signal worth keeping. Layer 0 is the cheapest possible foundation — three tables, four helpers, no LLM calls — and it unlocks every layer above it. **The most important observation from this audit: most of the data was already implicitly there** in the Phase 13 `score_history` JSONB and the Phase 19 `_save_draft` calls. Layer 0 just made it queryable.
+
+---
+
 ## Planned (Researched, Implementation Pending)
 
 The roadmap items from the 2026-04 lit sweep are now all shipped (Phases 7–12). Track A measurement landed in Phase 13. Future research notes will accumulate here as they're identified.
