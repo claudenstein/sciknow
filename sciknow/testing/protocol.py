@@ -3319,6 +3319,9 @@ _PHASE32_EXPECTED_ENDPOINTS: list[tuple[str, str]] = [
     ("GET", "/api/stream/{job_id}"),
     ("DELETE", "/api/jobs/{job_id}"),
     ("GET", "/api/jobs"),
+    # Phase 32.5 — task bar polls this for stats instead of competing
+    # with the per-section SSE consumer.
+    ("GET", "/api/jobs/{job_id}/stats"),
 ]
 
 
@@ -3737,6 +3740,84 @@ def l1_phase32_4_section_delete_and_add_in_sidebar() -> None:
     )
 
 
+def l1_phase32_5_task_bar_polls_stats_no_sse_competition() -> None:
+    """Phase 32.5 — the persistent task bar must poll
+    GET /api/jobs/{id}/stats, NOT open a second SSE EventSource on
+    /api/stream/{id}.
+
+    Bug history: the task bar's token counter and t/s display were
+    broken across ~10 prior fix attempts. Root cause was
+    architectural, not parsing: the per-section preview consumer
+    AND the task bar both opened an EventSource on the same
+    /api/stream/{id} URL. The server-side asyncio.Queue is shared,
+    Queue.get() removes items, so two consumers split the event
+    stream and the task bar saw a tiny (often zero) subset of tokens.
+    No amount of regex/math/format patching on the consumer side
+    could fix it because the events weren't arriving in the first
+    place.
+
+    Phase 32.5 fix: server-side counter in `_jobs[id]` updated by
+    `_observe_event_for_stats` as events flow through the producer.
+    Task bar polls a fixed-shape JSON snapshot every 500ms. Single
+    source of truth, no race, no parsing. This test locks in BOTH
+    halves of the fix so it can't silently regress.
+    """
+    import inspect
+    from sciknow.web import app as web_app
+    src = inspect.getsource(web_app)
+
+    # 1) Server-side observer must exist and be wired into the
+    #    generator runner BEFORE the event is enqueued.
+    assert "def _observe_event_for_stats(" in src, (
+        "_observe_event_for_stats helper missing — server-side counters won't update"
+    )
+    # The runner must call the observer for normal events
+    runner_src = src.split("def _run_generator_in_thread(")[1].split("\n@app.")[0]
+    assert "_observe_event_for_stats(job_id, event)" in runner_src, (
+        "_run_generator_in_thread must observe each event before enqueueing"
+    )
+
+    # 2) The polling endpoint must exist and return the expected fields.
+    assert '@app.get("/api/jobs/{job_id}/stats")' in src, (
+        "GET /api/jobs/{id}/stats endpoint missing"
+    )
+    stats_src = src.split('@app.get("/api/jobs/{job_id}/stats")')[1].split("@app.")[0]
+    for field in ('"tokens"', '"tps"', '"elapsed_s"', '"stream_state"', '"model_name"'):
+        assert field in stats_src, (
+            f"stats endpoint missing field: {field}"
+        )
+
+    # 3) The task bar JS must NOT open an EventSource for the global
+    #    job. This is the architectural bug we're locking out.
+    #    Look for any 'new EventSource' inside the task bar functions.
+    sg_src = src.split("function startGlobalJob(")[1].split("function _finishGlobalJob")[0]
+    assert "new EventSource" not in sg_src, (
+        "startGlobalJob must NOT open an EventSource — that's the bug. "
+        "It must poll /api/jobs/{id}/stats instead."
+    )
+
+    # 4) The task bar JS must call the polling helper.
+    assert "_pollGlobalJobStats(" in src, (
+        "task bar missing _pollGlobalJobStats — won't fetch any stats"
+    )
+    # ...and the helper must hit the right URL
+    poll_src = src.split("async function _pollGlobalJobStats(")[1].split("\nfunction startGlobalJob")[0]
+    assert "/api/jobs/' + jobId + '/stats" in poll_src, (
+        "_pollGlobalJobStats must fetch /api/jobs/{id}/stats"
+    )
+    # ...and read the server-supplied counters directly (no
+    # client-side accounting that could drift).
+    assert "stats.tokens" in poll_src and "stats.tps" in poll_src, (
+        "_pollGlobalJobStats must read tokens + tps directly from the server snapshot"
+    )
+
+    # 5) The previous SSE state variable must be gone — leaving it
+    #    declared but unused would invite future confusion.
+    assert "_globalJobSource" not in src, (
+        "_globalJobSource (the old SSE source ref) should be removed entirely"
+    )
+
+
 def l2_phase32_endpoint_shapes() -> None:
     """TestClient smoke test for the major read-only API endpoints.
 
@@ -3995,6 +4076,8 @@ L1_TESTS: list[Callable] = [
     l1_phase32_3_task_bar_is_fixed_not_sticky,
     # Phase 32.4 — inline section delete + add from the sidebar
     l1_phase32_4_section_delete_and_add_in_sidebar,
+    # Phase 32.5 — task bar polls server-side stats (no SSE competition)
+    l1_phase32_5_task_bar_polls_stats_no_sse_competition,
 ]
 
 L2_TESTS: list[Callable] = [

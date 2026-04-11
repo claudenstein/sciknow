@@ -19,6 +19,7 @@ import logging
 import re
 import threading
 import time
+from collections import deque
 from html import escape as _esc
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -131,8 +132,78 @@ def _create_job(job_type: str) -> tuple[str, asyncio.Queue]:
             "type": job_type,
             "cancel": threading.Event(),
             "finished_at": None,
+            # Phase 32.5 — server-side counters so the task bar can poll
+            # GET /api/jobs/{id}/stats instead of opening a SECOND SSE
+            # source on /api/stream/{id}, which would compete with the
+            # per-section preview consumer for the same asyncio.Queue
+            # (Queue.get() removes items, so two consumers split the
+            # event stream and neither sees a coherent view). Polling a
+            # server-side counter is the only architecturally correct
+            # way to deliver the same stats to two independent UIs.
+            "started_at": time.monotonic(),
+            "tokens": 0,
+            # 200-token rolling window is enough for ~30s of fast LLMs
+            "token_timestamps": deque(maxlen=200),
+            "model_name": None,
+            "task_desc": job_type,
+            "target_words": None,
+            "stream_state": "streaming",  # streaming | done | error
+            "error_message": None,
         }
     return job_id, queue
+
+
+def _observe_event_for_stats(job_id: str, event: dict) -> None:
+    """Phase 32.5 — bump the per-job counters as events flow through.
+
+    Called from `_run_generator_in_thread` BEFORE the event is put on
+    the consumer queue. The poll endpoint reads the resulting
+    counters; the consumer queue is left untouched (so the per-section
+    SSE preview keeps working unchanged).
+
+    Tracks token count, rolling timestamps for tokens-per-second,
+    model name, task description, target words, and lifecycle state.
+    Lock-protected dict mutation — fast enough to not bottleneck the
+    streaming generator.
+    """
+    et = event.get("type")
+    if not et:
+        return
+    with _job_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return
+        if et == "token":
+            text_val = event.get("text") or ""
+            # Approximate token count by whitespace splits — same
+            # heuristic the previous client-side code used. Falls back
+            # to 1 for short non-whitespace bursts.
+            n = len([w for w in text_val.split() if w]) or 1
+            job["tokens"] += n
+            now = time.monotonic()
+            ts = job["token_timestamps"]
+            for _ in range(n):
+                ts.append(now)
+        elif et == "model_info":
+            mn = event.get("writer_model") or event.get("model")
+            if mn:
+                job["model_name"] = mn
+        elif et == "progress":
+            d = event.get("detail") or event.get("stage")
+            if d:
+                job["task_desc"] = str(d)[:200]
+        elif et == "length_target":
+            tw = event.get("target_words")
+            if tw:
+                job["target_words"] = int(tw)
+        elif et in ("completed", "all_sections_complete"):
+            job["stream_state"] = "done"
+        elif et == "cancelled":
+            job["stream_state"] = "done"
+            job["task_desc"] = "Stopped"
+        elif et == "error":
+            job["stream_state"] = "error"
+            job["error_message"] = str(event.get("message") or "unknown")[:200]
 
 
 def _finish_job(job_id: str):
@@ -1695,17 +1766,31 @@ def _run_generator_in_thread(job_id: str, generator_fn, loop):
     try:
         for event in gen:
             if cancel.is_set():
-                loop.call_soon_threadsafe(queue.put_nowait, {"type": "cancelled"})
+                cancel_evt = {"type": "cancelled"}
+                _observe_event_for_stats(job_id, cancel_evt)
+                loop.call_soon_threadsafe(queue.put_nowait, cancel_evt)
                 break
+            # Phase 32.5 — observe BEFORE enqueueing so the polled
+            # stats stay ahead of (or at least in lockstep with) the
+            # SSE consumer reading from the queue.
+            _observe_event_for_stats(job_id, event)
             loop.call_soon_threadsafe(queue.put_nowait, event)
     except Exception as exc:
         logger.exception("Job %s failed", job_id)
-        loop.call_soon_threadsafe(queue.put_nowait, {"type": "error", "message": str(exc)})
+        err_evt = {"type": "error", "message": str(exc)}
+        _observe_event_for_stats(job_id, err_evt)
+        loop.call_soon_threadsafe(queue.put_nowait, err_evt)
     finally:
         try:
             gen.close()  # raises GeneratorExit at the current yield point
         except Exception:
             pass
+        # Phase 32.5 — mark stream done so a polling task bar that
+        # never observed an explicit completed/error event still
+        # transitions out of the streaming state on the next poll.
+        with _job_lock:
+            if job_id in _jobs and _jobs[job_id].get("stream_state") == "streaming":
+                _jobs[job_id]["stream_state"] = "done"
         loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel
         _finish_job(job_id)
 
@@ -2323,6 +2408,48 @@ async def cancel_job(job_id: str):
         raise HTTPException(404, "Job not found")
     job["cancel"].set()
     return JSONResponse({"ok": True})
+
+
+@app.get("/api/jobs/{job_id}/stats")
+async def get_job_stats(job_id: str):
+    """Phase 32.5 — server-side counter snapshot for the persistent
+    task bar.
+
+    The task bar polls this every ~500ms instead of opening a second
+    SSE source on /api/stream/{job_id}. The previous SSE-based design
+    competed with the per-section preview consumer for the SAME
+    asyncio.Queue, and Queue.get() removes items, so the two
+    consumers split the event stream and the task bar saw a tiny
+    fraction of the tokens (or zero if the per-section consumer was
+    faster). Polling a server-side counter eliminates that race.
+
+    Returns 410 (Gone) for jobs that finished and were swept by the
+    GC, so the client can transition to "done" cleanly without
+    re-fetching the job list.
+    """
+    with _job_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            # Treat as already-finished — the GC swept it after the
+            # 5-minute window, OR the job was never created.
+            raise HTTPException(410, "Job not found (likely already finished)")
+        now = time.monotonic()
+        ts = job.get("token_timestamps") or deque()
+        cutoff = now - 3.0
+        recent = sum(1 for t in ts if t >= cutoff)
+        tps = recent / 3.0 if recent else 0.0
+        elapsed_s = now - job.get("started_at", now)
+        return JSONResponse({
+            "id": job_id,
+            "stream_state": job.get("stream_state", "streaming"),
+            "tokens": int(job.get("tokens", 0)),
+            "tps": round(tps, 2),
+            "elapsed_s": round(elapsed_s, 1),
+            "model_name": job.get("model_name"),
+            "task_desc": job.get("task_desc") or job.get("type"),
+            "target_words": job.get("target_words"),
+            "error_message": job.get("error_message"),
+        })
 
 
 @app.get("/api/jobs")
@@ -4596,16 +4723,23 @@ function stopJob() {{
   stopGlobalJob();
 }}
 
-// ── Phase 30: persistent global task bar ──────────────────────────────
+// ── Phase 30 / 32.5: persistent global task bar ───────────────────────
 //
-// One global SSE source per job, NOT closed by loadSection or any
-// SPA navigation. The task bar at the top of the viewport reflects
-// the live state. doAutowrite/doWrite/etc all call startGlobalJob()
-// after kicking off their HTTP request; the bar handles its own
-// rendering loop and stop button.
+// Phase 30 first design used a SECOND EventSource on /api/stream/{{id}}
+// alongside the per-section preview consumer. Both ended up calling
+// queue.get() on the same server-side asyncio.Queue, which REMOVES
+// items, so the two consumers split the event stream and the task
+// bar saw a tiny (often zero) subset of tokens. Patching the task
+// bar's parser/regex/math couldn't fix it — the events weren't
+// arriving in the first place.
+//
+// Phase 32.5 fix: stop using SSE for the task bar. The server now
+// tracks token count, rolling tps, elapsed, model name, and stream
+// state per job in `_jobs[id]` (server side, plain Python). The task
+// bar polls GET /api/jobs/{{id}}/stats every 500ms and reads a
+// fixed-shape snapshot. Single source of truth, no race, no parsing.
 
 let _globalJob = null;
-let _globalJobSource = null;
 let _globalJobTimer = null;
 
 function _formatElapsed(ms) {{
@@ -4630,22 +4764,14 @@ function _renderTaskBar() {{
   document.getElementById('tb-task').textContent = j.taskDesc || j.type || 'Working';
   document.getElementById('tb-task').title = j.taskDesc || j.type || '';
   document.getElementById('tb-model').textContent = j.modelName || 'qwen3.5:27b';
-  document.getElementById('tb-tokens').textContent = j.tokens.toLocaleString();
-  // Rolling t/s over the last 3 seconds
-  const now = performance.now();
-  const cutoff = now - 3000;
-  while (j.recentTokens.length > 0 && j.recentTokens[0] < cutoff) {{
-    j.recentTokens.shift();
-  }}
-  const tps = j.recentTokens.length / 3;
-  document.getElementById('tb-tps').textContent = tps.toFixed(1);
-  const elapsed = j.startedAt ? (now - j.startedAt) : 0;
-  document.getElementById('tb-elapsed').textContent = _formatElapsed(elapsed);
+  document.getElementById('tb-tokens').textContent = (j.tokens || 0).toLocaleString();
+  document.getElementById('tb-tps').textContent = (j.tps || 0).toFixed(1);
+  document.getElementById('tb-elapsed').textContent = _formatElapsed((j.elapsedS || 0) * 1000);
   // ETA — only when target_words is known and tokens are flowing
   const etaWrap = document.getElementById('tb-eta');
-  if (j.targetWords && tps > 0.1 && j.tokens > 0) {{
+  if (j.targetWords && j.tps > 0.1 && j.tokens > 0) {{
     const remaining = Math.max(0, j.targetWords - j.tokens);
-    const etaMs = (remaining / tps) * 1000;
+    const etaMs = (remaining / j.tps) * 1000;
     document.getElementById('tb-eta-val').textContent = _formatElapsed(etaMs);
     etaWrap.style.display = 'inline-flex';
   }} else {{
@@ -4656,13 +4782,63 @@ function _renderTaskBar() {{
   dot.className = 'tb-dot ' + (j.state || 'streaming');
 }}
 
+// Phase 32.5 — poll the server-side stats endpoint. Replaces the
+// previous (broken) SSE consumer. Called every 500ms while a job
+// is active.
+async function _pollGlobalJobStats(jobId) {{
+  if (!_globalJob || _globalJob.id !== jobId) return;
+  try {{
+    const res = await fetch('/api/jobs/' + jobId + '/stats');
+    if (res.status === 410 || res.status === 404) {{
+      // Job already finished and was swept by GC, or never existed.
+      // Treat as a clean finish so the bar dismisses on its own.
+      const j = _globalJob;
+      if (j && j.state === 'streaming') {{
+        j.state = 'done';
+        j.taskDesc = 'Done';
+        _renderTaskBar();
+      }}
+      _finishGlobalJob('done', 2000);
+      return;
+    }}
+    if (!res.ok) return;  // network blip — keep polling
+    const stats = await res.json();
+    const j = _globalJob;
+    if (!j || j.id !== jobId) return;
+    // Mirror server snapshot directly into the local state — server
+    // is the source of truth, no client-side accounting.
+    j.tokens = stats.tokens || 0;
+    j.tps = stats.tps || 0;
+    j.elapsedS = stats.elapsed_s || 0;
+    if (stats.model_name) j.modelName = stats.model_name;
+    if (stats.task_desc) j.taskDesc = stats.task_desc;
+    if (stats.target_words) j.targetWords = stats.target_words;
+    // Lifecycle: if the server says we're done/error, transition.
+    if (stats.stream_state === 'done') {{
+      j.state = 'done';
+      // Don't overwrite a server-supplied "Stopped" / final message
+      if (j.taskDesc === stats.task_desc || j.taskDesc === 'Running…') {{
+        j.taskDesc = 'Done';
+      }}
+      _renderTaskBar();
+      _finishGlobalJob('done', 4000);
+      return;
+    }} else if (stats.stream_state === 'error') {{
+      j.state = 'error';
+      j.taskDesc = 'Error: ' + ((stats.error_message || 'unknown').slice(0, 80));
+      _renderTaskBar();
+      _finishGlobalJob('error', 0);  // wait for explicit dismiss
+      return;
+    }}
+    _renderTaskBar();
+  }} catch (e) {{
+    // Network blip — keep polling. Don't surface; the next tick will retry.
+  }}
+}}
+
 function startGlobalJob(jobId, opts) {{
   if (!jobId) return;
-  // Clean up any previous job
-  if (_globalJobSource) {{
-    try {{ _globalJobSource.close(); }} catch (e) {{}}
-    _globalJobSource = null;
-  }}
+  // Clean up any previous job's poll timer
   if (_globalJobTimer) {{
     clearInterval(_globalJobTimer);
     _globalJobTimer = null;
@@ -4675,8 +4851,8 @@ function startGlobalJob(jobId, opts) {{
     modelName: (opts && opts.modelName) || 'qwen3.5:27b',
     targetWords: (opts && opts.targetWords) || null,
     tokens: 0,
-    recentTokens: [],
-    startedAt: performance.now(),
+    tps: 0,
+    elapsedS: 0,
     state: 'streaming',
     sectionType: (opts && opts.sectionType) || null,
     chapterId: (opts && opts.chapterId) || null,
@@ -4687,72 +4863,16 @@ function startGlobalJob(jobId, opts) {{
   document.getElementById('tb-dismiss').style.display = 'none';
 
   _renderTaskBar();
-  // Re-render every 500ms so elapsed/t/s/eta tick in real time even
-  // when no events are flowing (e.g. during a long retrieval phase)
-  _globalJobTimer = setInterval(_renderTaskBar, 500);
 
-  // Open SSE source. The handler updates _globalJob state but DOES
-  // NOT directly touch the read-view DOM — we leave the per-section
-  // live preview to the existing handlers (which can hook into the
-  // global stream by listening for the corresponding section).
-  const source = new EventSource('/api/stream/' + jobId);
-  _globalJobSource = source;
-  source.onmessage = function(e) {{
-    let evt;
-    try {{ evt = JSON.parse(e.data); }} catch (err) {{ return; }}
-    const j = _globalJob;
-    if (!j || j.id !== jobId) return;
-
-    if (evt.type === 'token') {{
-      // Approximate token count by whitespace splits (Phase 15.4
-      // pattern, but the count IS the count we display now).
-      const text = (typeof evt.text === 'string') ? evt.text : '';
-      const n = (text.match(/\\S+/g) || []).length || 1;
-      j.tokens += n;
-      const now = performance.now();
-      for (let i = 0; i < n; i++) j.recentTokens.push(now);
-    }} else if (evt.type === 'progress') {{
-      if (evt.detail) j.taskDesc = evt.detail;
-    }} else if (evt.type === 'model_info') {{
-      if (evt.writer_model) j.modelName = evt.writer_model;
-    }} else if (evt.type === 'length_target') {{
-      if (evt.target_words) j.targetWords = evt.target_words;
-    }} else if (evt.type === 'completed' || evt.type === 'all_sections_complete') {{
-      j.state = 'done';
-      j.taskDesc = 'Done';
-      _renderTaskBar();
-      _finishGlobalJob('done', 4000);
-    }} else if (evt.type === 'error') {{
-      j.state = 'error';
-      j.taskDesc = 'Error: ' + (evt.message || 'unknown').slice(0, 80);
-      _renderTaskBar();
-      _finishGlobalJob('error', 0);  // wait for explicit dismiss
-    }} else if (evt.type === 'cancelled') {{
-      j.state = 'done';
-      j.taskDesc = 'Stopped';
-      _renderTaskBar();
-      _finishGlobalJob('done', 2000);
-    }} else if (evt.type === 'done') {{
-      // Sentinel from the SSE side — close the source
-      _finishGlobalJob('done', 1000);
-    }}
-  }};
-  source.onerror = function() {{
-    if (_globalJob) {{
-      _globalJob.state = 'error';
-      _globalJob.taskDesc = 'Connection lost';
-      _renderTaskBar();
-      _finishGlobalJob('error', 0);
-    }}
-  }};
+  // Phase 32.5 — kick off the poll loop. 500ms is fast enough that
+  // the t/s number feels live but slow enough to be negligible HTTP
+  // load (about 2 small JSON requests per second).
+  _pollGlobalJobStats(jobId);  // immediate first tick
+  _globalJobTimer = setInterval(() => _pollGlobalJobStats(jobId), 500);
 }}
 
 function _finishGlobalJob(state, autoDismissMs) {{
   if (!_globalJob) return;
-  if (_globalJobSource) {{
-    try {{ _globalJobSource.close(); }} catch (e) {{}}
-    _globalJobSource = null;
-  }}
   if (_globalJobTimer) {{
     clearInterval(_globalJobTimer);
     _globalJobTimer = null;
@@ -4777,9 +4897,11 @@ function stopGlobalJob() {{
   _globalJob.taskDesc = 'Stopping…';
   _renderTaskBar();
   fetch('/api/jobs/' + _globalJob.id, {{method: 'DELETE'}}).catch(() => {{}});
-  // The cancelled / done event from the server will trigger the
-  // actual cleanup in onmessage. As a safety net, force-dismiss
-  // after 5s in case the server never emits.
+  // Phase 32.5 — the next _pollGlobalJobStats tick will see
+  // stream_state === 'done' (set by _observe_event_for_stats when
+  // the cancelled event flows through _run_generator_in_thread) and
+  // call _finishGlobalJob. Safety net: force-dismiss after 5s in
+  // case the generator never reaches its next yield.
   const jobIdAtClick = _globalJob.id;
   setTimeout(() => {{
     if (_globalJob && _globalJob.id === jobIdAtClick && _globalJob.state !== 'streaming') {{
@@ -4795,10 +4917,8 @@ function dismissTaskBar() {{
   // full height when the bar isn't visible.
   document.body.classList.remove('task-bar-open');
   _globalJob = null;
-  if (_globalJobSource) {{
-    try {{ _globalJobSource.close(); }} catch (e) {{}}
-    _globalJobSource = null;
-  }}
+  // Phase 32.5 — only the poll timer needs cleanup now; the broken
+  // SSE source approach was removed.
   if (_globalJobTimer) {{
     clearInterval(_globalJobTimer);
     _globalJobTimer = null;
