@@ -3978,6 +3978,7 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
           <div class="sec-size-row" style="padding-top:4px;">
             <select id="plan-section-target-select" onchange="updatePlanSectionTargetWords(this.value)">
               <option value="">Auto (chapter target / num sections)</option>
+              <option value="400">Very short (~400w)</option>
               <option value="800">Short (~800w)</option>
               <option value="1500">Medium (~1500w)</option>
               <option value="3000">Long (~3000w)</option>
@@ -7010,14 +7011,14 @@ function populatePlanChapterTab(ch) {{
   meta.forEach((s, i) => {{
     const tw = _editingChapterTargetWords[s.slug];
     const isAuto = !tw || tw <= 0;
-    const presets = [800, 1500, 3000, 6000];
+    const presets = [400, 800, 1500, 3000, 6000];
     const isCustomMode = !!_editingChapterCustomMode[s.slug];
     const presetMatch = !isAuto && presets.includes(tw);
     const isCustom = isCustomMode || (!isAuto && !presetMatch);
     let optsHtml = '<option value="">Auto (~' + perSection + 'w)</option>';
     presets.forEach(p => {{
       const sel = (!isCustom && tw === p) ? ' selected' : '';
-      const labelMap = {{800: 'Short', 1500: 'Medium', 3000: 'Long', 6000: 'Extra long'}};
+      const labelMap = {{400: 'Very short', 800: 'Short', 1500: 'Medium', 3000: 'Long', 6000: 'Extra long'}};
       optsHtml += '<option value="' + p + '"' + sel + '>' + labelMap[p] + ' (~' + p + 'w)</option>';
     }});
     optsHtml += '<option value="custom"' + (isCustom ? ' selected' : '') + '>Custom\\u2026</option>';
@@ -7105,7 +7106,7 @@ function populatePlanSectionTab(chapterId, sectionSlug) {{
   _editingPlanSectionTargetWords = tw;
   const select = document.getElementById('plan-section-target-select');
   const customInput = document.getElementById('plan-section-target-custom');
-  const presets = [800, 1500, 3000, 6000];
+  const presets = [400, 800, 1500, 3000, 6000];
   if (select) {{
     if (!tw) {{
       select.value = '';
@@ -7533,7 +7534,7 @@ function renderSectionEditor() {{
     // resolution falls through to chapter target / num_sections.
     const tw = s.target_words;
     const isAuto = !tw || tw <= 0;
-    const presets = [800, 1500, 3000, 6000];
+    const presets = [400, 800, 1500, 3000, 6000];
     // Phase 31 — bug fix: previously isCustom was derived from
     // `!presets.includes(tw)`, but the "Custom" branch initialized
     // tw=1500 (in presets) so on re-render isCustom became false and
@@ -7545,7 +7546,7 @@ function renderSectionEditor() {{
     let optsHtml = '<option value="">Auto (~' + perSection + 'w)</option>';
     presets.forEach(p => {{
       const sel = (!isCustom && tw === p) ? ' selected' : '';
-      const labelMap = {{800: 'Short', 1500: 'Medium', 3000: 'Long', 6000: 'Extra long'}};
+      const labelMap = {{400: 'Very short', 800: 'Short', 1500: 'Medium', 3000: 'Long', 6000: 'Extra long'}};
       optsHtml += '<option value="' + p + '"' + sel + '>' + labelMap[p] + ' (~' + p + 'w)</option>';
     }});
     optsHtml += '<option value="custom"' + (isCustom ? ' selected' : '') + '>Custom\u2026</option>';
