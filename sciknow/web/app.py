@@ -2879,6 +2879,28 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
                                                   border-color: var(--success); }}
 .sec-orphan-delete:hover {{ background: var(--danger); color: white; }}
 .sec-orphan-adopt:hover {{ background: var(--success); color: white; }}
+/* Phase 32.4 — inline delete button on regular (drafted/empty)
+   sections. Lives at the right edge of the sec-link, hidden until
+   hover so it doesn't clutter the sidebar at rest. Same visual
+   language as the orphan delete button. */
+.sec-delete-btn {{
+  background: transparent; border: 1px solid transparent;
+  color: var(--fg-faint); cursor: pointer; padding: 0 6px;
+  font-size: 12px; border-radius: 3px;
+  margin-left: 4px; line-height: 1.4;
+  display: none;
+}}
+.sec-link:hover .sec-delete-btn {{ display: inline-block;
+                                   color: var(--danger);
+                                   border-color: var(--danger); }}
+.sec-delete-btn:hover {{ background: var(--danger); color: white !important; }}
+/* Phase 32.4 — "+ Add section" CTA at the bottom of each chapter's
+   section list, distinct from the empty-chapter "Start writing" CTA. */
+.sec-link.sec-add-cta {{ color: var(--fg-muted); font-style: normal;
+                         cursor: pointer; padding: 6px var(--sp-4) 6px 28px;
+                         font-size: 12px; }}
+.sec-link.sec-add-cta:hover {{ background: var(--accent-light);
+                               color: var(--accent); }}
 /* Phase 26 — drag-and-drop section reordering. Sections become
    draggable=true; CSS gives the dragged row a dimmed look and the
    target row a coloured top/bottom border to show where the drop
@@ -5087,6 +5109,14 @@ function rebuildSidebar(chapters, activeId) {{
         const draft = draftBySlug[tmpl.slug];
         const planAttr = escapeHtml((tmpl.plan || '').replace(/\\n/g, ' ').slice(0, 200));
         const safeTmplTitle = escapeHtml(tmpl.title || '');
+        // Phase 32.4 — inline delete button. The handler removes the
+        // slug from sections_meta; if a draft exists, it becomes an
+        // orphan in the sidebar (recoverable via the existing + adopt
+        // button — fully reversible).
+        const delBtn = '<button class="sec-delete-btn" ' +
+          'onclick="event.preventDefault();event.stopPropagation();' +
+          'deleteSection(\\'' + ch.id + '\\',\\'' + tmpl.slug + '\\')" ' +
+          'title="Remove this section from the chapter (draft becomes an orphan)">\\u2717</button>';
         if (draft) {{
           const active = draft.id === activeId ? 'active' : '';
           // Phase 26 — draggable for reordering
@@ -5096,7 +5126,8 @@ function rebuildSidebar(chapters, activeId) {{
             'onclick="return navTo(this)">' +
             '<span class="sec-status-dot drafted"></span>' +
             safeTmplTitle +
-            ' <span class="meta">v' + draft.version + ' \\u00b7 ' + draft.words + 'w</span></a>';
+            ' <span class="meta">v' + draft.version + ' \\u00b7 ' + draft.words + 'w</span>' +
+            delBtn + '</a>';
         }} else {{
           // Phase 29 — preview-on-click instead of immediate doWrite()
           html += '<div class="sec-link sec-empty" draggable="true" ' +
@@ -5105,7 +5136,8 @@ function rebuildSidebar(chapters, activeId) {{
             'onclick="previewEmptySection(\\'' + ch.id + '\\',\\'' + tmpl.slug + '\\')">' +
             '<span class="sec-status-dot empty"></span>' +
             safeTmplTitle +
-            ' <span class="meta">empty \\u00b7 \\u270e</span></div>';
+            ' <span class="meta">empty \\u00b7 \\u270e</span>' +
+            delBtn + '</div>';
         }}
       }});
     }}
@@ -5135,6 +5167,12 @@ function rebuildSidebar(chapters, activeId) {{
     if (meta.length === 0 && Object.keys(draftBySlug).length === 0) {{
       html += '<div class="sec-link sec-empty-cta" onclick="startWritingChapter(\\'' + ch.id + '\\')">\\u270e Start writing</div>';
     }}
+    // Phase 32.4 — "+ Add section" CTA at the bottom of every
+    // chapter's section list. Click → prompt for a title → POST
+    // a new section dict via PUT /api/chapters/{{id}}/sections.
+    html += '<div class="sec-link sec-add-cta" ' +
+      'onclick="addSectionToChapter(\\'' + ch.id + '\\')" ' +
+      'title="Add a new section to this chapter">+ Add section</div>';
     html += '</div>';
   }});
   container.innerHTML = html;
@@ -5515,6 +5553,106 @@ async function deleteChapter(chapterId) {{
   if (!confirm('Delete this chapter? Drafts will be preserved but unlinked.')) return;
   await fetch('/api/chapters/' + chapterId, {{method: 'DELETE'}});
   await refreshAfterJob(null);
+}}
+
+// Phase 32.4 — delete a single section from a chapter's sections_meta.
+// The associated draft (if any) becomes an orphan in the sidebar — it
+// is NOT hard-deleted, so the user can adopt it back via the existing
+// + button or hard-delete it via the X. This mirrors the chapter
+// delete UX (drafts preserved, just unlinked).
+async function deleteSection(chapterId, slug) {{
+  if (!chapterId || !slug) return;
+  const ch = chaptersData.find(c => c.id === chapterId);
+  if (!ch) return;
+  const meta = Array.isArray(ch.sections_meta) ? ch.sections_meta : [];
+  const sec = meta.find(s => s.slug === slug);
+  const title = (sec && sec.title) ? sec.title : slug;
+  // Detect whether a draft exists for this slug — affects the warning text.
+  const drafted = (ch.sections || []).some(d => (d.type || '').toLowerCase() === slug.toLowerCase());
+  const msg = drafted
+    ? 'Remove section "' + title + '" from this chapter?\\n\\nThe existing draft will become an orphan (still listed in the sidebar with a + to re-add and X to permanently delete).'
+    : 'Remove section "' + title + '" from this chapter?';
+  if (!confirm(msg)) return;
+  const updated = meta.filter(s => s.slug !== slug).map(s => ({{
+    slug: s.slug,
+    title: s.title || s.slug,
+    plan: s.plan || '',
+    target_words: (s.target_words && s.target_words > 0) ? s.target_words : null,
+  }}));
+  try {{
+    const res = await fetch('/api/chapters/' + chapterId + '/sections', {{
+      method: 'PUT',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{sections: updated}}),
+    }});
+    if (!res.ok) throw new Error('save failed (' + res.status + ')');
+    // If the user was viewing the draft we just orphaned, fall back
+    // to the dashboard so the center frame doesn't show stale content.
+    if (currentDraftId && drafted) {{
+      const activeIsThis = (ch.sections || []).some(d =>
+        d.id === currentDraftId && (d.type || '').toLowerCase() === slug.toLowerCase()
+      );
+      if (activeIsThis) {{
+        currentDraftId = '';
+        showDashboard();
+      }}
+    }}
+    // Refresh the sidebar so the slot disappears and any orphaned
+    // draft surfaces in the orphan list.
+    const sidebarRes = await fetch('/api/chapters');
+    const sd = await sidebarRes.json();
+    rebuildSidebar(sd.chapters || sd, currentDraftId);
+    // Update local cache so subsequent operations see the new list
+    if (Array.isArray(sd.chapters)) chaptersData = sd.chapters;
+  }} catch (e) {{
+    alert('Failed to remove section: ' + e.message);
+  }}
+}}
+
+// Phase 32.4 — inline add-section flow from the sidebar. Prompts for
+// a title, derives a slug client-side (matches core.book_ops's
+// _slugify_section_name), appends a new section dict to the chapter's
+// sections_meta, and PUTs the new list. The chapter modal Sections
+// tab still works for richer edits (plan, target_words, reorder).
+async function addSectionToChapter(chapterId) {{
+  if (!chapterId) return;
+  const ch = chaptersData.find(c => c.id === chapterId);
+  if (!ch) return;
+  const title = prompt('New section title (e.g. "The 11-Year Solar Cycle"):');
+  if (!title || !title.trim()) return;
+  const cleanTitle = title.trim();
+  const slug = cleanTitle.toLowerCase().replace(/\\s+/g, '_').replace(/[^a-z0-9_]/g, '');
+  if (!slug) {{
+    alert('Could not derive a slug from that title. Try plain letters.');
+    return;
+  }}
+  const meta = Array.isArray(ch.sections_meta) ? ch.sections_meta : [];
+  if (meta.some(s => s.slug === slug)) {{
+    alert('A section with slug "' + slug + '" already exists in this chapter.');
+    return;
+  }}
+  const updated = meta.map(s => ({{
+    slug: s.slug,
+    title: s.title || s.slug,
+    plan: s.plan || '',
+    target_words: (s.target_words && s.target_words > 0) ? s.target_words : null,
+  }}));
+  updated.push({{slug: slug, title: cleanTitle, plan: '', target_words: null}});
+  try {{
+    const res = await fetch('/api/chapters/' + chapterId + '/sections', {{
+      method: 'PUT',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{sections: updated}}),
+    }});
+    if (!res.ok) throw new Error('save failed (' + res.status + ')');
+    // Refresh sidebar so the new slot appears
+    const sidebarRes = await fetch('/api/chapters');
+    const sd = await sidebarRes.json();
+    rebuildSidebar(sd.chapters || sd, currentDraftId);
+    if (Array.isArray(sd.chapters)) chaptersData = sd.chapters;
+  }} catch (e) {{
+    alert('Failed to add section: ' + e.message);
+  }}
 }}
 
 // ── Enhanced Editor (Phase 3a) ────────────────────────────────────────

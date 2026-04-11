@@ -3679,6 +3679,64 @@ def l1_phase32_3_task_bar_is_fixed_not_sticky() -> None:
     )
 
 
+def l1_phase32_4_section_delete_and_add_in_sidebar() -> None:
+    """Phase 32.4 — every section in the sidebar gets an inline X
+    delete button (mirroring chapters), and every chapter gets an
+    inline + Add section affordance.
+
+    The user originally asked: "in the same way that chapters have
+    and 'x' mark to eliminate them, in the left panel, the sections
+    should have one as well... also implement some way to add
+    sections to the chapter".
+    """
+    import inspect
+    from sciknow.web import app as web_app
+    src = inspect.getsource(web_app)
+
+    # 1) The deleteSection JS function exists
+    assert "function deleteSection(" in src or "async function deleteSection(" in src, (
+        "deleteSection JS handler missing"
+    )
+    # ...is wired to a button class
+    assert "sec-delete-btn" in src, (
+        "sec-delete-btn class missing — section delete button not rendered"
+    )
+    # ...with hover-only visibility CSS
+    assert ".sec-link:hover .sec-delete-btn" in src, (
+        "sec-delete-btn missing hover rule — button would always show"
+    )
+    # ...and used by rebuildSidebar (referenced from a sec-link onclick)
+    assert "deleteSection(" in src, (
+        "deleteSection not invoked from sidebar template"
+    )
+
+    # 2) The addSectionToChapter JS function exists
+    assert "function addSectionToChapter(" in src or "async function addSectionToChapter(" in src, (
+        "addSectionToChapter JS handler missing"
+    )
+    assert "sec-add-cta" in src, (
+        "sec-add-cta class missing — Add section CTA not rendered"
+    )
+    assert "addSectionToChapter(" in src, (
+        "addSectionToChapter not invoked from sidebar template"
+    )
+
+    # 3) The delete handler must round-trip through the existing
+    #    PUT /api/chapters/{id}/sections endpoint, NOT a new endpoint
+    #    (because the backend already supports replace-the-whole-list
+    #    semantics and target_words preservation).
+    delete_section_src = src.split("function deleteSection(")[1].split("function addSectionToChapter(")[0]
+    assert "/api/chapters/" in delete_section_src and "/sections" in delete_section_src, (
+        "deleteSection must PUT /api/chapters/{id}/sections"
+    )
+    # 4) Both handlers must preserve target_words on every untouched
+    #    section so a delete/add doesn't wipe overrides set elsewhere
+    #    in the chapter.
+    assert "target_words: (s.target_words" in src, (
+        "delete/add handlers must preserve target_words on untouched sections"
+    )
+
+
 def l2_phase32_endpoint_shapes() -> None:
     """TestClient smoke test for the major read-only API endpoints.
 
@@ -3935,6 +3993,8 @@ L1_TESTS: list[Callable] = [
     l1_phase32_2_plan_modal_per_section_length,
     # Phase 32.3 — task bar must be position: fixed (not sticky)
     l1_phase32_3_task_bar_is_fixed_not_sticky,
+    # Phase 32.4 — inline section delete + add from the sidebar
+    l1_phase32_4_section_delete_and_add_in_sidebar,
 ]
 
 L2_TESTS: list[Callable] = [
