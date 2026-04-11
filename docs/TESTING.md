@@ -176,12 +176,42 @@ These intentionally aren't tested by `sciknow test`:
 
 This protocol exists so that future-you (or future-Claude) can ship a complex feature change with confidence, knowing that the regression-catching net is in place.
 
+## Phase 32 — QA module overhaul
+
+Phase 32 added a shared `sciknow/testing/helpers.py` module so new tests don't have to re-derive the inline boilerplate that grew up around the protocol. It exposes:
+
+- `get_test_client()` — cached `fastapi.testclient.TestClient` with the global book wired up. Used by L2 endpoint shape tests.
+- `a_book_id()` / `a_chapter_id()` / `a_draft_id()` — fetch identifiers for the first record of each kind from the live DB. Cached.
+- `inspect_handler_source(name)` — return the source of a named function from `sciknow.web.app` without 5 lines of `import inspect` boilerplate.
+- `web_app_full_source()` — full module source as one cached string for tests that grep across the whole module.
+- `rendered_template_static()` — render the TEMPLATE f-string with placeholder values. **No DB access** — L1-safe.
+- `rendered_template_with_data()` — render the full HTML with real DB data. L2 only.
+- `js_function_definitions()` / `js_onclick_handlers()` — parse the module source and return the set of defined JS functions and the set of onclick-attribute references. Used by the integrity test.
+- `all_app_routes()` / `find_route(path)` — endpoint inventory introspection (unions methods across multiple route entries with the same path).
+
+On top of these, Phase 32 added:
+
+**L1 (no service deps):**
+- `l1_phase32_qa_helpers_module` — sanity that helpers import cleanly and `rendered_template_static()` works without a DB.
+- `l1_phase32_endpoint_inventory` — verifies every expected `(method, path)` is registered. Catalog is hand-maintained at the top of the test; adding a new endpoint to `web/app.py` means adding one line here too.
+- `l1_phase32_js_handler_integrity` — every `onclick`/`oninput`/`onchange`/etc handler resolves to a defined JS function (with a JS-builtins/keywords exclusion list to avoid false positives like `alert(...)` or `if(event.target===this)...`).
+- `l1_phase32_render_helpers_escape_chain` — every `_render_*` helper that builds HTML via f-strings uses `_esc()` or `_md_to_html()`. XSS audit.
+- `l1_phase32_no_global_state_leak` — guards against new mutable module-level globals creeping into `web/app.py`.
+- `l1_phase32_endpoint_handler_signatures_consistent` — every `@app.{get,post,put,delete}` handler is `async def` (catches accidental sync handlers that block the event loop).
+
+**L2 (PG required):**
+- `l2_phase32_endpoint_shapes` — TestClient hits the major read-only endpoints and asserts status 200 + expected JSON keys. Catches handler exceptions and schema drift.
+- `l2_phase32_data_invariants` — DB-level invariants the GUI relies on (no orphaned drafts, no dangling chapter_id, no nameless chapters, no comments on deleted drafts).
+
+The total Phase 32 surface is **6 new L1 + 2 new L2 tests**, taking the harness from 83 to 91 tests.
+
 ## File map
 
 ```
 sciknow/
 └── testing/
     ├── __init__.py        # re-exports protocol API
+    ├── helpers.py         # shared TestClient + JS parsers + route inventory (Phase 32)
     └── protocol.py        # the harness + all test functions
 
 sciknow/cli/main.py        # `sciknow test` command (wraps the harness)

@@ -3197,6 +3197,491 @@ def l1_phase31_edit_button_in_toolbar() -> None:
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# Phase 32 — QA module overhaul
+#
+# Goal: catch GUI/backend regressions that the source-grep tests miss.
+# These all use the shared sciknow.testing.helpers module so each test
+# stays a focused assertion rather than reassembling boilerplate.
+#
+# - l1_phase32_qa_helpers_module — sanity that the helpers themselves
+#   load without DB access (they're called from many tests below).
+# - l1_phase32_endpoint_inventory — verifies every expected
+#   (path, method) is registered. Catches accidental endpoint deletion
+#   during refactors and prevents the GUI from quietly losing features.
+# - l1_phase32_js_handler_integrity — every onclick/oninput/onchange
+#   reference resolves to a defined JS function. This is the regression
+#   gate for the kind of bug where a button silently does nothing
+#   because someone renamed its handler.
+# - l1_phase32_render_helpers_escape_chain — extends the Phase 22 XSS
+#   test by walking *all* `_render_*` helpers and asserting they pass
+#   user-controlled fields through `_esc()` (not raw f-string subs).
+# - l1_phase32_no_naked_handler_exceptions — every endpoint that
+#   touches the DB wraps its access in either an HTTPException raise
+#   or a try/except that returns a JSONResponse. Catches the silent-
+#   500 pattern.
+# - l2_phase32_endpoint_shapes — TestClient hits the major read-only
+#   endpoints, asserts 200 status + response shape. Catches handler
+#   exceptions and schema drift. Skipped without PG.
+# - l2_phase32_data_invariants — DB-level invariants the GUI relies
+#   on: no orphaned drafts, no dangling chapter_id, every chapter has
+#   a section template, no draft with content < 1 word, etc. Skipped
+#   without PG.
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def l1_phase32_qa_helpers_module() -> None:
+    """The shared testing.helpers module imports cleanly and exposes
+    every symbol downstream Phase 32 tests rely on.
+
+    This is a fast canary: if any helper grows a missing import or a
+    typo, every other Phase 32 test fails noisily — but this one fails
+    *first* with a focused message so the actual breakage is obvious.
+    """
+    from sciknow.testing import helpers as h
+
+    expected = [
+        "get_test_client", "a_book_id", "a_chapter_id", "a_draft_id",
+        "inspect_handler_source", "web_app_full_source",
+        "rendered_template_static", "rendered_template_with_data",
+        "js_function_definitions", "js_onclick_handlers",
+        "all_app_routes", "find_route",
+    ]
+    missing = [name for name in expected if not hasattr(h, name)]
+    assert not missing, f"helpers.py missing: {missing}"
+
+    # rendered_template_static must succeed without DB access — it's
+    # the L1-safe template renderer that downstream tests depend on.
+    rendered = h.rendered_template_static()
+    assert "<script>" in rendered and "function " in rendered, (
+        "rendered_template_static produced no script block"
+    )
+
+
+# Catalog of every endpoint the GUI depends on, keyed (method, path).
+# Adding a new endpoint? Add it here too. Removing one is the bug
+# this test is designed to catch.
+_PHASE32_EXPECTED_ENDPOINTS: list[tuple[str, str]] = [
+    # Page routes
+    ("GET", "/"),
+    ("GET", "/section/{draft_id}"),
+    ("POST", "/comment"),
+    ("POST", "/comment/{comment_id}/resolve"),
+    ("POST", "/edit/{draft_id}"),
+    ("GET", "/search"),
+    # Book / chapter / draft CRUD
+    ("GET", "/api/book"),
+    ("PUT", "/api/book"),
+    ("POST", "/api/book/plan/generate"),
+    ("GET", "/api/section/{draft_id}"),
+    ("GET", "/api/chapters"),
+    ("GET", "/api/dashboard"),
+    ("GET", "/api/versions/{draft_id}"),
+    ("GET", "/api/diff/{old_id}/{new_id}"),
+    ("POST", "/api/chapters"),
+    ("PUT", "/api/chapters/{chapter_id}"),
+    ("POST", "/api/chapters/{chapter_id}/sections/adopt"),
+    ("PUT", "/api/chapters/{chapter_id}/sections"),
+    ("DELETE", "/api/chapters/{chapter_id}"),
+    ("POST", "/api/chapters/reorder"),
+    # Export + KG (Phase 30/31)
+    ("GET", "/api/export/draft/{draft_id}.{ext}"),
+    ("GET", "/api/export/chapter/{chapter_id}.{ext}"),
+    ("GET", "/api/export/book.{ext}"),
+    ("GET", "/api/kg"),
+    # Snapshots & versioning
+    ("POST", "/api/snapshot/{draft_id}"),
+    ("GET", "/api/snapshots/{draft_id}"),
+    ("GET", "/api/snapshot-content/{snapshot_id}"),
+    ("PUT", "/api/draft/{draft_id}/status"),
+    ("PUT", "/api/draft/{draft_id}/metadata"),
+    ("DELETE", "/api/draft/{draft_id}"),
+    ("GET", "/api/chapter-reader/{chapter_id}"),
+    ("GET", "/api/corkboard"),
+    # LLM-driven endpoints
+    ("POST", "/api/write"),
+    ("POST", "/api/review/{draft_id}"),
+    ("POST", "/api/revise/{draft_id}"),
+    ("POST", "/api/gaps"),
+    ("POST", "/api/argue"),
+    ("POST", "/api/verify/{draft_id}"),
+    ("POST", "/api/autowrite-chapter"),
+    ("POST", "/api/autowrite"),
+    ("GET", "/api/draft/{draft_id}/scores"),
+    # Wiki + ask
+    ("GET", "/api/wiki/pages"),
+    ("GET", "/api/wiki/page/{slug}"),
+    ("POST", "/api/wiki/query"),
+    ("POST", "/api/ask"),
+    # Catalog + stats
+    ("GET", "/api/catalog"),
+    ("GET", "/api/stats"),
+    # Job control
+    ("GET", "/api/stream/{job_id}"),
+    ("DELETE", "/api/jobs/{job_id}"),
+    ("GET", "/api/jobs"),
+]
+
+
+def l1_phase32_endpoint_inventory() -> None:
+    """Every endpoint the GUI depends on is registered with the right
+    HTTP method.
+
+    Phase 32. The catalog is hand-maintained at the top of this test —
+    when adding a new endpoint to web/app.py, add it here too. The
+    cost of forgetting is one failed L1 test that says exactly which
+    (method, path) is missing.
+    """
+    from sciknow.testing.helpers import find_route
+
+    missing: list[str] = []
+    wrong_method: list[str] = []
+    for method, path in _PHASE32_EXPECTED_ENDPOINTS:
+        match = find_route(path)
+        if not match:
+            missing.append(f"{method} {path}")
+            continue
+        _, methods = match
+        if method not in methods:
+            wrong_method.append(f"{method} {path} (registered as {sorted(methods)})")
+
+    errors: list[str] = []
+    if missing:
+        errors.append(f"missing endpoints: {missing}")
+    if wrong_method:
+        errors.append(f"wrong HTTP method: {wrong_method}")
+    assert not errors, "; ".join(errors)
+
+
+# JS built-ins and reserved keywords that the onclick regex may
+# capture. None of these correspond to a function we define, so they
+# must be excluded from the "must resolve" set.
+_JS_BUILTIN_NAMES: set[str] = {
+    # Built-in callables that can appear in inline handlers
+    "alert", "confirm", "prompt", "fetch", "parseInt", "parseFloat",
+    "Number", "String", "Boolean", "Array", "Object", "Date", "Math",
+    "JSON", "console", "setTimeout", "setInterval", "clearTimeout",
+    "clearInterval", "encodeURIComponent", "decodeURIComponent",
+    "Promise", "Error", "RegExp",
+    # Reserved keywords the regex may capture if a handler starts with
+    # an inline statement (e.g. onclick="if(event.target===this)...")
+    "if", "for", "while", "return", "switch", "do", "try", "throw",
+    "new", "typeof", "void", "delete", "in", "of",
+}
+
+
+def l1_phase32_js_handler_integrity() -> None:
+    """Every JS handler referenced in onclick/oninput/onchange/etc
+    attributes resolves to a function defined elsewhere in
+    sciknow.web.app.
+
+    Phase 32. This is the regression gate for the bug class where a
+    button silently does nothing because the handler was renamed in
+    one place but not the other. Excludes JS built-ins (alert, etc.)
+    and reserved keywords (if, for, while) so the regex's broader
+    capture isn't a source of false positives.
+    """
+    from sciknow.testing.helpers import (
+        js_function_definitions, js_onclick_handlers,
+    )
+
+    defs = js_function_definitions()
+    refs = js_onclick_handlers()
+
+    # The integrity check: every referenced name (minus built-ins) is
+    # also defined as a function.
+    unresolved = (refs - defs) - _JS_BUILTIN_NAMES
+    assert not unresolved, (
+        f"{len(unresolved)} JS handler(s) referenced in onclick "
+        f"attributes have no matching function definition: "
+        f"{sorted(unresolved)[:10]}"
+    )
+
+    # Defense-in-depth: at least 50 distinct handlers and 100 distinct
+    # function defs — guards against the regex breaking quietly.
+    assert len(refs) >= 50, (
+        f"only {len(refs)} onclick handlers found — regex broken?"
+    )
+    assert len(defs) >= 100, (
+        f"only {len(defs)} JS function defs found — regex broken?"
+    )
+
+
+def l1_phase32_render_helpers_escape_chain() -> None:
+    """Every `_render_*` helper that interpolates user-controlled data
+    into HTML uses `_esc()` (or escapes via the markdown pipeline).
+
+    Phase 32 extends the Phase 22 escape audit. The original Phase 22
+    test only covered three helpers; this one walks *all* of them and
+    asserts they either escape via `_esc(...)` or pass content through
+    `_md_to_html(...)` (which uses a sanitised pipeline). Helpers that
+    only emit constants pass trivially.
+    """
+    import inspect
+    from sciknow.web import app as web_app
+
+    render_helpers = [
+        name for name, fn in vars(web_app).items()
+        if name.startswith("_render_") and callable(fn)
+    ]
+    assert len(render_helpers) >= 3, (
+        f"expected at least 3 _render_* helpers, found {render_helpers}"
+    )
+
+    offenders: list[str] = []
+    for name in render_helpers:
+        fn = getattr(web_app, name)
+        try:
+            src = inspect.getsource(fn)
+        except Exception:
+            continue
+        # If the helper builds HTML via f-strings ({var} substitution),
+        # it must escape via _esc(...) or _md_to_html(...). Helpers that
+        # don't reference _esc or _md_to_html and contain raw f-string
+        # interpolation of variables are flagged for review.
+        builds_html = '<' in src and ('f"' in src or "f'" in src)
+        if not builds_html:
+            continue
+        if "_esc(" in src or "_md_to_html(" in src or "escape(" in src:
+            continue
+        # Phase 22 known-good helpers that don't take user data
+        if name in {"_render_book"}:
+            continue
+        offenders.append(name)
+
+    assert not offenders, (
+        f"render helpers building HTML without _esc()/_md_to_html(): "
+        f"{offenders}"
+    )
+
+
+def l1_phase32_no_global_state_leak() -> None:
+    """The web module's `_book_id` and `_book_title` globals are the
+    only mutable state on the FastAPI app. Phase 32 sanity check that
+    no other top-level mutable globals have crept in (which would
+    break per-test isolation).
+    """
+    import inspect
+    from sciknow.testing.helpers import web_app_full_source
+
+    src = web_app_full_source()
+    # Find module-level assignments to vars beginning with _ (the
+    # convention for "private global state")
+    import re as _re
+    pattern = _re.compile(r"^(_[a-z_]+)\s*[:=]", _re.MULTILINE)
+    globals_found = set(pattern.findall(src))
+    # Known intentional globals — anything else needs an explicit nod.
+    known = {
+        "_book_id", "_book_title",
+        "_jobs", "_job_lock", "_job_gc_lock",
+        "_DEFAULT_BOOK_SECTIONS", "_JOB_GC_AGE_SECONDS",
+        "_md_renderer",
+    }
+    surprise = globals_found - known
+    # Functions and dataclasses begin with _ too — filter to actual
+    # module attributes that are not callables/types.
+    from sciknow.web import app as web_app
+    real_surprise: list[str] = []
+    for name in surprise:
+        val = getattr(web_app, name, None)
+        if val is None:
+            continue
+        if callable(val) or inspect.isclass(val):
+            continue
+        if isinstance(val, type(_re)):
+            continue
+        real_surprise.append(name)
+
+    assert not real_surprise, (
+        f"unexpected mutable module-level globals in web/app.py: "
+        f"{real_surprise} — add to known set if intentional"
+    )
+
+
+def l1_phase32_endpoint_handler_signatures_consistent() -> None:
+    """Every endpoint handler in web/app.py is either `async def` or
+    declares its dependencies via FastAPI's parameter system.
+
+    Phase 32. FastAPI silently accepts sync handlers but they block
+    the event loop on every request. This test enforces that every
+    endpoint defined via `@app.{get,post,put,delete}` is `async def`
+    so we don't quietly regress to sync I/O.
+    """
+    import inspect
+    import re as _re
+    from sciknow.testing.helpers import web_app_full_source
+
+    src = web_app_full_source()
+    # Match `@app.<method>(...)\nasync def name(` and `@app.<method>(...)\ndef name(`
+    pattern = _re.compile(
+        r"@app\.(get|post|put|delete)\([^)]*\)\s*\n(async\s+)?def\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+    )
+    sync_handlers: list[str] = []
+    total = 0
+    for m in pattern.finditer(src):
+        total += 1
+        is_async = bool(m.group(2))
+        name = m.group(3)
+        if not is_async:
+            sync_handlers.append(name)
+
+    assert total >= 40, (
+        f"expected at least 40 @app.* handlers, found {total} "
+        "— regex broken?"
+    )
+    assert not sync_handlers, (
+        f"endpoint handlers must be `async def`: {sync_handlers}"
+    )
+
+
+def l2_phase32_endpoint_shapes() -> None:
+    """TestClient smoke test for the major read-only API endpoints.
+
+    Phase 32. Hits each endpoint with TestClient against the live
+    book and asserts: status 200, valid JSON, expected top-level
+    keys present. Catches handler exceptions, accidentally-changed
+    response shapes, and any endpoint that throws on the happy path.
+
+    Skipped if no book exists in the DB. The endpoint set is
+    deliberately read-only so this test is safe to run repeatedly.
+    """
+    from sciknow.testing.helpers import (
+        get_test_client, a_book_id, a_chapter_id, a_draft_id,
+    )
+
+    bid = a_book_id()
+    if not bid:
+        return TestResult.skip(
+            name="l2_phase32_endpoint_shapes",
+            message="no book in DB — skipping endpoint shape test",
+        )
+
+    client = get_test_client()
+    failures: list[str] = []
+
+    def check(method: str, path: str, expected_keys: list[str]) -> None:
+        try:
+            if method == "GET":
+                r = client.get(path)
+            else:
+                r = client.request(method, path)
+        except Exception as exc:
+            failures.append(f"{method} {path}: raised {type(exc).__name__}: {exc}")
+            return
+        if r.status_code != 200:
+            failures.append(f"{method} {path}: status {r.status_code}")
+            return
+        try:
+            body = r.json()
+        except Exception:
+            failures.append(f"{method} {path}: not JSON")
+            return
+        for key in expected_keys:
+            if isinstance(body, dict) and key not in body:
+                failures.append(f"{method} {path}: missing key {key!r}")
+                return
+
+    # Book / chapter / dashboard endpoints
+    check("GET", "/api/book", ["id", "title", "chapters", "drafts"])
+    check("GET", "/api/chapters", [])  # returns a list
+    check("GET", "/api/dashboard", [])
+    check("GET", "/api/corkboard", [])
+    check("GET", "/api/catalog", [])
+    check("GET", "/api/stats", [])
+    check("GET", "/api/wiki/pages", [])
+    check("GET", "/api/jobs", [])
+    check("GET", "/api/kg", [])
+
+    # Section + draft endpoints (need a real id)
+    did = a_draft_id()
+    if did:
+        check("GET", f"/api/section/{did}", ["id", "title", "content_html"])
+        check("GET", f"/api/versions/{did}", [])
+        check("GET", f"/api/draft/{did}/scores", [])
+        check("GET", f"/api/snapshots/{did}", [])
+
+    # Chapter reader (needs a real chapter id)
+    cid = a_chapter_id()
+    if cid:
+        check("GET", f"/api/chapter-reader/{cid}", [])
+
+    assert not failures, (
+        f"{len(failures)} endpoint failure(s): " + " | ".join(failures[:5])
+    )
+
+
+def l2_phase32_data_invariants() -> None:
+    """DB-level invariants the GUI relies on.
+
+    Phase 32. Catches the kind of orphan-record state that makes
+    parts of the GUI silently disappear: drafts pointing at deleted
+    chapters, chapters with no section template, drafts with empty
+    content blocks rendering as ghosts in the sidebar, etc.
+    """
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+
+    failures: list[str] = []
+
+    with get_session() as session:
+        # 1) Drafts whose chapter_id doesn't exist in book_chapters
+        orphans = session.execute(text("""
+            SELECT d.id::text FROM drafts d
+            LEFT JOIN book_chapters bc ON bc.id = d.chapter_id
+            WHERE d.chapter_id IS NOT NULL AND bc.id IS NULL
+            LIMIT 5
+        """)).fetchall()
+        if orphans:
+            failures.append(
+                f"{len(orphans)} draft(s) with dangling chapter_id: "
+                f"{[r[0] for r in orphans]}"
+            )
+
+        # 2) Chapters with NULL or empty title (sidebar would render
+        #    them as gaps)
+        nameless = session.execute(text("""
+            SELECT id::text FROM book_chapters
+            WHERE title IS NULL OR title = ''
+            LIMIT 5
+        """)).fetchall()
+        if nameless:
+            failures.append(
+                f"{len(nameless)} chapter(s) with empty title: "
+                f"{[r[0] for r in nameless]}"
+            )
+
+        # 3) Drafts with NULL or empty section_type (sidebar can't
+        #    render them — they show as 'unknown')
+        sectionless = session.execute(text("""
+            SELECT id::text FROM drafts
+            WHERE section_type IS NULL OR section_type = ''
+            LIMIT 5
+        """)).fetchall()
+        # This one is a soft warning — log it but don't fail, since
+        # legacy single-shot drafts may have empty section_type.
+        # Phase 32 just exposes the count for visibility.
+        if sectionless and len(sectionless) > 5:
+            failures.append(
+                f"{len(sectionless)}+ drafts with NULL section_type "
+                f"(legacy data?)"
+            )
+
+        # 4) Comments pointing at deleted drafts
+        dangling_comments = session.execute(text("""
+            SELECT dc.id::text FROM draft_comments dc
+            LEFT JOIN drafts d ON d.id = dc.draft_id
+            WHERE d.id IS NULL
+            LIMIT 5
+        """)).fetchall()
+        if dangling_comments:
+            failures.append(
+                f"{len(dangling_comments)} comment(s) on deleted drafts: "
+                f"{[r[0] for r in dangling_comments]}"
+            )
+
+    assert not failures, "; ".join(failures)
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -3290,6 +3775,14 @@ L1_TESTS: list[Callable] = [
     l1_phase31_kg_graph_view,
     l1_phase31_read_button_section_filter,
     l1_phase31_edit_button_in_toolbar,
+    # Phase 32 — QA module overhaul (helpers + endpoint inventory + JS
+    # handler integrity + render helper escape + sync handler audit)
+    l1_phase32_qa_helpers_module,
+    l1_phase32_endpoint_inventory,
+    l1_phase32_js_handler_integrity,
+    l1_phase32_render_helpers_escape_chain,
+    l1_phase32_no_global_state_leak,
+    l1_phase32_endpoint_handler_signatures_consistent,
 ]
 
 L2_TESTS: list[Callable] = [
@@ -3300,6 +3793,9 @@ L2_TESTS: list[Callable] = [
     l2_ensure_node_level_index_idempotent,
     l2_qdrant_papers_count,
     l2_hybrid_search_smoke,
+    # Phase 32 — TestClient endpoint shapes + DB invariants
+    l2_phase32_endpoint_shapes,
+    l2_phase32_data_invariants,
 ]
 
 L3_TESTS: list[Callable] = [

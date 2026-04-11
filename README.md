@@ -148,6 +148,7 @@ See [Architecture](docs/ARCHITECTURE.md) for the full system diagram, database s
 | **[Retrieval & RAG](docs/RETRIEVAL.md)** | Hybrid search, RRF fusion, reranking, self-correcting RAG, writing assistant |
 | **[Book Writing System](docs/BOOK.md)** | Book workflow, autowrite convergence, web reader, export formats, tips |
 | **[Operations](docs/OPERATIONS.md)** | Backup/restore, reference expansion, metadata enrichment, citation graph, development notes |
+| **[Testing Protocol](docs/TESTING.md)** | The 3-layer smoke harness (`sciknow test`), what each layer covers, how to add new checks |
 | **[Research & Innovations](docs/RESEARCH.md)** | All implemented techniques with research basis: BERTopic, GraphRAG, Self-RAG, TreeWriter, Karpathy wiki, consensus mapping |
 | **[Credits](docs/CREDITS.md)** | Open-source projects and research papers that sciknow builds on |
 
