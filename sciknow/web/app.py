@@ -4230,7 +4230,9 @@ let currentChapterId = '{active_chapter_id}';
 let currentSectionType = '{active_section_type}';
 let currentJobId = null;
 let currentEventSource = null;
-const chaptersData = {chapters_json};
+// Phase 32.4 — needs to be `let` (was `const`) so deleteSection /
+// addSectionToChapter can refresh the in-memory cache after a PUT.
+let chaptersData = {chapters_json};
 
 // ── Theme ─────────────────────────────────────────────────────────────────
 function toggleTheme() {{
