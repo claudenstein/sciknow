@@ -1102,11 +1102,56 @@ def _ordered_chapter_drafts(drafts, chapter_id: str) -> list:
     ))
 
 
+def _slugify_for_filename(s: str) -> str:
+    """Make a string safe for a filename (lowercase alphanum + dashes).
+    Mirrors core.book_ops._slugify_for_filename so the web layer doesn't
+    have to import a private helper."""
+    s = (s or "").lower().strip()
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    return s.strip("-")[:60] or "export"
+
+
+def _html_to_pdf_response(html: str, filename: str):
+    """Phase 31 — render an HTML export to PDF using weasyprint.
+    Returns a Response with the right Content-Type and a friendly
+    error message if weasyprint isn't installed.
+
+    weasyprint pulls Cairo + Pango via system libs; on Ubuntu the
+    deps are usually already there for GTK apps. The dependency is
+    declared in pyproject.toml so a fresh `uv sync` will install it,
+    but we still wrap the import in a try/except so a missing system
+    lib downgrades to a 503 with a clear message instead of crashing
+    the whole web server.
+    """
+    from fastapi.responses import Response
+    try:
+        from weasyprint import HTML
+    except ImportError as exc:
+        raise HTTPException(
+            503,
+            f"PDF export requires weasyprint ({exc}). "
+            "Install with: uv add weasyprint",
+        )
+    try:
+        pdf_bytes = HTML(string=html).write_pdf()
+    except Exception as exc:
+        logger.exception("PDF render failed")
+        raise HTTPException(500, f"PDF render failed: {exc}")
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
+
+
+_VALID_EXPORT_EXTS = ("txt", "md", "html", "pdf")
+
+
 @app.get("/api/export/draft/{draft_id}.{ext}")
 async def export_draft(draft_id: str, ext: str):
-    """Phase 30 — export a single draft as txt/md/html."""
-    if ext not in ("txt", "md", "html"):
-        raise HTTPException(400, "ext must be txt, md, or html")
+    """Phase 30/31 — export a single draft as txt/md/html/pdf."""
+    if ext not in _VALID_EXPORT_EXTS:
+        raise HTTPException(400, f"ext must be one of {_VALID_EXPORT_EXTS}")
     book, chapters, drafts, gaps, comments = _get_book_data()
     draft = next((d for d in drafts if d[0] == draft_id or d[0].startswith(draft_id)), None)
     if not draft:
@@ -1118,18 +1163,21 @@ async def export_draft(draft_id: str, ext: str):
     if ext == "txt":
         from fastapi.responses import PlainTextResponse
         return PlainTextResponse(_strip_md(md), media_type="text/plain; charset=utf-8")
-    # html
+    # html or pdf
     body = _draft_to_html_body(draft)
     html = _wrap_html_export(draft[1] or "Untitled", body)
+    if ext == "pdf":
+        slug = _slugify_for_filename(draft[1] or "draft") or "draft"
+        return _html_to_pdf_response(html, f"{slug}.pdf")
     return HTMLResponse(html)
 
 
 @app.get("/api/export/chapter/{chapter_id}.{ext}")
 async def export_chapter(chapter_id: str, ext: str):
-    """Phase 30 — export every drafted section in a chapter, ordered
+    """Phase 30/31 — export every drafted section in a chapter, ordered
     by the chapter's sections meta. Skips empty/orphan sections."""
-    if ext not in ("txt", "md", "html"):
-        raise HTTPException(400, "ext must be txt, md, or html")
+    if ext not in _VALID_EXPORT_EXTS:
+        raise HTTPException(400, f"ext must be one of {_VALID_EXPORT_EXTS}")
     book, chapters, drafts, gaps, comments = _get_book_data()
     ch = next((c for c in chapters if c[0] == chapter_id), None)
     if not ch:
@@ -1148,7 +1196,7 @@ async def export_chapter(chapter_id: str, ext: str):
         for d in section_drafts:
             parts.append(_strip_md(_draft_to_md(d)))
         return PlainTextResponse("\n\n".join(parts), media_type="text/plain; charset=utf-8")
-    # html
+    # html or pdf
     body = (
         f"<h1>Ch.{ch_num} {_esc(ch_title or '')}</h1>"
         f"<div class='meta'>{len(section_drafts)} sections</div>"
@@ -1156,15 +1204,18 @@ async def export_chapter(chapter_id: str, ext: str):
     for d in section_drafts:
         body += _draft_to_html_body(d)
     html = _wrap_html_export(f"Ch.{ch_num} {ch_title}", body)
+    if ext == "pdf":
+        slug = _slugify_for_filename(ch_title or "chapter") or "chapter"
+        return _html_to_pdf_response(html, f"ch{ch_num}_{slug}.pdf")
     return HTMLResponse(html)
 
 
 @app.get("/api/export/book.{ext}")
 async def export_book(ext: str):
-    """Phase 30 — export the whole book as one file. Iterates chapters
-    in order, then sections in each chapter's defined order."""
-    if ext not in ("txt", "md", "html"):
-        raise HTTPException(400, "ext must be txt, md, or html")
+    """Phase 30/31 — export the whole book as one file. Iterates
+    chapters in order, then sections in each chapter's defined order."""
+    if ext not in _VALID_EXPORT_EXTS:
+        raise HTTPException(400, f"ext must be one of {_VALID_EXPORT_EXTS}")
     book, chapters, drafts, gaps, comments = _get_book_data()
     book_title = book[1] if book else "Untitled book"
     if ext == "md":
@@ -1202,13 +1253,16 @@ async def export_book(ext: str):
             for d in _ordered_chapter_drafts(drafts, ch[0]):
                 parts.append(_strip_md(_draft_to_md(d, include_sources=False)))
         return PlainTextResponse("\n".join(parts), media_type="text/plain; charset=utf-8")
-    # html
+    # html or pdf
     body = f"<h1>{_esc(book_title)}</h1><div class='meta'>{len(chapters)} chapters</div>"
     for ch in chapters:
         body += f"<h1>Ch.{ch[1]} {_esc(ch[2] or '')}</h1>"
         for d in _ordered_chapter_drafts(drafts, ch[0]):
             body += _draft_to_html_body(d)
     html = _wrap_html_export(book_title, body)
+    if ext == "pdf":
+        slug = _slugify_for_filename(book_title) or "book"
+        return _html_to_pdf_response(html, f"{slug}.pdf")
     return HTMLResponse(html)
 
 
@@ -1402,18 +1456,19 @@ async def delete_draft(draft_id: str):
 # ── Chapter reader (continuous scroll) ───────────────────────────────────────
 
 @app.get("/api/chapter-reader/{chapter_id}")
-async def chapter_reader(chapter_id: str):
+async def chapter_reader(chapter_id: str, only_section: str = ""):
     """Return all sections of a chapter concatenated for continuous reading.
 
-    Phase 18 — major rewrite:
-    - Section order respects the chapter's `sections` JSONB list (the
-      user's chosen order), not a hardcoded paper-style map.
-    - Section headers use the user-provided title from the sections
-      meta, not the slug auto-capitalized.
-    - Sources from all drafts are stitched into a single global list
-      and citations in each draft's content are renumbered to match
-      the global list, so [N] click-to-source works in the chapter
-      view (was previously broken: each draft used [1..N] independently).
+    Phase 18 — section order respects book_chapters.sections JSONB,
+    not a hardcoded paper-style map. Sources are stitched into a
+    global renumbered list so citation click-to-source works.
+
+    Phase 31 — accepts an optional ``only_section`` query parameter.
+    When set, the response contains only that one section but in
+    the same continuous-scroll layout (same h2 styling, same
+    sources panel, just one section). Used by the Read button when
+    the user has a section selected — they expect Read to filter to
+    that section, not always dump the whole chapter.
     """
     from sciknow.core.book_ops import _normalize_chapter_sections
 
@@ -1425,14 +1480,24 @@ async def chapter_reader(chapter_id: str):
         if not ch:
             raise HTTPException(404, "Chapter not found")
 
-        # Get latest version per section_type
-        drafts = session.execute(text("""
-            SELECT d.id::text, d.section_type, d.content, d.word_count,
-                   d.version, d.status, d.sources
-            FROM drafts d
-            WHERE d.chapter_id::text = :cid
-            ORDER BY d.section_type, d.version DESC
-        """), {"cid": chapter_id}).fetchall()
+        # Phase 31 — fetch only the matching section_type when filtered
+        if only_section:
+            drafts = session.execute(text("""
+                SELECT d.id::text, d.section_type, d.content, d.word_count,
+                       d.version, d.status, d.sources
+                FROM drafts d
+                WHERE d.chapter_id::text = :cid
+                  AND LOWER(d.section_type) = LOWER(:sec)
+                ORDER BY d.version DESC
+            """), {"cid": chapter_id, "sec": only_section.strip()}).fetchall()
+        else:
+            drafts = session.execute(text("""
+                SELECT d.id::text, d.section_type, d.content, d.word_count,
+                       d.version, d.status, d.sources
+                FROM drafts d
+                WHERE d.chapter_id::text = :cid
+                ORDER BY d.section_type, d.version DESC
+            """), {"cid": chapter_id}).fetchall()
 
     # Keep only latest version per section_type
     seen: dict[str, tuple] = {}
@@ -3403,6 +3468,26 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .kg-table .kg-source {{ color: var(--fg-muted); font-size: 10px;
                       max-width: 220px; overflow: hidden;
                       text-overflow: ellipsis; white-space: nowrap; }}
+/* Phase 31 — KG force-directed graph (SVG nodes + edges) */
+#kg-graph-canvas {{ width: 100%; height: 520px; cursor: grab; }}
+#kg-graph-canvas svg {{ width: 100%; height: 100%; display: block; }}
+#kg-graph-canvas .kg-node circle {{ fill: var(--accent); stroke: var(--bg-elevated);
+                                    stroke-width: 2; cursor: pointer;
+                                    transition: r 0.15s ease, fill 0.15s ease; }}
+#kg-graph-canvas .kg-node:hover circle {{ fill: var(--accent-hover); r: 9; }}
+#kg-graph-canvas .kg-node text {{ font-size: 10px; fill: var(--fg);
+                                  pointer-events: none;
+                                  font-family: var(--font-sans); }}
+#kg-graph-canvas .kg-edge {{ stroke: var(--fg-muted); stroke-width: 1;
+                            opacity: 0.5; }}
+#kg-graph-canvas .kg-edge.highlighted {{ stroke: var(--accent);
+                                         stroke-width: 2; opacity: 1; }}
+#kg-graph-canvas .kg-edge-label {{ font-size: 8px; fill: var(--fg-muted);
+                                   pointer-events: none;
+                                   font-family: var(--font-mono); }}
+#kg-graph-canvas .kg-node.selected circle {{ fill: var(--success);
+                                             stroke: var(--success-light);
+                                             stroke-width: 3; r: 10; }}
 /* Phase 30 — persistent global task bar (top of viewport, full width).
    Visible whenever a job is running, regardless of SPA navigation.
    Designed to be unobtrusive: 36px tall, mono font for the numerics,
@@ -3578,13 +3663,17 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
     </select>
   </div>
 
-  <!-- Action Toolbar — Phase 14 v2 grouped layout -->
+  <!-- Action Toolbar — Phase 14 v2 grouped layout
+       Phase 31 — split AI actions from manual editing so the user
+       can find the inline editor without hunting for the small
+       edit-btn in the subtitle. -->
   <div class="toolbar" id="toolbar">
     <div class="tg">
-      <button class="primary" onclick="doAutowrite()" title="Autonomous write → review → revise loop">&#9889; Autowrite</button>
-      <button onclick="doWrite()" title="Draft this section from scratch">Write</button>
-      <button onclick="doReview()" title="Run a critic pass on this section">Review</button>
-      <button onclick="doRevise()" title="Revise based on review feedback">Revise</button>
+      <button class="primary" onclick="toggleEdit()" title="Manually edit the draft content (in-browser markdown editor with autosave)">&#9998; Edit</button>
+      <button onclick="doAutowrite()" title="Autonomous AI write → review → revise loop">&#9889; AI Autowrite</button>
+      <button onclick="doWrite()" title="AI drafts this section from scratch (single pass)">AI Write</button>
+      <button onclick="doReview()" title="AI critic pass on this section">AI Review</button>
+      <button onclick="doRevise()" title="AI revises based on review feedback">AI Revise</button>
     </div>
     <div class="sep"></div>
     <div class="tg">
@@ -3968,18 +4057,23 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
   </div>
 </div>
 
-<!-- Phase 30 — Knowledge Graph Modal -->
+<!-- Phase 30/31 — Knowledge Graph Modal with Graph + Table tabs -->
 <div class="modal-overlay" id="kg-modal" onclick="if(event.target===this)closeModal('kg-modal')">
   <div class="modal wide">
     <div class="modal-header">
       <h3>&#128279; Knowledge Graph</h3>
       <button class="modal-close" onclick="closeModal('kg-modal')">&times;</button>
     </div>
+    <div class="tabs">
+      <button class="tab active" data-tab="kg-graph" onclick="switchKgTab('kg-graph')">Graph</button>
+      <button class="tab" data-tab="kg-table" onclick="switchKgTab('kg-table')">Table</button>
+    </div>
     <div class="modal-body">
       <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
         Entity-relationship triples extracted from the corpus during wiki compile.
         Filter by subject substring, predicate (exact match), object substring,
-        or document id. Results are ordered by extraction confidence.
+        or document id. <strong>Graph</strong> shows up to 100 triples as nodes
+        and edges; <strong>Table</strong> is searchable and shows up to 200.
       </p>
       <div class="field" style="display:flex;gap:8px;align-items:flex-end;">
         <div style="flex:2;">
@@ -3999,7 +4093,17 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
         <button class="btn-primary" onclick="loadKg(0)">Filter</button>
       </div>
       <div id="kg-status" style="font-size:11px;color:var(--fg-muted);margin:8px 0;"></div>
-      <div id="kg-results" style="max-height:60vh;overflow-y:auto;"></div>
+      <!-- Graph tab pane (default) -->
+      <div id="kg-graph-pane" style="display:block;">
+        <div id="kg-graph-canvas" style="border:1px solid var(--border);border-radius:6px;background:var(--toolbar-bg);"></div>
+        <p style="font-size:10px;color:var(--fg-muted);margin-top:6px;">
+          &middot; Drag nodes to reposition. Click any node to filter the table to triples involving that entity. Showing the top 100 highest-confidence triples in the current filter.
+        </p>
+      </div>
+      <!-- Table tab pane -->
+      <div id="kg-table-pane" style="display:none;max-height:60vh;overflow-y:auto;">
+        <div id="kg-results"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -4013,11 +4117,11 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
     </div>
     <div class="modal-body">
       <p style="font-size:12px;color:var(--fg-muted);margin-bottom:14px;">
-        Pick what to export and the format. <strong>HTML</strong> is print-ready &mdash;
-        open it in your browser, then File &rarr; Print &rarr; Save as PDF for the
-        equivalent of a PDF export. <strong>Markdown</strong> preserves all
-        formatting and citations. <strong>Text</strong> is plain prose with the
-        markdown stripped.
+        <strong>PDF</strong> is rendered server-side via weasyprint &mdash; ready for
+        printing or sharing. <strong>HTML</strong> is the same content with print-friendly
+        CSS, useful as a fallback or for editing in another tool.
+        <strong>Markdown</strong> preserves all formatting and citations.
+        <strong>Text</strong> is plain prose with the markdown stripped.
       </p>
       <div class="export-grid">
         <div>
@@ -4624,14 +4728,24 @@ function dismissTaskBar() {{
   }}
 }}
 
-// ── Phase 30: Knowledge Graph browse modal ────────────────────────────
+// ── Phase 30/31: Knowledge Graph browse modal (Graph + Table tabs) ────
 async function openKgModal() {{
   openModal('kg-modal');
-  // Initial load (no filters)
+  switchKgTab('kg-graph');
   await loadKg(0);
 }}
 
+function switchKgTab(name) {{
+  document.querySelectorAll('#kg-modal .tab').forEach(t => {{
+    t.classList.toggle('active', t.dataset.tab === name);
+  }});
+  document.getElementById('kg-graph-pane').style.display = (name === 'kg-graph') ? 'block' : 'none';
+  document.getElementById('kg-table-pane').style.display = (name === 'kg-table') ? 'block' : 'none';
+}}
+
 let _kgPredicatesLoaded = false;
+let _kgTriples = [];
+
 async function loadKg(offset) {{
   const subject = document.getElementById('kg-subject').value.trim();
   const predicate = document.getElementById('kg-predicate').value.trim();
@@ -4644,7 +4758,6 @@ async function loadKg(offset) {{
   try {{
     const res = await fetch('/api/kg?' + params.toString());
     const data = await res.json();
-    // Populate the predicates dropdown the first time only
     if (!_kgPredicatesLoaded && data.predicates && data.predicates.length) {{
       const sel = document.getElementById('kg-predicate');
       data.predicates.forEach(p => {{
@@ -4654,35 +4767,178 @@ async function loadKg(offset) {{
       }});
       _kgPredicatesLoaded = true;
     }}
+    _kgTriples = data.triples || [];
     document.getElementById('kg-status').textContent =
       data.total + ' triple' + (data.total === 1 ? '' : 's') + ' total · ' +
-      'showing ' + data.triples.length;
-    if (data.triples.length === 0) {{
-      document.getElementById('kg-results').innerHTML =
-        '<div style="padding:24px;text-align:center;color:var(--fg-muted);font-size:12px;">No triples match your filter.</div>';
-      return;
-    }}
-    let html = '<table class="kg-table"><thead><tr>';
-    html += '<th>Subject</th><th>Predicate</th><th>Object</th><th>Source</th></tr></thead><tbody>';
-    data.triples.forEach(t => {{
-      html += '<tr>';
-      html += '<td>' + escapeHtml(t.subject) + '</td>';
-      html += '<td class="kg-pred">' + escapeHtml(t.predicate) + '</td>';
-      html += '<td>' + escapeHtml(t.object) + '</td>';
-      html += '<td class="kg-source" title="' + escapeHtml(t.source_title || '') + '">' +
-              escapeHtml((t.source_title || '').substring(0, 60)) + '</td>';
-      html += '</tr>';
-    }});
-    html += '</tbody></table>';
-    document.getElementById('kg-results').innerHTML = html;
+      'showing ' + _kgTriples.length + ' (top 100 in graph view)';
+
+    // Render BOTH the table and the graph from the same data so
+    // switching tabs is instant.
+    _renderKgTable(_kgTriples);
+    _renderKgGraph(_kgTriples.slice(0, 100));
   }} catch (e) {{
     document.getElementById('kg-status').textContent = 'Error: ' + e.message;
   }}
 }}
 
+function _renderKgTable(triples) {{
+  if (triples.length === 0) {{
+    document.getElementById('kg-results').innerHTML =
+      '<div style="padding:24px;text-align:center;color:var(--fg-muted);font-size:12px;">No triples match your filter.</div>';
+    return;
+  }}
+  let html = '<table class="kg-table"><thead><tr>';
+  html += '<th>Subject</th><th>Predicate</th><th>Object</th><th>Source</th></tr></thead><tbody>';
+  triples.forEach(t => {{
+    html += '<tr>';
+    html += '<td>' + escapeHtml(t.subject) + '</td>';
+    html += '<td class="kg-pred">' + escapeHtml(t.predicate) + '</td>';
+    html += '<td>' + escapeHtml(t.object) + '</td>';
+    html += '<td class="kg-source" title="' + escapeHtml(t.source_title || '') + '">' +
+            escapeHtml((t.source_title || '').substring(0, 60)) + '</td>';
+    html += '</tr>';
+  }});
+  html += '</tbody></table>';
+  document.getElementById('kg-results').innerHTML = html;
+}}
+
+// Phase 31 — render the KG as an actual force-directed SVG graph.
+// Pure SVG + minimal JS (no D3 dep). Each unique entity becomes a
+// node; each triple becomes a labeled edge. Layout is a tiny
+// Fruchterman-Reingold-style spring simulation that runs for ~150
+// iterations on load.
+function _renderKgGraph(triples) {{
+  const canvas = document.getElementById('kg-graph-canvas');
+  if (!canvas) return;
+  if (!triples || triples.length === 0) {{
+    canvas.innerHTML = '<div style="padding:80px 24px;text-align:center;color:var(--fg-muted);font-size:12px;">No triples match your filter.</div>';
+    return;
+  }}
+  const width = canvas.clientWidth || 800;
+  const height = 520;
+
+  // Build node + edge sets
+  const nodeIndex = new Map();
+  const nodes = [];
+  function ensureNode(label) {{
+    if (!nodeIndex.has(label)) {{
+      nodeIndex.set(label, nodes.length);
+      nodes.push({{
+        id: nodes.length, label: label,
+        x: Math.random() * width, y: Math.random() * height,
+        vx: 0, vy: 0,
+      }});
+    }}
+    return nodeIndex.get(label);
+  }}
+  const edges = triples.map(t => ({{
+    source: ensureNode((t.subject || '').substring(0, 60)),
+    target: ensureNode((t.object || '').substring(0, 60)),
+    predicate: t.predicate,
+  }}));
+
+  // Truncate node label for display
+  function nodeLabel(label) {{
+    return label.length > 24 ? label.substring(0, 24) + '\\u2026' : label;
+  }}
+
+  // Tiny spring simulation: F-R-style with cooling
+  const k = Math.sqrt((width * height) / Math.max(nodes.length, 1)) * 0.4;
+  let temperature = width / 10;
+  for (let iter = 0; iter < 150; iter++) {{
+    // Repulsion
+    for (let i = 0; i < nodes.length; i++) {{
+      nodes[i].vx = 0; nodes[i].vy = 0;
+      for (let j = 0; j < nodes.length; j++) {{
+        if (i === j) continue;
+        const dx = nodes[i].x - nodes[j].x;
+        const dy = nodes[i].y - nodes[j].y;
+        const d2 = dx * dx + dy * dy + 0.01;
+        const f = (k * k) / d2;
+        nodes[i].vx += dx * f;
+        nodes[i].vy += dy * f;
+      }}
+    }}
+    // Attraction along edges
+    edges.forEach(e => {{
+      const a = nodes[e.source], b = nodes[e.target];
+      const dx = a.x - b.x, dy = a.y - b.y;
+      const d = Math.sqrt(dx * dx + dy * dy) + 0.01;
+      const f = (d * d) / k;
+      const fx = (dx / d) * f;
+      const fy = (dy / d) * f;
+      a.vx -= fx; a.vy -= fy;
+      b.vx += fx; b.vy += fy;
+    }});
+    // Apply velocity capped by temperature
+    nodes.forEach(n => {{
+      const v = Math.sqrt(n.vx * n.vx + n.vy * n.vy);
+      const lim = Math.min(v, temperature);
+      n.x += (n.vx / (v || 1)) * lim;
+      n.y += (n.vy / (v || 1)) * lim;
+      // Stay inside the canvas
+      n.x = Math.max(20, Math.min(width - 20, n.x));
+      n.y = Math.max(20, Math.min(height - 20, n.y));
+    }});
+    temperature *= 0.97;
+  }}
+
+  // Render the SVG
+  let svg = '<svg viewBox="0 0 ' + width + ' ' + height + '">';
+  // Edges first so nodes render on top
+  edges.forEach((e, i) => {{
+    const a = nodes[e.source], b = nodes[e.target];
+    svg += '<line class="kg-edge" x1="' + a.x.toFixed(1) + '" y1="' + a.y.toFixed(1) +
+           '" x2="' + b.x.toFixed(1) + '" y2="' + b.y.toFixed(1) +
+           '" data-edge-i="' + i + '"></line>';
+    // Edge label at midpoint
+    const mx = ((a.x + b.x) / 2).toFixed(1);
+    const my = ((a.y + b.y) / 2).toFixed(1);
+    svg += '<text class="kg-edge-label" x="' + mx + '" y="' + my + '" text-anchor="middle">' +
+           escapeHtml(e.predicate) + '</text>';
+  }});
+  // Nodes
+  nodes.forEach(n => {{
+    svg += '<g class="kg-node" data-node-id="' + n.id + '" data-label="' + escapeHtml(n.label) + '" ' +
+           'transform="translate(' + n.x.toFixed(1) + ',' + n.y.toFixed(1) + ')">';
+    svg += '<circle r="6"></circle>';
+    svg += '<text x="9" y="3">' + escapeHtml(nodeLabel(n.label)) + '</text>';
+    svg += '</g>';
+  }});
+  svg += '</svg>';
+  canvas.innerHTML = svg;
+
+  // Click handler — clicking a node fills the subject filter and
+  // re-runs loadKg, effectively zooming into that entity.
+  canvas.querySelectorAll('.kg-node').forEach(g => {{
+    g.addEventListener('click', () => {{
+      const label = g.getAttribute('data-label');
+      document.getElementById('kg-subject').value = label;
+      switchKgTab('kg-table');
+      loadKg(0);
+    }});
+  }});
+}}
+
 // ── Phase 30: Export modal ────────────────────────────────────────────
 function openExportModal() {{
   openModal('export-modal');
+
+  // Phase 31 — separate HTML and PDF buttons. PDF uses weasyprint
+  // server-side; HTML is the printable browser-rendered version
+  // (still useful as a fallback if weasyprint can't run).
+  const exts = [
+    {{ ext: 'pdf',  label: 'PDF' }},
+    {{ ext: 'html', label: 'HTML' }},
+    {{ ext: 'md',   label: 'Markdown' }},
+    {{ ext: 'txt',  label: 'Text' }},
+  ];
+  function _btnHtml(base, enabled) {{
+    return exts.map(e => enabled
+      ? '<a href="' + base + '.' + e.ext + '" target="_blank">' + e.label + '</a>'
+      : '<a class="disabled">' + e.label + '</a>'
+    ).join('');
+  }}
 
   // This section
   const sectionName = currentDraftId
@@ -4690,35 +4946,22 @@ function openExportModal() {{
     : null;
   document.getElementById('export-section-name').textContent =
     sectionName || '(no draft selected)';
-  document.getElementById('export-section-btns').innerHTML = sectionName ? (
-    '<a href="/api/export/draft/' + currentDraftId + '.html" target="_blank">HTML / PDF</a>' +
-    '<a href="/api/export/draft/' + currentDraftId + '.md" target="_blank">Markdown</a>' +
-    '<a href="/api/export/draft/' + currentDraftId + '.txt" target="_blank">Text</a>'
-  ) : (
-    '<a class="disabled">HTML / PDF</a><a class="disabled">Markdown</a><a class="disabled">Text</a>'
-  );
+  document.getElementById('export-section-btns').innerHTML =
+    _btnHtml('/api/export/draft/' + currentDraftId, !!sectionName);
 
   // This chapter
   const ch = chaptersData.find(c => c.id === currentChapterId);
   const chName = ch ? ('Ch.' + ch.num + ': ' + ch.title) : null;
   document.getElementById('export-chapter-name').textContent =
     chName || '(no chapter selected)';
-  document.getElementById('export-chapter-btns').innerHTML = chName ? (
-    '<a href="/api/export/chapter/' + currentChapterId + '.html" target="_blank">HTML / PDF</a>' +
-    '<a href="/api/export/chapter/' + currentChapterId + '.md" target="_blank">Markdown</a>' +
-    '<a href="/api/export/chapter/' + currentChapterId + '.txt" target="_blank">Text</a>'
-  ) : (
-    '<a class="disabled">HTML / PDF</a><a class="disabled">Markdown</a><a class="disabled">Text</a>'
-  );
+  document.getElementById('export-chapter-btns').innerHTML =
+    _btnHtml('/api/export/chapter/' + currentChapterId, !!chName);
 
   // Whole book — always enabled
   document.getElementById('export-book-name').textContent =
     document.querySelector('.sidebar h2').textContent || 'Book';
-  document.getElementById('export-book-btns').innerHTML = (
-    '<a href="/api/export/book.html" target="_blank">HTML / PDF</a>' +
-    '<a href="/api/export/book.md" target="_blank">Markdown</a>' +
-    '<a href="/api/export/book.txt" target="_blank">Text</a>'
-  );
+  document.getElementById('export-book-btns').innerHTML =
+    _btnHtml('/api/export/book', true);
 }}
 
 async function refreshAfterJob(newDraftId) {{
@@ -7050,16 +7293,23 @@ function renderSectionEditor() {{
     const tw = s.target_words;
     const isAuto = !tw || tw <= 0;
     const presets = [800, 1500, 3000, 6000];
-    const isCustom = !isAuto && !presets.includes(tw);
+    // Phase 31 — bug fix: previously isCustom was derived from
+    // `!presets.includes(tw)`, but the "Custom" branch initialized
+    // tw=1500 (in presets) so on re-render isCustom became false and
+    // the input stayed hidden. Fix: track an explicit _customMode flag
+    // on the section dict, set when the user picks Custom, cleared
+    // when they pick a preset or Auto.
+    const presetMatch = !isAuto && presets.includes(tw);
+    const isCustom = s._customMode || (!isAuto && !presetMatch);
     let optsHtml = '<option value="">Auto (~' + perSection + 'w)</option>';
     presets.forEach(p => {{
-      const sel = (tw === p) ? ' selected' : '';
+      const sel = (!isCustom && tw === p) ? ' selected' : '';
       const labelMap = {{800: 'Short', 1500: 'Medium', 3000: 'Long', 6000: 'Extra long'}};
       optsHtml += '<option value="' + p + '"' + sel + '>' + labelMap[p] + ' (~' + p + 'w)</option>';
     }});
     optsHtml += '<option value="custom"' + (isCustom ? ' selected' : '') + '>Custom\u2026</option>';
     const customStyle = isCustom ? '' : 'display:none;';
-    const customVal = isCustom ? String(tw) : '';
+    const customVal = (isCustom && tw) ? String(tw) : '';
     html += '<div class="sec-row" data-idx="' + i + '">';
     html += '  <div class="sec-handle">';
     html += '    <button onclick="moveSection(' + i + ', -1)" title="Move up"' + (i === 0 ? ' disabled style="opacity:0.3;cursor:default;"' : '') + '>&uarr;</button>';
@@ -7089,34 +7339,57 @@ function renderSectionEditor() {{
   list.innerHTML = html;
 }}
 
-// Phase 29 — handle the size dropdown selection. "" → Auto (clear
-// override), a numeric preset → set, "custom" → reveal the number
-// input and wait for the user to type.
+// Phase 29/31 — handle the size dropdown selection. "" → Auto
+// (clear override + clear custom mode), a numeric preset → set
+// (and clear custom mode), "custom" → enter custom mode (reveal
+// the number input).
 function updateSectionTargetWords(idx, value) {{
   if (idx < 0 || idx >= _editingSections.length) return;
+  const sec = _editingSections[idx];
   if (value === "" || value === "auto") {{
-    _editingSections[idx].target_words = null;
+    sec.target_words = null;
+    sec._customMode = false;
   }} else if (value === "custom") {{
-    // Don't set target_words yet — wait for the custom input.
-    // Make sure we have a placeholder so the row reflects "custom mode".
-    if (!_editingSections[idx].target_words || [800, 1500, 3000, 6000].includes(_editingSections[idx].target_words)) {{
-      _editingSections[idx].target_words = 1500;
-    }}
+    // Phase 31 — set the explicit _customMode flag so the next
+    // re-render keeps the input visible regardless of whether
+    // target_words happens to coincide with a preset value.
+    sec._customMode = true;
+    // Default to a starting value if there isn't one yet
+    if (!sec.target_words) sec.target_words = 1500;
   }} else {{
     const n = parseInt(value, 10);
-    _editingSections[idx].target_words = isNaN(n) ? null : n;
+    sec.target_words = isNaN(n) ? null : n;
+    sec._customMode = false;
   }}
   renderSectionEditor();
+  // After re-render, focus the custom input if we just entered
+  // custom mode so the user can type immediately.
+  if (value === "custom") {{
+    setTimeout(() => {{
+      const rows = document.querySelectorAll('#ch-sections-list .sec-row');
+      if (rows[idx]) {{
+        const input = rows[idx].querySelector('.sec-size-custom');
+        if (input) {{
+          input.focus();
+          input.select();
+        }}
+      }}
+    }}, 0);
+  }}
 }}
 
 function updateSectionTargetWordsCustom(idx, value) {{
   if (idx < 0 || idx >= _editingSections.length) return;
+  const sec = _editingSections[idx];
   const n = parseInt(value, 10);
   if (isNaN(n) || n <= 0) {{
-    _editingSections[idx].target_words = null;
+    sec.target_words = null;
   }} else {{
-    _editingSections[idx].target_words = n;
+    sec.target_words = n;
   }}
+  // Stay in custom mode while the user types — only the dropdown
+  // change handler clears it.
+  sec._customMode = true;
   // Don't re-render here — the user is actively typing in the input.
 }}
 
@@ -7626,14 +7899,25 @@ async function showCorkboard() {{
 async function showChapterReader() {{
   if (!currentChapterId) {{ showEmptyHint("No chapter selected &mdash; click any chapter title in the sidebar to select it, then try again."); return; }}
 
-  const res = await fetch('/api/chapter-reader/' + currentChapterId);
+  // Phase 31 — context-aware Read button. If the user has a section
+  // selected, fetch only that section in the reader layout (same h2
+  // styling, sources panel, citation popovers — just one section).
+  // If only the chapter is selected, show the whole chapter.
+  const url = currentSectionType
+    ? ('/api/chapter-reader/' + currentChapterId + '?only_section=' + encodeURIComponent(currentSectionType))
+    : ('/api/chapter-reader/' + currentChapterId);
+  const res = await fetch(url);
   if (!res.ok) {{ alert('Chapter not found.'); return; }}
   const data = await res.json();
 
+  const isSectionOnly = !!currentSectionType;
   let html = '<div class="reader-view">';
   html += '<h1>Chapter ' + data.chapter_num + ': ' + data.chapter_title + '</h1>';
   html += '<p style="font-size:13px;opacity:0.5;margin-bottom:8px;">' +
-    data.total_words + ' words \\u00b7 ' + data.section_count + ' sections</p>';
+    data.total_words + ' words \\u00b7 ' + data.section_count + ' section' +
+    (data.section_count === 1 ? '' : 's') +
+    (isSectionOnly ? ' &middot; <strong>showing only ' + escapeHtml(currentSectionType) + '</strong>' : '') +
+    '</p>';
   // Phase 18 — outline / table-of-contents at the top of the chapter
   // view so the user can see the section structure at a glance and
   // jump straight to any section.

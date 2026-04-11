@@ -3049,6 +3049,153 @@ def l1_phase30_kg_endpoint() -> None:
     assert "openKgModal()" in src, "KG button not in toolbar"
 
 
+# ── Phase 31 — six fixes ──────────────────────────────────────────────────
+
+
+def l1_phase31_custom_dropdown_persists() -> None:
+    """Phase 31 — when the user picks "Custom" in the section size
+    dropdown, the renderer must keep the input visible on re-render.
+
+    Bug: Phase 29's isCustom was derived from `!presets.includes(tw)`,
+    so setting tw=1500 (a preset) hid the input. Fix: explicit
+    _customMode flag on the section dict.
+    """
+    import inspect
+    from sciknow.web import app as web_app
+    src = inspect.getsource(web_app)
+
+    # Renderer reads s._customMode
+    assert "s._customMode" in src or "_customMode" in src, (
+        "renderSectionEditor doesn't read the _customMode flag"
+    )
+    # updateSectionTargetWords sets it
+    assert "sec._customMode = true" in src, (
+        "updateSectionTargetWords doesn't set _customMode when 'custom' picked"
+    )
+    assert "sec._customMode = false" in src, (
+        "updateSectionTargetWords doesn't clear _customMode on Auto/preset"
+    )
+    # The renderer focuses the custom input after switching to custom
+    assert "input.focus()" in src and "sec-size-custom" in src, (
+        "no focus on the custom input after switching modes"
+    )
+
+
+def l1_phase31_pdf_export() -> None:
+    """Phase 31 — PDF export endpoint exists, accepts pdf ext, uses
+    weasyprint, returns application/pdf.
+    """
+    import inspect
+    from sciknow.web import app as web_app
+
+    # _html_to_pdf_response helper exists
+    assert hasattr(web_app, "_html_to_pdf_response"), (
+        "_html_to_pdf_response helper missing"
+    )
+
+    # All three export endpoints accept ext='pdf'
+    for fn_name in ("export_draft", "export_chapter", "export_book"):
+        fn = getattr(web_app, fn_name)
+        src = inspect.getsource(fn)
+        assert '"pdf"' in src or "_VALID_EXPORT_EXTS" in src, (
+            f"{fn_name} doesn't accept pdf"
+        )
+
+    # _VALID_EXPORT_EXTS has pdf
+    assert "pdf" in web_app._VALID_EXPORT_EXTS
+
+    # Export modal JS lists PDF as a separate button (not "HTML / PDF")
+    src = inspect.getsource(web_app)
+    assert "ext: 'pdf'" in src and "label: 'PDF'" in src, (
+        "Export modal doesn't have a separate PDF button"
+    )
+    # The misleading "HTML / PDF" label is gone
+    assert "HTML / PDF" not in src, (
+        "old misleading 'HTML / PDF' label still present"
+    )
+
+
+def l1_phase31_kg_graph_view() -> None:
+    """Phase 31 — KG modal has a Graph tab with SVG force-directed
+    rendering, alongside the existing Table tab."""
+    import inspect
+    from sciknow.web import app as web_app
+    src = inspect.getsource(web_app)
+
+    # Tabs in the HTML
+    assert 'data-tab="kg-graph"' in src and 'data-tab="kg-table"' in src, (
+        "KG modal missing Graph + Table tabs"
+    )
+    assert 'id="kg-graph-pane"' in src and 'id="kg-table-pane"' in src, (
+        "KG modal missing tab panes"
+    )
+
+    # JS helpers
+    assert "switchKgTab" in src, "switchKgTab JS missing"
+    assert "_renderKgGraph" in src and "_renderKgTable" in src, (
+        "KG render helpers missing"
+    )
+    assert "_renderKgGraph" in src and "Fruchterman" in src or "spring simulation" in src, (
+        "KG graph doesn't have a force-directed layout"
+    )
+
+    # CSS for nodes/edges
+    assert ".kg-node" in src and ".kg-edge" in src, (
+        "KG graph CSS missing"
+    )
+    assert "#kg-graph-canvas" in src
+
+
+def l1_phase31_read_button_section_filter() -> None:
+    """Phase 31 — chapter_reader endpoint accepts an only_section
+    query param + JS showChapterReader passes it when a section is
+    selected.
+    """
+    import inspect
+    from sciknow.web import app as web_app
+
+    sig = inspect.signature(web_app.chapter_reader)
+    assert "only_section" in sig.parameters, (
+        "chapter_reader missing only_section query param"
+    )
+
+    # JS showChapterReader uses currentSectionType to choose URL
+    src = inspect.getsource(web_app)
+    assert "only_section=" in src, (
+        "showChapterReader JS doesn't pass only_section to the API"
+    )
+    # The endpoint actually filters in SQL
+    cr_src = inspect.getsource(web_app.chapter_reader)
+    assert "only_section" in cr_src
+    assert "LOWER(d.section_type) = LOWER" in cr_src, (
+        "chapter_reader doesn't filter by section_type"
+    )
+
+
+def l1_phase31_edit_button_in_toolbar() -> None:
+    """Phase 31 — Edit button promoted from inline subtitle to the
+    primary toolbar group. AI Write/Autowrite/etc relabeled to
+    distinguish from the manual Edit action.
+    """
+    import inspect
+    from sciknow.web import app as web_app
+    src = inspect.getsource(web_app)
+
+    # The Edit button now appears in the toolbar's primary group
+    # alongside the AI buttons
+    assert ">&#9998; Edit</button>" in src, (
+        "Edit button missing from primary toolbar"
+    )
+    # The AI buttons are relabeled
+    assert "AI Autowrite" in src and "AI Write" in src, (
+        "AI buttons not relabeled"
+    )
+    # The toggleEdit function still exists and is wired to both buttons
+    assert src.count("toggleEdit()") >= 2, (
+        "toggleEdit not wired to both the toolbar Edit button and the cancel button"
+    )
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -3137,6 +3284,12 @@ L1_TESTS: list[Callable] = [
     l1_phase30_heatmap_numbered_columns,
     l1_phase30_export_endpoints,
     l1_phase30_kg_endpoint,
+    # Phase 31 — six fixes (custom dropdown, PDF, KG graph, Read filter, Edit toolbar)
+    l1_phase31_custom_dropdown_persists,
+    l1_phase31_pdf_export,
+    l1_phase31_kg_graph_view,
+    l1_phase31_read_button_section_filter,
+    l1_phase31_edit_button_in_toolbar,
 ]
 
 L2_TESTS: list[Callable] = [
