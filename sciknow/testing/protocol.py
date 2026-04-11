@@ -3568,6 +3568,68 @@ def l1_phase32_1_section_target_visible_and_loaded() -> None:
     )
 
 
+def l1_phase32_2_plan_modal_per_section_length() -> None:
+    """Phase 32.2 — the book Plan modal must offer a per-section length
+    dropdown in BOTH the 'Chapter sections' tab and the focused
+    'Section' tab, and the save handlers must persist target_words.
+
+    The user originally asked: "i want to be able to chose the length
+    per section not per chapter. in the chapter sections, inside the
+    plan, there should be a dropdown menu for section length selection
+    in every section". This test is the regression gate for that ask.
+    """
+    import inspect
+    from sciknow.web import app as web_app
+    src = inspect.getsource(web_app)
+
+    # 1) Plan modal Chapter sections tab — dropdown wired through
+    #    updatePlanChapterTargetWords + updatePlanChapterTargetWordsCustom
+    assert "updatePlanChapterTargetWords(" in src, (
+        "Plan modal Chapter sections tab missing target dropdown handler"
+    )
+    assert "updatePlanChapterTargetWordsCustom(" in src, (
+        "Plan modal Chapter sections tab missing custom-input handler"
+    )
+    assert "_editingChapterTargetWords" in src, (
+        "Plan modal missing the per-chapter target_words editing state"
+    )
+    # The save handler must include target_words in the PUT body for
+    # /api/chapters/{id}/sections.
+    assert "target_words: (tw && tw > 0) ? tw : null" in src, (
+        "savePlanChapterSections must persist target_words per section"
+    )
+
+    # 2) Plan modal Section tab — focused single-section dropdown
+    assert "updatePlanSectionTargetWords(" in src, (
+        "Plan modal Section tab missing target dropdown handler"
+    )
+    assert "updatePlanSectionTargetWordsCustom(" in src, (
+        "Plan modal Section tab missing custom-input handler"
+    )
+    assert "_editingPlanSectionTargetWords" in src, (
+        "Plan modal Section tab missing the editing state for target_words"
+    )
+    assert "plan-section-target-select" in src, (
+        "Plan modal Section tab missing the dropdown DOM element"
+    )
+
+    # 3) savePlanSection must include target_words for the edited
+    #    section AND preserve target_words for every other section
+    #    (otherwise saving the focused section would wipe overrides
+    #    the user set elsewhere in the chapter).
+    assert "target_words: newTw" in src, (
+        "savePlanSection must persist target_words for the edited section"
+    )
+
+    # 4) openPlanModal must reset the per-chapter editing maps so
+    #    slug collisions between chapters don't leak overrides.
+    #    Note: source has `{{}}` because the JS lives inside a Python
+    #    f-string template (literal braces are doubled).
+    assert "_editingChapterTargetWords = {{}}" in src, (
+        "openPlanModal must reset _editingChapterTargetWords on open"
+    )
+
+
 def l2_phase32_endpoint_shapes() -> None:
     """TestClient smoke test for the major read-only API endpoints.
 
@@ -3820,6 +3882,8 @@ L1_TESTS: list[Callable] = [
     l1_phase32_endpoint_handler_signatures_consistent,
     # Phase 32.1 — per-section target visible + persisted across reopens
     l1_phase32_1_section_target_visible_and_loaded,
+    # Phase 32.2 — per-section length dropdown in the Plan modal
+    l1_phase32_2_plan_modal_per_section_length,
 ]
 
 L2_TESTS: list[Callable] = [

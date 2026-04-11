@@ -3970,6 +3970,26 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
           <label>Section plan (a few sentences)</label>
           <textarea id="plan-section-text" style="min-height:200px;"></textarea>
         </div>
+        <!-- Phase 32.2 — per-section length dropdown. Mirrors the
+             chapter modal Sections tab so the user can pick a
+             length while editing the focused section plan. -->
+        <div class="field">
+          <label>Target length for this section</label>
+          <div class="sec-size-row" style="padding-top:4px;">
+            <select id="plan-section-target-select" onchange="updatePlanSectionTargetWords(this.value)">
+              <option value="">Auto (chapter target / num sections)</option>
+              <option value="800">Short (~800w)</option>
+              <option value="1500">Medium (~1500w)</option>
+              <option value="3000">Long (~3000w)</option>
+              <option value="6000">Extra long (~6000w)</option>
+              <option value="custom">Custom&hellip;</option>
+            </select>
+            <input type="number" id="plan-section-target-custom" class="sec-size-custom" placeholder="words"
+                   min="100" step="100" style="display:none;"
+                   oninput="updatePlanSectionTargetWordsCustom(this.value)">
+            <span id="plan-section-target-badge" class="sec-target-badge"></span>
+          </div>
+        </div>
       </div>
       <div id="plan-status" style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;"></div>
       <div id="plan-stream-stats" class="stream-stats"></div>
@@ -6861,6 +6881,14 @@ async function openPlanModal(context) {{
   }}
   _planContext = context;
 
+  // Phase 32.2 — reset per-chapter editing state every time the modal
+  // opens so slug collisions between chapters (e.g. "introduction"
+  // appearing in every chapter) don't leak overrides from one chapter
+  // into another.
+  _editingChapterPlans = {{}};
+  _editingChapterTargetWords = {{}};
+  _editingChapterCustomMode = {{}};
+
   openModal('plan-modal');
   document.getElementById('plan-status').textContent = 'Loading...';
 
@@ -6935,6 +6963,12 @@ function switchPlanTab(name) {{
 // Each section gets a title input + plan textarea, just like the
 // chapter modal's Sections tab — but read-only of the title (you
 // rename via the chapter modal), editable for the plan.
+// Phase 32.2 — every section now also gets a per-section length
+// dropdown so the user can pick "Long" / "Custom" / etc directly
+// inside the Plan modal without having to switch over to the
+// chapter modal Sections tab. Save round-trips through the same
+// PUT /api/chapters/{{id}}/sections endpoint, which already accepts
+// target_words as part of each section dict.
 function populatePlanChapterTab(ch) {{
   const header = document.getElementById('plan-chapter-header');
   if (header) {{
@@ -6948,8 +6982,53 @@ function populatePlanChapterTab(ch) {{
     list.innerHTML = '<div style="font-size:12px;color:var(--fg-muted);padding:12px;text-align:center;border:1px dashed var(--border);border-radius:4px;">This chapter has no sections defined. Open the chapter modal (\\u2699 icon) and use the Sections tab to add some.</div>';
     return;
   }}
-  let html = '';
+
+  // Compute the per-section auto budget so the dropdown's "Auto"
+  // option can show what the writer would aim for if no override
+  // is set. Mirrors the logic in renderSectionEditor.
+  const chapterTarget = (window._chapterWordTarget && window._chapterWordTarget > 0)
+    ? window._chapterWordTarget
+    : 6000;
+  const nSec = Math.max(1, meta.length);
+  const perSection = Math.max(400, Math.min(chapterTarget, Math.floor(chapterTarget / nSec)));
+
+  // Seed the editing state with current target_words from meta so
+  // the dropdown reflects whatever was previously saved.
+  meta.forEach(s => {{
+    if (!(s.slug in _editingChapterTargetWords)) {{
+      _editingChapterTargetWords[s.slug] = (s.target_words && s.target_words > 0)
+        ? s.target_words : null;
+    }}
+  }});
+
+  let html = '<div style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;padding:6px 10px;background:var(--toolbar-bg);border-radius:4px;">';
+  html += '<strong>' + meta.length + '</strong> section' + (meta.length === 1 ? '' : 's') +
+          ' &middot; chapter target: <strong>' + chapterTarget + '</strong> words &middot; ' +
+          'auto per section: <strong>~' + perSection + '</strong> words';
+  html += '</div>';
+
   meta.forEach((s, i) => {{
+    const tw = _editingChapterTargetWords[s.slug];
+    const isAuto = !tw || tw <= 0;
+    const presets = [800, 1500, 3000, 6000];
+    const isCustomMode = !!_editingChapterCustomMode[s.slug];
+    const presetMatch = !isAuto && presets.includes(tw);
+    const isCustom = isCustomMode || (!isAuto && !presetMatch);
+    let optsHtml = '<option value="">Auto (~' + perSection + 'w)</option>';
+    presets.forEach(p => {{
+      const sel = (!isCustom && tw === p) ? ' selected' : '';
+      const labelMap = {{800: 'Short', 1500: 'Medium', 3000: 'Long', 6000: 'Extra long'}};
+      optsHtml += '<option value="' + p + '"' + sel + '>' + labelMap[p] + ' (~' + p + 'w)</option>';
+    }});
+    optsHtml += '<option value="custom"' + (isCustom ? ' selected' : '') + '>Custom\\u2026</option>';
+    const customStyle = isCustom ? '' : 'display:none;';
+    const customVal = (isCustom && tw) ? String(tw) : '';
+    const effectiveTw = (tw && tw > 0) ? tw : perSection;
+    const badgeClass = (tw && tw > 0) ? 'sec-target-badge override' : 'sec-target-badge';
+    const badgeTag = (tw && tw > 0)
+      ? '<span class="badge-tag">override</span>'
+      : '<span class="badge-tag muted">auto</span>';
+
     html += '<div class="sec-row" data-slug="' + s.slug + '">';
     html += '  <div class="sec-fields">';
     html += '    <div style="font-weight:600;font-size:13px;color:var(--fg);margin-bottom:4px;">' +
@@ -6957,6 +7036,14 @@ function populatePlanChapterTab(ch) {{
     html += '    <textarea data-plan-slug="' + s.slug + '" placeholder="Section plan — what THIS section must cover" ' +
             'oninput="updatePlanChapterSection(\\'' + s.slug + '\\', this.value)">' +
             escapeHtml(s.plan || '') + '</textarea>';
+    html += '    <div class="sec-size-row">';
+    html += '      <label>Target:</label>';
+    html += '      <select onchange="updatePlanChapterTargetWords(\\'' + s.slug + '\\', this.value)">' + optsHtml + '</select>';
+    html += '      <input type="number" class="sec-size-custom" placeholder="words" min="100" step="100" ';
+    html += '             value="' + customVal + '" style="' + customStyle + '" ';
+    html += '             oninput="updatePlanChapterTargetWordsCustom(\\'' + s.slug + '\\', this.value)">';
+    html += '      <span class="' + badgeClass + '">~' + effectiveTw + ' words ' + badgeTag + '</span>';
+    html += '    </div>';
     html += '    <div class="sec-slug">slug: <code>' + s.slug + '</code></div>';
     html += '  </div>';
     html += '</div>';
@@ -6966,11 +7053,40 @@ function populatePlanChapterTab(ch) {{
 
 // Track plan edits for the chapter tab so save can collect them.
 let _editingChapterPlans = {{}};
+// Phase 32.2 — parallel maps for per-section target_words overrides
+// edited in the Plan modal's Chapter sections tab. Keyed by slug.
+// Reset whenever a different chapter is loaded into the tab.
+let _editingChapterTargetWords = {{}};
+let _editingChapterCustomMode = {{}};
 function updatePlanChapterSection(slug, value) {{
   _editingChapterPlans[slug] = value;
 }}
+function updatePlanChapterTargetWords(slug, value) {{
+  if (value === "" || value === "auto") {{
+    _editingChapterTargetWords[slug] = null;
+    _editingChapterCustomMode[slug] = false;
+  }} else if (value === "custom") {{
+    _editingChapterCustomMode[slug] = true;
+    if (!_editingChapterTargetWords[slug]) _editingChapterTargetWords[slug] = 1500;
+  }} else {{
+    const n = parseInt(value, 10);
+    _editingChapterTargetWords[slug] = isNaN(n) ? null : n;
+    _editingChapterCustomMode[slug] = false;
+  }}
+  // Re-render the tab so the badge/custom-input visibility updates.
+  const ch = chaptersData.find(c => c.id === _planContext.chapterId);
+  if (ch) populatePlanChapterTab(ch);
+}}
+function updatePlanChapterTargetWordsCustom(slug, value) {{
+  const n = parseInt(value, 10);
+  _editingChapterTargetWords[slug] = (isNaN(n) || n <= 0) ? null : n;
+  _editingChapterCustomMode[slug] = true;
+  // Don't re-render — the user is actively typing in the custom input.
+}}
 
 // Phase 21 — populate the single-section editor for the Section tab.
+// Phase 32.2 — also populates the per-section length dropdown.
+let _editingPlanSectionTargetWords = null;  // null = auto, number = override
 function populatePlanSectionTab(chapterId, sectionSlug) {{
   const ch = chaptersData.find(c => c.id === chapterId);
   if (!ch) return;
@@ -6983,6 +7099,33 @@ function populatePlanSectionTab(chapterId, sectionSlug) {{
   }}
   document.getElementById('plan-section-title').value = sec ? sec.title : sectionSlug;
   document.getElementById('plan-section-text').value = sec ? (sec.plan || '') : '';
+
+  // Phase 32.2 — seed the target dropdown from the section meta.
+  const tw = (sec && sec.target_words && sec.target_words > 0) ? sec.target_words : null;
+  _editingPlanSectionTargetWords = tw;
+  const select = document.getElementById('plan-section-target-select');
+  const customInput = document.getElementById('plan-section-target-custom');
+  const presets = [800, 1500, 3000, 6000];
+  if (select) {{
+    if (!tw) {{
+      select.value = '';
+    }} else if (presets.includes(tw)) {{
+      select.value = String(tw);
+    }} else {{
+      select.value = 'custom';
+    }}
+  }}
+  if (customInput) {{
+    if (tw && !presets.includes(tw)) {{
+      customInput.style.display = '';
+      customInput.value = String(tw);
+    }} else {{
+      customInput.style.display = 'none';
+      customInput.value = '';
+    }}
+  }}
+  _refreshPlanSectionTargetBadge(meta.length);
+
   // If the section is missing from the meta (orphan), warn the user.
   if (!sec) {{
     const status = document.getElementById('plan-status');
@@ -6991,6 +7134,57 @@ function populatePlanSectionTab(chapterId, sectionSlug) {{
         sectionSlug + '\\' isn\\'t in the chapter\\'s sections list. Saving will add it.</span>';
     }}
   }}
+}}
+
+// Phase 32.2 — refresh the target badge text + style based on the
+// current editing state. Called from both the dropdown and custom-
+// input change handlers.
+function _refreshPlanSectionTargetBadge(numSections) {{
+  const badge = document.getElementById('plan-section-target-badge');
+  if (!badge) return;
+  const chapterTarget = (window._chapterWordTarget && window._chapterWordTarget > 0)
+    ? window._chapterWordTarget : 6000;
+  const n = Math.max(1, numSections || 1);
+  const perSection = Math.max(400, Math.min(chapterTarget, Math.floor(chapterTarget / n)));
+  const tw = _editingPlanSectionTargetWords;
+  const effective = (tw && tw > 0) ? tw : perSection;
+  const tag = (tw && tw > 0)
+    ? '<span class="badge-tag">override</span>'
+    : '<span class="badge-tag muted">auto</span>';
+  badge.innerHTML = '~' + effective + ' words ' + tag;
+  badge.className = (tw && tw > 0) ? 'sec-target-badge override' : 'sec-target-badge';
+}}
+
+function updatePlanSectionTargetWords(value) {{
+  const customInput = document.getElementById('plan-section-target-custom');
+  if (value === '' || value === 'auto') {{
+    _editingPlanSectionTargetWords = null;
+    if (customInput) {{ customInput.style.display = 'none'; customInput.value = ''; }}
+  }} else if (value === 'custom') {{
+    if (!_editingPlanSectionTargetWords) _editingPlanSectionTargetWords = 1500;
+    if (customInput) {{
+      customInput.style.display = '';
+      customInput.value = String(_editingPlanSectionTargetWords);
+      customInput.focus();
+      customInput.select();
+    }}
+  }} else {{
+    const n = parseInt(value, 10);
+    _editingPlanSectionTargetWords = isNaN(n) ? null : n;
+    if (customInput) {{ customInput.style.display = 'none'; customInput.value = ''; }}
+  }}
+  // Re-fetch num sections from the active chapter for the badge.
+  const ch = chaptersData.find(c => c.id === _planContext.chapterId);
+  const n = (ch && Array.isArray(ch.sections_meta)) ? ch.sections_meta.length : 1;
+  _refreshPlanSectionTargetBadge(n);
+}}
+
+function updatePlanSectionTargetWordsCustom(value) {{
+  const n = parseInt(value, 10);
+  _editingPlanSectionTargetWords = (isNaN(n) || n <= 0) ? null : n;
+  const ch = chaptersData.find(c => c.id === _planContext.chapterId);
+  const num = (ch && Array.isArray(ch.sections_meta)) ? ch.sections_meta.length : 1;
+  _refreshPlanSectionTargetBadge(num);
 }}
 
 // Phase 17 — length preset buttons in the Plan modal. Setting a preset
@@ -7064,12 +7258,21 @@ async function savePlanChapterSections() {{
   if (!ch) return;
   const meta = Array.isArray(ch.sections_meta) ? ch.sections_meta : [];
 
-  // Apply pending plan edits
-  const updated = meta.map(s => ({{
-    slug: s.slug,
-    title: s.title || s.slug,
-    plan: (s.slug in _editingChapterPlans) ? _editingChapterPlans[s.slug] : (s.plan || ''),
-  }}));
+  // Apply pending plan + target_words edits.
+  // Phase 32.2 — target_words: prefer the editing-state map (set by
+  // the dropdown), fall back to whatever was on the section meta
+  // when the tab was opened. null/0 means "use the chapter auto".
+  const updated = meta.map(s => {{
+    const tw = (s.slug in _editingChapterTargetWords)
+      ? _editingChapterTargetWords[s.slug]
+      : (s.target_words || null);
+    return {{
+      slug: s.slug,
+      title: s.title || s.slug,
+      plan: (s.slug in _editingChapterPlans) ? _editingChapterPlans[s.slug] : (s.plan || ''),
+      target_words: (tw && tw > 0) ? tw : null,
+    }};
+  }});
 
   document.getElementById('plan-status').textContent = 'Saving section plans...';
   try {{
@@ -7085,6 +7288,8 @@ async function savePlanChapterSections() {{
       ch.sections_template = data.sections.map(s => s.slug);
     }}
     _editingChapterPlans = {{}};
+    _editingChapterTargetWords = {{}};
+    _editingChapterCustomMode = {{}};
     document.getElementById('plan-status').innerHTML =
       '<span style="color:var(--success);">Saved ' + updated.length + ' section plans.</span>';
     // Refresh sidebar so plan tooltips update
@@ -7109,6 +7314,11 @@ async function savePlanSection() {{
   const newTitle = document.getElementById('plan-section-title').value.trim();
   const meta = Array.isArray(ch.sections_meta) ? ch.sections_meta.slice() : [];
 
+  // Phase 32.2 — also persist the per-section target_words override
+  // edited via the dropdown.
+  const newTw = (_editingPlanSectionTargetWords && _editingPlanSectionTargetWords > 0)
+    ? _editingPlanSectionTargetWords : null;
+
   let found = false;
   const updated = meta.map(s => {{
     if (s.slug === slug) {{
@@ -7117,13 +7327,22 @@ async function savePlanSection() {{
         slug: s.slug,
         title: newTitle || s.title || s.slug,
         plan: newPlan,
+        target_words: newTw,
       }};
     }}
-    return s;
+    // Phase 32.2 — preserve target_words on every other section so
+    // saving from the Section tab doesn't accidentally wipe overrides
+    // set elsewhere in the chapter.
+    return {{
+      slug: s.slug,
+      title: s.title || s.slug,
+      plan: s.plan || '',
+      target_words: (s.target_words && s.target_words > 0) ? s.target_words : null,
+    }};
   }});
   // Orphan section (slug not in meta): append it.
   if (!found) {{
-    updated.push({{slug: slug, title: newTitle || slug, plan: newPlan}});
+    updated.push({{slug: slug, title: newTitle || slug, plan: newPlan, target_words: newTw}});
   }}
 
   document.getElementById('plan-status').textContent = 'Saving section plan...';
