@@ -44,6 +44,7 @@ A local-first scientific knowledge system that ingests papers, builds a compiled
 - **Autowrite** — autonomous convergence loop: generates, scores, verifies, revises until quality target is met
 - **TreeWriter planning** — hierarchical paragraph-level plans before drafting
 - **Web reader** — browser-based authoring with live LLM streaming, corkboard view, chapter reader, argument maps, citation popovers, snapshots, version diffs
+- **Compute dashboard** — book-level GPU compute ledger: cumulative tokens, wall time, and per-operation breakdown (write/review/revise/argue/gaps/autowrite) across every LLM call
 - **Multi-format export** — Markdown, HTML, BibTeX, LaTeX, DOCX with global citation dedup
 
 **Infrastructure**

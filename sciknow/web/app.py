@@ -20,6 +20,7 @@ import re
 import threading
 import time
 from collections import deque
+from datetime import datetime, timezone
 from html import escape as _esc
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -162,6 +163,11 @@ def _create_job(job_type: str) -> tuple[str, asyncio.Queue]:
             # server-side counter is the only architecturally correct
             # way to deliver the same stats to two independent UIs.
             "started_at": time.monotonic(),
+            # Phase 35 — wallclock start so we can persist a real
+            # timestamp to llm_usage_log on completion. `started_at`
+            # above is a monotonic stopwatch reading that can't be
+            # written to a TIMESTAMPTZ column.
+            "started_wall": datetime.now(timezone.utc),
             "tokens": 0,
             # 200-token rolling window is enough for ~30s of fast LLMs
             "token_timestamps": deque(maxlen=200),
@@ -232,6 +238,73 @@ def _finish_job(job_id: str):
         if job_id in _jobs:
             _jobs[job_id]["status"] = "done"
             _jobs[job_id]["finished_at"] = time.monotonic()
+
+
+def _persist_llm_usage(job_id: str) -> None:
+    """Phase 35 — append one row to llm_usage_log when a job finishes.
+
+    Called from `_run_generator_in_thread`'s finally block. Reads the
+    per-job counters maintained by `_observe_event_for_stats` and writes
+    a single compact row. Skip if tokens == 0 so zero-token noops (e.g.
+    immediate error before the first token, or cancel-before-start)
+    don't pollute the ledger.
+
+    All fields are best-effort — if the insert fails we swallow the
+    exception, the counter is an accounting nicety and must never take
+    down a streaming endpoint.
+    """
+    with _job_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return
+        tokens = int(job.get("tokens") or 0)
+        if tokens <= 0:
+            return
+        op_name = job.get("type") or "unknown"
+        model_name = job.get("model_name")
+        started_wall = job.get("started_wall")
+        stream_state = job.get("stream_state") or "done"
+        # stream_state is (streaming|done|error); fold "Stopped" (from
+        # the cancel branch in _observe_event_for_stats) into cancelled.
+        if stream_state == "error":
+            status_val = "error"
+        elif job.get("task_desc") == "Stopped":
+            status_val = "cancelled"
+        else:
+            status_val = "completed"
+        started_mono = job.get("started_at")
+        now_mono = time.monotonic()
+        duration = (now_mono - started_mono) if started_mono else None
+    try:
+        finished_wall = datetime.now(timezone.utc)
+        with get_session() as session:
+            session.execute(
+                text(
+                    """
+                    INSERT INTO llm_usage_log
+                        (book_id, chapter_id, operation, model_name,
+                         tokens, duration_seconds, status,
+                         started_at, finished_at)
+                    VALUES
+                        (CAST(:bid AS uuid), NULL, :op, :model,
+                         :tokens, :dur, :status,
+                         :started, :finished)
+                    """
+                ),
+                {
+                    "bid": _book_id or None,
+                    "op": op_name,
+                    "model": model_name,
+                    "tokens": tokens,
+                    "dur": duration,
+                    "status": status_val,
+                    "started": started_wall,
+                    "finished": finished_wall,
+                },
+            )
+            session.commit()
+    except Exception as exc:
+        logger.warning("llm_usage_log insert failed for job %s: %s", job_id, exc)
 
 
 # ── Data helpers ─────────────────────────────────────────────────────────────
@@ -829,6 +902,54 @@ async def api_dashboard():
     except Exception as exc:
         logger.warning("dashboard autowrite stats failed: %s", exc)
 
+    # Phase 35 — Total Compute ledger aggregated from llm_usage_log.
+    # Covers every LLM-backed op (write/review/revise/argue/gaps/
+    # autowrite/plan/...) so the dashboard can show cumulative GPU
+    # compute per book, plus a per-operation breakdown. Autowrite is a
+    # strict subset — the Autowrite Effort panel and the `autowrite`
+    # row of by_operation reconcile.
+    total_compute = {
+        "total_tokens": 0, "total_seconds": 0.0, "total_jobs": 0,
+        "by_operation": [],
+    }
+    try:
+        with get_session() as session:
+            totals = session.execute(text("""
+                SELECT
+                    COUNT(*),
+                    COALESCE(SUM(tokens), 0),
+                    COALESCE(SUM(duration_seconds), 0)
+                FROM llm_usage_log
+                WHERE book_id::text = :bid
+            """), {"bid": _book_id}).fetchone()
+            by_op = session.execute(text("""
+                SELECT operation,
+                       COUNT(*),
+                       COALESCE(SUM(tokens), 0),
+                       COALESCE(SUM(duration_seconds), 0)
+                FROM llm_usage_log
+                WHERE book_id::text = :bid
+                GROUP BY operation
+                ORDER BY SUM(tokens) DESC
+            """), {"bid": _book_id}).fetchall()
+            if totals:
+                total_compute = {
+                    "total_jobs": int(totals[0] or 0),
+                    "total_tokens": int(totals[1] or 0),
+                    "total_seconds": float(totals[2] or 0.0),
+                    "by_operation": [
+                        {
+                            "operation": r[0],
+                            "jobs": int(r[1] or 0),
+                            "tokens": int(r[2] or 0),
+                            "seconds": float(r[3] or 0.0),
+                        }
+                        for r in by_op
+                    ],
+                }
+    except Exception as exc:
+        logger.warning("dashboard total_compute stats failed: %s", exc)
+
     return {
         "heatmap": heatmap,
         # Phase 30 — column headers are positional integers, not slugs
@@ -841,6 +962,7 @@ async def api_dashboard():
             "comments": len(comments),
         },
         "autowrite_stats": autowrite_stats,
+        "total_compute": total_compute,
         "gaps": open_gaps,
     }
 
@@ -1852,6 +1974,12 @@ def _run_generator_in_thread(job_id: str, generator_fn, loop):
             if job_id in _jobs and _jobs[job_id].get("stream_state") == "streaming":
                 _jobs[job_id]["stream_state"] = "done"
         loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel
+        # Phase 35 — book-level GPU compute ledger: persist the final
+        # token/duration counters to llm_usage_log before marking the
+        # job done. Runs for EVERY job type (write/review/revise/
+        # argue/gaps/autowrite/plan/...) so the dashboard's Total
+        # Compute panel reflects all ops, not just autowrite.
+        _persist_llm_usage(job_id)
         _finish_job(job_id)
 
 
@@ -5505,6 +5633,44 @@ async function showDashboard() {{
   html += '<div class="stat-tile"><div class="num">' + s.gaps_open + '</div><div class="lbl">Open Gaps</div></div>';
   html += '<div class="stat-tile"><div class="num">' + s.comments + '</div><div class="lbl">Comments</div></div>';
   html += '</div>';
+
+  // Phase 35 — Total Compute panel. Aggregates every LLM-backed job
+  // (write/review/revise/argue/gaps/autowrite/plan/...) from the
+  // llm_usage_log ledger so the user can see total GPU compute spent
+  // on the book. Per-operation breakdown appears as chips below the
+  // three headline tiles. Autowrite is a strict subset — its detail
+  // panel follows directly below.
+  const tc = data.total_compute || {{}};
+  const fmtTokens = (n) => (n || 0) >= 1000
+    ? ((n / 1000).toFixed(1) + 'K')
+    : String(n || 0);
+  const fmtSecs = (secs) => {{
+    secs = Math.round(secs || 0);
+    if (secs < 60) return secs + 's';
+    if (secs < 3600) return Math.floor(secs / 60) + 'm ' + (secs % 60) + 's';
+    return Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm';
+  }};
+  if ((tc.total_jobs || 0) > 0) {{
+    html += '<h3 style="margin:24px 0 12px;font-size:14px;font-weight:600;color:var(--fg-muted);text-transform:uppercase;letter-spacing:0.04em;">Total Compute</h3>';
+    html += '<div class="stat-grid">';
+    html += '<div class="stat-tile"><div class="num">' + fmtTokens(tc.total_tokens) + '</div><div class="lbl">Total Tokens</div></div>';
+    html += '<div class="stat-tile"><div class="num">' + fmtSecs(tc.total_seconds) + '</div><div class="lbl">Total Time</div></div>';
+    html += '<div class="stat-tile"><div class="num">' + (tc.total_jobs || 0) + '</div><div class="lbl">LLM Jobs</div></div>';
+    html += '</div>';
+    // Per-operation breakdown as compact chips (only ops that actually ran)
+    if (Array.isArray(tc.by_operation) && tc.by_operation.length > 0) {{
+      html += '<div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px;">';
+      tc.by_operation.forEach(o => {{
+        html += '<span style="display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:12px;background:var(--bg-alt,#f3f4f6);font-size:12px;color:var(--fg-muted);">';
+        html += '<strong style="color:var(--fg);">' + (o.operation || '?') + '</strong>';
+        html += '<span>' + fmtTokens(o.tokens) + ' tok</span>';
+        html += '<span>' + fmtSecs(o.seconds) + '</span>';
+        html += '<span>×' + (o.jobs || 0) + '</span>';
+        html += '</span>';
+      }});
+      html += '</div>';
+    }}
+  }}
 
   // Phase 33 — Autowrite effort stats from the Layer 0 telemetry tables.
   // Shows cumulative token usage + time spent across all completed runs.

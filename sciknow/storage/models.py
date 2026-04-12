@@ -618,6 +618,51 @@ class AutowriteLesson(Base):
     )
 
 
+class LLMUsageLog(Base):
+    """Phase 35 — generic LLM usage ledger for GPU-compute accounting.
+
+    One row per completed job originating from the web UI (write, review,
+    revise, argue, gaps, autowrite, plan, etc.). Populated from
+    `_run_generator_in_thread`'s finally block using the per-job counters
+    maintained by `_observe_event_for_stats` (Phase 32.5).
+
+    The autowrite-specific `autowrite_runs.tokens_used` column (Phase 33)
+    is kept because it's wired into the autowrite telemetry subsystem;
+    this table is the superset used for the book dashboard's Total
+    Compute panel. Autowrite appears in both places by design — the
+    per-operation breakdown on the dashboard reconciles the totals.
+
+    A row is only inserted when tokens > 0 (skip zero-token no-ops / early
+    errors so the table stays signal-dense).
+    """
+    __tablename__ = "llm_usage_log"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    book_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("books.id", ondelete="CASCADE"), nullable=True
+    )
+    chapter_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("book_chapters.id", ondelete="SET NULL"), nullable=True
+    )
+    # Job type — matches _create_job's job_type argument in web/app.py
+    # (write | review | revise | argue | gaps | autowrite | plan | ...).
+    operation: Mapped[str] = mapped_column(Text, nullable=False)
+    model_name: Mapped[str | None] = mapped_column(Text)
+    tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
+    # completed | error | cancelled
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="completed")
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("idx_llm_usage_book", "book_id"),
+        Index("idx_llm_usage_book_op", "book_id", "operation"),
+    )
+
+
 class KnowledgeGraphTriple(Base):
     __tablename__ = "knowledge_graph"
 

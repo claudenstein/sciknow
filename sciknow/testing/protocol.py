@@ -4323,6 +4323,104 @@ def l1_phase34_cars_rhetorical_moves() -> None:
     )
 
 
+def l1_phase35_total_compute_counter() -> None:
+    """Phase 35 — book-level GPU compute counter on the dashboard.
+
+    Verifies:
+    - LLMUsageLog model exists in storage.models with the expected cols
+    - Alembic migration 0015 creates llm_usage_log with the indexes
+    - web/app.py wires _persist_llm_usage into the finally block of
+      _run_generator_in_thread, BEFORE _finish_job
+    - /api/dashboard returns a top-level `total_compute` key with the
+      expected shape (total_tokens, total_seconds, total_jobs,
+      by_operation[])
+    - The dashboard HTML renders a "Total Compute" heading and the
+      per-operation chips
+
+    L1 (source-grep only — no DB needed). L2 will cover the insert
+    roundtrip once a real run is in the ledger.
+    """
+    import inspect
+
+    from sciknow.storage import models as sm
+    assert hasattr(sm, "LLMUsageLog"), "LLMUsageLog model missing"
+    cols = {c.name for c in sm.LLMUsageLog.__table__.columns}
+    for needed in (
+        "id", "book_id", "chapter_id", "operation", "model_name",
+        "tokens", "duration_seconds", "status", "started_at", "finished_at",
+    ):
+        assert needed in cols, f"LLMUsageLog.{needed} column missing"
+    assert sm.LLMUsageLog.__tablename__ == "llm_usage_log"
+
+    # Migration file — assert it exists and references the expected cols.
+    from pathlib import Path
+    mig = Path(__file__).resolve().parents[1].parent / "migrations" / "versions" / "0015_llm_usage_log.py"
+    assert mig.exists(), f"migration 0015_llm_usage_log.py missing at {mig}"
+    mig_src = mig.read_text()
+    assert "create_table" in mig_src and "llm_usage_log" in mig_src
+    assert "idx_llm_usage_book" in mig_src
+    assert "idx_llm_usage_book_op" in mig_src
+    assert 'down_revision: Union[str, None] = "0014"' in mig_src, (
+        "migration 0015 should descend from 0014"
+    )
+
+    # Wiring in web/app.py — persistence helper + finally-block call.
+    from sciknow.web import app as web_app
+    src = inspect.getsource(web_app)
+    assert "def _persist_llm_usage(" in src, (
+        "_persist_llm_usage helper missing from web/app.py"
+    )
+    # _persist_llm_usage must be called from _run_generator_in_thread's
+    # finally block, BEFORE _finish_job (order matters: if _finish_job
+    # ran first the 'done' bookkeeping would be complete before we read
+    # the counters; current implementation reads under the same lock
+    # so both orderings work, but the spec is to persist first).
+    rg_src = inspect.getsource(web_app._run_generator_in_thread)
+    assert "_persist_llm_usage(job_id)" in rg_src, (
+        "_persist_llm_usage not called from _run_generator_in_thread"
+    )
+    idx_persist = rg_src.index("_persist_llm_usage(job_id)")
+    idx_finish = rg_src.index("_finish_job(job_id)")
+    assert idx_persist < idx_finish, (
+        "_persist_llm_usage must be called BEFORE _finish_job so the "
+        "ledger row reflects the still-live per-job counters"
+    )
+    # Skip zero-token jobs
+    ph_src = inspect.getsource(web_app._persist_llm_usage)
+    assert "tokens <= 0" in ph_src, (
+        "_persist_llm_usage must skip zero-token jobs"
+    )
+    # Wallclock start timestamp captured on job creation
+    create_src = inspect.getsource(web_app._create_job)
+    assert '"started_wall"' in create_src, (
+        "_create_job must capture started_wall for the ledger"
+    )
+
+    # Dashboard endpoint — total_compute key + by_operation aggregation
+    dash_src = inspect.getsource(web_app.api_dashboard)
+    assert '"total_compute"' in dash_src, (
+        "api_dashboard must return total_compute"
+    )
+    assert "FROM llm_usage_log" in dash_src, (
+        "api_dashboard must aggregate from llm_usage_log"
+    )
+    assert "GROUP BY operation" in dash_src, (
+        "api_dashboard must compute per-operation breakdown"
+    )
+    assert "by_operation" in dash_src
+
+    # Dashboard HTML — Total Compute widget
+    assert "Total Compute" in src, (
+        "dashboard HTML missing 'Total Compute' heading"
+    )
+    assert "tc.by_operation" in src, (
+        "dashboard HTML missing per-operation breakdown rendering"
+    )
+    assert "Total Tokens" in src and "Total Time" in src, (
+        "dashboard HTML missing Total Tokens / Total Time tiles"
+    )
+
+
 def l2_phase32_endpoint_shapes() -> None:
     """TestClient smoke test for the major read-only API endpoints.
 
@@ -5270,6 +5368,8 @@ L1_TESTS: list[Callable] = [
     l1_phase33_keyboard_shortcuts_and_polish,
     # Phase 34 — CARS rhetorical moves in tree plan + writer prompt
     l1_phase34_cars_rhetorical_moves,
+    # Phase 35 — book-level GPU compute counter on the dashboard
+    l1_phase35_total_compute_counter,
 ]
 
 L2_TESTS: list[Callable] = [
