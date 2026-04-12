@@ -804,6 +804,31 @@ async def api_dashboard():
     open_gaps = [{"id": g[0], "type": g[1], "description": g[2], "status": g[3],
                   "chapter_num": g[4]} for g in gaps if g[3] == "open"]
 
+    # Phase 33 — cumulative autowrite stats from the Layer 0 telemetry
+    # tables. Aggregate token usage and time across all completed runs
+    # for this book. Fail-soft: if the query errors, return zeros.
+    autowrite_stats = {"total_tokens": 0, "total_seconds": 0, "total_runs": 0}
+    try:
+        with get_session() as session:
+            aw = session.execute(text("""
+                SELECT
+                    COUNT(*),
+                    COALESCE(SUM(tokens_used), 0),
+                    COALESCE(SUM(EXTRACT(EPOCH FROM (finished_at - started_at))), 0)
+                FROM autowrite_runs
+                WHERE book_id::text = :bid
+                  AND status = 'completed'
+                  AND finished_at IS NOT NULL
+            """), {"bid": _book_id}).fetchone()
+            if aw:
+                autowrite_stats = {
+                    "total_runs": int(aw[0] or 0),
+                    "total_tokens": int(aw[1] or 0),
+                    "total_seconds": int(aw[2] or 0),
+                }
+    except Exception as exc:
+        logger.warning("dashboard autowrite stats failed: %s", exc)
+
     return {
         "heatmap": heatmap,
         # Phase 30 — column headers are positional integers, not slugs
@@ -815,6 +840,7 @@ async def api_dashboard():
             "gaps_open": len(open_gaps),
             "comments": len(comments),
         },
+        "autowrite_stats": autowrite_stats,
         "gaps": open_gaps,
     }
 
@@ -5426,6 +5452,27 @@ async function showDashboard() {{
   html += '<div class="stat-tile"><div class="num">' + s.gaps_open + '</div><div class="lbl">Open Gaps</div></div>';
   html += '<div class="stat-tile"><div class="num">' + s.comments + '</div><div class="lbl">Comments</div></div>';
   html += '</div>';
+
+  // Phase 33 — Autowrite effort stats from the Layer 0 telemetry tables.
+  // Shows cumulative token usage + time spent across all completed runs.
+  const aw = data.autowrite_stats || {{}};
+  if (aw.total_runs > 0) {{
+    html += '<h3 style="margin:24px 0 12px;font-size:14px;font-weight:600;color:var(--fg-muted);text-transform:uppercase;letter-spacing:0.04em;">Autowrite Effort</h3>';
+    html += '<div class="stat-grid">';
+    html += '<div class="stat-tile"><div class="num">' + (aw.total_runs || 0) + '</div><div class="lbl">Runs</div></div>';
+    const tokStr = (aw.total_tokens || 0) >= 1000
+      ? ((aw.total_tokens / 1000).toFixed(1) + 'K')
+      : String(aw.total_tokens || 0);
+    html += '<div class="stat-tile"><div class="num">' + tokStr + '</div><div class="lbl">Tokens Used</div></div>';
+    // Format total_seconds as hours + minutes
+    const secs = aw.total_seconds || 0;
+    let timeStr;
+    if (secs < 60) timeStr = secs + 's';
+    else if (secs < 3600) timeStr = Math.floor(secs / 60) + 'm ' + (secs % 60) + 's';
+    else timeStr = Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm';
+    html += '<div class="stat-tile"><div class="num">' + timeStr + '</div><div class="lbl">Time Spent</div></div>';
+    html += '</div>';
+  }}
 
   // Phase 14 — Corpus stats panel (mirrors `db stats` + RAPTOR + topics)
   if (corpusStats) {{

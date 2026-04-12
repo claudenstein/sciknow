@@ -474,6 +474,10 @@ class AutowriteRun(Base):
     iterations_used: Mapped[int | None] = mapped_column(Integer)
     converged: Mapped[bool | None] = mapped_column(Boolean)
     error_message: Mapped[str | None] = mapped_column(Text)
+    # Phase 33 — cumulative token count from the _AutowriteLogger's
+    # total_tokens counter. Set at finalization time so the dashboard
+    # can aggregate LLM token usage across all autowrite runs.
+    tokens_used: Mapped[int | None] = mapped_column(Integer)
 
     __table_args__ = (
         Index("idx_autowrite_runs_book", "book_id"),

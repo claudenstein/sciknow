@@ -642,6 +642,7 @@ def _finalize_autowrite_run(
     iterations_used: int,
     converged: bool,
     error_message: str | None = None,
+    tokens_used: int | None = None,
 ) -> None:
     """Phase 32.6 — close out a run row and back-fill `was_cited` flags.
 
@@ -664,7 +665,8 @@ def _finalize_autowrite_run(
                     final_overall = :final_overall,
                     iterations_used = :iterations_used,
                     converged = :converged,
-                    error_message = :error_message
+                    error_message = :error_message,
+                    tokens_used = :tokens_used
                 WHERE id = CAST(:run_id AS uuid)
             """), {
                 "run_id": run_id,
@@ -676,6 +678,7 @@ def _finalize_autowrite_run(
                 "iterations_used": iterations_used,
                 "converged": converged,
                 "error_message": (error_message or "")[:1000] or None,
+                "tokens_used": int(tokens_used) if tokens_used else None,
             })
 
             # Back-fill was_cited on the retrieval rows. The final draft's
@@ -3756,6 +3759,9 @@ def _autowrite_section_body(
         final_overall=overall,
         iterations_used=_telemetry_iterations_used,
         converged=_telemetry_converged,
+        # Phase 33 — persist the token count from the logger so the
+        # dashboard can aggregate cumulative LLM usage.
+        tokens_used=log._state.get("total_tokens", 0),
     )
 
     yield {
