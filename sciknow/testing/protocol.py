@@ -4003,6 +4003,69 @@ def l1_phase32_8_useful_count_boost_layer2() -> None:
     )
 
 
+def l1_phase32_9_dpo_export_layer4() -> None:
+    """Phase 32.9 — Layer 4: DPO preference dataset export.
+
+    Verifies:
+    - autowrite_iterations has the new pre/post_revision_content columns
+      (via the ORM model)
+    - _persist_autowrite_iteration accepts the new content kwargs
+    - _autowrite_section_body wires content into all three persist calls
+      (pre-revision, KEEP-update, DISCARD-update)
+    - _export_preference_pairs helper exists
+    - The CLI command `book preferences export` is registered
+    """
+    # ORM has the new columns
+    from sciknow.storage.models import AutowriteIteration
+    fields = AutowriteIteration.__mapper__.column_attrs.keys()
+    for col in ("pre_revision_content", "post_revision_content"):
+        assert col in fields, f"AutowriteIteration missing column: {col}"
+
+    # Helper accepts the new kwargs
+    from sciknow.core import book_ops
+    import inspect
+    sig = inspect.signature(book_ops._persist_autowrite_iteration)
+    for kw in ("pre_revision_content", "post_revision_content"):
+        assert kw in sig.parameters, (
+            f"_persist_autowrite_iteration missing kwarg: {kw}"
+        )
+
+    # Wired into _autowrite_section_body — content is captured at the
+    # pre-revision persist AND in both KEEP and DISCARD update calls.
+    body_src = inspect.getsource(book_ops._autowrite_section_body)
+    assert "pre_revision_content=content" in body_src, (
+        "_autowrite_section_body not capturing pre_revision_content — "
+        "Layer 4 will see NULLs and produce zero pairs"
+    )
+    # Both verdict branches must capture post_revision_content=revised
+    # (the DISCARD branch is the inverse-pair signal — never skip it)
+    n_post_capture = body_src.count("post_revision_content=revised")
+    assert n_post_capture >= 2, (
+        f"_autowrite_section_body has {n_post_capture} post_revision_content "
+        "captures — expected ≥2 (one for KEEP, one for DISCARD branch)"
+    )
+
+    # Export helper exists
+    assert hasattr(book_ops, "_export_preference_pairs"), (
+        "_export_preference_pairs missing — CLI command will crash"
+    )
+    export_sig = inspect.signature(book_ops._export_preference_pairs)
+    for kw in ("book_id", "output_path", "min_score", "min_delta",
+               "require_approval", "include_discard"):
+        assert kw in export_sig.parameters, (
+            f"_export_preference_pairs missing kwarg: {kw}"
+        )
+
+    # CLI command registered
+    from sciknow.cli import book as book_cli
+    assert hasattr(book_cli, "preferences_app"), (
+        "book.preferences_app subcommand missing"
+    )
+    assert hasattr(book_cli, "preferences_export"), (
+        "preferences_export CLI handler missing"
+    )
+
+
 def l2_phase32_endpoint_shapes() -> None:
     """TestClient smoke test for the major read-only API endpoints.
 
@@ -4491,6 +4554,144 @@ def l2_phase32_8_useful_boost_roundtrip() -> None:
     )
 
 
+def l2_phase32_9_dpo_export_roundtrip() -> None:
+    """Phase 32.9 — Layer 4: end-to-end DPO export against live PG.
+
+    Inserts 3 fake completed runs (KEEP, KEEP+DISCARD, low-score) with
+    pre/post-revision content populated. Runs the export and verifies:
+    - Filter rules drop the low-score row
+    - KEEP and DISCARD verdicts both produce pairs
+    - DISCARD pairs have chosen/rejected correctly inverted
+    - JSONL records have all expected fields
+    """
+    import json as _json
+    import tempfile
+    from pathlib import Path
+    from sqlalchemy import text as _t
+    from sciknow.storage.db import get_session
+    from sciknow.core import book_ops
+
+    with get_session() as s:
+        b = s.execute(_t("SELECT id::text FROM books LIMIT 1")).fetchone()
+        if not b:
+            return TestResult.skip(
+                name="l2_phase32_9_dpo_export_roundtrip",
+                message="no books in DB — skipping",
+            )
+        book_id = b[0]
+
+    fake_slug = "l2_dpo_test"
+    out = Path(tempfile.mktemp(suffix=".jsonl"))
+    try:
+        with get_session() as s:
+            # Run A: 1 KEEP iteration with passing scores
+            run_a = s.execute(_t("""
+                INSERT INTO autowrite_runs (book_id, section_slug, status, model)
+                VALUES (CAST(:bid AS uuid), :slug, 'completed', 'test')
+                RETURNING id::text
+            """), {"bid": book_id, "slug": fake_slug}).fetchone()
+            s.execute(_t("""
+                INSERT INTO autowrite_iterations (
+                    run_id, iteration, scores, action, overall_pre, overall_post,
+                    pre_revision_content, post_revision_content
+                ) VALUES (
+                    CAST(:rid AS uuid), 1, CAST('{}' AS jsonb), 'KEEP',
+                    0.72, 0.85, 'PRE-A', 'POST-A'
+                )
+            """), {"rid": run_a[0]})
+
+            # Run B: 1 DISCARD iteration with passing scores
+            run_b = s.execute(_t("""
+                INSERT INTO autowrite_runs (book_id, section_slug, status, model)
+                VALUES (CAST(:bid AS uuid), :slug, 'completed', 'test')
+                RETURNING id::text
+            """), {"bid": book_id, "slug": fake_slug}).fetchone()
+            s.execute(_t("""
+                INSERT INTO autowrite_iterations (
+                    run_id, iteration, scores, action, overall_pre, overall_post,
+                    pre_revision_content, post_revision_content
+                ) VALUES (
+                    CAST(:rid AS uuid), 1, CAST('{}' AS jsonb), 'DISCARD',
+                    0.78, 0.71, 'PRE-B', 'POST-B'
+                )
+            """), {"rid": run_b[0]})
+
+            # Run C: 1 KEEP with low scores (should be filtered out)
+            run_c = s.execute(_t("""
+                INSERT INTO autowrite_runs (book_id, section_slug, status, model)
+                VALUES (CAST(:bid AS uuid), :slug, 'completed', 'test')
+                RETURNING id::text
+            """), {"bid": book_id, "slug": fake_slug}).fetchone()
+            s.execute(_t("""
+                INSERT INTO autowrite_iterations (
+                    run_id, iteration, scores, action, overall_pre, overall_post,
+                    pre_revision_content, post_revision_content
+                ) VALUES (
+                    CAST(:rid AS uuid), 1, CAST('{}' AS jsonb), 'KEEP',
+                    0.45, 0.55, 'PRE-C', 'POST-C'
+                )
+            """), {"rid": run_c[0]})
+            s.commit()
+
+        # Run the export
+        n, path = book_ops._export_preference_pairs(
+            book_id=book_id, output_path=out,
+            min_score=0.7, min_delta=0.02,
+        )
+        assert n == 2, f"expected 2 pairs (KEEP + DISCARD; low-score skipped), got {n}"
+
+        # Parse and verify
+        records = []
+        with out.open() as f:
+            for line in f:
+                records.append(_json.loads(line))
+        assert len(records) == 2, f"expected 2 JSONL records, got {len(records)}"
+
+        # Find the KEEP and DISCARD records
+        keeps = [r for r in records if r["verdict"] == "KEEP"]
+        discards = [r for r in records if r["verdict"] == "DISCARD"]
+        assert len(keeps) == 1, f"expected 1 KEEP, got {len(keeps)}"
+        assert len(discards) == 1, f"expected 1 DISCARD, got {len(discards)}"
+
+        # KEEP: chosen = post, rejected = pre
+        keep = keeps[0]
+        assert keep["chosen"] == "POST-A", f"KEEP chosen should be POST-A, got {keep['chosen']!r}"
+        assert keep["rejected"] == "PRE-A", f"KEEP rejected should be PRE-A, got {keep['rejected']!r}"
+        assert keep["score_chosen"] > keep["score_rejected"], (
+            "KEEP record has chosen score lower than rejected — wrong direction"
+        )
+
+        # DISCARD: chosen = pre, rejected = post (inverse)
+        disc = discards[0]
+        assert disc["chosen"] == "PRE-B", f"DISCARD chosen should be PRE-B (inverse), got {disc['chosen']!r}"
+        assert disc["rejected"] == "POST-B", f"DISCARD rejected should be POST-B (inverse), got {disc['rejected']!r}"
+        assert disc["score_chosen"] > disc["score_rejected"], (
+            "DISCARD record has chosen score lower than rejected — inversion broken"
+        )
+
+        # All required fields present
+        for rec in records:
+            for field in ("prompt", "chosen", "rejected", "score_chosen",
+                          "score_rejected", "score_delta", "verdict",
+                          "section_slug", "iteration", "run_id"):
+                assert field in rec, f"missing field {field!r} in record"
+    finally:
+        try:
+            out.unlink()
+        except Exception:
+            pass
+        with get_session() as s:
+            s.execute(_t(
+                "DELETE FROM autowrite_runs WHERE section_slug = :s"
+            ), {"s": fake_slug})
+            s.commit()
+
+    return TestResult.ok(
+        name="l2_phase32_9_dpo_export_roundtrip",
+        message="2 pairs (KEEP + inverted DISCARD), 1 low-score correctly filtered",
+    )
+
+
 def l2_phase32_data_invariants() -> None:
     """DB-level invariants the GUI relies on.
 
@@ -4681,6 +4882,8 @@ L1_TESTS: list[Callable] = [
     l1_phase32_7_lessons_layer1,
     # Phase 32.8 — Layer 2: useful_count retrieval boost
     l1_phase32_8_useful_count_boost_layer2,
+    # Phase 32.9 — Layer 4: DPO preference dataset export
+    l1_phase32_9_dpo_export_layer4,
 ]
 
 L2_TESTS: list[Callable] = [
@@ -4700,6 +4903,8 @@ L2_TESTS: list[Callable] = [
     l2_phase32_7_lessons_roundtrip,
     # Phase 32.8 — Layer 2 useful_count boost roundtrip in real search
     l2_phase32_8_useful_boost_roundtrip,
+    # Phase 32.9 — Layer 4 DPO export with KEEP/DISCARD inversion + filters
+    l2_phase32_9_dpo_export_roundtrip,
 ]
 
 L3_TESTS: list[Callable] = [

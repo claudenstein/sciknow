@@ -542,6 +542,8 @@ def _persist_autowrite_iteration(
     word_count: int,
     word_count_delta: int | None,
     overall_pre: float,
+    pre_revision_content: str | None = None,
+    post_revision_content: str | None = None,
 ) -> None:
     """Phase 32.6 — persist one iteration's pre-revision state.
 
@@ -549,6 +551,13 @@ def _persist_autowrite_iteration(
     loop. Uses ON CONFLICT DO UPDATE so a later call from the post-revision
     update path can fill in `action`/`overall_post` without a separate
     UPDATE statement.
+
+    Phase 32.9 — also accepts `pre_revision_content` and
+    `post_revision_content` (Layer 4). Both are NULL on the first call
+    (the pre-revision persist) and only `post_revision_content` is set
+    on the second call (after the revision stream completes). The
+    upsert uses COALESCE so an UPDATE with NULL doesn't clobber a
+    value that was set on the prior call.
     """
     if not run_id:
         return
@@ -562,7 +571,8 @@ def _persist_autowrite_iteration(
                     run_id, iteration, scores, verification, cove,
                     action, word_count, word_count_delta,
                     weakest_dimension, revision_instruction,
-                    overall_pre, overall_post
+                    overall_pre, overall_post,
+                    pre_revision_content, post_revision_content
                 ) VALUES (
                     CAST(:run_id AS uuid), :iteration,
                     CAST(:scores AS jsonb),
@@ -570,7 +580,8 @@ def _persist_autowrite_iteration(
                     CAST(:cove AS jsonb),
                     :action, :word_count, :word_count_delta,
                     :weakest_dimension, :revision_instruction,
-                    :overall_pre, :overall_post
+                    :overall_pre, :overall_post,
+                    :pre_revision_content, :post_revision_content
                 )
                 ON CONFLICT (run_id, iteration) DO UPDATE SET
                     scores = EXCLUDED.scores,
@@ -582,7 +593,18 @@ def _persist_autowrite_iteration(
                     weakest_dimension = EXCLUDED.weakest_dimension,
                     revision_instruction = EXCLUDED.revision_instruction,
                     overall_pre = EXCLUDED.overall_pre,
-                    overall_post = EXCLUDED.overall_post
+                    overall_post = EXCLUDED.overall_post,
+                    -- Phase 32.9 — COALESCE so a NULL on the post-revision
+                    -- update never clobbers the pre-revision content set
+                    -- by the first persist call (and vice versa).
+                    pre_revision_content = COALESCE(
+                        EXCLUDED.pre_revision_content,
+                        autowrite_iterations.pre_revision_content
+                    ),
+                    post_revision_content = COALESCE(
+                        EXCLUDED.post_revision_content,
+                        autowrite_iterations.post_revision_content
+                    )
             """), {
                 "run_id": run_id,
                 "iteration": iteration,
@@ -600,6 +622,8 @@ def _persist_autowrite_iteration(
                     if history_entry.get("post_revision_overall") is not None
                     else None
                 ),
+                "pre_revision_content": pre_revision_content,
+                "post_revision_content": post_revision_content,
             })
             session.commit()
     except Exception as exc:
@@ -1033,6 +1057,198 @@ def _get_relevant_lessons(
     except Exception as exc:
         logger.warning("lesson retrieval failed: %s", exc)
         return []
+
+
+# ── Phase 32.9 — Compound learning Layer 4: DPO preference dataset ──────
+#
+# Each KEEP verdict in the autowrite loop is a preference pair: the
+# revised draft beat the pre-revision draft. Each DISCARD is the inverse:
+# the pre-revision draft beat the revision attempt. We capture BOTH
+# (Phase 32.6 captured the verdicts; Phase 32.9 added the actual content
+# columns) and export them as standard `{prompt, chosen, rejected}` JSONL
+# for future DPO fine-tuning when the DGX Spark arrives (Layer 6).
+#
+# Filter rules (configurable via the CLI flags):
+#   - Drop pairs where BOTH overall_pre and overall_post are below the
+#     `min_score` floor (default 0.7) — low signal on both sides.
+#   - Drop pairs where the score gap is below `min_delta` (default 0.02)
+#     — too noisy to learn from.
+#   - With --require-approval, only keep pairs from runs where the
+#     final draft is marked approved=true in drafts.custom_metadata.
+#     This is the human-in-the-loop bias mitigation from RESEARCH.md §21.
+
+
+def _export_preference_pairs(
+    *,
+    book_id: str | None = None,
+    output_path: "Path | None" = None,
+    min_score: float = 0.7,
+    min_delta: float = 0.02,
+    require_approval: bool = False,
+    include_discard: bool = True,
+) -> tuple[int, "Path"]:
+    """Phase 32.9 — Layer 4: walk autowrite_iterations and export
+    preference pairs as JSONL.
+
+    Returns (n_pairs_written, output_path).
+
+    Pair shape (one per JSONL line):
+        {
+          "prompt": str,                 # chapter title + section + topic
+          "chosen": str,                 # the higher-scored draft text
+          "rejected": str,               # the lower-scored draft text
+          "score_chosen": float,
+          "score_rejected": float,
+          "score_delta": float,
+          "verdict": "KEEP" | "DISCARD",
+          "section_slug": str,
+          "iteration": int,
+          "run_id": str,
+          "feature_versions": dict,      # which Phase X features were on
+          "model": str,
+        }
+    """
+    from pathlib import Path
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+    from sciknow.config import settings
+
+    if output_path is None:
+        if book_id:
+            output_path = settings.data_dir / "preferences" / f"book_{book_id[:8]}.jsonl"
+        else:
+            output_path = settings.data_dir / "preferences" / "all_books.jsonl"
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Pull the joinable rows: every iteration with both content columns
+    # populated belongs to a completed run.
+    where_clauses = [
+        "i.pre_revision_content IS NOT NULL",
+        "i.post_revision_content IS NOT NULL",
+        "i.action IS NOT NULL",
+        "r.status = 'completed'",
+    ]
+    params: dict = {
+        "min_score": float(min_score),
+        "min_delta": float(min_delta),
+    }
+    if book_id:
+        where_clauses.append("r.book_id::text = :book_id")
+        params["book_id"] = book_id
+
+    with get_session() as session:
+        rows = session.execute(text(f"""
+            SELECT
+                i.run_id::text,
+                i.iteration,
+                i.action,
+                i.pre_revision_content,
+                i.post_revision_content,
+                i.overall_pre,
+                i.overall_post,
+                i.weakest_dimension,
+                r.section_slug,
+                r.model,
+                r.feature_versions,
+                r.book_id::text,
+                r.chapter_id::text,
+                r.final_draft_id::text,
+                COALESCE(d.topic, '') AS topic,
+                COALESCE(bc.title, '') AS chapter_title,
+                COALESCE(bc.number, 0) AS chapter_num
+            FROM autowrite_iterations i
+            JOIN autowrite_runs r ON r.id = i.run_id
+            LEFT JOIN drafts d ON d.id = r.final_draft_id
+            LEFT JOIN book_chapters bc ON bc.id = r.chapter_id
+            WHERE {' AND '.join(where_clauses)}
+            ORDER BY r.started_at, i.iteration
+        """), params).fetchall()
+
+    n_written = 0
+    n_skipped_low_score = 0
+    n_skipped_small_delta = 0
+    n_skipped_unapproved = 0
+    n_skipped_discard = 0
+
+    with output_path.open("w", encoding="utf-8") as f:
+        for row in rows:
+            (run_id, iteration, action, pre_text, post_text,
+             overall_pre, overall_post, weakest, section_slug, model,
+             feature_versions, _book, _chapter, final_draft_id,
+             topic, chapter_title, chapter_num) = row
+
+            pre = float(overall_pre or 0.0)
+            post = float(overall_post or 0.0)
+            delta = abs(post - pre)
+
+            # Filter: both sides below the floor
+            if max(pre, post) < min_score:
+                n_skipped_low_score += 1
+                continue
+            # Filter: delta too small to learn from
+            if delta < min_delta:
+                n_skipped_small_delta += 1
+                continue
+            # Filter: DISCARD verdicts (only if explicitly excluded)
+            if not include_discard and action == "DISCARD":
+                n_skipped_discard += 1
+                continue
+
+            # Build chosen/rejected based on the verdict
+            if action == "KEEP":
+                chosen, rejected = post_text, pre_text
+                score_chosen, score_rejected = post, pre
+            elif action == "DISCARD":
+                chosen, rejected = pre_text, post_text
+                score_chosen, score_rejected = pre, post
+            else:
+                continue
+
+            # Optional approval gate (human-in-the-loop bias mitigation).
+            # Require the final draft to have custom_metadata.preference_approved = true.
+            if require_approval:
+                if not final_draft_id:
+                    n_skipped_unapproved += 1
+                    continue
+                with get_session() as s:
+                    meta = s.execute(text(
+                        "SELECT custom_metadata FROM drafts WHERE id::text = :id"
+                    ), {"id": final_draft_id}).scalar()
+                if not isinstance(meta, dict) or not meta.get("preference_approved"):
+                    n_skipped_unapproved += 1
+                    continue
+
+            prompt_text = (
+                f"Chapter {chapter_num}: {chapter_title}\n"
+                f"Section: {section_slug}\n"
+                f"Topic: {topic}".strip()
+            )
+            record = {
+                "prompt": prompt_text,
+                "chosen": chosen,
+                "rejected": rejected,
+                "score_chosen": round(score_chosen, 4),
+                "score_rejected": round(score_rejected, 4),
+                "score_delta": round(score_chosen - score_rejected, 4),
+                "verdict": action,
+                "section_slug": section_slug,
+                "iteration": iteration,
+                "run_id": run_id,
+                "feature_versions": feature_versions or {},
+                "model": model,
+            }
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            n_written += 1
+
+    logger.info(
+        "exported %d preference pairs to %s "
+        "(skipped: %d low-score, %d small-delta, %d unapproved, %d discard)",
+        n_written, output_path,
+        n_skipped_low_score, n_skipped_small_delta,
+        n_skipped_unapproved, n_skipped_discard,
+    )
+    return n_written, output_path
 
 
 def _save_draft(session, *, title, book_id, chapter_id, section_type, topic,
@@ -3236,11 +3452,15 @@ def _autowrite_section_body(
         )
         _telemetry_iterations_used = iteration + 1
         _telemetry_final_overall = overall
+        # Phase 32.9 — Layer 4: capture the pre-revision content (what
+        # the scorer scored). This becomes the "rejected" side of the
+        # KEEP preference pair, OR the "chosen" side of a DISCARD pair.
         _persist_autowrite_iteration(
             autowrite_run_id, iteration + 1, history_entry,
             word_count=_word_count_now,
             word_count_delta=_word_count_delta,
             overall_pre=overall,
+            pre_revision_content=content,
         )
 
         yield {"type": "scores", "scores": scores, "iteration": iteration + 1}
@@ -3369,11 +3589,14 @@ def _autowrite_section_body(
                 history[-1]["revision_verdict"] = "KEEP"
                 history[-1]["post_revision_overall"] = new_overall
                 # Update the iteration row with the verdict + post-overall.
+                # Phase 32.9 — also capture the revised content as
+                # post_revision_content for Layer 4 DPO pair extraction.
                 _persist_autowrite_iteration(
                     autowrite_run_id, iteration + 1, history[-1],
                     word_count=_telemetry_prev_word_count,
                     word_count_delta=None,  # captured at the pre-revision persist
                     overall_pre=_overall_pre,
+                    post_revision_content=revised,
                 )
             # Phase 15.1 — INCREMENTAL SAVE checkpoint #N: persist the
             # accepted revision so the user never loses more than the
@@ -3412,11 +3635,17 @@ def _autowrite_section_body(
                 # Phase 32.6 — record the DISCARD verdict in the
                 # iteration row. Word count stays the same (rejected
                 # revision was not adopted).
+                # Phase 32.9 — DISCARD verdicts ALSO produce a Layer 4
+                # preference pair (with chosen and rejected swapped):
+                # the original `content` won, the `revised` lost. Capture
+                # the revised text as post_revision_content so the
+                # exporter can build the inverse pair.
                 _persist_autowrite_iteration(
                     autowrite_run_id, iteration + 1, history[-1],
                     word_count=_telemetry_prev_word_count,
                     word_count_delta=None,
                     overall_pre=overall,
+                    post_revision_content=revised,
                 )
             # Update metadata only — content stays at previous KEEP state.
             discard_metadata = {

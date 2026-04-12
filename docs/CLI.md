@@ -286,6 +286,18 @@ sciknow book draft scores 3f2a1b4c                              # iteration-by-i
 sciknow book draft compare 3f2a1b4c 9d8e7f6a                    # side-by-side from persisted scores
 sciknow book draft compare 3f2a1b4c 9d8e7f6a --rescore          # re-run scorer + verifier (current rubric)
 
+# ── DPO preference dataset export (Phase 32.9 — Layer 4) ──────────────────
+
+# Export every preference pair (chosen, rejected) from autowrite history
+# in standard JSONL ready for HuggingFace TRL or any DPO trainer.
+sciknow book preferences export                                # all books → data/preferences/all_books.jsonl
+sciknow book preferences export "Global Cooling"               # one book
+sciknow book preferences export "Global Cooling" --stats       # show counts only, don't write
+sciknow book preferences export "Global Cooling" -o /tmp/dataset.jsonl
+sciknow book preferences export "Global Cooling" --min-score 0.75 --min-delta 0.05  # tighter filters
+sciknow book preferences export "Global Cooling" --no-discard  # KEEP verdicts only (conservative)
+sciknow book preferences export "Global Cooling" --require-approval  # human-in-the-loop gate
+
 # ── Autowrite variance bench (Phase 13) ──────────────────────────────────
 
 sciknow book autowrite-bench "Global Cooling" 3 overview --runs 5

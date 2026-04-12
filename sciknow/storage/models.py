@@ -502,6 +502,14 @@ class AutowriteIteration(Base):
     revision_instruction: Mapped[str | None] = mapped_column(Text)
     overall_pre: Mapped[float | None] = mapped_column(Float)
     overall_post: Mapped[float | None] = mapped_column(Float)
+    # Phase 32.9 — Layer 4: pre/post revision content for DPO pair
+    # extraction. pre_revision_content is what the scorer scored at the
+    # top of the iteration; post_revision_content is what the writer
+    # produced after the revision (regardless of KEEP/DISCARD).
+    # `sciknow book preferences export` walks these fields to build the
+    # preference dataset.
+    pre_revision_content: Mapped[str | None] = mapped_column(Text)
+    post_revision_content: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

@@ -38,6 +38,14 @@ app.add_typer(chapter_app, name="chapter")
 draft_app = typer.Typer(help="Inspect and compare saved drafts (Track A measurement).")
 app.add_typer(draft_app, name="draft")
 
+# Phase 32.9 — Compound learning Layer 4: DPO preference dataset export.
+# `book preferences export` walks autowrite_iterations and writes a
+# JSONL file in the standard {prompt, chosen, rejected} shape, ready
+# for DPO fine-tuning when the DGX Spark arrives (Layer 6). Both KEEP
+# and DISCARD verdicts produce pairs (DISCARDs as inverse pairs).
+preferences_app = typer.Typer(help="Export DPO preference pairs from autowrite history (Layer 4).")
+app.add_typer(preferences_app, name="preferences")
+
 console = Console()
 
 
@@ -2100,3 +2108,124 @@ def autowrite_bench(
     console.print(
         f"\n[dim]Total wall time: {elapsed_total:.0f}s  ·  avg per run: {avg_elapsed:.0f}s  ·  results in {bench_dir}[/dim]"
     )
+
+
+# ── Phase 32.9 — Layer 4: preference pair export ──────────────────────────────
+
+
+@preferences_app.command(name="export")
+def preferences_export(
+    book: str = typer.Argument(
+        None,
+        help="Book title or ID fragment (omit to export from all books)",
+    ),
+    output: Path = typer.Option(
+        None, "--output", "-o",
+        help="Output JSONL path (defaults to data/preferences/<book>.jsonl)",
+    ),
+    min_score: float = typer.Option(
+        0.7, "--min-score",
+        help="Drop pairs where the higher score is below this threshold (low signal on both sides)",
+    ),
+    min_delta: float = typer.Option(
+        0.02, "--min-delta",
+        help="Drop pairs where the score gap is below this (too noisy to learn from)",
+    ),
+    require_approval: bool = typer.Option(
+        False, "--require-approval",
+        help="Only include pairs from runs whose final draft has custom_metadata.preference_approved=true (human-in-the-loop bias mitigation)",
+    ),
+    no_discard: bool = typer.Option(
+        False, "--no-discard",
+        help="Skip DISCARD-verdict pairs (the inverse signal). KEEP-only by default keeps things conservative.",
+    ),
+    stats: bool = typer.Option(
+        False, "--stats",
+        help="Show counts only, don't write the file",
+    ),
+):
+    """Phase 32.9 — Export Layer 4 DPO preference pairs as JSONL.
+
+    Walks `autowrite_iterations` and turns every revision attempt into a
+    `{prompt, chosen, rejected}` record. Both KEEP and DISCARD verdicts
+    produce pairs:
+
+      KEEP    → chosen = post-revision, rejected = pre-revision
+      DISCARD → chosen = pre-revision,  rejected = post-revision (inverse signal)
+
+    Output format is the standard DPO shape, ready for HuggingFace TRL
+    or any other DPO trainer. Use `--require-approval` for the human-
+    in-the-loop bias mitigation: only pairs from drafts where the user
+    explicitly marked the final result as good get exported.
+
+    Examples:
+
+      sciknow book preferences export                            # all books
+      sciknow book preferences export "Global Cooling"           # one book
+      sciknow book preferences export "Global Cooling" --stats   # count only
+      sciknow book preferences export "Global Cooling" -o /tmp/dataset.jsonl
+      sciknow book preferences export "Global Cooling" --require-approval
+    """
+    from sciknow.core.book_ops import _export_preference_pairs
+    from sciknow.storage.db import get_session
+
+    book_id = None
+    if book:
+        with get_session() as session:
+            row = _get_book(session, book)
+        if not row:
+            console.print(f"[red]Book not found:[/red] {book}")
+            raise typer.Exit(code=1)
+        book_id = row[0]
+        console.print(f"[dim]exporting preferences for book: {row[1]} ({book_id[:8]}...)[/dim]")
+    else:
+        console.print("[dim]exporting preferences for ALL books[/dim]")
+
+    if stats:
+        # Run the export to a tempfile, count, then delete it.
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+        try:
+            n, _ = _export_preference_pairs(
+                book_id=book_id, output_path=tmp_path,
+                min_score=min_score, min_delta=min_delta,
+                require_approval=require_approval,
+                include_discard=not no_discard,
+            )
+        finally:
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+        console.print(f"\n[bold]{n}[/bold] preference pairs would be exported")
+        console.print(f"  filters: min_score={min_score}, min_delta={min_delta}, "
+                      f"approval={'required' if require_approval else 'off'}, "
+                      f"discards={'excluded' if no_discard else 'included'}")
+        return
+
+    n, path = _export_preference_pairs(
+        book_id=book_id, output_path=output,
+        min_score=min_score, min_delta=min_delta,
+        require_approval=require_approval,
+        include_discard=not no_discard,
+    )
+    console.print(f"\n[green]✓[/green] exported [bold]{n}[/bold] preference pairs to [cyan]{path}[/cyan]")
+    if n == 0:
+        console.print(
+            "[dim]No pairs exported. Possible reasons:\n"
+            "  - No autowrite runs have completed since Phase 32.9 shipped\n"
+            "    (older runs don't have pre/post-revision content captured)\n"
+            "  - All pairs were filtered out by --min-score / --min-delta\n"
+            "  - --require-approval is on but no drafts are marked approved[/dim]"
+        )
+    else:
+        # Show a small summary of what's in the file
+        import json as _json
+        verdicts: dict[str, int] = {}
+        with path.open() as f:
+            for line in f:
+                rec = _json.loads(line)
+                verdicts[rec["verdict"]] = verdicts.get(rec["verdict"], 0) + 1
+        verdict_str = ", ".join(f"{k}={v}" for k, v in sorted(verdicts.items()))
+        console.print(f"[dim]breakdown: {verdict_str}[/dim]")
