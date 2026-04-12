@@ -33,7 +33,7 @@ In priority order:
 - [ ] **LongCite-style sentence citations** (THUDM 2024) — sentence-level grounding with span match for ALCE-compatible `citation_f1`. Pairs naturally with the existing hedging_fidelity scoring + OVERSTATED verdict from Phase 11. **Top CS runner-up.**
 - [ ] **Toulmin scaffolds** for paragraphs the planner labels `Tension` (claim / data / warrant / qualifier / rebuttal). Linguistics runner-up #2.
 - [ ] **MADAM-RAG** (Wang et al. COLM 2025) for paragraphs the argument-mapper flags as contradiction-heavy. CS runner-up.
-- [ ] **Soft RAPTOR clustering.** Phase 12's RAPTOR build computes the GMM `proba` matrix but only uses `argmax`. Soft assignment would let chunks contribute to multiple cluster summaries above a probability threshold. **Polish, not a major lift.**
+- [x] **~~Soft RAPTOR clustering.~~** Shipped in Phase 34. The GMM `proba` matrix is now used: chunks with membership probability ≥ `RAPTOR_SOFT_THRESHOLD` (default 0.15) contribute to secondary clusters in addition to their argmax primary. This means a chunk about "solar forcing AND ocean heat content" can appear in BOTH the solar-forcing cluster summary AND the ocean-heat cluster summary, improving recall for queries that approach the overlap from either angle. Controlled by `settings.raptor_soft_threshold`; set to 0 to disable. Only affects `catalog raptor build`; existing RAPTOR nodes are unaffected until the next rebuild.
 
 **Do NOT relitigate** (rejected with documented reasons in `docs/RESEARCH.md` §526):
 HyDE, Self-RAG/CRAG (fine-tuned), Dense X / Propositional Retrieval,

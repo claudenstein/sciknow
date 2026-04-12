@@ -102,6 +102,16 @@ class Settings(BaseSettings):
     # (dense + sparse + FTS) still dominate.
     citation_boost_factor: float = 0.1
 
+    # Phase 34 — Soft RAPTOR clustering. When > 0, chunks with GMM
+    # membership probability above this threshold contribute to
+    # MULTIPLE cluster summaries instead of just their argmax cluster.
+    # Improves recall for queries that approach a topic from different
+    # angles. Set to 0 to disable (hard assignment only, Phase 12 default).
+    # 0.15 is conservative — a chunk needs ≥15% probability to land in
+    # a secondary cluster. Typical values: 0.10 (permissive) to 0.30
+    # (restrictive). Only affects the `catalog raptor build` step.
+    raptor_soft_threshold: float = 0.15
+
     # Phase 32.8 — Compound learning Layer 2: useful-chunk boost.
     # For each retrieved chunk, look up how often it was actually cited
     # in a finished autowrite draft (autowrite_retrievals.was_cited).

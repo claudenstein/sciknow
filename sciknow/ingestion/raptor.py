@@ -402,17 +402,43 @@ def _build_level(
     yield {"type": "progress", "stage": f"cluster L{target_level}",
            "detail": f"Clustering {len(parent_ids)} nodes (UMAP + GMM/BIC)..."}
     try:
-        labels, best_k, _proba = _cluster_with_gmm_bic(X)
+        labels, best_k, proba = _cluster_with_gmm_bic(X)
     except Exception as exc:
         logger.exception("Clustering failed at level %d", target_level)
         yield {"type": "error", "level": target_level,
                "message": f"Clustering failed: {exc}"}
         return
 
-    # Group parent ids by cluster label.
+    # Group parent ids by cluster label (hard assignment, Phase 12).
     clusters: dict[int, list[str]] = defaultdict(list)
     for pid, lbl in zip(parent_ids, labels):
         clusters[int(lbl)].append(pid)
+
+    # Phase 34 — soft RAPTOR clustering: also assign chunks to secondary
+    # clusters where their GMM membership probability exceeds the
+    # threshold. This lets one chunk contribute to multiple cluster
+    # summaries so its information is "visible" through more entry
+    # points at retrieval time — better recall for queries that approach
+    # the topic from different angles. See docs/ROADMAP.md §2 and
+    # docs/RESEARCH.md for the research basis.
+    from sciknow.config import settings
+    soft_threshold = getattr(settings, "raptor_soft_threshold", 0.15)
+    n_soft_added = 0
+    if soft_threshold > 0 and proba is not None and proba.shape[1] == best_k:
+        for i, pid in enumerate(parent_ids):
+            primary = int(labels[i])
+            for k in range(best_k):
+                if k == primary:
+                    continue  # already in via hard assignment
+                if float(proba[i, k]) >= soft_threshold:
+                    if pid not in clusters[k]:
+                        clusters[k].append(pid)
+                        n_soft_added += 1
+    if n_soft_added > 0:
+        logger.info(
+            "RAPTOR L%d soft clustering: %d extra assignments (threshold=%.2f)",
+            target_level, n_soft_added, soft_threshold,
+        )
 
     # Drop clusters smaller than min_cluster_size.
     clusters = {k: v for k, v in clusters.items() if len(v) >= min_cluster_size}
