@@ -639,7 +639,7 @@ Likely next-up candidates (in priority order, from the original lit sweep's runn
 1. ~~**CARS-adapted chapter moves**~~ — **shipped in Phase 34.** See §22 below.
 2. ~~**LongCite-style sentence citations**~~ — **shipped in Phase 34.** Sentence-level citation grounding rule added to the writer prompt + scorer prompt updated to check groundedness per sentence.
 3. ~~**Toulmin scaffolds**~~ — **shipped in Phase 34.** Conditional guidance for `[tension]`-labeled paragraphs: CLAIM → DATA → WARRANT → QUALIFIER → REBUTTAL.
-4. **MADAM-RAG** for paragraphs the argument-mapper flags as contradiction-heavy (Wang+ COLM 2025). CS runner-up.
+4. ~~**MADAM-RAG**~~ — **shipped in Phase 34** as MADAM-RAG-lite (prompt-only core). The tree planner tags contradiction-heavy paragraphs with pro/con source lists; the writer renders explicit ⚡ CONTRADICTION guidance. Full multi-agent debate deferred to DGX Spark.
 5. **Soft RAPTOR clustering** — use the GMM `proba` matrix the build already computes to allow chunks to contribute to multiple cluster summaries above a probability threshold. Polish on Phase 12.
 
 ---

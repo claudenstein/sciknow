@@ -827,7 +827,22 @@ def write_section_v2(
                     parts.append(rel)
                 if move:
                     parts.append(f"[{move}]")
-                relation_lines.append(f"  Paragraph {i} — {' '.join(parts)}: {point}")
+                line = f"  Paragraph {i} — {' '.join(parts)}: {point}"
+                # Phase 34 — MADAM-RAG-lite: if the planner tagged this
+                # paragraph with a contradiction, add explicit pro/con
+                # source guidance so the writer presents both sides.
+                contr = p.get("contradiction")
+                if isinstance(contr, dict) and contr.get("for") and contr.get("against"):
+                    for_srcs = ", ".join(str(s) for s in contr["for"])
+                    against_srcs = ", ".join(str(s) for s in contr["against"])
+                    nature = contr.get("nature") or "opposing findings"
+                    line += (
+                        f"\n    ⚡ CONTRADICTION: {nature}"
+                        f"\n       FOR: {for_srcs}  |  AGAINST: {against_srcs}"
+                        f"\n       → Present BOTH sides fairly. Use Toulmin structure"
+                        f" if this is a [tension] paragraph."
+                    )
+                relation_lines.append(line)
         if relation_lines:
             discourse_block = (
                 "\nParagraph plan with discourse relations (PDTB-lite) and CARS "
@@ -1316,6 +1331,17 @@ ideally one "integrate" paragraph (near the end). "tension" and "qualify" \
 add argumentative texture — use them when the literature genuinely has \
 gaps or caveats, not as filler. Do NOT make every paragraph "evidence".
 - "connects_to": one short sentence on how it leads to the next paragraph
+- "contradiction": (optional, Phase 34 MADAM-RAG-lite) — when the paragraph's \
+point involves OPPOSING findings across sources, include this object:
+    {{
+      "for": ["[1]", "[3]"],       // sources supporting the claim
+      "against": ["[4]", "[7]"],   // sources opposing or complicating it
+      "nature": "..."              // one-sentence description of the disagreement
+    }}
+  Set to null for paragraphs that don't involve a genuine contradiction. This \
+field is read by the writer prompt, which renders explicit pro/con guidance so \
+the paragraph presents both sides fairly (inspired by MADAM-RAG, Wang et al. \
+COLM 2025).
 - "children": optional sub-points (for complex paragraphs)
 
 The tree should flow logically: each paragraph builds on the previous one. Do NOT \
@@ -1331,6 +1357,7 @@ Respond ONLY with valid JSON:
       "sources": ["[1]", "[3]"],
       "discourse_relation": "background",
       "rhetorical_move": "orient",
+      "contradiction": null,
       "connects_to": "How this leads to the next paragraph",
       "children": []
     }},

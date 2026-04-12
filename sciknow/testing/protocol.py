@@ -4301,6 +4301,27 @@ def l1_phase34_cars_rhetorical_moves() -> None:
         "scorer prompt missing sentence-level groundedness guidance"
     )
 
+    # 7) MADAM-RAG-lite: contradiction field in tree_plan schema + writer rendering
+    assert "contradiction" in prompts.TREE_PLAN_SYSTEM, (
+        "tree_plan prompt missing contradiction field (MADAM-RAG-lite)"
+    )
+    contr_plan = [
+        {"point": "test", "discourse_relation": "contrast",
+         "rhetorical_move": "tension",
+         "contradiction": {
+             "for": ["[1]"], "against": ["[2]"],
+             "nature": "test disagreement",
+         }},
+    ]
+    sys_c, _ = prompts.write_section_v2("intro", "topic", [],
+                                        paragraph_plan=contr_plan)
+    assert "CONTRADICTION" in sys_c, (
+        "writer prompt not rendering the contradiction block"
+    )
+    assert "FOR: [1]" in sys_c and "AGAINST: [2]" in sys_c, (
+        "writer prompt missing the pro/con source lists"
+    )
+
 
 def l2_phase32_endpoint_shapes() -> None:
     """TestClient smoke test for the major read-only API endpoints.
