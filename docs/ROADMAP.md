@@ -19,7 +19,7 @@ These three were deferred:
 
 - [x] **~~Dead `/api/chapters/reorder` endpoint.~~** Wired in Phase 33 — chapter title bars are now draggable; the drop handler POSTs to this endpoint. No longer dead code.
 - [x] **~~Fragile `WHERE`-clause f-string~~** in the catalog query — shipped in Phase 41. Both `/api/catalog` and `/api/kg` rewritten to the always-bind pattern: every optional filter is bound as the real value or NULL, each WHERE clause gated with `(:param IS NULL OR …)`. The SQL is now fully static (no f-string, no `.join()`, no dynamic assembly) which makes the injection-vector question decidable at lint time instead of review time.
-- [ ] **`onclick="..."` pattern fragility.** A lot of inline handlers with interpolated strings. Phase 22 escaped the IDs but the pattern itself is harder to reason about than `addEventListener`. Refactor to event delegation. **Effort:** half-day.
+- [x] **~~`onclick="..."` pattern fragility~~** — shipped in Phase 42 (surgical scope: the ~20 interpolated handlers). New pattern: every such button carries `data-action="kebab-name"` + `data-*` attrs; one document-level click listener looks the action up in an `ACTIONS` registry and invokes it with the element. Static handlers (no interpolation → no fragility) left alone for a future CSP pass. Removes the XSS vector-by-construction and makes handlers breakpointable / auditable in one place.
 
 ---
 

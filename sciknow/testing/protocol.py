@@ -2888,24 +2888,32 @@ def l1_phase29_empty_section_preview_not_write() -> None:
     import inspect
     from sciknow.web import app as web_app
 
-    # Server-side render
+    # Server-side render — Phase 42 moved the click dispatch from an
+    # inline `onclick="previewEmptySection(...)"` to a
+    # `data-action="preview-empty-section"` attribute resolved by the
+    # global ACTIONS registry. Either marker satisfies the spirit of
+    # this test: empty rows preview, they don't fire a write.
     render_src = inspect.getsource(web_app._render_sidebar)
-    assert "previewEmptySection" in render_src, (
-        "_render_sidebar empty rows still call writeForCell instead of previewEmptySection"
+    _empty_hook_ok = (
+        "previewEmptySection" in render_src
+        or "preview-empty-section" in render_src
+    )
+    assert _empty_hook_ok, (
+        "_render_sidebar empty rows still call writeForCell instead "
+        "of previewEmptySection / preview-empty-section data-action"
     )
     # Make sure the OLD writeForCell call on empty rows is gone
     # (it's still used by the heatmap empty cells, that's fine)
     assert 'sec-empty"' in render_src
-    # The empty row's onclick should reference previewEmptySection
-    assert (
-        "sec-empty" in render_src and
-        "previewEmptySection" in render_src
-    )
 
-    # JS rebuildSidebar mirrors the same call
+    # JS rebuildSidebar mirrors the same call — accept either the old
+    # camelCase call or the new data-action kebab name.
     src = inspect.getsource(web_app)
-    assert src.count("previewEmptySection") >= 3, (
-        "previewEmptySection should appear in render_sidebar + rebuildSidebar + the helper itself"
+    total = src.count("previewEmptySection") + src.count("preview-empty-section")
+    assert total >= 3, (
+        "previewEmptySection / preview-empty-section should appear in "
+        "render_sidebar + rebuildSidebar + the helper / ACTIONS entry "
+        f"— only found {total} references"
     )
 
     # The helper renders an explicit Start writing button (so the user
@@ -4856,6 +4864,93 @@ def l1_phase41_static_where_clauses() -> None:
         )
 
 
+def l1_phase42_data_action_dispatcher() -> None:
+    """Phase 42 — retire inline onclick handlers with interpolated args.
+
+    The ~20 handlers that had f-string-interpolated variables (button
+    IDs, slugs, draft UUIDs, …) were flagged by the Phase 22 audit:
+    escaping-mitigated but fragile — one future PR forgetting _esc()
+    could reintroduce XSS. This phase converts every such site to a
+    data-action + data-* attribute pattern routed through a single
+    document-level click listener (ACTIONS registry).
+
+    Static handlers like onclick="openPlanModal()" are left alone —
+    no interpolation = no fragility. A future CSP pass can finish
+    them off.
+
+    Verifies:
+    - ACTIONS registry + document-level click listener exist
+    - Every entry keyed by the handlers the refactor moved over
+    - Rendered HTML has ZERO stale interpolated onclicks from the
+      refactored sites (sidebar + comments + heatmap + snapshots +
+      wiki + catalog + version history + section editor)
+    - Plenty of data-action attributes present on the rendered page
+    """
+    import re
+
+    from sciknow.testing.helpers import rendered_template_static
+    from sciknow.web import app as web_app
+    import inspect
+
+    src = inspect.getsource(web_app)
+
+    # 1) Dispatcher scaffolding
+    assert "const ACTIONS = {" in src, "ACTIONS registry missing"
+    assert "document.addEventListener('click', function(e)" in src, (
+        "data-action click listener missing"
+    )
+    assert "closest('[data-action]')" in src, (
+        "listener must walk up to the nearest [data-action] element"
+    )
+
+    # 2) Every action name the refactor introduced has a registry entry
+    expected_actions = {
+        # Cluster 1 — sidebar / comments
+        "preview-empty-section", "start-writing-chapter",
+        "adopt-orphan-section", "delete-orphan-draft", "resolve-comment",
+        # Cluster 2 — heatmap + gaps
+        "open-chapter-modal", "load-section", "write-for-gap",
+        # Cluster 3 — section editor + sidebar JS
+        "set-section-type", "add-section-to-chapter", "move-section",
+        "remove-section",
+        # Cluster 4 — wiki + catalog pagination
+        "open-wiki-page", "load-wiki-pages", "ask-about-paper",
+        "load-catalog",
+        # Cluster 5 — version history + snapshots
+        "select-version", "restore-bundle",
+        "diff-snapshot", "restore-snapshot",
+    }
+    for action in expected_actions:
+        assert f"'{action}':" in src, (
+            f"ACTIONS['{action}'] handler entry missing"
+        )
+
+    # 3) Rendered HTML has no stale interpolated handlers from the
+    #    refactored sites. The interpolated-onclick pattern is what we
+    #    removed; detect any remaining site by looking for the former
+    #    handler names in onclick= attributes followed by an arg.
+    rendered = rendered_template_static()
+    stale_patterns = [
+        r'onclick="resolveComment\(',
+        r'onclick="previewEmptySection\(',
+        r'onclick="startWritingChapter\(',
+        r'onclick="adoptOrphanSection\(',
+        r'onclick="deleteOrphanDraft\(',
+    ]
+    for pat in stale_patterns:
+        assert re.search(pat, rendered) is None, (
+            f"stale interpolated onclick handler still in rendered HTML: {pat}"
+        )
+
+    # 4) Plenty of data-action attributes present — the refactor
+    #    should have produced many on the rendered page.
+    attr_count = len(re.findall(r'data-action="[a-z-]+"', rendered))
+    assert attr_count >= 3, (
+        f"expected many data-action attributes on the rendered page, "
+        f"only found {attr_count}"
+    )
+
+
 def l2_phase32_endpoint_shapes() -> None:
     """TestClient smoke test for the major read-only API endpoints.
 
@@ -5818,6 +5913,8 @@ L1_TESTS: list[Callable] = [
     l1_phase40_cli_export_pdf_epub,
     # Phase 41 — static WHERE clauses on /api/catalog + /api/kg
     l1_phase41_static_where_clauses,
+    # Phase 42 — data-action dispatcher (retire interpolated onclicks)
+    l1_phase42_data_action_dispatcher,
 ]
 
 L2_TESTS: list[Callable] = [

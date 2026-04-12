@@ -3655,12 +3655,16 @@ def _render_sidebar(items, active_id):
                 # instead of immediately triggering doWrite(). The
                 # writing only fires after a deliberate click on the
                 # "Start writing" button inside the preview.
+                # Phase 42 — data-action dispatch replaces the
+                # f-string onclick handler with interpolation.
                 out += (
                     f'<div class="sec-link sec-empty" '
                     f'draggable="true" '
                     f'data-section-slug="{sec_type}" '
                     f'title="{plan_attr}" '
-                    f'onclick="previewEmptySection(&quot;{ch_id}&quot;,&quot;{sec_type}&quot;)">'
+                    f'data-action="preview-empty-section" '
+                    f'data-chapter-id="{ch_id}" '
+                    f'data-sec-type="{sec_type}">'
                     f'<span class="sec-status-dot empty"></span>'
                     f'{display}'
                     f'<span class="meta">empty \u00b7 \u270e</span></div>'
@@ -3671,6 +3675,9 @@ def _render_sidebar(items, active_id):
                 # Phase 25 — also show a "+" button that adopts the
                 # slug into the chapter's sections list, re-classifying
                 # the draft from "orphan" to "drafted".
+                # Phase 42 — orphan +/✗ buttons switched to data-action.
+                # The dispatcher handler calls preventDefault+stopPropagation
+                # internally so the anchor's navigation doesn't fire.
                 out += (
                     f'<a class="sec-link sec-orphan" href="/section/{sec_id}" '
                     f'data-draft-id="{sec_id}" onclick="return navTo(this)" '
@@ -3679,10 +3686,13 @@ def _render_sidebar(items, active_id):
                     f'{display} '
                     f'<span class="meta">orphan \u00b7 v{sec_v} \u00b7 {sec_w}w</span>'
                     f'<button class="sec-orphan-adopt" '
-                    f'onclick="event.preventDefault();event.stopPropagation();adoptOrphanSection(&quot;{ch_id}&quot;,&quot;{sec_type}&quot;)" '
+                    f'data-action="adopt-orphan-section" '
+                    f'data-chapter-id="{ch_id}" '
+                    f'data-sec-type="{sec_type}" '
                     f'title="Add this section_type to the chapter\u2019s sections list (idempotent)">+</button>'
                     f'<button class="sec-orphan-delete" '
-                    f'onclick="event.preventDefault();event.stopPropagation();deleteOrphanDraft(&quot;{sec_id}&quot;)" '
+                    f'data-action="delete-orphan-draft" '
+                    f'data-draft-id="{sec_id}" '
                     f'title="Delete this orphan draft permanently">\u2717</button>'
                     f'</a>'
                 )
@@ -3705,7 +3715,8 @@ def _render_sidebar(items, active_id):
         if not ch["sections"]:
             out += (
                 f'<div class="sec-link sec-empty-cta" '
-                f'onclick="startWritingChapter(&quot;{ch_id}&quot;)">'
+                f'data-action="start-writing-chapter" '
+                f'data-chapter-id="{ch_id}">'
                 f'\u270e Start writing</div>'
             )
         out += '</div>'
@@ -3746,8 +3757,10 @@ def _render_comments(comments):
             f'<span class="para-ref">P{int(para)}</span> '
             if para is not None else ""
         )
+        # Phase 42 — data-action dispatch (see ACTIONS registry in <script>).
         resolve_btn = (
-            f'<button class="resolve-btn" onclick="resolveComment(&quot;{_esc(str(cid))}&quot;)">Resolve</button>'
+            f'<button class="resolve-btn" data-action="resolve-comment" '
+            f'data-comment-id="{_esc(str(cid))}">Resolve</button>'
             if status == "open" else '<span class="resolved-tag">Resolved</span>'
         )
         comm_html = _esc(comm or "").replace("\n", "<br>")
@@ -5639,6 +5652,88 @@ let currentEventSource = null;
 // addSectionToChapter can refresh the in-memory cache after a PUT.
 let chaptersData = {chapters_json};
 
+// ── Phase 42: data-action click dispatcher ───────────────────────────────
+// Replaces ~20 inline onclick handlers that interpolated variables via
+// Python f-strings with HTML-entity escaping (&quot;). That pattern was
+// flagged by the Phase 22 audit: mitigated for XSS by _esc(), but
+// fragile — the next maintainer could easily forget escaping. It also
+// stops us from adopting a strict script-src CSP.
+//
+// New pattern: every such button carries `data-action="kebab-name"` plus
+// one or two `data-*` attrs for its arguments. The single listener below
+// looks up the handler in ACTIONS and invokes it with the element (which
+// owns its dataset) plus the raw event. Browsers escape data-* values
+// automatically, so the injection vector goes away by construction.
+//
+// Static handlers like `onclick="openPlanModal()"` are left alone — no
+// interpolation = no fragility. A future CSP pass can convert them too.
+const ACTIONS = {{
+  // Cluster 1 — Python-rendered sidebar + comments. Element carries
+  // data-chapter-id / data-sec-type / data-draft-id / data-comment-id
+  // so the handler doesn't need any interpolation.
+  'preview-empty-section': (el) =>
+    previewEmptySection(el.dataset.chapterId, el.dataset.secType),
+  'start-writing-chapter': (el) =>
+    startWritingChapter(el.dataset.chapterId),
+  'adopt-orphan-section': (el, e) => {{
+    // Adopt/delete buttons sit inside an anchor that navigates to the
+    // draft; stop the click from bubbling so the page doesn't change.
+    e.preventDefault(); e.stopPropagation();
+    adoptOrphanSection(el.dataset.chapterId, el.dataset.secType);
+  }},
+  'delete-orphan-draft': (el, e) => {{
+    e.preventDefault(); e.stopPropagation();
+    deleteOrphanDraft(el.dataset.draftId);
+  }},
+  'resolve-comment': (el) => resolveComment(el.dataset.commentId),
+
+  // Cluster 2 — dashboard heatmap + gaps. The chapter-modal / load-
+  // section opens happen directly from the cells. `preview-empty-
+  // section` is already registered above and works for both the
+  // sidebar and the heatmap callers.
+  'open-chapter-modal': (el) => openChapterModal(el.dataset.chapterId),
+  'load-section': (el) => loadSection(el.dataset.draftId),
+  'write-for-gap': (el) => writeForGap(parseInt(el.dataset.chapterNum, 10)),
+
+  // Cluster 3 — sidebar + section editor. setSectionType wants the
+  // clicked element as its second arg so it can toggle `.active` on
+  // the right chip; the delegator already passes `el`.
+  'set-section-type': (el) => setSectionType(el.dataset.secType, el),
+  'add-section-to-chapter': (el) => addSectionToChapter(el.dataset.chapterId),
+  'move-section': (el) => moveSection(
+    parseInt(el.dataset.sectionIndex, 10),
+    parseInt(el.dataset.delta, 10),
+  ),
+  'remove-section': (el) => removeSection(parseInt(el.dataset.sectionIndex, 10)),
+
+  // Cluster 4 — wiki browser + catalog pagination.
+  'open-wiki-page': (el) => openWikiPage(el.dataset.slug),
+  'load-wiki-pages': (el) => loadWikiPages(parseInt(el.dataset.page, 10)),
+  'ask-about-paper': (el) => askAboutPaper(el.dataset.paperTitle),
+  'load-catalog': (el) => loadCatalog(parseInt(el.dataset.page, 10)),
+
+  // Cluster 5 — version history + snapshot bundle/draft restore.
+  'select-version': (el) => selectVersion(el.dataset.versionId),
+  'restore-bundle': (el) => restoreBundle(el.dataset.snapshotId, el.dataset.scope),
+  'diff-snapshot': (el) => diffSnapshot(el.dataset.snapshotId),
+  'restore-snapshot': (el) => restoreSnapshot(el.dataset.snapshotId),
+}};
+
+document.addEventListener('click', function(e) {{
+  const el = e.target.closest('[data-action]');
+  if (!el) return;
+  const fn = ACTIONS[el.dataset.action];
+  if (typeof fn !== 'function') return;
+  // Event handlers may return false (legacy form), throw, or not —
+  // mirror the inline-onclick semantics so call sites don't change.
+  try {{
+    const ret = fn(el, e);
+    if (ret === false) {{ e.preventDefault(); e.stopPropagation(); }}
+  }} catch (exc) {{
+    console.error('[sciknow] data-action "' + el.dataset.action + '" failed:', exc);
+  }}
+}});
+
 // ── Theme ─────────────────────────────────────────────────────────────────
 function toggleTheme() {{
   const html = document.documentElement;
@@ -5720,14 +5815,15 @@ function showChapterEmptyState(chLabel, chId) {{
   html += '<div class="ch-scope-row"><span class="ch-scope-label">Topic query</span><div class="ch-scope-val">' +
           (tq ? '<code>' + tq.replace(/</g, '&lt;') + '</code>' : '<em style="color:var(--fg-faint);">Not set &mdash; the chapter title will be used as the retrieval query.</em>') +
           '</div></div>';
-  html += '<button class="btn-secondary" style="margin-top:8px;font-size:12px;" onclick="openChapterModal(&#39;' + chId + '&#39;)">&#9881; Edit chapter scope</button>';
+  // Phase 42 — data-action dispatch (see ACTIONS registry).
+  html += '<button class="btn-secondary" style="margin-top:8px;font-size:12px;" data-action="open-chapter-modal" data-chapter-id="' + chId + '">&#9881; Edit chapter scope</button>';
   html += '</div>';
 
   html += '<p>Once the scope feels right, choose a section type below and click <strong>Write</strong> in the toolbar, or click <strong>Autowrite</strong> to draft a section autonomously with the convergence loop.</p>';
   html += '<div class="empty-section-picker">';
   sections.forEach(s => {{
     const active = s === currentSectionType ? ' active' : '';
-    html += '<button class="section-chip' + active + '" onclick="setSectionType(&#39;' + s + '&#39;, this)">' + s.replace(/_/g, ' ') + '</button>';
+    html += '<button class="section-chip' + active + '" data-action="set-section-type" data-sec-type="' + s + '">' + s.replace(/_/g, ' ') + '</button>';
   }});
   html += '</div>';
   html += '<p style="margin-top:16px;font-size:12px;color:var(--fg-muted);">Tip: you can also explore the corpus without writing anything &mdash; use <strong>Ask Corpus</strong>, <strong>Wiki Query</strong>, or <strong>Browse Papers</strong>. The book&#39;s overall <strong>&#128221; Plan</strong> is also editable from the toolbar.</p>';
@@ -6538,10 +6634,12 @@ function rebuildSidebar(chapters, activeId) {{
             delBtn + '</a>';
         }} else {{
           // Phase 29 — preview-on-click instead of immediate doWrite()
+          // Phase 42 — data-action dispatch (preview-empty-section).
           html += '<div class="sec-link sec-empty" draggable="true" ' +
             'data-section-slug="' + tmpl.slug + '" ' +
             'title="' + planAttr + '" ' +
-            'onclick="previewEmptySection(\\'' + ch.id + '\\',\\'' + tmpl.slug + '\\')">' +
+            'data-action="preview-empty-section" ' +
+            'data-chapter-id="' + ch.id + '" data-sec-type="' + tmpl.slug + '">' +
             '<span class="sec-status-dot empty"></span>' +
             safeTmplTitle +
             ' <span class="meta">empty \\u00b7 \\u270e</span>' +
@@ -6557,6 +6655,7 @@ function rebuildSidebar(chapters, activeId) {{
       const display = escapeHtml(draft.title || (slug.charAt(0).toUpperCase() + slug.slice(1)));
       // Phase 22 — inline X button to delete the orphan
       // Phase 25 — also "+" button to adopt the slug into sections
+      // Phase 42 — data-action dispatch for orphan +/✗ buttons.
       html += '<a class="sec-link sec-orphan" href="/section/' + draft.id +
         '" data-draft-id="' + draft.id + '" onclick="return navTo(this)" ' +
         'title="Orphan draft. Click to inspect, + to adopt into sections, X to delete.">' +
@@ -6564,22 +6663,23 @@ function rebuildSidebar(chapters, activeId) {{
         display +
         ' <span class="meta">orphan \\u00b7 v' + draft.version + ' \\u00b7 ' + draft.words + 'w</span>' +
         '<button class="sec-orphan-adopt" ' +
-        'onclick="event.preventDefault();event.stopPropagation();adoptOrphanSection(\\'' + ch.id + '\\',\\'' + slug + '\\')" ' +
+        'data-action="adopt-orphan-section" ' +
+        'data-chapter-id="' + ch.id + '" data-sec-type="' + slug + '" ' +
         'title="Add this section_type to the chapter sections list">+</button>' +
         '<button class="sec-orphan-delete" ' +
-        'onclick="event.preventDefault();event.stopPropagation();deleteOrphanDraft(\\'' + draft.id + '\\')" ' +
+        'data-action="delete-orphan-draft" data-draft-id="' + draft.id + '" ' +
         'title="Delete this orphan draft permanently">\\u2717</button>' +
         '</a>';
     }});
 
     if (meta.length === 0 && Object.keys(draftBySlug).length === 0) {{
-      html += '<div class="sec-link sec-empty-cta" onclick="startWritingChapter(\\'' + ch.id + '\\')">\\u270e Start writing</div>';
+      html += '<div class="sec-link sec-empty-cta" data-action="start-writing-chapter" data-chapter-id="' + ch.id + '">\\u270e Start writing</div>';
     }}
     // Phase 32.4 — "+ Add section" CTA at the bottom of every
     // chapter's section list. Click → prompt for a title → POST
     // a new section dict via PUT /api/chapters/{{id}}/sections.
     html += '<div class="sec-link sec-add-cta" ' +
-      'onclick="addSectionToChapter(\\'' + ch.id + '\\')" ' +
+      'data-action="add-section-to-chapter" data-chapter-id="' + ch.id + '" ' +
       'title="Add a new section to this chapter">+ Add section</div>';
     html += '</div>';
   }});
@@ -6784,7 +6884,8 @@ async function showDashboard() {{
   }}
   html += '</tr></thead><tbody>';
   data.heatmap.forEach(row => {{
-    html += '<tr><td class="ch-label clickable" onclick="openChapterModal(&#39;' + row.id + '&#39;)" title="Click to edit chapter title and scope">';
+    // Phase 42 — data-action dispatch for the heatmap's clickable cells.
+    html += '<tr><td class="ch-label clickable" data-action="open-chapter-modal" data-chapter-id="' + row.id + '" title="Click to edit chapter title and scope">';
     html += '<span class="ch-label-num">Ch.' + row.num + '</span> ' + escapeHtml((row.title || '').substring(0, 36));
     html += ' <span class="ch-label-edit">&#9881;</span></td>';
     row.cells.forEach((cell, idx) => {{
@@ -6795,12 +6896,13 @@ async function showDashboard() {{
       }} else if (cell.status === 'empty') {{
         // Empty template slot — Phase 29 click-to-preview
         html += '<td><span class="hm-cell empty" ' +
-          'onclick="previewEmptySection(&#39;' + row.id + '&#39;,&#39;' + cell.type + '&#39;)" ' +
+          'data-action="preview-empty-section" ' +
+          'data-chapter-id="' + row.id + '" data-sec-type="' + cell.type + '" ' +
           'title="' + escapeHtml(posLabel) + ' (empty — click to preview)">+</span></td>';
       }} else {{
         const label = 'v' + cell.version + ' ' + cell.words + 'w';
         html += '<td><span class="hm-cell ' + cell.status + '" ' +
-          'onclick="loadSection(&#39;' + cell.draft_id + '&#39;)" ' +
+          'data-action="load-section" data-draft-id="' + cell.draft_id + '" ' +
           'title="' + escapeHtml(posLabel) + ' &mdash; ' + label + '">' + label + '</span></td>';
       }}
     }});
@@ -6814,7 +6916,9 @@ async function showDashboard() {{
     data.gaps.forEach(g => {{
       let btn = '';
       if (g.type === 'draft' && g.chapter_num) {{
-        btn = '<button onclick="writeForGap(' + g.chapter_num + ')">Write</button>';
+        // Phase 42 — data-action dispatch; chapter_num is a numeric
+        // attr, parsed back via parseInt in the handler.
+        btn = '<button data-action="write-for-gap" data-chapter-num="' + g.chapter_num + '">Write</button>';
       }} else if (g.type === 'evidence') {{
         const cmdHint = 'Run: sciknow db expand -q ' + g.description.substring(0,30).replace(/[&<>"\\']/g, '');
         btn = '<button data-cmd="' + cmdHint.replace(/&/g, '&amp;').replace(/"/g, '&quot;') + '" onclick="alert(this.dataset.cmd)">Expand</button>';
@@ -6969,7 +7073,7 @@ async function showVersions() {{
   let html = '';
   versionData.forEach(v => {{
     const review = v.has_review ? ' \\u2713' : '';
-    html += '<span class="version-badge" data-vid="' + v.id + '" onclick="selectVersion(&#39;' + v.id + '&#39;)">' +
+    html += '<span class="version-badge" data-vid="' + v.id + '" data-action="select-version" data-version-id="' + v.id + '">' +
       'v' + v.version + ' (' + v.word_count + 'w)' + review + '</span>';
   }});
   timeline.innerHTML = html;
@@ -8315,7 +8419,7 @@ async function loadWikiPages(page) {{
     let html = '<div class="wiki-page-list">';
     data.pages.forEach(p => {{
       const slug = (p.slug || '').replace(/'/g, '&#39;');
-      html += '<div class="wiki-page-row" onclick="openWikiPage(&#39;' + slug + '&#39;)">';
+      html += '<div class="wiki-page-row" data-action="open-wiki-page" data-slug="' + slug + '">';
       html += '<div class="wp-title">' + (p.title || p.slug || '').replace(/</g, '&lt;') + '</div>';
       html += '<div class="wp-meta">' + (p.word_count || 0).toLocaleString() + ' words · ' + (p.n_sources || 0) + ' src</div>';
       html += '<div class="wp-type">' + (p.page_type || '').replace(/_/g, ' ') + '</div>';
@@ -8325,9 +8429,9 @@ async function loadWikiPages(page) {{
 
     if (data.n_pages > 1) {{
       html += '<div class="catalog-pager">';
-      html += '<button onclick="loadWikiPages(' + (wikiBrowsePage - 1) + ')" ' + (wikiBrowsePage <= 1 ? 'disabled' : '') + '>‹ Prev</button>';
+      html += '<button data-action="load-wiki-pages" data-page="' + (wikiBrowsePage - 1) + '" ' + (wikiBrowsePage <= 1 ? 'disabled' : '') + '>‹ Prev</button>';
       html += '<span>Page ' + data.page + ' of ' + data.n_pages + '  ·  ' + data.total + ' pages</span>';
-      html += '<button onclick="loadWikiPages(' + (wikiBrowsePage + 1) + ')" ' + (wikiBrowsePage >= data.n_pages ? 'disabled' : '') + '>Next ›</button>';
+      html += '<button data-action="load-wiki-pages" data-page="' + (wikiBrowsePage + 1) + '" ' + (wikiBrowsePage >= data.n_pages ? 'disabled' : '') + '>Next ›</button>';
       html += '</div>';
     }}
 
@@ -8835,7 +8939,10 @@ async function loadCatalog(page) {{
     let html = '<table class="catalog-table"><thead><tr><th>Title</th><th>Year</th><th>Journal</th><th>Authors</th></tr></thead><tbody>';
     data.papers.forEach(p => {{
       const authorStr = (p.authors || []).slice(0, 2).map(a => (a.name || '').split(/\\s+/).slice(-1)[0]).filter(Boolean).join(', ') + (p.authors && p.authors.length > 2 ? ' et al.' : '');
-      html += '<tr onclick="askAboutPaper(' + JSON.stringify(p.title || '').replace(/"/g, '&quot;') + ')">';
+      // Phase 42 — data-paper-title carries the raw title; askAboutPaper
+      // reads it from the dataset.  Browsers escape data-* values, so no
+      // more JSON.stringify + quote juggling.
+      html += '<tr data-action="ask-about-paper" data-paper-title="' + escapeHtml(p.title || '') + '">';
       html += '<td><div class="ct-title">' + (p.title || '').replace(/</g, '&lt;') + '</div>';
       if (p.abstract) html += '<div class="ct-meta">' + p.abstract.substring(0, 160).replace(/</g, '&lt;') + '...</div>';
       html += '</td>';
@@ -8847,9 +8954,9 @@ async function loadCatalog(page) {{
     html += '</tbody></table>';
 
     html += '<div class="catalog-pager">';
-    html += '<button onclick="loadCatalog(' + (catalogPage - 1) + ')" ' + (catalogPage <= 1 ? 'disabled' : '') + '>‹ Prev</button>';
+    html += '<button data-action="load-catalog" data-page="' + (catalogPage - 1) + '" ' + (catalogPage <= 1 ? 'disabled' : '') + '>‹ Prev</button>';
     html += '<span>Page ' + data.page + ' of ' + data.n_pages + '  ·  ' + data.total + ' papers</span>';
-    html += '<button onclick="loadCatalog(' + (catalogPage + 1) + ')" ' + (catalogPage >= data.n_pages ? 'disabled' : '') + '>Next ›</button>';
+    html += '<button data-action="load-catalog" data-page="' + (catalogPage + 1) + '" ' + (catalogPage >= data.n_pages ? 'disabled' : '') + '>Next ›</button>';
     html += '</div>';
 
     results.innerHTML = html;
@@ -9567,8 +9674,9 @@ function renderSectionEditor() {{
     const customVal = (isCustom && tw) ? String(tw) : '';
     html += '<div class="sec-row" data-idx="' + i + '">';
     html += '  <div class="sec-handle">';
-    html += '    <button onclick="moveSection(' + i + ', -1)" title="Move up"' + (i === 0 ? ' disabled style="opacity:0.3;cursor:default;"' : '') + '>&uarr;</button>';
-    html += '    <button onclick="moveSection(' + i + ', 1)" title="Move down"' + (i === _editingSections.length - 1 ? ' disabled style="opacity:0.3;cursor:default;"' : '') + '>&darr;</button>';
+    // Phase 42 — data-action dispatch. delta is a signed int in dataset.
+    html += '    <button data-action="move-section" data-section-index="' + i + '" data-delta="-1" title="Move up"' + (i === 0 ? ' disabled style="opacity:0.3;cursor:default;"' : '') + '>&uarr;</button>';
+    html += '    <button data-action="move-section" data-section-index="' + i + '" data-delta="1" title="Move down"' + (i === _editingSections.length - 1 ? ' disabled style="opacity:0.3;cursor:default;"' : '') + '>&darr;</button>';
     html += '  </div>';
     html += '  <div class="sec-fields">';
     html += '    <input type="text" placeholder="Section title (e.g. The 11-Year Solar Cycle)" ';
@@ -9618,7 +9726,7 @@ function renderSectionEditor() {{
     html += '    </div>';
     html += '    <div class="sec-slug">slug: <code>' + slugDisplay + '</code></div>';
     html += '  </div>';
-    html += '  <button class="sec-delete" onclick="removeSection(' + i + ')" title="Delete this section">&times;</button>';
+    html += '  <button class="sec-delete" data-action="remove-section" data-section-index="' + i + '" title="Delete this section">&times;</button>';
     html += '</div>';
   }});
   // Phase 37 — one shared datalist for the per-section model inputs.
@@ -10647,7 +10755,7 @@ async function loadBundleList(scope) {{
       html += '<td style="padding:6px 4px;color:var(--fg-muted);">' + (s.word_count || 0).toLocaleString() + '</td>';
       html += '<td style="padding:6px 4px;color:var(--fg-muted);font-size:11px;">' + created + '</td>';
       html += '<td style="padding:6px 4px;text-align:right;">';
-      html += '<button onclick="restoreBundle(\\'' + s.id + '\\', \\'' + scope + '\\')" style="font-size:12px;padding:3px 10px;">Restore</button>';
+      html += '<button data-action="restore-bundle" data-snapshot-id="' + s.id + '" data-scope="' + scope + '" style="font-size:12px;padding:3px 10px;">Restore</button>';
       html += '</td></tr>';
     }});
     html += '</tbody></table>';
@@ -10710,8 +10818,8 @@ async function showSnapshots() {{
     html += '<div class="snap-item">';
     html += '<span>' + s.name + ' (' + s.word_count + 'w)</span>';
     html += '<div>';
-    html += '<button onclick="diffSnapshot(\\\'' + s.id + '\\\')">Diff</button> ';
-    html += '<button onclick="restoreSnapshot(\\\'' + s.id + '\\\')">Restore</button>';
+    html += '<button data-action="diff-snapshot" data-snapshot-id="' + s.id + '">Diff</button> ';
+    html += '<button data-action="restore-snapshot" data-snapshot-id="' + s.id + '">Restore</button>';
     html += '</div></div>';
   }});
   html += '</div>';
