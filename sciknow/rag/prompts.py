@@ -794,33 +794,47 @@ def write_section_v2(
             lines.append(f"Ch.{s.get('chapter_number', '?')} [{s.get('section_type', 'text')}]: {s['summary']}")
         summaries_block = "\nPrior chapter summaries:\n" + "\n".join(lines) + "\n"
 
-    # Optional discourse-relation guidance from a tree plan (PDTB-lite).
+    # Optional discourse-relation guidance from a tree plan (PDTB-lite)
+    # + Phase 34 CARS rhetorical-move guidance (Swales 1990 + Yang & Allison 2003).
     # If the planner produced a paragraph_plan list with discourse_relation
-    # fields, surface them so the writer opens each paragraph with an
-    # appropriate connective.
+    # and/or rhetorical_move fields, surface both so the writer knows:
+    #   (a) how to open each paragraph (discourse connective)
+    #   (b) what rhetorical function the paragraph serves (CARS move)
     discourse_block = ""
     if paragraph_plan:
         relation_lines = []
         for i, p in enumerate(paragraph_plan, 1):
             rel = (p.get("discourse_relation") or "").strip().lower()
+            move = (p.get("rhetorical_move") or "").strip().lower()
             point = (p.get("point") or p.get("main_point") or "").strip()
-            if rel and point:
-                relation_lines.append(f"  Paragraph {i} — {rel}: {point}")
+            if (rel or move) and point:
+                parts = []
+                if rel:
+                    parts.append(rel)
+                if move:
+                    parts.append(f"[{move}]")
+                relation_lines.append(f"  Paragraph {i} — {' '.join(parts)}: {point}")
         if relation_lines:
             discourse_block = (
-                "\nParagraph plan with discourse relations (PDTB-lite). For each "
-                "paragraph, open with a connective appropriate to its relation to "
-                "the previous paragraph:\n"
-                "  - background → 'Historically …', 'Earlier work …'\n"
-                "  - elaboration → 'More specifically …', 'In detail …'\n"
-                "  - evidence → 'Supporting this …', 'Direct measurements show …'\n"
-                "  - contrast → 'However …', 'By contrast …', 'Yet …'\n"
-                "  - concession → 'Although …', 'While X holds, …'\n"
-                "  - cause → 'As a result …', 'Because of this …'\n"
-                "  - comparison → 'Similarly …', 'Like X, Y …'\n"
-                "  - exemplification → 'For example …', 'A case in point …'\n"
-                "  - qualification → 'Within these limits …', 'For the period studied …'\n"
-                "  - synthesis → 'Taken together …', 'These lines of evidence converge on …'\n\n"
+                "\nParagraph plan with discourse relations (PDTB-lite) and CARS "
+                "rhetorical moves. For each paragraph:\n"
+                "  Discourse relation → open with an appropriate connective:\n"
+                "    background → 'Historically …', 'Earlier work …'\n"
+                "    elaboration → 'More specifically …', 'In detail …'\n"
+                "    evidence → 'Supporting this …', 'Direct measurements show …'\n"
+                "    contrast → 'However …', 'By contrast …', 'Yet …'\n"
+                "    concession → 'Although …', 'While X holds, …'\n"
+                "    cause → 'As a result …', 'Because of this …'\n"
+                "    comparison → 'Similarly …', 'Like X, Y …'\n"
+                "    exemplification → 'For example …', 'A case in point …'\n"
+                "    qualification → 'Within these limits …', 'For the period studied …'\n"
+                "    synthesis → 'Taken together …', 'These lines of evidence converge on …'\n"
+                "  CARS rhetorical move [in brackets] → shapes the paragraph's purpose:\n"
+                "    [orient] — define scope, frame concepts, set expectations\n"
+                "    [tension] — identify gaps, contradictions, open questions\n"
+                "    [evidence] — present specific data, measurements, observations\n"
+                "    [qualify] — hedge, state limitations, scope conditions\n"
+                "    [integrate] — synthesize into a conclusion connecting to the broader argument\n\n"
                 + "\n".join(relation_lines) + "\n"
             )
 
@@ -1259,6 +1273,23 @@ exactly one from this fixed PDTB-lite vocabulary:
     * qualification — narrows scope or adds caveats
     * synthesis — integrates multiple prior threads (typically near the end)
   The FIRST paragraph's discourse_relation should be "background".
+- "rhetorical_move": the CARS-adapted chapter move this paragraph serves — \
+pick exactly one from this 5-move vocabulary (Swales 1990, Yang & Allison 2003):
+    * orient — establish the terrain: define key concepts, frame the scope, \
+set up the reader's expectations for what this section covers
+    * tension — identify gaps, contradictions, open questions, or unresolved \
+debates in the literature. This is where the section becomes argumentative.
+    * evidence — present and evaluate the empirical evidence. Cite specific \
+data, measurements, model results, or observations.
+    * qualify — hedge, scope qualifications, limitations, conditions under \
+which findings hold. Mirror the sources' epistemic strength.
+    * integrate — synthesize the preceding points into a coherent conclusion \
+that connects to the broader chapter/book argument.
+  Guidelines: a well-structured section has AT LEAST one "orient" paragraph \
+(typically first), at least one "evidence" paragraph (the core), and \
+ideally one "integrate" paragraph (near the end). "tension" and "qualify" \
+add argumentative texture — use them when the literature genuinely has \
+gaps or caveats, not as filler. Do NOT make every paragraph "evidence".
 - "connects_to": one short sentence on how it leads to the next paragraph
 - "children": optional sub-points (for complex paragraphs)
 
@@ -1274,6 +1305,7 @@ Respond ONLY with valid JSON:
       "point": "Main argument of this paragraph",
       "sources": ["[1]", "[3]"],
       "discourse_relation": "background",
+      "rhetorical_move": "orient",
       "connects_to": "How this leads to the next paragraph",
       "children": []
     }},

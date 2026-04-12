@@ -29,7 +29,7 @@ From `docs/RESEARCH.md` §512. The 2026-04 literature sweep produced
 five candidates that didn't make the first ship batch (Phases 7–12).
 In priority order:
 
-- [ ] **CARS-adapted chapter moves** (Swales 1990 + Yang & Allison 2003) — 5-move scaffold (Orient → Tension → Evidence → Qualify → Integrate). Prompt-only, ~20 lines in `rag/prompts.py`. **Top linguistics runner-up.**
+- [x] **~~CARS-adapted chapter moves.~~** Shipped in Phase 34. `rhetorical_move` field added to the tree_plan prompt schema alongside `discourse_relation`. The 5-move vocabulary (orient/tension/evidence/qualify/integrate) is rendered as `[orient]`, `[tension]`, etc. in the writer's paragraph plan block. The planner labels each paragraph with both a PDTB-lite discourse relation (how it connects to the previous paragraph) AND a CARS rhetorical move (what function it serves in the section's argument). No schema change — pure prompt addition. **Top linguistics runner-up from the 2026-04 lit sweep.**
 - [ ] **LongCite-style sentence citations** (THUDM 2024) — sentence-level grounding with span match for ALCE-compatible `citation_f1`. Pairs naturally with the existing hedging_fidelity scoring + OVERSTATED verdict from Phase 11. **Top CS runner-up.**
 - [ ] **Toulmin scaffolds** for paragraphs the planner labels `Tension` (claim / data / warrant / qualifier / rebuttal). Linguistics runner-up #2.
 - [ ] **MADAM-RAG** (Wang et al. COLM 2025) for paragraphs the argument-mapper flags as contradiction-heavy. CS runner-up.

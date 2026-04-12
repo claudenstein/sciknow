@@ -954,6 +954,7 @@ def l1_research_doc_up_to_date() -> None:
         "## 19. RAPTOR",
         "## 20. Measurement & Observability",
         "## 21. Compound Learning from Iteration History",
+        "## 22. CARS-Adapted Chapter Moves",
     ):
         assert phase_marker in text, f"docs/RESEARCH.md missing section: {phase_marker!r}"
     # Implementation timeline should mention all phases up to 13.
@@ -4234,6 +4235,47 @@ def l1_phase33_keyboard_shortcuts_and_polish() -> None:
     )
 
 
+def l1_phase34_cars_rhetorical_moves() -> None:
+    """Phase 34 — CARS-adapted chapter moves (Swales 1990 + Yang & Allison 2003).
+
+    The 5-move scaffold (orient → tension → evidence → qualify → integrate)
+    is injected into the tree_plan prompt as a parallel label alongside
+    the existing PDTB-lite discourse_relation. The writer prompt renders
+    it as [orient], [tension], etc. per paragraph.
+
+    Verifies:
+    - tree_plan prompt includes rhetorical_move in the schema
+    - All 5 CARS moves are listed in the tree_plan system prompt
+    - write_section_v2 correctly renders CARS tags from paragraph_plan
+    - Without a paragraph_plan, no CARS block appears (backward compat)
+    """
+    from sciknow.rag import prompts
+
+    # 1) tree_plan prompt must include rhetorical_move in the schema
+    sys_tp, _ = prompts.tree_plan("intro", "topic", [])
+    assert "rhetorical_move" in sys_tp, "tree_plan missing rhetorical_move field"
+    for move in ("orient", "tension", "evidence", "qualify", "integrate"):
+        assert move in sys_tp, f"tree_plan missing CARS move: {move}"
+
+    # 2) Writer prompt renders CARS tags from paragraph_plan
+    plan = [
+        {"point": "test", "discourse_relation": "background",
+         "rhetorical_move": "orient"},
+        {"point": "test2", "discourse_relation": "contrast",
+         "rhetorical_move": "tension"},
+    ]
+    sys_w, _ = prompts.write_section_v2("intro", "topic", [], paragraph_plan=plan)
+    assert "[orient]" in sys_w, "writer not rendering [orient] tag"
+    assert "[tension]" in sys_w, "writer not rendering [tension] tag"
+    assert "CARS rhetorical move" in sys_w, "writer missing CARS legend"
+
+    # 3) Without paragraph_plan, no CARS block (backward compat)
+    sys_np, _ = prompts.write_section_v2("intro", "topic", [])
+    assert "CARS" not in sys_np, (
+        "CARS block should not appear without a paragraph_plan"
+    )
+
+
 def l2_phase32_endpoint_shapes() -> None:
     """TestClient smoke test for the major read-only API endpoints.
 
@@ -5179,6 +5221,8 @@ L1_TESTS: list[Callable] = [
     l1_phase32_10_style_fingerprint_layer5,
     # Phase 33 — keyboard shortcuts + chapter drag-drop + log rotation
     l1_phase33_keyboard_shortcuts_and_polish,
+    # Phase 34 — CARS rhetorical moves in tree plan + writer prompt
+    l1_phase34_cars_rhetorical_moves,
 ]
 
 L2_TESTS: list[Callable] = [

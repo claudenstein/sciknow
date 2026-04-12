@@ -590,13 +590,53 @@ The first user request that produced this section came after ~30 successful auto
 
 ---
 
+## 22. CARS-Adapted Chapter Moves (Phase 34)
+
+[Swales 1990](https://en.wikipedia.org/wiki/CARS_model) introduced the Create-a-Research-Space (CARS) model for academic introductions: Establishing territory → Establishing a niche → Occupying the niche. [Yang & Allison 2003](https://doi.org/10.1515/text.2003.004) adapted the model for book-length argumentative prose with a 5-move scaffold:
+
+| Move | Purpose | Typical rhetorical verbs |
+|---|---|---|
+| **Orient** | Define scope, frame concepts, set the reader's expectations | "This section examines…", "The concept of X refers to…" |
+| **Tension** | Identify gaps, contradictions, open debates in the literature | "However, a key question remains…", "These findings are contested by…" |
+| **Evidence** | Present specific data, measurements, model results, observations | "Satellite observations show…", "The reconstruction yields…" |
+| **Qualify** | Hedge, state limitations, scope conditions | "These results apply primarily to…", "Under high-emission scenarios only…" |
+| **Integrate** | Synthesize preceding points into a conclusion connecting to the broader argument | "Taken together, these lines of evidence…", "This supports the chapter's thesis that…" |
+
+### Implementation
+
+The 5-move vocabulary is added as a **parallel label** to the existing PDTB-lite `discourse_relation` field in the tree_plan prompt (Phase 9). Each paragraph in the planner's JSON output now has both:
+
+```json
+{
+  "point": "Main argument of this paragraph",
+  "discourse_relation": "contrast",
+  "rhetorical_move": "tension",
+  "sources": ["[1]", "[3]"],
+  "connects_to": "..."
+}
+```
+
+The writer prompt renders both: `discourse_relation` determines the opening connective ("However…"), while `rhetorical_move` determines the paragraph's purpose (present a gap vs. present evidence vs. hedge). This is the linguistic analogue of the PDTB relations — one shapes syntax, the other shapes rhetoric.
+
+### Design choice: why both discourse_relation AND rhetorical_move?
+
+They're orthogonal axes. A "concession" paragraph (discourse_relation) can serve any CARS move: it might be a *qualify* move ("Although the forcing is small…") or a *tension* move ("While most studies agree, Smith et al. challenge…"). The planner needs both to produce well-structured sections where the *flow* (discourse relations) and the *argument* (CARS moves) reinforce each other.
+
+### Expected impact
+
+Sections planned with CARS moves should have more argumentative texture: instead of a flat sequence of "here's a fact, here's another fact", the section will explicitly orient the reader, identify the interesting questions, present the evidence, qualify it, and synthesize. The win is primarily in completeness and coherence scoring dimensions — measurable via `book autowrite-bench` once we have enough runs to compare.
+
+**Cost:** zero new code outside `rag/prompts.py`. No schema changes, no migrations, no new endpoints. The planner's JSON schema gets one new field; the writer's discourse block gets one new column of tags. Fully backward-compatible: if the planner doesn't produce `rhetorical_move` (e.g. on a cold-start model that hasn't seen the new prompt), the writer block renders without CARS tags and behaves exactly as before.
+
+---
+
 ## Planned (Researched, Implementation Pending)
 
 The roadmap items from the 2026-04 lit sweep are now all shipped (Phases 7–12). Track A measurement landed in Phase 13. Future research notes will accumulate here as they're identified.
 
 Likely next-up candidates (in priority order, from the original lit sweep's runners-up):
 
-1. **CARS-adapted chapter moves** (Swales 1990 + Yang & Allison 2003) — 5-move scaffold (Orient → Tension → Evidence → Qualify → Integrate). Cost: prompt + ~20 lines. Linguistics runner-up #1.
+1. ~~**CARS-adapted chapter moves**~~ — **shipped in Phase 34.** See §22 below.
 2. **LongCite-style sentence citations** (THUDM 2024) — sentence-level grounding with span match for ALCE-compatible `citation_f1`. CS runner-up.
 3. **Toulmin scaffolds** for paragraphs the planner labels `Tension` (claim/data/warrant/qualifier/rebuttal). Linguistics runner-up #2.
 4. **MADAM-RAG** for paragraphs the argument-mapper flags as contradiction-heavy (Wang+ COLM 2025). CS runner-up.
