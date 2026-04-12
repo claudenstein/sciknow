@@ -138,8 +138,9 @@ def rendered_template_static() -> str:
     Postgres/Qdrant/Ollama. Used by JS-integrity tests that need the
     expanded `{var}` substitutions but don't care about real data.
     """
-    from sciknow.web.app import TEMPLATE
+    from sciknow.web.app import TEMPLATE, _BUILD_TAG
     return TEMPLATE.format(
+        _BUILD_TAG=_BUILD_TAG,
         book_title="Test Book",
         search_q="",
         search_results_html="",

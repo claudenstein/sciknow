@@ -894,8 +894,9 @@ def l1_web_rendered_js_is_valid() -> "TestResult":
             message="node not installed — skipping JS syntax check",
         )
 
-    from sciknow.web.app import TEMPLATE
+    from sciknow.web.app import TEMPLATE, _BUILD_TAG
     rendered = TEMPLATE.format(
+        _BUILD_TAG=_BUILD_TAG,
         book_title="Test Book", search_q="", search_results_html="",
         sidebar_html="", gaps_count=0,
         active_id="abc12345-6789-0000-0000-000000000000",

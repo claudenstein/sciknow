@@ -34,6 +34,27 @@ logger = logging.getLogger("sciknow.web")
 
 app = FastAPI(title="SciKnow Book Reader")
 
+# Phase 33 — build tag: a short version string visible in the browser
+# tab title and in the DevTools console so the user can instantly tell
+# whether their browser has stale JS (the "hard-refresh to see the new
+# chevron" problem from Phase 25). Computed once at import time from
+# the git short hash if possible, else from the current UTC timestamp.
+def _compute_build_tag() -> str:
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--short=7", "HEAD"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    except Exception:
+        pass
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+
+_BUILD_TAG = _compute_build_tag()
+
 
 # Global state — set by the CLI before launching uvicorn
 _book_id: str = ""
@@ -2645,6 +2666,7 @@ def _render_book(book, chapters, drafts, gaps, comments,
     # so they pass through unchanged. Numeric fields are coerced to int
     # so they can't smuggle markup either.
     return TEMPLATE.format(
+        _BUILD_TAG=_BUILD_TAG,
         book_title=_esc(book[1] if book else "Untitled"),
         book_id=_esc(str(_book_id)),
         book_plan=_esc((book[3] or "No plan set.") if book else ""),
@@ -2867,7 +2889,7 @@ TEMPLATE = """\
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{book_title} — SciKnow Reader</title>
+<title>{book_title} — SciKnow [{_BUILD_TAG}]</title>
 <style>
 /* ── Phase 14 — Web reader v2 design system ───────────────────────────────
    Modern indigo accent, refined neutrals, hairline borders, polished
@@ -4354,10 +4376,11 @@ body.task-bar-open {{ padding-top: 40px; }}
 </button>
 
 <script>
-// Phase 15.4 — page-load tag visible in DevTools Console.
-// If you don't see this line in the console, your browser is running
-// stale JS — hard-refresh with Ctrl+Shift+R (or Cmd+Shift+R on macOS).
-console.log('[sciknow] web reader loaded · build phase-15.4');
+// Phase 33 — page-load tag visible in DevTools Console. The build tag
+// is the git short hash (or a UTC timestamp if git isn't available).
+// If you see an old hash in the console after a deploy, your browser
+// is running stale JS — hard-refresh with Ctrl+Shift+R (macOS: Cmd+Shift+R).
+console.log('[sciknow] web reader loaded · build {_BUILD_TAG}');
 
 // ── State ─────────────────────────────────────────────────────────────────
 let currentDraftId = '{active_id}';

@@ -17,7 +17,7 @@ The Phase 22 QA agent flagged 15 issues in `sciknow/web/app.py`. The
 high-impact ones (XSS, job leak, draft delete) shipped in Phase 22.
 These three were deferred:
 
-- [ ] **Dead `/api/chapters/reorder` endpoint** at `web/app.py:704`. Registered but no JS calls it. Either remove it or wire chapter drag-and-drop in the sidebar (the section drag-and-drop in Phase 26 is a natural template). **Effort:** 1-2 hours for the GUI side.
+- [x] **~~Dead `/api/chapters/reorder` endpoint.~~** Wired in Phase 33 — chapter title bars are now draggable; the drop handler POSTs to this endpoint. No longer dead code.
 - [ ] **Fragile `WHERE`-clause f-string** in the catalog query (`web/app.py` ~1575). Current conditions are hardcoded so it's not exploitable, but it's a code smell that would bite if someone ever adds a user-controlled filter. Replace with explicit named bindings. **Effort:** 30 minutes.
 - [ ] **`onclick="..."` pattern fragility.** A lot of inline handlers with interpolated strings. Phase 22 escaped the IDs but the pattern itself is harder to reason about than `addEventListener`. Refactor to event delegation. **Effort:** half-day.
 
@@ -69,7 +69,7 @@ Mostly small.
 - [x] **~~Log rotation for `data/autowrite/`.~~** Shipped in Phase 33. `_rotate_old_logs` runs at `_AutowriteLogger.__init__` — keeps the most recent 50 `.jsonl` files, deletes older ones. Static method, no external deps.
 - [x] **~~Autowrite ETA in heartbeats.~~** Shipped in Phase 30 — the persistent task bar shows ETA when `target_words` is known and tokens are flowing (`remaining / tps`). The polling architecture from Phase 32.5 now keeps it in lockstep with the server-side counter.
 - [x] **~~Keyboard shortcuts.~~** Shipped in Phase 33. Esc (close modals, existing), Ctrl+S (force save in editor), Ctrl+K (focus search bar), Ctrl+E (toggle editor), ← / → (prev/next section in sidebar, guarded from inputs/textareas), D (dashboard), P (plan modal). All letter shortcuts only fire when focus is NOT in an input/textarea/select/contentEditable.
-- [ ] **Build-tag version string** in the template. Phase 25 had the "hard-refresh to see the new chevron" issue. If every render included a version string in the `<title>` or as a DevTools console line, users could instantly tell whether their browser has stale JS. **Effort:** 30 minutes.
+- [x] **~~Build-tag version string.~~** Shipped in Phase 33. `_BUILD_TAG` computed at import time from `git rev-parse --short=7 HEAD` (falls back to UTC timestamp). Visible in the browser tab title (`Book — SciKnow [abc1234]`) and in the DevTools console (`[sciknow] web reader loaded · build abc1234`). No more stale-JS guessing.
 
 ---
 
