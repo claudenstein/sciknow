@@ -3050,6 +3050,28 @@ def _autowrite_section_body(
                "detail": f"Layer 1: injecting {len(relevant_lessons)} lesson(s) from prior runs"}
         log.event("lessons_loaded", count=len(relevant_lessons))
 
+    # Phase 32.10 — Layer 5: fetch the book's style fingerprint, if it
+    # exists. Returns None on cold-start (no approved drafts yet).
+    # Independent of Layer 1: even when there are zero lessons, an
+    # established style fingerprint can still anchor the writer's
+    # voice to the user's prior accepted work.
+    style_fingerprint_block = ""
+    try:
+        from sciknow.core.style_fingerprint import (
+            get_style_fingerprint, format_fingerprint_for_prompt,
+        )
+        _fp = get_style_fingerprint(book_id) if book_id else None
+        if _fp:
+            style_fingerprint_block = format_fingerprint_for_prompt(_fp)
+            yield {"type": "progress", "stage": "style",
+                   "detail": f"Layer 5: injecting style fingerprint ({_fp.get('n_drafts_sampled', 0)} drafts)"}
+            log.event("style_fingerprint_loaded",
+                      n_drafts=_fp.get("n_drafts_sampled", 0))
+    except Exception as exc:
+        # Fail-soft: any error in fingerprint reads must NEVER block
+        # the autowrite — Layer 5 is purely additive.
+        logger.warning("style fingerprint load failed: %s", exc)
+
     if resume_content is None:
         system, user = rag_prompts.write_section_v2(
             section_type, topic, results,
@@ -3058,6 +3080,7 @@ def _autowrite_section_body(
             target_words=effective_target_words,
             section_plan=section_plan,
             lessons=relevant_lessons,
+            style_fingerprint_block=style_fingerprint_block,
         )
         yield {"type": "progress", "stage": "writing",
                "detail": f"Generating initial draft (~{effective_target_words} words)..."}

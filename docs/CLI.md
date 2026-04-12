@@ -298,6 +298,14 @@ sciknow book preferences export "Global Cooling" --min-score 0.75 --min-delta 0.
 sciknow book preferences export "Global Cooling" --no-discard  # KEEP verdicts only (conservative)
 sciknow book preferences export "Global Cooling" --require-approval  # human-in-the-loop gate
 
+# ── Style fingerprint (Phase 32.10 — Layer 5) ─────────────────────────────
+
+# Extract a per-book writing style fingerprint from approved drafts
+# (status in final/reviewed/revised). Injected into the writer prompt
+# as a style anchor on the next autowrite run. Pure Python — no LLM cost.
+sciknow book style refresh "Global Cooling"   # recompute from current state
+sciknow book style show "Global Cooling"      # display persisted fingerprint
+
 # ── Autowrite variance bench (Phase 13) ──────────────────────────────────
 
 sciknow book autowrite-bench "Global Cooling" 3 overview --runs 5

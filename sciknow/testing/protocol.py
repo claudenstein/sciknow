@@ -4066,6 +4066,111 @@ def l1_phase32_9_dpo_export_layer4() -> None:
     )
 
 
+def l1_phase32_10_style_fingerprint_layer5() -> None:
+    """Phase 32.10 — Layer 5: style fingerprint extraction.
+
+    Verifies the module loads, the extraction logic correctly counts
+    sentences/citations/hedges/transitions on a known input, the
+    aggregation produces the expected schema, the writer prompt has
+    the {style_fingerprint_section} placeholder, write_section_v2
+    accepts the new parameter, and both the consumer wiring and the
+    CLI commands are in place.
+    """
+    from sciknow.core import style_fingerprint as sf
+
+    # Module-level constants exist and are sane
+    assert isinstance(sf._HEDGE_CUES, frozenset) and len(sf._HEDGE_CUES) > 10, (
+        "_HEDGE_CUES looks broken"
+    )
+    assert isinstance(sf._TRANSITION_CUES, frozenset) and len(sf._TRANSITION_CUES) > 20, (
+        "_TRANSITION_CUES looks broken"
+    )
+
+    # Extraction works on a known input
+    test_text = (
+        "The 11-year solar cycle may modulate global temperature [1]. "
+        "However, the magnitude is contested [2]. "
+        "Recent reconstructions suggest a small effect."
+    )
+    metrics = sf._extract_metrics_for_draft(test_text)
+    assert metrics["n_sentences"] == 3, f"expected 3 sentences, got {metrics['n_sentences']}"
+    assert metrics["n_citations"] == 2, f"expected 2 citations, got {metrics['n_citations']}"
+    assert metrics["n_hedged_sentences"] >= 2, (
+        f"expected ≥2 hedged sentences (may, suggest), got {metrics['n_hedged_sentences']}"
+    )
+    assert metrics["transition_counts"].get("however") == 1, (
+        f"transition 'however' not detected: {metrics['transition_counts']}"
+    )
+
+    # Aggregation produces the expected schema
+    fp = sf._aggregate_fingerprint([metrics])
+    for key in (
+        "n_drafts_sampled", "median_sentence_length", "median_paragraph_words",
+        "citations_per_100_words", "hedging_rate", "avg_words_per_draft",
+        "top_transitions",
+    ):
+        assert key in fp, f"fingerprint missing key: {key}"
+
+    # Empty corpus produces a sensible empty fingerprint, not a crash
+    empty = sf._aggregate_fingerprint([])
+    assert empty["n_drafts_sampled"] == 0
+    assert "samples_warning" in empty
+
+    # Public helpers exist
+    for fn in ("compute_style_fingerprint", "get_style_fingerprint",
+               "format_fingerprint_for_prompt"):
+        assert hasattr(sf, fn), f"missing public function: {fn}"
+
+    # Format helper handles None / empty gracefully
+    assert sf.format_fingerprint_for_prompt(None) == ""
+    assert sf.format_fingerprint_for_prompt({"n_drafts_sampled": 0}) == ""
+
+    # Writer prompt has the new placeholder + parameter
+    from sciknow.rag import prompts as rag_prompts
+    assert "{style_fingerprint_section}" in rag_prompts.WRITE_V2_SYSTEM, (
+        "WRITE_V2_SYSTEM missing {style_fingerprint_section} placeholder"
+    )
+    import inspect
+    sig = inspect.signature(rag_prompts.write_section_v2)
+    assert "style_fingerprint_block" in sig.parameters, (
+        "write_section_v2 missing style_fingerprint_block parameter"
+    )
+
+    # Calling write_section_v2 with a fingerprint must produce a system
+    # prompt that contains the rendered block (not the raw placeholder).
+    fp_block = sf.format_fingerprint_for_prompt(fp)
+    sys_p, _ = rag_prompts.write_section_v2(
+        "intro", "topic", [],
+        style_fingerprint_block=fp_block,
+    )
+    assert "Match the established style" in sys_p, (
+        "fingerprint block did not render into the system prompt"
+    )
+    # Calling without a fingerprint must NOT leave the placeholder behind
+    sys_p2, _ = rag_prompts.write_section_v2("intro", "topic", [])
+    assert "{style_fingerprint_section}" not in sys_p2, (
+        "unrendered placeholder leaked into system prompt when fingerprint is None"
+    )
+
+    # Consumer wired into _autowrite_section_body
+    from sciknow.core import book_ops
+    body_src = inspect.getsource(book_ops._autowrite_section_body)
+    assert "get_style_fingerprint(" in body_src, (
+        "_autowrite_section_body not calling get_style_fingerprint — "
+        "Layer 5 wiring missing"
+    )
+    assert "style_fingerprint_block=" in body_src, (
+        "_autowrite_section_body not threading style_fingerprint_block "
+        "into write_section_v2"
+    )
+
+    # CLI commands registered
+    from sciknow.cli import book as book_cli
+    assert hasattr(book_cli, "style_app"), "book.style_app subcommand missing"
+    assert hasattr(book_cli, "style_refresh"), "style_refresh CLI handler missing"
+    assert hasattr(book_cli, "style_show"), "style_show CLI handler missing"
+
+
 def l2_phase32_endpoint_shapes() -> None:
     """TestClient smoke test for the major read-only API endpoints.
 
@@ -4692,6 +4797,129 @@ def l2_phase32_9_dpo_export_roundtrip() -> None:
     )
 
 
+def l2_phase32_10_style_fingerprint_roundtrip() -> None:
+    """Phase 32.10 — Layer 5: end-to-end style fingerprint roundtrip
+    against live PG.
+
+    Creates a temporary book, inserts 3 approved drafts with known
+    style features, runs compute_style_fingerprint, and verifies:
+    - The fingerprint is persisted to books.custom_metadata.style_fingerprint
+    - get_style_fingerprint reads it back identically
+    - The metrics roughly match what we put in
+    - format_fingerprint_for_prompt produces a non-empty block
+    Cleans up the temporary book in a finally block.
+    """
+    from sqlalchemy import text as _t
+    from sciknow.storage.db import get_session
+    from sciknow.core.style_fingerprint import (
+        compute_style_fingerprint, get_style_fingerprint,
+        format_fingerprint_for_prompt,
+    )
+
+    fake_book_title = "phase32.10 fingerprint roundtrip test"
+    book_id = None
+
+    # Sample drafts — same content gives a deterministic fingerprint
+    drafts = [
+        ("draft-1",
+         "The first sentence has six words. The second has five words here. "
+         "Recent work suggests three [1] to four key findings [2]. "
+         "However, the magnitude is contested.\n\nThis paragraph adds more "
+         "context. The mechanism appears robust [3]."),
+        ("draft-2",
+         "Ocean heat content trends indicate a steady rise [4]. The signal "
+         "may suggest anthropogenic forcing. However, internal variability "
+         "could account for some fraction [5].\n\nMoreover, deep ocean uptake "
+         "tends to dominate the budget."),
+        ("draft-3",
+         "Volcanic eruptions inject SO2 into the stratosphere [6]. The 1991 "
+         "Pinatubo event caused measurable cooling [7]. Importantly, the "
+         "decay timescale is approximately 18 months."),
+    ]
+
+    try:
+        # 1) Create a temp book + 3 approved drafts
+        with get_session() as s:
+            row = s.execute(_t("""
+                INSERT INTO books (title, status) VALUES (:t, 'draft')
+                RETURNING id::text
+            """), {"t": fake_book_title}).fetchone()
+            book_id = row[0]
+            for title, content in drafts:
+                s.execute(_t("""
+                    INSERT INTO drafts (
+                        title, book_id, content, status, version, sources
+                    ) VALUES (
+                        :title, CAST(:bid AS uuid), :content, 'final',
+                        1, '[]'::jsonb
+                    )
+                """), {"title": title, "bid": book_id, "content": content})
+            s.commit()
+
+        # 2) Compute the fingerprint
+        fp = compute_style_fingerprint(book_id)
+        assert fp["n_drafts_sampled"] == 3, (
+            f"expected 3 drafts sampled, got {fp['n_drafts_sampled']}"
+        )
+
+        # 3) Verify it persisted to books.custom_metadata
+        with get_session() as s:
+            meta = s.execute(_t(
+                "SELECT custom_metadata FROM books WHERE id::text = :id"
+            ), {"id": book_id}).scalar()
+        assert isinstance(meta, dict), f"custom_metadata not a dict: {type(meta)}"
+        assert "style_fingerprint" in meta, (
+            "style_fingerprint not persisted to books.custom_metadata"
+        )
+
+        # 4) get_style_fingerprint reads it back
+        fp_read = get_style_fingerprint(book_id)
+        assert fp_read is not None, "get_style_fingerprint returned None after compute"
+        assert fp_read["n_drafts_sampled"] == 3
+        assert fp_read["citations_per_100_words"] == fp["citations_per_100_words"]
+
+        # 5) Metrics are sane
+        assert fp["median_sentence_length"] > 0, "median_sentence_length is 0"
+        assert fp["citations_per_100_words"] > 0, (
+            "citations_per_100_words is 0 — citation regex broken"
+        )
+        assert fp["hedging_rate"] > 0, (
+            "hedging_rate is 0 — hedge cue list not detecting drafts that contain "
+            "'may', 'suggest', 'tends', 'could', 'approximately'"
+        )
+        # We have at least one transition: "however" or "moreover" or "importantly"
+        transitions = fp.get("top_transitions") or []
+        assert len(transitions) > 0, (
+            f"no transitions detected — {transitions}"
+        )
+
+        # 6) Format for prompt produces a non-empty block with the right keywords
+        block = format_fingerprint_for_prompt(fp)
+        assert "Match the established style" in block
+        assert "median sentence length" in block
+        assert "citation density" in block
+    finally:
+        # Always clean up
+        with get_session() as s:
+            if book_id:
+                s.execute(_t(
+                    "DELETE FROM drafts WHERE book_id::text = :id"
+                ), {"id": book_id})
+                s.execute(_t(
+                    "DELETE FROM books WHERE id::text = :id"
+                ), {"id": book_id})
+            s.commit()
+
+    return TestResult.ok(
+        name="l2_phase32_10_style_fingerprint_roundtrip",
+        message=(
+            f"3 drafts → median_sent={fp['median_sentence_length']}w, "
+            f"hedging={fp['hedging_rate']:.0%}, "
+            f"cites/100w={fp['citations_per_100_words']}"
+        ),
+    )
+
+
 def l2_phase32_data_invariants() -> None:
     """DB-level invariants the GUI relies on.
 
@@ -4884,6 +5112,8 @@ L1_TESTS: list[Callable] = [
     l1_phase32_8_useful_count_boost_layer2,
     # Phase 32.9 — Layer 4: DPO preference dataset export
     l1_phase32_9_dpo_export_layer4,
+    # Phase 32.10 — Layer 5: style fingerprint extraction
+    l1_phase32_10_style_fingerprint_layer5,
 ]
 
 L2_TESTS: list[Callable] = [
@@ -4905,6 +5135,8 @@ L2_TESTS: list[Callable] = [
     l2_phase32_8_useful_boost_roundtrip,
     # Phase 32.9 — Layer 4 DPO export with KEEP/DISCARD inversion + filters
     l2_phase32_9_dpo_export_roundtrip,
+    # Phase 32.10 — Layer 5 style fingerprint compute + persist + read
+    l2_phase32_10_style_fingerprint_roundtrip,
 ]
 
 L3_TESTS: list[Callable] = [

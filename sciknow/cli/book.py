@@ -46,6 +46,14 @@ app.add_typer(draft_app, name="draft")
 preferences_app = typer.Typer(help="Export DPO preference pairs from autowrite history (Layer 4).")
 app.add_typer(preferences_app, name="preferences")
 
+# Phase 32.10 — Compound learning Layer 5: style fingerprint.
+# `book style refresh` extracts the user's writing style from approved
+# drafts (status in final/reviewed/revised) and persists to
+# books.custom_metadata.style_fingerprint. The autowrite loop reads
+# this and injects it into the writer system prompt as a style anchor.
+style_app = typer.Typer(help="Manage the per-book writing style fingerprint (Layer 5).")
+app.add_typer(style_app, name="style")
+
 console = Console()
 
 
@@ -2229,3 +2237,96 @@ def preferences_export(
                 verdicts[rec["verdict"]] = verdicts.get(rec["verdict"], 0) + 1
         verdict_str = ", ".join(f"{k}={v}" for k, v in sorted(verdicts.items()))
         console.print(f"[dim]breakdown: {verdict_str}[/dim]")
+
+
+# ── Phase 32.10 — Layer 5: style fingerprint CLI ──────────────────────────────
+
+
+@style_app.command(name="refresh")
+def style_refresh(
+    book: str = typer.Argument(..., help="Book title or ID fragment"),
+):
+    """Phase 32.10 — Recompute the book's style fingerprint from the
+    user's approved drafts (status in final/reviewed/revised).
+
+    The fingerprint is persisted to books.custom_metadata.style_fingerprint
+    and read by the autowrite loop on the next run, injecting a style
+    anchor into the writer system prompt.
+
+    Run this whenever you've marked new drafts as final/reviewed/revised
+    and want the autowrite voice to start matching them. The computation
+    is pure Python over draft text — no LLM cost, runs in milliseconds.
+    """
+    from sciknow.core.style_fingerprint import compute_style_fingerprint
+    from sciknow.storage.db import get_session
+
+    with get_session() as session:
+        row = _get_book(session, book)
+    if not row:
+        console.print(f"[red]Book not found:[/red] {book}")
+        raise typer.Exit(code=1)
+    book_id, title = row[0], row[1]
+    console.print(f"[dim]computing style fingerprint for {title} ({book_id[:8]}...)[/dim]")
+
+    fp = compute_style_fingerprint(book_id)
+    n_drafts = fp.get("n_drafts_sampled", 0)
+
+    if n_drafts == 0:
+        console.print(
+            "\n[yellow]No approved drafts found.[/yellow] "
+            "Mark drafts as final/reviewed/revised in the web reader "
+            "(Status dropdown in the toolbar) and re-run this command."
+        )
+        return
+
+    console.print(f"\n[green]✓[/green] fingerprint computed from [bold]{n_drafts}[/bold] approved draft(s)")
+    console.print(f"  median sentence length: [bold]{fp.get('median_sentence_length', 0)}[/bold] words")
+    console.print(f"  median paragraph length: [bold]{fp.get('median_paragraph_words', 0)}[/bold] words")
+    console.print(f"  typical section length: [bold]~{int(fp.get('avg_words_per_draft', 0) or 0)}[/bold] words")
+    console.print(f"  citation density: [bold]{fp.get('citations_per_100_words', 0)}[/bold] per 100 words")
+    console.print(f"  hedging rate: [bold]{fp.get('hedging_rate', 0):.0%}[/bold] of sentences")
+    transitions = fp.get("top_transitions") or []
+    if transitions:
+        t_str = ", ".join(f"\"{t['word']}\" ({t['count']})" for t in transitions[:5])
+        console.print(f"  top transitions: {t_str}")
+    if "samples_warning" in fp:
+        console.print(f"\n[dim]{fp['samples_warning']}[/dim]")
+    console.print(
+        "\n[dim]The next autowrite run on this book will inject this "
+        "fingerprint into the writer system prompt as a style anchor.[/dim]"
+    )
+
+
+@style_app.command(name="show")
+def style_show(
+    book: str = typer.Argument(..., help="Book title or ID fragment"),
+):
+    """Phase 32.10 — Display the persisted style fingerprint for a book.
+
+    Reads books.custom_metadata.style_fingerprint without recomputing.
+    Use `style refresh` to regenerate from the current draft state.
+    """
+    from sciknow.core.style_fingerprint import (
+        get_style_fingerprint, format_fingerprint_for_prompt,
+    )
+    from sciknow.storage.db import get_session
+
+    with get_session() as session:
+        row = _get_book(session, book)
+    if not row:
+        console.print(f"[red]Book not found:[/red] {book}")
+        raise typer.Exit(code=1)
+    book_id, title = row[0], row[1]
+
+    fp = get_style_fingerprint(book_id)
+    if not fp:
+        console.print(
+            f"[yellow]No style fingerprint set for[/yellow] {title}.\n"
+            f"Run [cyan]sciknow book style refresh \"{title}\"[/cyan] to compute one."
+        )
+        return
+
+    console.print(f"\n[bold]Style fingerprint for {title}[/bold]")
+    console.print(format_fingerprint_for_prompt(fp))
+    if "samples_warning" in fp:
+        console.print(f"[dim]{fp['samples_warning']}[/dim]")

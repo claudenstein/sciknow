@@ -719,6 +719,7 @@ the prior topic and the new one ("Beyond the ocean heat content discussed above,
 atmospheric branch …").
 
 {length_target_section}
+{style_fingerprint_section}
 {lessons_section}
 {section_plan_section}
 {discourse_relation_section}
@@ -747,6 +748,7 @@ def write_section_v2(
     target_words: int | None = None,
     section_plan: str | None = None,
     lessons: list[str] | None = None,
+    style_fingerprint_block: str | None = None,
 ) -> tuple[str, str]:
     # Phase 32.7 — Layer 1 episodic memory. `lessons` is a list of 1-3
     # sentence concrete reflections distilled from past autowrite runs
@@ -847,6 +849,7 @@ def write_section_v2(
     return (
         WRITE_V2_SYSTEM.format(
             length_target_section=length_block,
+            style_fingerprint_section=(style_fingerprint_block or ""),
             lessons_section=lessons_block,
             section_plan_section=section_plan_block,
             discourse_relation_section=discourse_block,
