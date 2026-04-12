@@ -2484,6 +2484,402 @@ async def api_catalog(
     })
 
 
+# ── Phase 36: Tools panel endpoints ──────────────────────────────────────────
+# Brings four CLI-only capabilities into the web GUI:
+#   search query / search similar  → JSON
+#   ask synthesize                 → SSE (mirrors /api/ask which is the
+#                                        `ask question` equivalent)
+#   catalog topics                 → JSON (topic cluster breakdown)
+#   db enrich / db expand          → SSE, subprocess-backed so the CLI
+#                                    stays the source of truth for these
+#                                    long-running ops with complex flag
+#                                    surfaces (workers, resolvers, …).
+
+
+@app.post("/api/search/query")
+async def api_search_query(
+    q: str = Form(...),
+    top_k: int = Form(10),
+    candidate_k: int = Form(50),
+    no_rerank: bool = Form(False),
+    year_from: int = Form(None),
+    year_to: int = Form(None),
+    section: str = Form(None),
+    topic: str = Form(None),
+    expand: bool = Form(False),
+):
+    """Hybrid corpus search (sciknow search query). JSON response.
+
+    Quick-enough to return a JSON response rather than SSE: the search
+    fan-out is one Qdrant dense + one sparse + one PG FTS query, fused,
+    then a cross-encoder rerank over ~50 candidates. Typical <2s on the
+    reference hardware.
+    """
+    from sciknow.retrieval import context_builder, hybrid_search, reranker
+    from sciknow.storage.qdrant import get_client
+
+    qdrant = get_client()
+    with get_session() as session:
+        candidates = hybrid_search.search(
+            query=q, qdrant_client=qdrant, session=session,
+            candidate_k=candidate_k,
+            year_from=year_from, year_to=year_to,
+            section=section, topic_cluster=topic,
+            use_query_expansion=expand,
+        )
+        if not candidates:
+            return JSONResponse({"results": [], "n": 0})
+        if not no_rerank:
+            candidates = reranker.rerank(q, candidates, top_k=top_k)
+        else:
+            candidates = candidates[:top_k]
+        results = context_builder.build(candidates, session)
+
+    import re as _re
+    out = []
+    for r in results:
+        preview = _re.sub(r"<[^>]+>", "", r.content or "")
+        preview = _re.sub(r"\s+", " ", preview).strip()[:300]
+        out.append({
+            "rank": r.rank,
+            "title": r.title or "(untitled)",
+            "year": r.year,
+            "authors": r.authors or [],
+            "journal": r.journal,
+            "doi": r.doi,
+            "section_type": r.section_type,
+            "section_title": r.section_title,
+            "score": r.score,
+            "preview": preview,
+            "document_id": str(r.document_id) if r.document_id else None,
+        })
+    return JSONResponse({"results": out, "n": len(out)})
+
+
+@app.post("/api/search/similar")
+async def api_search_similar(
+    identifier: str = Form(...),
+    top_k: int = Form(10),
+):
+    """Nearest-neighbour paper search in the abstracts collection.
+
+    Mirrors `sciknow search similar`. Accepts a DOI, arXiv ID, title
+    fragment, or document UUID; resolves it to a document_id, pulls its
+    abstract embedding from Qdrant, and returns the top_k nearest
+    neighbours (excluding the query paper itself).
+    """
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+    from sciknow.storage.qdrant import ABSTRACTS_COLLECTION, get_client
+
+    qdrant = get_client()
+    ident = (identifier or "").strip()
+    if not ident:
+        raise HTTPException(400, "identifier required")
+
+    with get_session() as session:
+        row = session.execute(text(
+            "SELECT d.id::text, pm.title, pm.doi, pm.year "
+            "FROM paper_metadata pm JOIN documents d ON d.id = pm.document_id "
+            "WHERE LOWER(pm.doi) = LOWER(:q) OR LOWER(pm.arxiv_id) = LOWER(:q) "
+            "LIMIT 1"
+        ), {"q": ident}).first()
+        if not row:
+            row = session.execute(text(
+                "SELECT d.id::text, pm.title, pm.doi, pm.year "
+                "FROM paper_metadata pm JOIN documents d ON d.id = pm.document_id "
+                "WHERE pm.title ILIKE :pattern "
+                "ORDER BY pm.year DESC NULLS LAST LIMIT 1"
+            ), {"pattern": f"%{ident}%"}).first()
+        if not row:
+            try:
+                row = session.execute(text(
+                    "SELECT d.id::text, pm.title, pm.doi, pm.year "
+                    "FROM paper_metadata pm JOIN documents d ON d.id = pm.document_id "
+                    "WHERE d.id::text = :q LIMIT 1"
+                ), {"q": ident}).first()
+            except Exception:
+                row = None
+
+    if not row:
+        return JSONResponse({"error": "Paper not found", "query": ident}, status_code=404)
+
+    doc_id, title, doi, year = row
+    abstract_points = qdrant.scroll(
+        collection_name=ABSTRACTS_COLLECTION,
+        scroll_filter=Filter(must=[
+            FieldCondition(key="document_id", match=MatchValue(value=doc_id))
+        ]),
+        with_vectors=["dense"],
+        limit=1,
+    )[0]
+    if not abstract_points:
+        return JSONResponse({
+            "error": "No abstract embedding for this paper (was it ingested?)",
+            "query": ident, "document_id": doc_id, "title": title,
+        }, status_code=404)
+
+    query_vec = abstract_points[0].vector
+    if isinstance(query_vec, dict):
+        query_vec = query_vec.get("dense")
+
+    hits = qdrant.query_points(
+        collection_name=ABSTRACTS_COLLECTION,
+        query=query_vec, using="dense",
+        limit=top_k + 1, with_payload=True,
+    )
+
+    results = []
+    for point in hits.points:
+        payload = point.payload or {}
+        if payload.get("document_id") == doc_id:
+            continue  # exclude the query paper
+        results.append({
+            "title": payload.get("title") or (payload.get("content_preview") or "")[:80],
+            "year": payload.get("year"),
+            "authors": payload.get("authors") or [],
+            "document_id": payload.get("document_id"),
+            "score": float(point.score) if point.score is not None else None,
+        })
+        if len(results) >= top_k:
+            break
+
+    return JSONResponse({
+        "query": {"title": title, "year": year, "doi": doi, "document_id": doc_id},
+        "results": results, "n": len(results),
+    })
+
+
+@app.post("/api/ask/synthesize")
+async def api_ask_synthesize(
+    topic: str = Form(...),
+    model: str = Form(None),
+    context_k: int = Form(12),
+    year_from: int = Form(None),
+    year_to: int = Form(None),
+    domain: str = Form(None),
+    topic_filter: str = Form(None),
+):
+    """Multi-paper synthesis on a topic (sciknow ask synthesize). SSE.
+
+    Distinct from /api/ask which runs `ask question` (Q&A). Synthesize
+    biases the prompt toward consensus/method/open-question framing.
+    """
+    from sciknow.rag import prompts as rag_prompts
+    from sciknow.rag.llm import stream as llm_stream
+    from sciknow.retrieval import context_builder, hybrid_search, reranker
+    from sciknow.storage.qdrant import get_client
+
+    job_id, _queue = _create_job("synthesize")
+    loop = asyncio.get_event_loop()
+
+    def gen():
+        qdrant = get_client()
+        yield {"type": "progress", "stage": "retrieving",
+               "detail": f"Retrieving passages for: {topic}..."}
+        with get_session() as session:
+            candidates = hybrid_search.search(
+                query=topic, qdrant_client=qdrant, session=session,
+                candidate_k=50,
+                year_from=year_from if year_from else None,
+                year_to=year_to if year_to else None,
+                domain=domain or None,
+                topic_cluster=topic_filter or None,
+            )
+            if not candidates:
+                yield {"type": "error", "message": "No relevant passages found."}
+                return
+            candidates = reranker.rerank(topic, candidates, top_k=context_k)
+            results = context_builder.build(candidates, session)
+
+        from sciknow.rag.prompts import format_sources
+        sources = format_sources(results).splitlines()
+        yield {"type": "sources", "sources": sources, "n": len(sources)}
+
+        system, user = rag_prompts.synthesis(topic, results)
+        yield {"type": "progress", "stage": "generating",
+               "detail": f"Synthesising from {len(results)} passages..."}
+        for tok in llm_stream(system, user, model=model or None):
+            yield {"type": "token", "text": tok}
+        yield {"type": "completed"}
+
+    threading.Thread(
+        target=_run_generator_in_thread, args=(job_id, gen, loop), daemon=True
+    ).start()
+    return JSONResponse({"job_id": job_id})
+
+
+@app.get("/api/catalog/topics")
+async def api_catalog_topics(name: str = None):
+    """Topic cluster breakdown (sciknow catalog topics).
+
+    With no args: returns every non-null cluster name + paper count.
+    With ?name=...: returns the cluster's paper list (title/year/doi).
+    """
+    with get_session() as session:
+        if name:
+            rows = session.execute(text("""
+                SELECT pm.document_id::text, pm.title, pm.year, pm.doi,
+                       pm.authors, pm.journal
+                FROM paper_metadata pm
+                WHERE pm.topic_cluster = :n
+                ORDER BY pm.year DESC NULLS LAST, pm.title
+                LIMIT 500
+            """), {"n": name}).fetchall()
+            papers = [
+                {"document_id": r[0], "title": r[1], "year": r[2],
+                 "doi": r[3], "authors": r[4] or [], "journal": r[5]}
+                for r in rows
+            ]
+            return JSONResponse({"name": name, "papers": papers, "n": len(papers)})
+
+        rows = session.execute(text("""
+            SELECT topic_cluster, COUNT(*)
+            FROM paper_metadata
+            WHERE topic_cluster IS NOT NULL AND topic_cluster != ''
+            GROUP BY topic_cluster
+            ORDER BY COUNT(*) DESC
+        """)).fetchall()
+    return JSONResponse({
+        "topics": [{"name": r[0], "n": int(r[1])} for r in rows],
+    })
+
+
+# ── Corpus actions — subprocess-backed, stream stdout as SSE ─────────────────
+
+import os  # noqa: E402 — kept local-ish with the block that uses it
+import shlex  # noqa: E402
+import subprocess  # noqa: E402
+
+
+def _sciknow_cli_bin() -> str:
+    """Absolute path to the CLI entry point in the active venv.
+
+    Falls back to plain `sciknow` on PATH if the venv binary isn't found
+    (e.g. when running the test suite from a different Python).
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    candidate = repo_root / ".venv" / "bin" / "sciknow"
+    return str(candidate) if candidate.exists() else "sciknow"
+
+
+def _spawn_cli_streaming(job_id: str, argv: list[str], loop):
+    """Run `sciknow <argv...>` as a subprocess and forward its output as
+    SSE events. Each stdout line becomes `{type: "log", text: ...}`.
+
+    The subprocess is terminated on job cancel. stderr is merged into
+    stdout so Rich progress bars and error messages all surface in the
+    same log pane.
+    """
+    import shutil  # lazy — only used when cancelling
+
+    def gen():
+        cmd = [_sciknow_cli_bin(), *argv]
+        # Force Rich to plain-text and disable progress bars' fancy
+        # rendering so the web log pane doesn't fill up with ANSI noise.
+        env = os.environ.copy()
+        env.setdefault("NO_COLOR", "1")
+        env.setdefault("TERM", "dumb")
+        yield {"type": "progress", "stage": "starting",
+               "detail": "$ " + " ".join(shlex.quote(c) for c in cmd)}
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1, env=env,
+            )
+        except FileNotFoundError as exc:
+            yield {"type": "error", "message": f"CLI not found: {exc}"}
+            return
+
+        cancel = _jobs[job_id]["cancel"]
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                if cancel.is_set():
+                    break
+                line = line.rstrip("\n")
+                if line:
+                    yield {"type": "log", "text": line}
+            proc.wait(timeout=5)
+        except Exception as exc:
+            yield {"type": "error", "message": str(exc)}
+            return
+        finally:
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=5)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+        rc = proc.returncode or 0
+        if rc == 0:
+            yield {"type": "completed", "returncode": 0}
+        else:
+            yield {"type": "error",
+                   "message": f"CLI exited with code {rc}"}
+        _ = shutil  # silence lint for the lazy import
+
+    threading.Thread(
+        target=_run_generator_in_thread, args=(job_id, gen, loop), daemon=True
+    ).start()
+
+
+@app.post("/api/corpus/enrich")
+async def api_corpus_enrich(
+    dry_run: bool = Form(False),
+    threshold: float = Form(0.85),
+    limit: int = Form(0),
+    delay: float = Form(0.2),
+):
+    """Invoke `sciknow db enrich` from the web UI — SSE log stream."""
+    job_id, _queue = _create_job("corpus_enrich")
+    loop = asyncio.get_event_loop()
+    argv = ["db", "enrich",
+            "--threshold", str(threshold),
+            "--limit", str(limit),
+            "--delay", str(delay)]
+    if dry_run:
+        argv.append("--dry-run")
+    _spawn_cli_streaming(job_id, argv, loop)
+    return JSONResponse({"job_id": job_id})
+
+
+@app.post("/api/corpus/expand")
+async def api_corpus_expand(
+    limit: int = Form(0),
+    dry_run: bool = Form(False),
+    resolve: bool = Form(False),
+    ingest: bool = Form(True),
+    relevance: bool = Form(True),
+    relevance_threshold: float = Form(0.0),
+    relevance_query: str = Form(""),
+    workers: int = Form(0),
+):
+    """Invoke `sciknow db expand` from the web UI — SSE log stream.
+
+    The heavy flags (download_dir, delay) are left at CLI defaults to
+    keep the web UX simple; power users can still invoke the CLI
+    directly for unusual configurations.
+    """
+    job_id, _queue = _create_job("corpus_expand")
+    loop = asyncio.get_event_loop()
+    argv = ["db", "expand", "--limit", str(limit),
+            "--relevance-threshold", str(relevance_threshold),
+            "--workers", str(workers)]
+    if dry_run:
+        argv.append("--dry-run")
+    argv.append("--resolve" if resolve else "--no-resolve")
+    argv.append("--ingest" if ingest else "--no-ingest")
+    argv.append("--relevance" if relevance else "--no-relevance")
+    if relevance_query:
+        argv += ["--relevance-query", relevance_query]
+    _spawn_cli_streaming(job_id, argv, loop)
+    return JSONResponse({"job_id": job_id})
+
+
 @app.get("/api/stats")
 async def api_stats():
     """Aggregate stats for the enhanced dashboard panel.
@@ -4065,6 +4461,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button onclick="openWikiModal()" title="Query the compiled knowledge wiki (sciknow wiki query)">&#128218; Wiki Query</button>
       <button onclick="openKgModal()" title="Browse the knowledge graph (extracted entity-relationship triples)">&#128279; KG</button>
       <button onclick="openCatalogModal()" title="Browse the paper catalog (sciknow catalog list)">&#128194; Browse Papers</button>
+      <button onclick="openToolsModal()" title="CLI tools in the GUI: search, synthesize, topics, corpus enrich/expand">&#128736; Tools</button>
     </div>
     <div class="sep"></div>
     <div class="tg">
@@ -4486,6 +4883,175 @@ body.task-bar-open {{ padding-top: 40px; }}
         <button class="btn-primary" onclick="loadCatalog(1)">Filter</button>
       </div>
       <div id="catalog-results" style="margin-top:12px;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Phase 36 — Tools Modal: CLI-parity panel (search / synthesize / topics / corpus) -->
+<div class="modal-overlay" id="tools-modal" onclick="if(event.target===this)closeModal('tools-modal')">
+  <div class="modal wide">
+    <div class="modal-header">
+      <h3>&#128736; Tools</h3>
+      <button class="modal-close" onclick="closeModal('tools-modal')">&times;</button>
+    </div>
+    <div class="tabs">
+      <button class="tab active" data-tab="tl-search" onclick="switchToolsTab('tl-search')">Search</button>
+      <button class="tab" data-tab="tl-synth" onclick="switchToolsTab('tl-synth')">Synthesize</button>
+      <button class="tab" data-tab="tl-topics" onclick="switchToolsTab('tl-topics')">Topics</button>
+      <button class="tab" data-tab="tl-corpus" onclick="switchToolsTab('tl-corpus')">Corpus</button>
+    </div>
+    <div class="modal-body">
+
+      <!-- Search tab (sciknow search query + search similar) -->
+      <div id="tl-search-pane">
+        <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+          Hybrid retrieval (dense + sparse + FTS) with cross-encoder rerank.
+          Mirrors <code>sciknow search query</code> and <code>sciknow search similar</code>.
+        </p>
+        <div class="field" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
+          <div style="flex:3;min-width:220px;">
+            <label>Query &nbsp;<span style="color:var(--fg-muted);font-weight:400;">or DOI / title fragment for similar-paper search</span></label>
+            <input type="text" id="tl-search-q" placeholder="e.g. sea surface temperature reconstruction"
+                   onkeydown="if(event.key==='Enter')doToolSearch('query')">
+          </div>
+          <div style="flex:1;min-width:100px;"><label>Top-K</label>
+            <input type="number" id="tl-search-topk" value="10" min="1" max="50"></div>
+          <div style="flex:1;min-width:90px;"><label>Year from</label>
+            <input type="number" id="tl-search-yfrom"></div>
+          <div style="flex:1;min-width:90px;"><label>Year to</label>
+            <input type="number" id="tl-search-yto"></div>
+        </div>
+        <div class="field" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
+          <div style="flex:2;min-width:160px;"><label>Section</label>
+            <select id="tl-search-section">
+              <option value="">(any)</option>
+              <option value="abstract">abstract</option>
+              <option value="introduction">introduction</option>
+              <option value="methods">methods</option>
+              <option value="results">results</option>
+              <option value="discussion">discussion</option>
+              <option value="conclusion">conclusion</option>
+            </select></div>
+          <div style="flex:2;min-width:160px;"><label>Topic cluster</label>
+            <input type="text" id="tl-search-topic" placeholder="(any)"></div>
+          <div style="flex:1;min-width:100px;display:flex;align-items:center;">
+            <label style="display:flex;align-items:center;gap:6px;font-weight:400;">
+              <input type="checkbox" id="tl-search-expand"> LLM expand
+            </label></div>
+          <button class="btn-primary" onclick="doToolSearch('query')">Search</button>
+          <button onclick="doToolSearch('similar')" title="Find papers with a similar abstract to the one you typed (DOI or title fragment)">Similar</button>
+        </div>
+        <div id="tl-search-status" style="font-size:12px;color:var(--fg-muted);margin:4px 0;"></div>
+        <div id="tl-search-results" style="margin-top:8px;"></div>
+      </div>
+
+      <!-- Synthesize tab (sciknow ask synthesize) -->
+      <div id="tl-synth-pane" style="display:none;">
+        <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+          Multi-paper synthesis on a topic &mdash; biases the prompt toward
+          consensus, methods and open questions. Mirrors <code>sciknow ask synthesize</code>.
+          (For single Q&amp;A use <strong>&#128270; Ask Corpus</strong> in the toolbar.)
+        </p>
+        <div class="field">
+          <label>Topic</label>
+          <input type="text" id="tl-synth-topic" placeholder="e.g. solar activity and climate variability"
+                 onkeydown="if(event.key==='Enter')doToolSynthesize()">
+        </div>
+        <div class="field" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
+          <div style="flex:1;"><label>Context-K</label>
+            <input type="number" id="tl-synth-k" value="12" min="4" max="30"></div>
+          <div style="flex:1;"><label>Year from</label><input type="number" id="tl-synth-yfrom"></div>
+          <div style="flex:1;"><label>Year to</label><input type="number" id="tl-synth-yto"></div>
+          <div style="flex:2;"><label>Topic cluster filter</label>
+            <input type="text" id="tl-synth-topicfilter" placeholder="(any)"></div>
+          <button class="btn-primary" onclick="doToolSynthesize()">Synthesize</button>
+        </div>
+        <div id="tl-synth-status" style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;"></div>
+        <div class="modal-stream" id="tl-synth-stream"></div>
+        <div id="tl-synth-stats" class="stream-stats"></div>
+        <div class="modal-sources" id="tl-synth-sources" style="display:none;"></div>
+      </div>
+
+      <!-- Topics tab (sciknow catalog topics) -->
+      <div id="tl-topics-pane" style="display:none;">
+        <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+          Topic clusters assigned by <code>sciknow catalog cluster</code>.
+          Click a cluster to see its papers.
+        </p>
+        <div id="tl-topics-list" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;"></div>
+        <div id="tl-topics-papers"></div>
+      </div>
+
+      <!-- Corpus tab (sciknow db enrich / db expand) -->
+      <div id="tl-corpus-pane" style="display:none;">
+        <p style="font-size:11px;color:var(--fg-muted);margin-bottom:12px;">
+          Grow and enrich the paper corpus from the browser. These are
+          long-running ops &mdash; the log streams below. Cancel with the
+          red button.
+        </p>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:10px;">
+          <div style="border:1px solid var(--border);border-radius:6px;padding:10px;">
+            <div style="font-weight:600;margin-bottom:6px;">&#128270; Enrich (metadata)</div>
+            <div style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+              Fill missing DOIs via Crossref / OpenAlex / arXiv title search.
+              <code>sciknow db enrich</code>.
+            </div>
+            <div class="field" style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;">
+              <div style="flex:1;min-width:70px;"><label>Limit</label>
+                <input type="number" id="tl-enr-limit" value="0" min="0" title="0 = all"></div>
+              <div style="flex:1;min-width:80px;"><label>Threshold</label>
+                <input type="number" id="tl-enr-thresh" value="0.85" min="0" max="1" step="0.01"></div>
+              <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+                <input type="checkbox" id="tl-enr-dry"> dry-run
+              </label>
+            </div>
+            <button class="btn-primary" style="margin-top:8px;" onclick="doToolCorpus('enrich')">Run Enrich</button>
+          </div>
+          <div style="border:1px solid var(--border);border-radius:6px;padding:10px;">
+            <div style="font-weight:600;margin-bottom:6px;">&#127760; Expand (citations)</div>
+            <div style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+              Follow references &rarr; download OA PDFs &rarr; ingest.
+              <code>sciknow db expand</code>.
+            </div>
+            <div class="field" style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;">
+              <div style="flex:1;min-width:70px;"><label>Limit</label>
+                <input type="number" id="tl-exp-limit" value="0" min="0"></div>
+              <div style="flex:1;min-width:80px;"><label>Workers</label>
+                <input type="number" id="tl-exp-workers" value="0" min="0" title="0 = .env default"></div>
+              <div style="flex:1;min-width:80px;"><label>Relev. thr</label>
+                <input type="number" id="tl-exp-relthr" value="0.0" min="0" max="1" step="0.05"></div>
+            </div>
+            <div class="field" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:4px;">
+              <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+                <input type="checkbox" id="tl-exp-dry"> dry-run
+              </label>
+              <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+                <input type="checkbox" id="tl-exp-resolve"> resolve titles
+              </label>
+              <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+                <input type="checkbox" id="tl-exp-ingest" checked> ingest
+              </label>
+              <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+                <input type="checkbox" id="tl-exp-relevance" checked> relevance filter
+              </label>
+            </div>
+            <div class="field" style="margin-top:4px;">
+              <label>Relevance anchor query (optional)</label>
+              <input type="text" id="tl-exp-relq" placeholder="(corpus centroid if blank)">
+            </div>
+            <button class="btn-primary" style="margin-top:8px;" onclick="doToolCorpus('expand')">Run Expand</button>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:8px;">
+          <div id="tl-corpus-status" style="flex:1;font-size:12px;color:var(--fg-muted);"></div>
+          <button id="tl-corpus-cancel" onclick="cancelToolCorpus()"
+                  style="display:none;background:var(--danger,#c53030);color:white;border:0;padding:4px 10px;border-radius:4px;cursor:pointer;">
+            Cancel
+          </button>
+        </div>
+        <pre id="tl-corpus-log" style="margin-top:8px;max-height:360px;overflow:auto;background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:11px;font-family:ui-monospace,monospace;white-space:pre-wrap;"></pre>
+      </div>
+
     </div>
   </div>
 </div>
@@ -7473,6 +8039,292 @@ async function doAsk() {{
       source.close(); currentEventSource = null; currentJobId = null;
     }}
   }};
+}}
+
+// ── Phase 36: Tools modal (CLI-parity panel) ──────────────────────────
+// Four tabs, four flows:
+//   Search     → POST /api/search/(query|similar)  (JSON)
+//   Synthesize → POST /api/ask/synthesize + SSE    (streaming)
+//   Topics     → GET  /api/catalog/topics[?name=]  (JSON)
+//   Corpus     → POST /api/corpus/(enrich|expand) + SSE (subprocess)
+let _toolsCorpusJob = null;
+let _toolsSynthJob = null;
+
+function openToolsModal() {{
+  openModal('tools-modal');
+  switchToolsTab('tl-search');
+  setTimeout(() => document.getElementById('tl-search-q').focus(), 100);
+}}
+
+function switchToolsTab(name) {{
+  document.querySelectorAll('#tools-modal .tab').forEach(t => {{
+    t.classList.toggle('active', t.dataset.tab === name);
+  }});
+  ['tl-search', 'tl-synth', 'tl-topics', 'tl-corpus'].forEach(n => {{
+    const pane = document.getElementById(n + '-pane');
+    if (pane) pane.style.display = (n === name) ? 'block' : 'none';
+  }});
+  if (name === 'tl-topics') loadToolTopics();
+}}
+
+// ── Search tab ────────────────────────────────────────────────────────
+async function doToolSearch(mode) {{
+  const q = document.getElementById('tl-search-q').value.trim();
+  if (!q) return;
+  const status = document.getElementById('tl-search-status');
+  const results = document.getElementById('tl-search-results');
+  status.textContent = (mode === 'similar' ? 'Finding similar papers...' : 'Searching...');
+  results.innerHTML = '';
+
+  const fd = new FormData();
+  if (mode === 'similar') {{
+    fd.append('identifier', q);
+    fd.append('top_k', document.getElementById('tl-search-topk').value || '10');
+  }} else {{
+    fd.append('q', q);
+    fd.append('top_k', document.getElementById('tl-search-topk').value || '10');
+    const yf = document.getElementById('tl-search-yfrom').value;
+    const yt = document.getElementById('tl-search-yto').value;
+    const sec = document.getElementById('tl-search-section').value;
+    const tc = document.getElementById('tl-search-topic').value.trim();
+    const ex = document.getElementById('tl-search-expand').checked;
+    if (yf) fd.append('year_from', yf);
+    if (yt) fd.append('year_to', yt);
+    if (sec) fd.append('section', sec);
+    if (tc) fd.append('topic', tc);
+    if (ex) fd.append('expand', 'true');
+  }}
+
+  try {{
+    const url = (mode === 'similar') ? '/api/search/similar' : '/api/search/query';
+    const res = await fetch(url, {{method: 'POST', body: fd}});
+    const data = await res.json();
+    if (data.error) {{
+      status.textContent = data.error;
+      return;
+    }}
+    const hits = data.results || [];
+    if (hits.length === 0) {{
+      status.textContent = 'No results.';
+      return;
+    }}
+    status.textContent = (mode === 'similar'
+      ? 'Similar to: ' + ((data.query || {{}}).title || q)
+      : hits.length + ' result' + (hits.length === 1 ? '' : 's'));
+    let html = '<ol class="tl-search-list" style="padding-left:20px;">';
+    hits.forEach(h => {{
+      const authors = (h.authors || []).slice(0, 3).map(a => (a.name || '').split(/\\s+/).slice(-1)[0]).filter(Boolean).join(', ');
+      const year = h.year ? ' (' + h.year + ')' : '';
+      const sec = h.section_type ? '<span style="color:var(--accent);font-size:11px;">[' + h.section_type + ']</span> ' : '';
+      const score = (typeof h.score === 'number') ? ' <span style="color:var(--fg-muted);font-size:11px;">score=' + h.score.toFixed(3) + '</span>' : '';
+      html += '<li style="margin-bottom:10px;">';
+      html += sec + '<strong>' + (h.title || '(untitled)').replace(/</g, '&lt;') + '</strong>' + year + score;
+      if (authors) html += '<div style="color:var(--fg-muted);font-size:11px;">' + authors + '</div>';
+      if (h.doi) html += '<div style="font-size:11px;"><a href="https://doi.org/' + h.doi + '" target="_blank" rel="noopener">doi:' + h.doi + '</a></div>';
+      if (h.preview) html += '<div style="color:var(--fg-muted);font-size:12px;margin-top:2px;">' + h.preview.replace(/</g, '&lt;') + '</div>';
+      html += '</li>';
+    }});
+    html += '</ol>';
+    results.innerHTML = html;
+  }} catch (exc) {{
+    status.textContent = 'Error: ' + exc;
+  }}
+}}
+
+// ── Synthesize tab (SSE, mirrors doAsk) ──────────────────────────────
+async function doToolSynthesize() {{
+  const topic = document.getElementById('tl-synth-topic').value.trim();
+  if (!topic) return;
+  const status = document.getElementById('tl-synth-status');
+  const stream = document.getElementById('tl-synth-stream');
+  const sources = document.getElementById('tl-synth-sources');
+  status.textContent = 'Retrieving and synthesising...';
+  stream.textContent = '';
+  sources.style.display = 'none';
+  sources.innerHTML = '';
+
+  const stats = createStreamStats('tl-synth-stats', 'qwen3.5:27b');
+  stats.start();
+  setStreamCursor(stream, true);
+
+  const fd = new FormData();
+  fd.append('topic', topic);
+  fd.append('context_k', document.getElementById('tl-synth-k').value || '12');
+  const yf = document.getElementById('tl-synth-yfrom').value;
+  const yt = document.getElementById('tl-synth-yto').value;
+  const tf = document.getElementById('tl-synth-topicfilter').value.trim();
+  if (yf) fd.append('year_from', yf);
+  if (yt) fd.append('year_to', yt);
+  if (tf) fd.append('topic_filter', tf);
+
+  const res = await fetch('/api/ask/synthesize', {{method: 'POST', body: fd}});
+  const data = await res.json();
+  _toolsSynthJob = data.job_id;
+  const source = new EventSource('/api/stream/' + data.job_id);
+  let collected = null;
+
+  source.onmessage = function(e) {{
+    const evt = JSON.parse(e.data);
+    if (evt.type === 'token') {{
+      setStreamCursor(stream, false);
+      stream.textContent += evt.text;
+      setStreamCursor(stream, true);
+      stream.scrollTop = stream.scrollHeight;
+      stats.update(evt.text);
+    }} else if (evt.type === 'model_info') {{
+      stats.setModel(evt.writer_model);
+    }} else if (evt.type === 'progress') {{
+      status.textContent = evt.detail || evt.stage;
+    }} else if (evt.type === 'sources') {{
+      collected = evt.sources;
+      status.textContent = 'Synthesising from ' + (evt.n || evt.sources.length) + ' passages...';
+    }} else if (evt.type === 'completed') {{
+      status.textContent = 'Done';
+      stats.done('done');
+      setStreamCursor(stream, false);
+      if (collected && collected.length) {{
+        let html = '<div style="font-weight:600;margin-bottom:6px;">Sources (' + collected.length + ')</div>';
+        collected.forEach(s => {{ html += '<div class="src-item">' + s + '</div>'; }});
+        sources.innerHTML = html;
+        sources.style.display = 'block';
+      }}
+      source.close(); _toolsSynthJob = null;
+    }} else if (evt.type === 'error') {{
+      status.textContent = 'Error: ' + evt.message;
+      stats.done('error');
+      setStreamCursor(stream, false);
+      source.close(); _toolsSynthJob = null;
+    }} else if (evt.type === 'done') {{
+      stats.done('done');
+      setStreamCursor(stream, false);
+      source.close(); _toolsSynthJob = null;
+    }}
+  }};
+}}
+
+// ── Topics tab ───────────────────────────────────────────────────────
+async function loadToolTopics() {{
+  const list = document.getElementById('tl-topics-list');
+  const papers = document.getElementById('tl-topics-papers');
+  list.innerHTML = '<span style="color:var(--fg-muted);font-size:12px;">Loading…</span>';
+  papers.innerHTML = '';
+  try {{
+    const res = await fetch('/api/catalog/topics');
+    const data = await res.json();
+    const topics = data.topics || [];
+    if (topics.length === 0) {{
+      list.innerHTML = '<span style="color:var(--fg-muted);font-size:12px;">No topic clusters assigned yet. Run <code>sciknow catalog cluster</code> to build them.</span>';
+      return;
+    }}
+    list.innerHTML = '';
+    topics.forEach(t => {{
+      const btn = document.createElement('button');
+      btn.textContent = t.name + ' (' + t.n + ')';
+      btn.title = t.name + ' — ' + t.n + ' papers';
+      btn.style.cssText = 'background:var(--bg-alt,#f3f4f6);border:1px solid var(--border);border-radius:12px;padding:4px 10px;font-size:12px;cursor:pointer;';
+      btn.onclick = () => loadToolTopicPapers(t.name);
+      list.appendChild(btn);
+    }});
+  }} catch (exc) {{
+    list.innerHTML = '<span style="color:var(--danger,#c53030);font-size:12px;">Error: ' + exc + '</span>';
+  }}
+}}
+
+async function loadToolTopicPapers(name) {{
+  const papers = document.getElementById('tl-topics-papers');
+  papers.innerHTML = '<div style="padding:12px;color:var(--fg-muted);">Loading papers in "' + name + '"…</div>';
+  try {{
+    const res = await fetch('/api/catalog/topics?name=' + encodeURIComponent(name));
+    const data = await res.json();
+    const list = data.papers || [];
+    if (list.length === 0) {{
+      papers.innerHTML = '<div style="padding:12px;color:var(--fg-muted);">No papers in this cluster.</div>';
+      return;
+    }}
+    let html = '<h4 style="margin:4px 0 8px;">' + name.replace(/</g, '&lt;') + ' &mdash; ' + list.length + ' papers</h4>';
+    html += '<ol style="padding-left:20px;">';
+    list.forEach(p => {{
+      const year = p.year ? ' (' + p.year + ')' : '';
+      const authors = (p.authors || []).slice(0, 3).map(a => (a.name || '').split(/\\s+/).slice(-1)[0]).filter(Boolean).join(', ');
+      html += '<li style="margin-bottom:6px;"><strong>' + (p.title || '(untitled)').replace(/</g, '&lt;') + '</strong>' + year;
+      if (authors) html += '<div style="color:var(--fg-muted);font-size:11px;">' + authors + '</div>';
+      if (p.doi) html += '<div style="font-size:11px;"><a href="https://doi.org/' + p.doi + '" target="_blank" rel="noopener">doi:' + p.doi + '</a></div>';
+      html += '</li>';
+    }});
+    html += '</ol>';
+    papers.innerHTML = html;
+  }} catch (exc) {{
+    papers.innerHTML = '<div style="color:var(--danger,#c53030);padding:12px;">Error: ' + exc + '</div>';
+  }}
+}}
+
+// ── Corpus tab (enrich / expand, subprocess SSE) ─────────────────────
+async function doToolCorpus(action) {{
+  const status = document.getElementById('tl-corpus-status');
+  const logEl = document.getElementById('tl-corpus-log');
+  const cancelBtn = document.getElementById('tl-corpus-cancel');
+  logEl.textContent = '';
+  status.textContent = 'Starting ' + action + '...';
+  cancelBtn.style.display = 'inline-block';
+
+  const fd = new FormData();
+  if (action === 'enrich') {{
+    fd.append('limit', document.getElementById('tl-enr-limit').value || '0');
+    fd.append('threshold', document.getElementById('tl-enr-thresh').value || '0.85');
+    fd.append('dry_run', document.getElementById('tl-enr-dry').checked ? 'true' : 'false');
+  }} else {{
+    fd.append('limit', document.getElementById('tl-exp-limit').value || '0');
+    fd.append('workers', document.getElementById('tl-exp-workers').value || '0');
+    fd.append('relevance_threshold', document.getElementById('tl-exp-relthr').value || '0.0');
+    fd.append('dry_run', document.getElementById('tl-exp-dry').checked ? 'true' : 'false');
+    fd.append('resolve', document.getElementById('tl-exp-resolve').checked ? 'true' : 'false');
+    fd.append('ingest', document.getElementById('tl-exp-ingest').checked ? 'true' : 'false');
+    fd.append('relevance', document.getElementById('tl-exp-relevance').checked ? 'true' : 'false');
+    const rq = document.getElementById('tl-exp-relq').value.trim();
+    if (rq) fd.append('relevance_query', rq);
+  }}
+
+  try {{
+    const res = await fetch('/api/corpus/' + action, {{method: 'POST', body: fd}});
+    const data = await res.json();
+    _toolsCorpusJob = data.job_id;
+  }} catch (exc) {{
+    status.textContent = 'Failed to start: ' + exc;
+    cancelBtn.style.display = 'none';
+    return;
+  }}
+
+  const source = new EventSource('/api/stream/' + _toolsCorpusJob);
+  source.onmessage = function(e) {{
+    const evt = JSON.parse(e.data);
+    if (evt.type === 'log') {{
+      logEl.textContent += evt.text + '\\n';
+      logEl.scrollTop = logEl.scrollHeight;
+    }} else if (evt.type === 'progress') {{
+      status.textContent = evt.detail || evt.stage;
+      if (evt.detail && evt.detail.startsWith('$ ')) {{
+        logEl.textContent += evt.detail + '\\n';
+      }}
+    }} else if (evt.type === 'completed') {{
+      status.textContent = action + ' finished.';
+      cancelBtn.style.display = 'none';
+      source.close(); _toolsCorpusJob = null;
+    }} else if (evt.type === 'error') {{
+      status.textContent = 'Error: ' + evt.message;
+      cancelBtn.style.display = 'none';
+      source.close(); _toolsCorpusJob = null;
+    }} else if (evt.type === 'done') {{
+      cancelBtn.style.display = 'none';
+      source.close(); _toolsCorpusJob = null;
+    }}
+  }};
+}}
+
+async function cancelToolCorpus() {{
+  if (!_toolsCorpusJob) return;
+  try {{
+    await fetch('/api/jobs/' + _toolsCorpusJob, {{method: 'DELETE'}});
+  }} catch (exc) {{}}
 }}
 
 // ── Phase 14: Catalog Browser modal ───────────────────────────────────

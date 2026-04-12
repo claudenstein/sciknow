@@ -4421,6 +4421,103 @@ def l1_phase35_total_compute_counter() -> None:
     )
 
 
+def l1_phase36_tools_panel() -> None:
+    """Phase 36 — Tools modal bringing CLI-only capabilities into the web UI.
+
+    Four tabs mapped to CLI commands:
+      Search     → /api/search/query, /api/search/similar       (JSON)
+      Synthesize → /api/ask/synthesize                          (SSE)
+      Topics     → /api/catalog/topics                          (JSON)
+      Corpus     → /api/corpus/enrich, /api/corpus/expand       (SSE, subprocess)
+
+    Verifies handlers exist with the right shape, the Tools button is
+    wired, the modal HTML carries all four tabs, and the JS dispatches
+    to the right endpoint per tab.
+    """
+    import inspect
+
+    from sciknow.web import app as web_app
+    src = inspect.getsource(web_app)
+
+    # 1) Handlers exist on the module
+    for name in (
+        "api_search_query", "api_search_similar",
+        "api_ask_synthesize", "api_catalog_topics",
+        "api_corpus_enrich", "api_corpus_expand",
+        "_spawn_cli_streaming", "_sciknow_cli_bin",
+    ):
+        assert hasattr(web_app, name), f"web.app.{name} missing"
+
+    # 2) Routes are registered with the expected paths
+    paths = {getattr(r, "path", None) for r in web_app.app.routes}
+    for p in (
+        "/api/search/query", "/api/search/similar",
+        "/api/ask/synthesize", "/api/catalog/topics",
+        "/api/corpus/enrich", "/api/corpus/expand",
+    ):
+        assert p in paths, f"route {p} not registered"
+
+    # 3) Search handler uses the real retrieval stack, not a stub
+    sq_src = inspect.getsource(web_app.api_search_query)
+    assert "hybrid_search.search" in sq_src
+    assert "reranker.rerank" in sq_src
+    assert "context_builder.build" in sq_src
+    # no_rerank branch present
+    assert "no_rerank" in sq_src
+
+    # 4) Similar search uses the abstracts collection
+    ss_src = inspect.getsource(web_app.api_search_similar)
+    assert "ABSTRACTS_COLLECTION" in ss_src
+    assert "qdrant.query_points" in ss_src
+
+    # 5) Synthesize uses prompts.synthesis (NOT prompts.qa)
+    syn_src = inspect.getsource(web_app.api_ask_synthesize)
+    assert "rag_prompts.synthesis" in syn_src, (
+        "api_ask_synthesize must use prompts.synthesis, not prompts.qa "
+        "— otherwise it duplicates /api/ask instead of mirroring "
+        "`sciknow ask synthesize`"
+    )
+    assert "_create_job" in syn_src and "_run_generator_in_thread" in syn_src
+
+    # 6) Catalog topics — two modes (list vs per-topic paper list)
+    tp_src = inspect.getsource(web_app.api_catalog_topics)
+    assert "GROUP BY topic_cluster" in tp_src
+    assert 'WHERE pm.topic_cluster = :n' in tp_src
+
+    # 7) Corpus actions shell out to the sciknow CLI
+    enr_src = inspect.getsource(web_app.api_corpus_enrich)
+    exp_src = inspect.getsource(web_app.api_corpus_expand)
+    assert '"db", "enrich"' in enr_src
+    assert '"db", "expand"' in exp_src
+    # They pipe stdout to SSE via _spawn_cli_streaming
+    spawn_src = inspect.getsource(web_app._spawn_cli_streaming)
+    assert "subprocess.Popen" in spawn_src
+    assert '"log"' in spawn_src  # emits {type: "log", text: ...}
+    assert "proc.terminate" in spawn_src  # cancelable
+    # stderr merged into stdout so Rich progress bars surface in the log
+    assert "STDOUT" in spawn_src
+
+    # 8) Tools button is wired to the new modal
+    assert 'onclick="openToolsModal()"' in src, (
+        "Tools button not wired into the top-bar button tray"
+    )
+    # 9) Modal HTML has all four tabs
+    for tab in ("tl-search", "tl-synth", "tl-topics", "tl-corpus"):
+        assert f'data-tab="{tab}"' in src, f"tab {tab} missing from modal"
+        assert f'id="{tab}-pane"' in src, f"pane {tab}-pane missing"
+    # 10) JS dispatchers exist and hit the right endpoints
+    for fn in ("openToolsModal", "switchToolsTab", "doToolSearch",
+               "doToolSynthesize", "loadToolTopics", "loadToolTopicPapers",
+               "doToolCorpus", "cancelToolCorpus"):
+        assert f"function {fn}(" in src or f"async function {fn}(" in src, (
+            f"Tools JS function {fn} missing"
+        )
+    assert "'/api/search/query'" in src and "'/api/search/similar'" in src
+    assert "'/api/ask/synthesize'" in src
+    assert "'/api/catalog/topics'" in src
+    assert "'/api/corpus/' + action" in src
+
+
 def l2_phase32_endpoint_shapes() -> None:
     """TestClient smoke test for the major read-only API endpoints.
 
@@ -5370,6 +5467,9 @@ L1_TESTS: list[Callable] = [
     l1_phase34_cars_rhetorical_moves,
     # Phase 35 — book-level GPU compute counter on the dashboard
     l1_phase35_total_compute_counter,
+    # Phase 36 — Tools modal: CLI-parity panel (search / synthesize /
+    #   topics / corpus enrich + expand)
+    l1_phase36_tools_panel,
 ]
 
 L2_TESTS: list[Callable] = [
