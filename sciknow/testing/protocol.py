@@ -3866,6 +3866,79 @@ def l1_phase32_6_autowrite_telemetry_layer0() -> None:
     )
 
 
+def l1_phase32_7_lessons_layer1() -> None:
+    """Phase 32.7 — Layer 1: episodic memory store (lessons).
+
+    The producer/consumer surface for the Reflexion-style learning
+    loop documented in docs/RESEARCH.md §21 Layer 1. Verifies the
+    schema, prompts, helpers, and wiring all exist and connect.
+
+    Specifically:
+    - AutowriteLesson ORM model exists
+    - distill_lessons prompt + write_section_v2 lessons param exist
+    - Producer + consumer helpers exist on book_ops
+    - _finalize_autowrite_run calls _distill_lessons_from_run on
+      completed runs
+    - _autowrite_section_body calls _get_relevant_lessons before
+      write_section_v2 and threads the result through as the
+      lessons= parameter
+    """
+    # ORM model
+    from sciknow.storage import models
+    assert hasattr(models, "AutowriteLesson"), "AutowriteLesson model missing"
+
+    # Prompts
+    from sciknow.rag import prompts as rag_prompts
+    assert hasattr(rag_prompts, "distill_lessons"), (
+        "rag.prompts.distill_lessons missing — Layer 1 producer prompt"
+    )
+    # write_section_v2 must accept a lessons parameter
+    import inspect
+    sig = inspect.signature(rag_prompts.write_section_v2)
+    assert "lessons" in sig.parameters, (
+        "rag.prompts.write_section_v2 missing the lessons parameter — "
+        "consumer can't inject lessons into the writer prompt"
+    )
+
+    # The system prompt template must have a placeholder for the lessons block
+    assert "{lessons_section}" in rag_prompts.WRITE_V2_SYSTEM, (
+        "WRITE_V2_SYSTEM missing the {lessons_section} placeholder — "
+        "the lessons block won't render"
+    )
+
+    # Helpers
+    from sciknow.core import book_ops
+    for fn in ("_persist_lesson", "_distill_lessons_from_run",
+               "_get_relevant_lessons", "_embed_text_for_lessons"):
+        assert hasattr(book_ops, fn), f"book_ops.{fn} missing"
+
+    # Producer wired into _finalize_autowrite_run
+    finalize_src = inspect.getsource(book_ops._finalize_autowrite_run)
+    assert "_distill_lessons_from_run(" in finalize_src, (
+        "_finalize_autowrite_run does not call _distill_lessons_from_run — "
+        "lessons will never be produced from completed runs"
+    )
+
+    # Consumer wired into _autowrite_section_body
+    body_src = inspect.getsource(book_ops._autowrite_section_body)
+    assert "_get_relevant_lessons(" in body_src, (
+        "_autowrite_section_body does not call _get_relevant_lessons — "
+        "the writer prompt will never see past lessons"
+    )
+    assert "lessons=relevant_lessons" in body_src, (
+        "_autowrite_section_body does not thread relevant_lessons into "
+        "write_section_v2(lessons=...) — the lessons fetch is dead code"
+    )
+
+    # The producer uses the FAST model (per the MAR critique — different
+    # model than the writer/scorer to avoid confirmation bias).
+    distill_src = inspect.getsource(book_ops._distill_lessons_from_run)
+    assert "llm_fast_model" in distill_src, (
+        "_distill_lessons_from_run is not using settings.llm_fast_model — "
+        "MAR critique violated (same model judging itself)"
+    )
+
+
 def l2_phase32_endpoint_shapes() -> None:
     """TestClient smoke test for the major read-only API endpoints.
 
@@ -4088,6 +4161,116 @@ def l2_phase32_6_autowrite_telemetry_roundtrip() -> None:
     )
 
 
+def l2_phase32_7_lessons_roundtrip() -> None:
+    """Phase 32.7 — Layer 1 roundtrip against live PG.
+
+    Persists 3 lessons with real bge-m3 embeddings, retrieves them with
+    two different queries, and asserts the cosine similarity ranking
+    correctly disambiguates: a length-related query surfaces the
+    length lesson; a citation-related query surfaces the citation lesson.
+
+    Skipped if the embedder can't load (no GPU + no CPU fallback).
+    Cleans up after itself so the test is idempotent.
+    """
+    from sqlalchemy import text as _t
+    from sciknow.storage.db import get_session
+    from sciknow.core import book_ops
+
+    test_slug = "l2_lessons_test"
+
+    # Verify the embedder works (and warm it). Skip cleanly if it can't load.
+    try:
+        probe = book_ops._embed_text_for_lessons("smoke test")
+        if not probe or len(probe) != 1024:
+            return TestResult.skip(
+                name="l2_phase32_7_lessons_roundtrip",
+                message=f"embedder returned dim={len(probe) if probe else 0}",
+            )
+    except Exception as exc:
+        return TestResult.skip(
+            name="l2_phase32_7_lessons_roundtrip",
+            message=f"embedder unavailable: {str(exc)[:80]}",
+        )
+
+    # Pick a real book id so the FK is happy
+    with get_session() as s:
+        b = s.execute(_t("SELECT id::text FROM books LIMIT 1")).fetchone()
+        book_id = b[0] if b else None
+
+    lesson_length = (
+        "Drafts under 70% of target_words consistently fail to converge — "
+        "start with the right length anchor."
+    )
+    lesson_citations = (
+        "For methods sections, citation density above 1 per 80 words "
+        "correlates with higher groundedness scores."
+    )
+    lesson_hedging = (
+        "When the scoring loop oscillates between groundedness and length, "
+        "fix hedging fidelity first."
+    )
+
+    try:
+        # Persist all three with real embeddings
+        for ls, dim, imp in [
+            (lesson_length, "length", 1.3),
+            (lesson_citations, "citation_accuracy", 1.1),
+            (lesson_hedging, "hedging_fidelity", 1.2),
+        ]:
+            emb = book_ops._embed_text_for_lessons(ls)
+            book_ops._persist_lesson(
+                book_id=book_id, chapter_id=None, section_slug=test_slug,
+                lesson_text=ls, source_run_id=None, score_delta=0.15,
+                embedding=emb, importance=imp, dimension=dim,
+            )
+
+        # Verify they were persisted
+        with get_session() as s:
+            n = s.execute(_t(
+                "SELECT count(*) FROM autowrite_lessons WHERE section_slug = :s"
+            ), {"s": test_slug}).scalar()
+            assert n == 3, f"expected 3 lessons, found {n}"
+
+        # Length-related query → length lesson should rank #1
+        length_top = book_ops._get_relevant_lessons(
+            book_id, test_slug,
+            "I'm writing a section that's too short, how do I hit the target length?",
+            top_k=3,
+        )
+        assert len(length_top) == 3, f"expected 3 results, got {len(length_top)}"
+        assert "length anchor" in length_top[0], (
+            f"length query should rank length lesson #1, got: {length_top[0]!r}"
+        )
+
+        # Citation-related query → citation lesson should rank #1
+        cite_top = book_ops._get_relevant_lessons(
+            book_id, test_slug,
+            "How do I improve groundedness with better citations?",
+            top_k=3,
+        )
+        assert len(cite_top) == 3, f"expected 3 results, got {len(cite_top)}"
+        assert "citation density" in cite_top[0], (
+            f"citation query should rank citation lesson #1, got: {cite_top[0]!r}"
+        )
+
+        # Cold-start: empty query on an unknown section returns []
+        empty = book_ops._get_relevant_lessons(
+            book_id, "definitely_not_a_real_slug_xyz", "anything",
+        )
+        assert empty == [], f"unknown section should return [], got {empty}"
+    finally:
+        with get_session() as s:
+            s.execute(_t(
+                "DELETE FROM autowrite_lessons WHERE section_slug = :s"
+            ), {"s": test_slug})
+            s.commit()
+
+    return TestResult.ok(
+        name="l2_phase32_7_lessons_roundtrip",
+        message="3 lessons persisted, similarity ranking correctly disambiguated",
+    )
+
+
 def l2_phase32_data_invariants() -> None:
     """DB-level invariants the GUI relies on.
 
@@ -4274,6 +4457,8 @@ L1_TESTS: list[Callable] = [
     l1_phase32_5_task_bar_polls_stats_no_sse_competition,
     # Phase 32.6 — Layer 0 of compound learning: autowrite telemetry
     l1_phase32_6_autowrite_telemetry_layer0,
+    # Phase 32.7 — Layer 1: episodic memory store (lessons)
+    l1_phase32_7_lessons_layer1,
 ]
 
 L2_TESTS: list[Callable] = [
@@ -4289,6 +4474,8 @@ L2_TESTS: list[Callable] = [
     l2_phase32_data_invariants,
     # Phase 32.6 — Layer 0 telemetry roundtrip against live PG
     l2_phase32_6_autowrite_telemetry_roundtrip,
+    # Phase 32.7 — Layer 1 lessons roundtrip + similarity ranking
+    l2_phase32_7_lessons_roundtrip,
 ]
 
 L3_TESTS: list[Callable] = [

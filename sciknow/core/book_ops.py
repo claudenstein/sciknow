@@ -687,6 +687,352 @@ def _finalize_autowrite_run(
     except Exception as exc:
         logger.warning("autowrite telemetry: failed to finalize run %s: %s",
                        run_id, exc)
+        return
+
+    # Phase 32.7 — Layer 1: distill lessons from this run's trajectory.
+    # Only fires for completed runs (status='completed') with a real
+    # final draft — error/cancelled runs have nothing useful to learn
+    # from. Fail-soft: any error inside _distill_lessons_from_run logs
+    # and returns 0; the autowrite still finishes cleanly for the user.
+    if status == "completed" and final_draft_id:
+        try:
+            n = _distill_lessons_from_run(run_id)
+            if n > 0:
+                logger.info(
+                    "autowrite layer 1: distilled %d lesson(s) from run %s",
+                    n, run_id,
+                )
+        except Exception as exc:
+            logger.warning("layer 1 distillation failed: %s", exc)
+
+
+# ── Phase 32.7 — Compound learning Layer 1: episodic memory (lessons) ───
+#
+# Producer: _distill_lessons_from_run is called inline at the tail of
+# _finalize_autowrite_run. It reads the per-iteration trajectory from
+# autowrite_iterations (Layer 0), prompts the FAST model (per the MAR
+# critique — different model than the scorer to avoid confirmation bias),
+# parses 1-3 concrete lessons, embeds each via bge-m3, and persists to
+# autowrite_lessons.
+#
+# Consumer: _get_relevant_lessons is called from _autowrite_section_body
+# right before write_section_v2. It embeds the section query, fetches
+# all lessons for the (book, section_slug) scope, computes cosine
+# similarity in Python (the lesson table stays small enough that
+# all-pairs in Python beats setting up pgvector), ranks by the
+# Generative Agents formula `importance × recency_decay × similarity`,
+# and returns the top-K lesson texts.
+#
+# All four helpers are fail-soft: any error logs and returns an empty
+# result. Layer 1 is purely additive — a Layer 1 hiccup never blocks
+# autowrite from completing.
+
+# Default cap on how many lessons get injected into the writer prompt.
+# Per the ERL paper (arXiv:2603.24639), unbounded lesson buffers scale
+# poorly — context bloat kills both speed and quality. Top-K is the
+# right pattern. Five is generous; in practice 3 hits the sweet spot
+# for most sections.
+_MAX_LESSONS_INJECTED = 5
+
+# Recency decay half-life in days. A lesson at age=30 days is half as
+# salient as a fresh one. Mirrors the Generative Agents 2023 setting.
+_LESSON_RECENCY_HALF_LIFE_DAYS = 30.0
+
+
+def _embed_text_for_lessons(text: str) -> list[float] | None:
+    """Phase 32.7 — embed a single text string with bge-m3 dense.
+
+    Reuses the same _embed_query helper that hybrid_search.py uses for
+    query embedding so the lesson embeddings live in the same vector
+    space as the chunk embeddings (no model swap).
+    """
+    if not text or not text.strip():
+        return None
+    try:
+        from sciknow.retrieval.hybrid_search import _embed_query
+        dense, _sparse = _embed_query(text.strip())
+        return dense
+    except Exception as exc:
+        logger.warning("lesson embedding failed: %s", exc)
+        return None
+
+
+def _persist_lesson(
+    *,
+    book_id: str | None,
+    chapter_id: str | None,
+    section_slug: str,
+    lesson_text: str,
+    source_run_id: str | None,
+    score_delta: float | None,
+    embedding: list[float] | None,
+    importance: float,
+    dimension: str | None,
+) -> None:
+    """Phase 32.7 — INSERT one lesson row. Fail-soft."""
+    if not lesson_text or not lesson_text.strip():
+        return
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+    try:
+        with get_session() as session:
+            session.execute(text("""
+                INSERT INTO autowrite_lessons (
+                    book_id, chapter_id, section_slug,
+                    lesson_text, source_run_id, score_delta,
+                    embedding, importance, dimension
+                ) VALUES (
+                    CAST(:book_id AS uuid),
+                    CAST(:chapter_id AS uuid),
+                    :section_slug,
+                    :lesson_text,
+                    CAST(:source_run_id AS uuid),
+                    :score_delta,
+                    CAST(:embedding AS real[]),
+                    :importance,
+                    :dimension
+                )
+            """), {
+                "book_id": book_id,
+                "chapter_id": chapter_id,
+                "section_slug": section_slug,
+                "lesson_text": lesson_text.strip()[:1000],
+                "source_run_id": source_run_id,
+                "score_delta": float(score_delta) if score_delta is not None else None,
+                # PG accepts a Python list as a real[] when bound via
+                # the array literal cast.
+                "embedding": embedding,
+                "importance": float(importance),
+                "dimension": dimension,
+            })
+            session.commit()
+    except Exception as exc:
+        logger.warning("autowrite telemetry: failed to persist lesson: %s", exc)
+
+
+def _distill_lessons_from_run(run_id: str | None) -> int:
+    """Phase 32.7 — read a completed run's iteration history, prompt the
+    FAST model to extract 1-3 lessons, embed them, and persist to
+    autowrite_lessons. Returns the number of lessons persisted.
+
+    Called inline at the tail of `_finalize_autowrite_run` for runs with
+    status='completed'. Uses settings.llm_fast_model so the writer model
+    stays warm in VRAM (no swap penalty) AND it's a different model
+    than the scorer (mitigates the MAR confirmation-bias issue).
+    """
+    if not run_id:
+        return 0
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+    from sciknow.config import settings
+    from sciknow.rag import prompts as rag_prompts
+    from sciknow.rag.llm import complete as llm_complete
+
+    try:
+        # Read the run + iterations from the DB. We re-fetch instead of
+        # passing them through as parameters because _distill is called
+        # from _finalize, and the iteration data the finalizer has is
+        # not in the right shape (it's the in-memory `history` list,
+        # which has slightly different field names than the DB columns).
+        with get_session() as session:
+            run_row = session.execute(text("""
+                SELECT book_id::text, chapter_id::text, section_slug,
+                       final_overall, iterations_used, converged
+                FROM autowrite_runs WHERE id::text = :id
+            """), {"id": run_id}).fetchone()
+            if not run_row:
+                return 0
+            book_id, chapter_id, section_slug, final_overall, iters_used, converged = run_row
+
+            iter_rows = session.execute(text("""
+                SELECT iteration, scores, action, weakest_dimension,
+                       revision_instruction, word_count, word_count_delta,
+                       overall_pre, overall_post
+                FROM autowrite_iterations
+                WHERE run_id::text = :id
+                ORDER BY iteration
+            """), {"id": run_id}).fetchall()
+
+        if not iter_rows:
+            # No iterations to learn from — skip silently.
+            return 0
+
+        # Compute the score delta: final - first iteration's overall_pre.
+        first_overall = iter_rows[0][7]  # overall_pre
+        score_delta = (
+            (float(final_overall) - float(first_overall))
+            if (final_overall is not None and first_overall is not None)
+            else 0.0
+        )
+
+        # Build the iterations list in the shape distill_lessons() expects.
+        iterations = [
+            {
+                "iteration": r[0],
+                "scores": r[1] or {},
+                "action": r[2],
+                "weakest_dimension": r[3],
+                "revision_instruction": r[4],
+                "word_count": r[5],
+                "word_count_delta": r[6],
+            }
+            for r in iter_rows
+        ]
+
+        sys_p, usr_p = rag_prompts.distill_lessons(
+            section_slug=section_slug,
+            final_overall=float(final_overall or 0.0),
+            score_delta=score_delta,
+            iterations_used=int(iters_used or 0),
+            converged=bool(converged),
+            iterations=iterations,
+        )
+
+        # Use the FAST model — different from the writer/scorer (MAR
+        # critique) AND avoids a model swap since the fast model is
+        # already loaded for metadata extraction.
+        raw = llm_complete(
+            sys_p, usr_p,
+            model=settings.llm_fast_model,
+            temperature=0.2, num_ctx=4096,
+        )
+        # Strip thinking blocks the same way other parsers do.
+        raw = re.sub(r'<think>.*?</think>\s*', '', raw, flags=re.DOTALL).strip()
+        try:
+            parsed = json.loads(_clean_json(raw), strict=False)
+        except Exception as exc:
+            logger.warning(
+                "lesson distillation: failed to parse JSON from LLM: %s | raw: %s",
+                exc, raw[:200],
+            )
+            return 0
+
+        lessons = parsed.get("lessons") or []
+        if not isinstance(lessons, list):
+            return 0
+
+        # Importance starts at 1.0 + a small bonus for high score delta —
+        # a run that genuinely improved during iteration produced a
+        # stronger learning signal than one that converged immediately.
+        importance_bonus = max(0.0, min(0.5, float(score_delta) * 2.0))
+        importance = 1.0 + importance_bonus
+
+        n_persisted = 0
+        for ls in lessons[:3]:  # hard cap at 3 per run
+            if not isinstance(ls, dict):
+                continue
+            text_val = (ls.get("text") or "").strip()
+            dim = (ls.get("dimension") or "general").strip().lower()
+            if not text_val:
+                continue
+            embedding = _embed_text_for_lessons(text_val)
+            _persist_lesson(
+                book_id=book_id,
+                chapter_id=chapter_id,
+                section_slug=section_slug,
+                lesson_text=text_val,
+                source_run_id=run_id,
+                score_delta=score_delta,
+                embedding=embedding,
+                importance=importance,
+                dimension=dim,
+            )
+            n_persisted += 1
+        return n_persisted
+    except Exception as exc:
+        logger.warning("lesson distillation: top-level failure: %s", exc)
+        return 0
+
+
+def _get_relevant_lessons(
+    book_id: str | None,
+    section_slug: str,
+    query_text: str,
+    *,
+    top_k: int = _MAX_LESSONS_INJECTED,
+) -> list[str]:
+    """Phase 32.7 — fetch the top-K relevant lessons for an upcoming
+    autowrite run.
+
+    Scope: lessons from the SAME (book, section_slug) AND lessons from
+    the SAME section_slug across other books. The former are tied to
+    the user's specific book; the latter generalize across books on
+    similar section types. Cross-book lessons are slightly downweighted
+    by giving them a fixed importance multiplier of 0.7.
+
+    Ranking: `importance × recency_decay × cosine_similarity`. Recency
+    decay is `2^(-age_days / half_life)` so a 30-day-old lesson is at
+    half its stored importance.
+
+    Returns a list of lesson texts (strings only). Empty list on
+    cold-start (no lessons exist yet) or any failure.
+    """
+    if not section_slug:
+        return []
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+    try:
+        # Embed the query text first. If embedding fails (e.g. embedder
+        # OOM), fall back to non-similarity ranking — just importance ×
+        # recency, which still surfaces the most useful lessons.
+        query_emb = _embed_text_for_lessons(query_text)
+
+        with get_session() as session:
+            rows = session.execute(text("""
+                SELECT id::text, lesson_text, embedding, importance,
+                       book_id::text, dimension,
+                       EXTRACT(EPOCH FROM (now() - created_at)) / 86400.0 AS age_days
+                FROM autowrite_lessons
+                WHERE section_slug = :slug
+                  AND lesson_text IS NOT NULL
+                ORDER BY created_at DESC
+                LIMIT 200
+            """), {"slug": section_slug}).fetchall()
+
+        if not rows:
+            return []
+
+        import math
+        scored: list[tuple[float, str]] = []
+        for row in rows:
+            lesson_id, lesson_text, embedding, importance, l_book_id, _dim, age_days = row
+            if not lesson_text:
+                continue
+            # Recency decay: exp(-age * ln(2) / half_life) = 2^(-age/half_life)
+            recency = 2.0 ** (-(float(age_days or 0)) / _LESSON_RECENCY_HALF_LIFE_DAYS)
+            imp = float(importance or 1.0)
+            # Cross-book lessons get a downweight — they're generalized
+            # but less specific to this user's book.
+            if book_id and l_book_id and l_book_id != book_id:
+                imp *= 0.7
+            # Cosine similarity if both embeddings are present
+            if query_emb and embedding:
+                # Both should be 1024-dim bge-m3 vectors. PG ARRAY gets
+                # back as a Python list of floats.
+                try:
+                    a = query_emb
+                    b = list(embedding)
+                    if len(a) == len(b):
+                        dot = sum(x * y for x, y in zip(a, b))
+                        na = math.sqrt(sum(x * x for x in a))
+                        nb = math.sqrt(sum(y * y for y in b))
+                        sim = dot / (na * nb) if na > 0 and nb > 0 else 0.0
+                    else:
+                        sim = 0.0
+                except Exception:
+                    sim = 0.0
+            else:
+                # No embedding ⇒ neutral similarity. Lesson can still
+                # win on importance × recency alone.
+                sim = 0.5
+            score = imp * recency * (sim + 0.1)  # +0.1 floor so high-importance still wins on weak similarity
+            scored.append((score, lesson_text))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [t for _, t in scored[:top_k]]
+    except Exception as exc:
+        logger.warning("lesson retrieval failed: %s", exc)
+        return []
 
 
 def _save_draft(session, *, title, book_id, chapter_id, section_type, topic,
@@ -2472,6 +2818,22 @@ def _autowrite_section_body(
             log.event("planning_failed", message=str(exc)[:200])
             paragraph_plan = None
 
+    # Phase 32.7 — Layer 1: fetch top-K relevant lessons from past runs
+    # for this section_slug. The query text combines the section type,
+    # topic, and section plan so the embedding similarity ranks lessons
+    # that addressed the same kind of writing challenge above ones from
+    # an unrelated section. Returns [] on cold-start (no lessons yet).
+    _lessons_query = " ".join(filter(None, [
+        section_type, topic, (section_plan or "")[:500],
+    ]))
+    relevant_lessons = _get_relevant_lessons(
+        book_id, section_type, _lessons_query,
+    )
+    if relevant_lessons:
+        yield {"type": "progress", "stage": "lessons",
+               "detail": f"Layer 1: injecting {len(relevant_lessons)} lesson(s) from prior runs"}
+        log.event("lessons_loaded", count=len(relevant_lessons))
+
     if resume_content is None:
         system, user = rag_prompts.write_section_v2(
             section_type, topic, results,
@@ -2479,6 +2841,7 @@ def _autowrite_section_body(
             paragraph_plan=paragraph_plan,
             target_words=effective_target_words,
             section_plan=section_plan,
+            lessons=relevant_lessons,
         )
         yield {"type": "progress", "stage": "writing",
                "detail": f"Generating initial draft (~{effective_target_words} words)..."}

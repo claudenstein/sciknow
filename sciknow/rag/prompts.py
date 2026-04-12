@@ -719,6 +719,7 @@ the prior topic and the new one ("Beyond the ocean heat content discussed above,
 atmospheric branch …").
 
 {length_target_section}
+{lessons_section}
 {section_plan_section}
 {discourse_relation_section}
 {book_plan_section}
@@ -745,7 +746,29 @@ def write_section_v2(
     paragraph_plan: list[dict] | None = None,
     target_words: int | None = None,
     section_plan: str | None = None,
+    lessons: list[str] | None = None,
 ) -> tuple[str, str]:
+    # Phase 32.7 — Layer 1 episodic memory. `lessons` is a list of 1-3
+    # sentence concrete reflections distilled from past autowrite runs
+    # on similar sections (see core.book_ops._distill_lessons_from_run).
+    # Injected as a "Lessons from prior runs" block in the system prompt
+    # so the writer is conditioned by what worked / didn't work last time.
+    # Empty list = no block (cold-start, fresh book).
+    lessons_block = ""
+    if lessons:
+        # Cap at 5 — the ERL paper specifically calls out that
+        # concatenating an unbounded experience buffer kills both speed
+        # and quality. Top-K (chosen by the consumer's similarity
+        # ranking) is the right pattern.
+        capped = lessons[:5]
+        bullet_lines = "\n".join(f"  - {ls.strip()}" for ls in capped if ls.strip())
+        if bullet_lines:
+            lessons_block = (
+                "\nLessons from prior runs on similar sections "
+                "(distilled from past iteration trajectories — heed these):\n"
+                + bullet_lines + "\n"
+            )
+
     plan_block = ""
     if book_plan:
         plan_block = f"\nBook plan:\n{book_plan}\n"
@@ -824,6 +847,7 @@ def write_section_v2(
     return (
         WRITE_V2_SYSTEM.format(
             length_target_section=length_block,
+            lessons_section=lessons_block,
             section_plan_section=section_plan_block,
             discourse_relation_section=discourse_block,
             book_plan_section=plan_block,
@@ -833,6 +857,110 @@ def write_section_v2(
             context=format_context(results),
             section=section,
             topic=topic,
+        ),
+    )
+
+
+# ── Lesson distillation (Phase 32.7 — Layer 1 producer side) ──────────
+
+DISTILL_LESSONS_SYSTEM = """\
+You are a senior writing coach analyzing an autowrite iteration history \
+to extract concrete, actionable lessons that would improve future writing \
+of similar sections.
+
+Your job is NOT to praise or summarize. Your job is to identify SPECIFIC, \
+TRANSFERABLE patterns from this run that the writer should remember next \
+time it drafts a section like this one.
+
+Rules:
+- Output 1 to 3 lessons. Three is the absolute maximum.
+- Each lesson must be 1-2 sentences. No paragraphs.
+- Each lesson must be CONCRETE — refer to a specific dimension (e.g. \
+"groundedness") or a specific revision pattern (e.g. "the length \
+revision worked when it was paired with adding 2-3 new substantive \
+paragraphs"), not vague advice like "write better".
+- Each lesson must be TRANSFERABLE — applicable to other sections of \
+the same kind, not just this exact draft. Don't reference specific \
+claims or papers.
+- If the run was uneventful (converged on iteration 1, no improvements \
+needed), output an empty list. Don't manufacture lessons that aren't \
+there.
+- Tag each lesson with a `dimension` field naming which scoring \
+dimension it's about: groundedness | completeness | coherence | \
+citation_accuracy | hedging_fidelity | length | general.
+
+Output STRICT JSON in this shape:
+{{"lessons": [
+  {{"text": "...", "dimension": "..."}},
+  ...
+]}}
+
+If there are no lessons worth recording, output: {{"lessons": []}}"""
+
+DISTILL_LESSONS_USER = """\
+Section: {section_slug}
+Final overall score: {final_overall:.2f}
+Score delta (final - first iteration): {score_delta:+.2f}
+Iterations used: {iterations_used}
+Converged: {converged}
+
+Iteration trajectory (each row is one iteration's pre-revision state):
+
+{iterations_block}
+
+Extract 1-3 transferable lessons from this trajectory, OR output \
+{{"lessons": []}} if there's nothing worth recording."""
+
+
+def distill_lessons(
+    section_slug: str,
+    final_overall: float,
+    score_delta: float,
+    iterations_used: int,
+    converged: bool,
+    iterations: list[dict],
+) -> tuple[str, str]:
+    """Phase 32.7 — Layer 1 producer prompt. Used by
+    core.book_ops._distill_lessons_from_run to extract 1-3 concrete
+    lessons from a completed autowrite run's trajectory.
+
+    `iterations` is a list of dicts shaped like:
+        {iteration, scores, action, weakest_dimension, revision_instruction,
+         word_count, word_count_delta}
+
+    Note: this prompt is intentionally fed to the FAST model
+    (settings.llm_fast_model), not the writer/scorer. Per the MAR
+    critique (arXiv:2512.20845), letting the same model that
+    produced the verdicts also write the reflections leads to
+    confirmation bias and repeated reasoning errors.
+    """
+    rows = []
+    for it in iterations:
+        scores = it.get("scores") or {}
+        line = (
+            f"  Iter {it.get('iteration', '?')} — "
+            f"overall={scores.get('overall', 0):.2f} "
+            f"weakest={(it.get('weakest_dimension') or scores.get('weakest_dimension') or 'unknown')} "
+            f"action={it.get('action') or 'KEEP'} "
+            f"words={it.get('word_count', 0)}"
+            + (f" (Δ{it.get('word_count_delta'):+d})" if it.get('word_count_delta') is not None else "")
+        )
+        instr = it.get("revision_instruction") or scores.get("revision_instruction")
+        if instr:
+            # Truncate long revision instructions to keep the prompt short
+            line += f"\n    revision: {str(instr)[:240]}"
+        rows.append(line)
+    iterations_block = "\n".join(rows) if rows else "  (no iterations recorded)"
+
+    return (
+        DISTILL_LESSONS_SYSTEM,
+        DISTILL_LESSONS_USER.format(
+            section_slug=section_slug,
+            final_overall=float(final_overall or 0.0),
+            score_delta=float(score_delta or 0.0),
+            iterations_used=iterations_used,
+            converged="yes" if converged else "no",
+            iterations_block=iterations_block,
         ),
     )
 

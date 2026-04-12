@@ -14,7 +14,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR, UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, REAL, TSVECTOR, UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -544,6 +544,65 @@ class AutowriteRetrieval(Base):
             postgresql_where="was_cited = true",
         ),
         Index("idx_autowrite_retrievals_doc", "document_id"),
+    )
+
+
+class AutowriteLesson(Base):
+    """Phase 32.7 — Layer 1: episodic memory store.
+
+    A 1-3-sentence lesson distilled from a single autowrite run, embedded
+    via bge-m3 for similarity retrieval. Producer: `_distill_lessons_from_run`
+    is called inline at the tail of `_finalize_autowrite_run` (Layer 0).
+    Consumer: `_get_relevant_lessons` is called before `write_section_v2`
+    in `_autowrite_section_body` and injects top-K lessons into the writer
+    system prompt as a "Lessons from prior runs" block.
+
+    The 1024-dim embedding is stored in PG as REAL[] rather than indexed
+    in Qdrant because lesson tables stay small (~hundreds of rows per
+    book at steady state) and all-pairs cosine similarity in Python is
+    fast enough. If lesson counts ever exceed ~10k rows we'd switch to
+    pgvector — but that's a migration, not a schema change.
+
+    Ranking formula on read (Generative Agents 2023): the consumer applies
+    `importance × recency_decay × cosine_similarity`, NOT a simple cosine.
+    Recency decay is `exp(-age_days / 30)` so lessons stay relevant for
+    about a month after distillation.
+    """
+    __tablename__ = "autowrite_lessons"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    book_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("books.id", ondelete="CASCADE"), nullable=True
+    )
+    chapter_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("book_chapters.id", ondelete="SET NULL"), nullable=True
+    )
+    section_slug: Mapped[str] = mapped_column(Text, nullable=False)
+    lesson_text: Mapped[str] = mapped_column(Text, nullable=False)
+    source_run_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("autowrite_runs.id", ondelete="CASCADE"), nullable=True
+    )
+    score_delta: Mapped[float | None] = mapped_column(Float)
+    # 1024-dim bge-m3 dense vector. May be NULL if embedding failed at
+    # distillation time — the lesson stays in the table but is excluded
+    # from similarity retrieval.
+    embedding: Mapped[list[float] | None] = mapped_column(ARRAY(REAL))
+    importance: Mapped[float] = mapped_column(Float, nullable=False, server_default="1.0")
+    # groundedness | completeness | coherence | citation_accuracy |
+    # hedging_fidelity | length | general
+    dimension: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("idx_autowrite_lessons_section", "book_id", "chapter_id", "section_slug"),
+        Index("idx_autowrite_lessons_book", "book_id"),
+        Index(
+            "idx_autowrite_lessons_dimension",
+            "dimension",
+            postgresql_where="dimension IS NOT NULL",
+        ),
     )
 
 
