@@ -637,8 +637,8 @@ The roadmap items from the 2026-04 lit sweep are now all shipped (Phases 7–12)
 Likely next-up candidates (in priority order, from the original lit sweep's runners-up):
 
 1. ~~**CARS-adapted chapter moves**~~ — **shipped in Phase 34.** See §22 below.
-2. **LongCite-style sentence citations** (THUDM 2024) — sentence-level grounding with span match for ALCE-compatible `citation_f1`. CS runner-up.
-3. **Toulmin scaffolds** for paragraphs the planner labels `Tension` (claim/data/warrant/qualifier/rebuttal). Linguistics runner-up #2.
+2. ~~**LongCite-style sentence citations**~~ — **shipped in Phase 34.** Sentence-level citation grounding rule added to the writer prompt + scorer prompt updated to check groundedness per sentence.
+3. ~~**Toulmin scaffolds**~~ — **shipped in Phase 34.** Conditional guidance for `[tension]`-labeled paragraphs: CLAIM → DATA → WARRANT → QUALIFIER → REBUTTAL.
 4. **MADAM-RAG** for paragraphs the argument-mapper flags as contradiction-heavy (Wang+ COLM 2025). CS runner-up.
 5. **Soft RAPTOR clustering** — use the GMM `proba` matrix the build already computes to allow chunks to contribute to multiple cluster summaries above a probability threshold. Polish on Phase 12.
 

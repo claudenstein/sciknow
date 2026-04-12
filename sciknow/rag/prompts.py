@@ -693,6 +693,20 @@ Rules:
 - Maintain consistency with the book plan and prior chapter summaries below
 - Do not repeat content already covered in prior chapters — reference it instead
 
+Sentence-level citation grounding (Phase 34 — LongCite pattern):
+- Every sentence that makes a factual claim MUST end with at least one [N] \
+citation. Do NOT cluster citations at the end of a paragraph — distribute \
+them to the specific sentences that draw on each source.
+- A sentence that introduces a concept, defines a term, or makes a purely \
+logical transition does NOT need a citation. But any sentence containing \
+a datum, measurement, model result, empirical finding, or attributed claim \
+MUST cite its source inline.
+- When multiple sources support the same sentence, cite them all: [1][3][5]. \
+When a sentence synthesizes two opposing findings, cite both sides: \
+"A suggests X [1], while B finds Y [3]."
+- This makes post-hoc groundedness verification sentence-addressable: \
+the scorer can check each sentence against its cited passage independently.
+
 Hedging fidelity (CRITICAL — preserves scientific integrity):
 - For every claim drawn from a [N] source, transfer the source's epistemic strength \
 verbatim at the lexical level. If the source says *suggests*, *indicates*, *is associated \
@@ -834,7 +848,18 @@ def write_section_v2(
                 "    [tension] — identify gaps, contradictions, open questions\n"
                 "    [evidence] — present specific data, measurements, observations\n"
                 "    [qualify] — hedge, state limitations, scope conditions\n"
-                "    [integrate] — synthesize into a conclusion connecting to the broader argument\n\n"
+                "    [integrate] — synthesize into a conclusion connecting to the broader argument\n"
+                "  Toulmin scaffold for [tension] paragraphs (Phase 34):\n"
+                "    When a paragraph is marked [tension], structure it using the Toulmin\n"
+                "    model (Toulmin 1958) to give it genuine argumentative depth:\n"
+                "      1. CLAIM — state the contested assertion or open question\n"
+                "      2. DATA — present the evidence for and/or against\n"
+                "      3. WARRANT — explain the reasoning connecting data to claim\n"
+                "      4. QUALIFIER — state the conditions/scope under which the claim holds\n"
+                "      5. REBUTTAL — acknowledge the strongest counter-argument\n"
+                "    This turns a flat 'the topic is debated' into a structured argument.\n"
+                "    Non-tension paragraphs should NOT use the Toulmin scaffold — it would\n"
+                "    be forced and unnatural for orient/evidence/qualify/integrate moves.\n\n"
                 + "\n".join(relation_lines) + "\n"
             )
 
@@ -1398,7 +1423,10 @@ SCORE_SYSTEM = """\
 You are a scientific peer reviewer scoring a draft section. Evaluate on these \
 seven dimensions, each scored 0.0–1.0:
 
-1. **groundedness** — What fraction of claims cite a source [N] that actually supports them?
+1. **groundedness** — What fraction of factual-claim sentences have an inline [N] citation \
+that actually supports the claim? (Phase 34 — sentence-level: check each sentence individually, \
+not just paragraph-level citation presence. A paragraph with 4 claim sentences and 1 citation \
+at the end has groundedness ~0.25, not 1.0.)
 2. **completeness** — Does the section cover all major aspects of the topic given the available evidence?
 3. **coherence** — Does the argument flow logically? Are transitions smooth? No contradictions? \
 Does each new paragraph open by naming an entity from the previous paragraph (no cold-starts)?

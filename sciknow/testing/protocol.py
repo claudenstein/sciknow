@@ -4275,6 +4275,32 @@ def l1_phase34_cars_rhetorical_moves() -> None:
         "CARS block should not appear without a paragraph_plan"
     )
 
+    # 4) Toulmin scaffold guidance is present for [tension] paragraphs
+    tension_plan = [
+        {"point": "gap", "discourse_relation": "contrast",
+         "rhetorical_move": "tension"},
+    ]
+    sys_t, _ = prompts.write_section_v2("intro", "topic", [],
+                                        paragraph_plan=tension_plan)
+    assert "Toulmin" in sys_t, "Toulmin scaffold missing from discourse block"
+    for component in ("CLAIM", "DATA", "WARRANT", "QUALIFIER", "REBUTTAL"):
+        assert component in sys_t, f"Toulmin component {component} missing"
+
+    # 5) LongCite sentence-level citation guidance in WRITE_V2_SYSTEM
+    sys_base, _ = prompts.write_section_v2("intro", "topic", [])
+    assert "Sentence-level citation grounding" in sys_base, (
+        "LongCite sentence-level citation rule missing from writer prompt"
+    )
+    assert "sentence-addressable" in sys_base, (
+        "LongCite rationale (sentence-addressable verification) missing"
+    )
+
+    # 6) Scorer prompt references sentence-level groundedness
+    sys_scorer, _ = prompts.score_draft("intro", "topic", "draft", [])
+    assert "sentence-level" in sys_scorer.lower(), (
+        "scorer prompt missing sentence-level groundedness guidance"
+    )
+
 
 def l2_phase32_endpoint_shapes() -> None:
     """TestClient smoke test for the major read-only API endpoints.
