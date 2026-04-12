@@ -102,6 +102,15 @@ class Settings(BaseSettings):
     # (dense + sparse + FTS) still dominate.
     citation_boost_factor: float = 0.1
 
+    # Phase 32.8 — Compound learning Layer 2: useful-chunk boost.
+    # For each retrieved chunk, look up how often it was actually cited
+    # in a finished autowrite draft (autowrite_retrievals.was_cited).
+    # Same log-dampened multiplicative form as citation_boost, but
+    # slightly stronger by default (0.15 vs 0.1) because useful_count
+    # is a more direct signal of "this chunk helps write similar
+    # sections" than passive citation popularity. Set to 0 to disable.
+    useful_count_boost_factor: float = 0.15
+
     # `sciknow db expand` relevance filter. Cosine similarity threshold under
     # which candidate references are dropped before download. 0.55 is a sane
     # default for bge-m3 — ~80% of on-topic refs score above it on a focused

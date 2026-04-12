@@ -29,6 +29,10 @@ class SearchResult:
     journal: str | None
     doi: str | None
     citation_count: int = 0
+    # Phase 32.8 — Layer 2: how many times this chunk was cited in a
+    # finished autowrite draft (data source: autowrite_retrievals.was_cited).
+    # Powers the useful_count retrieval boost — see hybrid_search._apply_useful_boost.
+    useful_count: int = 0
 
     @property
     def citation(self) -> str:
@@ -88,5 +92,6 @@ def build(
             journal=candidate.journal,
             doi=candidate.doi,
             citation_count=candidate.citation_count,
+            useful_count=getattr(candidate, "useful_count", 0),
         ))
     return results

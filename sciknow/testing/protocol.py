@@ -3939,6 +3939,70 @@ def l1_phase32_7_lessons_layer1() -> None:
     )
 
 
+def l1_phase32_8_useful_count_boost_layer2() -> None:
+    """Phase 32.8 — Layer 2: useful chunk retrieval boost.
+
+    Verifies that:
+    - SearchCandidate has the useful_count field
+    - SearchResult has the useful_count field (so it propagates downstream)
+    - hybrid_search._apply_useful_boost exists
+    - It's wired into hybrid_search.search() AFTER _apply_citation_boost
+      (the two boosts compose multiplicatively)
+    - The settings knob useful_count_boost_factor exists with a sane default
+    - The boost SQL queries autowrite_retrievals.was_cited (not the wrong table)
+    """
+    from sciknow.retrieval import hybrid_search
+    from sciknow.retrieval.context_builder import SearchResult
+    from sciknow.config import settings
+
+    assert "useful_count" in hybrid_search.SearchCandidate.__dataclass_fields__, (
+        "SearchCandidate missing useful_count field"
+    )
+    assert "useful_count" in SearchResult.__dataclass_fields__, (
+        "SearchResult missing useful_count field — won't propagate to context_builder"
+    )
+    assert hasattr(hybrid_search, "_apply_useful_boost"), (
+        "_apply_useful_boost helper missing from hybrid_search"
+    )
+    assert hasattr(settings, "useful_count_boost_factor"), (
+        "settings.useful_count_boost_factor missing"
+    )
+    # Sane default — non-zero so the feature is on by default after migration
+    assert 0 < settings.useful_count_boost_factor < 1.0, (
+        f"useful_count_boost_factor={settings.useful_count_boost_factor} "
+        "out of expected range (0, 1)"
+    )
+
+    import inspect
+    # The boost helper must query autowrite_retrievals.was_cited — that's
+    # the data source. Wrong table or wrong column = silently broken.
+    boost_src = inspect.getsource(hybrid_search._apply_useful_boost)
+    assert "autowrite_retrievals" in boost_src, (
+        "_apply_useful_boost not querying the autowrite_retrievals table"
+    )
+    assert "was_cited = true" in boost_src or "was_cited=true" in boost_src, (
+        "_apply_useful_boost not filtering on was_cited — would count "
+        "EVERY retrieval, not just chunks that made it into final drafts"
+    )
+    assert "chunk_qdrant_id" in boost_src, (
+        "_apply_useful_boost not joining on chunk_qdrant_id"
+    )
+
+    # Wired into search() AFTER the citation boost so the two compose.
+    search_src = inspect.getsource(hybrid_search.search)
+    assert "_apply_useful_boost(" in search_src, (
+        "hybrid_search.search not calling _apply_useful_boost — Layer 2 dead"
+    )
+    # Order matters: citation boost should come first (it modifies scores),
+    # useful boost second (composes multiplicatively).
+    cite_idx = search_src.find("_apply_citation_boost(")
+    use_idx = search_src.find("_apply_useful_boost(")
+    assert cite_idx > 0 and use_idx > cite_idx, (
+        "_apply_useful_boost should be called AFTER _apply_citation_boost "
+        "so the two boosts compose multiplicatively in the right order"
+    )
+
+
 def l2_phase32_endpoint_shapes() -> None:
     """TestClient smoke test for the major read-only API endpoints.
 
@@ -4271,6 +4335,162 @@ def l2_phase32_7_lessons_roundtrip() -> None:
     )
 
 
+def l2_phase32_8_useful_boost_roundtrip() -> None:
+    """Phase 32.8 — Layer 2: end-to-end useful_count boost test.
+
+    Strategy:
+      1. Run a baseline hybrid search and pick a chunk at rank ~10
+         (mid-list, where a boost has room to move it).
+      2. Insert N fake autowrite_runs each citing that chunk in their
+         final draft (was_cited=true).
+      3. Re-run the same search and verify:
+         - the target chunk's score increased
+         - the score increase matches the formula:
+             new = old × (1 + 0.15 × log2(1 + N))
+         - useful_count was correctly populated on the candidate
+         - the rank either stayed the same or moved up (never down)
+      4. Cleanup all fake rows in a finally block.
+
+    Skipped if the embedder can't load.
+    """
+    import math
+    from sqlalchemy import text as _t
+    from sciknow.storage.db import get_session
+    from sciknow.storage.qdrant import get_client
+    from sciknow.retrieval import hybrid_search
+    from sciknow.config import settings
+
+    # Make sure the embedder works (it's used by hybrid_search internally)
+    try:
+        from sciknow.retrieval.hybrid_search import _embed_query
+        _embed_query("smoke test")
+    except Exception as exc:
+        return TestResult.skip(
+            name="l2_phase32_8_useful_boost_roundtrip",
+            message=f"embedder unavailable: {str(exc)[:80]}",
+        )
+
+    qclient = get_client()
+    n_fake_runs = 10
+    fake_slug = "l2_useful_boost_test"
+
+    # 1) Baseline search
+    with get_session() as s:
+        baseline = hybrid_search.search(
+            query="ocean heat content trends",
+            qdrant_client=qclient,
+            session=s,
+            candidate_k=20,
+        )
+    if len(baseline) < 12:
+        return TestResult.skip(
+            name="l2_phase32_8_useful_boost_roundtrip",
+            message=f"only {len(baseline)} candidates — need ≥12 for the rank-10 test",
+        )
+
+    # Pick a target at rank 10 (0-indexed: position 9). Mid-list so the
+    # boost has room to move it. We require that the target NOT already
+    # have a useful_count from real autowrite history — pick a clean
+    # one. Walk down from rank 10 if needed.
+    target = None
+    for c in baseline[9:]:
+        if c.useful_count == 0:
+            target = c
+            break
+    if target is None:
+        return TestResult.skip(
+            name="l2_phase32_8_useful_boost_roundtrip",
+            message="no clean (useful_count=0) candidate found at rank ≥10",
+        )
+    baseline_score = target.rrf_score
+    baseline_chunk_id = target.chunk_id
+
+    # 2) Insert N fake runs citing this chunk
+    try:
+        with get_session() as s:
+            book = s.execute(_t("SELECT id::text FROM books LIMIT 1")).fetchone()
+            book_id = book[0] if book else None
+            for _ in range(n_fake_runs):
+                row = s.execute(_t("""
+                    INSERT INTO autowrite_runs (book_id, section_slug, status)
+                    VALUES (CAST(:bid AS uuid), :slug, 'completed')
+                    RETURNING id::text
+                """), {"bid": book_id, "slug": fake_slug}).fetchone()
+                s.execute(_t("""
+                    INSERT INTO autowrite_retrievals (
+                        run_id, source_position, chunk_qdrant_id, was_cited
+                    ) VALUES (
+                        CAST(:rid AS uuid), 1, CAST(:cid AS uuid), true
+                    )
+                """), {"rid": row[0], "cid": baseline_chunk_id})
+            s.commit()
+
+        # 3) Re-run the same search
+        with get_session() as s:
+            boosted = hybrid_search.search(
+                query="ocean heat content trends",
+                qdrant_client=qclient,
+                session=s,
+                candidate_k=20,
+            )
+
+        new_target = next(
+            (c for c in boosted if c.chunk_id == baseline_chunk_id), None
+        )
+        assert new_target is not None, (
+            "target chunk dropped out of the candidate set after boost — "
+            "should be impossible since the boost only INCREASES scores"
+        )
+
+        # Score must have increased
+        assert new_target.rrf_score > baseline_score, (
+            f"score did not increase: baseline={baseline_score:.5f}, "
+            f"boosted={new_target.rrf_score:.5f}"
+        )
+
+        # Score should match the formula
+        expected = baseline_score * (
+            1.0 + settings.useful_count_boost_factor * math.log2(1 + n_fake_runs)
+        )
+        actual = new_target.rrf_score
+        # Allow 2% tolerance for floating-point + any concurrent state changes
+        assert abs(actual - expected) / expected < 0.02, (
+            f"boosted score {actual:.5f} doesn't match expected {expected:.5f} "
+            f"(formula: baseline × (1 + factor × log2(1 + N)))"
+        )
+
+        # useful_count must be populated (n_fake_runs distinct runs)
+        assert new_target.useful_count == n_fake_runs, (
+            f"useful_count={new_target.useful_count}, expected {n_fake_runs}"
+        )
+
+        # Rank should never go DOWN (boost is monotonically positive)
+        baseline_rank = next(
+            i for i, c in enumerate(baseline, 1) if c.chunk_id == baseline_chunk_id
+        )
+        new_rank = next(
+            i for i, c in enumerate(boosted, 1) if c.chunk_id == baseline_chunk_id
+        )
+        assert new_rank <= baseline_rank, (
+            f"rank went DOWN: {baseline_rank} → {new_rank}"
+        )
+    finally:
+        # Always clean up so the test is idempotent
+        with get_session() as s:
+            s.execute(_t(
+                "DELETE FROM autowrite_runs WHERE section_slug = :s"
+            ), {"s": fake_slug})
+            s.commit()
+
+    return TestResult.ok(
+        name="l2_phase32_8_useful_boost_roundtrip",
+        message=(
+            f"useful_count={n_fake_runs} → score "
+            f"{baseline_score:.5f}→{actual:.5f} (rank {baseline_rank}→{new_rank})"
+        ),
+    )
+
+
 def l2_phase32_data_invariants() -> None:
     """DB-level invariants the GUI relies on.
 
@@ -4459,6 +4679,8 @@ L1_TESTS: list[Callable] = [
     l1_phase32_6_autowrite_telemetry_layer0,
     # Phase 32.7 — Layer 1: episodic memory store (lessons)
     l1_phase32_7_lessons_layer1,
+    # Phase 32.8 — Layer 2: useful_count retrieval boost
+    l1_phase32_8_useful_count_boost_layer2,
 ]
 
 L2_TESTS: list[Callable] = [
@@ -4476,6 +4698,8 @@ L2_TESTS: list[Callable] = [
     l2_phase32_6_autowrite_telemetry_roundtrip,
     # Phase 32.7 — Layer 1 lessons roundtrip + similarity ranking
     l2_phase32_7_lessons_roundtrip,
+    # Phase 32.8 — Layer 2 useful_count boost roundtrip in real search
+    l2_phase32_8_useful_boost_roundtrip,
 ]
 
 L3_TESTS: list[Callable] = [

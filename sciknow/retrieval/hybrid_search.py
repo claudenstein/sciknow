@@ -36,6 +36,10 @@ class SearchCandidate:
     # Citation count: how many other papers in the corpus cite this paper.
     # Populated by _apply_citation_boost after hydration.
     citation_count: int = 0
+    # Phase 32.8 — Layer 2: useful_count is how many times this chunk was
+    # cited in a FINISHED autowrite draft (was_cited=true in
+    # autowrite_retrievals). Populated by _apply_useful_boost.
+    useful_count: int = 0
 
 
 # ── RRF ───────────────────────────────────────────────────────────────────────
@@ -450,6 +454,93 @@ def _apply_citation_boost(
     return candidates
 
 
+# ── Useful-count boost (Phase 32.8 — Compound learning Layer 2) ────────────────
+
+def _apply_useful_boost(
+    candidates: list[SearchCandidate],
+    session: Session,
+    boost_factor: float = 0.0,
+) -> list[SearchCandidate]:
+    """
+    Phase 32.8 — apply a log-dampened boost based on how often each
+    candidate chunk has been cited in a finished autowrite draft.
+
+    The data source is autowrite_retrievals.was_cited (set by
+    _finalize_autowrite_run when the final draft text is parsed for
+    [N] markers — see Phase 32.6 / Layer 0). For each candidate's
+    chunk_qdrant_id, we count how many distinct runs cited it in
+    their final draft, then apply:
+
+        boosted_score = rrf_score × (1 + boost_factor × log2(1 + useful_count))
+
+    At the default boost_factor=0.15:
+        0 useful   → ×1.00  (no change — cold start, no learning yet)
+        1 useful   → ×1.15
+        3 useful   → ×1.30
+        7 useful   → ×1.45
+       15 useful   → ×1.60
+
+    The signal is intentionally stronger than citation_boost (0.15
+    vs 0.1) because useful_count is a more direct relevance indicator:
+    citation_count tracks passive popularity ("other authors cite this
+    paper"), while useful_count tracks active utility ("this chunk
+    actually made it into a finished draft on similar work"). It's
+    transfer learning across the user's library — chunks that the
+    autowrite loop has already proven useful for one section start
+    ranking higher for similar future sections.
+
+    If `boost_factor` is 0.0, the function is a no-op (just populates
+    useful_count without modifying scores). The reranker still runs
+    after this and can override the boost for any genuinely irrelevant
+    chunk.
+    """
+    if not candidates:
+        return candidates
+
+    chunk_ids = {c.chunk_id for c in candidates if c.chunk_id}
+    if not chunk_ids:
+        return candidates
+
+    from sqlalchemy import text
+
+    placeholders = ", ".join(f":c{i}" for i, _ in enumerate(chunk_ids))
+    params = {f"c{i}": cid for i, cid in enumerate(chunk_ids)}
+    try:
+        rows = session.execute(
+            text(f"""
+                SELECT chunk_qdrant_id::text, COUNT(DISTINCT run_id) AS cnt
+                FROM autowrite_retrievals
+                WHERE was_cited = true
+                  AND chunk_qdrant_id::text IN ({placeholders})
+                GROUP BY chunk_qdrant_id
+            """),
+            params,
+        ).fetchall()
+    except Exception as exc:
+        # Layer 2 is purely additive — a SQL hiccup must never break
+        # the search path. Log and skip the boost; the citation_boost
+        # already-applied scores stand.
+        import logging
+        logging.getLogger(__name__).warning(
+            "useful_count boost lookup failed: %s", exc,
+        )
+        return candidates
+    use_counts = {r[0]: r[1] for r in rows}
+
+    import math
+
+    for c in candidates:
+        count = use_counts.get(c.chunk_id, 0)
+        c.useful_count = count
+        if boost_factor > 0 and count > 0:
+            c.rrf_score *= 1.0 + boost_factor * math.log2(1 + count)
+
+    if boost_factor > 0:
+        candidates.sort(key=lambda c: c.rrf_score, reverse=True)
+
+    return candidates
+
+
 # ── Query expansion ────────────────────────────────────────────────────────────
 
 def expand_query(query: str) -> str:
@@ -538,4 +629,12 @@ def search(
     candidates = _hydrate(qdrant_client, session, merged)
 
     boost = getattr(settings, "citation_boost_factor", 0.1)
-    return _apply_citation_boost(candidates, session, boost_factor=boost)
+    candidates = _apply_citation_boost(candidates, session, boost_factor=boost)
+
+    # Phase 32.8 — Layer 2: useful-chunk boost. Applied AFTER the
+    # citation boost so the two effects compose multiplicatively.
+    # Both are gentle log-dampened nudges; together they raise the
+    # ranking of chunks that are both well-cited in the literature
+    # AND have proven useful in past autowrite drafts.
+    useful_boost = getattr(settings, "useful_count_boost_factor", 0.15)
+    return _apply_useful_boost(candidates, session, boost_factor=useful_boost)
