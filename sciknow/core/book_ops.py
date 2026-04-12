@@ -1620,6 +1620,13 @@ class _AutowriteLogger:
         log_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir = log_dir
 
+        # Phase 33 — log rotation: keep the most recent 50 log files,
+        # delete older ones. Phase 24 creates a file per run and they
+        # accumulate forever; even at one autowrite per day this stays
+        # under 2 MB total (a typical log is 10-30 KB). The sweep runs
+        # at logger init so we never hold more than 50 logs on disk.
+        self._rotate_old_logs(log_dir, keep=50)
+
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         slug = _slugify_for_filename(section_type)
         self.run_id = f"{ts}_{slug}_{(chapter_id or 'noch')[:8]}"
@@ -1772,6 +1779,31 @@ class _AutowriteLogger:
                 # carry on — the heartbeat thread should not crash the
                 # autowrite if its log file disappears.
                 logger.warning("autowrite log write failed: %s", exc)
+
+    @staticmethod
+    def _rotate_old_logs(log_dir: Path, *, keep: int = 50) -> int:
+        """Phase 33 — delete log files older than the most recent `keep`.
+
+        Sorts by modification time (newest first) and unlinks the tail.
+        Ignores non-files (e.g. the `latest.jsonl` symlink). Returns the
+        number of files deleted.
+        """
+        try:
+            files = sorted(
+                (f for f in log_dir.iterdir()
+                 if f.is_file() and f.suffix == ".jsonl" and not f.is_symlink()),
+                key=lambda f: f.stat().st_mtime,
+                reverse=True,
+            )
+            stale = files[keep:]
+            for f in stale:
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+            return len(stale)
+        except Exception:
+            return 0
 
     def _update_latest_symlink(self) -> None:
         """Point data/autowrite/latest.jsonl at this run's file so the

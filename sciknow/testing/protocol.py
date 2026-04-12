@@ -4171,6 +4171,67 @@ def l1_phase32_10_style_fingerprint_layer5() -> None:
     assert hasattr(book_cli, "style_show"), "style_show CLI handler missing"
 
 
+def l1_phase33_keyboard_shortcuts_and_polish() -> None:
+    """Phase 33 — keyboard shortcuts, chapter drag-drop, log rotation.
+
+    Three QoL features shipped together:
+    1. Keyboard shortcuts: Ctrl+S (force save), Ctrl+K (focus search),
+       Ctrl+E (toggle editor), ←/→ (prev/next section), D (dashboard),
+       P (plan modal)
+    2. Chapter drag-and-drop reordering: ch-title bars are draggable,
+       drop handler POSTs /api/chapters/reorder
+    3. Log rotation: _rotate_old_logs keeps the last 50 autowrite logs
+    """
+    import inspect
+    from sciknow.web import app as web_app
+    src = inspect.getsource(web_app)
+
+    # 1) Keyboard shortcuts — the global keydown handler must include
+    #    the Ctrl+S / Ctrl+K / Ctrl+E / arrow / D / P shortcuts.
+    assert "e.key === 's'" in src and "edAutosave" in src, (
+        "Ctrl+S keyboard shortcut missing"
+    )
+    assert "e.key === 'k'" in src and "searchInput" in src, (
+        "Ctrl+K keyboard shortcut missing"
+    )
+    assert "e.key === 'e'" in src and "toggleEdit" in src, (
+        "Ctrl+E keyboard shortcut missing"
+    )
+    assert "ArrowLeft" in src and "ArrowRight" in src, (
+        "← / → section navigation shortcuts missing"
+    )
+
+    # 2) Chapter drag-drop — handler functions exist
+    for fn in ("chDragStart", "chDragOver", "chDrop", "chDragEnd"):
+        assert f"function {fn}(" in src or f"async function {fn}(" in src, (
+            f"chapter drag-drop handler {fn} missing"
+        )
+    # The ch-title must be draggable
+    assert "ch-title clickable\" draggable=\"true\"" in src, (
+        "ch-title not marked draggable"
+    )
+    # Drop handler must POST to /api/chapters/reorder
+    ch_drop_src = src.split("function chDrop(")[1].split("\nfunction ")[0]
+    assert "/api/chapters/reorder" in ch_drop_src, (
+        "chDrop must POST to /api/chapters/reorder"
+    )
+    # CSS indicator classes must exist
+    assert ".ch-drag-over-top" in src and ".ch-drag-over-bottom" in src, (
+        "chapter drag visual indicator CSS missing"
+    )
+
+    # 3) Log rotation — _rotate_old_logs exists on _AutowriteLogger
+    from sciknow.core.book_ops import _AutowriteLogger
+    assert hasattr(_AutowriteLogger, "_rotate_old_logs"), (
+        "_rotate_old_logs missing from _AutowriteLogger"
+    )
+    # Must be called from __init__
+    init_src = inspect.getsource(_AutowriteLogger.__init__)
+    assert "_rotate_old_logs(" in init_src, (
+        "_rotate_old_logs not called from _AutowriteLogger.__init__"
+    )
+
+
 def l2_phase32_endpoint_shapes() -> None:
     """TestClient smoke test for the major read-only API endpoints.
 
@@ -5114,6 +5175,8 @@ L1_TESTS: list[Callable] = [
     l1_phase32_9_dpo_export_layer4,
     # Phase 32.10 — Layer 5: style fingerprint extraction
     l1_phase32_10_style_fingerprint_layer5,
+    # Phase 33 — keyboard shortcuts + chapter drag-drop + log rotation
+    l1_phase33_keyboard_shortcuts_and_polish,
 ]
 
 L2_TESTS: list[Callable] = [

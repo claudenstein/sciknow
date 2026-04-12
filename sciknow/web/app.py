@@ -3032,6 +3032,14 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
    draggable=true; CSS gives the dragged row a dimmed look and the
    target row a coloured top/bottom border to show where the drop
    will land. Within-chapter only; the JS handler enforces that. */
+/* Phase 33 — chapter drag-and-drop visual indicators. Same pattern
+   as Phase 26 section drag-drop but on .ch-title elements. */
+.ch-title[draggable="true"] {{ cursor: grab; }}
+.ch-title[draggable="true"]:active {{ cursor: grabbing; }}
+.ch-group.dragging {{ opacity: 0.4; }}
+.ch-title.ch-drag-over-top {{ box-shadow: inset 0 2px 0 0 var(--accent); }}
+.ch-title.ch-drag-over-bottom {{ box-shadow: inset 0 -2px 0 0 var(--accent); }}
+/* Phase 26 — section drag-and-drop */
 .sec-link[draggable="true"] {{ cursor: grab; }}
 .sec-link[draggable="true"]:active {{ cursor: grabbing; }}
 .sec-link.dragging {{ opacity: 0.4; cursor: grabbing; }}
@@ -5180,7 +5188,15 @@ function rebuildSidebar(chapters, activeId) {{
     const safeTitle = escapeHtml(ch.title || '');
     html += '<div class="ch-group" data-ch-id="' + ch.id + '">';
     // Phase 23 — chevron toggle at the start of the chapter title.
-    html += '<div class="ch-title clickable" onclick="selectChapter(this.parentElement)">' +
+    // Phase 33 — chapter title is draggable for reordering (mirrors
+    // section drag-drop from Phase 26 but operates on ch-group).
+    html += '<div class="ch-title clickable" draggable="true" ' +
+      'data-ch-id="' + ch.id + '" ' +
+      'ondragstart="chDragStart(event,\\\'' + ch.id + '\\\')" ' +
+      'ondragover="chDragOver(event)" ' +
+      'ondrop="chDrop(event,\\\'' + ch.id + '\\\')" ' +
+      'ondragend="chDragEnd(event)" ' +
+      'onclick="selectChapter(this.parentElement)">' +
       '<button class="ch-toggle" ' +
       'onclick="event.stopPropagation();toggleChapter(this.closest(\\'.ch-group\\'))" ' +
       'title="Collapse or expand sections">\\u25be</button>' +
@@ -6536,11 +6552,96 @@ function closeModal(id) {{
   }}
 }}
 // Escape closes any open modal
+// ── Phase 33: keyboard shortcuts ──────────────────────────────────────
+//
+// Global keydown handler for the web reader. All shortcuts are designed
+// to be non-destructive and avoid conflicts with browser defaults:
+//   Esc           — close any open modal (already existed since Phase 14)
+//   Ctrl+S        — force save in editor (suppresses the browser's "Save as")
+//   Ctrl+K        — focus the sidebar search bar
+//   Ctrl+E        — toggle the inline editor
+//   ← / →         — navigate to previous / next section in the sidebar
+//                   (only when focus is NOT in an input/textarea/select)
+//   D             — show dashboard (same exclusion)
+//   P             — open plan modal (same exclusion)
+//
+// The "not in an input" guard prevents letter shortcuts from swallowing
+// keystrokes while the user types in a form field, textarea, search bar,
+// or the editor. Ctrl+* shortcuts work everywhere because the user
+// explicitly holds Ctrl.
+
 document.addEventListener('keydown', function(e) {{
+  const tag = (e.target.tagName || '').toUpperCase();
+  const inInput = (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
+                   || e.target.isContentEditable);
+
+  // ── Esc — close modals (Phase 14, kept) ──────────────────────────
   if (e.key === 'Escape') {{
     document.querySelectorAll('.modal-overlay.open').forEach(m => {{
       closeModal(m.id);
     }});
+    return;
+  }}
+
+  // ── Ctrl+S — force save in editor ────────────────────────────────
+  if ((e.ctrlKey || e.metaKey) && e.key === 's') {{
+    e.preventDefault();  // suppress browser "Save page as..."
+    const ev = document.getElementById('edit-view');
+    if (ev && ev.style.display !== 'none') {{
+      edAutosave();
+    }}
+    return;
+  }}
+
+  // ── Ctrl+K — focus search bar ────────────────────────────────────
+  if ((e.ctrlKey || e.metaKey) && e.key === 'k') {{
+    e.preventDefault();
+    const searchInput = document.querySelector('.search-bar input');
+    if (searchInput) {{
+      searchInput.focus();
+      searchInput.select();
+    }}
+    return;
+  }}
+
+  // ── Ctrl+E — toggle editor ───────────────────────────────────────
+  if ((e.ctrlKey || e.metaKey) && e.key === 'e') {{
+    e.preventDefault();
+    if (currentDraftId) toggleEdit();
+    return;
+  }}
+
+  // ── Letter shortcuts (only when NOT typing in a field) ───────────
+  if (inInput) return;
+
+  // ← / → — previous / next section
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {{
+    const links = Array.from(document.querySelectorAll('#sidebar-sections .sec-link[href]'));
+    if (links.length === 0) return;
+    const idx = links.findIndex(a => a.classList.contains('active'));
+    let next;
+    if (e.key === 'ArrowLeft') {{
+      next = idx > 0 ? links[idx - 1] : links[links.length - 1];
+    }} else {{
+      next = idx < links.length - 1 ? links[idx + 1] : links[0];
+    }}
+    if (next) {{
+      next.click();
+      next.scrollIntoView({{block: 'nearest'}});
+    }}
+    return;
+  }}
+
+  // D — dashboard
+  if (e.key === 'd' || e.key === 'D') {{
+    showDashboard();
+    return;
+  }}
+
+  // P — plan modal
+  if (e.key === 'p' || e.key === 'P') {{
+    openPlanModal();
+    return;
   }}
 }});
 
@@ -8082,6 +8183,93 @@ async function deleteOrphanDraft(draftId) {{
     alert('Delete failed: ' + e.message);
   }}
 }}
+
+// ── Phase 33: chapter drag-and-drop reordering ──────────────────────────
+//
+// The POST /api/chapters/reorder endpoint has existed since Phase 14
+// but was never wired to a GUI affordance. Phase 33 adds the drag
+// handlers, mirroring Phase 26's section drag-drop. The user drags
+// a chapter title bar above or below another chapter title bar; on
+// drop, the full chapter_ids order is POSTed and the sidebar rebuilt.
+//
+// Unlike section drag-drop, there's no within-chapter constraint —
+// chapters can be reordered freely across the whole book.
+
+let _chDragId = null;
+function chDragStart(e, chId) {{
+  _chDragId = chId;
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', chId);
+  const group = e.target.closest('.ch-group');
+  if (group) setTimeout(() => group.classList.add('dragging'), 0);
+}}
+function chDragOver(e) {{
+  if (!_chDragId) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  const title = e.target.closest('.ch-title');
+  // Visual indicator: top/bottom border based on cursor position.
+  document.querySelectorAll('.ch-title').forEach(t => {{
+    t.classList.remove('ch-drag-over-top', 'ch-drag-over-bottom');
+  }});
+  if (title) {{
+    const rect = title.getBoundingClientRect();
+    const mid = rect.top + rect.height / 2;
+    if (e.clientY < mid) {{
+      title.classList.add('ch-drag-over-top');
+    }} else {{
+      title.classList.add('ch-drag-over-bottom');
+    }}
+  }}
+}}
+function chDragEnd(e) {{
+  _chDragId = null;
+  document.querySelectorAll('.ch-group').forEach(g => g.classList.remove('dragging'));
+  document.querySelectorAll('.ch-title').forEach(t => {{
+    t.classList.remove('ch-drag-over-top', 'ch-drag-over-bottom');
+  }});
+}}
+async function chDrop(e, targetChId) {{
+  e.preventDefault();
+  if (!_chDragId || _chDragId === targetChId) {{
+    chDragEnd(e);
+    return;
+  }}
+  // Compute the new order by removing the dragged chapter from
+  // its current position and inserting it before or after the target.
+  const ids = chaptersData.map(c => c.id);
+  const fromIdx = ids.indexOf(_chDragId);
+  if (fromIdx < 0) {{ chDragEnd(e); return; }}
+  ids.splice(fromIdx, 1);
+  const toIdx = ids.indexOf(targetChId);
+  if (toIdx < 0) {{ chDragEnd(e); return; }}
+  // Insert above or below based on cursor position in the title bar.
+  const title = e.target.closest('.ch-title');
+  let insertIdx = toIdx;
+  if (title) {{
+    const rect = title.getBoundingClientRect();
+    insertIdx = e.clientY > rect.top + rect.height / 2 ? toIdx + 1 : toIdx;
+  }}
+  ids.splice(insertIdx, 0, _chDragId);
+  chDragEnd(e);
+  // POST the new order
+  try {{
+    const res = await fetch('/api/chapters/reorder', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{chapter_ids: ids}}),
+    }});
+    if (!res.ok) throw new Error('reorder failed (' + res.status + ')');
+    // Refresh the sidebar with the new order.
+    const sidebarRes = await fetch('/api/chapters');
+    const sd = await sidebarRes.json();
+    if (Array.isArray(sd.chapters)) chaptersData = sd.chapters;
+    rebuildSidebar(sd.chapters || sd, currentDraftId);
+  }} catch (err) {{
+    alert('Chapter reorder failed: ' + err.message);
+  }}
+}}
+
 
 // ── Phase 26: drag-and-drop section reordering ────────────────────────
 //

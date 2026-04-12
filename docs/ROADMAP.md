@@ -64,11 +64,11 @@ Things noticed while shipping Phases 17–28 but deferred for scope.
 Mostly small.
 
 - [ ] **Cross-chapter section drag-and-drop.** Phase 26 deliberately restricted to within-chapter because moving a draft between chapters needs to also update `drafts.chapter_id` — different risk profile. Worth doing with a confirm prompt. **Effort:** 1-2 hours.
-- [ ] **Chapter drag-and-drop reordering.** The endpoint (`/api/chapters/reorder`) exists, just needs the JS — same template as Phase 26. **Effort:** 1 hour.
+- [x] **~~Chapter drag-and-drop reordering.~~** Shipped in Phase 33. Chapter title bars are HTML5-draggable; the drop handler POSTs the new `chapter_ids` order to the existing `/api/chapters/reorder` endpoint and rebuilds the sidebar. Same visual language as Phase 26 section drag-drop (accent-colored top/bottom border on hover).
 - [ ] **Proper modal for the autowrite mode picker** (Phase 28). Currently uses `prompt("s/r/i")` which is ugly. A small 3-button modal would be cleaner. **Effort:** 1 hour.
-- [ ] **Log rotation for `data/autowrite/`.** Phase 24 creates a file per run; they accumulate forever. A simple "keep last 50" sweep on `_AutowriteLogger` startup would be enough. **Effort:** 30 minutes.
+- [x] **~~Log rotation for `data/autowrite/`.~~** Shipped in Phase 33. `_rotate_old_logs` runs at `_AutowriteLogger.__init__` — keeps the most recent 50 `.jsonl` files, deletes older ones. Static method, no external deps.
 - [x] **~~Autowrite ETA in heartbeats.~~** Shipped in Phase 30 — the persistent task bar shows ETA when `target_words` is known and tokens are flowing (`remaining / tps`). The polling architecture from Phase 32.5 now keeps it in lockstep with the server-side counter.
-- [ ] **Keyboard shortcuts** in the web reader — `Ctrl+S` to force save, `Ctrl+K` to focus search, arrow keys to nav between sections, `Esc` to close modals. **Effort:** half-day.
+- [x] **~~Keyboard shortcuts.~~** Shipped in Phase 33. Esc (close modals, existing), Ctrl+S (force save in editor), Ctrl+K (focus search bar), Ctrl+E (toggle editor), ← / → (prev/next section in sidebar, guarded from inputs/textareas), D (dashboard), P (plan modal). All letter shortcuts only fire when focus is NOT in an input/textarea/select/contentEditable.
 - [ ] **Build-tag version string** in the template. Phase 25 had the "hard-refresh to see the new chevron" issue. If every render included a version string in the `<title>` or as a DevTools console line, users could instantly tell whether their browser has stale JS. **Effort:** 30 minutes.
 
 ---
