@@ -207,9 +207,16 @@ def _normalize_chapter_sections(raw) -> list[dict]:
                     tw = None
             except (TypeError, ValueError):
                 tw = None
+            # Phase 37 — per-section model override. Non-empty string
+            # means "use this Ollama model for write/autowrite/review/
+            # revise on this section"; None/empty falls through to the
+            # caller-provided or global default.
+            model_raw = item.get("model")
+            model_val = (model_raw.strip() if isinstance(model_raw, str) else None) or None
             out.append({
                 "slug": slug, "title": title, "plan": plan,
                 "target_words": tw,
+                "model": model_val,
             })
     return out
 
@@ -284,6 +291,35 @@ def _get_section_target_words(
             tw = s.get("target_words")
             if tw and isinstance(tw, int) and tw > 0:
                 return tw
+            return None
+    return None
+
+
+def _get_section_model(
+    session, chapter_id: str, section_slug: str,
+) -> str | None:
+    """Phase 37 — return the per-section Ollama model override, or None
+    if this section has none set.
+
+    Resolution precedence at every LLM call site is:
+        1. Explicit caller model (CLI --model, API `model` form field)
+        2. Per-section model (this function)
+        3. settings.llm_model default (set inside rag.llm.stream)
+
+    Paired with the compute counter (Phase 35) and the Tools panel
+    (Phase 36): you see per-section spend, then dial expensive models
+    down to just the sections that need them. All four streams
+    (write / autowrite / review / revise) consult this resolver.
+    """
+    if not section_slug:
+        return None
+    sections = _get_chapter_sections_normalized(session, chapter_id)
+    target = _slugify_section_name(section_slug)
+    for s in sections:
+        if s["slug"] == target:
+            m = s.get("model")
+            if isinstance(m, str) and m.strip():
+                return m.strip()
             return None
     return None
 
@@ -2107,6 +2143,14 @@ def write_section_stream(
         # write_section_v2 / tree_plan ignore an empty plan.
         section_plan = _get_section_plan(session, ch_id, section_type)
 
+        # Phase 37 — per-section model override.  Precedence:
+        # caller arg > per-section override > global default
+        # (resolved inside rag.llm.stream).
+        if model is None:
+            section_model_override = _get_section_model(session, ch_id, section_type)
+            if section_model_override:
+                model = section_model_override
+
     yield {"type": "progress", "stage": "retrieval", "detail": "Searching literature..."}
 
     qdrant = get_client()
@@ -2284,6 +2328,13 @@ def review_draft_stream(
 
     d_id, d_title, d_section, d_topic, d_content, d_book_id, d_chapter_id = row
 
+    # Phase 37 — per-section model override (review path).
+    if model is None and d_chapter_id and d_section:
+        with get_session() as session:
+            section_model_override = _get_section_model(session, d_chapter_id, d_section)
+        if section_model_override:
+            model = section_model_override
+
     yield {"type": "progress", "stage": "retrieval",
            "detail": f"Retrieving context for review of '{d_title}'..."}
 
@@ -2344,6 +2395,13 @@ def revise_draft_stream(
 
     d_id, d_title, d_section, d_topic, d_content, d_book_id, d_chapter_id, \
         d_version, d_review_feedback, d_sources = row
+
+    # Phase 37 — per-section model override (revise path).
+    if model is None and d_chapter_id and d_section:
+        with get_session() as session:
+            section_model_override = _get_section_model(session, d_chapter_id, d_section)
+        if section_model_override:
+            model = section_model_override
 
     rev_instruction = instruction.strip()
     if not rev_instruction:
@@ -2963,6 +3021,18 @@ def _autowrite_section_body(
                 num_sections = _get_chapter_num_sections(session, ch_id)
                 effective_target_words = _section_target_words(chapter_target, num_sections)
         section_plan = _get_section_plan(session, ch_id, section_type)
+
+        # Phase 37 — per-section model override. Applied only when no
+        # explicit caller model was passed (CLI --model / web form).
+        # Covers every LLM call in the autowrite loop — writer, scorer,
+        # verifier, CoVe — so a section tagged with the flagship model
+        # gets consistent scoring too. Users who want to cut scorer
+        # cost specifically can still set LLM_FAST_MODEL and leave the
+        # section override unset.
+        if model is None:
+            section_model_override = _get_section_model(session, ch_id, section_type)
+            if section_model_override:
+                model = section_model_override
 
     # Phase 14.6 — Surface which model is going to do the writing so the
     # user never has to ask. resolved_model is what `llm.complete()` will

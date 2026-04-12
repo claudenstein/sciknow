@@ -4518,6 +4518,85 @@ def l1_phase36_tools_panel() -> None:
     assert "'/api/corpus/' + action" in src
 
 
+def l1_phase37_per_section_model_override() -> None:
+    """Phase 37 — per-section model override.
+
+    Section meta gets an optional `model` field; the four streams
+    (write / autowrite / review / revise) consult it before falling
+    through to the caller-provided model or the global default.
+
+    Precedence at every LLM call site:
+        1. Explicit caller model (CLI --model / API form field)
+        2. Per-section model override (new — this phase)
+        3. settings.llm_model default
+
+    Verifies: normalize preserves model, _get_section_model exists with
+    the right lookup semantics, all four stream functions invoke it,
+    and the chapter-modal Sections tab has the UI wiring.
+    """
+    import inspect
+
+    from sciknow.core import book_ops
+
+    # 1) Helper exists and has the right signature
+    assert hasattr(book_ops, "_get_section_model"), (
+        "_get_section_model helper missing from book_ops"
+    )
+    sig = inspect.signature(book_ops._get_section_model)
+    assert set(sig.parameters.keys()) >= {"session", "chapter_id", "section_slug"}, (
+        "_get_section_model signature must be (session, chapter_id, section_slug)"
+    )
+
+    # 2) normalize preserves model (non-empty string) and drops blanks
+    norm = book_ops._normalize_chapter_sections([
+        {"slug": "s1", "title": "S1", "plan": "", "model": "qwen3:32b"},
+        {"slug": "s2", "title": "S2", "plan": "", "model": ""},
+        {"slug": "s3", "title": "S3", "plan": ""},  # no model key at all
+    ])
+    by_slug = {s["slug"]: s for s in norm}
+    assert by_slug["s1"]["model"] == "qwen3:32b", (
+        "model string must be preserved by _normalize_chapter_sections"
+    )
+    assert by_slug["s2"]["model"] is None, (
+        "empty-string model must normalise to None"
+    )
+    assert by_slug["s3"]["model"] is None, (
+        "missing model key must default to None"
+    )
+
+    # 3) All four streams invoke the resolver BEFORE passing model to
+    #    downstream llm_stream calls. Grep by function source.
+    for fn_name in ("write_section_stream", "_autowrite_section_body",
+                    "review_draft_stream", "revise_draft_stream"):
+        fn = getattr(book_ops, fn_name)
+        src = inspect.getsource(fn)
+        assert "_get_section_model" in src, (
+            f"{fn_name} must consult _get_section_model for per-section override"
+        )
+        # Guarded by `model is None` — caller-provided model wins
+        assert "if model is None" in src, (
+            f"{fn_name} must only apply section override when caller passed no model"
+        )
+
+    # 4) Web UI wiring — load, render, save, handler
+    from sciknow.web import app as web_app
+    src = inspect.getsource(web_app)
+    # Editor state mirror carries the new field
+    assert "model: (s.model && typeof s.model === 'string') ? s.model : ''" in src, (
+        "section editor load path must copy model from sections_meta"
+    )
+    # Save payload includes it
+    assert "model: (s.model || '').trim() || null" in src, (
+        "section editor save path must include model in sectionsToSave"
+    )
+    # Row renders a model input + datalist
+    assert 'list="sec-model-suggestions"' in src
+    assert 'id="sec-model-suggestions"' in src
+    assert 'updateSectionModel(' in src
+    # Update handler exists
+    assert "function updateSectionModel(" in src
+
+
 def l2_phase32_endpoint_shapes() -> None:
     """TestClient smoke test for the major read-only API endpoints.
 
@@ -5470,6 +5549,8 @@ L1_TESTS: list[Callable] = [
     # Phase 36 — Tools modal: CLI-parity panel (search / synthesize /
     #   topics / corpus enrich + expand)
     l1_phase36_tools_panel,
+    # Phase 37 — per-section model override in chapter meta
+    l1_phase37_per_section_model_override,
 ]
 
 L2_TESTS: list[Callable] = [

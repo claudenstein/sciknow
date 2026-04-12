@@ -9000,10 +9000,13 @@ function openChapterModal(chId) {{
       title: s.title || '',
       plan: s.plan || '',
       target_words: (s.target_words && s.target_words > 0) ? s.target_words : null,
+      // Phase 37 — per-section model override. Empty/null = use
+      // caller model / global default.
+      model: (s.model && typeof s.model === 'string') ? s.model : '',
     }}));
   }} else if (Array.isArray(ch.sections_template)) {{
     _editingSections = ch.sections_template.map(slug => ({{
-      slug: slug, title: titleifyClient(slug), plan: ''
+      slug: slug, title: titleifyClient(slug), plan: '', model: ''
     }}));
   }} else {{
     _editingSections = [];
@@ -9118,11 +9121,40 @@ function renderSectionEditor() {{
     html += (tw && tw > 0 ? ' <span class="badge-tag">override</span>' : ' <span class="badge-tag muted">auto</span>');
     html += '</span>';
     html += '    </div>';
+    // Phase 37 — per-section model override. Free-text input with a
+    // shared datalist of common Ollama tags. Empty = use the caller's
+    // model (CLI --model / API form) or fall through to settings.
+    // llm_model. Pairs with the Phase 35 compute counter: dial
+    // expensive models up only on sections that need them.
+    const modelVal = (s.model || '').trim();
+    const modelBadgeClass = modelVal ? 'sec-target-badge override' : 'sec-target-badge';
+    const modelBadgeTitle = modelVal
+      ? 'Per-section model override (this section only)'
+      : 'Uses the caller-provided model or settings.llm_model default';
+    html += '    <div class="sec-size-row">';
+    html += '      <label>Model:</label>';
+    html += '      <input type="text" list="sec-model-suggestions" class="sec-size-custom" ';
+    html += '             style="width:160px;" placeholder="(default)" ';
+    html += '             value="' + escapeHtml(modelVal) + '" ';
+    html += '             oninput="updateSectionModel(' + i + ', this.value)">';
+    html += '      <span class="' + modelBadgeClass + '" title="' + modelBadgeTitle + '">';
+    html += (modelVal ? escapeHtml(modelVal) + ' <span class="badge-tag">override</span>'
+                      : '— <span class="badge-tag muted">default</span>');
+    html += '</span>';
+    html += '    </div>';
     html += '    <div class="sec-slug">slug: <code>' + slugDisplay + '</code></div>';
     html += '  </div>';
     html += '  <button class="sec-delete" onclick="removeSection(' + i + ')" title="Delete this section">&times;</button>';
     html += '</div>';
   }});
+  // Phase 37 — one shared datalist for the per-section model inputs.
+  // The list is hints, not a whitelist — Ollama accepts any tag.
+  html += '<datalist id="sec-model-suggestions">';
+  ['qwen3:32b', 'qwen3:14b', 'qwen3:8b', 'qwen2.5:32b', 'qwen2.5:14b',
+   'qwen2.5:7b', 'llama3.1:70b', 'llama3.1:8b', 'mistral-nemo:12b',
+   'gemma2:27b', 'gemma2:9b', 'phi3.5:3.8b']
+    .forEach(m => {{ html += '<option value="' + m + '">'; }});
+  html += '</datalist>';
   list.innerHTML = html;
 }}
 
@@ -9757,6 +9789,15 @@ function updateSection(idx, field, value) {{
   _editingSections[idx][field] = value;
 }}
 
+// Phase 37 — per-section model override input handler.  Blank string
+// clears the override so the section falls back to the caller-provided
+// model / global default. Trim, store; do NOT re-render (user is
+// typing; re-render would eat focus).
+function updateSectionModel(idx, value) {{
+  if (idx < 0 || idx >= _editingSections.length) return;
+  _editingSections[idx].model = (value || '').trim();
+}}
+
 async function saveChapterInfo() {{
   const chId = document.getElementById('chapter-modal').dataset.chId;
   if (!chId) return;
@@ -9786,6 +9827,10 @@ async function saveChapterInfo() {{
         title: (s.title || '').trim() || (s.slug || ''),
         plan: (s.plan || '').trim(),
         target_words: (s.target_words && s.target_words > 0) ? s.target_words : null,
+        // Phase 37 — per-section model override. Empty string is
+        // persisted as null by _normalize_chapter_sections so the
+        // section falls through to the caller/global default.
+        model: (s.model || '').trim() || null,
       }}));
     const secRes = await fetch('/api/chapters/' + chId + '/sections', {{
       method: 'PUT',
