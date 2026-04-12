@@ -1548,6 +1548,19 @@ async def update_draft_metadata(request: Request, draft_id: str):
     return JSONResponse({"ok": True})
 
 
+@app.put("/api/draft/{draft_id}/chapter")
+async def move_draft_to_chapter(draft_id: str, chapter_id: str = Form(...)):
+    """Phase 33 — move a draft to a different chapter. Updates
+    drafts.chapter_id. Used by cross-chapter section drag-and-drop."""
+    with get_session() as session:
+        session.execute(text(
+            "UPDATE drafts SET chapter_id = CAST(:cid AS uuid) "
+            "WHERE id::text = :did"
+        ), {"did": draft_id, "cid": chapter_id})
+        session.commit()
+    return JSONResponse({"ok": True})
+
+
 @app.delete("/api/draft/{draft_id}")
 async def delete_draft(draft_id: str):
     """Phase 22 — permanently delete a single draft. Used by the GUI's
@@ -3222,6 +3235,10 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
                   padding: 8px 16px; font-size: 13px; font-weight: 500; border-radius: var(--r-md);
                   cursor: pointer; transition: all .12s; }}
 .btn-secondary:hover {{ background: var(--toolbar-bg); border-color: var(--border-strong); }}
+/* Phase 33 — autowrite mode picker buttons */
+.aw-mode-btn {{ font-size: 12px; padding: 6px 12px; }}
+.aw-mode-btn.active {{ background: var(--accent); color: var(--accent-fg);
+                       border-color: var(--accent); }}
 /* Modal-specific content classes */
 .modal-stream {{ font-family: var(--font-serif); font-size: 15px; line-height: 1.7;
                  padding: var(--sp-3); background: var(--toolbar-bg); border-radius: var(--r-md);
@@ -4095,6 +4112,42 @@ body.task-bar-open {{ padding-top: 40px; }}
       <div class="modal-stream" id="ask-stream"></div>
       <div id="ask-stream-stats" class="stream-stats"></div>
       <div class="modal-sources" id="ask-sources" style="display:none;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Phase 33 — Autowrite Configuration Modal (replaces the old triple-prompt UX) -->
+<div class="modal-overlay" id="autowrite-config-modal" onclick="if(event.target===this)closeModal('autowrite-config-modal')">
+  <div class="modal" style="max-width:480px;">
+    <div class="modal-header">
+      <h3>&#9889; Autowrite</h3>
+      <button class="modal-close" onclick="closeModal('autowrite-config-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <p id="aw-config-scope" style="font-size:13px;color:var(--fg);margin-bottom:16px;font-weight:600;"></p>
+      <div class="field">
+        <label>Max iterations per section</label>
+        <input type="number" id="aw-config-max-iter" value="3" min="1" max="10" style="width:80px;">
+        <span style="font-size:11px;color:var(--fg-muted);margin-left:8px;">Each iteration: score &rarr; verify &rarr; revise</span>
+      </div>
+      <div class="field">
+        <label>Target score (0.0 &ndash; 1.0)</label>
+        <input type="number" id="aw-config-target-score" value="0.85" min="0" max="1" step="0.05" style="width:80px;">
+        <span style="font-size:11px;color:var(--fg-muted);margin-left:8px;">Stop iterating when overall &ge; this</span>
+      </div>
+      <div id="aw-config-mode-section" style="display:none;margin-top:16px;">
+        <label>Existing drafts</label>
+        <p id="aw-config-mode-info" style="font-size:12px;color:var(--fg-muted);margin:4px 0 10px;"></p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="btn-secondary aw-mode-btn active" data-mode="skip" onclick="selectAwMode('skip')" title="Only fill sections that don't have a draft yet">Skip (fill missing)</button>
+          <button class="btn-secondary aw-mode-btn" data-mode="rebuild" onclick="selectAwMode('rebuild')" title="Overwrite all sections from scratch">Rebuild</button>
+          <button class="btn-secondary aw-mode-btn" data-mode="resume" onclick="selectAwMode('resume')" title="Load existing content + run more iterations">Resume</button>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeModal('autowrite-config-modal')">Cancel</button>
+      <button class="btn-primary" onclick="confirmAutowrite()">&#9889; Start</button>
     </div>
   </div>
 </div>
@@ -6159,58 +6212,78 @@ document.addEventListener('DOMContentLoaded', buildPopovers);
 let awScores = [];
 let awTargetScore = 0.85;
 
-async function doAutowrite() {{
+// Phase 33 — autowrite mode picker via a proper modal (replaces the
+// triple-prompt() UX from Phase 28). doAutowrite opens the modal;
+// confirmAutowrite reads the values and fires the request.
+let _awSelectedMode = 'skip';
+
+function selectAwMode(mode) {{
+  _awSelectedMode = mode;
+  document.querySelectorAll('.aw-mode-btn').forEach(b => {{
+    b.classList.toggle('active', b.dataset.mode === mode);
+  }});
+}}
+
+function doAutowrite() {{
   if (!currentChapterId) {{ showEmptyHint("No chapter selected &mdash; click any chapter title in the sidebar to select it, then try again."); return; }}
 
-  // Phase 20 — when no specific section is selected (the user has a
-  // chapter highlighted in the sidebar but hasn't picked a section),
-  // run autowrite for ALL of the chapter's defined sections instead
-  // of defaulting to a single 'introduction' draft (which doesn't
-  // match any user-defined section and creates an orphan).
   const isAllSections = !currentSectionType;
   const section = currentSectionType || '__all__';
-  const maxIter = prompt('Max iterations per section (default 3):', '3');
-  if (maxIter === null) return;
-  const targetStr = prompt('Target score (default 0.85):', '0.85');
-  if (targetStr === null) return;
-  awTargetScore = parseFloat(targetStr) || 0.85;
-  awScores = [];
+  const ch = chaptersData.find(c => c.id === currentChapterId);
+  const chTitle = ch ? ('Ch.' + ch.num + ': ' + ch.title) : 'this chapter';
 
-  // Phase 28 — three-way handling for sections that already have a draft.
-  // Default = skip; alternatives = rebuild (overwrite from scratch) or
-  // resume (load existing content + run more iterations).
-  let modeRebuild = false;
-  let modeResume = false;
-  if (isAllSections) {{
-    const ch = chaptersData.find(c => c.id === currentChapterId);
-    const nSecs = (ch && ch.sections_meta && ch.sections_meta.length) || 5;
-    // Count sections that already have a draft so the prompt is meaningful
+  // Configure the modal scope label
+  const scopeEl = document.getElementById('aw-config-scope');
+  if (scopeEl) {{
+    scopeEl.textContent = isAllSections
+      ? 'Autowrite ALL sections of ' + chTitle
+      : 'Autowrite ' + section + ' in ' + chTitle;
+  }}
+
+  // Reset inputs to defaults
+  document.getElementById('aw-config-max-iter').value = '3';
+  document.getElementById('aw-config-target-score').value = '0.85';
+  _awSelectedMode = 'skip';
+  document.querySelectorAll('.aw-mode-btn').forEach(b => {{
+    b.classList.toggle('active', b.dataset.mode === 'skip');
+  }});
+
+  // Show the mode section only when running all sections AND some already
+  // have drafts — otherwise mode choice is irrelevant.
+  const modeSection = document.getElementById('aw-config-mode-section');
+  const modeInfo = document.getElementById('aw-config-mode-info');
+  if (isAllSections && ch) {{
+    const nSecs = (ch.sections_meta && ch.sections_meta.length) || 0;
     let nDrafted = 0;
-    if (ch && Array.isArray(ch.sections)) {{
+    if (Array.isArray(ch.sections)) {{
       const draftedSlugs = new Set(ch.sections.filter(s => s.id).map(s => (s.type || '').toLowerCase()));
       nDrafted = (ch.sections_meta || []).filter(m => draftedSlugs.has(m.slug)).length;
     }}
-    let modeStr;
-    if (nDrafted === 0) {{
-      // No existing drafts — just confirm the long run.
-      if (!confirm('Autowrite all ' + nSecs + ' sections of this chapter? This can take ' + (nSecs * 5) + '-' + (nSecs * 10) + ' minutes.')) return;
+    if (nDrafted > 0) {{
+      modeSection.style.display = 'block';
+      modeInfo.textContent = nDrafted + ' of ' + nSecs + ' sections already have a draft.';
     }} else {{
-      modeStr = prompt(
-        nDrafted + ' of ' + nSecs + ' sections already have a draft.\\n\\n' +
-        'Pick how to handle them:\\n' +
-        '  s = skip   (default — only fill the missing sections)\\n' +
-        '  r = rebuild (overwrite drafted sections from scratch)\\n' +
-        '  i = iterate (resume from existing content, run more iterations)\\n\\n' +
-        'Type s, r, or i:',
-        's'
-      );
-      if (modeStr === null) return;
-      modeStr = (modeStr || 's').trim().toLowerCase();
-      if (modeStr === 'r' || modeStr === 'rebuild') modeRebuild = true;
-      else if (modeStr === 'i' || modeStr === 'iterate' || modeStr === 'resume') modeResume = true;
-      // else: default skip behaviour
+      modeSection.style.display = 'none';
     }}
+  }} else {{
+    modeSection.style.display = 'none';
   }}
+
+  openModal('autowrite-config-modal');
+}}
+
+async function confirmAutowrite() {{
+  closeModal('autowrite-config-modal');
+
+  const isAllSections = !currentSectionType;
+  const section = currentSectionType || '__all__';
+  const maxIter = document.getElementById('aw-config-max-iter').value || '3';
+  const targetStr = document.getElementById('aw-config-target-score').value || '0.85';
+  awTargetScore = parseFloat(targetStr) || 0.85;
+  awScores = [];
+
+  const modeRebuild = _awSelectedMode === 'rebuild';
+  const modeResume = _awSelectedMode === 'resume';
 
   showStreamPanel(isAllSections
     ? 'Autowriting all sections...'
@@ -6233,10 +6306,8 @@ async function doAutowrite() {{
   const fd = new FormData();
   fd.append('chapter_id', currentChapterId);
   if (!isAllSections) fd.append('section_type', section);
-  fd.append('max_iter', maxIter || '3');
+  fd.append('max_iter', maxIter);
   fd.append('target_score', String(awTargetScore));
-  // Phase 28 — pass the user's chosen mode (only for chapter-wide runs;
-  // single-section autowrite always rewrites the targeted section)
   if (isAllSections && modeRebuild) fd.append('rebuild', 'true');
   if (isAllSections && modeResume) fd.append('resume', 'true');
   const endpoint = isAllSections ? '/api/autowrite-chapter' : '/api/autowrite';
@@ -8387,11 +8458,11 @@ function handleSectionDragOver(e) {{
   if (!_draggedSection) return;
   const link = _findDraggableSection(e.target);
   if (!link) return;
-  // Only allow drops within the same chapter.
   const group = link.closest('.ch-group');
-  if (!group || group.dataset.chId !== _draggedSection.chapterId) return;
+  if (!group) return;
   // Don't show a drop indicator on the dragged row itself.
-  if (link.dataset.sectionSlug === _draggedSection.slug) return;
+  if (link.dataset.sectionSlug === _draggedSection.slug
+      && group.dataset.chId === _draggedSection.chapterId) return;
   e.preventDefault();
   if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
   // Compute drop position based on cursor Y vs row midpoint.
@@ -8408,19 +8479,37 @@ function handleSectionDrop(e) {{
   const link = _findDraggableSection(e.target);
   if (!link) {{ _cleanupDrag(); return; }}
   const group = link.closest('.ch-group');
-  if (!group || group.dataset.chId !== _draggedSection.chapterId) {{
-    _cleanupDrag();
-    return;
-  }}
+  if (!group) {{ _cleanupDrag(); return; }}
   e.preventDefault();
+
+  const targetChId = group.dataset.chId;
   const targetSlug = link.dataset.sectionSlug;
-  if (targetSlug === _draggedSection.slug) {{
+  const sourceChId = _draggedSection.chapterId;
+  const sourceSlug = _draggedSection.slug;
+
+  if (targetSlug === sourceSlug && targetChId === sourceChId) {{
     _cleanupDrag();
     return;
   }}
+
   const rect = link.getBoundingClientRect();
   const position = e.clientY < (rect.top + rect.height / 2) ? 'before' : 'after';
-  reorderSections(_draggedSection.chapterId, _draggedSection.slug, targetSlug, position);
+
+  if (targetChId === sourceChId) {{
+    // Within-chapter reorder (Phase 26, unchanged)
+    reorderSections(sourceChId, sourceSlug, targetSlug, position);
+  }} else {{
+    // Phase 33 — cross-chapter move. Requires a confirm because it
+    // updates drafts.chapter_id, which changes where the draft lives
+    // in the book's chapter structure.
+    const srcCh = chaptersData.find(c => c.id === sourceChId);
+    const tgtCh = chaptersData.find(c => c.id === targetChId);
+    const srcName = srcCh ? 'Ch.' + srcCh.num : 'source chapter';
+    const tgtName = tgtCh ? 'Ch.' + tgtCh.num : 'target chapter';
+    if (confirm('Move section "' + sourceSlug + '" from ' + srcName + ' to ' + tgtName + '?')) {{
+      moveSectionCrossChapter(sourceChId, sourceSlug, targetChId, targetSlug, position);
+    }}
+  }}
   _cleanupDrag();
 }}
 
@@ -8477,6 +8566,80 @@ async function reorderSections(chapterId, draggedSlug, targetSlug, position) {{
     alert('Reorder failed: ' + e.message);
   }}
 }}
+
+// Phase 33 — cross-chapter section move. Four API calls:
+// 1. Find the draft for this slug in the source chapter
+// 2. PUT /api/draft/{{id}}/chapter — move the draft to the target chapter
+// 3. Remove the slug from source chapter's sections
+// 4. Add the slug to target chapter's sections at the right position
+// Then refresh the sidebar.
+async function moveSectionCrossChapter(srcChId, slug, tgtChId, targetSlug, position) {{
+  const srcCh = chaptersData.find(c => c.id === srcChId);
+  const tgtCh = chaptersData.find(c => c.id === tgtChId);
+  if (!srcCh || !tgtCh) return;
+
+  // 1) Find the draft id for this section in the source chapter.
+  // Draft could be in the sections list returned from /api/chapters.
+  const draft = (srcCh.sections || []).find(s =>
+    (s.type || '').toLowerCase() === slug.toLowerCase() && s.id
+  );
+  const draftId = draft ? draft.id : null;
+
+  try {{
+    // 2) Move the draft if it exists
+    if (draftId) {{
+      const fd = new FormData();
+      fd.append('chapter_id', tgtChId);
+      const r = await fetch('/api/draft/' + draftId + '/chapter', {{method: 'PUT', body: fd}});
+      if (!r.ok) throw new Error('draft move failed (' + r.status + ')');
+    }}
+
+    // 3) Remove slug from source chapter's sections
+    const srcMeta = (srcCh.sections_meta || []).filter(s => s.slug !== slug);
+    const srcSections = srcMeta.map(s => ({{
+      slug: s.slug, title: s.title || s.slug, plan: s.plan || '',
+      target_words: (s.target_words && s.target_words > 0) ? s.target_words : null,
+    }}));
+    await fetch('/api/chapters/' + srcChId + '/sections', {{
+      method: 'PUT',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{sections: srcSections}}),
+    }});
+
+    // 4) Add slug to target chapter's sections at the right position
+    const movedEntry = (srcCh.sections_meta || []).find(s => s.slug === slug) || {{slug: slug, title: slug, plan: ''}};
+    const tgtMeta = (tgtCh.sections_meta || []).map(s => ({{
+      slug: s.slug, title: s.title || s.slug, plan: s.plan || '',
+      target_words: (s.target_words && s.target_words > 0) ? s.target_words : null,
+    }}));
+    const insertIdx = tgtMeta.findIndex(s => s.slug === targetSlug);
+    const newEntry = {{
+      slug: movedEntry.slug, title: movedEntry.title || movedEntry.slug,
+      plan: movedEntry.plan || '',
+      target_words: (movedEntry.target_words && movedEntry.target_words > 0)
+        ? movedEntry.target_words : null,
+    }};
+    if (insertIdx >= 0) {{
+      tgtMeta.splice(position === 'before' ? insertIdx : insertIdx + 1, 0, newEntry);
+    }} else {{
+      tgtMeta.push(newEntry);
+    }}
+    await fetch('/api/chapters/' + tgtChId + '/sections', {{
+      method: 'PUT',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{sections: tgtMeta}}),
+    }});
+
+    // 5) Refresh sidebar
+    const sidebarRes = await fetch('/api/chapters');
+    const sd = await sidebarRes.json();
+    if (Array.isArray(sd.chapters)) chaptersData = sd.chapters;
+    rebuildSidebar(sd.chapters || sd, currentDraftId);
+  }} catch (e) {{
+    alert('Cross-chapter move failed: ' + e.message);
+  }}
+}}
+
 
 // Wire drag-and-drop handlers via event delegation on the sidebar
 // container. Idempotent — re-running attaches a NEW listener but the

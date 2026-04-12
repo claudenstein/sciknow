@@ -3296,6 +3296,7 @@ _PHASE32_EXPECTED_ENDPOINTS: list[tuple[str, str]] = [
     ("GET", "/api/snapshot-content/{snapshot_id}"),
     ("PUT", "/api/draft/{draft_id}/status"),
     ("PUT", "/api/draft/{draft_id}/metadata"),
+    ("PUT", "/api/draft/{draft_id}/chapter"),
     ("DELETE", "/api/draft/{draft_id}"),
     ("GET", "/api/chapter-reader/{chapter_id}"),
     ("GET", "/api/corkboard"),
