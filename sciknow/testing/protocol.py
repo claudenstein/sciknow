@@ -898,6 +898,8 @@ def l1_web_rendered_js_is_valid() -> "TestResult":
     rendered = TEMPLATE.format(
         _BUILD_TAG=_BUILD_TAG,
         book_title="Test Book", search_q="", search_results_html="",
+        # Phase 38 — book_id placeholder for the bundle-snapshot JS
+        book_id="00000000-0000-0000-0000-000000000000",
         sidebar_html="", gaps_count=0,
         active_id="abc12345-6789-0000-0000-000000000000",
         active_title="Test", active_version=1, active_words=100,
@@ -4597,6 +4599,94 @@ def l1_phase37_per_section_model_override() -> None:
     assert "function updateSectionModel(" in src
 
 
+def l1_phase38_scoped_snapshot_bundles() -> None:
+    """Phase 38 — chapter + book snapshot bundles.
+
+    Extends the per-draft snapshot system with two new scopes for
+    autowrite-all safety. Verifies:
+    - DraftSnapshot model has scope / chapter_id / book_id columns
+    - draft_id is now nullable (chapter/book bundles have no single draft)
+    - Migration 0016 exists and descends from 0015
+    - Five new endpoints: create (chapter/book), list (chapter/book),
+      non-destructive bundle restore
+    - UI: Bundles button + modal with chapter/book tabs
+    - Restore helper creates NEW draft versions, doesn't overwrite
+    """
+    import inspect
+    from pathlib import Path
+
+    from sciknow.storage import models as sm
+    cols = {c.name: c for c in sm.DraftSnapshot.__table__.columns}
+    for needed in ("scope", "chapter_id", "book_id"):
+        assert needed in cols, f"DraftSnapshot.{needed} column missing"
+    # Phase 38 made draft_id nullable so chapter/book rows can exist
+    assert cols["draft_id"].nullable is True, (
+        "DraftSnapshot.draft_id must be nullable so chapter/book "
+        "scope rows can be inserted"
+    )
+
+    # Migration file
+    mig = Path(__file__).resolve().parents[1].parent / "migrations" / "versions" / "0016_scoped_snapshots.py"
+    assert mig.exists(), f"migration 0016 missing at {mig}"
+    mig_src = mig.read_text()
+    assert 'down_revision: Union[str, None] = "0015"' in mig_src
+    assert "add_column" in mig_src and "scope" in mig_src
+    assert "alter_column" in mig_src and "draft_id" in mig_src
+
+    # Endpoints + routes
+    from sciknow.web import app as web_app
+    for name in (
+        "create_chapter_snapshot", "create_book_snapshot",
+        "list_chapter_snapshots", "list_book_snapshots",
+        "restore_snapshot_bundle", "_snapshot_chapter_drafts",
+        "_restore_chapter_bundle",
+    ):
+        assert hasattr(web_app, name), f"web.app.{name} missing"
+    paths = {getattr(r, "path", None) for r in web_app.app.routes}
+    for p in (
+        "/api/snapshot/chapter/{chapter_id}",
+        "/api/snapshot/book/{book_id}",
+        "/api/snapshots/chapter/{chapter_id}",
+        "/api/snapshots/book/{book_id}",
+        "/api/snapshot/restore-bundle/{snapshot_id}",
+    ):
+        assert p in paths, f"route {p} not registered"
+
+    # Restore is non-destructive: INSERTs into drafts, doesn't UPDATE
+    restore_src = inspect.getsource(web_app._restore_chapter_bundle)
+    assert "INSERT INTO drafts" in restore_src, (
+        "bundle restore must INSERT new draft rows"
+    )
+    assert "MAX(version)" in restore_src, (
+        "bundle restore must compute next version per section"
+    )
+    # Status check so non-bundle snapshots fail fast
+    rsb_src = inspect.getsource(web_app.restore_snapshot_bundle)
+    assert 'scope not in ("chapter", "book")' in rsb_src, (
+        "restore_snapshot_bundle must reject draft-scope snapshots"
+    )
+
+    # Chapter snapshot must capture latest version per section_type
+    csh_src = inspect.getsource(web_app._snapshot_chapter_drafts)
+    assert "DISTINCT ON (d.section_type)" in csh_src, (
+        "chapter snapshot must capture ONE row per section_type"
+    )
+
+    # UI wiring
+    src = inspect.getsource(web_app)
+    assert 'onclick="openBundleSnapshots()"' in src, (
+        "Bundles button not wired"
+    )
+    for tab in ("sb-chapter", "sb-book"):
+        assert f'data-tab="{tab}"' in src, f"tab {tab} missing"
+        assert f'id="{tab}-pane"' in src, f"pane {tab}-pane missing"
+    for fn in ("openBundleSnapshots", "switchBundleTab",
+               "doBundleSnapshot", "loadBundleList", "restoreBundle"):
+        assert f"function {fn}(" in src or f"async function {fn}(" in src, (
+            f"JS function {fn} missing"
+        )
+
+
 def l2_phase32_endpoint_shapes() -> None:
     """TestClient smoke test for the major read-only API endpoints.
 
@@ -5551,6 +5641,8 @@ L1_TESTS: list[Callable] = [
     l1_phase36_tools_panel,
     # Phase 37 — per-section model override in chapter meta
     l1_phase37_per_section_model_override,
+    # Phase 38 — chapter + book snapshot bundles (autowrite safety net)
+    l1_phase38_scoped_snapshot_bundles,
 ]
 
 L2_TESTS: list[Callable] = [

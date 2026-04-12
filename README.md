@@ -47,6 +47,7 @@ A local-first scientific knowledge system that ingests papers, builds a compiled
 - **Compute dashboard** — book-level GPU compute ledger: cumulative tokens, wall time, and per-operation breakdown (write/review/revise/argue/gaps/autowrite) across every LLM call
 - **Tools panel** — CLI-parity in the browser: hybrid corpus search, similarity search, multi-paper synthesis, topic-cluster browser, and one-click corpus enrich / citation expand with live log streaming
 - **Per-section model override** — dial expensive models up on the sections that need them (methods, results) and down on the cheap ones (overviews, conclusions); set per section in the Chapter Sections tab
+- **Scoped snapshot bundles** — whole-chapter and whole-book snapshots as a single click before firing autowrite-all; restore is non-destructive (creates new draft versions, existing drafts stay as undo path)
 - **Multi-format export** — Markdown, HTML, BibTeX, LaTeX, DOCX with global citation dedup
 
 **Infrastructure**

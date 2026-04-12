@@ -1641,6 +1641,294 @@ async def get_snapshot_content(snapshot_id: str):
     return {"content": row[0]}
 
 
+# ── Phase 38: chapter + book snapshots (bundle of all drafts) ────────────────
+# Design:
+#   - A scope='chapter' snapshot stores {"chapter_id", "drafts": [...]}
+#     in `content` as JSON. Each draft entry carries section_type,
+#     title, version, word_count, and the full content text at snapshot
+#     time.
+#   - A scope='book' snapshot stores {"book_id", "chapters": [{chapter
+#     bundle}, ...]} — the natural union.
+#   - Restore is NON-DESTRUCTIVE for chapter/book snapshots: it inserts
+#     new draft rows with fresh version numbers instead of overwriting
+#     existing content. Safer than the per-draft overwrite path because
+#     chapter restores touch many sections at once.
+#
+# Snapshot the chapter BEFORE firing autowrite-all. Restore if the
+# autowrite-all run produces worse output than what you had.
+
+
+def _snapshot_chapter_drafts(session, chapter_id: str) -> dict:
+    """Build the JSON bundle that will be stored in `content`.
+
+    Captures the LATEST version per (chapter_id, section_type) —
+    i.e. what the user would see in the GUI right now. Orphan drafts
+    (chapter_id set but section_type is None or already replaced) are
+    not special-cased: we just take the newest row per section_type.
+    """
+    rows = session.execute(text("""
+        SELECT DISTINCT ON (d.section_type)
+            d.id::text, d.section_type, d.title, d.version, d.word_count,
+            d.content, d.sources
+        FROM drafts d
+        WHERE d.chapter_id::text = :cid
+        ORDER BY d.section_type, d.version DESC, d.created_at DESC
+    """), {"cid": chapter_id}).fetchall()
+    return {
+        "chapter_id": chapter_id,
+        "drafts": [
+            {
+                "id": r[0],
+                "section_type": r[1],
+                "title": r[2] or "",
+                "version": r[3] or 1,
+                "word_count": r[4] or 0,
+                "content": r[5] or "",
+                "sources": r[6] if isinstance(r[6], list) else [],
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.post("/api/snapshot/chapter/{chapter_id}")
+async def create_chapter_snapshot(chapter_id: str, name: str = Form("")):
+    """Snapshot every draft in a chapter as one bundle.
+
+    Phase 38 — the safety net for autowrite-all on a chapter. Takes a
+    label, stores the chapter's current draft state as a JSON bundle
+    in a single `draft_snapshots` row with scope='chapter'.
+    """
+    import datetime as _dt
+    with get_session() as session:
+        ch = session.execute(text(
+            "SELECT id::text, title FROM book_chapters WHERE id::text = :cid"
+        ), {"cid": chapter_id}).fetchone()
+        if not ch:
+            raise HTTPException(404, "Chapter not found")
+        bundle = _snapshot_chapter_drafts(session, chapter_id)
+        if not bundle["drafts"]:
+            raise HTTPException(400, "Chapter has no drafts to snapshot")
+        snap_name = (name or "").strip() or (
+            f"{ch[1]} — {_dt.datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        )
+        payload = json.dumps(bundle)
+        total_words = sum(d.get("word_count") or 0 for d in bundle["drafts"])
+        session.execute(text("""
+            INSERT INTO draft_snapshots
+                (chapter_id, scope, name, content, word_count)
+            VALUES
+                (CAST(:cid AS uuid), 'chapter', :name, :content, :wc)
+        """), {"cid": chapter_id, "name": snap_name,
+               "content": payload, "wc": total_words})
+        session.commit()
+    return JSONResponse({
+        "ok": True, "name": snap_name,
+        "drafts_included": len(bundle["drafts"]),
+        "total_words": total_words,
+    })
+
+
+@app.post("/api/snapshot/book/{book_id}")
+async def create_book_snapshot(book_id: str, name: str = Form("")):
+    """Snapshot every draft across every chapter in a book.
+
+    Phase 38 — the union-of-chapters safety net. Useful before running
+    autowrite at the whole-book level or before a risky refactor.
+    """
+    import datetime as _dt
+    with get_session() as session:
+        book = session.execute(text(
+            "SELECT id::text, title FROM books WHERE id::text = :bid"
+        ), {"bid": book_id}).fetchone()
+        if not book:
+            raise HTTPException(404, "Book not found")
+        chapters = session.execute(text(
+            "SELECT id::text, number, title FROM book_chapters "
+            "WHERE book_id::text = :bid ORDER BY number"
+        ), {"bid": book_id}).fetchall()
+
+        chapter_bundles = []
+        grand_total = 0
+        for ch in chapters:
+            bundle = _snapshot_chapter_drafts(session, ch[0])
+            if not bundle["drafts"]:
+                continue
+            bundle["chapter_number"] = ch[1]
+            bundle["chapter_title"] = ch[2] or ""
+            chapter_bundles.append(bundle)
+            grand_total += sum(d.get("word_count") or 0 for d in bundle["drafts"])
+
+        if not chapter_bundles:
+            raise HTTPException(400, "Book has no drafts to snapshot")
+
+        snap_name = (name or "").strip() or (
+            f"{book[1]} — {_dt.datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        )
+        payload = json.dumps({
+            "book_id": book_id, "chapters": chapter_bundles,
+        })
+        session.execute(text("""
+            INSERT INTO draft_snapshots
+                (book_id, scope, name, content, word_count)
+            VALUES
+                (CAST(:bid AS uuid), 'book', :name, :content, :wc)
+        """), {"bid": book_id, "name": snap_name,
+               "content": payload, "wc": grand_total})
+        session.commit()
+    return JSONResponse({
+        "ok": True, "name": snap_name,
+        "chapters_included": len(chapter_bundles),
+        "total_words": grand_total,
+    })
+
+
+@app.get("/api/snapshots/chapter/{chapter_id}")
+async def list_chapter_snapshots(chapter_id: str):
+    """List chapter-scope snapshots for a chapter."""
+    with get_session() as session:
+        rows = session.execute(text("""
+            SELECT id::text, name, word_count, created_at, scope
+            FROM draft_snapshots
+            WHERE chapter_id::text = :cid AND scope = 'chapter'
+            ORDER BY created_at DESC
+        """), {"cid": chapter_id}).fetchall()
+    return {"snapshots": [
+        {"id": r[0], "name": r[1], "word_count": r[2] or 0,
+         "created_at": str(r[3]) if r[3] else "", "scope": r[4]}
+        for r in rows
+    ]}
+
+
+@app.get("/api/snapshots/book/{book_id}")
+async def list_book_snapshots(book_id: str):
+    """List book-scope snapshots for a book."""
+    with get_session() as session:
+        rows = session.execute(text("""
+            SELECT id::text, name, word_count, created_at, scope
+            FROM draft_snapshots
+            WHERE book_id::text = :bid AND scope = 'book'
+            ORDER BY created_at DESC
+        """), {"bid": book_id}).fetchall()
+    return {"snapshots": [
+        {"id": r[0], "name": r[1], "word_count": r[2] or 0,
+         "created_at": str(r[3]) if r[3] else "", "scope": r[4]}
+        for r in rows
+    ]}
+
+
+def _restore_chapter_bundle(session, bundle: dict) -> int:
+    """Insert a NEW draft version per section in the bundle.
+
+    Non-destructive: the existing drafts stay put with their current
+    versions; the restored bundle shows up as the newest version of
+    each section (so the GUI's "latest version" resolver picks it).
+    Returns the number of drafts created.
+    """
+    from uuid import uuid4 as _uuid4
+
+    chapter_id = bundle.get("chapter_id")
+    drafts = bundle.get("drafts") or []
+    created = 0
+    for d in drafts:
+        section_type = d.get("section_type")
+        if not section_type:
+            continue
+        # Determine the next version number for this (chapter_id,
+        # section_type) pair so the restored row outranks the current
+        # latest on the GUI's version sort.
+        row = session.execute(text(
+            "SELECT COALESCE(MAX(version), 0) FROM drafts "
+            "WHERE chapter_id::text = :cid AND section_type = :st"
+        ), {"cid": chapter_id, "st": section_type}).fetchone()
+        next_ver = int((row[0] if row else 0) or 0) + 1
+        # book_id: read from an existing draft in the chapter (they
+        # all share one).
+        bk_row = session.execute(text(
+            "SELECT book_id::text FROM drafts "
+            "WHERE chapter_id::text = :cid LIMIT 1"
+        ), {"cid": chapter_id}).fetchone()
+        book_id = bk_row[0] if bk_row else None
+        sources_json = json.dumps(d.get("sources") or [])
+        restore_title = d.get("title") or f"Restored {section_type}"
+        session.execute(text("""
+            INSERT INTO drafts
+                (id, title, book_id, chapter_id, section_type, topic,
+                 content, word_count, sources, version, model_used,
+                 custom_metadata)
+            VALUES
+                (:id, :title, CAST(:bid AS uuid), CAST(:cid AS uuid),
+                 :st, :topic, :content, :wc, CAST(:sources AS jsonb),
+                 :ver, :model, CAST(:meta AS jsonb))
+        """), {
+            "id": str(_uuid4()),
+            "title": restore_title,
+            "bid": book_id,
+            "cid": chapter_id,
+            "st": section_type,
+            "topic": None,
+            "content": d.get("content") or "",
+            "wc": int(d.get("word_count") or 0),
+            "sources": sources_json,
+            "ver": next_ver,
+            "model": "snapshot-restore",
+            "meta": json.dumps({
+                "checkpoint": "restored_from_snapshot",
+                "restored_from_draft_id": d.get("id"),
+                "restored_from_version": d.get("version"),
+            }),
+        })
+        created += 1
+    return created
+
+
+@app.post("/api/snapshot/restore-bundle/{snapshot_id}")
+async def restore_snapshot_bundle(snapshot_id: str):
+    """Non-destructively restore a chapter/book bundle snapshot.
+
+    Phase 38. For each section in the bundle, inserts a new `drafts`
+    row at `version = max_current_version + 1`, so the restored
+    content becomes the new latest. Existing rows are untouched,
+    giving the user an undo path if the restore itself was wrong.
+    """
+    with get_session() as session:
+        row = session.execute(text(
+            "SELECT id::text, scope, content, chapter_id::text, "
+            "       book_id::text, name "
+            "FROM draft_snapshots WHERE id::text = :sid LIMIT 1"
+        ), {"sid": snapshot_id}).fetchone()
+        if not row:
+            raise HTTPException(404, "Snapshot not found")
+        _, scope, content, ch_id, bk_id, snap_name = row
+        if scope not in ("chapter", "book"):
+            raise HTTPException(
+                400,
+                f"Snapshot scope {scope!r} is not a bundle — use the "
+                f"per-draft restore endpoint instead."
+            )
+        try:
+            payload = json.loads(content)
+        except Exception as exc:
+            raise HTTPException(500, f"Malformed snapshot bundle: {exc}")
+
+        total_drafts = 0
+        chapters_touched = 0
+        if scope == "chapter":
+            total_drafts = _restore_chapter_bundle(session, payload)
+            chapters_touched = 1
+        else:  # book
+            for ch_bundle in payload.get("chapters") or []:
+                total_drafts += _restore_chapter_bundle(session, ch_bundle)
+                chapters_touched += 1
+        session.commit()
+
+    return JSONResponse({
+        "ok": True, "name": snap_name, "scope": scope,
+        "chapters_restored": chapters_touched,
+        "drafts_created": total_drafts,
+    })
+
+
 # ── Draft status + metadata ──────────────────────────────────────────────────
 
 @app.put("/api/draft/{draft_id}/status")
@@ -4466,7 +4754,8 @@ body.task-bar-open {{ padding-top: 40px; }}
     <div class="sep"></div>
     <div class="tg">
       <button onclick="showVersions()" title="View version history and diffs">History</button>
-      <button onclick="takeSnapshot()" title="Save a snapshot of current content">Snapshot</button>
+      <button onclick="takeSnapshot()" title="Save a snapshot of current draft content">Snapshot</button>
+      <button onclick="openBundleSnapshots()" title="Snapshot / restore whole chapter or whole book — safety net for autowrite-all">&#128230; Bundles</button>
       <button onclick="openExportModal()" title="Export this section, chapter, or the whole book to text or printable HTML/PDF">&#128229; Export</button>
       <button onclick="showCorkboard()" title="Visual card-based view">Corkboard</button>
       <button onclick="showChapterReader()" title="Read entire chapter as continuous scroll">Read</button>
@@ -4883,6 +5172,60 @@ body.task-bar-open {{ padding-top: 40px; }}
         <button class="btn-primary" onclick="loadCatalog(1)">Filter</button>
       </div>
       <div id="catalog-results" style="margin-top:12px;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Phase 38 — Scoped snapshot bundles (chapter + book) -->
+<div class="modal-overlay" id="bundle-modal" onclick="if(event.target===this)closeModal('bundle-modal')">
+  <div class="modal wide">
+    <div class="modal-header">
+      <h3>&#128230; Snapshot Bundles</h3>
+      <button class="modal-close" onclick="closeModal('bundle-modal')">&times;</button>
+    </div>
+    <div class="tabs">
+      <button class="tab active" data-tab="sb-chapter" onclick="switchBundleTab('sb-chapter')">Chapter</button>
+      <button class="tab" data-tab="sb-book" onclick="switchBundleTab('sb-book')">Book</button>
+    </div>
+    <div class="modal-body">
+
+      <!-- Chapter scope -->
+      <div id="sb-chapter-pane">
+        <p style="font-size:11px;color:var(--fg-muted);margin-bottom:10px;">
+          Snapshot every section in the current chapter as one bundle.
+          Restore is <strong>non-destructive</strong> &mdash; each section
+          gets a NEW draft version, so existing drafts stay put as an undo path.
+          Best used before firing <code>autowrite</code> on a whole chapter.
+        </p>
+        <div class="field" style="display:flex;gap:8px;align-items:flex-end;">
+          <div style="flex:2;">
+            <label>Snapshot label (optional)</label>
+            <input type="text" id="sb-chapter-name" placeholder="(auto: chapter title + timestamp)">
+          </div>
+          <button class="btn-primary" onclick="doBundleSnapshot('chapter')">Snapshot Current Chapter</button>
+        </div>
+        <div id="sb-chapter-status" style="font-size:12px;color:var(--fg-muted);margin:8px 0;"></div>
+        <div id="sb-chapter-list" style="margin-top:10px;"></div>
+      </div>
+
+      <!-- Book scope -->
+      <div id="sb-book-pane" style="display:none;">
+        <p style="font-size:11px;color:var(--fg-muted);margin-bottom:10px;">
+          Snapshot every draft across every chapter in this book.
+          Restore walks each chapter bundle and creates new draft versions per section.
+          Slow on big books &mdash; prefer a chapter snapshot when you only need scope for one chapter.
+        </p>
+        <div class="field" style="display:flex;gap:8px;align-items:flex-end;">
+          <div style="flex:2;">
+            <label>Snapshot label (optional)</label>
+            <input type="text" id="sb-book-name" placeholder="(auto: book title + timestamp)">
+          </div>
+          <button class="btn-primary" onclick="doBundleSnapshot('book')">Snapshot Whole Book</button>
+        </div>
+        <div id="sb-book-status" style="font-size:12px;color:var(--fg-muted);margin:8px 0;"></div>
+        <div id="sb-book-list" style="margin-top:10px;"></div>
+      </div>
+
     </div>
   </div>
 </div>
@@ -9964,6 +10307,115 @@ async function showChapterReader() {{
 
   // Build popovers for citations in reader view
   setTimeout(buildPopovers, 100);
+}}
+
+// ── Phase 38: scoped snapshot bundles (chapter + book) ───────────────
+// Safety net for autowrite-all. Chapter bundle stores every section's
+// current content; restore creates NEW draft versions per section
+// (non-destructive) so the old versions stay around as an undo path.
+function openBundleSnapshots() {{
+  openModal('bundle-modal');
+  switchBundleTab('sb-chapter');
+}}
+
+function switchBundleTab(name) {{
+  document.querySelectorAll('#bundle-modal .tab').forEach(t => {{
+    t.classList.toggle('active', t.dataset.tab === name);
+  }});
+  document.getElementById('sb-chapter-pane').style.display = (name === 'sb-chapter') ? 'block' : 'none';
+  document.getElementById('sb-book-pane').style.display = (name === 'sb-book') ? 'block' : 'none';
+  if (name === 'sb-chapter') loadBundleList('chapter');
+  else loadBundleList('book');
+}}
+
+async function doBundleSnapshot(scope) {{
+  const nameEl = document.getElementById('sb-' + scope + '-name');
+  const status = document.getElementById('sb-' + scope + '-status');
+  let url;
+  if (scope === 'chapter') {{
+    if (!currentChapterId) {{
+      status.textContent = 'No current chapter — select a section first.';
+      return;
+    }}
+    url = '/api/snapshot/chapter/' + currentChapterId;
+  }} else {{
+    url = '/api/snapshot/book/{book_id}';
+  }}
+  status.textContent = 'Saving…';
+  const fd = new FormData();
+  fd.append('name', nameEl.value || '');
+  try {{
+    const res = await fetch(url, {{method: 'POST', body: fd}});
+    const data = await res.json();
+    if (!res.ok || !data.ok) {{
+      status.textContent = 'Error: ' + (data.detail || data.error || 'failed');
+      return;
+    }}
+    const extra = scope === 'chapter'
+      ? ` (${{data.drafts_included}} section${{data.drafts_included === 1 ? '' : 's'}}, ${{data.total_words}} words)`
+      : ` (${{data.chapters_included}} chapter${{data.chapters_included === 1 ? '' : 's'}}, ${{data.total_words}} words)`;
+    status.innerHTML = '<span style="color:var(--success);">Saved &quot;' + (data.name || '').replace(/</g, '&lt;') + '&quot;</span>' + extra;
+    nameEl.value = '';
+    loadBundleList(scope);
+  }} catch (exc) {{
+    status.textContent = 'Error: ' + exc;
+  }}
+}}
+
+async function loadBundleList(scope) {{
+  const list = document.getElementById('sb-' + scope + '-list');
+  const target = (scope === 'chapter') ? currentChapterId : '{book_id}';
+  if (!target) {{
+    list.innerHTML = '<div style="color:var(--fg-muted);font-size:12px;">Open any section first so a chapter is active.</div>';
+    return;
+  }}
+  list.innerHTML = '<div style="color:var(--fg-muted);font-size:12px;">Loading…</div>';
+  try {{
+    const res = await fetch('/api/snapshots/' + scope + '/' + target);
+    const data = await res.json();
+    const snaps = data.snapshots || [];
+    if (snaps.length === 0) {{
+      list.innerHTML = '<div style="color:var(--fg-muted);font-size:12px;">No ' + scope + ' snapshots yet.</div>';
+      return;
+    }}
+    let html = '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
+    html += '<thead><tr style="color:var(--fg-muted);text-align:left;border-bottom:1px solid var(--border);">';
+    html += '<th style="padding:6px 4px;">Label</th><th style="padding:6px 4px;">Words</th><th style="padding:6px 4px;">Saved</th><th></th></tr></thead><tbody>';
+    snaps.forEach(s => {{
+      const created = (s.created_at || '').split('.')[0].replace('T', ' ');
+      html += '<tr style="border-bottom:1px solid var(--border);">';
+      html += '<td style="padding:6px 4px;">' + (s.name || '').replace(/</g, '&lt;') + '</td>';
+      html += '<td style="padding:6px 4px;color:var(--fg-muted);">' + (s.word_count || 0).toLocaleString() + '</td>';
+      html += '<td style="padding:6px 4px;color:var(--fg-muted);font-size:11px;">' + created + '</td>';
+      html += '<td style="padding:6px 4px;text-align:right;">';
+      html += '<button onclick="restoreBundle(\\'' + s.id + '\\', \\'' + scope + '\\')" style="font-size:12px;padding:3px 10px;">Restore</button>';
+      html += '</td></tr>';
+    }});
+    html += '</tbody></table>';
+    list.innerHTML = html;
+  }} catch (exc) {{
+    list.innerHTML = '<div style="color:var(--danger,#c53030);font-size:12px;">Error: ' + exc + '</div>';
+  }}
+}}
+
+async function restoreBundle(snapId, scope) {{
+  const confirmMsg = scope === 'chapter'
+    ? 'Restore this chapter snapshot? Each section will get a NEW draft version. Existing drafts stay untouched.'
+    : 'Restore this BOOK snapshot? Every chapter will get new draft versions for every section. Existing drafts stay untouched.';
+  if (!confirm(confirmMsg)) return;
+  const status = document.getElementById('sb-' + scope + '-status');
+  status.textContent = 'Restoring…';
+  try {{
+    const res = await fetch('/api/snapshot/restore-bundle/' + snapId, {{method: 'POST'}});
+    const data = await res.json();
+    if (!res.ok || !data.ok) {{
+      status.textContent = 'Error: ' + (data.detail || data.error || 'failed');
+      return;
+    }}
+    status.innerHTML = '<span style="color:var(--success);">Restored ' + data.drafts_created + ' draft' + (data.drafts_created === 1 ? '' : 's') + ' across ' + data.chapters_restored + ' chapter' + (data.chapters_restored === 1 ? '' : 's') + '. Reload to see them.</span>';
+  }} catch (exc) {{
+    status.textContent = 'Error: ' + exc;
+  }}
 }}
 
 // ── Snapshots ─────────────────────────────────────────────────────────

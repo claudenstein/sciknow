@@ -318,12 +318,46 @@ class Draft(Base):
 
 
 class DraftSnapshot(Base):
+    """Named snapshots of draft/chapter/book state.
+
+    Phase 38 — scope extended beyond a single draft. Three shapes:
+
+    - `scope='draft'` (original): `draft_id` set, `content` is raw text,
+      restore overwrites the current draft content. Existing endpoints
+      `/api/snapshot/{draft_id}` keep working unchanged.
+
+    - `scope='chapter'`: `chapter_id` set, `draft_id` NULL, `content`
+      is a JSON bundle `{"chapter_id": ..., "drafts": [{id, section_type,
+      title, content, word_count, version}, ...]}`. Restore creates NEW
+      draft VERSIONS for every section in the bundle — non-destructive.
+
+    - `scope='book'`: `book_id` set, `draft_id` and `chapter_id` NULL,
+      `content` is a JSON bundle containing every chapter bundle.
+      Restore behaves like a chapter restore, per-chapter.
+
+    Chapter/book snapshots are the safety net for the destructive
+    `autowrite-all` op: one click snapshots a chapter's current state
+    before letting autowrite loose on it.
+    """
     __tablename__ = "draft_snapshots"
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    draft_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("drafts.id", ondelete="CASCADE"), nullable=False
+    # Nullable since Phase 38: chapter/book scope snapshots have no
+    # single draft to point at.
+    draft_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("drafts.id", ondelete="CASCADE"), nullable=True
     )
+    chapter_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("book_chapters.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    book_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("books.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    # 'draft' | 'chapter' | 'book' — Phase 38 default preserves legacy
+    # rows as draft-scoped without a backfill.
+    scope: Mapped[str] = mapped_column(Text, nullable=False, server_default="draft")
     name: Mapped[str] = mapped_column(Text, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     word_count: Mapped[int | None] = mapped_column(Integer)
@@ -333,6 +367,11 @@ class DraftSnapshot(Base):
 
     __table_args__ = (
         Index("idx_snapshots_draft", "draft_id"),
+        # Phase 38 — targeted indexes for the new list endpoints.
+        Index("idx_snapshots_chapter", "chapter_id",
+              postgresql_where="chapter_id IS NOT NULL"),
+        Index("idx_snapshots_book", "book_id",
+              postgresql_where="book_id IS NOT NULL"),
     )
 
 

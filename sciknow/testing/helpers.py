@@ -142,6 +142,10 @@ def rendered_template_static() -> str:
     return TEMPLATE.format(
         _BUILD_TAG=_BUILD_TAG,
         book_title="Test Book",
+        # Phase 38 — `book_id` placeholder for the bundle-snapshot JS
+        # that references `/api/snapshot/book/{book_id}` directly in
+        # the rendered client code.
+        book_id="00000000-0000-0000-0000-000000000000",
         search_q="",
         search_results_html="",
         sidebar_html="",
