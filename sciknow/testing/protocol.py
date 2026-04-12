@@ -4750,6 +4750,56 @@ def l1_phase39_book_settings_modal() -> None:
     )
 
 
+def l1_phase40_cli_export_pdf_epub() -> None:
+    """Phase 40 — CLI parity for PDF and EPUB export.
+
+    `sciknow book export` previously supported markdown, html, bibtex,
+    latex, docx. The web reader had its own WeasyPrint PDF button
+    (Phase 31) but the CLI didn't. EPUB was missing from both. This
+    phase adds both to the CLI.
+
+    Verifies:
+    - PDF path exists and uses weasyprint (same lib as the web reader)
+    - EPUB path exists and invokes pandoc with --citeproc
+    - Help text + error message list the new formats
+    """
+    import inspect
+
+    from sciknow.cli import book as book_cli
+    src = inspect.getsource(book_cli.export)
+
+    # PDF branch
+    assert 'if fmt == "pdf":' in src, "pdf branch missing from `book export`"
+    assert "weasyprint" in src, (
+        "pdf branch must use weasyprint (same lib as the web reader's "
+        "_html_to_pdf_response)"
+    )
+    assert "write_pdf" in src
+
+    # EPUB branch
+    assert 'if fmt == "epub":' in src, "epub branch missing from `book export`"
+    # Pandoc invocation with citeproc + bibliography
+    assert '"pandoc"' in src and "--citeproc" in src and "--bibliography=" in src, (
+        "epub branch must call pandoc --citeproc with the generated bibliography"
+    )
+    # Pandoc missing → friendly exit, not a crash
+    assert 'shutil.which("pandoc")' in src, (
+        "epub branch must guard on pandoc availability"
+    )
+
+    # Help text + unknown-format message surface the new formats
+    assert "pdf" in book_cli.export.__doc__.lower(), (
+        "export docstring must list pdf"
+    )
+    assert "epub" in book_cli.export.__doc__.lower(), (
+        "export docstring must list epub"
+    )
+    # Unknown-format error now lists all seven formats
+    assert "Use: markdown, html, pdf, epub, bibtex, latex, docx" in src, (
+        "unknown-format error must advertise the full format list"
+    )
+
+
 def l2_phase32_endpoint_shapes() -> None:
     """TestClient smoke test for the major read-only API endpoints.
 
@@ -5708,6 +5758,8 @@ L1_TESTS: list[Callable] = [
     l1_phase38_scoped_snapshot_bundles,
     # Phase 39 — consolidated per-book Settings modal
     l1_phase39_book_settings_modal,
+    # Phase 40 — CLI export parity: pdf + epub
+    l1_phase40_cli_export_pdf_epub,
 ]
 
 L2_TESTS: list[Callable] = [

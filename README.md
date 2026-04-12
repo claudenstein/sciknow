@@ -49,7 +49,7 @@ A local-first scientific knowledge system that ingests papers, builds a compiled
 - **Per-section model override** — dial expensive models up on the sections that need them (methods, results) and down on the cheap ones (overviews, conclusions); set per section in the Chapter Sections tab
 - **Scoped snapshot bundles** — whole-chapter and whole-book snapshots as a single click before firing autowrite-all; restore is non-destructive (creates new draft versions, existing drafts stay as undo path)
 - **Book Settings panel** — one tabbed modal consolidates title, description, leitmotiv, target word count, and the style fingerprint (with on-demand refresh) so per-book config isn't scattered across four surfaces
-- **Multi-format export** — Markdown, HTML, BibTeX, LaTeX, DOCX with global citation dedup
+- **Multi-format export** — Markdown, HTML, PDF (WeasyPrint), EPUB (pandoc), BibTeX, LaTeX, DOCX with global citation dedup, available from both the CLI and the web reader
 
 **Infrastructure**
 - **All local** — PostgreSQL + Qdrant + Ollama, no cloud APIs, no Docker

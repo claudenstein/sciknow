@@ -1356,13 +1356,16 @@ def export(
     include_sources: bool = typer.Option(True, "--sources/--no-sources",
                                           help="Include source citations per chapter."),
     fmt:        str = typer.Option("markdown", "--format", "-f",
-                                    help="Export format: markdown, html, bibtex, latex, docx."),
+                                    help="Export format: markdown, html, pdf, epub, bibtex, latex, docx."),
 ):
     """
     Compile all chapter drafts into a single document.
 
     Formats:
       markdown  — Markdown with inline [N] citations + bibliography (default)
+      html      — self-contained static reader (same look as the web reader)
+      pdf       — HTML → PDF via weasyprint (Phase 40 — parity with the web export)
+      epub      — Markdown → EPUB via Pandoc (Phase 40; requires pandoc installed)
       bibtex    — .bib file from all cited papers' metadata
       latex     — Markdown → LaTeX via Pandoc (requires pandoc installed)
       docx      — Markdown → DOCX via Pandoc (requires pandoc installed)
@@ -1371,9 +1374,11 @@ def export(
 
       sciknow book export "Global Cooling"
 
-      sciknow book export "Global Cooling" --format bibtex -o refs.bib
+      sciknow book export "Global Cooling" --format pdf -o book.pdf
 
-      sciknow book export "Global Cooling" --format latex -o book.tex
+      sciknow book export "Global Cooling" --format epub -o book.epub
+
+      sciknow book export "Global Cooling" --format bibtex -o refs.bib
     """
     from sqlalchemy import text
     from sciknow.storage.db import get_session
@@ -1540,6 +1545,71 @@ def export(
         )
         return
 
+    # ── PDF export — Phase 40, parity with the web reader's export ─────
+    # Uses weasyprint on the rendered HTML. No pandoc dependency; the
+    # only requirement is weasyprint, which the web reader already
+    # depends on for its PDF button (pyproject.toml).
+    if fmt == "pdf":
+        try:
+            from weasyprint import HTML as _WPHTML
+        except ImportError as exc:
+            console.print(
+                f"[red]PDF export requires weasyprint ({exc}).[/red]\n"
+                f"Install: [bold]uv add weasyprint[/bold]"
+            )
+            raise typer.Exit(1)
+        from sciknow.web.app import _get_book_data, _render_book, set_book
+        set_book(book[0], book[1])
+        bk, chs, drs, gps, comms = _get_book_data()
+        html = _render_book(bk, chs, drs, gps, comms)
+        pdf_path = output or Path(f"{safe}.pdf")
+        try:
+            _WPHTML(string=html).write_pdf(str(pdf_path))
+        except Exception as exc:
+            console.print(f"[red]PDF render failed:[/red] {exc}")
+            raise typer.Exit(1)
+        console.print(
+            f"[green]✓ PDF exported:[/green] [bold]{pdf_path}[/bold]  "
+            f"({total_words:,} words)"
+        )
+        return
+
+    # ── EPUB export — Phase 40, Markdown → EPUB via pandoc ─────────────
+    # Piggybacks on the same markdown generation path used by latex/
+    # docx above. Pandoc's built-in EPUB writer is the pragmatic
+    # choice — no extra Python dep, and it already does citeproc
+    # against the generated BibTeX.
+    if fmt == "epub":
+        import subprocess, shutil
+        if not shutil.which("pandoc"):
+            console.print(
+                "[red]Pandoc not installed.[/red] Required for EPUB export.\n"
+                "Install: [bold]sudo apt install pandoc[/bold]"
+            )
+            raise typer.Exit(1)
+        md_path = Path(f"{safe}.md")
+        md_path.write_text(md, encoding="utf-8")
+        bib = _generate_bibtex(None, book[0])
+        bib_path = md_path.with_suffix(".bib")
+        bib_path.write_text(bib, encoding="utf-8")
+        epub_path = output or Path(f"{safe}.epub")
+        cmd = [
+            "pandoc", str(md_path),
+            "--citeproc", f"--bibliography={bib_path}",
+            "--metadata", f"title={book[1]}",
+            "-o", str(epub_path),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            console.print(f"[red]Pandoc failed:[/red] {result.stderr[:300]}")
+            raise typer.Exit(1)
+        console.print(
+            f"[green]✓ EPUB exported:[/green] [bold]{epub_path}[/bold]  "
+            f"({total_words:,} words)"
+        )
+        console.print(f"[dim]BibTeX: {bib_path}[/dim]")
+        return
+
     # ── BibTeX export ────────────────────────────────────────────────────
     if fmt == "bibtex":
         bib = _generate_bibtex(session if 'session' in dir() else None, book[0])
@@ -1596,7 +1666,7 @@ def export(
         console.print(f"[dim]BibTeX: {bib_path}[/dim]")
         return
 
-    console.print(f"[red]Unknown format: {fmt}[/red]. Use: markdown, bibtex, latex, docx")
+    console.print(f"[red]Unknown format: {fmt}[/red]. Use: markdown, html, pdf, epub, bibtex, latex, docx")
 
 
 def _generate_bibtex(session, book_id: str) -> str:
