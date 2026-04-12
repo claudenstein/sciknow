@@ -508,6 +508,10 @@ async def api_book():
     # Phase 17 — expose the length target so the GUI Plan modal can
     # render it (and show the default when unset).
     target_chapter_words = meta.get("target_chapter_words") if isinstance(meta, dict) else None
+    # Phase 39 — expose the style fingerprint so the Book Settings
+    # modal can render metrics + a "last refreshed" stamp without a
+    # second round-trip.
+    style_fingerprint = meta.get("style_fingerprint") if isinstance(meta, dict) else None
     return {
         "id": book[0] if book else "",
         "title": book[1] if book else "",
@@ -516,6 +520,7 @@ async def api_book():
         "status": (book[4] or "draft") if book else "draft",
         "target_chapter_words": target_chapter_words,  # may be None → client shows default
         "default_target_chapter_words": 6000,
+        "style_fingerprint": style_fingerprint,
         "chapters": len(chapters),
         "drafts": len(drafts),
         "gaps": len(gaps),
@@ -579,6 +584,24 @@ async def api_book_update(
         ), params)
         session.commit()
     return JSONResponse({"ok": True})
+
+
+@app.post("/api/book/style-fingerprint/refresh")
+async def api_book_style_fingerprint_refresh():
+    """Phase 39 — recompute the book's style fingerprint on demand.
+
+    Mirrors `sciknow book style refresh` in the web layer so the Book
+    Settings modal can trigger a rebuild without dropping to the CLI.
+    Runs synchronously (no SSE) because the work is pure SQL + regex
+    over the book's drafts — sub-second for books with <500 drafts.
+    """
+    from sciknow.core.style_fingerprint import compute_style_fingerprint
+    try:
+        fp = compute_style_fingerprint(_book_id)
+    except Exception as exc:
+        logger.warning("style fingerprint refresh failed: %s", exc)
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+    return JSONResponse({"ok": True, "fingerprint": fp})
 
 
 @app.post("/api/book/plan/generate")
@@ -4745,6 +4768,7 @@ body.task-bar-open {{ padding-top: 40px; }}
     <div class="sep"></div>
     <div class="tg">
       <button onclick="openPlanModal()" title="View / edit / regenerate the book plan (the leitmotiv)">&#128221; Plan</button>
+      <button onclick="openBookSettings()" title="Consolidated per-book settings: title, description, plan, length target, style fingerprint">&#9881; Settings</button>
       <button onclick="openAskModal()" title="Full corpus RAG question (sciknow ask question)">&#128270; Ask Corpus</button>
       <button onclick="openWikiModal()" title="Query the compiled knowledge wiki (sciknow wiki query)">&#128218; Wiki Query</button>
       <button onclick="openKgModal()" title="Browse the knowledge graph (extracted entity-relationship triples)">&#128279; KG</button>
@@ -5172,6 +5196,91 @@ body.task-bar-open {{ padding-top: 40px; }}
         <button class="btn-primary" onclick="loadCatalog(1)">Filter</button>
       </div>
       <div id="catalog-results" style="margin-top:12px;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Phase 39 — Consolidated Book Settings modal -->
+<div class="modal-overlay" id="book-settings-modal" onclick="if(event.target===this)closeModal('book-settings-modal')">
+  <div class="modal wide">
+    <div class="modal-header">
+      <h3>&#9881; Book Settings</h3>
+      <button class="modal-close" onclick="closeModal('book-settings-modal')">&times;</button>
+    </div>
+    <div class="tabs">
+      <button class="tab active" data-tab="bs-basics" onclick="switchBookSettingsTab('bs-basics')">Basics</button>
+      <button class="tab" data-tab="bs-leitmotiv" onclick="switchBookSettingsTab('bs-leitmotiv')">Leitmotiv</button>
+      <button class="tab" data-tab="bs-style" onclick="switchBookSettingsTab('bs-style')">Style</button>
+    </div>
+    <div class="modal-body">
+
+      <!-- Basics tab -->
+      <div id="bs-basics-pane">
+        <p style="font-size:11px;color:var(--fg-muted);margin-bottom:12px;">
+          Persistent per-book settings. Writes through
+          <code>PUT /api/book</code>; empty values leave the field untouched.
+        </p>
+        <div class="field">
+          <label>Title</label>
+          <input type="text" id="bs-title" placeholder="(required)">
+        </div>
+        <div class="field">
+          <label>Description</label>
+          <input type="text" id="bs-description" placeholder="One-line blurb shown in catalog / stats">
+        </div>
+        <div class="field" style="display:flex;gap:8px;align-items:flex-end;">
+          <div style="flex:1;">
+            <label>Target words per chapter</label>
+            <input type="number" id="bs-target-chapter-words" min="0" step="500"
+                   placeholder="6000 (default)">
+          </div>
+          <div style="flex:2;font-size:11px;color:var(--fg-muted);padding-bottom:8px;">
+            Per-section target = chapter target ÷ number of sections.
+            Set <strong>0</strong> to clear the override and use the default.
+            Override per section in the Chapter modal's Sections tab.
+          </div>
+        </div>
+        <div id="bs-basics-meta" style="margin-top:10px;font-size:11px;color:var(--fg-muted);"></div>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:14px;">
+          <button class="btn-primary" onclick="saveBookSettings('basics')">Save Basics</button>
+          <span id="bs-basics-status" style="font-size:12px;color:var(--fg-muted);"></span>
+        </div>
+      </div>
+
+      <!-- Leitmotiv tab (the book plan) -->
+      <div id="bs-leitmotiv-pane" style="display:none;">
+        <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+          The book's thesis / scope document (200&ndash;500 words). Injected into
+          every writer prompt so chapter sections stay aligned with the overall
+          argument. Use the <strong>&#128221; Plan</strong> quick-editor for
+          regeneration; this tab is for direct editing.
+        </p>
+        <div class="field">
+          <label>Plan / leitmotiv</label>
+          <textarea id="bs-plan" rows="16" style="font-family:var(--font-sans,inherit);font-size:13px;line-height:1.55;"></textarea>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:8px;">
+          <button class="btn-primary" onclick="saveBookSettings('leitmotiv')">Save Plan</button>
+          <span id="bs-leitmotiv-status" style="font-size:12px;color:var(--fg-muted);"></span>
+        </div>
+      </div>
+
+      <!-- Style tab -->
+      <div id="bs-style-pane" style="display:none;">
+        <p style="font-size:11px;color:var(--fg-muted);margin-bottom:10px;">
+          Style fingerprint extracted from drafts marked
+          <em>final</em> / <em>reviewed</em> / <em>revised</em> (Phase 32.10 / Layer 5).
+          Injected into the autowrite writer prompt so future sections match your
+          already-approved style. Refresh after you've accepted or edited drafts.
+        </p>
+        <div id="bs-style-fingerprint"
+             style="padding:14px;border:1px solid var(--border);border-radius:6px;background:var(--bg-alt,#f8f8f8);min-height:120px;"></div>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:10px;">
+          <button class="btn-primary" onclick="refreshStyleFingerprint()">Recompute Fingerprint</button>
+          <span id="bs-style-status" style="font-size:12px;color:var(--fg-muted);"></span>
+        </div>
+      </div>
+
     </div>
   </div>
 </div>
@@ -10307,6 +10416,134 @@ async function showChapterReader() {{
 
   // Build popovers for citations in reader view
   setTimeout(buildPopovers, 100);
+}}
+
+// ── Phase 39: consolidated Book Settings modal ───────────────────────
+// Brings title/description/plan/target_chapter_words/style_fingerprint
+// into one editor. All fields round-trip through existing endpoints:
+// GET /api/book for reads, PUT /api/book for writes, and a new
+// POST /api/book/style-fingerprint/refresh for the style tab.
+async function openBookSettings() {{
+  openModal('book-settings-modal');
+  switchBookSettingsTab('bs-basics');
+  await loadBookSettings();
+}}
+
+function switchBookSettingsTab(name) {{
+  document.querySelectorAll('#book-settings-modal .tab').forEach(t => {{
+    t.classList.toggle('active', t.dataset.tab === name);
+  }});
+  ['bs-basics', 'bs-leitmotiv', 'bs-style'].forEach(n => {{
+    const pane = document.getElementById(n + '-pane');
+    if (pane) pane.style.display = (n === name) ? 'block' : 'none';
+  }});
+}}
+
+async function loadBookSettings() {{
+  try {{
+    const res = await fetch('/api/book');
+    const data = await res.json();
+    document.getElementById('bs-title').value = data.title || '';
+    document.getElementById('bs-description').value = data.description || '';
+    document.getElementById('bs-target-chapter-words').value = (data.target_chapter_words != null) ? String(data.target_chapter_words) : '';
+    document.getElementById('bs-plan').value = data.plan || '';
+    // Basics meta — chapter / draft / gaps counts come through the
+    // same endpoint, so surface them as a read-only summary.
+    const meta = document.getElementById('bs-basics-meta');
+    const defaultTcw = data.default_target_chapter_words || 6000;
+    const effectiveTcw = data.target_chapter_words || defaultTcw;
+    meta.innerHTML = '<strong>' + (data.chapters || 0) + '</strong> chapter' + ((data.chapters || 0) === 1 ? '' : 's')
+                   + ' · <strong>' + (data.drafts || 0) + '</strong> draft' + ((data.drafts || 0) === 1 ? '' : 's')
+                   + ' · Status: <strong>' + (data.status || 'draft') + '</strong>'
+                   + ' · Effective target: <strong>~' + effectiveTcw + '</strong> words/chapter'
+                   + (data.target_chapter_words ? '' : ' <em>(default)</em>');
+    renderStyleFingerprint(data.style_fingerprint);
+  }} catch (exc) {{
+    document.getElementById('bs-basics-status').textContent = 'Load failed: ' + exc;
+  }}
+}}
+
+function renderStyleFingerprint(fp) {{
+  const el = document.getElementById('bs-style-fingerprint');
+  if (!fp || !fp.n_drafts_sampled) {{
+    el.innerHTML = '<div style="color:var(--fg-muted);font-size:13px;">No fingerprint yet &mdash; mark some drafts as <em>final</em> / <em>reviewed</em> / <em>revised</em> and click <strong>Recompute</strong>.</div>';
+    return;
+  }}
+  const rows = [
+    ['Drafts sampled', fp.n_drafts_sampled],
+    ['Average words per draft', fp.avg_words_per_draft],
+    ['Median sentence length', (fp.median_sentence_length || 0) + ' words'],
+    ['Median paragraph length', (fp.median_paragraph_words || 0) + ' words'],
+    ['Citations per 100 words', (fp.citations_per_100_words != null) ? fp.citations_per_100_words.toFixed(2) : '—'],
+    ['Hedging rate', (fp.hedging_rate != null) ? (fp.hedging_rate * 100).toFixed(1) + '%' : '—'],
+  ];
+  let html = '<div style="display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;font-size:13px;">';
+  rows.forEach(([k, v]) => {{
+    html += '<div style="color:var(--fg-muted);">' + k + '</div>';
+    html += '<div><strong>' + (v != null ? v : '—') + '</strong></div>';
+  }});
+  html += '</div>';
+  const trans = fp.top_transitions || [];
+  if (trans.length) {{
+    html += '<div style="margin-top:10px;font-size:12px;color:var(--fg-muted);">Top sentence-initial transitions: ';
+    html += trans.slice(0, 8).map(t => '<span style="display:inline-block;padding:2px 8px;margin:2px;border:1px solid var(--border);border-radius:10px;background:var(--bg);font-family:ui-monospace,monospace;font-size:11px;">' + (t[0] || t).replace(/</g, '&lt;') + '</span>').join('');
+    html += '</div>';
+  }}
+  if (fp.computed_at) {{
+    html += '<div style="margin-top:10px;font-size:11px;color:var(--fg-muted);">Computed at: ' + fp.computed_at + '</div>';
+  }}
+  el.innerHTML = html;
+}}
+
+async function saveBookSettings(tab) {{
+  const statusId = 'bs-' + tab + '-status';
+  const status = document.getElementById(statusId);
+  status.textContent = 'Saving…';
+  const fd = new FormData();
+  if (tab === 'basics') {{
+    fd.append('title', document.getElementById('bs-title').value);
+    fd.append('description', document.getElementById('bs-description').value);
+    const tcw = document.getElementById('bs-target-chapter-words').value;
+    // Blank leaves unchanged; 0 clears back to default; positive sets.
+    if (tcw !== '') fd.append('target_chapter_words', tcw);
+  }} else if (tab === 'leitmotiv') {{
+    fd.append('plan', document.getElementById('bs-plan').value);
+  }}
+  try {{
+    const res = await fetch('/api/book', {{method: 'PUT', body: fd}});
+    const data = await res.json();
+    if (!res.ok || !data.ok) {{
+      status.textContent = 'Save failed: ' + (data.detail || 'unknown');
+      return;
+    }}
+    status.innerHTML = '<span style="color:var(--success);">Saved.</span>';
+    // Rehydrate meta line — chapter counts may shift if the target changed
+    if (tab === 'basics') await loadBookSettings();
+  }} catch (exc) {{
+    status.textContent = 'Save failed: ' + exc;
+  }}
+}}
+
+async function refreshStyleFingerprint() {{
+  const status = document.getElementById('bs-style-status');
+  status.textContent = 'Computing from approved drafts…';
+  try {{
+    const res = await fetch('/api/book/style-fingerprint/refresh', {{method: 'POST'}});
+    const data = await res.json();
+    if (!res.ok || !data.ok) {{
+      status.textContent = 'Refresh failed: ' + (data.error || data.detail || 'unknown');
+      return;
+    }}
+    renderStyleFingerprint(data.fingerprint);
+    const sampled = (data.fingerprint && data.fingerprint.n_drafts_sampled) || 0;
+    if (sampled === 0) {{
+      status.textContent = 'No approved drafts yet — mark some as final/reviewed/revised first.';
+    }} else {{
+      status.innerHTML = '<span style="color:var(--success);">Updated from ' + sampled + ' draft' + (sampled === 1 ? '' : 's') + '.</span>';
+    }}
+  }} catch (exc) {{
+    status.textContent = 'Refresh failed: ' + exc;
+  }}
 }}
 
 // ── Phase 38: scoped snapshot bundles (chapter + book) ───────────────

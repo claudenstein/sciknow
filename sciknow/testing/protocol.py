@@ -4687,6 +4687,69 @@ def l1_phase38_scoped_snapshot_bundles() -> None:
         )
 
 
+def l1_phase39_book_settings_modal() -> None:
+    """Phase 39 — consolidated per-book Settings modal.
+
+    Brings title / description / plan / target_chapter_words /
+    style_fingerprint into one editor. Leaves existing per-chapter
+    surfaces alone (Chapter modal still owns sections editing).
+
+    Verifies:
+    - GET /api/book now returns style_fingerprint (None or dict)
+    - POST /api/book/style-fingerprint/refresh endpoint exists and
+      calls compute_style_fingerprint
+    - Settings button + modal HTML with 3 tabs (basics/leitmotiv/style)
+    - JS functions for open/switch/load/save/refresh
+    """
+    import inspect
+
+    from sciknow.web import app as web_app
+
+    # 1) New endpoint registered
+    paths = {getattr(r, "path", None) for r in web_app.app.routes}
+    assert "/api/book/style-fingerprint/refresh" in paths, (
+        "style fingerprint refresh endpoint not registered"
+    )
+    assert hasattr(web_app, "api_book_style_fingerprint_refresh")
+
+    # 2) Refresh handler calls compute_style_fingerprint
+    fn_src = inspect.getsource(web_app.api_book_style_fingerprint_refresh)
+    assert "compute_style_fingerprint" in fn_src, (
+        "refresh endpoint must call compute_style_fingerprint"
+    )
+
+    # 3) GET /api/book surfaces style_fingerprint
+    get_src = inspect.getsource(web_app.api_book)
+    assert '"style_fingerprint"' in get_src, (
+        "/api/book must expose style_fingerprint for the settings modal"
+    )
+
+    # 4) Button + modal HTML wiring
+    src = inspect.getsource(web_app)
+    assert 'onclick="openBookSettings()"' in src, (
+        "Settings button not wired into the top-bar"
+    )
+    assert 'id="book-settings-modal"' in src
+    for tab in ("bs-basics", "bs-leitmotiv", "bs-style"):
+        assert f'data-tab="{tab}"' in src, f"tab {tab} missing"
+        assert f'id="{tab}-pane"' in src, f"pane {tab}-pane missing"
+
+    # 5) JS dispatchers exist
+    for fn in ("openBookSettings", "switchBookSettingsTab",
+               "loadBookSettings", "renderStyleFingerprint",
+               "saveBookSettings", "refreshStyleFingerprint"):
+        assert f"function {fn}(" in src or f"async function {fn}(" in src, (
+            f"JS function {fn} missing"
+        )
+
+    # 6) Save roundtrip hits the existing PUT /api/book (no new write endpoint)
+    save_src = src[src.index("async function saveBookSettings("):]
+    save_src = save_src[:save_src.index("\nasync function ")] if "\nasync function " in save_src else save_src[:3000]
+    assert "/api/book" in save_src and "method: 'PUT'" in save_src, (
+        "saveBookSettings must PUT to /api/book (no new write endpoint)"
+    )
+
+
 def l2_phase32_endpoint_shapes() -> None:
     """TestClient smoke test for the major read-only API endpoints.
 
@@ -5643,6 +5706,8 @@ L1_TESTS: list[Callable] = [
     l1_phase37_per_section_model_override,
     # Phase 38 — chapter + book snapshot bundles (autowrite safety net)
     l1_phase38_scoped_snapshot_bundles,
+    # Phase 39 — consolidated per-book Settings modal
+    l1_phase39_book_settings_modal,
 ]
 
 L2_TESTS: list[Callable] = [
