@@ -4800,6 +4800,62 @@ def l1_phase40_cli_export_pdf_epub() -> None:
     )
 
 
+def l1_phase41_static_where_clauses() -> None:
+    """Phase 41 — retire the WHERE-clause f-strings in /api/catalog and
+    /api/kg.
+
+    The Phase 22 audit flagged both endpoints for assembling the SQL
+    WHERE clause from a Python list of pre-formatted fragments and
+    then interpolating the result via an f-string. Not exploitable
+    today (every fragment is a code-local string literal) but a fragile
+    pattern — one future PR could concatenate user input into the
+    query shape.
+
+    Refactor: bind every optional filter as the real value or NULL,
+    gate each clause with ``(:param IS NULL OR …)``. The SQL string
+    is now fully static — no f-string, no .format(), no dynamic
+    assembly — which makes the injection-vector question decidable
+    at lint time rather than review time.
+
+    Verifies:
+    - Neither handler source uses `WHERE " + " AND ".join(...)` or
+      builds `where_sql` / `where_clause` from string concatenation.
+    - Neither handler source uses f-string SQL blocks.
+    - The hallmark of the always-bind pattern is present:
+      `(:param IS NULL OR …)` for each filter.
+    """
+    import inspect
+
+    from sciknow.web import app as web_app
+
+    cat_src = inspect.getsource(web_app.api_catalog)
+    kg_src = inspect.getsource(web_app.api_kg)
+
+    for name, src in (("api_catalog", cat_src), ("api_kg", kg_src)):
+        # No dynamic WHERE assembly
+        assert 'where = []' not in src, (
+            f"{name}: dynamic `where = []` accumulator still present"
+        )
+        assert '" AND ".join(' not in src, (
+            f"{name}: `\" AND \".join(...)` WHERE assembly still present"
+        )
+        assert 'where_clause' not in src and 'where_sql' not in src, (
+            f"{name}: `where_clause` / `where_sql` variable still present"
+        )
+        # No f-string SQL blocks (triple-quoted or otherwise)
+        assert 'text(f"""' not in src, (
+            f"{name}: f-string SQL block still present"
+        )
+        assert 'text(f"' not in src, (
+            f"{name}: f-string single-line SQL still present"
+        )
+        # Always-bind pattern is the hallmark of the refactor
+        assert "IS NULL OR" in src, (
+            f"{name}: missing `(:param IS NULL OR …)` gates — the "
+            f"always-bind pattern is the whole point of the refactor"
+        )
+
+
 def l2_phase32_endpoint_shapes() -> None:
     """TestClient smoke test for the major read-only API endpoints.
 
@@ -5760,6 +5816,8 @@ L1_TESTS: list[Callable] = [
     l1_phase39_book_settings_modal,
     # Phase 40 — CLI export parity: pdf + epub
     l1_phase40_cli_export_pdf_epub,
+    # Phase 41 — static WHERE clauses on /api/catalog + /api/kg
+    l1_phase41_static_where_clauses,
 ]
 
 L2_TESTS: list[Callable] = [

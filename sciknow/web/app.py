@@ -1557,35 +1557,42 @@ async def api_kg(
     """
     limit = max(1, min(int(limit or 200), 1000))
     offset = max(0, int(offset or 0))
-    where = []
-    params: dict = {"limit": limit, "offset": offset}
-    if subject.strip():
-        where.append("kg.subject ILIKE :subject_q")
-        params["subject_q"] = f"%{subject.strip()}%"
-    if predicate.strip():
-        where.append("kg.predicate = :predicate_q")
-        params["predicate_q"] = predicate.strip()
-    if object.strip():
-        where.append("kg.object ILIKE :object_q")
-        params["object_q"] = f"%{object.strip()}%"
-    if document_id.strip():
-        where.append("kg.source_doc_id::text = :doc_q")
-        params["doc_q"] = document_id.strip()
-    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    # Phase 41 — always-bind pattern. Every optional filter is bound
+    # to its real value or NULL so the SQL can stay fully static.
+    # Removes the WHERE-clause f-string that the Phase 22 audit flagged.
+    subj_q = subject.strip()
+    pred_q = predicate.strip()
+    obj_q = object.strip()
+    doc_q = document_id.strip()
+    params: dict = {
+        "limit": limit,
+        "offset": offset,
+        "subject_q": f"%{subj_q}%" if subj_q else None,
+        "predicate_q": pred_q or None,
+        "object_q": f"%{obj_q}%" if obj_q else None,
+        "doc_q": doc_q or None,
+    }
 
     with get_session() as session:
         # Total count for pagination
-        total = session.execute(text(
-            f"SELECT COUNT(*) FROM knowledge_graph kg {where_sql}"
-        ), params).scalar()
+        total = session.execute(text("""
+            SELECT COUNT(*) FROM knowledge_graph kg
+            WHERE (:subject_q   IS NULL OR kg.subject ILIKE :subject_q)
+              AND (:predicate_q IS NULL OR kg.predicate = :predicate_q)
+              AND (:object_q    IS NULL OR kg.object ILIKE :object_q)
+              AND (:doc_q       IS NULL OR kg.source_doc_id::text = :doc_q)
+        """), params).scalar()
 
-        rows = session.execute(text(f"""
+        rows = session.execute(text("""
             SELECT kg.subject, kg.predicate, kg.object,
                    kg.source_doc_id::text, kg.confidence,
                    pm.title
             FROM knowledge_graph kg
             LEFT JOIN paper_metadata pm ON pm.document_id = kg.source_doc_id
-            {where_sql}
+            WHERE (:subject_q   IS NULL OR kg.subject ILIKE :subject_q)
+              AND (:predicate_q IS NULL OR kg.predicate = :predicate_q)
+              AND (:object_q    IS NULL OR kg.object ILIKE :object_q)
+              AND (:doc_q       IS NULL OR kg.source_doc_id::text = :doc_q)
             ORDER BY kg.confidence DESC, kg.subject
             LIMIT :limit OFFSET :offset
         """), params).fetchall()
@@ -2732,42 +2739,57 @@ async def api_catalog(
     journal: str = None,
     topic_cluster: str = None,
 ):
-    """Paginated paper list with optional filters. Mirrors `sciknow catalog list`."""
+    """Paginated paper list with optional filters. Mirrors `sciknow catalog list`.
+
+    Phase 41 — query is fully static. Every optional filter is
+    always bound (as the real value or NULL) and gated by a
+    ``(:param IS NULL OR …)`` short-circuit. This removes the
+    f-string interpolation of pre-built WHERE fragments that the
+    Phase 22 audit flagged: no code path builds SQL from Python
+    strings anymore, so a future maintainer can't accidentally
+    concatenate user input into the query shape.
+    """
     page = max(page, 1)
     per_page = min(max(per_page, 1), 100)
     offset = (page - 1) * per_page
 
-    where = []
-    params: dict = {"limit": per_page, "offset": offset}
-    if year_from is not None:
-        where.append("pm.year >= :year_from")
-        params["year_from"] = year_from
-    if year_to is not None:
-        where.append("pm.year <= :year_to")
-        params["year_to"] = year_to
-    if author:
-        where.append("EXISTS (SELECT 1 FROM jsonb_array_elements(pm.authors) a WHERE a->>'name' ILIKE :author)")
-        params["author"] = f"%{author}%"
-    if journal:
-        where.append("pm.journal ILIKE :journal")
-        params["journal"] = f"%{journal}%"
-    if topic_cluster:
-        where.append("pm.topic_cluster = :topic_cluster")
-        params["topic_cluster"] = topic_cluster
-
-    where_clause = ("WHERE " + " AND ".join(where)) if where else ""
+    params: dict = {
+        "limit": per_page,
+        "offset": offset,
+        "year_from": year_from,
+        "year_to": year_to,
+        # Both ILIKE filters are wrapped with %% here so the SQL can
+        # stay static. NULL means "no filter" courtesy of the gating
+        # IS NULL check on each clause.
+        "author": f"%{author}%" if author else None,
+        "journal": f"%{journal}%" if journal else None,
+        "topic_cluster": topic_cluster or None,
+    }
 
     with get_session() as session:
-        total = session.execute(text(f"""
-            SELECT COUNT(*) FROM paper_metadata pm {where_clause}
-        """), {k: v for k, v in params.items() if k not in ("limit", "offset")}).scalar() or 0
+        total = session.execute(text("""
+            SELECT COUNT(*) FROM paper_metadata pm
+            WHERE (:year_from IS NULL OR pm.year >= :year_from)
+              AND (:year_to   IS NULL OR pm.year <= :year_to)
+              AND (:author    IS NULL OR EXISTS (
+                   SELECT 1 FROM jsonb_array_elements(pm.authors) a
+                   WHERE a->>'name' ILIKE :author))
+              AND (:journal        IS NULL OR pm.journal ILIKE :journal)
+              AND (:topic_cluster  IS NULL OR pm.topic_cluster = :topic_cluster)
+        """), params).scalar() or 0
 
-        rows = session.execute(text(f"""
+        rows = session.execute(text("""
             SELECT pm.document_id::text, pm.title, pm.year, pm.authors,
                    pm.journal, pm.doi, pm.abstract, pm.topic_cluster,
                    pm.metadata_source
             FROM paper_metadata pm
-            {where_clause}
+            WHERE (:year_from IS NULL OR pm.year >= :year_from)
+              AND (:year_to   IS NULL OR pm.year <= :year_to)
+              AND (:author    IS NULL OR EXISTS (
+                   SELECT 1 FROM jsonb_array_elements(pm.authors) a
+                   WHERE a->>'name' ILIKE :author))
+              AND (:journal        IS NULL OR pm.journal ILIKE :journal)
+              AND (:topic_cluster  IS NULL OR pm.topic_cluster = :topic_cluster)
             ORDER BY pm.year DESC NULLS LAST, pm.title
             LIMIT :limit OFFSET :offset
         """), params).fetchall()

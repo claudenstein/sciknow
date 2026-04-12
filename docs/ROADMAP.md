@@ -18,7 +18,7 @@ high-impact ones (XSS, job leak, draft delete) shipped in Phase 22.
 These three were deferred:
 
 - [x] **~~Dead `/api/chapters/reorder` endpoint.~~** Wired in Phase 33 — chapter title bars are now draggable; the drop handler POSTs to this endpoint. No longer dead code.
-- [ ] **Fragile `WHERE`-clause f-string** in the catalog query (`web/app.py` ~1575). Current conditions are hardcoded so it's not exploitable, but it's a code smell that would bite if someone ever adds a user-controlled filter. Replace with explicit named bindings. **Effort:** 30 minutes.
+- [x] **~~Fragile `WHERE`-clause f-string~~** in the catalog query — shipped in Phase 41. Both `/api/catalog` and `/api/kg` rewritten to the always-bind pattern: every optional filter is bound as the real value or NULL, each WHERE clause gated with `(:param IS NULL OR …)`. The SQL is now fully static (no f-string, no `.join()`, no dynamic assembly) which makes the injection-vector question decidable at lint time instead of review time.
 - [ ] **`onclick="..."` pattern fragility.** A lot of inline handlers with interpolated strings. Phase 22 escaped the IDs but the pattern itself is harder to reason about than `addEventListener`. Refactor to event delegation. **Effort:** half-day.
 
 ---
