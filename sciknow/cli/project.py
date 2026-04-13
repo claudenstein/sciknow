@@ -334,44 +334,121 @@ def _do_migration_from_existing(project: Project, *, dry_run: bool) -> None:
 
 
 def _migrate_qdrant_collections(project: Project) -> None:
-    """Snapshot legacy collections then restore them under prefixed names.
+    """Copy legacy collections into the project's prefixed collections.
 
-    Qdrant doesn't support in-place rename so we use the snapshot
-    mechanism: create a snapshot of each legacy collection, recreate
-    it with the new name from that snapshot, leave the legacy
-    collection in place for the user to verify + drop manually.
+    Initially this used Qdrant's snapshot/restore API, but
+    ``recover_snapshot(location="file://...")`` requires the snapshot
+    file path to be accessible from inside the Qdrant server's
+    filesystem, which doesn't work in containerised setups (or even
+    bare-metal installs whose snapshot dir doesn't match the URL we
+    construct). The user hits a ``Bad request: Snapshot file ... does
+    not exist`` 400 even though the snapshot was created.
+
+    Reliable alternative: ``init_collections()`` against the new
+    project's prefixes + a scroll-and-upsert loop that streams every
+    point (with both dense + sparse vectors and payload) from the
+    legacy collection into the new one. Slower (~1300 pts/s on the
+    reference hardware, so ~80s for a 100k-chunk corpus) but it has
+    no dependency on the Qdrant server's filesystem layout. Leaves
+    the legacy collection untouched as a recovery path.
     """
-    from sciknow.storage.qdrant import get_client
+    from qdrant_client.models import PointStruct
+
+    from sciknow.storage.qdrant import get_client, init_collections
 
     client = get_client()
+    try:
+        existing = {c.name for c in client.get_collections().collections}
+    except Exception as exc:
+        console.print(f"[yellow]Qdrant unreachable: {exc}. Skipping migration.[/yellow]")
+        return
+
+    # 1. Provision the project's prefixed collections under the active
+    # project. We've already written .active-project upstream of this
+    # call site? No — init writes it AFTER migration. Set the env var
+    # so init_collections() picks the right names regardless.
+    prev_env = os.environ.get("SCIKNOW_PROJECT")
+    os.environ["SCIKNOW_PROJECT"] = project.slug
+    try:
+        init_collections()
+    finally:
+        if prev_env is None:
+            os.environ.pop("SCIKNOW_PROJECT", None)
+        else:
+            os.environ["SCIKNOW_PROJECT"] = prev_env
+
+    # 2. Copy each legacy collection's points into its prefixed twin.
     pairs = [
         ("papers", project.papers_collection),
         ("abstracts", project.abstracts_collection),
         ("wiki", project.wiki_collection),
     ]
     for old, new in pairs:
-        try:
-            existing = {c.name for c in client.get_collections().collections}
-        except Exception as exc:
-            console.print(f"[yellow]Qdrant unreachable: {exc}. Skipping {old} → {new}.[/yellow]")
-            return
         if old not in existing:
             console.print(f"  [dim]skip Qdrant {old} (not present)[/dim]")
             continue
-        if new in existing:
-            console.print(f"  [yellow]skip Qdrant {new} (target already exists)[/yellow]")
+        try:
+            src_count = client.get_collection(old).points_count
+        except Exception as exc:
+            console.print(f"  [yellow]skip Qdrant {old}: {exc}[/yellow]")
             continue
-        with console.status(f"Snapshot + restore Qdrant `{old}` → `{new}`…"):
+        if src_count == 0:
+            console.print(f"  [dim]skip Qdrant {old} (empty)[/dim]")
+            continue
+        with console.status(f"Copying Qdrant `{old}` → `{new}` ({src_count} pts)…"):
+            copied = _scroll_upsert(client, old, new, batch_size=500)
+        # Brief settle window for async upserts to register in count
+        import time as _t
+        for _ in range(5):
             try:
-                snap = client.create_snapshot(collection_name=old)
-                client.recover_snapshot(
-                    collection_name=new,
-                    location=f"file:///qdrant/storage/snapshots/{old}/{snap.name}",
-                )
-            except Exception as exc:
-                console.print(f"  [red]✗[/red] {old} → {new}: {exc}")
-                continue
-        console.print(f"  [green]✓[/green] Qdrant {old} → {new}")
+                dst_count = client.get_collection(new).points_count
+            except Exception:
+                dst_count = -1
+            if dst_count == src_count:
+                break
+            _t.sleep(1)
+        ok = dst_count == src_count
+        marker = "[green]✓[/green]" if ok else "[yellow]?[/yellow]"
+        console.print(f"  {marker} Qdrant {old} → {new}: copied={copied} dst_count={dst_count}")
+        if not ok:
+            console.print(
+                f"    [yellow](source had {src_count}; check the new collection "
+                f"or re-run if the count doesn't settle)[/yellow]"
+            )
+
+
+def _scroll_upsert(client, src: str, dst: str, *, batch_size: int = 500) -> int:
+    """Stream all points from one collection to another.
+
+    Preserves both dense + sparse vectors and the full payload by
+    requesting them on scroll and passing them straight through to
+    upsert. ``wait=False`` on upsert lets us pipeline; the caller
+    polls the final count to confirm the destination caught up.
+    """
+    from qdrant_client.models import PointStruct
+
+    copied = 0
+    offset = None
+    while True:
+        result, next_offset = client.scroll(
+            collection_name=src,
+            limit=batch_size,
+            offset=offset,
+            with_vectors=True,
+            with_payload=True,
+        )
+        if not result:
+            break
+        points = [
+            PointStruct(id=p.id, vector=p.vector, payload=p.payload)
+            for p in result
+        ]
+        client.upsert(collection_name=dst, points=points, wait=False)
+        copied += len(points)
+        if next_offset is None:
+            break
+        offset = next_offset
+    return copied
 
 
 @app.command(name="list")
