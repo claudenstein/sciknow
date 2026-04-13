@@ -177,7 +177,9 @@ See [Architecture](docs/ARCHITECTURE.md) for the full system diagram, database s
 | **[Book Writing System](docs/BOOK.md)** | Book workflow, autowrite convergence, web reader, export formats, tips |
 | **[Operations](docs/OPERATIONS.md)** | Backup/restore, reference expansion, metadata enrichment, citation graph, development notes |
 | **[Testing Protocol](docs/TESTING.md)** | The 3-layer smoke harness (`sciknow test`), what each layer covers, how to add new checks |
+| **[Benchmarks](docs/BENCHMARKS.md)** | Performance + quality measurement harness (`sciknow bench`): fast/live/llm/full layers, baseline findings, optimization notes |
 | **[Research & Innovations](docs/RESEARCH.md)** | All implemented techniques with research basis: BERTopic, GraphRAG, Self-RAG, TreeWriter, Karpathy wiki, consensus mapping |
+| **[Multi-Project](docs/PROJECTS.md)** | Per-project isolation (DB + Qdrant + `data/`), project lifecycle CLI + GUI |
 | **[Credits](docs/CREDITS.md)** | Open-source projects and research papers that sciknow builds on |
 
 ---

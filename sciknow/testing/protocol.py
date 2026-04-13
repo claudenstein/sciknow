@@ -5080,6 +5080,45 @@ def l1_phase43_project_resolution() -> None:
     assert "db_name" in sig.parameters
 
 
+def l1_bench_harness_surface() -> None:
+    """Phase 44 — the bench harness module loads and exposes the expected
+    surface (run/run_layer/LAYERS/BenchMetric). Each layer has >= 1
+    callable. Every bench function declared in LAYERS is zero-arg.
+
+    Pure static — no DB, no Qdrant, no LLM. Catches accidental removal
+    of `sciknow bench` wiring or a bench function that was decorated
+    into accepting parameters.
+    """
+    import inspect
+
+    from sciknow.testing import bench as bench_mod
+    from sciknow.cli import main as main_cli
+
+    # Surface
+    for attr in ("run", "run_layer", "LAYERS", "BenchMetric", "BenchResult",
+                 "write_results", "render_report", "diff_against_latest"):
+        assert hasattr(bench_mod, attr), f"bench module missing {attr!r}"
+
+    # Each layer populated + zero-arg bench fns
+    layer_names = set(bench_mod.LAYERS.keys())
+    for required in ("fast", "live", "llm", "full"):
+        assert required in layer_names, f"bench layer {required!r} missing"
+
+    for layer, entries in bench_mod.LAYERS.items():
+        assert entries, f"bench layer {layer!r} is empty"
+        for cat, fn in entries:
+            assert isinstance(cat, str) and cat, f"{layer}: missing category"
+            sig = inspect.signature(fn)
+            assert len(sig.parameters) == 0, (
+                f"{fn.__name__}: bench functions must be zero-arg "
+                f"(got {list(sig.parameters)})"
+            )
+
+    # `sciknow bench` CLI registered on the Typer app
+    cmd_names = {c.name for c in main_cli.app.registered_commands}
+    assert "bench" in cmd_names, "`sciknow bench` not registered on CLI"
+
+
 def l1_phase43h_web_project_endpoints() -> None:
     """Phase 43h — web GUI exposes project management.
 
@@ -6096,6 +6135,8 @@ L1_TESTS: list[Callable] = [
     l1_phase43_project_resolution,
     # Phase 43h — web GUI project management + db stats project-aware bugfix
     l1_phase43h_web_project_endpoints,
+    # Phase 44 — bench harness (`sciknow bench`)
+    l1_bench_harness_surface,
 ]
 
 L2_TESTS: list[Callable] = [

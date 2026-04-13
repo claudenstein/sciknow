@@ -129,5 +129,58 @@ def test_cmd(
         raise typer.Exit(1)
 
 
+@app.command(name="bench")
+def bench_cmd(
+    layer: str = typer.Option(
+        "fast", "--layer", "-l",
+        help="Which bench layer to run: fast (descriptive only), live "
+             "(adds hybrid_search + embedder + reranker), llm (adds "
+             "Ollama throughput), or full.",
+    ),
+    tag: str = typer.Option(
+        "", "--tag",
+        help="Free-form label stamped into the output file + latest.json.",
+    ),
+    compare: bool = typer.Option(
+        True, "--compare/--no-compare",
+        help="Diff numeric metrics against the previous run's latest.json.",
+    ),
+):
+    """Run the benchmarking harness (performance + quality metrics).
+
+    This is separate from ``sciknow test`` — test is pass/fail for
+    correctness, bench is numbers for speed/quality. Results land as
+    JSONL under ``{data_dir}/bench/<ts>.jsonl`` plus a ``latest.json``
+    rollup that the next run diffs against.
+
+    \b
+    Layers:
+      fast   — DB + Qdrant stats, descriptive only, no model calls (~5s).
+      live   — adds 1 embedder pass + hybrid_search round trip (~30s cold).
+      llm    — adds Ollama fast + main model throughput (~60–180s cold).
+      full   — every bench. Run before a release or after infra change.
+    """
+    from sciknow.testing import bench as bench_mod
+
+    if layer not in bench_mod.LAYERS:
+        console.print(f"[red]Unknown layer: {layer!r}. Use {list(bench_mod.LAYERS)}[/red]")
+        raise typer.Exit(2)
+
+    console.print(f"[bold]sciknow bench[/bold] · layer: [cyan]{layer}[/cyan]"
+                  + (f" · tag: [dim]{tag}[/dim]" if tag else ""))
+    console.print()
+    results, out_path = bench_mod.run(layer=layer, tag=tag)
+
+    diff = bench_mod.diff_against_latest(results) if compare else None
+    bench_mod.render_report(results, diff=diff)
+
+    console.print()
+    console.print(f"[dim]Results written to[/dim] {out_path}")
+    n_err = sum(1 for r in results if r.status == "error")
+    if n_err:
+        console.print(f"[yellow]{n_err} bench function(s) errored — check the JSONL for details.[/yellow]")
+    raise typer.Exit(0 if n_err == 0 else 1)
+
+
 if __name__ == "__main__":
     app()

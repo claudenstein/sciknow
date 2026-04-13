@@ -630,9 +630,43 @@ Sections planned with CARS moves should have more argumentative texture: instead
 
 ---
 
+## 23. Empirical Validation via Benchmark Harness (Phase 44)
+
+**Status:** Production
+
+The 22 sections above describe techniques adopted from the literature. This section describes the measurement framework that validates them against real corpus data, and the first-baseline findings that either confirm or refine claims made elsewhere in this document.
+
+### The harness
+
+A second measurement system lives beside `sciknow test`: `sciknow bench` (`sciknow/testing/bench.py`). Where `test` is pass/fail for correctness, `bench` emits numeric metrics for speed and quality, grouped into four layers: `fast` (DB + Qdrant descriptive stats, no model calls), `live` (adds hybrid_search + embedder + reranker), `llm` (adds Ollama throughput), and `full`. Results persist as JSONL at `{data_dir}/bench/<ts>.jsonl` plus a `latest.json` rollup; subsequent runs diff numeric metrics against `latest.json` (`--compare` on by default).
+
+Design principle: benches **do not assert** — they measure. A drift from baseline is flagged but never raises, because the threshold for "bad" is workload-dependent (a GPU upgrade halves every latency metric, and that is not a regression). Pass/fail judgment stays in `sciknow test`, which is concerned with code correctness rather than metric drift.
+
+See [`docs/BENCHMARKS.md`](BENCHMARKS.md) for the full layer/metric taxonomy and how to add a new bench function.
+
+### Findings from the first recorded baseline (2026-04-13, global-cooling project, 2774 papers, 103k chunks)
+
+**Hybrid-search signal overlap (§2 claim: "three complementary signals at the cost of one model").** Measured Jaccard of the top-50 result sets across probe queries: **dense vs sparse = 0.035, dense vs FTS = 0.000, sparse vs FTS = 0.002, mean pairwise = 0.012**. Near-zero overlap on every pair. This is stronger empirical support for the RRF-fusion hypothesis than we had before — the three signals are essentially disjoint on this corpus, meaning fusion is buying genuine breadth rather than marginal re-ranking. The dense-FTS = 0 result specifically flags that the PostgreSQL FTS path retrieves at **paper** granularity (matching `paper_metadata.search_vector`) whereas dense/sparse retrieve at **chunk** granularity, so the chunk IDs returned by the FTS path are a structurally different population — a design observation worth adding to §2 proper.
+
+**Reranker displacement (§2 claim: "cross-encoder for maximum precision").** Over probe queries, the bge-reranker-v2-m3 cross-encoder moves the top-10 by an average of 4.2 positions per query and changes the #1 candidate **100% of the time**. RRF fusion alone, even across three complementary signals, systematically produces a different top-1 than the cross-encoder prefers. The reranker is not a polishing pass — it is doing structural work that fusion does not approximate.
+
+**Model contention (§implementation detail previously unquantified).** On the reference hardware (RTX 3090, 24 GB), the bge-m3 embedder runs at 104 chunks/s on GPU but falls to 2.1 chunks/s on CPU (50× slower) when an Ollama LLM is resident in VRAM. The bge-reranker-v2-m3 shows the same pattern: 89 pairs/s GPU → 1.3 pairs/s CPU fallback (68× slower). The CPU fallback path (`sciknow.retrieval.device.load_with_cpu_fallback`) is correct in its intent but underlines the need to **explicitly `keep_alive=0` an LLM before running embedding/rerank passes in mixed workloads** — otherwise the workflow silently runs orders of magnitude slower than its intended GPU-hot performance.
+
+**Autowrite convergence (§10 claim: "autonomous convergence loop").** Of 10 recorded runs, the median rounds-to-plateau is 1 and the early-stop rate is 30%. Most autowrite runs plateau immediately after the first draft rather than iteratively improving. This is not a failure of the loop — a plateau at round 1 with a high overall score (mean 0.711, median 0.8) means the first pass is already good enough — but it is a flag that the review→revise cycle may not be earning its cost for typical queries on this corpus. A targeted A/B comparing autowrite-N=3 vs autowrite-N=1 would settle whether iteration is adding signal or noise.
+
+**Section-detection gap (§chunker).** Of 2,774 papers, only 0.2% have a detected `related_work` section, 24.3% a `results` section, and 37.3% an `abstract`. The `_SECTION_PATTERNS` regex in `sciknow/ingestion/chunker.py` is likely too narrow — "Background", "Prior Work", "Literature Review" are plausible misses for `related_work`. This is a measurable ingestion-quality issue that chunker-level work can fix without reprocessing PDFs (the raw section titles are preserved in the block tree).
+
+**Citation cross-linking (§expand/§2 claim: "citation-count boost").** Of 23,674 citation edges extracted, only 4.5% resolve to a paper already in the corpus. The citation-count boost in retrieval is therefore operating on a small base, dampening its effect. Either the corpus isn't densely citing itself (plausible for a focused domain), or the DOI/title matching in `sciknow/ingestion/citations.py` is rejecting near-matches it should accept. Worth instrumenting the match step to separate the two causes.
+
+### Why this belongs in the research doc
+
+The six techniques above made claims — "three complementary signals", "maximum precision via cross-encoder", "autonomous convergence", "citation-count boost". A system that ships those claims without measuring them is vibes-based engineering. The baseline run quantifies which claims are validated (signal complementarity, reranker value), which need refinement (the FTS-vs-chunk granularity observation), and which are either unmet on this corpus or need a targeted study before the next research iteration (autowrite convergence depth, section detection coverage). Future research decisions — "should we ship RAPTOR soft clustering?", "should we add HyDE after all?" — should first run `sciknow bench --layer full --tag pre-X`, ship X, then `--tag post-X` and read the diff.
+
+---
+
 ## Planned (Researched, Implementation Pending)
 
-The roadmap items from the 2026-04 lit sweep are now all shipped (Phases 7–12). Track A measurement landed in Phase 13. Future research notes will accumulate here as they're identified.
+The roadmap items from the 2026-04 lit sweep are now all shipped (Phases 7–12). Track A measurement landed in Phase 13. Phase 44 added empirical validation of those claims. Future research notes will accumulate here as they're identified.
 
 Likely next-up candidates (in priority order, from the original lit sweep's runners-up):
 
@@ -712,4 +746,30 @@ Phase 11: Chain-of-Verification     → decoupled fact-check questions, gated on
 Phase 12: RAPTOR hierarchical tree  → UMAP+GMM clustering, LLM cluster summaries as level-N nodes
 Phase 13: Track A measurement       → score history persistence, draft scores/compare/autowrite-bench
 Phase 14: Web reader v2             → modern UI, score history viewer, wiki/ask/catalog modals, stats dashboard
+Phase 15: Query expansion + device  → optional abstract query expansion + CPU-fallback model loader (Phase 15.2)
+Phase 16: Expand-by-author          → citation-graph discovery by author identity (arXiv + OpenAlex)
+Phase 17: Length-aware writing      → per-section target_words wired through writer + scorer
+Phase 18: Per-section citation plan → LLM plans which sources each paragraph should cite before writing
+Phase 19: Periodic-save autowrite   → crash-safe autowrite with in-flight draft persistence
+Phase 20: Chapter-level autowrite   → run write → review → revise over all sections in a chapter
+Phase 21: MinerU 2.5-Pro VLM + UI   → optional VLM-PDF backend; sidebar/section-editor/plan modal
+Phase 22: Render helper refactor    → extract render helpers; delete-draft endpoint; chapter progress
+Phase 23-27: UI polish              → chevron visibility, section drag+drop, display-title derivation
+Phase 28: Resumable drafts          → pick up the last in-flight draft after crash
+Phase 29: Roadmap doc + size UI     → per-section target dropdown, empty-section preview, roadmap doc
+Phase 30: Dashboard / KG / export   → persistent task bar, heatmap, KG endpoint, multi-format export
+Phase 31: KG graph view + read btn  → interactive KG graph, read-button per section, tools dropdown
+Phase 32: QA helpers + Track A v2   → helpers.py module; endpoints; telemetry tables; style fingerprint
+Phase 33: Keyboard shortcuts + tag  → build-tag in browser title to detect stale JS
+Phase 34: CARS moves                → orient/tension/evidence/qualify/integrate parallel to PDTB
+Phase 35: Total compute counter     → cumulative tokens + wall-time across a book
+Phase 36: Tools panel               → all CLI ops (search, synthesize, expand, enrich) in the browser
+Phase 37: Per-section model o'ride  → heterogeneous model mixing per section (e.g. flagship for methods)
+Phase 38: Scoped snapshot bundles   → chapter + book snapshot/restore as one click before autowrite-all
+Phase 39: Book Settings modal       → consolidated per-book config (title, description, plan, target)
+Phase 40: CLI export via endpoint   → CLI PDF export uses the same code path as web → single source
+Phase 41: Static WHERE clauses      → Qdrant payload filters pre-computed; measurable retrieval speedup
+Phase 42: Data-action dispatcher    → generic data-action DOM hook replaces ~40 onclick handlers
+Phase 43: Multi-project isolation   → per-project DB + Qdrant collections + data dir, with lifecycle CLI + GUI
+Phase 44: Benchmark harness         → `sciknow bench` fast/live/llm/full layers; empirical validation of §2/§10
 ```

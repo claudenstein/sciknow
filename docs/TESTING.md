@@ -6,6 +6,8 @@
 
 sciknow has a layered smoke-test harness, **not** a pytest suite. The CLI command is `sciknow test`. Every PR that touches synthesis, retrieval, ingestion, or storage should pass at least L1 before merging. Bigger PRs (a "Phase" feature drop, an infrastructure change, a model swap) should also pass L2 and ideally L3.
 
+> **Performance + quality measurements** live in a separate harness: `sciknow bench` (`sciknow/testing/bench.py`, Phase 44). `test` answers "is the code still correct?"; `bench` answers "how fast is it and how good are the outputs?". See [BENCHMARKS.md](BENCHMARKS.md) for the bench layers and how to add a metric.
+
 ## Why a smoke harness instead of pytest?
 
 This repo prioritises correctness over coverage metrics. The failure modes worth catching are:
