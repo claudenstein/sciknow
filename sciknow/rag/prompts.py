@@ -1729,3 +1729,177 @@ def citation_choose(
         k=len(candidates),
         candidates="\n".join(blocks) or "(no candidates)",
     )
+
+
+# ── Phase 46.C — Ensemble NeurIPS-rubric review + meta-reviewer ────────
+#
+# Replaces (or augments) the single-pass `review_draft_stream` with N
+# independent reviewers at temperature 0.75 (NeurIPS paper-review
+# convention) + a meta-reviewer that fuses their numeric rubric scores
+# and synthesises the free-text fields.
+#
+# The rubric is the NeurIPS 2024 reviewer form (sections, ranges, and
+# field names preserved verbatim where possible) so a sciknow draft
+# can be judged on the same yardstick as a real submission.
+#
+# Positivity-bias mitigation (documented in AI-Scientist v1 paper §4):
+# half the reviewers run a pessimistic variant of the system prompt
+# ("if unsure, recommend reject"). The meta-reviewer sees both. This
+# matches `reviewer_system_prompt_neg` in AI-Scientist/perform_review.py.
+
+
+REVIEW_NEURIPS_BASE = """\
+You are a reviewer for a top-tier machine learning / applied science \
+conference. You are reading ONE section of a larger work-in-progress \
+manuscript. Your job is to produce a structured review using the \
+conference's standard form, based ONLY on the draft text and the \
+retrieved source passages the author used. Be specific, cite evidence \
+from the draft, and never invent detail.
+
+Score each dimension on its documented scale. Err toward harshness for \
+vague claims, uncited specific numbers, and hedging that doesn't match \
+the source's confidence. Err toward generosity only for sections that \
+are structurally sound and evidentially grounded — a good draft in a \
+weak genre (e.g. a summary-heavy section) is still a good draft.
+
+Respond ONLY with valid JSON matching this schema:
+
+{
+  "summary": "3-5 sentences summarising what the section argues and how.",
+  "strengths": ["…", "…"],
+  "weaknesses": ["…", "…"],
+  "questions": ["…", "…"],
+  "limitations": ["…", "…"],
+  "ethical_concerns": false,
+  "soundness": 3,
+  "presentation": 3,
+  "contribution": 3,
+  "overall": 6,
+  "confidence": 3,
+  "decision": "weak_accept",
+  "rationale": "1-2 sentences tying the numeric scores to the text."
+}
+
+Scoring scales (NeurIPS 2024 form):
+  soundness:     1 (poor) | 2 (fair) | 3 (good) | 4 (excellent)
+  presentation:  1 (poor) | 2 (fair) | 3 (good) | 4 (excellent)
+  contribution:  1 (poor) | 2 (fair) | 3 (good) | 4 (excellent)
+  overall:       1-10   (10 = top 2%)
+  confidence:    1-5    (5 = absolutely certain)
+  decision:      "strong_reject" | "reject" | "weak_reject" |
+                 "borderline" | "weak_accept" | "accept" | "strong_accept"
+"""
+
+
+REVIEW_NEURIPS_PESSIMISTIC = REVIEW_NEURIPS_BASE + (
+    "\n\nIMPORTANT — you are the SKEPTICAL reviewer on this panel. If "
+    "you are unsure about a claim, RECOMMEND REJECT. Your job is to "
+    "find every hole. Do not soften scores to be polite. AI-Scientist "
+    "and follow-up work document a systematic positivity bias in "
+    "LLM reviewers; your role is the counterweight."
+)
+
+
+REVIEW_NEURIPS_OPTIMISTIC = REVIEW_NEURIPS_BASE + (
+    "\n\nIMPORTANT — you are the GENEROUS reviewer on this panel. "
+    "Reward sections that are structurally sound, well-grounded, and "
+    "clearly written, even if narrow in scope. A focused contribution "
+    "beats a sprawling one. Do not reject on stylistic grounds alone."
+)
+
+
+REVIEW_NEURIPS_USER = """\
+Section type: {section_type}
+Topic: {topic}
+
+Draft:
+---
+{draft_content}
+---
+
+Source passages the author used:
+{context}
+
+---
+
+Return your structured review as JSON only."""
+
+
+def review_neurips(
+    section_type: str,
+    topic: str,
+    draft_content: str,
+    results: list,
+    *,
+    stance: str = "neutral",
+) -> tuple[str, str]:
+    """One reviewer's prompt. ``stance`` ∈ {neutral, pessimistic, optimistic}.
+
+    The caller runs this N times with distinct stances + temperature
+    0.75 to get an ensemble. See ``core.book_ops.ensemble_review_stream``.
+    """
+    if stance == "pessimistic":
+        sys = REVIEW_NEURIPS_PESSIMISTIC
+    elif stance == "optimistic":
+        sys = REVIEW_NEURIPS_OPTIMISTIC
+    else:
+        sys = REVIEW_NEURIPS_BASE
+    return sys, REVIEW_NEURIPS_USER.format(
+        section_type=section_type or "text",
+        topic=topic or "",
+        draft_content=draft_content[:12000],
+        context=format_context(results),
+    )
+
+
+REVIEW_META_SYSTEM = """\
+You are the meta-reviewer (area chair) fusing N independent reviews of \
+one section of a scientific manuscript. You see every reviewer's full \
+review as JSON. Your job: produce a single synthesis review that:
+
+- Numeric scores are the MEDIAN of the individual reviewers' scores \
+(not the mean — median is robust to one outlier reviewer).
+- `decision` is chosen by applying the median overall score to the \
+standard NeurIPS cutoffs: <5 = reject family, 5-6 = borderline, \
+7 = weak_accept, >=8 = accept family.
+- `summary` should capture WHAT the reviewers converged on.
+- `strengths` / `weaknesses` / `questions` / `limitations` are the \
+UNION of individual reviewers' lists, deduplicated and sorted by how \
+many reviewers raised each point (highest-agreement items first).
+- `rationale` should call out explicit disagreement: "reviewer 2 is \
+the only one who flagged X, but they had low confidence; taking the \
+majority view that…"
+- `confidence` is the max of the individual reviewer confidences \
+(someone in the pool is probably right about what they know well).
+
+Respond with JSON matching the same schema the individual reviewers \
+used, plus one extra field: `disagreement` = a float in [0, 1] \
+measuring how much the reviewers diverged on `overall` (0 = unanimous, \
+1 = wildly split, computed as stdev/range). High disagreement is a \
+signal that the draft is borderline."""
+
+
+REVIEW_META_USER = """\
+Section: {section_type} — {topic}
+
+The {n} independent reviews (each a JSON object):
+
+{reviews_json}
+
+---
+
+Produce the fused meta-review as JSON only."""
+
+
+def review_meta(
+    section_type: str,
+    topic: str,
+    reviews: list[dict],
+) -> tuple[str, str]:
+    import json as _json
+    return REVIEW_META_SYSTEM, REVIEW_META_USER.format(
+        section_type=section_type or "text",
+        topic=topic or "",
+        n=len(reviews),
+        reviews_json=_json.dumps(reviews, indent=2)[:24000],
+    )

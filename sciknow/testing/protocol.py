@@ -5298,6 +5298,80 @@ def l1_phase46_citation_verify_surface() -> None:
     )
 
 
+def l1_phase46c_ensemble_review_surface() -> None:
+    """Phase 46.C — ensemble NeurIPS-rubric review prompts + generator + CLI."""
+    import inspect
+
+    from sciknow.rag import prompts as rag_prompts
+    from sciknow.core import book_ops
+    from sciknow.cli import book as book_cli
+
+    # Prompt functions exist, return (system, user)
+    for fn in ("review_neurips", "review_meta"):
+        assert hasattr(rag_prompts, fn), f"prompts missing {fn}"
+
+    sys_n, usr_n = rag_prompts.review_neurips("results", "x", "draft", [])
+    assert "soundness" in sys_n and "presentation" in sys_n
+    assert "contribution" in sys_n and "overall" in sys_n
+    assert "decision" in sys_n
+
+    # Stance variants contain the expected override text
+    sys_p, _ = rag_prompts.review_neurips("results", "x", "d", [],
+                                           stance="pessimistic")
+    assert "SKEPTICAL" in sys_p, "pessimistic stance must instruct skepticism"
+    sys_o, _ = rag_prompts.review_neurips("results", "x", "d", [],
+                                           stance="optimistic")
+    assert "GENEROUS" in sys_o, "optimistic stance must reward grounded drafts"
+
+    sys_m, usr_m = rag_prompts.review_meta(
+        "results", "x",
+        [{"overall": 6, "decision": "weak_accept"},
+         {"overall": 5, "decision": "borderline"}],
+    )
+    assert "median" in sys_m.lower()
+    assert "disagreement" in sys_m
+
+    # Generator + helpers exposed
+    for name in ("ensemble_review_stream", "_parse_review_json",
+                 "_compute_meta_fallback", "_median"):
+        assert hasattr(book_ops, name), f"book_ops missing {name}"
+
+    # Mechanical fallback math sanity
+    fb = book_ops._compute_meta_fallback([
+        {"overall": 7, "soundness": 3, "presentation": 3, "contribution": 3,
+         "confidence": 4, "decision": "weak_accept",
+         "strengths": ["clear structure"], "weaknesses": ["narrow scope"]},
+        {"overall": 4, "soundness": 2, "presentation": 3, "contribution": 2,
+         "confidence": 3, "decision": "reject",
+         "strengths": ["good citations"], "weaknesses": ["narrow scope", "math error"]},
+        {"overall": 6, "soundness": 3, "presentation": 3, "contribution": 3,
+         "confidence": 4, "decision": "weak_accept",
+         "strengths": ["clear structure"], "weaknesses": ["narrow scope"]},
+    ])
+    assert fb["overall"] == 6, f"median of 7/4/6 should be 6, got {fb['overall']}"
+    # "narrow scope" appeared in all 3 reviews → rank first
+    assert fb["weaknesses"][0] == "narrow scope"
+    assert 0.0 <= fb["disagreement"] <= 1.0
+    assert fb["decision"] in {
+        "strong_reject", "reject", "weak_reject", "borderline",
+        "weak_accept", "accept", "strong_accept",
+    }
+
+    # Empty case: no reviews → _median returns None
+    assert book_ops._median([]) is None
+    assert book_ops._median([5.0]) == 5.0
+
+    # CLI registered
+    callbacks = {c.callback for c in book_cli.app.registered_commands}
+    assert book_cli.ensemble_review in callbacks, (
+        "`sciknow book ensemble-review` not registered"
+    )
+    # Consumer handles the ensemble-specific event types
+    src = inspect.getsource(book_cli._consume_events)
+    for token in ("reviewer_done", "meta_review_start"):
+        assert token in src, f"_consume_events missing handler for {token!r}"
+
+
 def l1_bench_harness_surface() -> None:
     """Phase 44 — the bench harness module loads and exposes the expected
     surface (run/run_layer/LAYERS/BenchMetric). Each layer has >= 1
@@ -6358,9 +6432,11 @@ L1_TESTS: list[Callable] = [
     # Phase 45 — project types + watchlist
     l1_phase45_project_types,
     l1_phase45_watchlist_surface,
-    # Phase 46 — auditable scientific writing (citation insert + verify)
+    # Phase 46 — auditable scientific writing (citation insert + verify +
+    # ensemble review)
     l1_phase46_citation_insert_surface,
     l1_phase46_citation_verify_surface,
+    l1_phase46c_ensemble_review_surface,
 ]
 
 L2_TESTS: list[Callable] = [

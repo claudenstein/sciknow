@@ -212,6 +212,33 @@ def _consume_events(gen, console):
                 f"\n[bold]Inserted {event.get('count', 0)} citation(s)[/bold] "
                 f"([dim]{event.get('skipped', 0)} skipped[/dim])"
             )
+        elif t == "reviewer_done":
+            # Phase 46.C — ensemble review, one reviewer's result
+            status = event.get("status", "")
+            idx   = event.get("index", "?")
+            stance = event.get("stance", "")
+            if status == "ok":
+                overall = event.get("overall")
+                decision = event.get("decision", "")
+                conf = event.get("confidence")
+                ov = f"{overall}" if overall is not None else "—"
+                cf = f"conf={conf}" if conf is not None else ""
+                console.print(
+                    f"  [green]✓[/green] Reviewer {idx} ({stance}): "
+                    f"overall={ov}  decision={decision}  {cf}"
+                )
+            else:
+                console.print(
+                    f"  [yellow]~[/yellow] Reviewer {idx} ({stance}): {status} "
+                    f"{event.get('message', '')}"
+                )
+        elif t == "meta_review_start":
+            n = event.get("n_reviewers", 0)
+            scores = event.get("overall_scores", [])
+            scores_str = ", ".join(str(s) if s is not None else "?" for s in scores)
+            console.print(
+                f"\n[bold]Fusing {n} reviewer(s)[/bold]  [dim](overall: {scores_str})[/dim]"
+            )
         elif t == "completed":
             completed = event
             wc = event.get("word_count", 0)
@@ -228,6 +255,41 @@ def _consume_events(gen, console):
                     f"\n[green]\u2713[/green] Citation pass done: "
                     f"{ni} inserted / {nn} identified / {ns} skipped{saved}"
                 )
+            if "meta" in event and isinstance(event.get("meta"), dict):
+                # Phase 46.C — ensemble review meta summary
+                meta = event["meta"]
+                dec  = meta.get("decision", "?")
+                ov   = meta.get("overall", "?")
+                disagreement = meta.get("disagreement", 0.0) or 0.0
+                color = (
+                    "green"  if isinstance(ov, (int, float)) and ov >= 7 else
+                    "yellow" if isinstance(ov, (int, float)) and ov >= 5 else
+                    "red"
+                )
+                console.print()
+                console.print(Rule("[bold]Meta-reviewer verdict[/bold]"))
+                console.print(
+                    f"  overall=[bold {color}]{ov}[/bold {color}]  "
+                    f"soundness={meta.get('soundness', '?')}  "
+                    f"presentation={meta.get('presentation', '?')}  "
+                    f"contribution={meta.get('contribution', '?')}  "
+                    f"confidence={meta.get('confidence', '?')}  "
+                    f"decision=[bold]{dec}[/bold]  "
+                    f"disagreement={disagreement:.2f}"
+                )
+                strengths = meta.get("strengths") or []
+                weaknesses = meta.get("weaknesses") or []
+                if strengths:
+                    console.print("  [green]Strengths[/green]:")
+                    for s in strengths[:5]:
+                        console.print(f"    [green]+[/green] {s[:160]}")
+                if weaknesses:
+                    console.print("  [red]Weaknesses[/red]:")
+                    for w in weaknesses[:5]:
+                        console.print(f"    [red]-[/red] {w[:160]}")
+                r = meta.get("rationale") or ""
+                if r:
+                    console.print(f"  [dim]{r[:300]}[/dim]")
             if did:
                 console.print(f"[dim]Draft ID: {did[:8]}[/dim]")
         elif t == "error":
@@ -1099,6 +1161,58 @@ def verify_citations(
     if output is not None:
         output.write_text(_json.dumps(report.as_dict(), indent=2))
         console.print(f"[dim]Full report written to {output}[/dim]")
+
+
+# ── ensemble-review (Phase 46.C — NeurIPS-rubric panel + meta-reviewer) ─────────
+
+@app.command(name="ensemble-review")
+def ensemble_review(
+    draft_id: Annotated[str, typer.Argument(help="Draft ID (first 8+ chars).")],
+    n: int = typer.Option(3, "--n", "-n", min=1, max=9,
+                           help="Number of independent reviewers (3 is NeurIPS default)."),
+    temperature: float = typer.Option(0.75, "--temperature", "-T",
+                                       help="Per-reviewer sampling temperature (0.75 NeurIPS convention)."),
+    context_k: int = typer.Option(12, "--context-k", "-k",
+                                   help="Passages retrieved for each reviewer to see."),
+    model: str | None = typer.Option(None, "--model"),
+    save: bool = typer.Option(True, "--save/--no-save",
+                               help="Persist panel + meta to drafts.custom_metadata.ensemble_review."),
+):
+    """
+    Phase 46.C — ensemble NeurIPS-rubric review with meta-reviewer fusion.
+
+    Runs N independent reviewers over one draft section (default 3), each
+    with temperature 0.75 and a rotating stance (neutral/pessimistic/
+    optimistic — positivity-bias mitigation from AI-Scientist v1 §4).
+    A meta-reviewer then fuses their numeric scores (median over the
+    rubric) and unions their free-text lists, weighted by agreement.
+
+    Rubric (NeurIPS 2024 form):
+      soundness, presentation, contribution   (1–4)
+      overall                                  (1–10)
+      confidence                               (1–5)
+      decision  ∈ strong_reject … strong_accept
+
+    Complementary to `book review` (single-pass critic) and
+    `book verify-citations` (external citation check). Ensemble review
+    is higher-variance-reducing but more expensive (~N× the LLM cost).
+
+    Examples:
+
+      sciknow book ensemble-review 3f2a1b4c
+
+      sciknow book ensemble-review 3f2a1b4c -n 5 -T 0.8
+
+      sciknow book ensemble-review 3f2a1b4c --no-save
+    """
+    from sciknow.core.book_ops import ensemble_review_stream
+
+    console.print()
+    gen = ensemble_review_stream(
+        draft_id, n_reviewers=n, temperature=temperature,
+        context_k=context_k, model=model, save=save,
+    )
+    _consume_events(gen, console)
 
 
 # ── review ─────────────────────────────────────────────────────────────────────

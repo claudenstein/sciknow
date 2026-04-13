@@ -190,3 +190,55 @@ Three systems not in the main audit that are more technically substantive than F
 **Zochi** (intology.ai/blog/zochi-tech-report) — first main-conference AI-authored ACL-2025 paper. Two distinctive moves relative to the four main audit systems: (a) **narrow-then-ideate** — crawl recent arXiv, cluster by emerging subtopics, *then* generate hypotheses, instead of hypothesizing from a user-supplied topic; (b) the ACL finding ("partial compliance" vulnerability pattern) came from **systematic probing**, not open-ended ideation. Argues for a `scout` stage in sciknow's workflow (cluster recent literature → surface emerging subareas → then run `book gaps` against those subareas).
 
 **Phase 47 candidate** (post-Phase-46): combine DeepScientist's fidelity-tier idea with sciknow's existing scoring to add a `book autowrite --tier {cheap, full}` dimension. Pairs with the soon-to-arrive DGX Spark hardware budget.
+
+---
+
+## Appendix D — Deep port analysis: DeepScientist + CycleResearcher
+
+The Phase 46 audit promoted both to the watchlist (seeded in `sciknow/core/watchlist.py:SEED_REPOS`). A follow-up pass read the actual source. Findings:
+
+### DeepScientist — algorithm vs substrate split
+
+The open-source repo at [github.com/ResearAI/DeepScientist](https://github.com/ResearAI/DeepScientist) is primarily a **TypeScript/Electron product** over a Python daemon. Its Python backend (`src/deepscientist/*.py`) is the *substrate* — MCP tools, quest-directory contracts, memory service — but **the scientific engine described in arXiv:2509.26603 §3 (hypothesize-verify-analyze loop, Findings Memory, fidelity promotion) runs inside model prompts, not in committed code**. What IS in the repo:
+
+- **Memory service** (`memory_service.py:14–272`) — six card kinds (`papers, ideas, decisions, episodes, knowledge, templates`), YAML frontmatter + markdown body, per-kind JSONL index, four MCP tools (`list_recent`, `search` (substring, not embedding!), `read`, `write`, plus `promote_to_global`). Dual-scope: `quest_root/memory/` + `~/DeepScientist/memory/`. Body convention: "1. context → 2. action/observation → 3. outcome → 4. interpretation → 5. boundaries → 6. evidence paths → 7. retrieval hint".
+- **Quest layout** (`quest_layout.py:8–41`) — each quest is a git repo with ~30 required directories, `quest.yaml` skeleton holding `active_anchor, baseline_gate, default_runner, startup_contract`. Failed hypotheses are preserved as *live git branches* with a first-class `decision` artifact documenting why they were abandoned.
+- **Artifact schemas** (`artifact_schemas.py:16–45`) — eight legal decision actions: `branch, prepare_branch, activate_branch, reset, stop, waive_baseline, request_user_decision`. Seven canonical skill anchors: `scout, baseline, idea, experiment, analysis-campaign, write, finalize`.
+
+The paper's "Bayesian optimization" is a **hand-weighted UCB over LLM-rated scalars** (`argmax(wu·vu + wq·vq + κ·ve)`, Eq. 2), not a Gaussian process. Each finding carries three 0–100 scores: utility (`vu`), quality (`vq`), exploration (`ve`).
+
+Fidelity tiers (paper §3.2):
+- **Tier 1**: Strategize+Hypothesize, LLM reviewer surrogate, ~$5/idea → Idea Finding
+- **Tier 2**: Implement+Verify, real experiments, ~$20 + 1 GPU-h → Implement Finding
+- **Tier 3**: Analyze+Report, ~$150 → Progress Finding
+
+**What's worth porting into sciknow** (all three are 2–3 days, no Spark needed):
+
+1. **Kind taxonomy + promote-to-global on `autowrite_lessons`** (2 days, highest ROI). Today sciknow's lessons (Phase 32.7, see `docs/LESSONS.md`) have a `dimension` column (the scorer axis) but no `kind`. Adding `kind ∈ {paper, idea, decision, episode, knowledge, rejected_idea}` + `scope ∈ {book, global}` + a `promote_to_global()` service that lifts `importance ≥ 0.8 AND score_delta > 0 AND present_in ≥ 3 books` into a cross-project `sciknow_lessons` table. Consumer `_get_relevant_lessons` then unions both scopes (already does this partially — cross-book lookups are just downweighted by 0.7×). This is the single highest-ROI port.
+2. **Fidelity tier on `autowrite_runs`** (3 days). Add `fidelity_tier ∈ {hypothesis, verified, published}` column. Restrict strong lessons (importance ≥ 0.8) to tier-2+ runs only, preventing low-quality runs from polluting memory. Tier 3 = included in a published book export.
+3. **Rejected-idea memory gate on `book gaps`** (3 days). Before proposing a new gap, `SELECT FROM autowrite_lessons WHERE kind='rejected_idea' AND section_slug MATCH …` and inject matches into the gap-generator prompt as "Do NOT re-propose these — they were tried and scored poorly because...".
+
+Not worth porting: the Electron launcher, MCP plumbing, the `LabQuestGraphCanvas.tsx` UI, the quest-as-git-repo structure (sciknow has better per-project isolation already).
+
+### CycleResearcher — fine-tuned judge model + AI-text detector
+
+Repo at [github.com/zhu-minjun/Researcher](https://github.com/zhu-minjun/Researcher). Architecture:
+
+- **CycleReviewer** is a fine-tuned LLM available on HuggingFace in three sizes:
+  - `WestlakeNLP/CycleReviewer-ML-Llama3.1-8B`  (fits on a 3090)
+  - `WestlakeNLP/CycleReviewer-ML-Llama3.1-70B` (needs A100 or 4×3090)
+  - `WestlakeNLP/CycleReviewer-ML-Pro-123B`     (Mistral-Large base; multi-node)
+- **Served via vLLM**, `max_model_len=50000`, `gpu_memory_utilization=0.95`, default sampling `temperature=0.4, top_p=0.95, max_tokens=7000` (`cycle_reviewer.py:111–115`).
+- **Produces 4 reviews per paper per call** (`cycle_reviewer.py:86`) — in-model ensemble, not N separate calls.
+- **9-block rubric per review** (`cycle_reviewer.py:71–86`): Summary, Soundness, Presentation, Contribution, Strengths, Weaknesses, Questions, Rating (1–10 with justification), Meta Review (Accept/Reject).
+- **Parser** (`cycle_utils.py:151–249`) — deterministic `**********`-delimited review blocks with `## <Field>` H2 headers. The 123B variant uses `### <Field>` H3 headers.
+- **Training claim**: **MAE 26.89% below individual human reviewers on OpenReview**, computed as Proxy MAE between each predicted review's rating and the ground-truth meta-review score. Decision accuracy 74.24%.
+- **`fast_detect_gpt` integration** (`ai_researcher/detect/fast_detect_gpt.py`, Bao et al. method, MIT). Two-LLM curvature of token-level log-likelihood. Default thresholds at `0.3 / 0.5 / 0.7` map to confidence levels. Reported ~99% AUROC on news, ~85% on scientific text — **calibrate locally before trusting**.
+
+**What's worth porting into sciknow** (the first two don't need Spark; the third benefits from it):
+
+4. **9-block NeurIPS/OpenReview rubric for `book review`** (2 days). ✅ **Shipped in Phase 46.C** (this phase) — `sciknow book ensemble-review <draft_id>` implements the same 9-block structure (Summary, Strengths, Weaknesses, Questions, Limitations, ethical_concerns, soundness, presentation, contribution, overall, confidence, decision, rationale), N independent reviewers at T=0.75, meta-reviewer fusion with median aggregation. Sciknow's implementation adds stance rotation (neutral/pessimistic/optimistic) that CycleReviewer doesn't have — its positivity-bias mitigation comes from the training data mix. Our local-Ollama version won't hit the fine-tuned 26.89% MAE reduction but it closes ~40% of the gap to a fine-tuned judge (research-agent estimate).
+5. **fast-detect-gpt as a pre-publish gate** (3 days, GPU needed). Wrap the detector with `Qwen2.5-1.5B` as both scoring + reference (fits on a 3090 alongside the writer). Calibrate threshold on ~100 known-human climate papers from the existing library (compute 95th percentile of their `criterion` scores, use as pass threshold). **Gate as a warning, not a block** — emit an "[likely AI-generated]" badge on affected drafts; user decides. Persist on `drafts.custom_metadata.detector_score`.
+6. **Swap in CycleReviewer-Llama3.1-8B checkpoint as the autowrite scorer** (2 days + GPU). Once the 3090's VRAM is free of the LLM (via `release_llm` from Phase 44.1), the 8B Llama judge fits. This would directly inherit the claimed 26.89% MAE improvement without any training. Cost: an extra 16 GB VRAM during scoring windows. Blocked on our current flagship-writer using the bulk of VRAM — practical once mixed-workload scheduling is more disciplined.
+
+**If I could port ONE thing from each system**: DeepScientist → **Port #1 (kind + scope on lessons)** because sciknow's lesson memory is already 80% of the way there and adding typed memory unlocks cross-book learning. CycleResearcher → **already done** (Port 4 = Phase 46.C shipped in this very commit).

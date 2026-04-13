@@ -23,7 +23,7 @@ import re
 import threading
 import time
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger("sciknow.core.book_ops")
@@ -4422,3 +4422,298 @@ def _parse_citation_choice_json(raw: str) -> dict:
     if not isinstance(data, dict):
         return {"verdict": "NONE", "reason": "non-object LLM output"}
     return data
+
+
+# ════════════════════════════════════════════════════════════════════
+# Phase 46.C — Ensemble NeurIPS-rubric review + meta-reviewer
+# ════════════════════════════════════════════════════════════════════
+#
+# AI-Scientist `perform_review.perform_review` pattern, adapted:
+# run N independent reviewers over one draft section (each with
+# temperature 0.75 and its own stance — neutral / pessimistic /
+# optimistic) then fuse with a meta-reviewer. Persist the full panel
+# + meta to drafts.custom_metadata.ensemble_review so downstream tools
+# can read the history.
+#
+# Why ensemble: a single-pass review (the pre-Phase-46 `review_draft_
+# stream`) is high-variance; different runs disagree on scores and
+# decisions. Taking the median across N independent reviewers reduces
+# the variance predictably (≈ 1/√N) and the "disagreement" field on
+# the meta-review acts as an early warning that a draft is borderline
+# (some reviewers accept, some reject — likely genuinely ambiguous).
+
+
+_DEFAULT_REVIEW_STANCES = ["neutral", "pessimistic", "optimistic"]
+
+
+def _parse_review_json(raw: str) -> dict:
+    """Tolerant parser for a single NeurIPS-rubric review record."""
+    import json as _json
+    s = _strip_code_fence(raw)
+    try:
+        data = _json.loads(s)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _median(xs: list[float]) -> float | None:
+    if not xs:
+        return None
+    xs = sorted(xs)
+    n = len(xs)
+    if n % 2:
+        return float(xs[n // 2])
+    return (xs[n // 2 - 1] + xs[n // 2]) / 2.0
+
+
+def _compute_meta_fallback(reviews: list[dict]) -> dict:
+    """If the meta-reviewer LLM fails or returns junk, compute a
+    mechanical fallback locally so the user never gets nothing.
+
+    Mirrors the instructions in REVIEW_META_SYSTEM (median scores,
+    union of free-text lists, disagreement = stdev/range).
+    """
+    import statistics as _st
+
+    def _nums(field: str) -> list[float]:
+        out = []
+        for r in reviews:
+            v = r.get(field)
+            if isinstance(v, (int, float)):
+                out.append(float(v))
+        return out
+
+    overall_vals = _nums("overall")
+    disagreement = 0.0
+    if len(overall_vals) >= 2:
+        span = max(overall_vals) - min(overall_vals)
+        if span > 0:
+            disagreement = round(min(1.0, _st.stdev(overall_vals) / span), 2)
+
+    med_overall = _median(overall_vals) or 0.0
+    if med_overall >= 8:
+        decision = "accept"
+    elif med_overall >= 7:
+        decision = "weak_accept"
+    elif med_overall >= 5:
+        decision = "borderline"
+    elif med_overall >= 4:
+        decision = "weak_reject"
+    else:
+        decision = "reject"
+
+    # Dedup + agreement-rank free-text lists
+    def _union_ranked(field: str) -> list[str]:
+        from collections import Counter
+        c: Counter = Counter()
+        for r in reviews:
+            items = r.get(field) or []
+            if not isinstance(items, list):
+                continue
+            seen_in_review: set = set()
+            for it in items:
+                if not isinstance(it, str):
+                    continue
+                norm = it.strip()
+                if not norm or norm in seen_in_review:
+                    continue
+                seen_in_review.add(norm)
+                c[norm] += 1
+        # Sort by (count desc, first-occurrence) and cap at 10
+        return [item for item, _n in c.most_common(10)]
+
+    confidences = _nums("confidence")
+    any_ethics = any(bool(r.get("ethical_concerns")) for r in reviews)
+
+    return {
+        "summary":       (reviews[0].get("summary", "") if reviews else "")[:1200],
+        "strengths":     _union_ranked("strengths"),
+        "weaknesses":    _union_ranked("weaknesses"),
+        "questions":     _union_ranked("questions"),
+        "limitations":   _union_ranked("limitations"),
+        "ethical_concerns": any_ethics,
+        "soundness":     _median(_nums("soundness")),
+        "presentation":  _median(_nums("presentation")),
+        "contribution":  _median(_nums("contribution")),
+        "overall":       med_overall,
+        "confidence":    max(confidences) if confidences else None,
+        "decision":      decision,
+        "rationale":     f"Mechanical fallback: median across {len(reviews)} reviewers.",
+        "disagreement":  disagreement,
+        "source":        "fallback_no_meta_llm",
+    }
+
+
+def ensemble_review_stream(
+    draft_id: str,
+    *,
+    n_reviewers: int = 3,
+    temperature: float = 0.75,
+    model: str | None = None,
+    context_k: int = 12,
+    save: bool = True,
+    stances: list[str] | None = None,
+) -> Iterator[Event]:
+    """Phase 46.C — run an ensemble of independent reviewers + a meta-reviewer.
+
+    Parameters:
+        draft_id:    prefix of drafts.id
+        n_reviewers: how many independent reviewers to run (default 3)
+        temperature: per-reviewer temperature (0.75 = NeurIPS convention)
+        model:       LLM override; falls back to section-model override,
+                     then settings.llm_model
+        context_k:   passages to retrieve for each reviewer to see
+        save:        if True, persist panel + meta into
+                     drafts.custom_metadata.ensemble_review
+        stances:     list of stances to cycle through. Defaults to
+                     ["neutral", "pessimistic", "optimistic"] —
+                     AI-Scientist's positivity-bias mitigation.
+
+    Events yielded:
+        progress, reviewer_done, meta_review_start, completed, error
+    """
+    from sqlalchemy import text
+    from sciknow.rag import prompts as rag_prompts
+    from sciknow.rag.llm import complete
+    from sciknow.storage.db import get_session
+    from sciknow.storage.qdrant import get_client
+
+    # Load the draft
+    with get_session() as session:
+        row = session.execute(text("""
+            SELECT d.id::text, d.title, d.section_type, d.topic, d.content,
+                   d.chapter_id::text
+            FROM drafts d WHERE d.id::text LIKE :q
+            LIMIT 1
+        """), {"q": f"{draft_id}%"}).fetchone()
+    if not row:
+        yield {"type": "error", "message": f"Draft not found: {draft_id}"}
+        return
+    d_id, d_title, d_section, d_topic, d_content, d_chapter_id = row
+
+    # Per-section model override (Phase 37)
+    if model is None and d_chapter_id and d_section:
+        with get_session() as session:
+            override = _get_section_model(session, d_chapter_id, d_section)
+        if override:
+            model = override
+
+    # Stance rotation
+    stance_pool = list(stances) if stances else _DEFAULT_REVIEW_STANCES
+    if not stance_pool:
+        stance_pool = ["neutral"]
+    assigned_stances: list[str] = []
+    for i in range(max(1, n_reviewers)):
+        assigned_stances.append(stance_pool[i % len(stance_pool)])
+
+    yield {"type": "progress", "stage": "retrieve",
+           "detail": f"Retrieving context for ensemble review of '{d_title}'…"}
+
+    qdrant = get_client()
+    search_query = f"{d_section or ''} {d_topic or d_title}"
+    with get_session() as session:
+        results, _ = _retrieve(session, qdrant, search_query, context_k=context_k)
+
+    reviews: list[dict] = []
+    for i, stance in enumerate(assigned_stances, 1):
+        yield {"type": "progress", "stage": "reviewing",
+               "detail": f"Reviewer {i}/{len(assigned_stances)} ({stance})…"}
+        sys_r, usr_r = rag_prompts.review_neurips(
+            d_section, d_topic or d_title, d_content, results,
+            stance=stance,
+        )
+        try:
+            raw = complete(sys_r, usr_r, model=model, temperature=temperature)
+        except Exception as exc:
+            yield {"type": "reviewer_done", "index": i, "stance": stance,
+                   "status": "error", "message": str(exc)}
+            continue
+
+        parsed = _parse_review_json(raw)
+        if not parsed:
+            yield {"type": "reviewer_done", "index": i, "stance": stance,
+                   "status": "parse_error"}
+            continue
+        parsed["_stance"] = stance
+        parsed["_reviewer_index"] = i
+        reviews.append(parsed)
+        yield {
+            "type": "reviewer_done",
+            "index": i, "stance": stance,
+            "status": "ok",
+            "overall":    parsed.get("overall"),
+            "decision":   parsed.get("decision"),
+            "soundness":  parsed.get("soundness"),
+            "presentation": parsed.get("presentation"),
+            "contribution": parsed.get("contribution"),
+            "confidence": parsed.get("confidence"),
+        }
+
+    if not reviews:
+        yield {"type": "error",
+               "message": "all reviewers failed — cannot compute meta-review"}
+        return
+
+    yield {"type": "meta_review_start",
+           "n_reviewers": len(reviews),
+           "overall_scores": [r.get("overall") for r in reviews]}
+
+    # Meta-reviewer pass. If it fails or returns garbage, fall back to
+    # the deterministic aggregation so the user always gets a result.
+    sys_m, usr_m = rag_prompts.review_meta(
+        d_section, d_topic or d_title, reviews,
+    )
+    meta: dict = {}
+    try:
+        raw_meta = complete(sys_m, usr_m, model=model, temperature=0.2)
+        meta = _parse_review_json(raw_meta)
+    except Exception as exc:
+        logger.warning("meta-reviewer LLM failed: %s", exc)
+
+    if not meta or meta.get("overall") is None:
+        meta = _compute_meta_fallback(reviews)
+    else:
+        # Defensive: make sure critical fields exist even if the LLM
+        # omitted them; fall back to the mechanical values per-field.
+        fb = _compute_meta_fallback(reviews)
+        for k in ("soundness", "presentation", "contribution",
+                  "confidence", "disagreement", "decision"):
+            if meta.get(k) in (None, ""):
+                meta[k] = fb[k]
+        meta.setdefault("source", "llm_meta_reviewer")
+
+    if save:
+        import json as _json
+        with get_session() as session:
+            session.execute(text("""
+                UPDATE drafts
+                SET custom_metadata =
+                  COALESCE(custom_metadata, '{}'::jsonb)
+                  || jsonb_build_object(
+                       'ensemble_review',
+                       CAST(:payload AS jsonb))
+                WHERE id::text = :did
+            """), {
+                "payload": _json.dumps({
+                    "n_reviewers": len(reviews),
+                    "stances":     assigned_stances,
+                    "reviews":     reviews,
+                    "meta":        meta,
+                    "model":       model,
+                    "temperature": temperature,
+                    "context_k":   context_k,
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                }),
+                "did": d_id,
+            })
+            session.commit()
+
+    yield {
+        "type": "completed",
+        "draft_id": d_id,
+        "n_reviewers": len(reviews),
+        "meta": meta,
+        "reviews": reviews,
+        "saved": save,
+    }
