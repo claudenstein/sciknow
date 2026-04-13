@@ -52,9 +52,29 @@ memory and would be wasted on the existing 3090.
 - [ ] **Phase B — LLM host routing.** Split `ask question` (3090, fast) vs `book write` / `ask synthesize` (Spark, 70B+ model). ~50 lines in `sciknow/rag/llm.py`. Simplest of the three. **Start here when the box arrives.**
 - [ ] **Phase C — vLLM backend on Spark** for batch LLM workloads (catalog cluster, `db export --generate-qa`, `book argue` / `book gaps`). Big throughput win on batch operations.
 - [ ] **Phase E — QLoRA fine-tuning of `bge-reranker-v2-m3`** on the user's own climate corpus. Specialised reranker for the user's domain.
+- [ ] **Phase 47.S1 — CycleReviewer swap-in as the autowrite scorer.** `WestlakeNLP/CycleReviewer-ML-Llama3.1-8B` (fits the 3090 alone but not alongside our 27B writer). On Spark, co-reside with the flagship writer and route scoring requests to it. Paper claims 26.89% MAE vs individual human reviewers on OpenReview. Direct replacement for the current LLM-prompt scorer — we inherit the gain without training. Tracked in `docs/COMPARISON.md` Appendix D. **Preconditions**: Spark + mixed-workload scheduling.
+- [ ] **Phase 47.S2 — Iterative DPO on our own KEEP/DISCARD verdicts.** Phase 32.6 autowrite telemetry already captures `(overall_pre, overall_post, action)` per iteration. A post-Spark job exports `data/preferences/<book>.jsonl` in `{prompt, chosen, rejected}` shape, trains a LoRA on the writer with 2k+ validated pairs (3 epochs). See `docs/RESEARCH.md` §21 Layer 4. **Preconditions**: Spark + ≥ 2k validated pairs (we're accumulating).
+- [ ] **Phase 47.S3 — fast-detect-gpt pre-publish gate.** Bao et al. method, MIT; `Qwen2.5-1.5B` as both scoring and reference. Today's 3090 has the VRAM if the writer is evicted; works better on Spark where the writer stays hot. Calibrate threshold against ~100 known-human climate papers. Gate as a warning badge, not a block.
 
 **Do NOT** move embedder / reranker to Spark — 3090 has 3.4× more
 bandwidth and they're bandwidth-bound at single-batch-size.
+
+### 3a. CycleResearcher — pending evaluation when Spark arrives
+
+Three concrete ports from CycleResearcher (arXiv:2411.00816, ICLR 2025).
+Watchlist: `zhu-minjun/Researcher`. All three map onto Spark's unified
+memory; none are feasible on the 3090 alongside the current 27B writer.
+In effort-impact order:
+
+1. **CycleReviewer as autowrite scorer** (2 days + Spark). See Phase 47.S1 above. Direct drop-in against the existing scorer interface; inherits the published 26.89% MAE reduction without training on our end.
+2. **9-block NeurIPS rubric in the writer prompt** (2 days, no Spark needed — ✅ **already shipped** as `sciknow book ensemble-review` in Phase 46.C with N=3 stance-rotated reviewers + meta-reviewer).
+3. **Iterative DPO on sciknow's own preferences** (2 weeks + Spark). See Phase 47.S2 above. Already tracked in `docs/RESEARCH.md` §21 Layer 4 — CycleResearcher's RL loop is the current-gen reference implementation of the pattern.
+4. **fast-detect-gpt pre-publish gate** (3 days, GPU). See Phase 47.S3 above.
+
+The common thread: without Spark we're stuck running scoring on the
+same GPU as the writer, which means either (a) evicting the writer
+(cache-cold on resume) or (b) CPU-fallback on the scorer (50× slower —
+see `docs/BENCHMARKS.md` contention finding).
 
 ---
 

@@ -37,13 +37,27 @@ def list_cmd(
              "fresh state. Default behaviour prints whatever was "
              "recorded at last check (so the command is fast + offline).",
     ),
+    force: bool = typer.Option(
+        False, "--force", "-f",
+        help="With --check, bypass the 24h per-repo cooldown. Use "
+             "sparingly — the anonymous GitHub API allows only 60 "
+             "requests/hour.",
+    ),
 ):
     """Show the watchlist. Green rows had new activity since last check."""
     wl.seed_if_empty()
     if check:
-        console.print("[dim]fetching GitHub for each watched repo…[/dim]")
-        for _ in wl.check_all():
-            pass
+        console.print("[dim]fetching GitHub for each watched repo (cooldown 24h)…[/dim]")
+        n_checked, n_cached, n_err = 0, 0, 0
+        for _repo, status in wl.check_all(force=force):
+            if status == "checked": n_checked += 1
+            elif status == "cached": n_cached += 1
+            else: n_err += 1
+        if n_cached:
+            console.print(
+                f"[dim]{n_checked} checked, {n_cached} within 24h cooldown "
+                f"(pass --force to bypass), {n_err} errored.[/dim]"
+            )
     rows = wl.list_watched()
     if not rows:
         console.print("[yellow]No repos on the watchlist.[/yellow]")
@@ -119,11 +133,32 @@ def check(
         None,
         help="Repo to check (URL or owner/repo). Omit to check every watched repo.",
     ),
+    force: bool = typer.Option(
+        False, "--force", "-f",
+        help="Bypass the 24h cooldown. Defaults to False — GitHub's "
+             "anonymous API allows 60 req/hour and the upstream repos "
+             "we watch don't ship day-over-day.",
+    ),
 ):
-    """Fetch one or every watched repo and print what's new."""
+    """Fetch one or every watched repo and print what's new.
+
+    A repo is only re-checked if its last successful check was more
+    than 24h ago; otherwise the cached state is shown. Use ``--force``
+    to override (or set ``GITHUB_TOKEN`` in the env to raise the
+    API budget to 5k/hour).
+    """
     if url_or_key:
         try:
-            r = wl.check(url_or_key)
+            r = wl.check(url_or_key, force=force)
+        except wl.RateLimited as rl:
+            cached = rl.cached
+            delta = cached.new_commits_since_last_check or 0
+            mark = f"[green]+{delta} new commits[/green]" if delta > 0 else "[dim]up to date[/dim]"
+            console.print(
+                f"[bold]{cached.key}[/bold]  ★ {cached.stars:,}  pushed {cached.last_pushed_at}  "
+                f"{mark}  [yellow](cached; next check in {rl.hours_remaining:.1f}h — pass --force to override)[/yellow]"
+            )
+            return
         except Exception as exc:
             console.print(f"[red]check failed:[/red] {exc}")
             raise typer.Exit(1)
@@ -133,18 +168,26 @@ def check(
             f"[bold]{r.key}[/bold]  ★ {r.stars:,}  pushed {r.last_pushed_at}  {mark}"
         )
         return
-    table = Table(title="Check results", show_lines=False)
+    table = Table(title=f"Check results (24h cooldown{' — BYPASSED' if force else ''})",
+                  show_lines=False)
     table.add_column("Repo", style="bold")
     table.add_column("★", justify="right")
     table.add_column("Pushed", style="dim")
     table.add_column("Δ since last", justify="right")
-    for r in wl.check_all():
+    table.add_column("Status", style="dim")
+    for r, status in wl.check_all(force=force):
         delta = r.new_commits_since_last_check or 0
+        status_mark = (
+            "[green]✓[/green]" if status == "checked" else
+            "[yellow]cached[/yellow]" if status == "cached" else
+            "[red]err[/red]"
+        )
         table.add_row(
             r.key,
-            f"{r.stars:,}",
+            f"{r.stars:,}" if r.stars else "",
             r.last_pushed_at or "",
             (f"[green]+{delta}[/green]" if delta else "[dim]—[/dim]"),
+            status_mark,
         )
     console.print(table)
 

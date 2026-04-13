@@ -177,6 +177,33 @@ def _ts() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# ── Rate limit ─────────────────────────────────────────────────────────
+#
+# GitHub's anonymous REST API allows 60 requests/hour — easy to burn
+# through if a script or shell loop hits `watch check` repeatedly. Worse,
+# daily-level insight (what got pushed overnight) is all we need for
+# a research-watch use case. The 24h guard below is enforced on
+# ``check()`` by default; callers pass ``force=True`` to override.
+
+CHECK_COOLDOWN_HOURS = 24.0
+
+
+def _hours_since(iso_ts: str | None) -> float | None:
+    """Hours since the given ISO-8601 UTC timestamp, or None if unparseable."""
+    if not iso_ts:
+        return None
+    try:
+        # Accept both "…Z" and "…+00:00"
+        s = iso_ts.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    delta = datetime.now(timezone.utc) - dt
+    return delta.total_seconds() / 3600.0
+
+
 def _append(entry: dict) -> None:
     entry = {"ts": _ts(), **entry}
     with _log_path().open("a") as f:
@@ -294,12 +321,48 @@ def remove(url_or_key: str) -> bool:
     return True
 
 
-def check(url_or_key: str, *, github_token: str | None = None) -> WatchedRepo:
+class RateLimited(Exception):
+    """Raised when ``check`` is called inside the cooldown window and
+    the caller didn't pass ``force=True``.
+
+    The exception carries the ``hours_remaining`` until the next check
+    is allowed, and the cached WatchedRepo from the last successful
+    check, so callers can show stale-but-useful data without a new
+    API call.
+    """
+    def __init__(self, hours_remaining: float, cached: WatchedRepo):
+        self.hours_remaining = hours_remaining
+        self.cached = cached
+        super().__init__(
+            f"checked {round(CHECK_COOLDOWN_HOURS - hours_remaining, 1)}h ago; "
+            f"next check in {hours_remaining:.1f}h. Pass force=True to override."
+        )
+
+
+def check(
+    url_or_key: str,
+    *,
+    github_token: str | None = None,
+    force: bool = False,
+    cooldown_hours: float | None = None,
+) -> WatchedRepo:
     """Hit the GitHub API and record the current HEAD sha + activity.
 
     Uses the anonymous v3 REST API (60 requests/hour) by default. Pass
     ``github_token`` or set ``GITHUB_TOKEN`` in the environment to raise
     the rate limit to 5000/hour. No authentication beyond that.
+
+    **Daily rate-limit**: by default a repo is re-checked only if its
+    most recent ``check`` log entry is older than ``CHECK_COOLDOWN_HOURS``
+    (default 24h). Pass ``force=True`` to override, or tighten/loosen
+    via ``cooldown_hours``. This is a defensive guard against script
+    loops burning through the anon-API budget; the upstream repos we
+    watch don't ship day-over-day, so hourly checks wouldn't tell us
+    anything a daily check doesn't.
+
+    Raises ``RateLimited`` if skipped; the exception carries the cached
+    ``WatchedRepo`` so callers can render stale-but-useful data without
+    a new API call.
 
     Writes a ``check`` event to the log; the ``new_commits_since_last_check``
     field is set to the number of commits between the previously stored
@@ -310,6 +373,19 @@ def check(url_or_key: str, *, github_token: str | None = None) -> WatchedRepo:
         owner, repo = url_or_key.split("/", 1)
     else:
         owner, repo = parse_github_url(url_or_key)
+
+    # Cooldown guard — only when we have a prior successful check.
+    index = _replay()
+    key = f"{owner}/{repo}"
+    cached = index.get(key)
+    cooldown = cooldown_hours if cooldown_hours is not None else CHECK_COOLDOWN_HOURS
+    if not force and cached is not None and cached.last_checked_at:
+        hrs = _hours_since(cached.last_checked_at)
+        if hrs is not None and hrs < cooldown:
+            raise RateLimited(
+                hours_remaining=round(cooldown - hrs, 2),
+                cached=cached,
+            )
 
     token = github_token or os.environ.get("GITHUB_TOKEN")
     headers = {"Accept": "application/vnd.github+json"}
@@ -329,9 +405,7 @@ def check(url_or_key: str, *, github_token: str | None = None) -> WatchedRepo:
 
         # Count commits since last known sha — the compare endpoint
         # returns {"total_commits": N} directly when a baseline exists.
-        index = _replay()
-        key = f"{owner}/{repo}"
-        prior_sha = index[key].last_default_sha if key in index else None
+        prior_sha = cached.last_default_sha if cached is not None else None
         new_commits = 0
         if prior_sha and prior_sha != head_sha:
             rc = client.get(f"{base}/compare/{prior_sha}...{head_sha}")
@@ -352,7 +426,7 @@ def check(url_or_key: str, *, github_token: str | None = None) -> WatchedRepo:
     return WatchedRepo(
         owner=owner, repo=repo,
         url=meta.get("html_url") or f"https://github.com/{owner}/{repo}",
-        note=(index[key].note if key in index else ""),
+        note=(cached.note if cached is not None else ""),
         last_default_sha=head_sha,
         last_pushed_at=meta.get("pushed_at"),
         stars=meta.get("stargazers_count", 0),
@@ -362,11 +436,30 @@ def check(url_or_key: str, *, github_token: str | None = None) -> WatchedRepo:
     )
 
 
-def check_all(*, github_token: str | None = None) -> Iterable[WatchedRepo]:
-    """Yield a WatchedRepo per watched repo after fetching. Best-effort —
-    errors on individual repos are logged and skipped."""
+def check_all(
+    *,
+    github_token: str | None = None,
+    force: bool = False,
+    cooldown_hours: float | None = None,
+) -> Iterable[tuple[WatchedRepo, str]]:
+    """Yield ``(repo, status)`` per watched repo.
+
+    ``status`` is one of ``"checked"`` (hit the API, fresh data),
+    ``"cached"`` (inside the cooldown, returned last-known data), or
+    ``"error"`` (network / HTTP failure).
+
+    The signature changed in Phase 46.D to carry the status explicitly;
+    the CLI surface uses it to distinguish "just checked" from "within
+    24h window". Errors on individual repos are still best-effort:
+    they log a warning and yield ``(cached_or_empty, "error")``.
+    """
     for r in list_watched():
         try:
-            yield check(r.key, github_token=github_token)
+            got = check(r.key, github_token=github_token,
+                        force=force, cooldown_hours=cooldown_hours)
+            yield got, "checked"
+        except RateLimited as rl:
+            yield rl.cached, "cached"
         except Exception as exc:
             logger.warning("check %s failed: %s", r.key, exc)
+            yield r, "error"

@@ -5185,8 +5185,30 @@ def l1_phase45_watchlist_surface() -> None:
 
     # Public API is zero-arg or dataclass-trivial
     for name in ("add", "remove", "check", "check_all",
-                 "list_watched", "seed_if_empty"):
+                 "list_watched", "seed_if_empty",
+                 # Phase 46.D rate-limit: daily cooldown + RateLimited
+                 "CHECK_COOLDOWN_HOURS", "RateLimited",
+                 "_hours_since"):
         assert hasattr(wl, name), f"watchlist missing {name}"
+    # Daily cooldown is the default (24h); callers can override.
+    assert wl.CHECK_COOLDOWN_HOURS == 24.0, (
+        "daily watchlist cooldown should default to 24h to be polite "
+        "to the anon GitHub API; current value: "
+        f"{wl.CHECK_COOLDOWN_HOURS}"
+    )
+    # _hours_since handles both "Z" and "+00:00" ISO formats
+    assert wl._hours_since(None) is None
+    assert wl._hours_since("not a date") is None
+    from datetime import datetime as _dt, timezone as _tz
+    recent = _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    hrs = wl._hours_since(recent)
+    assert hrs is not None and hrs < 0.5, (
+        f"freshly-stamped timestamp should report <30min, got {hrs}"
+    )
+    import inspect as _inspect
+    sig = _inspect.signature(wl.check)
+    for p in ("force", "cooldown_hours", "github_token"):
+        assert p in sig.parameters, f"wl.check missing {p!r} keyword"
 
     # CLI registered on root
     cmd_names = {c.name for c in main_cli.app.registered_groups}
