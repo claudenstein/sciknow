@@ -229,6 +229,14 @@ class Book(Base):
     description: Mapped[str | None] = mapped_column(Text)
     plan: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="draft")
+    # Phase 45 — project type: scientific_book (default, legacy) |
+    # scientific_paper | (future: scifi_novel, literature_review, ...)
+    # Drives section defaults, prompt conditioning, length targets,
+    # export templates. Lives in books despite the name because books
+    # is the project root record. See sciknow.core.project_type.
+    book_type: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="scientific_book",
+    )
     # Phase 17 — per-book settings that aren't worth a dedicated column.
     # Currently used for target_chapter_words (length target), but
     # intentionally kept open so we can drop new book-level knobs in

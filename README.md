@@ -180,6 +180,7 @@ See [Architecture](docs/ARCHITECTURE.md) for the full system diagram, database s
 | **[Benchmarks](docs/BENCHMARKS.md)** | Performance + quality measurement harness (`sciknow bench`): fast/live/llm/full layers, baseline findings, optimization notes |
 | **[Research & Innovations](docs/RESEARCH.md)** | All implemented techniques with research basis: BERTopic, GraphRAG, Self-RAG, TreeWriter, Karpathy wiki, consensus mapping |
 | **[Multi-Project](docs/PROJECTS.md)** | Per-project isolation (DB + Qdrant + `data/`), project lifecycle CLI + GUI |
+| **[Comparative Analysis](docs/COMPARISON.md)** | Phase 45 audit vs karpathy/autoresearch, AI-Scientist, AutoResearchClaw, FARS — what to borrow, what's already better |
 | **[Credits](docs/CREDITS.md)** | Open-source projects and research papers that sciknow builds on |
 
 ---

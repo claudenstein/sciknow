@@ -60,9 +60,16 @@ console = Console()
 # ── helpers ────────────────────────────────────────────────────────────────────
 
 def _get_book(session, title_or_id: str):
+    """Fetch a book row.
+
+    Returns a tuple ``(id, title, description, status, created_at, plan, book_type)``.
+    Phase 45 appended ``book_type`` at the end so every caller can
+    branch on project type without rewriting their indexed access.
+    Older callers that slice ``row[:6]`` keep working unchanged.
+    """
     from sqlalchemy import text
     row = session.execute(text("""
-        SELECT id::text, title, description, status, created_at, plan
+        SELECT id::text, title, description, status, created_at, plan, book_type
         FROM books WHERE title ILIKE :q OR id::text LIKE :q
         LIMIT 1
     """), {"q": f"%{title_or_id}%"}).fetchone()
@@ -240,21 +247,47 @@ def _save_draft(session, *, title, book_id, chapter_id, section_type, topic,
 def create(
     title: Annotated[str, typer.Argument(help="Book title.")],
     description: str | None = typer.Option(None, "--description", "-d"),
+    type: str = typer.Option(
+        "scientific_book", "--type", "-t",
+        help=(
+            "Project type. Drives section defaults, length targets, "
+            "prompt conditioning, and export defaults. Run "
+            "`sciknow book types` to list available types."
+        ),
+    ),
     target_chapter_words: int | None = typer.Option(
         None, "--target-chapter-words",
         help=(
-            "Target words per chapter for autowrite/write "
-            "(default 6000). Stored on the book; sections get a "
-            "proportional share of this budget."
+            "Target words per chapter for autowrite/write. Defaults "
+            "to the project type's default (book: 6400, paper: 4000). "
+            "Sections get a proportional share of this budget."
+        ),
+    ),
+    bootstrap: bool = typer.Option(
+        True, "--bootstrap/--no-bootstrap",
+        help=(
+            "For flat project types (e.g. scientific_paper), auto-create "
+            "a single chapter with the type's canonical section template. "
+            "Has no effect on hierarchical types like scientific_book."
         ),
     ),
 ):
     """
-    Create a new book project.
+    Create a new project.
+
+    Phase 45 — projects now carry a **type**. The type decides the default
+    section set, length targets, and downstream prompt conditioning:
+
+      - ``scientific_book``  (default)  hierarchical book → chapters → sections
+      - ``scientific_paper``            flat IMRaD paper (one chapter, canonical sections)
+
+    Run ``sciknow book types`` for the full list + each type's template.
 
     Examples:
 
       sciknow book create "Global Cooling: The Coming Solar Minimum"
+
+      sciknow book create "Climate-Volcano Coupling" --type scientific_paper
 
       sciknow book create "Solar Climate" --description "The role of the sun in climate change"
 
@@ -263,6 +296,16 @@ def create(
     import json as _json
     from sqlalchemy import text
     from sciknow.storage.db import get_session
+    from sciknow.core.project_type import (
+        default_sections_as_dicts, get_project_type, validate_type_slug,
+    )
+
+    try:
+        validate_type_slug(type)
+    except ValueError as exc:
+        console.print(f"[red]--type:[/red] {exc}")
+        raise typer.Exit(2)
+    pt = get_project_type(type)
 
     with get_session() as session:
         existing = session.execute(text(
@@ -273,29 +316,87 @@ def create(
             raise typer.Exit(1)
 
         custom_meta: dict = {}
-        if target_chapter_words is not None:
-            if target_chapter_words <= 0:
-                console.print("[red]--target-chapter-words must be positive[/red]")
-                raise typer.Exit(1)
-            custom_meta["target_chapter_words"] = target_chapter_words
+        effective_target = target_chapter_words or pt.default_target_chapter_words
+        if effective_target <= 0:
+            console.print("[red]--target-chapter-words must be positive[/red]")
+            raise typer.Exit(1)
+        custom_meta["target_chapter_words"] = effective_target
 
         result = session.execute(text("""
-            INSERT INTO books (title, description, custom_metadata)
-            VALUES (:title, :desc, CAST(:meta AS jsonb))
+            INSERT INTO books (title, description, book_type, custom_metadata)
+            VALUES (:title, :desc, :btype, CAST(:meta AS jsonb))
             RETURNING id::text
         """), {
-            "title": title, "desc": description,
+            "title": title, "desc": description, "btype": pt.slug,
             "meta": _json.dumps(custom_meta),
         })
         book_id = result.fetchone()[0]
         session.commit()
 
-    console.print(f"[green]✓ Created book:[/green] [bold]{title}[/bold]  [dim](id: {book_id[:8]})[/dim]")
+        # Bootstrap a single chapter with the type's section template
+        # for flat types — this is the "one project = one document"
+        # shape for papers, literature reviews, grant proposals, etc.
+        if bootstrap and pt.is_flat:
+            sections_json = _json.dumps(default_sections_as_dicts(pt))
+            session.execute(text("""
+                INSERT INTO book_chapters
+                  (book_id, number, title, description, sections)
+                VALUES
+                  (CAST(:book_id AS uuid), 1, :ch_title, :ch_desc,
+                   CAST(:sections AS jsonb))
+            """), {
+                "book_id": book_id,
+                "ch_title": title,
+                "ch_desc": description or f"{pt.display_name} — {title}",
+                "sections": sections_json,
+            })
+            session.commit()
+
     console.print(
-        "\nNext steps:\n"
-        f"  [bold]sciknow book outline {title!r}[/bold]   — generate a chapter structure\n"
-        f"  [bold]sciknow book chapter add {title!r} \"Chapter Title\"[/bold]  — add chapters manually"
+        f"[green]✓ Created {pt.display_name}:[/green] [bold]{title}[/bold] "
+        f"[dim](type={pt.slug}, id={book_id[:8]})[/dim]"
     )
+    if pt.is_flat and bootstrap:
+        console.print(
+            "[dim]  Auto-created one chapter with sections: "
+            + ", ".join(s.key for s in pt.default_sections) + "[/dim]"
+        )
+        console.print(
+            "\nNext steps:\n"
+            f"  [bold]sciknow book serve {title!r}[/bold]  — open in the browser\n"
+            f"  [bold]sciknow book autowrite {title!r} --chapter 1 --full[/bold]  — write every section"
+        )
+    else:
+        console.print(
+            "\nNext steps:\n"
+            f"  [bold]sciknow book outline {title!r}[/bold]   — generate a chapter structure\n"
+            f"  [bold]sciknow book chapter add {title!r} \"Chapter Title\"[/bold]  — add chapters manually"
+        )
+
+
+@app.command(name="types")
+def types():
+    """List available project types (Phase 45)."""
+    from rich.table import Table as _RT
+    from sciknow.core.project_type import list_project_types
+
+    table = _RT(title="Project Types")
+    table.add_column("Slug", style="bold")
+    table.add_column("Display", style="cyan")
+    table.add_column("Flat", justify="center")
+    table.add_column("Default sections", overflow="fold")
+    table.add_column("Target words/chap", justify="right")
+    table.add_column("Description", style="dim", overflow="fold")
+    for pt in list_project_types():
+        table.add_row(
+            pt.slug,
+            pt.display_name,
+            "●" if pt.is_flat else "",
+            ", ".join(s.key for s in pt.default_sections),
+            f"{pt.default_target_chapter_words:,}",
+            pt.description,
+        )
+    console.print(table)
 
 
 # ── list ───────────────────────────────────────────────────────────────────────
@@ -308,32 +409,34 @@ def list_books():
 
     with get_session() as session:
         rows = session.execute(text("""
-            SELECT b.id::text, b.title, b.status, b.description,
+            SELECT b.id::text, b.title, b.status, b.description, b.book_type,
                    COUNT(DISTINCT bc.id) as n_chapters,
                    COUNT(DISTINCT d.id)  as n_drafts
             FROM books b
             LEFT JOIN book_chapters bc ON bc.book_id = b.id
             LEFT JOIN drafts d ON d.book_id = b.id
-            GROUP BY b.id, b.title, b.status, b.description
+            GROUP BY b.id, b.title, b.status, b.description, b.book_type
             ORDER BY b.created_at DESC
         """)).fetchall()
 
     if not rows:
-        console.print("[yellow]No books yet.[/yellow]  Create one: [bold]sciknow book create \"Title\"[/bold]")
+        console.print("[yellow]No projects yet.[/yellow]  Create one: [bold]sciknow book create \"Title\"[/bold]")
         raise typer.Exit(0)
 
-    table = Table(title="Book Projects", box=box.SIMPLE_HEAD, expand=True)
+    table = Table(title="Projects", box=box.SIMPLE_HEAD, expand=True)
     table.add_column("ID",       style="dim",   width=8)
     table.add_column("Title",                   ratio=3)
-    table.add_column("Status",   style="cyan",  width=12)
+    table.add_column("Type",     style="magenta", width=18)
+    table.add_column("Status",   style="cyan",  width=10)
     table.add_column("Chapters", justify="right", width=9)
     table.add_column("Drafts",   justify="right", width=7)
     table.add_column("Description",             ratio=2)
 
     for row in rows:
+        btype = (row[4] or "scientific_book").replace("scientific_", "")
         table.add_row(
-            row[0][:8], row[1], row[2],
-            str(row[4]), str(row[5]),
+            row[0][:8], row[1], btype, row[2],
+            str(row[5]), str(row[6]),
             (row[3] or "")[:60],
         )
     console.print(table)
@@ -476,11 +579,28 @@ def outline(
     from sciknow.rag.llm import complete
     from sciknow.storage.db import get_session
 
+    from sciknow.core.project_type import get_project_type
+
     with get_session() as session:
         book = _get_book(session, book_title)
         if not book:
             console.print(f"[red]Book not found:[/red] {book_title}")
             raise typer.Exit(1)
+
+        # Flat project types (scientific_paper) don't have a chapter
+        # outline — the one chapter + canonical sections was bootstrapped
+        # at `book create` time. Refuse to overwrite that shape here.
+        pt = get_project_type(book[6] if len(book) > 6 else None)
+        if pt.is_flat:
+            console.print(
+                f"[yellow]Skipping outline:[/yellow] project type [bold]{pt.slug}[/bold] "
+                "is flat (one chapter, canonical sections auto-created at project init)."
+            )
+            console.print(
+                f"  To customize sections, edit chapter 1 directly: "
+                f"[bold]sciknow book chapter show {book_title!r} 1[/bold]"
+            )
+            raise typer.Exit(0)
 
         papers = session.execute(text(
             "SELECT title, year FROM paper_metadata ORDER BY year DESC NULLS LAST"

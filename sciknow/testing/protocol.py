@@ -5080,6 +5080,126 @@ def l1_phase43_project_resolution() -> None:
     assert "db_name" in sig.parameters
 
 
+def l1_phase45_project_types() -> None:
+    """Phase 45 — project_type registry + CLI + Book model column.
+
+    Static checks: scientific_book + scientific_paper registered,
+    get_project_type falls back to default on unknown slug, flat types
+    have is_flat=True with a required abstract-like section, Book model
+    has book_type, `sciknow book types` + `sciknow book create --type`
+    are exposed.
+    """
+    import inspect
+
+    from sciknow.core.project_type import (
+        PROJECT_TYPES, DEFAULT_TYPE_SLUG,
+        get_project_type, list_project_types, validate_type_slug,
+        default_sections_as_dicts, section_keys, target_words_for,
+    )
+    from sciknow.storage.models import Book
+    from sciknow.cli import book as book_cli
+
+    # Registry covers the two shipped types
+    assert "scientific_book"  in PROJECT_TYPES
+    assert "scientific_paper" in PROJECT_TYPES
+    assert DEFAULT_TYPE_SLUG  == "scientific_book"
+
+    # Fallback to default on unknown slug (never raises)
+    assert get_project_type("not_a_type").slug == DEFAULT_TYPE_SLUG
+    assert get_project_type(None).slug         == DEFAULT_TYPE_SLUG
+
+    # validate_type_slug rejects unknown slugs
+    try:
+        validate_type_slug("definitely-not-a-type")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("validate_type_slug should reject unknown slugs")
+
+    # Paper type is flat with IMRaD canonical sections
+    paper = PROJECT_TYPES["scientific_paper"]
+    assert paper.is_flat is True
+    keys = section_keys(paper)
+    for expected in ("abstract", "introduction", "methods",
+                     "results", "discussion", "conclusion"):
+        assert expected in keys, f"paper template missing {expected!r}"
+    # Required flag on abstract (the IMRaD opener)
+    assert any(s.key == "abstract" and s.required for s in paper.default_sections), (
+        "scientific_paper must mark `abstract` as required"
+    )
+    # target_words_for returns something for a templated section
+    assert target_words_for(paper, "abstract") is not None
+    assert target_words_for(paper, "not_a_section") is None
+
+    # Book type is hierarchical
+    book = PROJECT_TYPES["scientific_book"]
+    assert book.is_flat is False
+
+    # Sections as dicts match the BookChapter.sections JSONB shape
+    for d in default_sections_as_dicts(paper):
+        for k in ("key", "title", "target_words", "required"):
+            assert k in d, f"section dict missing {k}"
+
+    # Book SQLAlchemy model has the new column
+    assert hasattr(Book, "book_type"), "Book model missing book_type column"
+
+    # CLI surface — typer registers commands by function name when no
+    # explicit name= is passed, so introspect via callback identity rather
+    # than the .name attribute (which is None for unnamed commands).
+    callbacks = {c.callback for c in book_cli.app.registered_commands}
+    assert book_cli.types  in callbacks, "`sciknow book types` not registered"
+    assert book_cli.create in callbacks, "`sciknow book create` not registered"
+    # create() signature has the --type parameter
+    create_sig = inspect.signature(book_cli.create)
+    assert "type" in create_sig.parameters, "book create missing --type flag"
+
+
+def l1_phase45_watchlist_surface() -> None:
+    """Phase 45 — repo watchlist module + CLI surface."""
+    import inspect
+
+    from sciknow.core import watchlist as wl
+    from sciknow.cli import watch as watch_cli
+    from sciknow.cli import main as main_cli
+
+    # URL parser
+    owner, repo = wl.parse_github_url("https://github.com/foo/bar")
+    assert (owner, repo) == ("foo", "bar")
+    owner, repo = wl.parse_github_url("https://github.com/foo/bar.git/")
+    assert (owner, repo) == ("foo", "bar")
+    try:
+        wl.parse_github_url("https://gitlab.com/foo/bar")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("parse_github_url should reject non-github URLs")
+
+    # SEED_REPOS has at least the four priors we know about
+    seed_keys = {u["url"] for u in wl.SEED_REPOS}
+    for must in (
+        "https://github.com/karpathy/autoresearch",
+        "https://github.com/SakanaAI/AI-Scientist",
+        "https://github.com/aiming-lab/AutoResearchClaw",
+    ):
+        assert must in seed_keys, f"seed watchlist missing {must}"
+
+    # Public API is zero-arg or dataclass-trivial
+    for name in ("add", "remove", "check", "check_all",
+                 "list_watched", "seed_if_empty"):
+        assert hasattr(wl, name), f"watchlist missing {name}"
+
+    # CLI registered on root
+    cmd_names = {c.name for c in main_cli.app.registered_groups}
+    assert "watch" in cmd_names, "`sciknow watch` subapp not registered"
+    # Subapp has the expected commands (introspect via callback identity
+    # to cover both explicitly-named and function-name-defaulted commands)
+    callbacks = {c.callback for c in watch_cli.app.registered_commands}
+    for fn_name in ("list_cmd", "add", "remove", "check", "note", "seed"):
+        assert getattr(watch_cli, fn_name, None) in callbacks, (
+            f"sciknow watch missing `{fn_name}` subcommand"
+        )
+
+
 def l1_bench_harness_surface() -> None:
     """Phase 44 — the bench harness module loads and exposes the expected
     surface (run/run_layer/LAYERS/BenchMetric). Each layer has >= 1
@@ -6137,6 +6257,9 @@ L1_TESTS: list[Callable] = [
     l1_phase43h_web_project_endpoints,
     # Phase 44 — bench harness (`sciknow bench`)
     l1_bench_harness_surface,
+    # Phase 45 — project types + watchlist
+    l1_phase45_project_types,
+    l1_phase45_watchlist_surface,
 ]
 
 L2_TESTS: list[Callable] = [
