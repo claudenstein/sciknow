@@ -29,36 +29,101 @@ _TOKENIZER = tiktoken.get_encoding("cl100k_base")
 # ---------------------------------------------------------------------------
 
 # (canonical_type, list of lowercase prefixes to match heading text against)
+#
+# Phase 44.1 — broadened after bench findings showed very low hit rates on
+# `related_work` (0.2%), `results` (24%), and `abstract` (37%). Two changes:
+# (1) expand each list with domain-common synonyms the original regex missed
+#     (e.g. "findings" for results, "review" for related_work, "extended
+#     abstract" for abstract), and (2) switch `_classify_heading` from
+#     first-match-wins to longest-prefix-wins so overlapping keywords
+#     ("experiment" in methods, "experimental results" in results) resolve
+#     to the more specific category.
+#
+# Overlapping keywords that previously caused misclassification:
+#   - "experiment*" in methods preempted "experimental result/finding"
+#   - "observation" in methods preempted "observed results"
+# Both fixed by longest-prefix-wins.
+
 _SECTION_PATTERNS: list[tuple[str, list[str]]] = [
-    ("abstract",       ["abstract"]),
-    ("introduction",   ["introduction", "background", "motivation", "overview"]),
+    ("abstract",       ["abstract", "extended abstract", "synopsis",
+                        "plain language summary", "plain-language summary",
+                        "highlights"]),
+    ("introduction",   ["introduction", "background", "motivation", "overview",
+                        "preface", "preamble"]),
     ("related_work",   ["related work", "prior work", "literature review",
-                        "previous work", "state of the art"]),
-    ("methods",        ["method", "material", "experiment", "data and method",
-                        "approach", "model", "dataset", "proposed",
-                        "framework", "architecture", "observation",
-                        "instrument", "data collection", "simulation"]),
-    ("results",        ["result", "finding", "performance", "evaluation",
-                        "experiment", "measurement", "observation"]),
-    ("discussion",     ["discussion", "analysis", "interpretation", "implication"]),
-    ("conclusion",     ["conclusion", "summary", "outlook", "future work",
-                        "closing", "concluding"]),
-    ("acknowledgments",["acknowledgment", "acknowledgement", "funding", "support"]),
-    ("references",     ["reference", "bibliography"]),
-    ("appendix",       ["appendix", "supplement"]),
+                        "previous work", "previous research", "previous studies",
+                        "state of the art", "state-of-the-art",
+                        "review of", "historical perspective",
+                        "research context", "theoretical background"]),
+    ("methods",        ["method", "material", "data and method",
+                        "approach", "model description", "model",
+                        "framework", "architecture",
+                        "instrument", "data collection",
+                        "experimental setup", "experimental design",
+                        "experimental method", "experimental procedure",
+                        "experiment", "simulation setup", "numerical setup",
+                        "simulation", "observation", "dataset",
+                        "study area", "study site", "study region",
+                        "sample preparation", "sampling",
+                        "proposed"]),
+    ("results",        ["result", "finding", "main finding", "key finding",
+                        "performance", "evaluation",
+                        "experimental result", "experimental finding",
+                        "observed result", "simulation result",
+                        "main outcome", "outcome",
+                        "empirical result", "empirical finding",
+                        "measurement result", "measurement",
+                        "observations and measurements",
+                        # Combined headings stay in `results` rather than
+                        # `discussion`: users filtering --section results
+                        # expect findings; a "Results and Discussion" section
+                        # contains findings-as-primary-content with analysis
+                        # threaded in. Classifying it as discussion hid 118
+                        # papers' findings under a less-specific bucket
+                        # (post-bench Phase 44.1 finding). Prefix is longer
+                        # than plain "discussion" so longest-prefix wins.
+                        "results and discussion"]),
+    ("discussion",     ["discussion", "analysis", "interpretation", "implication",
+                        "general discussion"]),
+    ("conclusion",     ["conclusion", "concluding remark", "concluding",
+                        "summary", "summary and conclusion", "closing",
+                        "outlook", "future work", "future research",
+                        "future direction", "perspectives and outlook"]),
+    ("acknowledgments",["acknowledgment", "acknowledgement", "funding",
+                        "support", "author contribution",
+                        "conflict of interest", "competing interest",
+                        "ethics statement"]),
+    ("references",     ["reference", "bibliography", "works cited",
+                        "cited literature"]),
+    ("appendix",       ["appendix", "supplement", "supplementary",
+                        "supporting information", "code availability",
+                        "data availability"]),
 ]
 
 _SKIP_SECTIONS = {"references", "acknowledgments"}
 
 
+# Longest-prefix-wins classifier, built once at import time.
+# Each entry is (prefix, section_type), sorted by prefix length DESC so the
+# first startswith match is also the longest. This gets us both "experimental
+# result" → results and "experimental setup" → methods without the old
+# first-match-wins ordering footgun.
+_CLASSIFY_TABLE: list[tuple[str, str]] = sorted(
+    ((prefix, section_type)
+     for section_type, prefixes in _SECTION_PATTERNS
+     for prefix in prefixes),
+    key=lambda pair: len(pair[0]),
+    reverse=True,
+)
+
+
 def _classify_heading(heading: str) -> str:
-    """Map a heading string to a canonical section type."""
+    """Map a heading string to a canonical section type (longest-prefix wins)."""
     normalised = re.sub(r'^[\d.]+\s*', '', heading.lower().strip())
     normalised = re.sub(r'[^\w\s]', '', normalised).strip()
-    for section_type, prefixes in _SECTION_PATTERNS:
-        for prefix in prefixes:
-            if normalised.startswith(prefix):
-                return section_type
+    for prefix, section_type in _CLASSIFY_TABLE:
+        if normalised.startswith(prefix):
+            return section_type
     return "unknown"
 
 

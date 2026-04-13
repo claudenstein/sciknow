@@ -1422,6 +1422,42 @@ def expand(
             f"[dim]{cache_size} DOIs cached as 'no OA PDF' — will be skipped on next run.[/dim]"
         )
 
+    # Phase 44.1 — auto-run the citation linker at the end of expand.
+    # Citations referencing newly-ingested papers don't get retroactively
+    # linked by per-paper ingestion (ingest only links citations FROM the
+    # paper being ingested, not citations TO it). Running the full-table
+    # linker after a bulk expand closes that gap; the bench baseline found
+    # 4.5% cross-link rate and a retroactive run bumped it to 6.1%.
+    if ingested:
+        try:
+            from sqlalchemy import text as _sql_text
+            from sciknow.storage.db import get_session
+            with get_session() as session:
+                corpus = session.execute(_sql_text("""
+                    SELECT pm.doi, d.id FROM paper_metadata pm
+                    JOIN documents d ON d.id = pm.document_id
+                    WHERE pm.doi IS NOT NULL AND d.ingestion_status = 'complete'
+                """)).fetchall()
+                doi_to_doc = {(r[0] or "").lower().strip(): r[1] for r in corpus}
+                unlinked = session.execute(_sql_text("""
+                    SELECT id, cited_doi FROM citations
+                    WHERE cited_doi IS NOT NULL AND cited_document_id IS NULL
+                """)).fetchall()
+                new_links = 0
+                for cit_id, doi in unlinked:
+                    did = doi_to_doc.get((doi or "").lower().strip())
+                    if did:
+                        session.execute(
+                            _sql_text("UPDATE citations SET cited_document_id = :d WHERE id = :c"),
+                            {"d": did, "c": cit_id},
+                        )
+                        new_links += 1
+                session.commit()
+            if new_links:
+                console.print(f"[dim]✓ Backfilled {new_links} citation cross-links.[/dim]")
+        except Exception as exc:
+            console.print(f"[dim]citation link-backfill skipped: {exc}[/dim]")
+
 
 @app.command(name="link-citations")
 def link_citations(
@@ -1454,7 +1490,7 @@ def link_citations(
             JOIN documents d ON d.id = pm.document_id
             WHERE pm.doi IS NOT NULL AND d.ingestion_status = 'complete'
         """)).fetchall()
-        doi_to_doc = {r[0].lower(): r[1] for r in rows}
+        doi_to_doc = {(r[0] or "").lower().strip(): r[1] for r in rows}
 
         # Find unlinked citations whose cited_doi matches a corpus paper
         unlinked = session.execute(sql_text("""
@@ -1465,7 +1501,7 @@ def link_citations(
 
         linked = 0
         for cit_id, cited_doi in unlinked:
-            doc_id = doi_to_doc.get((cited_doi or "").lower())
+            doc_id = doi_to_doc.get((cited_doi or "").lower().strip())
             if doc_id:
                 if not dry_run:
                     session.execute(
@@ -1514,6 +1550,103 @@ def link_citations(
                     str(count),
                 )
             console.print(table)
+
+
+@app.command(name="reclassify-sections")
+def reclassify_sections(
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Print what would change, don't write.",
+    ),
+):
+    """Re-run the heading classifier on existing sections + chunks.
+
+    Phase 44.1 — the ``_SECTION_PATTERNS`` in ``sciknow.ingestion.chunker``
+    were broadened after bench findings showed very low hit rates on
+    ``related_work`` (0.2%), ``results`` (24%), and ``abstract`` (37%).
+    This command retroactively applies the new patterns to already-
+    ingested papers so the corpus benefits without re-running the full
+    MinerU pipeline.
+
+    Updates:
+      - ``paper_sections.section_type``  (used for ingest-time chunking params)
+      - ``chunks.section_type``          (used for Qdrant filtering + retrieval)
+
+    Idempotent — re-running against a corpus already classified with
+    the current patterns is a no-op.
+    """
+    from collections import Counter
+    from sqlalchemy import text as _text
+
+    from sciknow.cli import preflight
+    from sciknow.ingestion.chunker import _classify_heading
+    from sciknow.storage.db import get_session
+
+    preflight()
+
+    with get_session() as session:
+        rows = session.execute(_text("""
+            SELECT id::text, section_title, section_type
+            FROM paper_sections
+            WHERE section_title IS NOT NULL
+        """)).fetchall()
+        if not rows:
+            console.print("[yellow]No paper_sections rows — nothing to reclassify.[/yellow]")
+            return
+
+        transitions: Counter = Counter()
+        to_update: list[tuple[str, str]] = []   # (section_id, new_type)
+        for sid, title, old_type in rows:
+            new_type = _classify_heading(title or "")
+            if new_type != (old_type or "unknown"):
+                transitions[f"{old_type or 'null'} → {new_type}"] += 1
+                to_update.append((sid, new_type))
+
+        console.print(f"[bold]Scanned[/bold] {len(rows):,} sections")
+        if not to_update:
+            console.print("[green]✓ No changes needed — classifier output matches stored types.[/green]")
+            return
+        console.print(f"[bold]Changes needed:[/bold] {len(to_update):,}")
+        for t, n in transitions.most_common(20):
+            console.print(f"  {t}: {n:,}")
+
+        if dry_run:
+            console.print("[dim](dry-run — no writes)[/dim]")
+            return
+
+        # Write paper_sections updates. Batched to keep the transaction
+        # manageable on a 100k-chunk corpus.
+        BATCH = 500
+        for i in range(0, len(to_update), BATCH):
+            batch = to_update[i:i+BATCH]
+            ids_by_type: dict[str, list[str]] = {}
+            for sid, nt in batch:
+                ids_by_type.setdefault(nt, []).append(sid)
+            for nt, ids in ids_by_type.items():
+                session.execute(
+                    _text("UPDATE paper_sections SET section_type = :nt "
+                          "WHERE id::text = ANY(:ids)"),
+                    {"nt": nt, "ids": ids},
+                )
+            if i % (BATCH * 10) == 0:
+                session.commit()
+        session.commit()
+        console.print("[green]✓ paper_sections updated.[/green]")
+
+        # Mirror into chunks via join on section_id. One UPDATE per
+        # canonical type keeps the query plan simple.
+        n_chunk_updates = 0
+        for new_type in set(nt for _, nt in to_update):
+            res = session.execute(_text("""
+                UPDATE chunks c SET section_type = :nt
+                FROM paper_sections ps
+                WHERE c.section_id = ps.id AND ps.section_type = :nt
+                  AND COALESCE(c.section_type, '') <> :nt
+            """), {"nt": new_type})
+            n_chunk_updates += res.rowcount or 0
+        session.commit()
+        console.print(f"[green]✓ chunks updated: {n_chunk_updates:,} rows.[/green]")
+    console.print("[dim]Run `sciknow bench --layer fast --no-compare` to confirm new coverage percentages.[/dim]")
 
 
 @app.command(name="tag-multimodal")

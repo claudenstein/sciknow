@@ -27,6 +27,50 @@ def _get_client() -> ollama.Client:
     return _client
 
 
+def release_llm(models: list[str] | None = None) -> list[str]:
+    """Unload Ollama models from VRAM.
+
+    Phase 44.1 — the benchmark harness surfaced a 50–70× slowdown on
+    the bge-m3 embedder and bge-reranker-v2-m3 when an LLM was still
+    resident in VRAM (both fall back to CPU). Call this helper before
+    a mixed LLM → embedder/reranker flow so the GPU is free for the
+    small-model workload.
+
+    Ollama's way to unload is to issue a tiny request with
+    ``keep_alive=0``; the server evicts the model as soon as the
+    request returns. There is no explicit ``/api/unload`` endpoint.
+
+    Args:
+        models: specific model names to unload. If None, queries
+                ``/api/ps`` and unloads every currently-loaded model.
+
+    Returns the list of model names that were asked to unload.
+    Errors are swallowed per-model — a stuck unload shouldn't
+    block the caller's real workload.
+    """
+    client = _get_client()
+    if models is None:
+        try:
+            ps = client.ps()
+            models = [m.model if hasattr(m, "model") else m.name
+                      for m in (ps.models or [])]
+        except Exception as exc:
+            logger.debug("release_llm: ps() failed: %s", exc)
+            return []
+    released: list[str] = []
+    for name in models or []:
+        try:
+            # Empty prompt + keep_alive=0 tells Ollama to unload. Using
+            # generate() (not chat) because generate is cheaper and still
+            # triggers the eviction on every Ollama version we support.
+            client.generate(model=name, prompt="", keep_alive=0)
+            released.append(name)
+            logger.info("released Ollama model=%s", name)
+        except Exception as exc:
+            logger.debug("release_llm(%s) failed: %s", name, exc)
+    return released
+
+
 def stream(
     system: str,
     user: str,

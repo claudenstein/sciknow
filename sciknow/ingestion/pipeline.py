@@ -412,6 +412,22 @@ def ingest(
             # ------------------------------------------------------------------
             # Stage 4: Embedding + Qdrant upsert
             # ------------------------------------------------------------------
+            # Phase 44.1 — evict any Ollama model that the metadata
+            # cascade left resident. The bench harness showed bge-m3
+            # drops 50× (104 → 2.1 chunks/s) when an LLM squats on VRAM
+            # and the retrieval device fallback kicks it to CPU. The
+            # metadata extraction's LLM step is the main culprit here
+            # (fast model, held for keep_alive). Unloading is cheap
+            # (~50 ms) and idempotent; if no model is loaded, nothing
+            # happens.
+            try:
+                from sciknow.rag.llm import release_llm
+                released = release_llm()
+                if released:
+                    logger.info("freed VRAM before embed: %s", released)
+            except Exception as exc:
+                logger.debug("release_llm pre-embed failed: %s", exc)
+
             _set_status(session, doc, "embedding")
             t0 = time.monotonic()
 

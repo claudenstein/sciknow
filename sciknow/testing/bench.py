@@ -561,15 +561,26 @@ _PROBE_QUERIES = [
 def b_retrieval_hybrid_latency() -> Iterable[BenchMetric]:
     """Wall time for hybrid_search top-50 on a probe-query set. Measures
     the whole pipeline (dense + sparse + FTS + RRF fusion), not any one
-    signal. Reports p50/p90/mean across queries."""
+    signal. Reports p50/p90/mean across queries.
+
+    Warms up with one off-the-clock query so the first cold-model load
+    (~5–8 s on a 3090) doesn't contaminate the mean. Phase 44.1 bench
+    baseline previously recorded mean 1083 ms vs p50 68 ms purely
+    because of this cold-start effect.
+    """
     from sciknow.retrieval.hybrid_search import search
     from sciknow.storage.db  import get_session
     from sciknow.storage.qdrant import get_client
     client = get_client()
     timings = []
     result_counts = []
-    t_total_start = time.monotonic()
     with get_session() as session:
+        # Warmup — load models, warm JIT caches. NOT counted.
+        try:
+            _ = search("warmup probe", client, session, candidate_k=10)
+        except Exception as exc:
+            logger.debug("warmup query failed: %s", exc)
+        t_total_start = time.monotonic()
         for q in _PROBE_QUERIES:
             t0 = time.monotonic()
             try:

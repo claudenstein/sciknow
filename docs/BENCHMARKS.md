@@ -49,7 +49,7 @@ This section captures the first recorded baseline. Keep it for historical contex
 
 **Corpus** — 2,774 papers (100% complete), 102,963 chunks (37/paper), 23,674 citation edges of which only 4.5% cross-linked to the corpus.
 
-**Metadata mix** — 77.5% Crossref-sourced, 16.4% embedded PDF fallback, 5.6% unknown, 0.4% OpenAlex, **0.04% arXiv (1 paper)** — almost certainly indicates the arXiv cascade step is rarely triggering in practice. Either Crossref is already answering for arXiv papers, or the arXiv detection/lookup is too conservative.
+**Metadata mix** — 77.5% Crossref-sourced, 16.4% embedded PDF fallback, 5.6% unknown, 0.4% OpenAlex, 0.04% arXiv (1 paper). **Not a cascade bug.** Follow-up diagnosis (`SELECT with_arxiv, with_doi FROM paper_metadata GROUP BY metadata_source`): **31 papers have both an arXiv ID and a DOI and were sourced by Crossref** — these are published arXiv preprints where the DOI short-circuits the cascade. Only 4 papers had an arXiv ID with no DOI (the only case where the arXiv cascade is the unique path), of which 1 was sourced successfully. The `arxiv: 1` number reflects that Crossref has authoritative metadata for most arXiv preprints, not a broken cascade step.
 
 **Section coverage** — only 79.9% of papers have an `introduction` section detected, 62.7% `conclusion`, 41.0% `methods`, 37.3% `abstract`, 37.1% `discussion`, 24.3% `results`, **0.2% `related_work`**. The very low `related_work` hit rate is the clearest chunker signal — either the pattern regex is too narrow (missing "Background", "Prior Work", etc.) or papers in this corpus don't use that heading. Worth investigating.
 
@@ -84,13 +84,29 @@ The 50-70× drop when bge-m3 or bge-reranker falls back to CPU (because the LLM 
 
 Ranked by effort × impact:
 
-1. **Release LLM keep-alive during embedder/reranker calls.** 50-70× slowdown when both want VRAM. Low-risk code change.
-2. **Fix section detection for `related_work`, `results`, `discussion`.** 0.2%-24% hit rate means chunker is blind to a third of scientific structure. Extend `_SECTION_PATTERNS` in `sciknow/ingestion/chunker.py`.
-3. **Investigate why arXiv metadata step never fires.** 1 of 2,774 papers went through the arXiv cascade — suggests the detection is too conservative or already-shadowed by Crossref. Trace with a sample of known arXiv papers.
-4. **Improve citation cross-linking.** 4.5% linked. Either DOI-exact matching is missing partial matches, or the corpus just doesn't cite within itself often. Try title-normalized fuzzy match for unlinked citations.
-5. **Investigate autowrite 1-round plateau.** Median rounds-to-plateau = 1 says the review→revise loop plateaus immediately. Root-cause with detailed scorer output on 2-3 example runs.
-6. **Profile the slow retrieval tail.** p50/p90 are fine but mean is pulled up by a few >1 s queries. Add instrumentation to `search()` to log per-signal latency, then rerun the bench.
-7. **Consider deeper RAPTOR.** L1:L0 compression ratio of 1:2,450 is very aggressive. For the "what does this paper say broadly about X" use case, a midlayer (L1 with ~500 summaries) might hit a better precision/recall point.
+1. ~~**Release LLM keep-alive during embedder/reranker calls.**~~ **Shipped in Phase 44.1.** `sciknow.rag.llm.release_llm()` added; the ingestion pipeline now calls it before the embed stage. Measured effect in mixed workloads: bge-m3 **2.1 → 93.7 chunks/s (45×)**.
+2. ~~**Fix section detection for `related_work`, `results`, `discussion`.**~~ **Shipped in Phase 44.1.** `_SECTION_PATTERNS` broadened + switched from first-match-wins to longest-prefix-wins. New synonyms cover "Extended Abstract", "Literature Review", "Experimental Setup", "Data Availability", "Code Availability", etc. Added `sciknow db reclassify-sections` to retroactively apply new patterns to existing chunks. Measured effect: `related_work` **0.2% → 0.7% (3.5×)**, +690 previously-unknown sections now classified, +12 `results` recoveries.
+3. ~~**Investigate why arXiv metadata step never fires.**~~ **Not a bug.** 31 of the 32 papers with arXiv IDs also had DOIs, and Crossref (Layer 2) is authoritative for DOI-having papers; it answers before the arXiv cascade (Layer 3) can fire. Only 4 papers had an arXiv ID *without* a DOI (the unique-arXiv case), and 1 of those was successfully sourced by the arXiv cascade. The headline `arxiv: 1 paper` reflects correct cascade semantics, not a broken step.
+4. ~~**Improve citation cross-linking.**~~ **Shipped in Phase 44.1.** Two fixes: (a) `.strip()` added on both sides of the DOI map (future-proof; no measured effect today since corpus DOIs happen to have no trailing whitespace), and (b) `db expand` now runs the link-backfill automatically after a bulk ingest. Previously the linker had to be run manually after growth. Measured effect of the one-off backfill on the existing corpus: **1,064 → 1,446 cross-linked citations (+36%)**.
+5. **Investigate autowrite 1-round plateau.** Median rounds-to-plateau = 1 says the review→revise loop plateaus immediately. Root-cause with detailed scorer output on 2-3 example runs. *Still open — deferred because it requires qualitative judgment on scorer calibration, not a mechanical fix.*
+6. ~~**Profile the slow retrieval tail.**~~ **Not a code issue — bench measurement artifact.** Per-query profiling of `search()` with warm models showed all 8 probe queries complete in 25–66 ms, well under the baseline's reported latency_mean of 1,083 ms. The mean was inflated by the first query eating the bge-m3 cold-load cost (~7 s). Fix in `sciknow/testing/bench.py`: added an off-the-clock warmup query before the timed loop. Re-measured: **mean 1,083 ms → 28 ms, p50 68 ms → 29 ms**.
+7. **Consider deeper RAPTOR.** L1:L0 compression ratio of 1:2,450 is very aggressive. For the "what does this paper say broadly about X" use case, a midlayer (L1 with ~500 summaries) might hit a better precision/recall point. *Still open — research decision pending a targeted eval on broad-synthesis queries.*
+
+## Post-fix scorecard (Phase 44.1 vs Phase 44 baseline, same corpus)
+
+| Metric | Baseline | Post-fix | Δ |
+|---|---:|---:|---:|
+| Retrieval latency, mean | 1,083 ms | 28 ms | −97% |
+| Retrieval latency, p50 | 68 ms | 29 ms | −57% |
+| bge-m3 embedder, in full run | 2.1 chunks/s | 93.7 chunks/s | +45× |
+| Section coverage: `related_work` | 0.2% | 0.7% | 3.5× |
+| Section coverage: `results` | 24.3% | 24.8% | +0.5 pp |
+| Sections classified (was unknown) | — | +690 | — |
+| Citations cross-linked | 1,064 / 23,674 (4.5%) | 1,446 / 23,674 (6.1%) | +382 |
+| Signal complementarity (Jaccard mean) | 0.012 | 0.012 | unchanged |
+| Reranker displacement (top-1 change %) | 100% | 100% | unchanged |
+
+Items 5 and 7 remain open and require more than mechanical fixes — an autowrite scorer calibration study and a RAPTOR-depth A/B respectively.
 
 ## Adding a new bench function
 
