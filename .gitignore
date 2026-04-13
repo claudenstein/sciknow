@@ -26,10 +26,25 @@ build/
 data/
 downloads/
 
+# ── Phase 43 — multi-project state (per-deployment, never commit) ─────────────
+# `projects/<slug>/data/` holds the corpus PDFs + MinerU outputs etc. for each
+# project. Same reasoning as data/ above — managed by `sciknow project
+# archive/unarchive`, not git. The `.gitkeep` below is the one exception so
+# the directory exists in fresh clones.
+projects/
+!projects/.gitkeep
+# Active project pointer is per-checkout — selecting a project is a local
+# decision, not a repo decision.
+.active-project
+
 # ── Backup archives ────────────────────────────────────────────────────────────
 *.tar.gz
 *.tar.bz2
 *.zip
+# Phase 43e — `sciknow project archive` writes here.
+archives/
+*.skproj.tar
+*.skproj.tar.zst
 
 # ── Logs and temp files ────────────────────────────────────────────────────────
 *.log
