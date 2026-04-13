@@ -3378,6 +3378,243 @@ async def list_jobs():
         ]
 
 
+# ── Project management (Phase 43h GUI) ───────────────────────────────────
+#
+# Mirrors the `sciknow project …` CLI surface. The web reader was
+# launched against a specific book in a specific project, so switching
+# projects from the running server would leave the UI pointing at a
+# book that no longer exists in the active project's DB. We therefore:
+#   - show the active project + all siblings read-only (list / show)
+#   - let the user init new projects, destroy others, or `use` a different
+#     slug — but `use` just writes .active-project and returns a notice
+#     that the user must restart the server to actually switch corpora.
+# This keeps the CLI semantics intact and avoids the footgun of hot-
+# swapping the DB connection under the running app.
+
+
+@app.get("/api/projects")
+async def api_projects_list():
+    """List all projects with their active marker + health."""
+    import os as _os
+    from sciknow.cli.project import _pg_database_exists
+    from sciknow.core.project import (
+        get_active_project, list_projects, read_active_slug_from_file,
+    )
+    active_slug = (
+        _os.environ.get("SCIKNOW_PROJECT")
+        or read_active_slug_from_file()
+        or get_active_project().slug
+    )
+    out = []
+    for p in list_projects():
+        try:
+            db_ok = _pg_database_exists(p.pg_database)
+        except Exception:
+            db_ok = False
+        out.append({
+            "slug": p.slug,
+            "active": p.slug == active_slug,
+            "pg_database": p.pg_database,
+            "data_dir": str(p.data_dir),
+            "papers_collection": p.papers_collection,
+            "abstracts_collection": p.abstracts_collection,
+            "wiki_collection": p.wiki_collection,
+            "status": "ok" if (p.exists() and db_ok) else "incomplete",
+            "is_default": p.is_default,
+        })
+    # Running-process view — what the web reader itself is currently
+    # using (may differ from .active-project if the server was started
+    # with --project / SCIKNOW_PROJECT and that has since changed).
+    running = get_active_project()
+    return JSONResponse({
+        "projects": out,
+        "active_slug": active_slug,
+        "running_slug": running.slug,
+    })
+
+
+@app.get("/api/projects/{slug}")
+async def api_projects_show(slug: str):
+    """Show details for a single project (counts + collection names)."""
+    from sciknow.cli.project import _pg_database_exists
+    from sciknow.core.project import Project, get_active_project, validate_slug
+    try:
+        validate_slug(slug)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    project = Project(slug=slug, repo_root=get_active_project().repo_root)
+    db_ok = _pg_database_exists(project.pg_database)
+    payload = {
+        "slug": project.slug,
+        "root": str(project.root),
+        "data_dir": str(project.data_dir),
+        "data_dir_exists": project.data_dir.exists(),
+        "pg_database": project.pg_database,
+        "pg_database_exists": db_ok,
+        "qdrant_prefix": project.qdrant_prefix,
+        "papers_collection": project.papers_collection,
+        "abstracts_collection": project.abstracts_collection,
+        "wiki_collection": project.wiki_collection,
+        "env_overlay_path": str(project.env_overlay_path),
+        "env_overlay_exists": project.env_overlay_path.exists(),
+        "is_default": project.is_default,
+    }
+    if db_ok:
+        try:
+            from sciknow.storage.db import get_session as _gs
+            with _gs(db_name=project.pg_database) as session:
+                payload["n_documents"] = session.execute(text("SELECT COUNT(*) FROM documents")).scalar() or 0
+                payload["n_chunks"]    = session.execute(text("SELECT COUNT(*) FROM chunks")).scalar() or 0
+                payload["n_books"]     = session.execute(text("SELECT COUNT(*) FROM books")).scalar() or 0
+                payload["n_drafts"]    = session.execute(text("SELECT COUNT(*) FROM drafts")).scalar() or 0
+        except Exception as exc:
+            payload["counts_error"] = str(exc)
+    return JSONResponse(payload)
+
+
+@app.post("/api/projects/use")
+async def api_projects_use(request: Request):
+    """Set the active project (writes ``.active-project``).
+
+    Does NOT hot-swap the running server's DB connection. Returns a
+    ``restart_required`` flag so the frontend can tell the user to
+    restart ``sciknow book serve`` in a book that exists in the target
+    project.
+    """
+    from sciknow.core.project import (
+        Project, get_active_project, list_projects, validate_slug,
+        write_active_slug,
+    )
+    body = await request.json()
+    slug = (body or {}).get("slug", "").strip()
+    try:
+        validate_slug(slug)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if slug != "default":
+        candidate = Project(slug=slug, repo_root=get_active_project().repo_root)
+        if not candidate.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Project {slug!r} not found. Available: "
+                       + ", ".join(p.slug for p in list_projects()),
+            )
+    write_active_slug(slug)
+    running = get_active_project().slug
+    return JSONResponse({
+        "ok": True,
+        "active_slug": slug,
+        "running_slug": running,
+        "restart_required": slug != running,
+        "message": (
+            f"Active project set to {slug!r}. Restart `sciknow book serve` "
+            f"in a book that belongs to {slug!r} to work on that corpus."
+            if slug != running else
+            f"Active project is already {slug!r}."
+        ),
+    })
+
+
+@app.post("/api/projects/init")
+async def api_projects_init(request: Request):
+    """Create a new empty project. Runs synchronously (fast: ~3–5 s).
+
+    Does NOT accept ``--from-existing`` — that's a one-shot migration
+    that should be done from the CLI where the user has a shell for
+    monitoring. The GUI only creates fresh empty projects.
+    """
+    from sciknow.cli.project import (
+        _create_pg_database, _ensure_init_dirs, _init_qdrant_collections_for_project,
+        _pg_database_exists, _run_alembic_upgrade,
+    )
+    from sciknow.core.project import (
+        Project, get_active_project, validate_slug,
+    )
+    body = await request.json()
+    slug = (body or {}).get("slug", "").strip()
+    try:
+        validate_slug(slug)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if slug == "default":
+        raise HTTPException(status_code=400, detail="'default' is reserved for the legacy layout.")
+    project = Project(slug=slug, repo_root=get_active_project().repo_root)
+    if project.root.exists():
+        raise HTTPException(status_code=409, detail=f"Project directory already exists: {project.root}")
+    if _pg_database_exists(project.pg_database):
+        raise HTTPException(status_code=409, detail=f"PG database already exists: {project.pg_database}")
+
+    try:
+        _ensure_init_dirs(project)
+        _create_pg_database(project.pg_database)
+        _run_alembic_upgrade(project.pg_database)
+        _init_qdrant_collections_for_project(project)
+    except Exception as exc:
+        logger.exception("project init failed")
+        raise HTTPException(status_code=500, detail=f"init failed: {exc}")
+    return JSONResponse({
+        "ok": True,
+        "slug": slug,
+        "pg_database": project.pg_database,
+        "papers_collection": project.papers_collection,
+    })
+
+
+@app.post("/api/projects/destroy")
+async def api_projects_destroy(request: Request):
+    """Drop a project's DB + collections + data dir. Requires ``confirm``
+    matching the slug to prevent accidental clicks."""
+    import shutil as _shutil
+    from sciknow.cli.project import (
+        _delete_qdrant_collections_for_project, _drop_pg_database,
+    )
+    from sciknow.core.project import (
+        Project, _active_project_file, get_active_project,
+        read_active_slug_from_file, validate_slug,
+    )
+    body = await request.json()
+    slug    = (body or {}).get("slug", "").strip()
+    confirm = (body or {}).get("confirm", "").strip()
+    try:
+        validate_slug(slug)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if slug == "default":
+        raise HTTPException(status_code=400, detail="Refusing to destroy the legacy 'default' project.")
+    if confirm != slug:
+        raise HTTPException(status_code=400, detail="Confirmation slug does not match.")
+    if slug == get_active_project().slug:
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot destroy the project the web reader is currently running against. "
+                   "Restart `sciknow book serve` in a different project first.",
+        )
+
+    project = Project(slug=slug, repo_root=get_active_project().repo_root)
+    errors: list[str] = []
+    try:
+        _drop_pg_database(project.pg_database)
+    except Exception as exc:
+        errors.append(f"pg drop: {exc}")
+    try:
+        n_dropped = _delete_qdrant_collections_for_project(project)
+    except Exception as exc:
+        n_dropped = 0
+        errors.append(f"qdrant: {exc}")
+    try:
+        if project.root.exists():
+            _shutil.rmtree(project.root)
+    except Exception as exc:
+        errors.append(f"data dir: {exc}")
+    # If destroying the on-disk active project, clear .active-project
+    active = read_active_slug_from_file()
+    if active == slug:
+        f = _active_project_file()
+        if f.exists():
+            f.unlink()
+    return JSONResponse({"ok": not errors, "errors": errors, "qdrant_dropped": n_dropped})
+
+
 # ── HTML rendering helpers ───────────────────────────────────────────────────
 
 def _render_book(book, chapters, drafts, gaps, comments,
@@ -4820,6 +5057,10 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button onclick="showChapterReader()" title="Read entire chapter as continuous scroll">Read</button>
       <button onclick="showDashboard()" title="Book dashboard with stats + heatmap">Dashboard</button>
     </div>
+    <div class="sep"></div>
+    <div class="tg">
+      <button onclick="openProjectsModal()" title="Manage sciknow projects (list / switch / create / destroy). See `sciknow project --help`."><span id="proj-btn-label">&#128193; Projects</span></button>
+    </div>
   </div>
 
   <!-- Phase 13 — Score history panel (collapsible, lazy-loaded) -->
@@ -5316,6 +5557,45 @@ body.task-bar-open {{ padding-top: 40px; }}
         </div>
       </div>
 
+    </div>
+  </div>
+</div>
+
+<!-- Phase 43h — Project management modal -->
+<div class="modal-overlay" id="projects-modal" onclick="if(event.target===this)closeModal('projects-modal')">
+  <div class="modal wide">
+    <div class="modal-header">
+      <h3>&#128193; Projects</h3>
+      <button class="modal-close" onclick="closeModal('projects-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <p style="font-size:11px;color:var(--fg-muted);margin-bottom:12px;">
+        Each project has its own PostgreSQL DB, Qdrant collections, and <code>data/</code> directory.
+        Mirrors <code>sciknow project …</code>. The web reader is currently running against
+        <strong id="proj-running"></strong>; switching the active project only takes effect after
+        restarting <code>sciknow book serve</code>.
+      </p>
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;">
+        <button class="btn-primary" onclick="refreshProjectsList()">Refresh</button>
+        <span id="proj-msg" style="font-size:12px;color:var(--fg-muted);flex:1;"></span>
+      </div>
+      <div id="projects-list-wrap" style="margin-bottom:16px;">
+        <div id="projects-list" style="font-size:13px;">Loading…</div>
+      </div>
+      <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:8px;">
+        <h4 style="font-size:13px;margin-bottom:8px;">Create new project</h4>
+        <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+          Creates an empty project (DB + collections + dir + migrations). For the one-shot
+          migration of the legacy install, use <code>sciknow project init &lt;slug&gt; --from-existing</code>
+          from the CLI.
+        </p>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <input type="text" id="proj-new-slug" placeholder="new-project-slug (lowercase, hyphens)"
+                 style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--bg);color:var(--fg);">
+          <button class="btn-primary" onclick="createProject()">Create</button>
+        </div>
+      </div>
+      <div id="proj-detail" style="margin-top:14px;"></div>
     </div>
   </div>
 </div>
@@ -10868,6 +11148,197 @@ async function updateStatus(status) {{
   await fetch('/api/draft/' + currentDraftId + '/status', {{method: 'PUT', body: fd}});
 }}
 
+
+// ── Phase 43h — Project management modal ──────────────────────────────
+// Mirrors `sciknow project` from the CLI. Switching the active project
+// only writes .active-project; the running web reader keeps serving its
+// original book until the user restarts `sciknow book serve`.
+
+function openProjectsModal() {{
+  openModal('projects-modal');
+  refreshProjectsList();
+}}
+
+function _projMsg(text, kind) {{
+  const el = document.getElementById('proj-msg');
+  if (!el) return;
+  el.textContent = text || '';
+  el.style.color = kind === 'error' ? 'var(--danger)'
+                 : kind === 'ok'    ? 'var(--success)'
+                 : 'var(--fg-muted)';
+}}
+
+async function refreshProjectsList() {{
+  _projMsg('Loading…');
+  const wrap = document.getElementById('projects-list');
+  try {{
+    const resp = await fetch('/api/projects');
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    document.getElementById('proj-running').textContent = data.running_slug || '(unknown)';
+    if (!data.projects || data.projects.length === 0) {{
+      wrap.innerHTML = '<em style="color:var(--fg-muted);">No projects yet. Create one below.</em>';
+      _projMsg('');
+      return;
+    }}
+    const rows = data.projects.map(p => {{
+      const activeMark = p.active ? '<span style="color:var(--accent);font-weight:600;">●</span>' : '<span style="color:var(--fg-faint);">○</span>';
+      const statusBadge = p.status === 'ok'
+        ? '<span style="color:var(--success);">ok</span>'
+        : '<span style="color:var(--warning);">incomplete</span>';
+      const isRunning = p.slug === data.running_slug;
+      const useBtn    = p.active ? ''
+        : `<button onclick="useProject('${{p.slug}}')" title="Set .active-project to ${{p.slug}}">Use</button>`;
+      const destroyBtn = (p.is_default || isRunning) ? ''
+        : `<button onclick="destroyProject('${{p.slug}}')" style="color:var(--danger);" title="Drop DB + collections + data dir">Destroy</button>`;
+      const showBtn = `<button onclick="showProjectDetail('${{p.slug}}')">Details</button>`;
+      return `<tr>
+        <td style="text-align:center;width:30px;">${{activeMark}}</td>
+        <td style="font-weight:600;">${{p.slug}}${{isRunning ? ' <span style="font-size:10px;color:var(--accent);">(running)</span>' : ''}}</td>
+        <td style="color:var(--fg-muted);font-family:var(--font-mono);font-size:11px;">${{p.pg_database}}</td>
+        <td style="color:var(--fg-muted);font-family:var(--font-mono);font-size:11px;">${{p.papers_collection}}</td>
+        <td>${{statusBadge}}</td>
+        <td style="white-space:nowrap;">${{showBtn}} ${{useBtn}} ${{destroyBtn}}</td>
+      </tr>`;
+    }}).join('');
+    wrap.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:12px;">
+      <thead><tr style="text-align:left;border-bottom:1px solid var(--border);color:var(--fg-muted);">
+        <th></th><th>Slug</th><th>PG DB</th><th>Papers coll.</th><th>Status</th><th></th>
+      </tr></thead>
+      <tbody>${{rows}}</tbody></table>`;
+    _projMsg(data.projects.length + ' project' + (data.projects.length === 1 ? '' : 's') + '.', 'ok');
+  }} catch (exc) {{
+    wrap.innerHTML = '';
+    _projMsg('Failed to list projects: ' + exc, 'error');
+  }}
+}}
+
+async function showProjectDetail(slug) {{
+  const dest = document.getElementById('proj-detail');
+  dest.innerHTML = 'Loading details for <code>' + slug + '</code>…';
+  try {{
+    const resp = await fetch('/api/projects/' + encodeURIComponent(slug));
+    if (!resp.ok) {{
+      const msg = await resp.text();
+      throw new Error('HTTP ' + resp.status + ': ' + msg);
+    }}
+    const d = await resp.json();
+    const counts = (d.n_documents !== undefined)
+      ? `<ul style="margin:6px 0 0 18px;font-size:12px;">
+           <li>Documents: <strong>${{(d.n_documents||0).toLocaleString()}}</strong></li>
+           <li>Chunks: <strong>${{(d.n_chunks||0).toLocaleString()}}</strong></li>
+           <li>Books: <strong>${{d.n_books||0}}</strong></li>
+           <li>Drafts: <strong>${{d.n_drafts||0}}</strong></li>
+         </ul>`
+      : (d.counts_error ? `<div style="color:var(--warning);font-size:11px;">Counts unavailable: ${{d.counts_error}}</div>` : '');
+    dest.innerHTML = `<div style="border:1px solid var(--border);border-radius:var(--r-md);padding:10px;background:var(--toolbar-bg);">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+        <strong>${{d.slug}}${{d.is_default ? ' <span style="font-size:11px;color:var(--fg-muted);">(legacy default)</span>' : ''}}</strong>
+        <button onclick="document.getElementById('proj-detail').innerHTML=''">&times;</button>
+      </div>
+      <dl style="display:grid;grid-template-columns:140px 1fr;gap:4px 12px;font-size:12px;margin:0;">
+        <dt style="color:var(--fg-muted);">Root</dt><dd style="font-family:var(--font-mono);font-size:11px;">${{d.root}}</dd>
+        <dt style="color:var(--fg-muted);">Data dir</dt><dd style="font-family:var(--font-mono);font-size:11px;">${{d.data_dir}}${{d.data_dir_exists ? '' : ' <span style="color:var(--warning);">(missing)</span>'}}</dd>
+        <dt style="color:var(--fg-muted);">PG database</dt><dd style="font-family:var(--font-mono);font-size:11px;">${{d.pg_database}}${{d.pg_database_exists ? '' : ' <span style="color:var(--warning);">(missing)</span>'}}</dd>
+        <dt style="color:var(--fg-muted);">Qdrant prefix</dt><dd style="font-family:var(--font-mono);font-size:11px;">${{d.qdrant_prefix || '(none)'}}</dd>
+        <dt style="color:var(--fg-muted);">Collections</dt><dd style="font-family:var(--font-mono);font-size:11px;">${{d.papers_collection}}, ${{d.abstracts_collection}}, ${{d.wiki_collection}}</dd>
+        <dt style="color:var(--fg-muted);">Env overlay</dt><dd style="font-family:var(--font-mono);font-size:11px;">${{d.env_overlay_path}}${{d.env_overlay_exists ? '' : ' <span style="color:var(--fg-faint);">(not present)</span>'}}</dd>
+      </dl>
+      ${{counts}}
+    </div>`;
+  }} catch (exc) {{
+    dest.innerHTML = '<div style="color:var(--danger);font-size:12px;">Failed: ' + exc + '</div>';
+  }}
+}}
+
+async function useProject(slug) {{
+  _projMsg('Switching active project to ' + slug + '…');
+  try {{
+    const resp = await fetch('/api/projects/use', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{slug: slug}}),
+    }});
+    const data = await resp.json();
+    if (!resp.ok) {{
+      _projMsg('Use failed: ' + (data.detail || resp.status), 'error');
+      return;
+    }}
+    _projMsg(data.message || ('Active project: ' + slug), 'ok');
+    if (data.restart_required) {{
+      alert('Active project is now "' + slug + '".\\n\\n'
+          + 'This running web reader will keep serving the original book from "'
+          + data.running_slug + '". To work on the new project, stop this server '
+          + '(Ctrl+C in the terminal) and run:\\n\\n'
+          + '  sciknow --project ' + slug + ' book serve "<book title in ' + slug + '>"');
+    }}
+    refreshProjectsList();
+  }} catch (exc) {{
+    _projMsg('Use failed: ' + exc, 'error');
+  }}
+}}
+
+async function createProject() {{
+  const slug = (document.getElementById('proj-new-slug').value || '').trim();
+  if (!slug) {{
+    _projMsg('Enter a slug first.', 'error');
+    return;
+  }}
+  if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(slug)) {{
+    _projMsg('Slug must be lowercase alphanumerics + hyphens (e.g. "global-cooling").', 'error');
+    return;
+  }}
+  if (!confirm('Create empty project "' + slug + '"? This runs migrations + initialises Qdrant collections (takes a few seconds).')) return;
+  _projMsg('Creating ' + slug + '…');
+  try {{
+    const resp = await fetch('/api/projects/init', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{slug: slug}}),
+    }});
+    const data = await resp.json();
+    if (!resp.ok) {{
+      _projMsg('Create failed: ' + (data.detail || resp.status), 'error');
+      return;
+    }}
+    _projMsg('Created ' + slug + ' (DB: ' + data.pg_database + ').', 'ok');
+    document.getElementById('proj-new-slug').value = '';
+    refreshProjectsList();
+  }} catch (exc) {{
+    _projMsg('Create failed: ' + exc, 'error');
+  }}
+}}
+
+async function destroyProject(slug) {{
+  const confirmSlug = prompt(
+    'DESTROY project "' + slug + '"?\\n\\n'
+    + 'This drops the PostgreSQL database, the Qdrant collections, and the data directory. '
+    + 'Run `sciknow project archive ' + slug + '` from the CLI first if you might want it back.\\n\\n'
+    + 'Type the slug to confirm:');
+  if (confirmSlug === null) return;
+  if (confirmSlug !== slug) {{
+    _projMsg('Slug did not match — destroy cancelled.', 'error');
+    return;
+  }}
+  _projMsg('Destroying ' + slug + '…');
+  try {{
+    const resp = await fetch('/api/projects/destroy', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{slug: slug, confirm: slug}}),
+    }});
+    const data = await resp.json();
+    if (!resp.ok) {{
+      _projMsg('Destroy failed: ' + (data.detail || resp.status), 'error');
+      return;
+    }}
+    const errs = (data.errors && data.errors.length) ? (' (errors: ' + data.errors.join('; ') + ')') : '';
+    _projMsg('Destroyed ' + slug + errs, errs ? 'error' : 'ok');
+    refreshProjectsList();
+  }} catch (exc) {{
+    _projMsg('Destroy failed: ' + exc, 'error');
+  }}
+}}
 
 </script>
 </body>

@@ -5080,6 +5080,53 @@ def l1_phase43_project_resolution() -> None:
     assert "db_name" in sig.parameters
 
 
+def l1_phase43h_web_project_endpoints() -> None:
+    """Phase 43h — web GUI exposes project management.
+
+    Static checks: the FastAPI app registers /api/projects endpoints
+    (list/show/use/init/destroy), and the HTML template renders a
+    Projects button + projects-modal container. Guards against
+    accidental removal of either the endpoint surface or the UI hook.
+    """
+    import inspect
+
+    from sciknow.web import app as webapp
+
+    route_paths = {r.path for r in webapp.app.routes if hasattr(r, "path")}
+    for required in (
+        "/api/projects",
+        "/api/projects/{slug}",
+        "/api/projects/use",
+        "/api/projects/init",
+        "/api/projects/destroy",
+    ):
+        assert required in route_paths, (
+            f"missing web endpoint {required!r}; "
+            f"Projects GUI (Phase 43h) depends on it"
+        )
+
+    # The template should mount both the button and the modal, and
+    # wire them through openProjectsModal() / refreshProjectsList().
+    tpl = webapp.TEMPLATE
+    assert "openProjectsModal" in tpl, (
+        "toolbar should bind a Projects button to openProjectsModal()"
+    )
+    assert 'id="projects-modal"' in tpl, "projects-modal container missing"
+    assert "refreshProjectsList" in tpl
+    assert "destroyProject" in tpl
+    assert "createProject" in tpl
+    assert "useProject" in tpl
+
+    # db stats should use the project-aware collection name so it
+    # doesn't report N/A under a non-default project (Phase 43h bugfix).
+    from sciknow.cli import db as db_cli
+    stats_src = inspect.getsource(db_cli)
+    assert 'get_collection("papers")' not in stats_src, (
+        "db stats must not hardcode the 'papers' collection name — "
+        "use storage.qdrant.papers_collection() instead"
+    )
+
+
 def l2_phase32_endpoint_shapes() -> None:
     """TestClient smoke test for the major read-only API endpoints.
 
@@ -6047,6 +6094,8 @@ L1_TESTS: list[Callable] = [
     # Phase 43 — multi-project foundations (project resolution, project-
     # aware DB / Qdrant / paths, sciknow project CLI, --project flag)
     l1_phase43_project_resolution,
+    # Phase 43h — web GUI project management + db stats project-aware bugfix
+    l1_phase43h_web_project_endpoints,
 ]
 
 L2_TESTS: list[Callable] = [

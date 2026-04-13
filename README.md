@@ -87,6 +87,28 @@ sciknow book autowrite "My Book" --full   # or let it write autonomously
 sciknow book export "My Book" --format latex -o manuscript.tex
 ```
 
+### Multi-project workflow
+
+Each project has its own PostgreSQL database, Qdrant collections, and `data/`
+directory, so corpora never cross-contaminate. Project resolution precedence:
+`--project <slug>` flag → `SCIKNOW_PROJECT` env var → `.active-project` file →
+legacy `default` (the pre-Phase-43 single-tenant layout).
+
+```bash
+sciknow project init <slug>                     # create a fresh empty project
+sciknow project init global-cooling --from-existing
+                                                # adopt the legacy install into a slot
+sciknow project list                            # all projects + active marker
+sciknow project show [slug]                     # details (defaults to active)
+sciknow project use <slug>                      # set .active-project
+sciknow project destroy <slug> --yes            # drop DB + collections + data dir
+sciknow project archive <slug>                  # bundle to portable archive, drop live state
+sciknow project unarchive archives/<slug>-<ts>.skproj.tar
+sciknow --project <slug> <any subcommand>       # one-shot override
+```
+
+See [`docs/PROJECTS.md`](docs/PROJECTS.md) for the full design.
+
 ### When to use what
 
 | I want to... | Use this |

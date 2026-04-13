@@ -384,3 +384,43 @@ With `--generate-qa`:
 {"title": "...", "year": 2021, "section": "methods", "doi": "...", "content": "...",
  "question": "...", "answer": "..."}
 ```
+
+---
+
+## `sciknow project` (multi-project)
+
+Each project has its own PostgreSQL database (`sciknow_<slug>`), its own
+Qdrant collections (`<slug>_papers`, `<slug>_abstracts`, `<slug>_wiki`),
+and its own `projects/<slug>/data/` directory. Resolution precedence:
+`--project <slug>` flag &rarr; `SCIKNOW_PROJECT` env var &rarr;
+`.active-project` file at repo root &rarr; legacy `default` (pre-Phase-43
+single-tenant layout using `data/` + the `sciknow` DB unchanged).
+
+```bash
+# Lifecycle
+sciknow project init <slug>                     # fresh empty project (DB + collections + dir + migrations)
+sciknow project init <slug> --from-existing     # one-shot migration of the legacy install into a slot
+sciknow project init <slug> --dry-run           # preview steps without executing
+
+# Inspect
+sciknow project list                            # all projects + active marker + health
+sciknow project show [slug]                     # details (defaults to active project)
+
+# Switch
+sciknow project use <slug>                      # writes .active-project
+sciknow --project <slug> <any subcommand>       # one-shot override (no .active-project change)
+SCIKNOW_PROJECT=<slug> sciknow ...              # env var equivalent
+
+# Destructive
+sciknow project destroy <slug> --yes            # drop DB + collections + data dir
+
+# Portable
+sciknow project archive <slug>                  # bundle to archives/<slug>-<ts>.skproj.tar, drop live
+sciknow project archive <slug> --keep-live      # snapshot only, keep live state
+sciknow project archive <slug> -o /path/out.tar # custom output path
+sciknow project unarchive <archive-file>        # restore (becomes active)
+```
+
+The web reader exposes list / show / use / init / destroy through a Projects
+modal in the action toolbar. See [Multi-project design](PROJECTS.md) for the
+full architecture.

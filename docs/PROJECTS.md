@@ -1,7 +1,28 @@
 # Multi-Project Support — Design & Roadmap
 
-Status: **Design doc, not implemented.** This is the plan the user asked
-for before we write any code.
+Status: **Shipped (Phase 43a–h).** The design below is the plan that landed.
+Phase 43a–d delivered the plumbing; 43e added `sciknow project …`
+subcommands; 43f added the one-shot legacy-layout migration; 43g
+added the root `--project` flag; 43h added the GUI project picker.
+
+## Command surface (cheat sheet)
+
+```bash
+sciknow project init <slug>                     # fresh empty project
+sciknow project init <slug> --from-existing     # adopt legacy install
+sciknow project init <slug> --dry-run           # preview without changes
+sciknow project list                            # all projects + active marker
+sciknow project show [slug]                     # details (defaults to active)
+sciknow project use <slug>                      # set .active-project
+sciknow project destroy <slug> [--yes]          # drop DB + collections + dir
+sciknow project archive <slug> [-o path]        # bundle to .skproj.tar, drop live
+sciknow project archive <slug> --keep-live      # snapshot only, keep live state
+sciknow project unarchive <archive-file>        # restore from archive
+sciknow --project <slug> <any subcommand>       # one-shot override
+```
+
+The web reader exposes list / show / use / init / destroy through the
+Projects modal (&#128193; button in the action toolbar).
 
 ---
 

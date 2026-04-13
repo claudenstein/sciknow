@@ -521,8 +521,9 @@ def stats():
         ).scalar()
 
     try:
+        from sciknow.storage.qdrant import papers_collection
         qdrant = get_client()
-        papers_info = qdrant.get_collection("papers")
+        papers_info = qdrant.get_collection(papers_collection())
         qdrant_points = papers_info.points_count
     except Exception:
         qdrant_points = "N/A"
