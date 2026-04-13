@@ -2063,6 +2063,7 @@ def autowrite_bench(
     preflight()
 
     from datetime import datetime
+    from sciknow.config import settings  # Phase 43d — for project data dir
     from sciknow.core import book_ops
     from sciknow.storage.db import get_session
 
@@ -2080,7 +2081,8 @@ def autowrite_bench(
         ch_num = ch[1]
         ch_title = ch[2]
 
-    bench_dir = Path("data/bench") / datetime.now().strftime("%Y%m%d-%H%M%S")
+    # Phase 43d — project-aware bench output.
+    bench_dir = settings.data_dir / "bench" / datetime.now().strftime("%Y%m%d-%H%M%S")
     bench_dir.mkdir(parents=True, exist_ok=True)
 
     console.print(Rule(f"[bold]autowrite-bench[/bold] · Ch.{ch_num} {ch_title} — {section_type}"))

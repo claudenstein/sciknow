@@ -122,7 +122,8 @@ def backup(
             console.print(f"  [green]✓[/green] Processed PDFs  ({n} files)")
 
         if include_downloads:
-            dl_dir = Path("data/downloads")
+            # Phase 43d — project-aware data path.
+            dl_dir = settings.data_dir / "downloads"
             if dl_dir.exists():
                 with console.status("Copying downloaded PDFs…"):
                     shutil.copytree(dl_dir, staging / "downloads")
@@ -292,8 +293,9 @@ def restore(
 
             downloads_src = staging / "downloads"
             if downloads_src.exists():
-                dl_dest = Path("data/downloads")
-                dl_dest.mkdir(exist_ok=True)
+                # Phase 43d — restores into the active project's dir.
+                dl_dest = settings.data_dir / "downloads"
+                dl_dest.mkdir(parents=True, exist_ok=True)
                 with console.status("Restoring downloaded PDFs…"):
                     shutil.copytree(downloads_src, dl_dest, dirs_exist_ok=True)
                 n = sum(1 for _ in dl_dest.rglob("*.pdf"))
@@ -862,8 +864,12 @@ def enrich(
 
 @app.command()
 def expand(
-    download_dir: Path  = typer.Option(Path("data/downloads"), "--download-dir", "-d",
-                                        help="Directory where new PDFs are saved before ingestion."),
+    # Phase 43d — default resolved in body so the active project's
+    # data_dir is used (Typer evaluates option defaults at import time,
+    # which would freeze a legacy path). Pass None sentinel; resolve
+    # via settings.data_dir / "downloads" below.
+    download_dir: Path  = typer.Option(None, "--download-dir", "-d",
+                                        help="Directory where new PDFs are saved before ingestion (default: <project data>/downloads)."),
     limit:        int   = typer.Option(0,     "--limit",     help="Max new papers to download (0 = all found)."),
     resolve:      bool  = typer.Option(False, "--resolve/--no-resolve",
                                         help="Also resolve title-only references via Crossref (slow, ~0.3s each)."),
@@ -923,6 +929,11 @@ def expand(
         extract_references_from_mineru_content_list,
         fetch_openalex_references,
     )
+
+    # Phase 43d — resolve download_dir here (Typer default was None to
+    # defer active-project lookup until the command actually runs).
+    if download_dir is None:
+        download_dir = settings.data_dir / "downloads"
     from sciknow.storage.db import get_session
 
     download_dir.mkdir(parents=True, exist_ok=True)
@@ -1704,8 +1715,9 @@ def expand_author(
         help="Free-text topic anchor for the relevance filter. If empty, the corpus centroid is used."),
     relevance_threshold: float = typer.Option(0.0, "--relevance-threshold",
         help="Cosine similarity threshold (0 = use EXPAND_RELEVANCE_THRESHOLD from .env, default 0.55)."),
-    download_dir: Path = typer.Option(Path("data/downloads"), "--download-dir", "-d",
-        help="Directory where new PDFs are saved before ingestion."),
+    # Phase 43d — default resolved in body (see `expand` above).
+    download_dir: Path = typer.Option(None, "--download-dir", "-d",
+        help="Directory where new PDFs are saved before ingestion (default: <project data>/downloads)."),
     workers: int = typer.Option(0, "--workers", "-w",
         help="Parallel ingestion worker subprocesses (0 = use INGEST_WORKERS from .env)."),
     ingest: bool = typer.Option(True, "--ingest/--no-ingest",
@@ -1756,6 +1768,11 @@ def expand_author(
     from sciknow.ingestion.downloader import find_and_download
     from sciknow.storage.db import get_session
     from sqlalchemy import text as sql_text
+
+    # Phase 43d — resolve download_dir here (Typer default was None to
+    # defer active-project lookup until the command actually runs).
+    if download_dir is None:
+        download_dir = settings.data_dir / "downloads"
 
     # ── Step 1: validate ─────────────────────────────────────────────────────
     if year_from is not None and year_to is not None and year_from > year_to:

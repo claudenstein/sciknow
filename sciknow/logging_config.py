@@ -25,10 +25,14 @@ import logging.handlers
 from pathlib import Path
 
 
-def setup_logging(log_dir: str = "data", level: int = logging.DEBUG) -> None:
+def setup_logging(log_dir: str | None = None, level: int = logging.DEBUG) -> None:
     """Configure the sciknow logger with a rotating file handler.
 
     Safe to call multiple times — skips if already configured.
+
+    Phase 43d — when ``log_dir`` is ``None`` (the normal case), the log
+    is written to the active project's ``data/sciknow.log``. Pass an
+    explicit path to override (used by tests and for ad-hoc debugging).
     """
     logger = logging.getLogger("sciknow")
     if logger.handlers:
@@ -36,7 +40,16 @@ def setup_logging(log_dir: str = "data", level: int = logging.DEBUG) -> None:
 
     logger.setLevel(level)
 
-    log_path = Path(log_dir) / "sciknow.log"
+    if log_dir is None:
+        # Lazy import — logging_config is imported early in the CLI
+        # callback and we don't want a hard dep on settings at module
+        # import time.
+        from sciknow.config import settings
+        log_base = Path(settings.data_dir)
+    else:
+        log_base = Path(log_dir)
+
+    log_path = log_base / "sciknow.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     handler = logging.handlers.RotatingFileHandler(

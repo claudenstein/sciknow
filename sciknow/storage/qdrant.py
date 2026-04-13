@@ -1,3 +1,25 @@
+"""Qdrant connection + collection initialization.
+
+Phase 43c — project-aware. Collection names are now derived from the
+active project (``<slug>_papers`` etc.) instead of being hardcoded
+strings. Existing code that imports ``PAPERS_COLLECTION`` /
+``ABSTRACTS_COLLECTION`` / ``WIKI_COLLECTION`` keeps working thanks to
+a module-level ``__getattr__`` fallback (PEP 562) that resolves the old
+names to the active project's collection at lookup time.
+
+- Legacy / ``default`` project: unprefixed collection names
+  (``papers``, ``abstracts``, ``wiki``). Keeps pre-Phase-43 deployments
+  working without migration.
+- Real project: collection names are ``<sql_safe_slug>_papers`` etc.
+- Cross-project access: pass the collection name as a string. Most
+  call sites use the local constants, which means they automatically
+  target the active project. For cross-project operations (e.g. the
+  one-shot migration in Phase 43f) pass explicit names.
+
+The Qdrant *client* stays global — one Qdrant instance serves every
+project; only the collection names differ. No reason to spin up per-
+project HTTP sessions.
+"""
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
@@ -14,14 +36,63 @@ from qdrant_client.models import (
 
 from sciknow.config import settings
 
-PAPERS_COLLECTION = "papers"
-ABSTRACTS_COLLECTION = "abstracts"
-WIKI_COLLECTION = "wiki"
+# ── Project-aware collection names ──────────────────────────────────────
 
 
-# Module-level singleton client — QdrantClient holds an httpx session internally;
-# reusing it avoids per-call connection setup across the many retrieval and
-# ingestion call sites.
+def papers_collection() -> str:
+    """Return the active project's ``papers`` collection name."""
+    from sciknow.core.project import get_active_project
+    return get_active_project().papers_collection
+
+
+def abstracts_collection() -> str:
+    """Return the active project's ``abstracts`` collection name."""
+    from sciknow.core.project import get_active_project
+    return get_active_project().abstracts_collection
+
+
+def wiki_collection() -> str:
+    """Return the active project's ``wiki`` collection name."""
+    from sciknow.core.project import get_active_project
+    return get_active_project().wiki_collection
+
+
+# ── Legacy-constant compatibility shim (PEP 562) ───────────────────────
+#
+# Pre-Phase-43 call sites import the names ``PAPERS_COLLECTION``,
+# ``ABSTRACTS_COLLECTION``, and ``WIKI_COLLECTION`` directly. Rather than
+# touching ~60 call sites mechanically, we resolve these module-level
+# attributes on demand via ``__getattr__``. Each access returns the
+# active project's collection name, so the constants Just Work when the
+# active project changes between processes.
+#
+# Within a single process the active project is stable, so the value
+# captured by ``from ... import PAPERS_COLLECTION`` at import time is
+# the right one for the entire run. When Phase 43e's
+# ``sciknow project use`` is invoked, a fresh CLI process picks up the
+# new project automatically.
+
+_LEGACY_ALIASES = {
+    "PAPERS_COLLECTION": papers_collection,
+    "ABSTRACTS_COLLECTION": abstracts_collection,
+    "WIKI_COLLECTION": wiki_collection,
+}
+
+
+def __getattr__(name: str):  # PEP 562 — module-level fallback
+    if name in _LEGACY_ALIASES:
+        return _LEGACY_ALIASES[name]()
+    raise AttributeError(
+        f"module {__name__!r} has no attribute {name!r}"
+    )
+
+
+# ── Client singleton ────────────────────────────────────────────────────
+#
+# QdrantClient holds an httpx session internally; reusing it avoids
+# per-call connection setup across the many retrieval and ingestion
+# call sites.
+
 _client: QdrantClient | None = None
 
 
@@ -32,13 +103,29 @@ def get_client() -> QdrantClient:
     return _client
 
 
+# ── Collection provisioning ─────────────────────────────────────────────
+
+
 def init_collections(client: QdrantClient | None = None) -> None:
+    """Create the active project's collections if they don't exist.
+
+    Idempotent — collections that already exist are skipped. Reads the
+    active project's collection names at call time so ``sciknow db init``
+    against a freshly-created project produces the right prefixes.
+    """
     if client is None:
         client = get_client()
 
+    # Resolve once at call time so we use consistent names throughout
+    # this invocation (guards against the unlikely case of the active
+    # project changing mid-call).
+    papers_coll = papers_collection()
+    abstracts_coll = abstracts_collection()
+    wiki_coll = wiki_collection()
+
     existing = {c.name for c in client.get_collections().collections}
 
-    if PAPERS_COLLECTION not in existing:
+    if papers_coll not in existing:
         # Scalar int8 quantization trades a tiny recall hit for ~75% memory
         # savings on dense vectors; `always_ram=True` keeps the quantized copy
         # hot while original vectors stay on disk (see settings.qdrant_*).
@@ -54,7 +141,7 @@ def init_collections(client: QdrantClient | None = None) -> None:
             else None
         )
         client.create_collection(
-            collection_name=PAPERS_COLLECTION,
+            collection_name=papers_coll,
             vectors_config={
                 "dense": VectorParams(
                     size=settings.embedding_dim,
@@ -87,11 +174,11 @@ def init_collections(client: QdrantClient | None = None) -> None:
             # so retrieval can opt in/out of summary nodes via filter.
             ("node_level", PayloadSchemaType.INTEGER),
         ]:
-            client.create_payload_index(PAPERS_COLLECTION, field, schema)
+            client.create_payload_index(papers_coll, field, schema)
 
-    if ABSTRACTS_COLLECTION not in existing:
+    if abstracts_coll not in existing:
         client.create_collection(
-            collection_name=ABSTRACTS_COLLECTION,
+            collection_name=abstracts_coll,
             vectors_config={
                 "dense": VectorParams(
                     size=settings.embedding_dim,
@@ -104,13 +191,13 @@ def init_collections(client: QdrantClient | None = None) -> None:
             },
         )
         client.create_payload_index(
-            ABSTRACTS_COLLECTION, "document_id", PayloadSchemaType.KEYWORD
+            abstracts_coll, "document_id", PayloadSchemaType.KEYWORD
         )
 
 
-    if WIKI_COLLECTION not in existing:
+    if wiki_coll not in existing:
         client.create_collection(
-            collection_name=WIKI_COLLECTION,
+            collection_name=wiki_coll,
             vectors_config={
                 "dense": VectorParams(
                     size=settings.embedding_dim,
@@ -126,12 +213,13 @@ def init_collections(client: QdrantClient | None = None) -> None:
             ("page_type", PayloadSchemaType.KEYWORD),
             ("slug", PayloadSchemaType.KEYWORD),
         ]:
-            client.create_payload_index(WIKI_COLLECTION, field, schema)
+            client.create_payload_index(wiki_coll, field, schema)
 
 
 def ensure_node_level_index(client: QdrantClient | None = None) -> bool:
     """
-    Ensure the `node_level` payload index exists on the papers collection.
+    Ensure the `node_level` payload index exists on the active project's
+    papers collection.
 
     init_collections() only creates the index when the collection itself is
     being created, so existing installations from before the RAPTOR work
@@ -146,7 +234,7 @@ def ensure_node_level_index(client: QdrantClient | None = None) -> bool:
         client = get_client()
     try:
         client.create_payload_index(
-            PAPERS_COLLECTION,
+            papers_collection(),
             "node_level",
             PayloadSchemaType.INTEGER,
         )
