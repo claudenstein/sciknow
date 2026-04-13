@@ -1,7 +1,33 @@
 from pathlib import Path
 
-from pydantic import computed_field
+from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _default_data_dir() -> Path:
+    """Phase 43a — per-project default for ``data_dir``.
+
+    Delegates to ``core.project.get_active_project()`` so each project
+    gets its own ``data/`` tree. Wrapped in a factory (rather than a
+    module-level ``Path`` literal) because the active project is
+    resolved at settings-construction time, not at module import time.
+
+    Env override (``DATA_DIR=...`` in .env) still wins — pydantic
+    checks the env var before falling back to ``default_factory``.
+    """
+    from sciknow.core.project import get_active_project
+    return get_active_project().data_dir
+
+
+def _default_pg_database() -> str:
+    """Phase 43a — per-project default for ``pg_database``.
+
+    Same contract as ``_default_data_dir``: env override wins, else
+    the active project's DB name (``sciknow`` for legacy default,
+    ``sciknow_<slug>`` for real projects).
+    """
+    from sciknow.core.project import get_active_project
+    return get_active_project().pg_database
 
 
 class Settings(BaseSettings):
@@ -11,15 +37,20 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Base data directory (relative to cwd or absolute)
-    data_dir: Path = Path("data")
+    # Base data directory — Phase 43a: defaults to the active project's
+    # data dir (see ``sciknow.core.project``). ``DATA_DIR`` env var still
+    # wins for single-tenant / testing scenarios.
+    data_dir: Path = Field(default_factory=_default_data_dir)
 
     # PostgreSQL
     pg_host: str = "localhost"
     pg_port: int = 5432
     pg_user: str = "sciknow"
     pg_password: str = "sciknow"
-    pg_database: str = "sciknow"
+    # Phase 43a: defaults to the active project's DB name
+    # (``sciknow`` legacy, ``sciknow_<slug>`` per project). ``PG_DATABASE``
+    # env var still wins.
+    pg_database: str = Field(default_factory=_default_pg_database)
 
     # Qdrant
     qdrant_host: str = "localhost"
