@@ -4951,6 +4951,135 @@ def l1_phase42_data_action_dispatcher() -> None:
     )
 
 
+def l1_phase43_project_resolution() -> None:
+    """Phase 43 — multi-project foundations.
+
+    Static / no-DB checks on:
+    - Project dataclass + slug validation
+    - get_active_project() precedence: SCIKNOW_PROJECT env >
+      .active-project file > legacy 'default' fallback
+    - Settings delegate data_dir + pg_database to the active project
+    - Qdrant module-level __getattr__ resolves legacy constants to the
+      active project's collection names
+    - sciknow.cli.project module exposes init/list/show/use/destroy/
+      archive/unarchive
+    - Root CLI exposes --project flag
+
+    DB / Qdrant / filesystem state changes are out of scope here
+    (those go in L2).
+    """
+    import inspect
+    import os
+
+    from sciknow.core.project import (
+        Project,
+        get_active_project,
+        list_projects,
+        validate_slug,
+    )
+
+    # 1) Slug validation rules
+    for good in ("global-cooling", "abc", "a1", "x-y-z", "default"):
+        validate_slug(good)
+    for bad in ("Bad", "no_underscore", "-leading", "trailing-", "with space", "", "weird!"):
+        try:
+            validate_slug(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"validate_slug should have rejected {bad!r}")
+
+    # 2) Default project legacy compat
+    d = Project.default()
+    assert d.is_default
+    assert d.pg_database == "sciknow"
+    assert d.papers_collection == "papers"
+    assert d.abstracts_collection == "abstracts"
+    assert d.wiki_collection == "wiki"
+    assert d.qdrant_prefix == ""
+
+    # 3) Real project derivations (PG / Qdrant identifier safety —
+    # hyphens converted to underscores)
+    p = Project(slug="global-cooling", repo_root=d.repo_root)
+    assert not p.is_default
+    assert p.pg_database == "sciknow_global_cooling"
+    assert p.qdrant_prefix == "global_cooling_"
+    assert p.papers_collection == "global_cooling_papers"
+    assert p.root.name == "global-cooling"
+    assert p.root.parent.name == "projects"
+
+    # 4) get_active_project() precedence — SCIKNOW_PROJECT env wins
+    prev_env = os.environ.pop("SCIKNOW_PROJECT", None)
+    try:
+        os.environ["SCIKNOW_PROJECT"] = "test-priority"
+        active = get_active_project()
+        assert active.slug == "test-priority", (
+            f"SCIKNOW_PROJECT env should override (got {active.slug!r})"
+        )
+    finally:
+        if prev_env is None:
+            os.environ.pop("SCIKNOW_PROJECT", None)
+        else:
+            os.environ["SCIKNOW_PROJECT"] = prev_env
+
+    # No env, no .active-project file (assuming the test env is
+    # legacy-default) → 'default'.
+    if not (d.repo_root / ".active-project").exists() and not list_projects():
+        assert get_active_project().is_default
+
+    # 5) Settings delegates to active project
+    from sciknow.config import Settings
+    s = Settings()
+    # In the test process, no SCIKNOW_PROJECT and no projects/ dir →
+    # default project values
+    if not list_projects() and not os.environ.get("SCIKNOW_PROJECT"):
+        assert s.pg_database == "sciknow", (
+            f"settings.pg_database should default to legacy 'sciknow' "
+            f"(got {s.pg_database!r})"
+        )
+        # data_dir is now absolute; check the trailing component
+        assert s.data_dir.name == "data"
+
+    # 6) Qdrant module-level __getattr__ legacy compat
+    from sciknow.storage import qdrant as qmod
+    assert callable(qmod.papers_collection)
+    assert callable(qmod.abstracts_collection)
+    assert callable(qmod.wiki_collection)
+    # The PEP 562 __getattr__ should resolve legacy constants to
+    # the active project's collection name (a string, not a callable).
+    assert isinstance(qmod.PAPERS_COLLECTION, str)
+    assert isinstance(qmod.ABSTRACTS_COLLECTION, str)
+    assert isinstance(qmod.WIKI_COLLECTION, str)
+    # Bogus attribute still raises AttributeError
+    try:
+        _ = qmod.BOGUS_NAME
+    except AttributeError:
+        pass
+    else:
+        raise AssertionError("qdrant.__getattr__ should reject unknown names")
+
+    # 7) sciknow.cli.project subcommands wired in
+    from sciknow.cli import project as project_cli
+    for name in ("init", "list_cmd", "show", "use", "destroy",
+                 "archive", "unarchive"):
+        assert hasattr(project_cli, name), f"project CLI missing {name!r}"
+
+    # 8) Root CLI exposes --project flag
+    from sciknow.cli import main as main_cli
+    callback_src = inspect.getsource(main_cli._startup)
+    assert "--project" in callback_src
+    assert "SCIKNOW_PROJECT" in callback_src
+
+    # 9) DB layer accepts an explicit db_name
+    from sciknow.storage.db import get_engine, get_admin_engine, get_session
+    eng = get_engine("test_db_name_abc")
+    assert "test_db_name_abc" in str(eng.url)
+    admin = get_admin_engine()
+    assert str(admin.url).endswith("/postgres")
+    sig = inspect.signature(get_session)
+    assert "db_name" in sig.parameters
+
+
 def l2_phase32_endpoint_shapes() -> None:
     """TestClient smoke test for the major read-only API endpoints.
 
@@ -5915,6 +6044,9 @@ L1_TESTS: list[Callable] = [
     l1_phase41_static_where_clauses,
     # Phase 42 — data-action dispatcher (retire interpolated onclicks)
     l1_phase42_data_action_dispatcher,
+    # Phase 43 — multi-project foundations (project resolution, project-
+    # aware DB / Qdrant / paths, sciknow project CLI, --project flag)
+    l1_phase43_project_resolution,
 ]
 
 L2_TESTS: list[Callable] = [

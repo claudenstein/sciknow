@@ -54,6 +54,7 @@ A local-first scientific knowledge system that ingests papers, builds a compiled
 **Infrastructure**
 - **All local** — PostgreSQL + Qdrant + Ollama, no cloud APIs, no Docker
 - **Backup & restore** — portable archives for migrating between machines
+- **Multi-project** — host multiple isolated knowledge bases (own DB + Qdrant collections + data dir per project) with `sciknow project init/list/use/destroy/archive`
 
 ---
 

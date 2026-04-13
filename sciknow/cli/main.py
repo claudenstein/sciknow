@@ -29,8 +29,34 @@ logger = logging.getLogger("sciknow.cli")
 
 
 @app.callback()
-def _startup(ctx: typer.Context) -> None:
-    """Initialize logging and record the CLI invocation."""
+def _startup(
+    ctx: typer.Context,
+    project: str = typer.Option(
+        None, "--project", "-P",
+        help="Override the active project for this invocation. "
+             "Equivalent to setting SCIKNOW_PROJECT in the env. "
+             "See `sciknow project list` for available slugs.",
+    ),
+) -> None:
+    """Initialize logging and record the CLI invocation.
+
+    Phase 43g — the ``--project`` root flag exports SCIKNOW_PROJECT into
+    the process environment so every downstream module that reads from
+    ``sciknow.core.project.get_active_project()`` picks up the override.
+    Precedence (high → low): this flag → existing SCIKNOW_PROJECT env →
+    ``.active-project`` file → legacy ``default`` fallback.
+    """
+    import os
+    if project:
+        # Validate eagerly so a typo fails before any subcommand runs.
+        from sciknow.core.project import validate_slug
+        try:
+            validate_slug(project)
+        except ValueError as exc:
+            console.print(f"[red]--project:[/red] {exc}")
+            raise typer.Exit(2)
+        os.environ["SCIKNOW_PROJECT"] = project
+
     setup_logging()
     cmd = " ".join(sys.argv[1:]) or "(no args)"
     logger.info(f"CLI  {cmd}")

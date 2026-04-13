@@ -968,7 +968,18 @@ def serve(
     from sciknow.web.app import app as web_app, set_book
     set_book(book[0], book[1])
 
+    # Phase 43g — surface which project is being served so the user
+    # knows which DB / data dir / collections are in play.
+    from sciknow.core.project import get_active_project
+    active = get_active_project()
+    project_label = (
+        f"[dim]project: default / legacy[/dim]"
+        if active.is_default
+        else f"[dim]project: {active.slug}[/dim]"
+    )
+
     console.print(f"\n[bold]SciKnow Book Reader[/bold]: {book[1]}")
+    console.print(f"  {project_label}")
     console.print(f"  [link=http://{host}:{port}]http://{host}:{port}[/link]")
     console.print(f"  [dim]Press Ctrl+C to stop.[/dim]\n")
 
