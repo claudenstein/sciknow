@@ -5436,6 +5436,49 @@ def l1_phase46e_web_expand_surface() -> None:
     )
 
 
+def l1_phase46f_setup_wizard_surface() -> None:
+    """Phase 46.F — end-to-end web setup wizard + its endpoints.
+
+    Static checks: 5 new subprocess-backed endpoints + 1 inline
+    endpoint + 1 aggregate-status endpoint are registered, and the
+    HTML template mounts a 5-step wizard with expected DOM hooks.
+    """
+    from sciknow.web import app as webapp
+
+    route_paths = {r.path for r in webapp.app.routes if hasattr(r, "path")}
+    for required in (
+        "/api/corpus/ingest-directory",
+        "/api/corpus/upload",
+        "/api/catalog/cluster",
+        "/api/catalog/raptor/build",
+        "/api/wiki/compile",
+        "/api/book/create",
+        "/api/setup/status",
+    ):
+        assert required in route_paths, (
+            f"Phase 46.F endpoint {required!r} not registered"
+        )
+
+    tpl = webapp.TEMPLATE
+    # Wizard modal + trail + 5 step panes exist
+    assert 'id="setup-wizard-modal"' in tpl, "setup wizard modal missing"
+    assert 'id="sw-trail"'            in tpl, "sw-trail missing"
+    for step in ("project", "corpus", "indices", "expand", "book"):
+        assert f'id="sw-step-{step}"' in tpl, f"wizard step pane {step} missing"
+    # Toolbar button opens the wizard
+    assert "openSetupWizard()" in tpl, "Setup toolbar button missing"
+    # Each orchestration fn is wired
+    for fn in (
+        "swCreateProject", "swUseProject", "swLoadProjectsForWizard",
+        "swUploadPDFs", "swIngestDirectory", "swRunIndex",
+        "swCreateBook", "swAttachLogStream", "swRefreshStatus",
+        "swGoto",
+    ):
+        assert fn in tpl, f"wizard JS fn {fn} missing"
+    # CSS for the trail pills
+    assert ".sw-step.active" in tpl, "wizard trail active style missing"
+
+
 def l1_bench_harness_surface() -> None:
     """Phase 44 — the bench harness module loads and exposes the expected
     surface (run/run_layer/LAYERS/BenchMetric). Each layer has >= 1
@@ -6497,11 +6540,12 @@ L1_TESTS: list[Callable] = [
     l1_phase45_project_types,
     l1_phase45_watchlist_surface,
     # Phase 46 — auditable scientific writing (citation insert + verify +
-    # ensemble review + expand-by-author web surface)
+    # ensemble review + expand-by-author web surface + end-to-end wizard)
     l1_phase46_citation_insert_surface,
     l1_phase46_citation_verify_surface,
     l1_phase46c_ensemble_review_surface,
     l1_phase46e_web_expand_surface,
+    l1_phase46f_setup_wizard_surface,
 ]
 
 L2_TESTS: list[Callable] = [

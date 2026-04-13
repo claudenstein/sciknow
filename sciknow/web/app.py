@@ -3298,6 +3298,326 @@ async def api_corpus_enrich(
     return JSONResponse({"job_id": job_id})
 
 
+# ── Phase 46.F — End-to-end web flow (ingest / indices / book create) ────────
+#
+# Wires every CLI step from "empty project" to "book export" to a web
+# endpoint so the Setup Wizard modal can walk a new user through the
+# entire pipeline from the browser. All long-running ops use the same
+# SSE-streamed-subprocess pattern as /api/corpus/{enrich,expand}.
+#
+# Endpoints added here:
+#   POST /api/corpus/ingest-directory   stream `sciknow ingest directory <path>`
+#   POST /api/corpus/upload             multipart upload → stage → ingest
+#   POST /api/catalog/cluster           stream `sciknow catalog cluster`
+#   POST /api/catalog/raptor/build      stream `sciknow catalog raptor build`
+#   POST /api/wiki/compile              stream `sciknow wiki compile`
+#   POST /api/book/create               create a book + optional bootstrap
+#                                       (inline, no subprocess — fast)
+#   GET  /api/setup/status              aggregate "where am I in the pipeline?"
+
+
+@app.post("/api/corpus/ingest-directory")
+async def api_corpus_ingest_directory(
+    path: str = Form(...),
+    recursive: bool = Form(True),
+    force: bool = Form(False),
+    workers: int = Form(0),
+):
+    """SSE-streamed wrapper around ``sciknow ingest directory <path>``.
+
+    Phase 46.F — path is a server-side directory. The wizard UI
+    usually pairs this with an ``ingest/upload`` step that stages
+    uploaded files into ``{data_dir}/inbox/`` first.
+    """
+    p = Path(path).expanduser().resolve()
+    if not p.exists() or not p.is_dir():
+        raise HTTPException(status_code=400, detail=f"not a directory: {p}")
+    job_id, _ = _create_job("corpus_ingest_directory")
+    loop = asyncio.get_event_loop()
+    argv: list[str] = ["ingest", "directory", str(p)]
+    if not recursive:
+        argv.append("--no-recursive")
+    if force:
+        argv.append("--force")
+    if workers and int(workers) > 0:
+        argv += ["--workers", str(int(workers))]
+    _spawn_cli_streaming(job_id, argv, loop)
+    return JSONResponse({"job_id": job_id, "path": str(p)})
+
+
+@app.post("/api/corpus/upload")
+async def api_corpus_upload(request: Request):
+    """Accept a multipart PDF upload + (optionally) queue an ingest job.
+
+    Files are saved to ``{data_dir}/inbox/uploads_<ts>/`` inside the
+    active project so multi-project isolation holds. If ``start_ingest``
+    is truthy, an ingest job is spawned automatically and its job_id
+    is returned; otherwise the client can trigger
+    ``POST /api/corpus/ingest-directory`` itself with the returned
+    ``staging_dir``.
+    """
+    from datetime import datetime, timezone
+    from sciknow.config import settings
+
+    form = await request.form()
+    files = form.getlist("files")
+    start_ingest = form.get("start_ingest", "false").lower() in {"1", "true", "yes"}
+    force        = form.get("force",        "false").lower() in {"1", "true", "yes"}
+    recursive    = form.get("recursive",    "true").lower()  in {"1", "true", "yes"}
+    if not files:
+        raise HTTPException(status_code=400, detail="no files in upload")
+
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    staging = Path(settings.data_dir) / "inbox" / f"uploads_{ts}"
+    staging.mkdir(parents=True, exist_ok=True)
+
+    saved: list[str] = []
+    for f in files:
+        if not hasattr(f, "filename") or not f.filename:
+            continue
+        # Strip path components — we only accept a flat filename.
+        name = Path(f.filename).name
+        if not name.lower().endswith(".pdf"):
+            # Skip non-PDFs silently; ingestion would fail anyway.
+            continue
+        dest = staging / name
+        # Avoid collisions within this batch.
+        i = 0
+        while dest.exists():
+            i += 1
+            dest = staging / f"{dest.stem}_{i}{dest.suffix}"
+        contents = await f.read()
+        dest.write_bytes(contents)
+        saved.append(dest.name)
+
+    if not saved:
+        # Clean up empty staging dir
+        try: staging.rmdir()
+        except Exception: pass
+        raise HTTPException(status_code=400,
+                             detail="no .pdf files in upload (only PDFs accepted)")
+
+    payload: dict = {
+        "staging_dir": str(staging),
+        "n_files": len(saved),
+        "files": saved,
+    }
+    if start_ingest:
+        job_id, _ = _create_job("corpus_ingest_upload")
+        loop = asyncio.get_event_loop()
+        argv = ["ingest", "directory", str(staging)]
+        if not recursive: argv.append("--no-recursive")
+        if force:         argv.append("--force")
+        _spawn_cli_streaming(job_id, argv, loop)
+        payload["job_id"] = job_id
+    return JSONResponse(payload)
+
+
+@app.post("/api/catalog/cluster")
+async def api_catalog_cluster(
+    min_cluster_size: int = Form(0),
+    rebuild: bool = Form(False),
+    dry_run: bool = Form(False),
+):
+    """SSE-streamed wrapper around ``sciknow catalog cluster``."""
+    job_id, _ = _create_job("catalog_cluster")
+    loop = asyncio.get_event_loop()
+    argv = ["catalog", "cluster"]
+    if min_cluster_size and int(min_cluster_size) > 0:
+        argv += ["--min-cluster-size", str(int(min_cluster_size))]
+    if rebuild: argv.append("--rebuild")
+    if dry_run: argv.append("--dry-run")
+    _spawn_cli_streaming(job_id, argv, loop)
+    return JSONResponse({"job_id": job_id})
+
+
+@app.post("/api/catalog/raptor/build")
+async def api_catalog_raptor_build():
+    """SSE-streamed wrapper around ``sciknow catalog raptor build``.
+
+    RAPTOR is a one-off batch op (typically 5-30 min depending on
+    corpus size). No options exposed — build policy uses the CLI
+    defaults.
+    """
+    job_id, _ = _create_job("catalog_raptor_build")
+    loop = asyncio.get_event_loop()
+    _spawn_cli_streaming(job_id, ["catalog", "raptor", "build"], loop)
+    return JSONResponse({"job_id": job_id})
+
+
+@app.post("/api/wiki/compile")
+async def api_wiki_compile(
+    rebuild: bool = Form(False),
+    rewrite_stale: bool = Form(False),
+    doc_id: str = Form(""),
+):
+    """SSE-streamed wrapper around ``sciknow wiki compile``."""
+    job_id, _ = _create_job("wiki_compile")
+    loop = asyncio.get_event_loop()
+    argv = ["wiki", "compile"]
+    if rebuild:        argv.append("--rebuild")
+    if rewrite_stale:  argv.append("--rewrite-stale")
+    if doc_id.strip(): argv += ["--doc-id", doc_id.strip()]
+    _spawn_cli_streaming(job_id, argv, loop)
+    return JSONResponse({"job_id": job_id})
+
+
+@app.post("/api/book/create")
+async def api_book_create(request: Request):
+    """Phase 46.F — web-side book creation with type selection.
+
+    Runs inline (no subprocess) because book creation is fast (~50 ms)
+    and doesn't need streaming progress. Mirrors ``sciknow book create
+    --type=<slug>`` including the flat-type bootstrap that auto-creates
+    chapter 1 with canonical sections for ``scientific_paper`` and
+    other ``is_flat=True`` types.
+    """
+    import json as _json
+    from sciknow.core.project_type import (
+        default_sections_as_dicts, get_project_type, validate_type_slug,
+    )
+
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else dict(await request.form())
+    title = (body.get("title") or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="title is required")
+    btype = (body.get("type") or "scientific_book").strip()
+    try:
+        validate_type_slug(btype)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    description = (body.get("description") or "").strip() or None
+    try:
+        tcw = int(body.get("target_chapter_words") or 0)
+    except (TypeError, ValueError):
+        tcw = 0
+    bootstrap = (str(body.get("bootstrap", "true")).lower() in {"1", "true", "yes"})
+
+    pt = get_project_type(btype)
+    custom_meta: dict = {}
+    effective_target = tcw if tcw > 0 else pt.default_target_chapter_words
+    custom_meta["target_chapter_words"] = effective_target
+
+    with get_session() as session:
+        existing = session.execute(text(
+            "SELECT id::text FROM books WHERE title = :t"
+        ), {"t": title}).fetchone()
+        if existing:
+            raise HTTPException(status_code=409,
+                                 detail=f"book already exists: {title}")
+        row = session.execute(text("""
+            INSERT INTO books (title, description, book_type, custom_metadata)
+            VALUES (:t, :d, :bt, CAST(:m AS jsonb))
+            RETURNING id::text
+        """), {
+            "t": title, "d": description, "bt": pt.slug,
+            "m": _json.dumps(custom_meta),
+        })
+        book_id = row.fetchone()[0]
+
+        chapter_id: str | None = None
+        if bootstrap and pt.is_flat:
+            sections_json = _json.dumps(default_sections_as_dicts(pt))
+            cid_row = session.execute(text("""
+                INSERT INTO book_chapters
+                  (book_id, number, title, description, sections)
+                VALUES
+                  (CAST(:book_id AS uuid), 1, :ch_title, :ch_desc,
+                   CAST(:sections AS jsonb))
+                RETURNING id::text
+            """), {
+                "book_id": book_id,
+                "ch_title": title,
+                "ch_desc": description or f"{pt.display_name} — {title}",
+                "sections": sections_json,
+            })
+            chapter_id = cid_row.fetchone()[0]
+        session.commit()
+
+    return JSONResponse({
+        "ok": True,
+        "book_id": book_id,
+        "title": title,
+        "book_type": pt.slug,
+        "display_name": pt.display_name,
+        "is_flat": pt.is_flat,
+        "chapter_id_bootstrapped": chapter_id,
+        "default_sections": [s.key for s in pt.default_sections],
+    })
+
+
+@app.get("/api/setup/status")
+async def api_setup_status():
+    """Phase 46.F — aggregate "where am I in the pipeline?" snapshot.
+
+    Returns per-stage booleans + counts so the wizard can render a
+    progress trail: which steps are done, which need running. Cheap —
+    one round-trip to PG + one to Qdrant, no embeddings or LLM.
+    """
+    out: dict = {}
+    with get_session() as session:
+        out["n_documents"] = session.execute(text(
+            "SELECT COUNT(*) FROM documents"
+        )).scalar() or 0
+        out["n_complete"] = session.execute(text(
+            "SELECT COUNT(*) FROM documents WHERE ingestion_status='complete'"
+        )).scalar() or 0
+        out["n_chunks"] = session.execute(text(
+            "SELECT COUNT(*) FROM chunks"
+        )).scalar() or 0
+        out["n_with_topic"] = session.execute(text(
+            "SELECT COUNT(*) FROM paper_metadata "
+            "WHERE topic_cluster IS NOT NULL AND topic_cluster != ''"
+        )).scalar() or 0
+        try:
+            out["n_wiki_pages"] = session.execute(text(
+                "SELECT COUNT(*) FROM wiki_pages"
+            )).scalar() or 0
+        except Exception:
+            out["n_wiki_pages"] = 0
+        try:
+            out["n_books"] = session.execute(text(
+                "SELECT COUNT(*) FROM books"
+            )).scalar() or 0
+        except Exception:
+            out["n_books"] = 0
+    # RAPTOR presence — cheap Qdrant count with an indexed filter
+    raptor_levels: dict[str, int] = {}
+    try:
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
+        from sciknow.storage.qdrant import PAPERS_COLLECTION, get_client
+        qdrant = get_client()
+        for lvl in (1, 2, 3):
+            try:
+                info = qdrant.count(
+                    collection_name=PAPERS_COLLECTION,
+                    count_filter=Filter(must=[
+                        FieldCondition(key="node_level", match=MatchValue(value=lvl))
+                    ]), exact=False,
+                )
+                n = info.count if hasattr(info, "count") else int(info)
+                if n > 0:
+                    raptor_levels[f"L{lvl}"] = n
+            except Exception:
+                pass
+    except Exception:
+        pass
+    out["raptor_levels"] = raptor_levels
+
+    # Active project info (Phase 43)
+    try:
+        from sciknow.core.project import get_active_project
+        p = get_active_project()
+        out["project"] = {
+            "slug": p.slug,
+            "is_default": p.is_default,
+            "data_dir": str(p.data_dir),
+        }
+    except Exception:
+        out["project"] = {"slug": "unknown"}
+    return JSONResponse(out)
+
+
 @app.post("/api/corpus/expand-author")
 async def api_corpus_expand_author(
     name: str = Form(...),
@@ -4492,6 +4812,11 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
                       to {{ opacity: 1; transform: translateY(0); }} }}
 /* Form fields */
 .field {{ margin-bottom: var(--sp-3); }}
+/* Phase 46.F — Setup Wizard trail pills */
+.sw-step {{ padding: 4px 10px; border-radius: 12px; background: var(--toolbar-bg);
+           color: var(--fg-muted); border: 1px solid var(--border); }}
+.sw-step.active {{ background: var(--accent-light); color: var(--accent);
+                  border-color: var(--accent); font-weight: 600; }}
 .field label {{ display: block; font-size: 12px; font-weight: 500;
                 color: var(--fg-muted); margin-bottom: var(--sp-1); }}
 .field input, .field textarea, .field select {{ width: 100%; padding: 8px var(--sp-3);
@@ -5225,6 +5550,8 @@ body.task-bar-open {{ padding-top: 40px; }}
     </div>
     <div class="sep"></div>
     <div class="tg">
+      <button onclick="openSetupWizard()"
+              title="End-to-end setup: create project → upload PDFs → ingest → build indices → create book. Phase 46.F.">&#128736; Setup</button>
       <button onclick="openProjectsModal()" title="Manage sciknow projects (list / switch / create / destroy). See `sciknow project --help`."><span id="proj-btn-label">&#128193; Projects</span></button>
     </div>
   </div>
@@ -5762,6 +6089,235 @@ body.task-bar-open {{ padding-top: 40px; }}
         </div>
       </div>
       <div id="proj-detail" style="margin-top:14px;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Phase 46.F — End-to-end Setup Wizard: project → corpus → indices → expand → book -->
+<div class="modal-overlay" id="setup-wizard-modal" onclick="if(event.target===this)closeModal('setup-wizard-modal')">
+  <div class="modal wide">
+    <div class="modal-header">
+      <h3>&#128736; Setup Wizard</h3>
+      <button class="modal-close" onclick="closeModal('setup-wizard-modal')">&times;</button>
+    </div>
+    <!-- Step progress trail -->
+    <div id="sw-trail" style="display:flex;gap:8px;padding:8px 18px;border-bottom:1px solid var(--border);font-size:12px;">
+      <span data-sw-step="project" class="sw-step active">1 · Project</span>
+      <span data-sw-step="corpus"  class="sw-step">2 · Corpus</span>
+      <span data-sw-step="indices" class="sw-step">3 · Indices</span>
+      <span data-sw-step="expand"  class="sw-step">4 · Expand</span>
+      <span data-sw-step="book"    class="sw-step">5 · Book</span>
+    </div>
+
+    <div class="modal-body" style="padding-top:0;">
+
+      <!-- STEP 1 — Project -->
+      <div id="sw-step-project" class="sw-step-pane" style="padding:14px 18px;">
+        <p style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;">
+          A <strong>project</strong> isolates one corpus (its own DB + Qdrant
+          collections + data dir). Pick an existing one or create a new one.
+          The web reader is currently serving the project shown as
+          <strong>active</strong>; creating a new project here writes
+          <code>.active-project</code> but does NOT hot-swap this running
+          server — finish the wizard, then restart <code>sciknow book
+          serve</code> against the new project.
+        </p>
+        <div style="display:flex;gap:10px;align-items:flex-start;">
+          <div style="flex:1;">
+            <h4 style="font-size:13px;margin:0 0 6px;">Existing projects</h4>
+            <div id="sw-project-list" style="font-size:12px;max-height:180px;overflow:auto;border:1px solid var(--border);border-radius:6px;">
+              Loading…
+            </div>
+          </div>
+          <div style="flex:1;border-left:1px solid var(--border);padding-left:12px;">
+            <h4 style="font-size:13px;margin:0 0 6px;">Create new</h4>
+            <div class="field">
+              <label>Slug</label>
+              <input type="text" id="sw-new-slug" placeholder="global-cooling">
+            </div>
+            <button class="btn-primary" onclick="swCreateProject()">Create empty project</button>
+            <p style="font-size:11px;color:var(--fg-muted);margin-top:6px;">
+              Slug is lowercase alphanumerics + hyphens. Runs migrations
+              + creates Qdrant collections (~3 s).
+            </p>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;">
+          <span id="sw-project-status" style="font-size:12px;color:var(--fg-muted);"></span>
+          <button class="btn-primary" onclick="swGoto('corpus')">Next: Corpus &rarr;</button>
+        </div>
+      </div>
+
+      <!-- STEP 2 — Corpus -->
+      <div id="sw-step-corpus" class="sw-step-pane" style="display:none;padding:14px 18px;">
+        <p style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;">
+          Feed the project PDFs. Two paths:
+          <strong>upload</strong> files from your browser, or point to a
+          <strong>directory on this server</strong>. Either way, the
+          ingestion pipeline runs (PDF → metadata → sections → chunks →
+          embeddings). Large corpora take hours.
+        </p>
+        <div id="sw-corpus-status" style="font-size:12px;padding:8px;background:var(--toolbar-bg);border:1px solid var(--border);border-radius:4px;margin-bottom:10px;">
+          Loading corpus status…
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+          <div style="border:1px solid var(--border);border-radius:6px;padding:10px;">
+            <div style="font-weight:600;font-size:13px;margin-bottom:4px;">&#128190; Upload PDFs</div>
+            <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+              Files are staged under
+              <code>{{data_dir}}/inbox/uploads_&lt;ts&gt;/</code> and then
+              ingested.
+            </p>
+            <input type="file" id="sw-upload-files" accept="application/pdf,.pdf" multiple
+                   style="display:block;margin-bottom:8px;">
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;margin-bottom:4px;">
+              <input type="checkbox" id="sw-upload-start-ingest" checked>
+              start ingesting immediately
+            </label>
+            <button class="btn-primary" onclick="swUploadPDFs()">Upload</button>
+          </div>
+          <div style="border:1px solid var(--border);border-radius:6px;padding:10px;">
+            <div style="font-weight:600;font-size:13px;margin-bottom:4px;">&#128193; Server directory</div>
+            <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+              Path is resolved on the server. Useful when a corpus is
+              already on disk (or over a network mount).
+            </p>
+            <div class="field">
+              <input type="text" id="sw-ingest-path" placeholder="/path/to/pdfs">
+            </div>
+            <div class="field" style="display:flex;gap:10px;flex-wrap:wrap;">
+              <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+                <input type="checkbox" id="sw-ingest-recursive" checked> recursive
+              </label>
+              <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+                <input type="checkbox" id="sw-ingest-force"> force re-ingest
+              </label>
+            </div>
+            <button class="btn-primary" onclick="swIngestDirectory()">Ingest directory</button>
+          </div>
+        </div>
+        <pre id="sw-ingest-log" style="margin-top:10px;max-height:260px;overflow:auto;background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:11px;font-family:ui-monospace,monospace;white-space:pre-wrap;"></pre>
+        <div style="display:flex;gap:8px;justify-content:space-between;margin-top:8px;">
+          <button onclick="swGoto('project')">&larr; Back</button>
+          <div>
+            <button onclick="swRefreshStatus()">Refresh status</button>
+            <button class="btn-primary" onclick="swGoto('indices')">Next: Indices &rarr;</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- STEP 3 — Indices -->
+      <div id="sw-step-indices" class="sw-step-pane" style="display:none;padding:14px 18px;">
+        <p style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;">
+          After ingestion, build the three optional indices. Each improves
+          downstream quality — you can skip any of them. Run in any order.
+        </p>
+        <div id="sw-indices-status" style="font-size:12px;padding:8px;background:var(--toolbar-bg);border:1px solid var(--border);border-radius:4px;margin-bottom:10px;">
+          Loading index status…
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
+          <div style="border:1px solid var(--border);border-radius:6px;padding:10px;">
+            <div style="font-weight:600;font-size:13px;margin-bottom:4px;">&#127918; Topic Clusters</div>
+            <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+              BERTopic over abstracts. Fast (seconds). Enables
+              <code>--topic</code> filtering in retrieval + the Topics
+              browser.
+            </p>
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;margin-bottom:4px;">
+              <input type="checkbox" id="sw-cluster-rebuild"> rebuild from scratch
+            </label>
+            <button class="btn-primary" onclick="swRunIndex('cluster')">Cluster</button>
+          </div>
+          <div style="border:1px solid var(--border);border-radius:6px;padding:10px;">
+            <div style="font-weight:600;font-size:13px;margin-bottom:4px;">&#127794; RAPTOR tree</div>
+            <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+              Hierarchical summaries (UMAP + GMM). Slow (5–30 min).
+              Enables broad-synthesis retrieval.
+            </p>
+            <button class="btn-primary" onclick="swRunIndex('raptor')">Build RAPTOR</button>
+          </div>
+          <div style="border:1px solid var(--border);border-radius:6px;padding:10px;">
+            <div style="font-weight:600;font-size:13px;margin-bottom:4px;">&#128218; Wiki compile</div>
+            <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+              Compile per-paper wiki pages + KG triples. Slow
+              (LLM-bound, ~1 min per paper).
+            </p>
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;margin-bottom:4px;">
+              <input type="checkbox" id="sw-wiki-rebuild"> rebuild
+            </label>
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;margin-bottom:4px;">
+              <input type="checkbox" id="sw-wiki-stale" checked> rewrite stale
+            </label>
+            <button class="btn-primary" onclick="swRunIndex('wiki')">Compile wiki</button>
+          </div>
+        </div>
+        <pre id="sw-indices-log" style="margin-top:10px;max-height:260px;overflow:auto;background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:11px;font-family:ui-monospace,monospace;white-space:pre-wrap;"></pre>
+        <div style="display:flex;gap:8px;justify-content:space-between;margin-top:8px;">
+          <button onclick="swGoto('corpus')">&larr; Back</button>
+          <div>
+            <button onclick="swRefreshStatus()">Refresh status</button>
+            <button class="btn-primary" onclick="swGoto('expand')">Next: Expand &rarr;</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- STEP 4 — Expand -->
+      <div id="sw-step-expand" class="sw-step-pane" style="display:none;padding:14px 18px;">
+        <p style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;">
+          Optional: grow the corpus by following citations or pulling
+          everything an author has published. Uses the full
+          Expand tab — see the <strong>Tools</strong> toolbar button for
+          the detailed surface.
+        </p>
+        <div style="display:flex;gap:10px;">
+          <button class="btn-primary" onclick="closeModal('setup-wizard-modal');openToolsModal();switchToolsTab('tl-corpus');">
+            &#128736; Open Tools &rarr; Corpus tab
+          </button>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:space-between;margin-top:20px;">
+          <button onclick="swGoto('indices')">&larr; Back</button>
+          <button class="btn-primary" onclick="swGoto('book')">Next: Book &rarr;</button>
+        </div>
+      </div>
+
+      <!-- STEP 5 — Book -->
+      <div id="sw-step-book" class="sw-step-pane" style="display:none;padding:14px 18px;">
+        <p style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;">
+          Create the writing project. Pick a type — <strong>scientific
+          book</strong> (hierarchical, chapters → sections) or
+          <strong>scientific paper</strong> (flat IMRaD, one chapter with
+          canonical sections). The type drives section defaults, prompt
+          conditioning, length targets.
+        </p>
+        <div class="field" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
+          <div style="flex:3;min-width:220px;">
+            <label>Title</label>
+            <input type="text" id="sw-book-title" placeholder="e.g. Global Cooling: The Coming Solar Minimum">
+          </div>
+          <div style="flex:2;min-width:180px;">
+            <label>Type</label>
+            <select id="sw-book-type">
+              <option value="scientific_book" selected>Scientific Book (chapters)</option>
+              <option value="scientific_paper">Scientific Paper (IMRaD, flat)</option>
+            </select>
+          </div>
+          <div style="flex:1;min-width:120px;">
+            <label>Target words/chap</label>
+            <input type="number" id="sw-book-target" placeholder="(type default)">
+          </div>
+        </div>
+        <div class="field">
+          <label>Description (optional)</label>
+          <input type="text" id="sw-book-desc" placeholder="One-line blurb.">
+        </div>
+        <button class="btn-primary" onclick="swCreateBook()">Create project</button>
+        <div id="sw-book-status" style="margin-top:8px;font-size:12px;color:var(--fg-muted);"></div>
+        <div style="display:flex;gap:8px;justify-content:space-between;margin-top:14px;">
+          <button onclick="swGoto('expand')">&larr; Back</button>
+          <button onclick="closeModal('setup-wizard-modal')">Done</button>
+        </div>
+      </div>
+
     </div>
   </div>
 </div>
@@ -11558,6 +12114,296 @@ async function updateStatus(status) {{
   const fd = new FormData();
   fd.append('status', status);
   await fetch('/api/draft/' + currentDraftId + '/status', {{method: 'PUT', body: fd}});
+}}
+
+
+// ── Phase 46.F — Setup Wizard (end-to-end from empty to book) ─────────
+//
+// Walks a new user through: project choice → corpus ingest → index
+// builds → expand → book creation. Each step reads live state via
+// /api/setup/status so the trail shows real progress, not just UI
+// position. Subprocess-backed steps (ingest, cluster, raptor, wiki)
+// stream to a per-step <pre> log.
+
+let _swCurrentStep = 'project';
+let _swCurrentJob  = null;
+
+function openSetupWizard() {{
+  openModal('setup-wizard-modal');
+  swGoto('project');
+  swRefreshStatus();
+  swLoadProjectsForWizard();
+}}
+
+function swGoto(step) {{
+  _swCurrentStep = step;
+  document.querySelectorAll('#setup-wizard-modal .sw-step-pane').forEach(p => {{
+    p.style.display = 'none';
+  }});
+  const pane = document.getElementById('sw-step-' + step);
+  if (pane) pane.style.display = 'block';
+  document.querySelectorAll('#sw-trail .sw-step').forEach(s => {{
+    s.classList.toggle('active', s.dataset.swStep === step);
+  }});
+  // Auto-refresh status on entering steps 2 + 3 so counts are fresh
+  if (step === 'corpus' || step === 'indices') swRefreshStatus();
+}}
+
+async function swRefreshStatus() {{
+  try {{
+    const res = await fetch('/api/setup/status');
+    const d = await res.json();
+    const proj = d.project || {{slug: 'unknown'}};
+    // Corpus step
+    const cstat = document.getElementById('sw-corpus-status');
+    if (cstat) {{
+      cstat.innerHTML =
+        '<strong>Active project:</strong> <code>' + proj.slug + '</code>'
+        + (proj.is_default ? ' <em>(legacy default)</em>' : '')
+        + '<br><strong>Documents:</strong> ' + (d.n_documents || 0).toLocaleString()
+        + ' &middot; <strong>Complete:</strong> ' + (d.n_complete || 0).toLocaleString()
+        + ' &middot; <strong>Chunks:</strong> ' + (d.n_chunks || 0).toLocaleString();
+    }}
+    // Indices step
+    const istat = document.getElementById('sw-indices-status');
+    if (istat) {{
+      const rapt = d.raptor_levels || {{}};
+      const raptStr = Object.keys(rapt).length
+        ? Object.keys(rapt).sort().map(k => k + '=' + rapt[k]).join(', ')
+        : '(not built)';
+      istat.innerHTML =
+        '<strong>Topic clusters:</strong> ' + (d.n_with_topic || 0)
+        + ' papers tagged &middot; <strong>RAPTOR:</strong> ' + raptStr
+        + ' &middot; <strong>Wiki pages:</strong> ' + (d.n_wiki_pages || 0);
+    }}
+  }} catch (_) {{}}
+}}
+
+async function swLoadProjectsForWizard() {{
+  const list = document.getElementById('sw-project-list');
+  list.innerHTML = 'Loading…';
+  try {{
+    const res = await fetch('/api/projects');
+    const d = await res.json();
+    const active = d.active_slug;
+    const running = d.running_slug;
+    if (!d.projects || !d.projects.length) {{
+      list.innerHTML = '<div style="padding:10px;color:var(--fg-muted);">No projects yet. Create one on the right.</div>';
+      return;
+    }}
+    list.innerHTML = d.projects.map(p => {{
+      const mark = p.slug === active ? '●' : '○';
+      const running_mark = p.slug === running
+        ? ' <span style="color:var(--accent);font-size:10px;">(running here)</span>'
+        : '';
+      const useBtn = p.slug === active ? '' :
+        `<button onclick="swUseProject('${{p.slug}}')">Use</button>`;
+      return `<div style="padding:6px 10px;border-bottom:1px solid var(--border);
+                           display:flex;align-items:center;gap:8px;">
+        <span style="color:var(--accent);">${{mark}}</span>
+        <strong style="flex:1;">${{p.slug}}</strong>${{running_mark}}
+        ${{useBtn}}</div>`;
+    }}).join('');
+  }} catch (exc) {{
+    list.innerHTML = '<div style="padding:10px;color:var(--danger);">Failed: ' + exc + '</div>';
+  }}
+}}
+
+async function swUseProject(slug) {{
+  try {{
+    const res = await fetch('/api/projects/use', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{slug: slug}}),
+    }});
+    const d = await res.json();
+    document.getElementById('sw-project-status').textContent =
+      d.message || ('Active project: ' + slug);
+    swLoadProjectsForWizard();
+    swRefreshStatus();
+  }} catch (exc) {{
+    document.getElementById('sw-project-status').textContent = 'Failed: ' + exc;
+  }}
+}}
+
+async function swCreateProject() {{
+  const slug = (document.getElementById('sw-new-slug').value || '').trim();
+  if (!slug) return;
+  if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(slug)) {{
+    document.getElementById('sw-project-status').textContent =
+      'Slug must be lowercase alphanumerics + hyphens.';
+    return;
+  }}
+  document.getElementById('sw-project-status').textContent =
+    'Creating ' + slug + '…';
+  try {{
+    const res = await fetch('/api/projects/init', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{slug: slug}}),
+    }});
+    const d = await res.json();
+    if (!res.ok) {{
+      document.getElementById('sw-project-status').textContent =
+        'Failed: ' + (d.detail || res.status);
+      return;
+    }}
+    document.getElementById('sw-project-status').textContent =
+      '✓ Created ' + slug + '. Use it below to activate.';
+    swLoadProjectsForWizard();
+  }} catch (exc) {{
+    document.getElementById('sw-project-status').textContent = 'Failed: ' + exc;
+  }}
+}}
+
+// ── Corpus step ─────────────────────────────────────────────────────
+async function swUploadPDFs() {{
+  const input = document.getElementById('sw-upload-files');
+  if (!input.files || !input.files.length) return;
+  const fd = new FormData();
+  for (const f of input.files) fd.append('files', f);
+  fd.append('start_ingest',
+    document.getElementById('sw-upload-start-ingest').checked ? 'true' : 'false');
+  const log = document.getElementById('sw-ingest-log');
+  log.textContent = 'Uploading ' + input.files.length + ' file(s)…\\n';
+  try {{
+    const res = await fetch('/api/corpus/upload', {{method: 'POST', body: fd}});
+    const d = await res.json();
+    if (!res.ok) {{
+      log.textContent += 'Upload failed: ' + (d.detail || res.status) + '\\n';
+      return;
+    }}
+    log.textContent += '✓ Staged ' + d.n_files + ' file(s) to ' + d.staging_dir + '\\n';
+    if (d.job_id) swAttachLogStream(d.job_id, 'sw-ingest-log');
+  }} catch (exc) {{
+    log.textContent += 'Upload failed: ' + exc + '\\n';
+  }}
+}}
+
+async function swIngestDirectory() {{
+  const path = (document.getElementById('sw-ingest-path').value || '').trim();
+  if (!path) return;
+  const fd = new FormData();
+  fd.append('path', path);
+  fd.append('recursive',
+    document.getElementById('sw-ingest-recursive').checked ? 'true' : 'false');
+  fd.append('force',
+    document.getElementById('sw-ingest-force').checked ? 'true' : 'false');
+  const log = document.getElementById('sw-ingest-log');
+  log.textContent = 'Starting ingest of ' + path + '…\\n';
+  try {{
+    const res = await fetch('/api/corpus/ingest-directory',
+      {{method: 'POST', body: fd}});
+    const d = await res.json();
+    if (!res.ok) {{
+      log.textContent += 'Failed: ' + (d.detail || res.status) + '\\n';
+      return;
+    }}
+    swAttachLogStream(d.job_id, 'sw-ingest-log');
+  }} catch (exc) {{
+    log.textContent += 'Failed: ' + exc + '\\n';
+  }}
+}}
+
+// ── Indices step ────────────────────────────────────────────────────
+async function swRunIndex(kind) {{
+  const fd = new FormData();
+  let url = '';
+  if (kind === 'cluster') {{
+    url = '/api/catalog/cluster';
+    fd.append('rebuild',
+      document.getElementById('sw-cluster-rebuild').checked ? 'true' : 'false');
+  }} else if (kind === 'raptor') {{
+    url = '/api/catalog/raptor/build';
+  }} else if (kind === 'wiki') {{
+    url = '/api/wiki/compile';
+    fd.append('rebuild',
+      document.getElementById('sw-wiki-rebuild').checked ? 'true' : 'false');
+    fd.append('rewrite_stale',
+      document.getElementById('sw-wiki-stale').checked ? 'true' : 'false');
+  }}
+  const log = document.getElementById('sw-indices-log');
+  log.textContent = 'Starting ' + kind + '…\\n';
+  try {{
+    const res = await fetch(url, {{method: 'POST', body: fd}});
+    const d = await res.json();
+    if (!res.ok) {{
+      log.textContent += 'Failed: ' + (d.detail || res.status) + '\\n';
+      return;
+    }}
+    swAttachLogStream(d.job_id, 'sw-indices-log');
+  }} catch (exc) {{
+    log.textContent += 'Failed: ' + exc + '\\n';
+  }}
+}}
+
+// ── Book step ───────────────────────────────────────────────────────
+async function swCreateBook() {{
+  const title = (document.getElementById('sw-book-title').value || '').trim();
+  if (!title) {{
+    document.getElementById('sw-book-status').textContent = 'Title is required.';
+    return;
+  }}
+  const type = document.getElementById('sw-book-type').value;
+  const desc = document.getElementById('sw-book-desc').value.trim();
+  const target = document.getElementById('sw-book-target').value;
+  const payload = {{
+    title: title, type: type, description: desc, bootstrap: true,
+  }};
+  if (target) payload.target_chapter_words = parseInt(target, 10);
+  const stat = document.getElementById('sw-book-status');
+  stat.textContent = 'Creating…';
+  try {{
+    const res = await fetch('/api/book/create', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify(payload),
+    }});
+    const d = await res.json();
+    if (!res.ok) {{
+      stat.innerHTML = '<span style="color:var(--danger);">Failed: '
+        + (d.detail || res.status) + '</span>';
+      return;
+    }}
+    const flatNote = d.is_flat
+      ? ' &middot; Auto-created chapter 1 with sections: '
+        + (d.default_sections || []).join(', ')
+      : '';
+    stat.innerHTML = '<span style="color:var(--success);">✓ Created '
+      + d.display_name + ' "' + d.title + '"</span>'
+      + '<br><code>' + d.book_id.slice(0, 8) + '</code>' + flatNote
+      + '<br>Next: restart <code>sciknow book serve "' + d.title
+      + '"</code> to open this book in the reader.';
+  }} catch (exc) {{
+    stat.innerHTML = '<span style="color:var(--danger);">Failed: ' + exc + '</span>';
+  }}
+}}
+
+// Shared SSE log attacher — renders `log` events line-by-line, and
+// updates status counts when the job ends.
+function swAttachLogStream(jobId, logElId) {{
+  _swCurrentJob = jobId;
+  const logEl = document.getElementById(logElId);
+  const source = new EventSource('/api/stream/' + jobId);
+  source.onmessage = function(e) {{
+    const evt = JSON.parse(e.data);
+    if (evt.type === 'log') {{
+      logEl.textContent += evt.text + '\\n';
+      logEl.scrollTop = logEl.scrollHeight;
+    }} else if (evt.type === 'progress') {{
+      if (evt.detail && evt.detail.startsWith('$ ')) {{
+        logEl.textContent += evt.detail + '\\n';
+      }}
+    }} else if (evt.type === 'error') {{
+      logEl.textContent += 'ERROR: ' + evt.message + '\\n';
+      source.close(); _swCurrentJob = null;
+      swRefreshStatus();
+    }} else if (evt.type === 'completed' || evt.type === 'done') {{
+      logEl.textContent += '— done —\\n';
+      source.close(); _swCurrentJob = null;
+      swRefreshStatus();
+    }}
+  }};
 }}
 
 
