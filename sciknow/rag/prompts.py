@@ -1580,3 +1580,152 @@ def gaps_json(
         paper_list=paper_lines,
         draft_list=draft_lines,
     )
+
+
+# ── Phase 46 — Two-stage citation insertion (AI-Scientist pattern) ────
+#
+# Split the "where does a citation belong?" decision from the "what goes
+# there?" decision. Pass 1 sees only the draft + the canonical section
+# taxonomy and emits {location, claim, query} records. Pass 2 sees each
+# location + the top-K hybrid-search candidates and picks (or rejects).
+#
+# The gain over one-shot write-with-citations:
+# - Placement becomes auditable (each [N] has an explicit rationale)
+# - Retrieval is budget-bounded per claim, not dependent on whatever
+#   happened to be in the writer's context window
+# - "No good citation available" is an explicit output, so hallucinated
+#   [N] markers drop sharply
+
+
+CITATION_NEEDS_SYSTEM = """\
+You are a citation editor for a scientific manuscript. You see only the \
+draft text — no sources. Your job: identify the passages where an inline \
+citation is needed (missing) or where the existing citation looks weak \
+(e.g. a sweeping claim propped up by one reference), and emit a precise \
+search query that a paper-retrieval system could use to find supporting \
+evidence.
+
+Rules:
+- Focus on FALSIFIABLE factual claims: specific numbers, mechanisms, \
+attributions, named effects, scope conditions, causal directions, \
+historical statements, named benchmarks or datasets.
+- Skip aesthetic / opinion / scene-setting sentences.
+- Skip claims that ALREADY carry a citation unless the claim looks \
+under-supported ("the literature shows [3]" with just one [3] is a red \
+flag).
+- The query should be 4–12 words, technical, concrete. Think "what you \
+would type into Google Scholar." Not a question — a noun phrase.
+- The location must be a VERBATIM substring of the draft (a sentence or \
+clause). Quote it exactly, including punctuation. Do not paraphrase.
+- If the section has no claims that warrant a citation, return an empty \
+list. Do NOT pad.
+
+Respond ONLY with valid JSON in this shape:
+
+{
+  "needs": [
+    {
+      "location": "Global surface temperature has risen by about 1.1 °C since 1850.",
+      "claim": "magnitude of warming since preindustrial baseline",
+      "query": "preindustrial global mean surface temperature change 1850 present",
+      "reason": "specific number with no citation",
+      "existing_citations": []
+    },
+    {
+      "location": "Aerosol forcing remains the largest source of uncertainty in climate projections [3].",
+      "claim": "aerosol forcing dominates projection uncertainty",
+      "query": "anthropogenic aerosol radiative forcing uncertainty climate projections",
+      "reason": "sweeping claim supported by only one reference",
+      "existing_citations": ["[3]"]
+    }
+  ]
+}"""
+
+
+CITATION_NEEDS_USER = """\
+Section: {section_type} — {section_title}
+
+Draft:
+---
+{draft_content}
+---
+
+Identify places that need (additional) citations. Return JSON only."""
+
+
+def citation_needs(
+    section_type: str,
+    section_title: str,
+    draft_content: str,
+) -> tuple[str, str]:
+    return CITATION_NEEDS_SYSTEM, CITATION_NEEDS_USER.format(
+        section_type=section_type or "unknown",
+        section_title=section_title or "",
+        draft_content=draft_content[:12000],
+    )
+
+
+CITATION_CHOOSE_SYSTEM = """\
+You are selecting a citation for a single claim in a scientific draft. \
+You see the claim + the top-K hybrid-search candidates from the author's \
+paper corpus. Your job: pick AT MOST TWO candidates that directly \
+support the claim, or explicitly return NONE if no candidate is a good fit.
+
+Rules:
+- Prefer DIRECT support over tangential support. A paper that measures \
+the claimed quantity beats a paper that mentions it in passing.
+- Prefer PRIMARY sources over reviews unless the claim is itself \
+"the literature agrees that…" — then a review is appropriate.
+- Prefer RECENT papers over older ones when the claim concerns current \
+understanding (post-2015 for contemporary work); prefer ORIGINAL papers \
+when the claim is historical.
+- If none of the candidates is a good fit, return "verdict": "NONE" with \
+a short reason. DO NOT force a citation.
+- Quality > quantity. One excellent citation beats three mediocre ones.
+
+Respond ONLY with valid JSON:
+
+{
+  "verdict": "CITE" | "NONE",
+  "chosen": [
+    {"candidate_index": 2, "confidence": 0.9, "why": "reports the exact number"},
+    {"candidate_index": 5, "confidence": 0.6, "why": "provides the mechanism"}
+  ],
+  "reason": "plain-English explanation (1 sentence)"
+}"""
+
+
+CITATION_CHOOSE_USER = """\
+Claim: {claim}
+Draft context (the sentence where the citation goes):
+  "{location}"
+
+Top {k} candidates from the corpus:
+{candidates}
+
+Pick up to 2 that directly support the claim, or return NONE.
+Return JSON only."""
+
+
+def citation_choose(
+    claim: str,
+    location: str,
+    candidates: list,
+) -> tuple[str, str]:
+    # Format candidates like the retrieval context but trimmed —
+    # one numbered block per candidate so the LLM can refer by index.
+    blocks = []
+    for i, c in enumerate(candidates):
+        title  = (c.get("title")   if isinstance(c, dict) else getattr(c, "title",   "")) or ""
+        year   = (c.get("year")    if isinstance(c, dict) else getattr(c, "year",    "")) or ""
+        section = (c.get("section") if isinstance(c, dict) else getattr(c, "section_type", "")) or ""
+        preview = (c.get("preview") if isinstance(c, dict) else getattr(c, "content_preview", "")) or ""
+        blocks.append(
+            f"[{i}] ({year}, {section}) {title}\n    {preview[:350]}"
+        )
+    return CITATION_CHOOSE_SYSTEM, CITATION_CHOOSE_USER.format(
+        claim=claim,
+        location=location,
+        k=len(candidates),
+        candidates="\n".join(blocks) or "(no candidates)",
+    )

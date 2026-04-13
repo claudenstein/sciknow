@@ -5200,6 +5200,104 @@ def l1_phase45_watchlist_surface() -> None:
         )
 
 
+def l1_phase46_citation_insert_surface() -> None:
+    """Phase 46.A — two-stage citation insertion prompts + generator + CLI.
+
+    Static checks. Exercises the JSON parsers on synthetic LLM output
+    to guard against a tolerance regression, and confirms the CLI hook
+    is registered.
+    """
+    import inspect
+
+    from sciknow.rag import prompts as rag_prompts
+    from sciknow.core import book_ops
+    from sciknow.cli import book as book_cli
+
+    # Prompt functions exist and return (system, user) tuples
+    for fn_name in ("citation_needs", "citation_choose"):
+        assert hasattr(rag_prompts, fn_name), f"prompts missing {fn_name}"
+    s1, u1 = rag_prompts.citation_needs("methods", "Data collection",
+                                         "Global temperature rose 1.1 °C since 1850.")
+    assert "location" in s1 and "verbatim" in s1.lower()
+    assert "methods" in u1
+
+    s2, u2 = rag_prompts.citation_choose(
+        claim="warming magnitude", location="rose 1.1 °C",
+        candidates=[{"title": "Foo", "year": 2020, "section": "results",
+                     "preview": "Observed 1.1 °C rise since preindustrial.",
+                     "doc_id": "x", "chunk_id": "y"}],
+    )
+    assert "CITE" in s2 and "NONE" in s2
+
+    # JSON parsers are tolerant of fenced code blocks + missing keys
+    parsed = book_ops._parse_citation_needs_json(
+        "```json\n{\"needs\": [{\"location\": \"x\", \"claim\": \"y\", \"query\": \"z\"}]}\n```"
+    )
+    assert isinstance(parsed, list) and parsed and parsed[0]["location"] == "x"
+    assert book_ops._parse_citation_needs_json("garbage") == []
+    choice = book_ops._parse_citation_choice_json(
+        '{"verdict": "CITE", "chosen": [{"candidate_index": 0, "confidence": 0.9}]}'
+    )
+    assert choice["verdict"] == "CITE"
+    bad = book_ops._parse_citation_choice_json("not json")
+    assert bad["verdict"] == "NONE"
+
+    # The streaming generator exists + is callable
+    assert callable(getattr(book_ops, "insert_citations_stream", None))
+
+    # CLI command registered
+    callbacks = {c.callback for c in book_cli.app.registered_commands}
+    assert book_cli.insert_citations in callbacks, (
+        "`sciknow book insert-citations` not registered"
+    )
+    # And _consume_events recognises the new event types (a whitelist
+    # grep: if someone deletes the handlers, this test flags it).
+    import inspect as _inspect
+    src = _inspect.getsource(book_cli._consume_events)
+    for token in ("citation_needs", "citation_candidates",
+                  "citation_selected", "citation_skipped",
+                  "citation_inserted"):
+        assert token in src, f"_consume_events missing handler for {token!r}"
+
+
+def l1_phase46_citation_verify_surface() -> None:
+    """Phase 46.B — external citation verification module + CLI."""
+    from sciknow.core import citation_verify as cv
+    from sciknow.cli import book as book_cli
+
+    # Verdict semantics: title similarity thresholds must match the
+    # AutoResearchClaw calibration (0.80 / 0.50) per docs/COMPARISON.md.
+    assert cv.T_HIGH == 0.80
+    assert cv.T_LOW  == 0.50
+    assert cv._verdict_from_similarity(0.9)  == cv.VERIFIED
+    assert cv._verdict_from_similarity(0.6)  == cv.SUSPICIOUS
+    assert cv._verdict_from_similarity(0.2)  == cv.HALLUCINATED
+
+    # Jaccard sanity
+    assert cv.title_similarity("A B C", "A B C") == 1.0
+    assert cv.title_similarity("", "anything")   == 0.0
+    assert 0 < cv.title_similarity(
+        "Global surface temperature trends since 1850",
+        "Global temperature trend since 1850 preindustrial",
+    ) < 1.0
+
+    # CitationRecord → dict roundtrip
+    r = cv.CitationRecord(
+        marker=1, title="T", year=2020, doi="10.1/x",
+        arxiv_id=None, metadata_source="crossref",
+    )
+    d = r.as_dict()
+    for k in ("marker", "title", "verdict", "similarity", "notes",
+              "external_title", "external_source"):
+        assert k in d, f"CitationRecord.as_dict missing {k}"
+
+    # CLI command registered
+    callbacks = {c.callback for c in book_cli.app.registered_commands}
+    assert book_cli.verify_citations in callbacks, (
+        "`sciknow book verify-citations` not registered"
+    )
+
+
 def l1_bench_harness_surface() -> None:
     """Phase 44 — the bench harness module loads and exposes the expected
     surface (run/run_layer/LAYERS/BenchMetric). Each layer has >= 1
@@ -6260,6 +6358,9 @@ L1_TESTS: list[Callable] = [
     # Phase 45 — project types + watchlist
     l1_phase45_project_types,
     l1_phase45_watchlist_surface,
+    # Phase 46 — auditable scientific writing (citation insert + verify)
+    l1_phase46_citation_insert_surface,
+    l1_phase46_citation_verify_surface,
 ]
 
 L2_TESTS: list[Callable] = [

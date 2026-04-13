@@ -127,6 +127,66 @@ Estimated: 8–10 focused days. Every step is prompt + Python, no new DB migrati
 
 Periodic check cadence: weekly is probably enough; none of these are security-critical. `sciknow watch list --check` from a `cron` entry or a manual tick at the start of each planning session covers it.
 
-## Appendix — Seed watchlist rationale
+## Appendix A — Seed watchlist rationale
 
 See `sciknow/core/watchlist.py:SEED_REPOS`. Each entry carries a one-line note explaining what idea we already stole or plan to steal. The point is that **sciknow's debt to these upstream projects is now captured in a machine-readable form** — not a blog post, not a CREDITS line, but a structured list that evolves with the field.
+
+## Appendix B — FARS deep-dive follow-up
+
+A second research pass (Phase 46 audit) confirmed what the first pass suggested but did not prove: **the FARS framework is not public and there is no companion technical paper.**
+
+Confirmed negatives:
+- `gitlab.com/fars-a` hosts 185 public repositories. All 185 are concrete research-project outputs (slugs like `partial-roundtrip-stability-seed-selection`, `delta-rule-momentum-cl`). None is named `fars-core` / `fars-framework` / `fars-runner` / similar. The org has no subgroups.
+- `github.com/analemmaai` is a verified-empty org. `github.com/analemma`, `github.com/analemma-intelligence`, `github.com/analemma-ai`, `github.com/fars-a`, `github.com/fars-ai` all 404.
+- arXiv title search `"Fully Automated Research System"` → 0 results. arXiv all-field `analemma AND FARS` → 0. Semantic Scholar `Analemma FARS Fully Automated Research System` → empty. The blog post explicitly frames the 100-paper livestream *as* the evaluation; no methodology paper is referenced.
+- **`open-fars/openfars`** is a 400-LOC fan tribute with *mocked* experiments (`src/agents/experiment.py` does `results = {"accuracy": 0.85 + random.random() * 0.1}`). It is architectural cues only — no retrieval, no reviewer, no cost tracking.
+
+What IS verifiable about FARS (by reverse-engineering the output repos):
+
+**`task_plan.json` schema**, cross-checked across two output repos:
+
+```json
+[
+  {
+    "index": 0,
+    "category": "Environment Configuration",
+    "title": "Dependencies Installation and Project Structure Initialization",
+    "description": "Set up … Reference: \"Denoising Diffusion Implicit Models\" | https://arxiv.org/abs/2010.02502",
+    "status": "pending",
+    "summary": ""
+  }
+]
+```
+
+Category vocabulary (closed): `Environment Configuration`, `Baseline Experiment`, `Main Experiment`, `Analysis Experiment`, `Optimization`, `Effectiveness Evaluation`. Typical plan is 9–14 tasks. Only two statuses are observed (`pending`, `completed`); there is no `running` or `failed`. `summary` is empty at plan-time and populated by the Experiment agent after completion — it is the agent's write-back channel into the plan.
+
+Per-project directory layout (`idea/` + `exp/`):
+
+```
+idea/
+  metadata.json       — {proposal_id, quality_score, finalized_at}  (1–5 rubric from the pre-plan review gate)
+  plan.json           — [{category, title, description, steps: {step1, step2, …}}]
+  proposal.md         — human-readable hypothesis with inline LaTeX math
+  references/<paper-slug>/
+    meta/bibtex.txt
+    meta/meta_info.txt
+    meta/toc.txt
+    sections/*.md     — one markdown per paper section
+exp/
+  task_plan.json
+  .gitignore
+```
+
+**Verdict**: the FARS directory layout is a lightweight but coherent design worth referencing, not implementing verbatim. sciknow's existing `projects/<slug>/data/` already provides the per-project scope. The task_plan.json shape would fit cleanly inside a future resumable-autowrite feature (Phase 46.E from the main ranking).
+
+## Appendix C — Additional research leads surfaced by the Phase 46 audit
+
+Three systems not in the main audit that are more technically substantive than FARS:
+
+**CycleResearcher** (arXiv:2411.00816, ICLR 2025) — `github.com/zhu-minjun/Researcher`. Two fine-tuned LLMs: `cycle_researcher.py` generates, `cycle_reviewer.py` scores. CycleReviewer is *trained* on a Review-5k dataset of OpenReview triples and reports **MAE 26.89% lower than individual human reviewers** at score prediction. Feedback is applied via reinforcement learning on preferences, not prompt-level critique. Also ships an integrated AI-text detector (`fast_detect_gpt.py`) so a draft can be gated before publication. Most actionable porting target for sciknow when the DGX Spark arrives: a small fine-tuned CycleReviewer-style judge trained on OpenReview triples and used as the autowrite scorer.
+
+**DeepScientist** (arXiv:2509.26603, ICLR 2026 top-10) — `github.com/ResearAI/DeepScientist`. Frames autonomous discovery as Bayesian optimization with three layers: a **Findings Memory** (cumulative lesson store), a scoring function, and **hierarchical fidelity levels** — cheap exploration ideas get promoted to expensive validation only after passing early gates. 20,000 GPU-hours over ~1,100 validated findings. Also: "one repo per quest" with **failed branches preserved as named assets**, and a `Research Map` canvas. The fidelity hierarchy is the key idea sciknow lacks — today every autowrite section runs the full loop. Adding a cheap-to-expensive tier (`book autowrite --tier cheap` → `--tier full`) with an explicit promotion gate would let us explore many section drafts cheaply before committing GPU time.
+
+**Zochi** (intology.ai/blog/zochi-tech-report) — first main-conference AI-authored ACL-2025 paper. Two distinctive moves relative to the four main audit systems: (a) **narrow-then-ideate** — crawl recent arXiv, cluster by emerging subtopics, *then* generate hypotheses, instead of hypothesizing from a user-supplied topic; (b) the ACL finding ("partial compliance" vulnerability pattern) came from **systematic probing**, not open-ended ideation. Argues for a `scout` stage in sciknow's workflow (cluster recent literature → surface emerging subareas → then run `book gaps` against those subareas).
+
+**Phase 47 candidate** (post-Phase-46): combine DeepScientist's fidelity-tier idea with sciknow's existing scoring to add a `book autowrite --tier {cheap, full}` dimension. Pairs with the soon-to-arrive DGX Spark hardware budget.

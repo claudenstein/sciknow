@@ -179,12 +179,55 @@ def _consume_events(gen, console):
                 v = claim.get("verdict", "?")
                 color = "green" if v == "SUPPORTED" else "yellow" if v == "EXTRAPOLATED" else "red"
                 console.print(f"  [{color}]{v}[/{color}]: {claim.get('text', '')[:80]}")
+        elif t == "citation_needs":
+            # Phase 46.A — two-stage citation insertion: pass-1 output.
+            console.print()
+            console.print(Rule(f"[bold]Citation opportunities[/bold]  ({event.get('count', 0)} found)"))
+            for i, n in enumerate(event.get("needs", []), 1):
+                loc = (n.get("location") or "")[:90]
+                q   = n.get("query") or ""
+                console.print(f"  [cyan]{i}.[/cyan] {loc}")
+                console.print(f"      [dim]query: {q}[/dim]")
+            console.print()
+        elif t == "citation_candidates":
+            # Don't print the full candidate list per need — it's noisy;
+            # just show the count so the user sees progress.
+            console.print(
+                f"  [dim]→ retrieved {len(event.get('candidates', []))} candidates "
+                f"for need #{event.get('index', '?') + 1 if isinstance(event.get('index'), int) else '?'}[/dim]"
+            )
+        elif t == "citation_selected":
+            m = event.get("marker", "?")
+            src = event.get("source", {})
+            conf = event.get("confidence", 0.0)
+            console.print(
+                f"  [green]+[/green] [{m}] {src.get('title', '')[:70]} "
+                f"({src.get('year', '')}) [dim]conf={conf:.2f}[/dim]"
+            )
+        elif t == "citation_skipped":
+            r = event.get("reason", "")
+            console.print(f"  [yellow]~[/yellow] skipped: {r}")
+        elif t == "citation_inserted":
+            console.print(
+                f"\n[bold]Inserted {event.get('count', 0)} citation(s)[/bold] "
+                f"([dim]{event.get('skipped', 0)} skipped[/dim])"
+            )
         elif t == "completed":
             completed = event
             wc = event.get("word_count", 0)
             did = event.get("draft_id", "")
             if wc:
                 console.print(f"\n[green]\u2713 Done[/green]  ({wc} words)")
+            if "n_inserted" in event:
+                # Phase 46.A — citation-insert completion summary
+                ni = event.get("n_inserted", 0)
+                ns = event.get("n_skipped", 0)
+                nn = event.get("n_needs", 0)
+                saved = " [dim](dry-run)[/dim]" if event.get("saved") is False else ""
+                console.print(
+                    f"\n[green]\u2713[/green] Citation pass done: "
+                    f"{ni} inserted / {nn} identified / {ns} skipped{saved}"
+                )
             if did:
                 console.print(f"[dim]Draft ID: {did[:8]}[/dim]")
         elif t == "error":
@@ -908,6 +951,154 @@ def plan(
         session.commit()
     console.print("[green]✓ Book plan saved.[/green]")
     console.print("[dim]This plan will be injected into all future `book write` calls.[/dim]")
+
+
+# ── insert-citations (Phase 46.A — two-stage citation loop) ─────────────────────
+
+@app.command(name="insert-citations")
+def insert_citations(
+    draft_id: Annotated[str, typer.Argument(help="Draft ID (first 8+ chars).")],
+    model: str | None = typer.Option(None, "--model"),
+    candidate_k: int = typer.Option(8, "--candidate-k", "-k",
+                                     help="Top-K hybrid-search candidates to show pass-2 per claim."),
+    max_needs: int | None = typer.Option(None, "--max-needs",
+                                          help="Cap on citation opportunities to process (saves LLM calls)."),
+    dry_run: bool = typer.Option(False, "--dry-run",
+                                  help="Don't write a new version — print what would change."),
+    save: bool = typer.Option(True, "--save/--no-save",
+                               help="Persist a new draft version with inserted [N] markers."),
+):
+    """
+    Phase 46.A — two-stage citation insertion (AI-Scientist pattern).
+
+    Pass 1: LLM sees only the draft, identifies where a citation is
+            needed, emits {location, claim, query} records.
+    Pass 2: For each need, hybrid search retrieves top-K candidates,
+            LLM picks (or rejects) with confidence scores.
+    Apply:  Deterministic single-pass rewrite inserts [N] markers at
+            the identified locations; sources are merged into the
+            draft's JSONB ``sources`` column. Saves as a new version.
+
+    This is strictly better than writing-with-citations in one shot
+    because placement is auditable, retrieval is budget-bounded, and
+    "no good citation available" is an explicit output.
+
+    Examples:
+
+      sciknow book insert-citations 3f2a1b4c
+
+      sciknow book insert-citations 3f2a1b4c --dry-run   # preview
+
+      sciknow book insert-citations 3f2a1b4c --max-needs 5 -k 12
+    """
+    from sciknow.core.book_ops import insert_citations_stream
+
+    console.print()
+    gen = insert_citations_stream(
+        draft_id, model=model, candidate_k=candidate_k,
+        max_needs=max_needs, dry_run=dry_run, save=save,
+    )
+    _consume_events(gen, console)
+
+
+# ── verify-citations (Phase 46.B — external citation verification) ──────────────
+
+@app.command(name="verify-citations")
+def verify_citations(
+    draft_id: Annotated[str, typer.Argument(help="Draft ID (first 8+ chars).")],
+    output: Path | None = typer.Option(
+        None, "--output", "-o",
+        help="Write the full JSON report to this file (default: print summary only).",
+    ),
+    show_records: bool = typer.Option(
+        True, "--records/--no-records",
+        help="Print the per-citation verdict table.",
+    ),
+):
+    """
+    Phase 46.B — external citation verification (AutoResearchClaw pattern).
+
+    Walks the draft's sources and cross-checks each cited paper against
+    external registries:
+
+      1. arXiv ID    → Semantic Scholar arXiv endpoint (JSON).
+      2. DOI         → Crossref canonical record.
+      3. Title only  → OpenAlex search; top hit.
+
+    Each cited source gets a verdict based on title-Jaccard to the
+    authoritative record:
+
+      VERIFIED      ≥ 0.80
+      SUSPICIOUS    0.50 – 0.80
+      HALLUCINATED  < 0.50 or no match at all
+      SKIPPED       no identifier AND no title to query with
+
+    Complementary to the in-corpus ``book review`` grounding pass —
+    that checks whether claims match the retrieved evidence; this
+    checks whether the cited sources are real published papers.
+
+    Examples:
+
+      sciknow book verify-citations 3f2a1b4c
+
+      sciknow book verify-citations 3f2a1b4c -o verification.json
+    """
+    import json as _json
+    from sciknow.core.citation_verify import (
+        HALLUCINATED, SKIPPED, SUSPICIOUS, VERIFIED, verify_draft,
+    )
+
+    console.print(f"[bold]Verifying citations[/bold] on draft {draft_id}…")
+    report = verify_draft(draft_id)
+    if report.n_citations == 0:
+        console.print("[yellow]No citations on this draft (nothing to verify).[/yellow]")
+        raise typer.Exit(0)
+
+    # Summary line with colored counts
+    counts = [
+        (f"[green]✓ verified {report.n_verified}[/green]", report.n_verified),
+        (f"[yellow]? suspicious {report.n_suspicious}[/yellow]", report.n_suspicious),
+        (f"[red]✗ hallucinated {report.n_hallucinated}[/red]", report.n_hallucinated),
+        (f"[dim]- skipped {report.n_skipped}[/dim]", report.n_skipped),
+    ]
+    console.print(
+        f"[bold]{report.n_citations}[/bold] citations: "
+        + "  ".join(label for label, _ in counts)
+    )
+
+    if show_records:
+        table = Table(title=f"Citation Verdicts — draft {report.draft_id[:8]}",
+                      box=box.SIMPLE_HEAD, expand=True)
+        table.add_column("[N]", justify="right", width=4)
+        table.add_column("Verdict", width=14)
+        table.add_column("Sim", justify="right", width=5)
+        table.add_column("Source", width=10)
+        table.add_column("Title",  ratio=3)
+        table.add_column("DOI / arXiv", ratio=1, style="dim")
+        table.add_column("Notes", ratio=1, style="dim", overflow="fold")
+
+        for r in report.records:
+            color = (
+                "green"  if r.verdict == VERIFIED else
+                "yellow" if r.verdict == SUSPICIOUS else
+                "red"    if r.verdict == HALLUCINATED else
+                "dim"
+            )
+            ident = r.doi or (f"arXiv:{r.arxiv_id}" if r.arxiv_id else "—")
+            table.add_row(
+                str(r.marker if r.marker is not None else "—"),
+                f"[{color}]{r.verdict}[/{color}]",
+                f"{r.similarity:.2f}" if r.similarity else "—",
+                r.external_source or "—",
+                (r.title or "")[:80],
+                ident[:40],
+                r.notes[:60],
+            )
+        console.print(table)
+
+    if output is not None:
+        output.write_text(_json.dumps(report.as_dict(), indent=2))
+        console.print(f"[dim]Full report written to {output}[/dim]")
 
 
 # ── review ─────────────────────────────────────────────────────────────────────

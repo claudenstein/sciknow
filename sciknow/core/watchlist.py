@@ -88,6 +88,21 @@ SEED_REPOS: list[dict] = [
                 "v2's BFTS is derived from. Relevant if we ever want to add "
                 "agentic tree search to autowrite.",
     },
+    # Phase 46 audit surfaced these three as more substantive than FARS.
+    {
+        "url": "https://github.com/zhu-minjun/Researcher",
+        "note": "CycleResearcher (arXiv:2411.00816, ICLR 2025). Ships a "
+                "fine-tuned CycleReviewer judge model (MAE 26.89% below human "
+                "reviewers on OpenReview triples). Main porting target when "
+                "DGX Spark arrives — swap in as the autowrite scorer.",
+    },
+    {
+        "url": "https://github.com/ResearAI/DeepScientist",
+        "note": "DeepScientist (arXiv:2509.26603, ICLR 2026 top-10). "
+                "Findings Memory + Bayesian optimization + hierarchical "
+                "fidelity tiers (cheap → expensive promotion gates). "
+                "Candidate inspiration for a `book autowrite --tier` flag.",
+    },
 ]
 
 

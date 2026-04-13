@@ -4085,3 +4085,340 @@ def autowrite_chapter_all_sections_stream(
         "n_failed": n_failed,
         "drafts": final_drafts,
     }
+
+
+# ════════════════════════════════════════════════════════════════════
+# Phase 46 — Two-stage citation insertion (A)
+# ════════════════════════════════════════════════════════════════════
+#
+# AI-Scientist's `citation_first_prompt` / `citation_second_prompt`
+# ported into sciknow. Pass 1 sees only the draft and emits
+# {location, claim, query} records. Pass 2 sees each location + the
+# top-K hybrid-search candidates and picks (or rejects). The event
+# stream mirrors the other generators so the CLI and the web reader
+# can subscribe uniformly:
+#
+#   progress, citation_scan_start, citation_needs, citation_candidates,
+#   citation_selected | citation_skipped, citation_inserted,
+#   completed, error
+
+
+def insert_citations_stream(
+    draft_id: str,
+    *,
+    model: str | None = None,
+    candidate_k: int = 8,
+    max_needs: int | None = None,
+    dry_run: bool = False,
+    save: bool = True,
+) -> Iterator[Event]:
+    """Run the two-stage citation insertion pass over a saved draft.
+
+    Phase 46.A — auditable citations. Each yielded event is typed; the
+    CLI/web layers render them. The heavy work is LLM pass-1 (identify
+    needs), hybrid retrieval per need, LLM pass-2 (choose), and a
+    single deterministic insertion pass that rewrites the draft text.
+
+    Parameters:
+        draft_id:     prefix of the drafts.id (matches `LIKE draft_id%`)
+        model:        LLM override; falls back to section-model override,
+                      then settings.llm_model
+        candidate_k:  top-K candidates per claim to show pass-2
+        max_needs:    cap the number of locations processed (saves LLM
+                      calls when a draft has many candidate locations)
+        dry_run:      don't rewrite the draft; yield what would change
+        save:         persist the rewritten content as a new draft version
+    """
+    import json as _json
+    import re as _re
+
+    from sqlalchemy import text
+    from sciknow.rag import prompts as rag_prompts
+    from sciknow.rag.llm import complete
+    from sciknow.storage.db import get_session
+    from sciknow.storage.qdrant import get_client
+
+    with get_session() as session:
+        row = session.execute(text("""
+            SELECT d.id::text, d.title, d.section_type, d.topic, d.content,
+                   d.book_id::text, d.chapter_id::text, d.version,
+                   d.sources, d.word_count
+            FROM drafts d WHERE d.id::text LIKE :q
+            LIMIT 1
+        """), {"q": f"{draft_id}%"}).fetchone()
+    if not row:
+        yield {"type": "error", "message": f"Draft not found: {draft_id}"}
+        return
+
+    d_id, d_title, d_section, d_topic, d_content, d_book_id, d_chapter_id, \
+        d_version, d_sources, d_wc = row
+    d_sources = d_sources or []
+
+    # Per-section model override (Phase 37) so a custom model picked for
+    # this section also drives its citation editing.
+    if model is None and d_chapter_id and d_section:
+        with get_session() as session:
+            override = _get_section_model(session, d_chapter_id, d_section)
+        if override:
+            model = override
+
+    yield {"type": "progress", "stage": "citation_scan_start",
+           "detail": f"Scanning draft '{d_title}' for citation opportunities…"}
+
+    sys_n, usr_n = rag_prompts.citation_needs(
+        section_type=d_section or "unknown",
+        section_title=d_topic or d_title or "",
+        draft_content=d_content or "",
+    )
+    try:
+        raw_needs = complete(sys_n, usr_n, model=model, temperature=0.1)
+    except Exception as exc:
+        yield {"type": "error", "message": f"citation_needs LLM call failed: {exc}"}
+        return
+
+    needs = _parse_citation_needs_json(raw_needs)
+    if not needs:
+        yield {"type": "completed", "draft_id": d_id,
+               "n_needs": 0, "n_inserted": 0,
+               "message": "no citation opportunities identified"}
+        return
+    if max_needs is not None and max_needs > 0:
+        needs = needs[:max_needs]
+
+    yield {"type": "citation_needs", "count": len(needs),
+           "needs": needs}
+
+    qdrant = get_client()
+
+    # existing_sources tracks the draft's current [N] → source_id mapping
+    # so newly-inserted citations don't clobber existing marker numbers.
+    # d_sources comes back as a JSON list from the DB.
+    existing_sources: list[dict] = list(d_sources) if isinstance(d_sources, list) else []
+    next_marker = max((s.get("n", 0) for s in existing_sources), default=0) + 1
+
+    new_citations: list[dict] = []   # {location, marker, source}
+    skipped: list[dict] = []         # {location, reason}
+
+    for idx, need in enumerate(needs):
+        location = (need.get("location") or "").strip()
+        claim    = (need.get("claim")    or "").strip()
+        query    = (need.get("query")    or "").strip() or claim
+        if not location or not query:
+            skipped.append({"index": idx, "reason": "missing location or query"})
+            continue
+
+        yield {"type": "progress", "stage": "citation_retrieve",
+               "detail": f"({idx+1}/{len(needs)}) retrieving for '{claim[:60]}'…"}
+
+        with get_session() as session:
+            results, _ = _retrieve(session, qdrant, query, context_k=candidate_k)
+
+        if not results:
+            skipped.append({"index": idx, "location": location,
+                            "reason": "no retrieval candidates"})
+            yield {"type": "citation_skipped", "index": idx,
+                   "location": location, "reason": "no retrieval candidates"}
+            continue
+
+        # Shape the candidate list for the pass-2 prompt.
+        cand_dicts = [
+            {
+                "title":   r.get("title") or r.get("paper_title") or "",
+                "year":    r.get("year") or "",
+                "section": r.get("section_type") or "",
+                "preview": r.get("content") or r.get("content_preview") or "",
+                "doc_id":  r.get("document_id") or r.get("doc_id") or "",
+                "chunk_id": r.get("chunk_id") or r.get("id") or "",
+            }
+            for r in results
+        ]
+
+        yield {"type": "citation_candidates", "index": idx,
+               "location": location, "candidates": [
+                   {"i": i, "title": c["title"], "year": c["year"]}
+                   for i, c in enumerate(cand_dicts)
+               ]}
+
+        sys_c, usr_c = rag_prompts.citation_choose(
+            claim=claim, location=location, candidates=cand_dicts,
+        )
+        try:
+            raw_choice = complete(sys_c, usr_c, model=model, temperature=0.1)
+        except Exception as exc:
+            skipped.append({"index": idx, "reason": f"choose LLM failed: {exc}"})
+            yield {"type": "citation_skipped", "index": idx,
+                   "reason": f"choose LLM failed: {exc}"}
+            continue
+
+        choice = _parse_citation_choice_json(raw_choice)
+        verdict = (choice.get("verdict") or "").upper()
+        if verdict != "CITE":
+            reason = choice.get("reason") or "no good candidate"
+            skipped.append({"index": idx, "location": location, "reason": reason})
+            yield {"type": "citation_skipped", "index": idx,
+                   "location": location, "reason": reason}
+            continue
+
+        # For each chosen candidate, attach a marker.
+        picked = choice.get("chosen") or []
+        if not isinstance(picked, list) or not picked:
+            skipped.append({"index": idx, "reason": "empty chosen list"})
+            continue
+
+        cite_markers_for_location: list[int] = []
+        for pick in picked:
+            try:
+                ci = int(pick.get("candidate_index"))
+            except (TypeError, ValueError):
+                continue
+            if ci < 0 or ci >= len(cand_dicts):
+                continue
+            cand = cand_dicts[ci]
+            marker = next_marker
+            next_marker += 1
+            source_entry = {
+                "n": marker,
+                "title":   cand["title"],
+                "year":    cand["year"],
+                "doc_id":  cand["doc_id"],
+                "chunk_id": cand["chunk_id"],
+                "confidence": float(pick.get("confidence") or 0.0),
+                "why":     pick.get("why") or "",
+                "inserted_by": "phase46_citation_loop",
+            }
+            existing_sources.append(source_entry)
+            new_citations.append({"location": location, "marker": marker,
+                                  "source": source_entry})
+            cite_markers_for_location.append(marker)
+
+            yield {"type": "citation_selected", "index": idx,
+                   "location": location, "marker": marker,
+                   "source": {"title": cand["title"], "year": cand["year"]},
+                   "confidence": source_entry["confidence"]}
+
+    # ── Deterministic insertion pass ──────────────────────────────────
+    #
+    # Replace each `location` verbatim with `location [N]` (or
+    # `location [N][M]` if two markers). We use a single Python-level
+    # str.replace per location to avoid regex misfires on LaTeX/mathjax
+    # content. Only the first occurrence is replaced, which matches the
+    # pass-1 contract (location must be unique in the draft).
+    new_content = d_content or ""
+    n_inserted = 0
+    for cite in new_citations:
+        loc = cite["location"]
+        marker = cite["marker"]
+        if loc not in new_content:
+            # LLM paraphrased slightly or whitespace differs; skip.
+            skipped.append({"location": loc,
+                            "reason": "exact location no longer in draft"})
+            continue
+        # Append the marker to the end of the matched span rather than a
+        # literal substring append, so consecutive selections for the
+        # same location get grouped: "claim. [7][8]"
+        replacement = f"{loc} [{marker}]"
+        new_content = new_content.replace(loc, replacement, 1)
+        n_inserted += 1
+
+    yield {"type": "citation_inserted", "count": n_inserted,
+           "skipped": len(skipped)}
+
+    if dry_run or not save:
+        yield {"type": "completed", "draft_id": d_id,
+               "n_needs": len(needs), "n_inserted": n_inserted,
+               "n_skipped": len(skipped),
+               "new_content_preview": new_content[:400],
+               "citations": new_citations,
+               "saved": False}
+        return
+
+    # Persist as a new draft version. Matches the pattern used by
+    # revise_draft_stream: increment version, keep the same title,
+    # parent to the old draft_id.
+    with get_session() as session:
+        new_id = session.execute(text("""
+            INSERT INTO drafts
+              (title, book_id, chapter_id, section_type, topic, content,
+               word_count, sources, model_used, version, parent_draft_id,
+               summary, status, custom_metadata)
+            SELECT title, book_id, chapter_id, section_type, topic,
+                   :content,
+                   ARRAY_LENGTH(string_to_array(:content, ' '), 1),
+                   CAST(:sources AS jsonb),
+                   COALESCE(:model, model_used),
+                   version + 1,
+                   id,
+                   summary, status,
+                   COALESCE(custom_metadata, '{}'::jsonb) ||
+                     jsonb_build_object(
+                       'phase46_citations_added', :n_inserted,
+                       'phase46_citations_skipped', :n_skipped)
+            FROM drafts WHERE id::text = :src
+            RETURNING id::text
+        """), {
+            "content": new_content,
+            "sources": _json.dumps(existing_sources),
+            "model":   model,
+            "n_inserted": n_inserted,
+            "n_skipped": len(skipped),
+            "src": d_id,
+        }).scalar()
+        session.commit()
+
+    yield {"type": "completed",
+           "draft_id": new_id or d_id,
+           "parent_draft_id": d_id,
+           "n_needs": len(needs), "n_inserted": n_inserted,
+           "n_skipped": len(skipped),
+           "citations": new_citations,
+           "saved": True}
+
+
+# ── JSON parsers for the citation loop ────────────────────────────────
+
+def _strip_code_fence(raw: str) -> str:
+    """Remove ```json ... ``` fences if the LLM added them."""
+    s = (raw or "").strip()
+    if s.startswith("```"):
+        s = s.split("\n", 1)[-1]
+        if s.endswith("```"):
+            s = s.rsplit("```", 1)[0]
+    return s.strip()
+
+
+def _parse_citation_needs_json(raw: str) -> list[dict]:
+    """Tolerant parser for CITATION_NEEDS output."""
+    import json as _json
+    s = _strip_code_fence(raw)
+    try:
+        data = _json.loads(s)
+    except Exception:
+        return []
+    needs = data.get("needs") if isinstance(data, dict) else None
+    if not isinstance(needs, list):
+        return []
+    out: list[dict] = []
+    for n in needs:
+        if not isinstance(n, dict):
+            continue
+        out.append({
+            "location": str(n.get("location") or "").strip(),
+            "claim":    str(n.get("claim")    or "").strip(),
+            "query":    str(n.get("query")    or "").strip(),
+            "reason":   str(n.get("reason")   or ""),
+            "existing_citations": n.get("existing_citations") or [],
+        })
+    return out
+
+
+def _parse_citation_choice_json(raw: str) -> dict:
+    """Tolerant parser for CITATION_CHOOSE output."""
+    import json as _json
+    s = _strip_code_fence(raw)
+    try:
+        data = _json.loads(s)
+    except Exception:
+        return {"verdict": "NONE", "reason": "unparseable LLM output"}
+    if not isinstance(data, dict):
+        return {"verdict": "NONE", "reason": "non-object LLM output"}
+    return data
