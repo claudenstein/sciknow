@@ -13,6 +13,7 @@ from sciknow.cli import catalog as catalog_module
 from sciknow.cli import db as db_module
 from sciknow.cli import draft as draft_module
 from sciknow.cli import ingest as ingest_module
+from sciknow.cli import project as project_module
 from sciknow.cli import search as search_module
 from sciknow.cli import wiki as wiki_module
 from sciknow.logging_config import setup_logging
@@ -43,6 +44,8 @@ app.add_typer(ask_module.app, name="ask")
 app.add_typer(book_module.app, name="book")
 app.add_typer(draft_module.app, name="draft")
 app.add_typer(wiki_module.app, name="wiki")
+# Phase 43e — multi-project lifecycle commands.
+app.add_typer(project_module.app, name="project")
 
 
 @app.command(name="test")

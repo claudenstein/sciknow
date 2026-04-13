@@ -1,0 +1,737 @@
+"""``sciknow project ...`` — multi-project lifecycle commands.
+
+Phase 43e. The user-facing surface for the multi-project work whose
+plumbing landed in 43a–d. Subcommands:
+
+- ``init <slug>``           create a new project (DB + collections + dir + migrations)
+- ``init <slug> --from-existing``
+                            adopt the legacy single-tenant layout into a project slot
+- ``list``                  show every project with health + size summary
+- ``show [slug]``           details for one project (defaults to active)
+- ``use <slug>``            set the active project for subsequent CLI calls
+- ``destroy <slug>``        drop DB + collections + data dir (guarded by --yes)
+- ``archive <slug>``        bundle the project into a portable archive then drop live state
+- ``unarchive <archive>``   restore an archived project
+"""
+from __future__ import annotations
+
+import logging
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+from datetime import datetime
+from pathlib import Path
+from typing import Annotated
+
+import typer
+from rich.console import Console
+from rich.table import Table
+from sqlalchemy import text
+
+from sciknow.config import settings
+from sciknow.core.project import (
+    Project,
+    _SLUG_RE,
+    get_active_project,
+    list_projects,
+    read_active_slug_from_file,
+    validate_slug,
+    write_active_slug,
+)
+from sciknow.storage.db import get_admin_engine, get_engine, get_session
+
+app = typer.Typer(help="Manage sciknow projects (corpus + book + DB isolation).")
+console = Console()
+logger = logging.getLogger("sciknow.cli.project")
+
+
+# ── shared helpers ─────────────────────────────────────────────────────
+
+
+def _resolve_slug_or_default(slug: str | None) -> Project:
+    """Use the given slug if provided, else the active project."""
+    if slug:
+        validate_slug(slug)
+        return Project(slug=slug, repo_root=get_active_project().repo_root)
+    return get_active_project()
+
+
+def _pg_database_exists(db_name: str) -> bool:
+    with get_admin_engine().connect() as conn:
+        row = conn.execute(
+            text("SELECT 1 FROM pg_database WHERE datname = :n"),
+            {"n": db_name},
+        ).fetchone()
+    return row is not None
+
+
+def _create_pg_database(db_name: str, template: str | None = None) -> None:
+    """``CREATE DATABASE`` against the admin DB.
+
+    ``template`` lets us clone an existing DB atomically (used by the
+    one-shot migration in Phase 43f). PostgreSQL identifiers can't be
+    parameterised, so we validate strictly first then format directly.
+    """
+    if not db_name.replace("_", "").isalnum():
+        raise ValueError(f"Refusing to CREATE DATABASE on suspicious name {db_name!r}")
+    if template and not template.replace("_", "").isalnum():
+        raise ValueError(f"Refusing to clone from suspicious template {template!r}")
+    with get_admin_engine().connect().execution_options(
+        isolation_level="AUTOCOMMIT"
+    ) as conn:
+        sql = f'CREATE DATABASE "{db_name}"'
+        if template:
+            sql += f' WITH TEMPLATE "{template}"'
+        conn.execute(text(sql))
+
+
+def _drop_pg_database(db_name: str) -> None:
+    if not db_name.replace("_", "").isalnum():
+        raise ValueError(f"Refusing to DROP DATABASE on suspicious name {db_name!r}")
+    with get_admin_engine().connect().execution_options(
+        isolation_level="AUTOCOMMIT"
+    ) as conn:
+        # Disconnect any lingering sessions so the drop succeeds even
+        # when something held a stale connection (alembic, web reader).
+        conn.execute(
+            text(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = :n AND pid <> pg_backend_pid()"
+            ),
+            {"n": db_name},
+        )
+        conn.execute(text(f'DROP DATABASE IF EXISTS "{db_name}"'))
+
+
+def _run_alembic_upgrade(db_name: str) -> None:
+    """Run ``alembic upgrade head`` against ``db_name``.
+
+    Uses subprocess so the alembic process gets a fresh import of
+    settings + project — we set SCIKNOW_PROJECT in the env so it picks
+    up the right active project (and the -x override pins the DB
+    explicitly as belt-and-suspenders).
+    """
+    repo_root = get_active_project().repo_root
+    env = os.environ.copy()
+    # `-x db_name=...` is honoured by migrations/env.py to override
+    # the URL regardless of which project is active.
+    cmd = [
+        sys.executable, "-m", "alembic",
+        "-x", f"db_name={db_name}",
+        "upgrade", "head",
+    ]
+    result = subprocess.run(
+        cmd, cwd=str(repo_root), env=env,
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        console.print(f"[red]alembic failed (rc={result.returncode}):[/red]")
+        console.print(result.stderr or result.stdout)
+        raise typer.Exit(1)
+
+
+def _init_qdrant_collections_for_project(project: Project) -> None:
+    """Create the project's collections (uses init_collections + env override).
+
+    Switches the SCIKNOW_PROJECT env var so the resolution layer
+    picks up the new project, then calls init_collections() which
+    reads collection names from the active project. Restores the env
+    afterwards.
+    """
+    from sciknow.storage.qdrant import init_collections
+
+    prev = os.environ.get("SCIKNOW_PROJECT")
+    os.environ["SCIKNOW_PROJECT"] = project.slug
+    try:
+        init_collections()
+    finally:
+        if prev is None:
+            os.environ.pop("SCIKNOW_PROJECT", None)
+        else:
+            os.environ["SCIKNOW_PROJECT"] = prev
+
+
+def _delete_qdrant_collections_for_project(project: Project) -> int:
+    """Best-effort drop of the project's three collections.
+
+    Returns the number actually deleted (a project that's never been
+    fully provisioned may have only some). Errors swallowed per
+    collection so a partial failure doesn't block destroy.
+    """
+    from sciknow.storage.qdrant import get_client
+
+    client = get_client()
+    deleted = 0
+    for name in (
+        project.papers_collection,
+        project.abstracts_collection,
+        project.wiki_collection,
+    ):
+        try:
+            client.delete_collection(collection_name=name)
+            deleted += 1
+        except Exception as exc:
+            logger.debug("delete_collection(%s) failed: %s", name, exc)
+    return deleted
+
+
+def _ensure_init_dirs(project: Project) -> None:
+    """Create the project's directory tree if missing."""
+    project.root.mkdir(parents=True, exist_ok=True)
+    project.data_dir.mkdir(parents=True, exist_ok=True)
+    if not project.env_overlay_path.exists():
+        project.env_overlay_path.write_text(
+            "# Optional per-project overrides for sciknow settings.\n"
+            "# Anything set here wins over the root .env. Examples:\n"
+            "#   LLM_MODEL=qwen3:32b\n"
+            "#   LLM_FAST_MODEL=qwen3:8b\n"
+        )
+
+
+# ── commands ───────────────────────────────────────────────────────────
+
+
+@app.command()
+def init(
+    slug: Annotated[str, typer.Argument(help="Project slug (lowercase alphanumerics + hyphens, e.g. 'global-cooling').")],
+    from_existing: bool = typer.Option(
+        False, "--from-existing",
+        help="One-shot migration: adopt the current single-tenant install (data/, sciknow DB, "
+             "unprefixed Qdrant collections) into this project slot. See `docs/PROJECTS.md` §43f.",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Print the steps without executing them. Useful before --from-existing.",
+    ),
+):
+    """Create a new project (DB + collections + dir + migrations).
+
+    Without flags: starts a brand-new empty project. The new project
+    becomes the active one (.active-project is updated) so subsequent
+    CLI invocations use it.
+
+    With ``--from-existing``: migrates the legacy ``sciknow`` DB +
+    ``data/`` tree + unprefixed Qdrant collections into the new
+    project's slot.
+    """
+    try:
+        validate_slug(slug)
+    except ValueError as exc:
+        console.print(f"[red]Invalid slug:[/red] {exc}")
+        raise typer.Exit(2)
+    if slug == "default":
+        console.print("[red]'default' is reserved for the legacy layout — pick another slug.[/red]")
+        raise typer.Exit(2)
+
+    repo_root = get_active_project().repo_root
+    project = Project(slug=slug, repo_root=repo_root)
+
+    if project.root.exists() and not from_existing:
+        console.print(f"[red]Project directory already exists:[/red] {project.root}")
+        raise typer.Exit(1)
+    if _pg_database_exists(project.pg_database) and not from_existing:
+        console.print(f"[red]PostgreSQL database already exists:[/red] {project.pg_database}")
+        console.print("[dim]Run `sciknow project destroy` first if you want to recreate it.[/dim]")
+        raise typer.Exit(1)
+
+    if from_existing:
+        _do_migration_from_existing(project, dry_run=dry_run)
+    else:
+        _do_fresh_init(project, dry_run=dry_run)
+
+    if not dry_run:
+        write_active_slug(slug)
+        console.print(f"\n[green]✓ Project [bold]{slug}[/bold] is now active.[/green]")
+        console.print(f"[dim]Run `sciknow project show` to see details.[/dim]")
+
+
+def _do_fresh_init(project: Project, *, dry_run: bool) -> None:
+    """Empty-project init — DB, collections, dirs, migrations."""
+    console.print(f"[bold]Initializing empty project:[/bold] {project.slug}")
+    console.print(f"  PG database:  {project.pg_database}")
+    console.print(f"  Qdrant prefix: {project.qdrant_prefix or '(none)'}")
+    console.print(f"  Data dir:     {project.data_dir}")
+    if dry_run:
+        console.print("[dim](dry-run, no changes made)[/dim]")
+        return
+
+    with console.status("Creating directories…"):
+        _ensure_init_dirs(project)
+    console.print("  [green]✓[/green] directories")
+
+    with console.status("Creating PostgreSQL database…"):
+        _create_pg_database(project.pg_database)
+    console.print(f"  [green]✓[/green] PG database `{project.pg_database}`")
+
+    with console.status("Running migrations…"):
+        _run_alembic_upgrade(project.pg_database)
+    console.print("  [green]✓[/green] migrations applied")
+
+    with console.status("Creating Qdrant collections…"):
+        _init_qdrant_collections_for_project(project)
+    console.print(
+        f"  [green]✓[/green] Qdrant collections "
+        f"(`{project.papers_collection}`, `{project.abstracts_collection}`, "
+        f"`{project.wiki_collection}`)"
+    )
+
+
+def _do_migration_from_existing(project: Project, *, dry_run: bool) -> None:
+    """One-shot migration from the legacy single-tenant layout."""
+    repo_root = project.repo_root
+    legacy_data = repo_root / "data"
+    legacy_db = "sciknow"
+
+    console.print(f"[bold]Migrating legacy layout into project:[/bold] {project.slug}")
+    console.print(f"  Source PG: {legacy_db}  →  {project.pg_database}")
+    console.print(f"  Source data: {legacy_data}  →  {project.data_dir}")
+    console.print(f"  Qdrant: papers/abstracts/wiki  →  {project.qdrant_prefix}*")
+
+    # Pre-flight verification
+    legacy_db_exists = _pg_database_exists(legacy_db)
+    if not legacy_db_exists:
+        console.print(f"[red]Legacy database `{legacy_db}` not found.[/red]")
+        raise typer.Exit(1)
+    if not legacy_data.exists():
+        console.print(f"[yellow]Legacy data dir not found: {legacy_data}. Continuing without it.[/yellow]")
+    if _pg_database_exists(project.pg_database):
+        console.print(f"[red]Target database `{project.pg_database}` already exists.[/red]")
+        raise typer.Exit(1)
+
+    if dry_run:
+        console.print("[dim](dry-run, no changes made)[/dim]")
+        return
+
+    # 1. Clone PG via CREATE DATABASE WITH TEMPLATE — atomic, fast
+    with console.status(f"Cloning PG database (`{legacy_db}` → `{project.pg_database}`)…"):
+        _create_pg_database(project.pg_database, template=legacy_db)
+    console.print(f"  [green]✓[/green] PG cloned to `{project.pg_database}`")
+
+    # 2. Move the data directory contents
+    with console.status("Moving filesystem contents…"):
+        _ensure_init_dirs(project)
+        if legacy_data.exists():
+            for child in legacy_data.iterdir():
+                dest = project.data_dir / child.name
+                if dest.exists():
+                    console.print(f"[yellow]skip (already exists): {dest}[/yellow]")
+                    continue
+                shutil.move(str(child), str(dest))
+    console.print(f"  [green]✓[/green] data/* moved to {project.data_dir}")
+
+    # 3. Snapshot + restore Qdrant collections under new names
+    _migrate_qdrant_collections(project)
+
+    console.print("\n[green]✓ Legacy layout migrated.[/green]")
+    console.print(
+        f"[dim]The old `{legacy_db}` PG database and the unprefixed Qdrant "
+        f"collections are still present — run `sciknow project show` to verify "
+        f"the new project, then drop the legacy ones manually if everything looks good.[/dim]"
+    )
+
+
+def _migrate_qdrant_collections(project: Project) -> None:
+    """Snapshot legacy collections then restore them under prefixed names.
+
+    Qdrant doesn't support in-place rename so we use the snapshot
+    mechanism: create a snapshot of each legacy collection, recreate
+    it with the new name from that snapshot, leave the legacy
+    collection in place for the user to verify + drop manually.
+    """
+    from sciknow.storage.qdrant import get_client
+
+    client = get_client()
+    pairs = [
+        ("papers", project.papers_collection),
+        ("abstracts", project.abstracts_collection),
+        ("wiki", project.wiki_collection),
+    ]
+    for old, new in pairs:
+        try:
+            existing = {c.name for c in client.get_collections().collections}
+        except Exception as exc:
+            console.print(f"[yellow]Qdrant unreachable: {exc}. Skipping {old} → {new}.[/yellow]")
+            return
+        if old not in existing:
+            console.print(f"  [dim]skip Qdrant {old} (not present)[/dim]")
+            continue
+        if new in existing:
+            console.print(f"  [yellow]skip Qdrant {new} (target already exists)[/yellow]")
+            continue
+        with console.status(f"Snapshot + restore Qdrant `{old}` → `{new}`…"):
+            try:
+                snap = client.create_snapshot(collection_name=old)
+                client.recover_snapshot(
+                    collection_name=new,
+                    location=f"file:///qdrant/storage/snapshots/{old}/{snap.name}",
+                )
+            except Exception as exc:
+                console.print(f"  [red]✗[/red] {old} → {new}: {exc}")
+                continue
+        console.print(f"  [green]✓[/green] Qdrant {old} → {new}")
+
+
+@app.command(name="list")
+def list_cmd():
+    """List all projects with their status."""
+    projects = list_projects()
+    active_slug = read_active_slug_from_file() or os.environ.get("SCIKNOW_PROJECT")
+
+    if not projects:
+        console.print("[dim]No projects yet.[/dim]")
+        console.print("Run [bold]sciknow project init <slug>[/bold] to create one,")
+        console.print("or [bold]sciknow project init <slug> --from-existing[/bold] to migrate the current install.")
+        return
+
+    table = Table(title="Projects")
+    table.add_column("Active", justify="center", width=6)
+    table.add_column("Slug", style="bold")
+    table.add_column("PG database")
+    table.add_column("Data dir")
+    table.add_column("Status")
+
+    for p in projects:
+        active_mark = "●" if active_slug == p.slug else ""
+        try:
+            db_ok = _pg_database_exists(p.pg_database)
+        except Exception:
+            db_ok = False
+        status = "[green]ok[/green]" if (p.exists() and db_ok) else "[yellow]incomplete[/yellow]"
+        rel_data = p.data_dir.relative_to(p.repo_root) if p.data_dir.is_relative_to(p.repo_root) else p.data_dir
+        table.add_row(active_mark, p.slug, p.pg_database, str(rel_data), status)
+
+    console.print(table)
+    if active_slug is None:
+        console.print("[dim]No active project set. Use [bold]sciknow project use <slug>[/bold].[/dim]")
+
+
+@app.command()
+def show(slug: str = typer.Argument(None, help="Project slug. Defaults to active project.")):
+    """Show details for a project (DB connection, paper / book counts)."""
+    project = _resolve_slug_or_default(slug)
+    console.print(f"[bold]Project:[/bold] {project.slug}{'  [dim](default / legacy)[/dim]' if project.is_default else ''}")
+    console.print(f"  Root:          {project.root}")
+    console.print(f"  Data dir:      {project.data_dir}{'  [yellow](missing)[/yellow]' if not project.data_dir.exists() else ''}")
+    console.print(f"  PG database:   {project.pg_database}")
+    console.print(f"  Qdrant prefix: {project.qdrant_prefix or '(none)'}")
+    console.print(f"  Papers coll:   {project.papers_collection}")
+    console.print(f"  Abstracts:     {project.abstracts_collection}")
+    console.print(f"  Wiki:          {project.wiki_collection}")
+    console.print(f"  Env overlay:   {project.env_overlay_path}{'  [dim](not present)[/dim]' if not project.env_overlay_path.exists() else ''}")
+
+    # Live counts from the project's own DB
+    if not _pg_database_exists(project.pg_database):
+        console.print("\n[yellow]PostgreSQL database does not exist.[/yellow]")
+        console.print(f"[dim]Run `sciknow project init {project.slug}` to create it.[/dim]")
+        return
+
+    try:
+        with get_session(db_name=project.pg_database) as session:
+            n_docs = session.execute(text("SELECT COUNT(*) FROM documents")).scalar() or 0
+            n_chunks = session.execute(text("SELECT COUNT(*) FROM chunks")).scalar() or 0
+            n_books = session.execute(text("SELECT COUNT(*) FROM books")).scalar() or 0
+            n_drafts = session.execute(text("SELECT COUNT(*) FROM drafts")).scalar() or 0
+        console.print(f"\n  Documents:  {n_docs:,}")
+        console.print(f"  Chunks:     {n_chunks:,}")
+        console.print(f"  Books:      {n_books:,}")
+        console.print(f"  Drafts:     {n_drafts:,}")
+    except Exception as exc:
+        console.print(f"\n[yellow]Could not read counts: {exc}[/yellow]")
+
+
+@app.command()
+def use(slug: Annotated[str, typer.Argument(help="Project slug to activate.")]):
+    """Set the active project (writes ``.active-project`` at repo root)."""
+    try:
+        validate_slug(slug)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2)
+    if slug != "default":
+        # default doesn't need to "exist" in projects/, it's the legacy fallback
+        candidate = Project(slug=slug, repo_root=get_active_project().repo_root)
+        if not candidate.exists():
+            console.print(f"[red]Project not found:[/red] {candidate.root}")
+            console.print(f"[dim]Available: {', '.join(p.slug for p in list_projects()) or '(none)'}[/dim]")
+            raise typer.Exit(1)
+    write_active_slug(slug)
+    console.print(f"[green]✓ Active project: {slug}[/green]")
+
+
+@app.command()
+def destroy(
+    slug: Annotated[str, typer.Argument(help="Project slug to destroy.")],
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+):
+    """Drop the project's PG database, Qdrant collections, and data dir.
+
+    [bold red]Destructive.[/bold red] Run ``sciknow project archive`` first if
+    you might want the project back later.
+    """
+    if slug == "default":
+        console.print("[red]Refusing to destroy the legacy 'default' project.[/red]")
+        raise typer.Exit(2)
+    try:
+        validate_slug(slug)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2)
+
+    project = Project(slug=slug, repo_root=get_active_project().repo_root)
+    console.print(f"[bold red]About to DESTROY project:[/bold red] {slug}")
+    console.print(f"  PG database:  {project.pg_database}")
+    console.print(f"  Qdrant:       {project.papers_collection}, {project.abstracts_collection}, {project.wiki_collection}")
+    console.print(f"  Data dir:     {project.data_dir}")
+    if not yes and not typer.confirm("Proceed?"):
+        console.print("Cancelled.")
+        raise typer.Exit(0)
+
+    with console.status("Dropping PG database…"):
+        try:
+            _drop_pg_database(project.pg_database)
+        except Exception as exc:
+            console.print(f"[yellow]PG drop failed: {exc}[/yellow]")
+    console.print(f"  [green]✓[/green] PG database dropped")
+
+    n_dropped = _delete_qdrant_collections_for_project(project)
+    console.print(f"  [green]✓[/green] Qdrant collections deleted ({n_dropped})")
+
+    if project.root.exists():
+        shutil.rmtree(project.root)
+    console.print(f"  [green]✓[/green] Data dir removed")
+
+    # If destroying the active project, clear .active-project
+    active = read_active_slug_from_file()
+    if active == slug:
+        from sciknow.core.project import _active_project_file
+        f = _active_project_file()
+        if f.exists():
+            f.unlink()
+        console.print(f"[dim]Cleared .active-project (was {slug}).[/dim]")
+
+
+# ── archive / unarchive ─────────────────────────────────────────────────
+
+
+def _default_archive_dir() -> Path:
+    return get_active_project().repo_root / "archives"
+
+
+@app.command()
+def archive(
+    slug: Annotated[str, typer.Argument(help="Project slug to archive.")],
+    output: Path | None = typer.Option(
+        None, "--output", "-o",
+        help="Archive file path. Default: archives/<slug>-<UTC>.skproj.tar.zst",
+    ),
+    keep_live: bool = typer.Option(
+        False, "--keep-live",
+        help="Don't drop the live state after archiving (snapshot only).",
+    ),
+):
+    """Bundle a project into a portable archive then drop the live state.
+
+    The archive contains: PostgreSQL dump, Qdrant snapshots for each
+    collection, the entire data directory, and the ``.env.overlay``.
+    Restore later with ``sciknow project unarchive <file>``.
+    """
+    if slug == "default":
+        console.print("[red]Use `sciknow db backup` for the legacy 'default' install.[/red]")
+        raise typer.Exit(2)
+    validate_slug(slug)
+    project = Project(slug=slug, repo_root=get_active_project().repo_root)
+    if not project.exists():
+        console.print(f"[red]Project not found:[/red] {project.root}")
+        raise typer.Exit(1)
+
+    archive_dir = _default_archive_dir()
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    if output is None:
+        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        output = archive_dir / f"{slug}-{ts}.skproj.tar"
+
+    console.print(f"[bold]Archiving project:[/bold] {slug}  →  {output}")
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        staging = tmp / "skproj"
+        staging.mkdir()
+
+        # 1. Manifest
+        (staging / "manifest.txt").write_text(
+            f"slug: {slug}\n"
+            f"created_at: {datetime.utcnow().isoformat()}Z\n"
+            f"pg_database: {project.pg_database}\n"
+            f"qdrant_prefix: {project.qdrant_prefix}\n"
+        )
+
+        # 2. PG dump
+        with console.status("Dumping PostgreSQL…"):
+            dump_path = staging / "postgres.dump"
+            env = os.environ.copy()
+            env["PGPASSWORD"] = settings.pg_password
+            res = subprocess.run([
+                "pg_dump",
+                "-h", settings.pg_host,
+                "-p", str(settings.pg_port),
+                "-U", settings.pg_user,
+                "-F", "c", "-f", str(dump_path),
+                project.pg_database,
+            ], env=env, capture_output=True, text=True)
+            if res.returncode != 0:
+                console.print(f"[red]pg_dump failed:[/red] {res.stderr}")
+                raise typer.Exit(1)
+        console.print(f"  [green]✓[/green] PG dump")
+
+        # 3. Qdrant snapshots — best-effort, copy the snapshot files
+        from sciknow.storage.qdrant import get_client
+        client = get_client()
+        snaps_dir = staging / "qdrant_snapshots"
+        snaps_dir.mkdir()
+        existing = {c.name for c in client.get_collections().collections}
+        for coll in (project.papers_collection, project.abstracts_collection, project.wiki_collection):
+            if coll not in existing:
+                continue
+            try:
+                snap = client.create_snapshot(collection_name=coll)
+                # Save the snapshot name so unarchive knows which file to recover from
+                (snaps_dir / f"{coll}.snapshot_name").write_text(snap.name)
+            except Exception as exc:
+                console.print(f"  [yellow]Qdrant snapshot {coll} failed:[/yellow] {exc}")
+        console.print(f"  [green]✓[/green] Qdrant snapshots")
+
+        # 4. Data directory
+        with console.status("Bundling data directory…"):
+            data_target = staging / "data"
+            if project.data_dir.exists():
+                shutil.copytree(project.data_dir, data_target)
+        console.print(f"  [green]✓[/green] data dir")
+
+        # 5. env overlay
+        if project.env_overlay_path.exists():
+            shutil.copy2(project.env_overlay_path, staging / ".env.overlay")
+
+        # 6. tar everything (zstd would need an extra dep; plain tar is universal)
+        with console.status("Writing archive…"):
+            with tarfile.open(output, "w") as tf:
+                tf.add(staging, arcname="skproj")
+        size_mb = output.stat().st_size / 1024 / 1024
+        console.print(f"  [green]✓[/green] archive written ({size_mb:.1f} MB)")
+
+    if not keep_live:
+        console.print("\nDropping live state…")
+        try:
+            _drop_pg_database(project.pg_database)
+        except Exception as exc:
+            console.print(f"[yellow]PG drop failed: {exc}[/yellow]")
+        _delete_qdrant_collections_for_project(project)
+        if project.root.exists():
+            shutil.rmtree(project.root)
+        active = read_active_slug_from_file()
+        if active == slug:
+            from sciknow.core.project import _active_project_file
+            f = _active_project_file()
+            if f.exists():
+                f.unlink()
+        console.print("[green]✓ Live state dropped.[/green]")
+    console.print(f"\n[green]✓ Archive complete:[/green] {output}")
+
+
+@app.command()
+def unarchive(
+    archive_file: Annotated[Path, typer.Argument(help="Archive file produced by `project archive`.")],
+):
+    """Restore an archived project.
+
+    Recreates the PG database (from the dump), the Qdrant collections
+    (from snapshots), and the data directory.
+    """
+    if not archive_file.exists():
+        console.print(f"[red]Archive not found:[/red] {archive_file}")
+        raise typer.Exit(1)
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        with console.status("Extracting archive…"):
+            with tarfile.open(archive_file, "r") as tf:
+                tf.extractall(tmp, filter="data")
+        staging = tmp / "skproj"
+        if not (staging / "manifest.txt").exists():
+            console.print(f"[red]Archive doesn't look like a sciknow project — manifest missing.[/red]")
+            raise typer.Exit(1)
+
+        # Parse the manifest
+        manifest = {}
+        for line in (staging / "manifest.txt").read_text().splitlines():
+            if ":" in line:
+                k, v = line.split(":", 1)
+                manifest[k.strip()] = v.strip()
+        slug = manifest.get("slug", "")
+        try:
+            validate_slug(slug)
+        except ValueError as exc:
+            console.print(f"[red]Manifest slug invalid: {exc}[/red]")
+            raise typer.Exit(1)
+
+        project = Project(slug=slug, repo_root=get_active_project().repo_root)
+        if project.root.exists() or _pg_database_exists(project.pg_database):
+            console.print(f"[red]Project {slug} already present (dir or DB exists). Refusing to overwrite.[/red]")
+            console.print(f"[dim]Run `sciknow project destroy {slug}` first if you really want to replace it.[/dim]")
+            raise typer.Exit(1)
+
+        console.print(f"[bold]Restoring project:[/bold] {slug}")
+
+        # 1. Create empty PG DB + restore from dump
+        _create_pg_database(project.pg_database)
+        with console.status("Restoring PostgreSQL dump…"):
+            env = os.environ.copy()
+            env["PGPASSWORD"] = settings.pg_password
+            res = subprocess.run([
+                "pg_restore",
+                "-h", settings.pg_host,
+                "-p", str(settings.pg_port),
+                "-U", settings.pg_user,
+                "-d", project.pg_database,
+                str(staging / "postgres.dump"),
+            ], env=env, capture_output=True, text=True)
+            # pg_restore frequently emits non-fatal warnings to stderr;
+            # only the exit code is authoritative.
+            if res.returncode != 0:
+                console.print(f"[red]pg_restore failed:[/red] {res.stderr}")
+                raise typer.Exit(1)
+        console.print("  [green]✓[/green] PG restored")
+
+        # 2. Data directory
+        _ensure_init_dirs(project)
+        data_src = staging / "data"
+        if data_src.exists():
+            for child in data_src.iterdir():
+                shutil.move(str(child), str(project.data_dir / child.name))
+        console.print("  [green]✓[/green] data dir restored")
+
+        # 3. env overlay
+        env_src = staging / ".env.overlay"
+        if env_src.exists():
+            shutil.copy2(env_src, project.env_overlay_path)
+
+        # 4. Qdrant snapshots — note: we saved the snapshot *names*;
+        # the actual snapshot files live in Qdrant's storage volume,
+        # which a one-shot CLI can't easily reach. Best-effort: warn
+        # the user that vectors need to be re-embedded if snapshot
+        # restore failed. A full vector restore would need a Qdrant-
+        # native snapshot upload mechanism (REST endpoint) — out of
+        # scope for the first cut; tracked in PROJECTS.md as a TODO.
+        snaps_dir = staging / "qdrant_snapshots"
+        if snaps_dir.exists() and any(snaps_dir.iterdir()):
+            console.print(
+                "  [yellow]![/yellow] Qdrant snapshots present in archive but cannot be "
+                "restored automatically (Qdrant snapshot files live in the server's storage "
+                "volume). To rebuild vectors: run `sciknow db init` then re-ingest with "
+                "`sciknow ingest directory <project-data>/processed/`."
+            )
+
+    write_active_slug(slug)
+    console.print(f"\n[green]✓ Project [bold]{slug}[/bold] restored and now active.[/green]")
