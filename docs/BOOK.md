@@ -39,10 +39,102 @@ This prevents contradictions, repeated explanations, and inconsistent terminolog
 
 ## The Write → Review → Revise Loop
 
-1. **Write** (`book write`) — RAG-grounded draft with cross-chapter context
-2. **Review** (`book review`) — LLM critic assesses groundedness, completeness, accuracy, coherence, redundancy. Saves structured feedback.
-3. **Revise** (`book revise`) — applies review feedback (or a custom instruction) to produce version N+1. The original is preserved.
-4. Repeat 2-3 until satisfied.
+The canonical manual cycle:
+
+```
+write → review → revise → [review again?] → accept
+```
+
+### `book write` — produces v1
+
+RAG-grounded draft generation with cross-chapter context. Creates a
+new row in `drafts` at `version = 1` (or `N+1` if the section already
+has drafts). Emits streaming tokens; incremental save at every
+checkpoint so partial work survives a cancel.
+
+### `book review` — produces structured feedback about a draft
+
+*Diagnostic only.* Assesses the draft, writes the result to
+`drafts.review_feedback`, does not change the draft content.
+
+Under the hood (`core/book_ops.py:review_draft_stream` +
+`rag/prompts.py:review`):
+
+1. Loads the draft by ID.
+2. Re-retrieves ~12 passages using `"{section} {topic}"` as the query
+   so the reviewer looks at the same kind of evidence the writer had.
+3. Asks the LLM to evaluate the draft on six dimensions:
+   - **Groundedness** — is every claim backed by a `[N]` citation?
+   - **Completeness** — obvious missing topics?
+   - **Accuracy** — any misrepresentation of the cited sources?
+   - **Coherence** — does the argument flow? contradictions?
+   - **Redundancy** — anything repeated?
+   - **Suggestions** — up to 5 concrete, actionable fixes.
+4. Saves the free-text output as `drafts.review_feedback` (it's
+   meant for a human to read, not structured JSON).
+
+Appears in the right-panel *Review* tab in the web reader, or streamed
+to the terminal if you ran the CLI command.
+
+### `book revise` — applies feedback to produce a new draft version
+
+*Non-destructive.* Creates a **new** draft row at `version = N+1`,
+linked to the original via `parent_draft_id`. The original stays put
+— the GUI's latest-version sort just shows the new one on top.
+
+Under the hood (`core/book_ops.py:revise_draft_stream` +
+`rag/prompts.py:revise`):
+
+1. Loads the current draft + its saved `review_feedback` (if any).
+2. Optionally retrieves additional passages (`context_k`, default 8)
+   for any new evidence the revision might need.
+3. Builds the prompt with three parts:
+   - The current draft.
+   - **The revision instruction** — either what you typed explicitly,
+     or *"Apply the following review feedback: {feedback}"* if you
+     ran `review` first and didn't pass `--instruction`.
+   - Fresh passages as optional extra context.
+4. Asks the LLM to output the **complete revised section** (not a
+   diff) — preserving citations and tone, applying the requested
+   change.
+5. Generates a summary, saves as a new draft row.
+
+**Two usage patterns:**
+
+```bash
+# Pattern A — explicit instruction (most common)
+sciknow book revise 3f2a1b4c -i "add a counterargument in para 3 citing Schmidt 2023"
+
+# Pattern B — apply saved review feedback
+sciknow book review 3f2a1b4c        # saves feedback
+sciknow book revise 3f2a1b4c        # applies it (no --instruction)
+```
+
+### Relationship to autowrite
+
+**Autowrite is the automated convergence loop of the same cycle**:
+
+```
+write → score → verify → revise → rescore → KEEP/DISCARD → loop until target_score or max_iter
+```
+
+It uses structured JSON scoring (6 dimensions → 0-1 scores) instead
+of review's free-text feedback, fires CoVe on weak drafts, and
+decides automatically whether to keep each iteration.
+
+**In practical terms:**
+
+- **`review` + `revise`** are the *manual* loop, for when you know
+  what you want changed and want direct control. Ideal after an
+  autowrite run, when you spot the three things it missed
+  (miscalibrated confidence, weak citations, missing perspective).
+- **`autowrite`** is the *automated* loop, for when you want "make
+  this better until it converges" with no intervention. Great for
+  drafting, weak for the editorial judgment calls that make a book
+  yours.
+
+See `docs/STRATEGY.md` for the principled human + autowrite division
+of labor.
 
 ### Quality flags on `book write`
 
