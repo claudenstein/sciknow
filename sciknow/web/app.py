@@ -3042,6 +3042,124 @@ async def api_ask_synthesize(
     return JSONResponse({"job_id": job_id})
 
 
+# ── Phase 46.E — Authors + domains + expand-author (web surface) ─────────────
+#
+# Makes the "grow the corpus" capability reachable from the browser:
+#   GET /api/catalog/authors       — ranked + searchable authors
+#   GET /api/catalog/domains       — paper_metadata.domains unnested + ranked
+#   POST /api/corpus/expand-author — run `sciknow db expand-author` as an
+#                                    SSE-streamed subprocess (same pattern as
+#                                    the existing /api/corpus/expand)
+#
+# Ranking rationale: the user selecting an author for expansion wants to
+# see their most-cited / most-authored-in-this-corpus candidates first,
+# so the default sort key is (citation_count DESC, paper_count DESC).
+# An optional ?q=fragment filters by substring on the author name — PG's
+# ILIKE on an already-GROUP-BYed name list is fast enough at our scale
+# (~5k distinct authors in the global-cooling project); if the author
+# count ever exceeds ~50k we'd promote this to a materialized view.
+
+
+@app.get("/api/catalog/authors")
+async def api_catalog_authors(
+    q: str = "",
+    limit: int = 50,
+    min_papers: int = 1,
+):
+    """Phase 46.E — ranked + searchable author index.
+
+    Returns authors from ``paper_metadata.authors`` unnested and grouped
+    by name, ranked by ``(citation_count DESC, paper_count DESC)`` so
+    the most-cited / most-prolific names surface first. Used by the
+    web UI's Expand-by-Author picker.
+
+    Params:
+      q          — substring match (case-insensitive) on the author name;
+                   empty string returns the top ``limit`` overall.
+      limit      — cap on rows returned (default 50).
+      min_papers — require at least this many papers in the corpus
+                   (default 1 — every author).
+    """
+    limit = max(1, min(500, int(limit or 50)))
+    min_papers = max(1, int(min_papers or 1))
+    q_like = f"%{q.strip()}%" if q and q.strip() else None
+    with get_session() as session:
+        # CTE approach — CROSS JOIN LATERAL is the correct PG dance for
+        # jsonb_array_elements inside a join that also hits citations.
+        # Using DISTINCT on (document_id) within the explosion to
+        # deduplicate the many-to-one from authors → document.
+        base_sql = """
+            WITH exploded AS (
+                SELECT author->>'name' AS name,
+                       COALESCE(author->>'orcid', '') AS orcid,
+                       pm.document_id
+                FROM paper_metadata pm
+                CROSS JOIN LATERAL jsonb_array_elements(pm.authors) AS author
+                WHERE pm.authors IS NOT NULL
+                  AND author->>'name' IS NOT NULL
+                  AND trim(author->>'name') != ''
+            )
+            SELECT e.name,
+                   COUNT(DISTINCT e.document_id) AS n_papers,
+                   COUNT(c.id)                   AS n_cites,
+                   (ARRAY_AGG(DISTINCT NULLIF(e.orcid, '')))[1] AS first_orcid
+            FROM exploded e
+            LEFT JOIN citations c ON c.cited_document_id = e.document_id
+            {where}
+            GROUP BY e.name
+            HAVING COUNT(DISTINCT e.document_id) >= :min_papers
+            ORDER BY n_cites DESC, n_papers DESC, e.name
+            LIMIT :limit
+        """
+        params = {"min_papers": min_papers, "limit": limit}
+        if q_like:
+            where = "WHERE e.name ILIKE :q"
+            params["q"] = q_like
+        else:
+            where = ""
+        rows = session.execute(
+            text(base_sql.format(where=where)), params,
+        ).fetchall()
+
+    return JSONResponse({
+        "authors": [
+            {"name": r[0], "n_papers": int(r[1] or 0),
+             "n_citations": int(r[2] or 0), "orcid": r[3] or None}
+            for r in rows
+        ],
+        "query": q,
+        "limit": limit,
+    })
+
+
+@app.get("/api/catalog/domains")
+async def api_catalog_domains(limit: int = 60):
+    """Phase 46.E — ranked domain / tag index (paper_metadata.domains unnested).
+
+    ``domains`` is a text[] column populated by the metadata cascade —
+    Crossref's subject list or the arXiv primary-category field. Empty
+    arrays are common (our corpus ingested mostly via embedded_pdf /
+    Crossref for works without subject tags), but this endpoint still
+    ranks what's present so the UI can expose tag-filtering.
+    """
+    limit = max(1, min(500, int(limit or 60)))
+    with get_session() as session:
+        rows = session.execute(text("""
+            SELECT tag, COUNT(DISTINCT pm.document_id) AS n
+            FROM paper_metadata pm
+            CROSS JOIN LATERAL unnest(pm.domains) AS tag
+            WHERE pm.domains IS NOT NULL
+              AND array_length(pm.domains, 1) > 0
+              AND trim(tag) != ''
+            GROUP BY tag
+            ORDER BY n DESC, tag
+            LIMIT :lim
+        """), {"lim": limit}).fetchall()
+    return JSONResponse({
+        "domains": [{"name": r[0], "n": int(r[1])} for r in rows],
+    })
+
+
 @app.get("/api/catalog/topics")
 async def api_catalog_topics(name: str = None):
     """Topic cluster breakdown (sciknow catalog topics).
@@ -3174,6 +3292,54 @@ async def api_corpus_enrich(
             "--threshold", str(threshold),
             "--limit", str(limit),
             "--delay", str(delay)]
+    if dry_run:
+        argv.append("--dry-run")
+    _spawn_cli_streaming(job_id, argv, loop)
+    return JSONResponse({"job_id": job_id})
+
+
+@app.post("/api/corpus/expand-author")
+async def api_corpus_expand_author(
+    name: str = Form(...),
+    orcid: str = Form(""),
+    year_from: int = Form(0),
+    year_to: int = Form(0),
+    limit: int = Form(0),
+    strict_author: bool = Form(True),
+    all_matches: bool = Form(False),
+    relevance: bool = Form(True),
+    relevance_threshold: float = Form(0.0),
+    relevance_query: str = Form(""),
+    workers: int = Form(0),
+    ingest: bool = Form(True),
+    dry_run: bool = Form(False),
+):
+    """Phase 46.E — invoke ``sciknow db expand-author`` from the web UI.
+
+    Runs as a background subprocess; stdout streams as SSE ``log`` events.
+    """
+    if not name.strip():
+        raise HTTPException(status_code=400, detail="author name required")
+    job_id, _queue = _create_job("corpus_expand_author")
+    loop = asyncio.get_event_loop()
+    argv: list[str] = ["db", "expand-author", name.strip()]
+    if orcid.strip():
+        argv += ["--orcid", orcid.strip()]
+    if year_from:
+        argv += ["--from", str(year_from)]
+    if year_to:
+        argv += ["--to", str(year_to)]
+    if limit and int(limit) > 0:
+        argv += ["--limit", str(int(limit))]
+    argv += ["--workers", str(int(workers or 0))]
+    argv += ["--relevance-threshold", str(float(relevance_threshold or 0.0))]
+    if strict_author:   argv.append("--strict-author")
+    else:               argv.append("--no-strict-author")
+    if all_matches:     argv.append("--all-matches")
+    argv.append("--relevance" if relevance else "--no-relevance")
+    if relevance_query.strip():
+        argv += ["--relevance-query", relevance_query.strip()]
+    argv.append("--ingest" if ingest else "--no-ingest")
     if dry_run:
         argv.append("--dry-run")
     _spawn_cli_streaming(job_id, argv, loop)
@@ -5739,77 +5905,171 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div class="modal-sources" id="tl-synth-sources" style="display:none;"></div>
       </div>
 
-      <!-- Topics tab (sciknow catalog topics) -->
+      <!-- Topics tab (sciknow catalog topics + Phase 46.E domain tags) -->
       <div id="tl-topics-pane" style="display:none;">
-        <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
-          Topic clusters assigned by <code>sciknow catalog cluster</code>.
-          Click a cluster to see its papers.
-        </p>
-        <div id="tl-topics-list" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;"></div>
+        <div style="display:flex;gap:12px;align-items:flex-start;">
+          <div style="flex:2;">
+            <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+              <strong>Topic clusters</strong> (from <code>sciknow catalog cluster</code>).
+              Click a cluster to see its papers. Ranked by paper count.
+            </p>
+            <div id="tl-topics-list" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;"></div>
+          </div>
+          <div style="flex:1;border-left:1px solid var(--border);padding-left:12px;min-width:180px;">
+            <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+              <strong>Domain tags</strong> (from <code>paper_metadata.domains</code>).
+              Empty if no tags are populated for this corpus.
+            </p>
+            <div id="tl-domains-list" style="display:flex;flex-wrap:wrap;gap:4px;"></div>
+          </div>
+        </div>
         <div id="tl-topics-papers"></div>
       </div>
 
-      <!-- Corpus tab (sciknow db enrich / db expand) -->
+      <!-- Corpus tab (Phase 46.E — full expand surface: enrich / expand-citations / expand-author) -->
       <div id="tl-corpus-pane" style="display:none;">
         <p style="font-size:11px;color:var(--fg-muted);margin-bottom:12px;">
-          Grow and enrich the paper corpus from the browser. These are
-          long-running ops &mdash; the log streams below. Cancel with the
-          red button.
+          Grow and enrich the paper corpus from the browser. Pick one of
+          three modes. All are long-running; the log streams below. Cancel
+          with the red button.
         </p>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:10px;">
-          <div style="border:1px solid var(--border);border-radius:6px;padding:10px;">
-            <div style="font-weight:600;margin-bottom:6px;">&#128270; Enrich (metadata)</div>
-            <div style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
-              Fill missing DOIs via Crossref / OpenAlex / arXiv title search.
-              <code>sciknow db enrich</code>.
-            </div>
-            <div class="field" style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;">
-              <div style="flex:1;min-width:70px;"><label>Limit</label>
-                <input type="number" id="tl-enr-limit" value="0" min="0" title="0 = all"></div>
-              <div style="flex:1;min-width:80px;"><label>Threshold</label>
-                <input type="number" id="tl-enr-thresh" value="0.85" min="0" max="1" step="0.01"></div>
-              <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
-                <input type="checkbox" id="tl-enr-dry"> dry-run
-              </label>
-            </div>
-            <button class="btn-primary" style="margin-top:8px;" onclick="doToolCorpus('enrich')">Run Enrich</button>
+        <div class="tabs" style="margin-bottom:10px;">
+          <button class="tab active" data-ctab="corp-enrich" onclick="switchCorpusTab('corp-enrich')">&#128270; Enrich</button>
+          <button class="tab" data-ctab="corp-cites" onclick="switchCorpusTab('corp-cites')">&#127760; Expand (citations)</button>
+          <button class="tab" data-ctab="corp-author" onclick="switchCorpusTab('corp-author')">&#128100; Expand by author</button>
+        </div>
+
+        <!-- Enrich (metadata) panel -->
+        <div id="corp-enrich-pane" style="border:1px solid var(--border);border-radius:6px;padding:10px;">
+          <div style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;">
+            Fill missing DOIs via Crossref / OpenAlex / arXiv title search.
+            Mirrors <code>sciknow db enrich</code>.
           </div>
-          <div style="border:1px solid var(--border);border-radius:6px;padding:10px;">
-            <div style="font-weight:600;margin-bottom:6px;">&#127760; Expand (citations)</div>
-            <div style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
-              Follow references &rarr; download OA PDFs &rarr; ingest.
-              <code>sciknow db expand</code>.
-            </div>
-            <div class="field" style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;">
-              <div style="flex:1;min-width:70px;"><label>Limit</label>
-                <input type="number" id="tl-exp-limit" value="0" min="0"></div>
-              <div style="flex:1;min-width:80px;"><label>Workers</label>
-                <input type="number" id="tl-exp-workers" value="0" min="0" title="0 = .env default"></div>
-              <div style="flex:1;min-width:80px;"><label>Relev. thr</label>
-                <input type="number" id="tl-exp-relthr" value="0.0" min="0" max="1" step="0.05"></div>
-            </div>
-            <div class="field" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:4px;">
-              <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
-                <input type="checkbox" id="tl-exp-dry"> dry-run
-              </label>
-              <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
-                <input type="checkbox" id="tl-exp-resolve"> resolve titles
-              </label>
-              <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
-                <input type="checkbox" id="tl-exp-ingest" checked> ingest
-              </label>
-              <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
-                <input type="checkbox" id="tl-exp-relevance" checked> relevance filter
-              </label>
-            </div>
-            <div class="field" style="margin-top:4px;">
+          <div class="field" style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;">
+            <div style="flex:1;min-width:70px;"><label>Limit</label>
+              <input type="number" id="tl-enr-limit" value="0" min="0" title="0 = all"></div>
+            <div style="flex:1;min-width:80px;"><label>Threshold</label>
+              <input type="number" id="tl-enr-thresh" value="0.85" min="0" max="1" step="0.01"></div>
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+              <input type="checkbox" id="tl-enr-dry"> dry-run
+            </label>
+          </div>
+          <button class="btn-primary" style="margin-top:8px;" onclick="doToolCorpus('enrich')">Run Enrich</button>
+        </div>
+
+        <!-- Expand by citations -->
+        <div id="corp-cites-pane" style="display:none;border:1px solid var(--border);border-radius:6px;padding:10px;">
+          <div style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;">
+            Follow references &rarr; download OA PDFs &rarr; ingest.
+            Mirrors <code>sciknow db expand</code>.
+          </div>
+          <div class="field" style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;">
+            <div style="flex:1;min-width:70px;"><label>Limit</label>
+              <input type="number" id="tl-exp-limit" value="0" min="0"></div>
+            <div style="flex:1;min-width:80px;"><label>Workers</label>
+              <input type="number" id="tl-exp-workers" value="0" min="0" title="0 = .env default"></div>
+            <div style="flex:1;min-width:80px;"><label>Relev. thr</label>
+              <input type="number" id="tl-exp-relthr" value="0.0" min="0" max="1" step="0.05"></div>
+          </div>
+          <div class="field" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:4px;">
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+              <input type="checkbox" id="tl-exp-dry"> dry-run
+            </label>
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+              <input type="checkbox" id="tl-exp-resolve"> resolve titles
+            </label>
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+              <input type="checkbox" id="tl-exp-ingest" checked> ingest
+            </label>
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+              <input type="checkbox" id="tl-exp-relevance" checked> relevance filter
+            </label>
+          </div>
+          <div class="field" style="margin-top:4px;display:flex;gap:8px;align-items:flex-end;">
+            <div style="flex:3;">
               <label>Relevance anchor query (optional)</label>
               <input type="text" id="tl-exp-relq" placeholder="(corpus centroid if blank)">
             </div>
-            <button class="btn-primary" style="margin-top:8px;" onclick="doToolCorpus('expand')">Run Expand</button>
+            <div style="flex:2;">
+              <label>Anchor from topic</label>
+              <select id="tl-exp-relq-topic" onchange="if(this.value){{document.getElementById('tl-exp-relq').value=this.value;}}">
+                <option value="">(pick a topic…)</option>
+              </select>
+            </div>
           </div>
+          <button class="btn-primary" style="margin-top:8px;" onclick="doToolCorpus('expand')">Run Expand</button>
         </div>
-        <div style="display:flex;gap:8px;align-items:center;margin-top:8px;">
+
+        <!-- Phase 46.E — Expand by author panel -->
+        <div id="corp-author-pane" style="display:none;border:1px solid var(--border);border-radius:6px;padding:10px;">
+          <div style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;">
+            Find every paper by an author across OpenAlex + Crossref, then
+            download the open-access ones and ingest. Mirrors
+            <code>sciknow db expand-author</code>. The picker below ranks
+            authors by <strong>citation count</strong> (within this
+            corpus) then paper count, so the most-authoritative names
+            surface first.
+          </div>
+          <div class="field" style="display:flex;gap:8px;align-items:flex-end;">
+            <div style="flex:3;">
+              <label>Search author</label>
+              <input type="text" id="tl-eauth-q"
+                     placeholder="Type a name — e.g. Solanki, Lockwood…"
+                     oninput="onExpandAuthorSearchInput(event)"
+                     onkeydown="if(event.key==='Enter'){{event.preventDefault();onExpandAuthorSearchInput(event);}}">
+            </div>
+            <div style="flex:2;">
+              <label>ORCID (optional)</label>
+              <input type="text" id="tl-eauth-orcid" placeholder="0000-0000-0000-0000">
+            </div>
+          </div>
+          <div id="tl-eauth-results"
+               style="max-height:260px;overflow:auto;border:1px solid var(--border);
+                      border-radius:4px;margin-top:6px;font-size:12px;display:none;"></div>
+          <div id="tl-eauth-selected"
+               style="margin-top:6px;font-size:12px;color:var(--fg-muted);">
+            No author selected yet — search above and click a row.
+          </div>
+          <div class="field" style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;margin-top:6px;">
+            <div style="flex:1;min-width:80px;"><label>Year from</label>
+              <input type="number" id="tl-eauth-yfrom" placeholder="(any)"></div>
+            <div style="flex:1;min-width:80px;"><label>Year to</label>
+              <input type="number" id="tl-eauth-yto" placeholder="(any)"></div>
+            <div style="flex:1;min-width:70px;"><label>Limit</label>
+              <input type="number" id="tl-eauth-limit" value="0" min="0" title="0 = all"></div>
+            <div style="flex:1;min-width:80px;"><label>Workers</label>
+              <input type="number" id="tl-eauth-workers" value="0" min="0"></div>
+            <div style="flex:1;min-width:80px;"><label>Relev. thr</label>
+              <input type="number" id="tl-eauth-relthr" value="0.0" min="0" max="1" step="0.05"></div>
+          </div>
+          <div class="field" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:4px;">
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+              <input type="checkbox" id="tl-eauth-strict" checked> strict author match
+            </label>
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+              <input type="checkbox" id="tl-eauth-all"> keep all matches (skip disamb.)
+            </label>
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+              <input type="checkbox" id="tl-eauth-relevance" checked> relevance filter
+            </label>
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+              <input type="checkbox" id="tl-eauth-ingest" checked> ingest
+            </label>
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+              <input type="checkbox" id="tl-eauth-dry"> dry-run
+            </label>
+          </div>
+          <div class="field" style="margin-top:4px;">
+            <label>Relevance anchor query (optional)</label>
+            <input type="text" id="tl-eauth-relq"
+                   placeholder="(corpus centroid if blank)">
+          </div>
+          <button class="btn-primary" style="margin-top:8px;" onclick="doToolCorpus('expand-author')">
+            Run Expand-by-Author
+          </button>
+        </div>
+
+        <div style="display:flex;gap:8px;align-items:center;margin-top:12px;">
           <div id="tl-corpus-status" style="flex:1;font-size:12px;color:var(--fg-muted);"></div>
           <button id="tl-corpus-cancel" onclick="cancelToolCorpus()"
                   style="display:none;background:var(--danger,#c53030);color:white;border:0;padding:4px 10px;border-radius:4px;cursor:pointer;">
@@ -8915,7 +9175,9 @@ function openToolsModal() {{
 }}
 
 function switchToolsTab(name) {{
-  document.querySelectorAll('#tools-modal .tab').forEach(t => {{
+  // Only flip the TOP-level Tools tabs (not any inner Corpus-subtabs,
+  // which carry data-ctab instead of data-tab so they don't collide).
+  document.querySelectorAll('#tools-modal > .tabs > .tab').forEach(t => {{
     t.classList.toggle('active', t.dataset.tab === name);
   }});
   ['tl-search', 'tl-synth', 'tl-topics', 'tl-corpus'].forEach(n => {{
@@ -8923,6 +9185,105 @@ function switchToolsTab(name) {{
     if (pane) pane.style.display = (n === name) ? 'block' : 'none';
   }});
   if (name === 'tl-topics') loadToolTopics();
+  if (name === 'tl-corpus') {{
+    // Default to Enrich sub-tab on first open
+    switchCorpusTab('corp-enrich');
+    loadCorpusTopicList();
+  }}
+}}
+
+
+// Phase 46.E — inner tabs for the Corpus pane (Enrich / Expand-citations /
+// Expand-by-Author). Uses data-ctab to avoid colliding with the outer
+// Tools tabs' data-tab.
+function switchCorpusTab(name) {{
+  document.querySelectorAll('#tl-corpus-pane .tab').forEach(t => {{
+    t.classList.toggle('active', t.dataset.ctab === name);
+  }});
+  ['corp-enrich', 'corp-cites', 'corp-author'].forEach(n => {{
+    const pane = document.getElementById(n + '-pane');
+    if (pane) pane.style.display = (n === name) ? 'block' : 'none';
+  }});
+}}
+
+
+// Phase 46.E — author search-as-you-type for the Expand-by-Author panel.
+// Debounced 200ms. Hits /api/catalog/authors?q=…&limit=15 and renders a
+// clickable list; clicking a row sets window._selectedExpandAuthorName
+// and populates the input + orcid + selected-line.
+let _authorSearchTimer = null;
+window._selectedExpandAuthorName = null;
+
+function onExpandAuthorSearchInput(_event) {{
+  if (_authorSearchTimer) clearTimeout(_authorSearchTimer);
+  _authorSearchTimer = setTimeout(runExpandAuthorSearch, 200);
+}}
+
+async function runExpandAuthorSearch() {{
+  const q = document.getElementById('tl-eauth-q').value.trim();
+  const box = document.getElementById('tl-eauth-results');
+  try {{
+    const url = '/api/catalog/authors?limit=15'
+              + (q.length >= 2 ? '&q=' + encodeURIComponent(q) : '');
+    const res = await fetch(url);
+    const data = await res.json();
+    const authors = data.authors || [];
+    if (!authors.length) {{
+      box.style.display = 'block';
+      box.innerHTML = '<div style="padding:10px;color:var(--fg-muted);">No authors match.</div>';
+      return;
+    }}
+    const rows = authors.map(a => {{
+      const safe = a.name.replace(/"/g, '&quot;');
+      const orcidBit = a.orcid ? ` <span style=\"color:var(--fg-muted);\">orcid ${{a.orcid}}</span>` : '';
+      return `<div class="eauth-row" onclick="selectExpandAuthor(${{JSON.stringify(a)}})"
+        style="padding:6px 10px;cursor:pointer;border-bottom:1px solid var(--border);"
+        onmouseenter="this.style.background='var(--accent-light,#eef2ff)';"
+        onmouseleave="this.style.background='';">
+        <strong>${{safe}}</strong>${{orcidBit}}
+        <div style="color:var(--fg-muted);font-size:11px;">
+          ${{a.n_papers}} paper${{a.n_papers === 1 ? '' : 's'}} ·
+          ${{a.n_citations}} citation${{a.n_citations === 1 ? '' : 's'}} in corpus
+        </div></div>`;
+    }}).join('');
+    box.innerHTML = rows;
+    box.style.display = 'block';
+  }} catch (exc) {{
+    box.style.display = 'block';
+    box.innerHTML = `<div style="padding:10px;color:var(--danger,#c53030);">Search failed: ${{exc}}</div>`;
+  }}
+}}
+
+function selectExpandAuthor(author) {{
+  window._selectedExpandAuthorName = author.name;
+  document.getElementById('tl-eauth-q').value = author.name;
+  if (author.orcid) document.getElementById('tl-eauth-orcid').value = author.orcid;
+  document.getElementById('tl-eauth-results').style.display = 'none';
+  document.getElementById('tl-eauth-selected').innerHTML =
+    '<span style="color:var(--success,#059669);">Selected:</span> <strong>'
+    + author.name + '</strong>'
+    + (author.orcid ? ' <code>' + author.orcid + '</code>' : '')
+    + ' — ' + author.n_papers + ' paper(s), ' + author.n_citations + ' citation(s) in this corpus';
+}}
+
+
+// Populate the "Anchor from topic" dropdown on the Expand-citations panel
+// with the current corpus's ranked topic clusters.
+async function loadCorpusTopicList() {{
+  const sel = document.getElementById('tl-exp-relq-topic');
+  if (!sel || sel.dataset.loaded) return;
+  try {{
+    const res = await fetch('/api/catalog/topics');
+    const data = await res.json();
+    const topics = (data.topics || []).slice(0, 40);
+    topics.forEach(t => {{
+      const opt = document.createElement('option');
+      opt.value = t.name;
+      opt.textContent = t.name + '  (' + t.n + ' papers)';
+      sel.appendChild(opt);
+    }});
+    sel.dataset.loaded = '1';
+  }} catch (_) {{}}
 }}
 
 // ── Search tab ────────────────────────────────────────────────────────
@@ -9064,25 +9425,47 @@ async function doToolSynthesize() {{
 async function loadToolTopics() {{
   const list = document.getElementById('tl-topics-list');
   const papers = document.getElementById('tl-topics-papers');
+  const dlist = document.getElementById('tl-domains-list');
   list.innerHTML = '<span style="color:var(--fg-muted);font-size:12px;">Loading…</span>';
   papers.innerHTML = '';
+  if (dlist) dlist.innerHTML = '<span style="color:var(--fg-muted);font-size:11px;">Loading…</span>';
   try {{
-    const res = await fetch('/api/catalog/topics');
-    const data = await res.json();
-    const topics = data.topics || [];
+    // Load topics + domains in parallel
+    const [topicsRes, domainsRes] = await Promise.all([
+      fetch('/api/catalog/topics'),
+      fetch('/api/catalog/domains?limit=80'),
+    ]);
+    const topics = (await topicsRes.json()).topics || [];
+    const domains = (await domainsRes.json()).domains || [];
+
     if (topics.length === 0) {{
       list.innerHTML = '<span style="color:var(--fg-muted);font-size:12px;">No topic clusters assigned yet. Run <code>sciknow catalog cluster</code> to build them.</span>';
-      return;
+    }} else {{
+      list.innerHTML = '';
+      topics.forEach(t => {{
+        const btn = document.createElement('button');
+        btn.textContent = t.name + ' (' + t.n + ')';
+        btn.title = t.name + ' — ' + t.n + ' papers';
+        btn.style.cssText = 'background:var(--bg-alt,#f3f4f6);border:1px solid var(--border);border-radius:12px;padding:4px 10px;font-size:12px;cursor:pointer;';
+        btn.onclick = () => loadToolTopicPapers(t.name);
+        list.appendChild(btn);
+      }});
     }}
-    list.innerHTML = '';
-    topics.forEach(t => {{
-      const btn = document.createElement('button');
-      btn.textContent = t.name + ' (' + t.n + ')';
-      btn.title = t.name + ' — ' + t.n + ' papers';
-      btn.style.cssText = 'background:var(--bg-alt,#f3f4f6);border:1px solid var(--border);border-radius:12px;padding:4px 10px;font-size:12px;cursor:pointer;';
-      btn.onclick = () => loadToolTopicPapers(t.name);
-      list.appendChild(btn);
-    }});
+
+    if (dlist) {{
+      if (!domains.length) {{
+        dlist.innerHTML = '<span style="color:var(--fg-muted);font-size:11px;">No domain tags on this corpus.</span>';
+      }} else {{
+        dlist.innerHTML = '';
+        domains.forEach(d => {{
+          const el = document.createElement('span');
+          el.textContent = d.name + ' (' + d.n + ')';
+          el.title = d.name + ' — ' + d.n + ' papers';
+          el.style.cssText = 'background:var(--accent-light,#eef2ff);border:1px solid var(--border);border-radius:10px;padding:2px 8px;font-size:11px;';
+          dlist.appendChild(el);
+        }});
+      }}
+    }}
   }} catch (exc) {{
     list.innerHTML = '<span style="color:var(--danger,#c53030);font-size:12px;">Error: ' + exc + '</span>';
   }}
@@ -9130,6 +9513,30 @@ async function doToolCorpus(action) {{
     fd.append('limit', document.getElementById('tl-enr-limit').value || '0');
     fd.append('threshold', document.getElementById('tl-enr-thresh').value || '0.85');
     fd.append('dry_run', document.getElementById('tl-enr-dry').checked ? 'true' : 'false');
+  }} else if (action === 'expand-author') {{
+    // Phase 46.E — expand-by-author
+    const nm = (window._selectedExpandAuthorName
+                 || document.getElementById('tl-eauth-q').value || '').trim();
+    if (!nm) {{
+      status.textContent = 'Pick an author from the list (or type a name and press Enter).';
+      cancelBtn.style.display = 'none';
+      return;
+    }}
+    fd.append('name', nm);
+    const orcid = document.getElementById('tl-eauth-orcid').value.trim();
+    if (orcid) fd.append('orcid', orcid);
+    fd.append('year_from', document.getElementById('tl-eauth-yfrom').value || '0');
+    fd.append('year_to',   document.getElementById('tl-eauth-yto').value   || '0');
+    fd.append('limit',     document.getElementById('tl-eauth-limit').value || '0');
+    fd.append('workers',   document.getElementById('tl-eauth-workers').value || '0');
+    fd.append('relevance_threshold', document.getElementById('tl-eauth-relthr').value || '0.0');
+    fd.append('strict_author', document.getElementById('tl-eauth-strict').checked ? 'true' : 'false');
+    fd.append('all_matches',   document.getElementById('tl-eauth-all').checked ? 'true' : 'false');
+    fd.append('relevance',     document.getElementById('tl-eauth-relevance').checked ? 'true' : 'false');
+    fd.append('ingest',        document.getElementById('tl-eauth-ingest').checked ? 'true' : 'false');
+    fd.append('dry_run',       document.getElementById('tl-eauth-dry').checked ? 'true' : 'false');
+    const rq = document.getElementById('tl-eauth-relq').value.trim();
+    if (rq) fd.append('relevance_query', rq);
   }} else {{
     fd.append('limit', document.getElementById('tl-exp-limit').value || '0');
     fd.append('workers', document.getElementById('tl-exp-workers').value || '0');
@@ -9145,6 +9552,11 @@ async function doToolCorpus(action) {{
   try {{
     const res = await fetch('/api/corpus/' + action, {{method: 'POST', body: fd}});
     const data = await res.json();
+    if (!res.ok) {{
+      status.textContent = 'Failed to start: ' + (data.detail || res.status);
+      cancelBtn.style.display = 'none';
+      return;
+    }}
     _toolsCorpusJob = data.job_id;
   }} catch (exc) {{
     status.textContent = 'Failed to start: ' + exc;

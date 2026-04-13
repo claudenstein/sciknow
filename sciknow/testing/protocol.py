@@ -5394,6 +5394,48 @@ def l1_phase46c_ensemble_review_surface() -> None:
         assert token in src, f"_consume_events missing handler for {token!r}"
 
 
+def l1_phase46e_web_expand_surface() -> None:
+    """Phase 46.E — web expand surface: authors + domains + expand-author.
+
+    Static checks. Verifies the three new endpoints register on the
+    FastAPI app, and the HTML template mounts the Expand-by-Author
+    panel + live author search JS hooks.
+    """
+    from sciknow.web import app as webapp
+
+    # Endpoints
+    route_paths = {r.path for r in webapp.app.routes if hasattr(r, "path")}
+    for required in (
+        "/api/catalog/authors",
+        "/api/catalog/domains",
+        "/api/corpus/expand-author",
+    ):
+        assert required in route_paths, (
+            f"Phase 46.E web endpoint {required!r} not registered"
+        )
+
+    # Template renders the Expand-by-Author panel + search hooks
+    tpl = webapp.TEMPLATE
+    for token in (
+        'id="corp-author-pane"',
+        'id="tl-eauth-q"',
+        'id="tl-eauth-results"',
+        'id="tl-eauth-selected"',
+        "onExpandAuthorSearchInput",
+        "selectExpandAuthor",
+        "switchCorpusTab",
+        "loadCorpusTopicList",
+        # Topics tab now also renders domains alongside clusters
+        'id="tl-domains-list"',
+    ):
+        assert token in tpl, f"expand-UI: template missing {token!r}"
+
+    # doToolCorpus knows about the three action values
+    assert "action === 'expand-author'" in tpl, (
+        "doToolCorpus must handle the expand-author action"
+    )
+
+
 def l1_bench_harness_surface() -> None:
     """Phase 44 — the bench harness module loads and exposes the expected
     surface (run/run_layer/LAYERS/BenchMetric). Each layer has >= 1
@@ -6455,10 +6497,11 @@ L1_TESTS: list[Callable] = [
     l1_phase45_project_types,
     l1_phase45_watchlist_surface,
     # Phase 46 — auditable scientific writing (citation insert + verify +
-    # ensemble review)
+    # ensemble review + expand-by-author web surface)
     l1_phase46_citation_insert_surface,
     l1_phase46_citation_verify_surface,
     l1_phase46c_ensemble_review_surface,
+    l1_phase46e_web_expand_surface,
 ]
 
 L2_TESTS: list[Callable] = [
