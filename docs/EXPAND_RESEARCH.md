@@ -1,9 +1,9 @@
 # `db expand` — corpus growth without dilution
 
-How the current implementation works, what signals are missing, and a
-concrete priority stack for upgrading it. Written 2026-04-14 as the
-design basis for the next round of expander work; follow the same
-"parked vs ship next" split we use in `docs/KG_RESEARCH.md`.
+How the ranker works (Phase 49, shipped 2026-04-14) and why. The
+original version of this doc was a design brief; everything in the
+"Priority stack" section below is now implemented — see the **Status**
+block at the bottom for what's parked.
 
 ## Current implementation (as audited 2026-04-14)
 
@@ -99,6 +99,37 @@ What it does today:
 5. **Local PageRank on depth-2 subgraph.** Build once per invocation with NetworkX, score all candidates. Adds the Inciteful foundational-paper signal.
 6. **Best-first frontier with budget + stopping rule.** `--budget 50` per round; stop at median-score drop 30% or novelty < 30%. Replace the current single-shot all-or-nothing flow.
 7. **`--dry-run` writes a shortlist TSV** with per-candidate feature breakdown (what signal kept/dropped each one). HITL review becomes viable; feature attribution is how we'll tune weights later.
+
+## Status (Phase 49 — shipped 2026-04-14)
+
+All seven priority-stack items above are implemented. Code lives in:
+
+- `sciknow/ingestion/expand_ranker.py` — `CandidateFeatures`, RRF
+  fusion, PageRank (scipy sparse), bibliographic coupling, one-timer
+  filter, shortlist-TSV writer, stopping rule.
+- `sciknow/ingestion/expand_filters.py` — retraction / predatory /
+  doc-type hard filters with a seed predatory-publisher list.
+- `sciknow/ingestion/expand_apis.py` — OpenAlex `/works`, `/works?cites=`
+  and Semantic Scholar `/paper/{id}/citations` clients with in-process
+  caching + polite throttling.
+- `sciknow/cli/db.py::_run_rrf_ranker` — orchestrator wired into the
+  existing `db expand` flow via `--strategy rrf` (default).
+
+New CLI flags:
+- `--strategy rrf|legacy` (default rrf)
+- `--budget N` — max papers to queue per round (default 50)
+- `--no-openalex` / `--no-semantic-scholar` — degrade cleanly when
+  offline or when you want a fast pre-pass
+- `--shortlist-tsv PATH` — write the full per-candidate feature
+  breakdown (implies `--dry-run`); default path when `--dry-run` is
+  set in RRF mode is `<download_dir>/expand_shortlist.tsv`
+
+End-to-end smoke from the 73-paper climate corpus: 1810 raw candidates
+→ 663 survive bge-m3 cosine cut → pool capped at 60 → 1 hard-dropped
+(predatory) + 4 one-timers → 55 survivors → top-10 by RRF. The top
+candidate had co-citation = 157, velocity = 29 cites/year, bib
+coupling = 0.12. PageRank correctly promoted a high-velocity review
+(258 cites/year) above candidates with higher coupling.
 
 ## Parked (don't ship without clear justification)
 

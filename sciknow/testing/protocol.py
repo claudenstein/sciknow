@@ -6710,6 +6710,140 @@ def l2_phase32_data_invariants() -> None:
     assert not failures, "; ".join(failures)
 
 
+def l1_phase49_expand_rrf_ranker() -> None:
+    """Phase 49 — RRF-fused multi-signal expand ranker.
+
+    Static checks on the new modules (no network, no APIs):
+      - expand_filters has retraction / predatory / doc-type filters
+        with the documented contract (None-safe, returns reason str)
+      - expand_ranker.CandidateFeatures one-timer rule fires with the
+        expected boundary (cite_count 1 + external 0 → one-timer;
+        external 5 → not)
+      - RRF fusion yields a higher score for the candidate that
+        consistently ranks near the top across signals
+      - local_pagerank converges (sums ≈ 1) on a tiny synthetic graph
+      - write_shortlist_tsv produces a parseable TSV with all the
+        documented columns
+      - the CLI helper `_run_rrf_ranker` is importable from sciknow.cli.db
+        (used by tests + future refactors)
+      - the orchestrator APIs module exposes the public entry points
+        we call from db.py
+    """
+    import inspect as _inspect
+    import tempfile as _tempfile
+    from pathlib import Path as _Path
+
+    from sciknow.ingestion import expand_apis, expand_filters, expand_ranker
+    from sciknow.cli import db as db_cli
+
+    # Hard filters — None-safe, reason strings stable
+    assert expand_filters.is_retracted(None) is False
+    assert expand_filters.is_retracted({"is_retracted": True}) is True
+    assert expand_filters.is_predatory_venue(None) is False
+    assert expand_filters.is_predatory_venue({
+        "primary_location": {"source": {"publisher": "Scientific Research Publishing"}}
+    }) is True
+    assert expand_filters.drop_reason_by_doc_type({"type": "editorial"}) == "editorial"
+    assert expand_filters.drop_reason_by_doc_type({"type": "article"}) == ""
+    drop, reason = expand_filters.apply_hard_filters({"is_retracted": True})
+    assert drop is True and reason == "retracted"
+    drop, reason = expand_filters.apply_hard_filters({"type": "article"})
+    assert drop is False and reason == ""
+
+    # One-timer rule — default boundary
+    f = expand_ranker.CandidateFeatures(
+        doi="10.1/a", corpus_cite_count=1, external_cite_count=0,
+    )
+    assert f.is_one_timer() is True, "corpus=1+external=0 should be one-timer"
+    f2 = expand_ranker.CandidateFeatures(
+        doi="10.1/b", corpus_cite_count=1, external_cite_count=10,
+    )
+    assert f2.is_one_timer() is False, (
+        "external>=5 lifts a candidate out of one-timer status"
+    )
+
+    # RRF — candidate consistently high should win
+    scores = expand_ranker.rrf_fuse([
+        ["a", "b", "c"],
+        ["a", "c", "b"],
+        ["a", "b", "c"],
+    ])
+    assert scores["a"] > scores["b"] > scores["c"], (
+        "RRF must respect multi-ranking consensus"
+    )
+
+    # PageRank on a tiny synthetic graph converges and sums ~ 1
+    pr = expand_ranker.local_pagerank(
+        nodes=["A", "B", "C", "D"],
+        edges=[("A", "B"), ("C", "B"), ("D", "B"), ("B", "A")],
+        iters=50,
+    )
+    assert set(pr.keys()) == {"A", "B", "C", "D"}
+    assert abs(sum(pr.values()) - 1.0) < 0.01, "PR must sum ≈ 1"
+    assert pr["B"] > pr["A"], "the hub (B) must outrank A in this graph"
+
+    # Shortlist TSV round-trip
+    with _tempfile.TemporaryDirectory() as tmp:
+        out = _Path(tmp) / "shortlist.tsv"
+        c_keep = expand_ranker.CandidateFeatures(
+            doi="10.1/keep", title="kept paper", bge_m3_cosine=0.9,
+            co_citation=3, rrf_score=0.1,
+        )
+        c_drop = expand_ranker.CandidateFeatures(
+            doi="10.1/drop", title="retracted", hard_drop_reason="retracted",
+        )
+        expand_ranker.write_shortlist_tsv([c_keep, c_drop], out)
+        content = out.read_text()
+        # Header + 2 rows
+        lines = [line for line in content.splitlines() if line.strip()]
+        assert len(lines) == 3, f"expected header + 2 rows, got {len(lines)}"
+        header = lines[0].split("\t")
+        for col in ("decision", "drop_reason", "rrf_score", "doi",
+                    "co_citation", "bib_coupling", "pagerank",
+                    "influential_cites", "corpus_cites", "external_cites"):
+            assert col in header, f"column {col!r} missing from shortlist TSV"
+        assert "KEEP" in content and "DROP" in content
+
+    # Orchestrator handle on the CLI module
+    assert hasattr(db_cli, "_run_rrf_ranker"), (
+        "CLI is missing the _run_rrf_ranker orchestrator"
+    )
+
+    # expand_apis exposes the public entry points we call into
+    for name in (
+        "fetch_openalex_work",
+        "fetch_openalex_cited_by",
+        "fetch_s2_citations",
+        "count_influential_from_corpus",
+    ):
+        assert hasattr(expand_apis, name), (
+            f"expand_apis.{name} missing — db.py depends on it"
+        )
+
+    # expand_ranker exposes the orchestration helpers
+    for name in (
+        "CandidateFeatures",
+        "rrf_fuse",
+        "local_pagerank",
+        "bibliographic_coupling",
+        "apply_one_timer_filter",
+        "score_via_rrf",
+        "write_shortlist_tsv",
+        "should_stop_expansion",
+        "enrich_from_openalex_work",
+        "apply_author_overlap",
+    ):
+        assert hasattr(expand_ranker, name), (
+            f"expand_ranker.{name} missing"
+        )
+
+    # CLI flags are wired (static signature check — avoids running the command)
+    src = _inspect.getsource(db_cli.expand)
+    for flag in ("--strategy", "--budget", "--no-openalex",
+                 "--no-semantic-scholar", "--shortlist-tsv"):
+        assert flag in src, f"expand CLI missing flag {flag!r}"
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -6877,6 +7011,8 @@ L1_TESTS: list[Callable] = [
     l1_phase47_promote_to_global_surface,
     # Phase 46.G — HF benchmark watchlist
     l1_phase46g_benchmark_watchlist,
+    # Phase 49 — RRF-fused multi-signal expand ranker
+    l1_phase49_expand_rrf_ranker,
 ]
 
 L2_TESTS: list[Callable] = [

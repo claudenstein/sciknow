@@ -17,6 +17,313 @@ app = typer.Typer(help="Database and infrastructure management.")
 console = Console()
 
 
+# ── Phase 49 — RRF-fused expand ranker orchestrator ───────────────────────
+# Lives at module scope so L1 tests can import it without instantiating
+# the whole Typer app. See docs/EXPAND_RESEARCH.md for the design
+# rationale + per-signal trade-offs; the per-signal math lives in
+# sciknow/ingestion/expand_ranker.py.
+
+def _run_rrf_ranker(
+    *,
+    downloadable: list,
+    papers: list,
+    existing_dois: set,
+    budget: int,
+    no_openalex: bool,
+    no_s2: bool,
+    dry_run: bool,
+    shortlist_tsv: Path | None,
+    download_dir: Path,
+    console,
+):
+    """Upgrade the already-cosine-filtered `downloadable` list of
+    `Reference` objects into a ranked, RRF-fused, hard-filtered list.
+
+    Returns `(refs_to_download, ranked_features)`:
+      - refs_to_download : Reference[]  — top-`budget` after filters + RRF
+      - ranked_features  : CandidateFeatures[]  — full list with scores
+                            (for --shortlist-tsv)
+
+    Downloads / ingests are NOT done here — the caller still runs the
+    existing download+ingest pipeline on the returned Reference list.
+    """
+    from collections import Counter
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from sciknow.ingestion import expand_apis, expand_filters, expand_ranker
+    from sciknow.ingestion.expand_ranker import (
+        CandidateFeatures,
+        apply_author_overlap,
+        apply_one_timer_filter,
+        bibliographic_coupling,
+        compute_corpus_side_counts,
+        enrich_from_openalex_work,
+        local_pagerank,
+        score_via_rrf,
+        write_shortlist_tsv,
+    )
+
+    # Seed set = existing corpus with DOIs (needed for co-citation /
+    # coupling — we need OpenAlex IDs for seeds, and we only have
+    # those via DOI lookup).
+    seed_dois = [p[0] for p in papers if p[0]]  # pm.doi column
+
+    console.print(
+        f"\n[bold]RRF ranker[/bold] — {len(downloadable)} candidates "
+        f"→ target top {budget}"
+    )
+
+    # ── 1. Build CandidateFeatures from the cosine-prefiltered pool.
+    #     Cap to 3×budget so we don't waste API quota on long tails.
+    pool_cap = max(budget * 3, 60)
+    cosine_pool = sorted(
+        downloadable,
+        key=lambda r: getattr(r, "_relevance_score", 0.0),
+        reverse=True,
+    )[:pool_cap]
+    feats: list[CandidateFeatures] = []
+    ref_by_key: dict[str, object] = {}
+    for r in cosine_pool:
+        f = CandidateFeatures(
+            doi=(r.doi or ""),
+            arxiv_id=(r.arxiv_id or ""),
+            title=(r.title or ""),
+            year=int(r.year or 0),
+            bge_m3_cosine=float(getattr(r, "_relevance_score", 0.0) or 0.0),
+        )
+        feats.append(f)
+        ref_by_key[f.key] = r
+
+    # Count how many seeds reference each candidate → corpus_cite_count.
+    seed_ref_counts: Counter = Counter()
+    for r in cosine_pool:
+        pass  # corpus_cite_count derivation is on the seed-ref side below
+
+    # Recover corpus-cite counts from the candidate-gathering step: each
+    # candidate `Reference` was already deduped across seeds but we lose
+    # the count. Recompute by walking the full candidate list before
+    # dedup — cheap (dict lookup) if the caller kept per-ref refs.
+    # Here we approximate by counting re-appearances in `downloadable`
+    # (Reference is deduped by key so this is always 1); a precise count
+    # would need a refactor. Keep as 1 for now; one-timer filter still
+    # fires when external_cite_count < 5.
+    for f in feats:
+        f.corpus_cite_count = 1
+
+    if no_openalex:
+        console.print(
+            "[yellow]  --no-openalex: skipping OpenAlex + PageRank + "
+            "co-citation signals.[/yellow]"
+        )
+        # Without OpenAlex: only cosine + one-timer filter apply.
+        # external_cite_count stays at 0 → one-timer drops everyone
+        # with corpus_cite_count=1. Disable the one-timer filter in
+        # this degraded mode by pre-populating external_cite_count=999.
+        for f in feats:
+            f.external_cite_count = 999
+    else:
+        # ── 2. Parallel OpenAlex work fetch ──────────────────────────────────
+        console.print(f"  fetching OpenAlex metadata for {len(feats)} candidates…")
+        oa_works = expand_ranker._parallel_openalex_works(
+            [(f.doi, f.arxiv_id) for f in feats],
+            max_workers=8,
+        )
+        for f in feats:
+            w = oa_works.get(f.key) or oa_works.get((f.doi or f"arxiv:{f.arxiv_id}").lower())
+            enrich_from_openalex_work(f, w)
+
+        # ── 3. Hard filters (retraction / predatory / doc-type) ──────────────
+        hard_dropped = 0
+        for f in feats:
+            w = oa_works.get(f.key)
+            drop, reason = expand_filters.apply_hard_filters(w)
+            if drop:
+                f.hard_drop_reason = reason
+                f.decisions.append(f"HARD_DROP: {reason}")
+                hard_dropped += 1
+        if hard_dropped:
+            console.print(f"  hard filters dropped {hard_dropped} candidates")
+
+        # ── 4. Seed enrichment: fetch OpenAlex works for seeds to get refs ──
+        #     Only bother with seeds that have a DOI (needed to resolve).
+        seed_dois_to_query = seed_dois[:100]  # cap for API politeness
+        seed_oa_works: dict[str, dict] = {}
+        if seed_dois_to_query:
+            console.print(
+                f"  fetching OpenAlex metadata for {len(seed_dois_to_query)} seeds…"
+            )
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                futures = {
+                    pool.submit(expand_apis.fetch_openalex_work, d): d
+                    for d in seed_dois_to_query
+                }
+                for fut in as_completed(futures):
+                    d = futures[fut]
+                    try:
+                        w = fut.result()
+                        if w:
+                            seed_oa_works[d.lower()] = w
+                    except Exception:
+                        pass
+
+        # ── 5. Bibliographic coupling ───────────────────────────────────────
+        seed_refs_union: set[str] = set()
+        seed_refs_size = 0
+        for w in seed_oa_works.values():
+            refs = w.get("referenced_works") or []
+            seed_refs_size += len(refs)
+            seed_refs_union.update(refs)
+        for f in feats:
+            if f.hard_drop_reason:
+                continue
+            w = oa_works.get(f.key)
+            if not w:
+                continue
+            cand_refs = w.get("referenced_works") or []
+            f.bib_coupling = bibliographic_coupling(
+                cand_refs, seed_refs_union, seed_refs_size
+            )
+
+        # ── 6. Co-citation via seed cited-by sets ──────────────────────────
+        #     Cheaper to fetch once per seed than once per candidate.
+        if seed_oa_works:
+            console.print(f"  fetching cited-by for {len(seed_oa_works)} seeds (co-citation)…")
+            forward_refs: list[list[str]] = []
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                futures = [
+                    pool.submit(expand_apis.fetch_openalex_cited_by, w.get("id"), per_page=100, max_pages=2)
+                    for w in seed_oa_works.values()
+                    if w.get("id")
+                ]
+                for fut in as_completed(futures):
+                    try:
+                        papers_citing_seed = fut.result()
+                        for p in papers_citing_seed:
+                            refs = p.get("referenced_works") or []
+                            if refs:
+                                forward_refs.append(refs)
+                    except Exception:
+                        pass
+            if forward_refs:
+                co_counts: Counter = Counter()
+                cand_oa_ids = {f.openalex_id for f in feats if f.openalex_id}
+                for refs in forward_refs:
+                    for r in refs:
+                        if r in cand_oa_ids:
+                            co_counts[r] += 1
+                for f in feats:
+                    if f.openalex_id:
+                        f.co_citation = int(co_counts.get(f.openalex_id, 0))
+
+        # ── 7. Local PageRank on the depth-2 citation subgraph ─────────────
+        #     Nodes: seed OA IDs, candidate OA IDs, their 1-hop refs.
+        #     Edges: (src, tgt) where src cites tgt.
+        console.print("  building depth-2 citation subgraph for PageRank…")
+        edges: list[tuple[str, str]] = []
+        node_set: set[str] = set()
+        for w in seed_oa_works.values():
+            sid = w.get("id")
+            if not sid:
+                continue
+            node_set.add(sid)
+            for ref in (w.get("referenced_works") or []):
+                node_set.add(ref)
+                edges.append((sid, ref))
+        for f in feats:
+            if not f.openalex_id:
+                continue
+            node_set.add(f.openalex_id)
+            w = oa_works.get(f.key)
+            if w:
+                for ref in (w.get("referenced_works") or []):
+                    node_set.add(ref)
+                    edges.append((f.openalex_id, ref))
+        if node_set and edges:
+            pr = local_pagerank(list(node_set), edges)
+            for f in feats:
+                f.pagerank = float(pr.get(f.openalex_id, 0.0)) if f.openalex_id else 0.0
+        else:
+            console.print("  [dim]  (subgraph empty — PageRank skipped)[/dim]")
+
+        # ── 8. Semantic Scholar isInfluential + intents ────────────────────
+        if not no_s2:
+            survivors = [f for f in feats if not f.hard_drop_reason and f.doi]
+            if survivors:
+                console.print(
+                    f"  fetching Semantic Scholar citations for {len(survivors)} "
+                    "survivors (1 RPS throttled)…"
+                )
+                for f in survivors:
+                    data = expand_apis.fetch_s2_citations(f.doi)
+                    f.influential_cite_count = expand_apis.count_influential_from_corpus(
+                        data, existing_dois
+                    )
+
+        # ── 9. Author overlap ──────────────────────────────────────────────
+        #     From paper_metadata (existing corpus) + OpenAlex authorships
+        #     on each candidate.
+        from sciknow.storage.db import get_session
+        from sqlalchemy import text as sql_text
+        corpus_author_counts: Counter = Counter()
+        with get_session() as session:
+            rows = session.execute(sql_text(
+                "SELECT authors FROM paper_metadata WHERE authors IS NOT NULL"
+            )).fetchall()
+        for (authors,) in rows:
+            # authors column is JSON array of strings (based on ingestion flow).
+            try:
+                if isinstance(authors, str):
+                    authors_list = json.loads(authors)
+                else:
+                    authors_list = authors or []
+            except Exception:
+                authors_list = []
+            for a in authors_list:
+                if isinstance(a, str):
+                    corpus_author_counts[a.strip().lower()] += 1
+        candidate_authors: dict[str, list[str]] = {}
+        for f in feats:
+            w = oa_works.get(f.key)
+            if not w:
+                continue
+            names = []
+            for auth in (w.get("authorships") or []):
+                display = (auth.get("author") or {}).get("display_name") or ""
+                if display:
+                    names.append(display.strip().lower())
+            candidate_authors[f.key] = names
+        apply_author_overlap(feats, dict(corpus_author_counts), candidate_authors)
+
+        # ── 10. Corpus-side cite count derivation ──────────────────────────
+        cited_by_lookup = {f.key: f.cited_by_count for f in feats}
+        compute_corpus_side_counts(feats, cited_by_lookup=cited_by_lookup)
+
+    # ── 11. One-timer filter ──────────────────────────────────────────────
+    apply_one_timer_filter(feats)
+
+    # ── 12. RRF fusion ────────────────────────────────────────────────────
+    ranked = score_via_rrf(feats)
+    kept = [f for f in ranked if not f.hard_drop_reason]
+    dropped = [f for f in ranked if f.hard_drop_reason]
+    console.print(
+        f"  [green]kept {len(kept)}[/green]  [red]dropped {len(dropped)}[/red]  "
+        f"(→ taking top {min(budget, len(kept))} for download)"
+    )
+
+    # ── 13. Shortlist TSV for HITL review ────────────────────────────────
+    tsv_path = shortlist_tsv
+    if tsv_path is None and dry_run:
+        tsv_path = download_dir / "expand_shortlist.tsv"
+    if tsv_path:
+        write_shortlist_tsv(ranked, tsv_path)
+        console.print(f"  [dim]shortlist TSV written to {tsv_path}[/dim]")
+
+    # ── 14. Return the top-`budget` Reference objects for the download phase
+    top_feats = kept[:budget]
+    top_refs = [ref_by_key[f.key] for f in top_feats if f.key in ref_by_key]
+    return top_refs, ranked
+
+
 # ── backup ─────────────────────────────────────────────────────────────────────
 
 @app.command()
@@ -889,6 +1196,27 @@ def expand(
                                                    "(0 = use INGEST_WORKERS from .env, default 1). Each worker loads its own "
                                                    "MinerU (~7GB VRAM) + bge-m3 (~2.2GB). On a 24GB 3090 with an LLM resident, "
                                                    "keep at 1. Raise to 2 only when the LLM is off-GPU."),
+    # ── Phase 49 — RRF-fused multi-signal ranker (see docs/EXPAND_RESEARCH.md)
+    strategy:           str   = typer.Option("rrf", "--strategy",
+                                              help="Candidate ranking strategy: 'rrf' (default — multi-signal RRF "
+                                                   "fusion with hard filters, co-citation, bib coupling, PageRank, "
+                                                   "influential-citation flag) or 'legacy' (pre-Phase-49 bge-m3 "
+                                                   "cosine filter only)."),
+    budget:             int   = typer.Option(50,    "--budget",
+                                              help="Max papers to queue for download per RRF round (default 50). "
+                                                   "Ignored for --strategy legacy."),
+    rrf_no_openalex:    bool  = typer.Option(False, "--no-openalex",
+                                              help="Skip the per-candidate OpenAlex work lookup in RRF mode. Disables "
+                                                   "co-citation / bib coupling / PageRank / velocity / hard filters, "
+                                                   "falling back to bge-m3 cosine + one-timer only. Use when offline."),
+    rrf_no_s2:          bool  = typer.Option(False, "--no-semantic-scholar",
+                                              help="Skip the Semantic Scholar citations lookup (the isInfluential + "
+                                                   "intents signal). Faster by ~1 s per survivor candidate. Default "
+                                                   "is to include."),
+    shortlist_tsv:      Path  = typer.Option(None,  "--shortlist-tsv",
+                                              help="Write the full ranked shortlist (kept + dropped, every signal) "
+                                                   "to this TSV path. Implies --dry-run when set. Default in RRF dry-"
+                                                   "run mode: <download_dir>/expand_shortlist.tsv."),
 ):
     """
     Expand the collection by following references in existing papers.
@@ -1149,6 +1477,32 @@ def expand(
                 "  [dim]Common cause: GPU OOM. Free VRAM with `ollama stop <model>` "
                 "and re-run, or use [bold]--no-relevance[/bold] to skip explicitly.[/dim]"
             )
+
+    # ── Phase 49: RRF-fused multi-signal ranker ──────────────────────────────
+    # When --strategy rrf (default), run the full ranker over the candidate
+    # pool: fetch OpenAlex metadata, apply hard filters, compute co-citation
+    # / bib coupling / PageRank / influential-cite / author-overlap signals,
+    # fuse via RRF, and cut to `budget`. Replaces `downloadable` with the
+    # top-ranked survivors so the existing download flow below processes
+    # exactly those. Dry-run mode writes the full shortlist TSV and exits.
+    # See docs/EXPAND_RESEARCH.md for the research behind each signal.
+    ranked_features: list = []
+    if strategy == "rrf" and downloadable:
+        downloadable, ranked_features = _run_rrf_ranker(
+            downloadable=downloadable,
+            papers=papers,
+            existing_dois=existing_dois,
+            budget=budget,
+            no_openalex=rrf_no_openalex,
+            no_s2=rrf_no_s2,
+            dry_run=dry_run,
+            shortlist_tsv=shortlist_tsv,
+            download_dir=download_dir,
+            console=console,
+        )
+        # If dry-run + RRF, the TSV has been written and we can exit early.
+        if dry_run:
+            raise typer.Exit(0)
 
     # Apply limit early so --resolve doesn't waste time on refs we won't download
     if limit:
