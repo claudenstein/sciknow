@@ -6393,13 +6393,17 @@ body.task-bar-open {{ padding-top: 40px; }}
 <header class="topbar" id="topbar">
   <button class="nav-btn" onclick="openPlanModal()" title="View / edit / regenerate the book plan (the leitmotiv)">&#128221; Plan</button>
   <button class="nav-btn" onclick="openBookSettings()" title="Consolidated per-book settings: title, description, plan, length target, style fingerprint">&#9881; Settings</button>
+  <button class="nav-btn" onclick="showDashboard()" title="Book dashboard with stats + heatmap">&#128200; Dashboard</button>
+  <button class="nav-btn" onclick="showCorkboard()" title="Visual card-based view of the book">&#128204; Corkboard</button>
+  <button class="nav-btn" onclick="showVersions()" title="View version history and diffs">&#128344; History</button>
+  <button class="nav-btn" onclick="takeSnapshot()" title="Save a snapshot of current draft content">&#128248; Snapshot</button>
+  <button class="nav-btn" onclick="openExportModal()" title="Export this section, chapter, or the whole book to text or printable HTML/PDF">&#128229; Export</button>
   <button class="nav-btn" onclick="openAskModal()" title="Full corpus RAG question (sciknow ask question)">&#128270; Ask Corpus</button>
   <button class="nav-btn" onclick="openWikiModal()" title="Query the compiled knowledge wiki (sciknow wiki query)">&#128218; Wiki Query</button>
   <button class="nav-btn" onclick="openKgModal()" title="Browse the knowledge graph (extracted entity-relationship triples)">&#128279; KG</button>
   <button class="nav-btn" onclick="openCatalogModal()" title="Browse the paper catalog (sciknow catalog list)">&#128194; Browse Papers</button>
   <button class="nav-btn" onclick="openToolsModal()" title="CLI tools in the GUI: search, synthesize, topics, corpus enrich/expand">&#128736; Tools</button>
   <button class="nav-btn" onclick="openSetupWizard()" title="End-to-end setup: create project → upload PDFs → ingest → build indices → create book. Phase 46.F.">&#128295; Setup</button>
-  <button class="nav-btn" onclick="showDashboard()" title="Book dashboard with stats + heatmap">&#128200; Dashboard</button>
   <button class="nav-btn" onclick="openProjectsModal()" title="Manage sciknow projects (list / switch / create / destroy). See `sciknow project --help`."><span id="proj-btn-label">&#128193; Projects</span></button>
 </header>
 
@@ -6485,11 +6489,7 @@ body.task-bar-open {{ padding-top: 40px; }}
     </div>
     <div class="sep"></div>
     <div class="tg">
-      <button onclick="showVersions()" title="View version history and diffs">History</button>
-      <button onclick="takeSnapshot()" title="Save a snapshot of current draft content">Snapshot</button>
       <button onclick="openBundleSnapshots()" title="Snapshot / restore whole chapter or whole book — safety net for autowrite-all">&#128230; Bundles</button>
-      <button onclick="openExportModal()" title="Export this section, chapter, or the whole book to text or printable HTML/PDF">&#128229; Export</button>
-      <button onclick="showCorkboard()" title="Visual card-based view">Corkboard</button>
       <button onclick="showChapterReader()" title="Read entire chapter as continuous scroll">Read</button>
     </div>
   </div>
