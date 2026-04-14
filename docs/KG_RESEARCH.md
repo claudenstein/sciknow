@@ -7,26 +7,45 @@ This doc captures the research that justifies what's shipped and what's
 deferred — written so the next session can pick the right next move
 without re-running the analysis.
 
-## Priority stack (ship these next, in order)
+## Status (Phase 48b)
 
-1. **Hover-dim + 1-hop highlight** — dim everything except the hovered node
-   and its direct neighbors. Single highest-ROI interaction in every
-   node-link tool. ~40 lines.
-2. **Louvain community detection + per-cluster coloring + gravity wells** —
-   O(n log n), portable to vanilla JS in ~80 lines. The single biggest
-   readability win in the 100–500 node range.
-3. **Right-click context menu: ego-expand at depth 1/2, pin, hide, open source
-   paper, copy triple** — ego expansion is how Inciteful / ResearchRabbit /
-   Litmaps are navigated; it beats any global view.
-4. **ForceAtlas2 with `linLogMode=true`** (Jacomy 2014, PLOS ONE) and
-   link-strength ∝ log(1+triple_count) — better hub separation than
-   Fruchterman-Reingold. ~150 lines.
-5. **"Explain this edge" popover** — on edge hover, show the source sentence
-   from the paper that produced the triple. Turns the graph from decoration
-   into evidence. Requires provenance in the triple store.
+### Shipped
+- 3D orbit camera + drag-to-reposition + wheel zoom (Phase 48)
+- Seven theme presets + one-click Invert (Phase 48)
+- **Louvain community detection**, per-cluster Okabe-Ito coloring, and
+  per-community gravity wells that pre-position nodes
+- **ForceAtlas2-derived physics**: log-weighted attraction (linLog),
+  degree-scaled repulsion (dissuade-hubs), weak origin centering
+- Duplicate-triple merging: same (s, t) pair → one curved edge with a
+  count badge and a Set of predicate families
+- Curved quadratic-Bézier edges with bundle offsets so A→B and B→A (or
+  multiple same-direction edges) don't overlap
+- **Hover-dim + 1-hop highlight**: dim non-neighbors on node hover
+- **Right-click context menu** for node / edge / background — pin,
+  hide, ego-expand (via new `any_side` API param), center view,
+  copy label/triple, show source paper, filter by predicate
+- **Live search box** that dims non-matches and tween-centers on the
+  first match
+- **Spacebar freeze** / resume of the physics loop
+- **Center-on-click camera tween** (cubic ease-in-out)
+- **PNG export** (SVG → canvas → 2× retina download)
+- **Color-by dropdown**: cluster / predicate family / plain (theme edge)
+- **Label size slider** + **Max-degree slider** (hides hub nodes above N)
+- **Predicate family coloring** (causal / measurement / taxonomic /
+  compositional / citational / other) using Okabe-Ito colorblind-safe
+  categorical palette
 
-These five cover ~80% of the usability delta between "pretty demo" and
-"tool researchers actually use daily."
+### Still in the backlog (in rough priority order)
+1. **"Explain this edge" popover** with the source *sentence* (not just
+   paper title). Requires schema migration to store sentence offsets
+   at extraction time — biggest feature remaining, biggest lift.
+2. **Cached layout per filter** (localStorage by filter-hash) for warm
+   starts when users alternate filters.
+3. **Shareable URL** encoding camera + filter + pinned set in the hash.
+4. **Ego expansion at depth ≥ 2** (currently depth 1).
+5. **Barnes-Hut** only once we hit n ≈ 800 or profile shows > 8 ms/frame.
+6. **Lasso selection**, **keyboard graph walk**, **minimap** — all
+   explicitly parked as low-ROI for this tool.
 
 ## Axis-by-axis notes
 

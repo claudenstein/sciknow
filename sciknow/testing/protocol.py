@@ -3181,6 +3181,41 @@ def l1_phase31_kg_graph_view() -> None:
     assert "kg-theme-chip" in src and "kg-invert-btn" in src, (
         "KG theme chip CSS/markup missing"
     )
+    # Phase 48b — the full "top notch" KG upgrade: Louvain clusters,
+    # predicate families, ForceAtlas2-derived physics, hover-dim,
+    # right-click context menu, live search, PNG export, ego expansion.
+    # Each of these is a load-bearing piece users interact with; guard
+    # so a future refactor can't silently remove any one of them.
+    assert "_kgLouvain" in src and "KG_CLUSTER_PALETTE" in src, (
+        "KG clustering (Louvain + palette) missing"
+    )
+    assert "KG_PREDICATE_FAMILIES" in src and "_kgPredicateFamily" in src, (
+        "KG predicate-family coloring missing"
+    )
+    assert "_applyKgClusterDefs" in src, (
+        "KG per-cluster gradient defs missing"
+    )
+    assert "_kgShowMenu" in src and "kg-context-menu" in src, (
+        "KG right-click context menu missing"
+    )
+    assert "kgEgoExpand" in src and "any_side" in src, (
+        "KG ego-expansion (right-click 'Expand around here') missing"
+    )
+    assert "kgToggleFreeze" in src and "kgDownloadPng" in src, (
+        "KG freeze / PNG-export toolbar actions missing"
+    )
+    assert "kgSetColorBy" in src and "kgSetLabelScale" in src, (
+        "KG color-mode / label-size toolbar actions missing"
+    )
+    assert "tweenCenterOn" in src, (
+        "KG center-on-click camera tween missing"
+    )
+    assert "hoverNeighbors" in src, (
+        "KG hover-dim 1-hop highlight missing"
+    )
+    assert 'id="kg-search"' in src, (
+        "KG live search input missing from Graph tab"
+    )
 
 
 def l1_phase31_read_button_section_filter() -> None:

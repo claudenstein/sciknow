@@ -1544,12 +1544,18 @@ async def api_kg(
     predicate: str = "",
     object: str = "",
     document_id: str = "",
+    any_side: str = "",
     limit: int = 200,
     offset: int = 0,
 ):
     """Phase 30 — return knowledge_graph triples filtered by any of:
     subject (substring, case-insensitive), predicate (exact),
     object (substring, case-insensitive), document_id (exact UUID).
+
+    Phase 48 — `any_side` matches rows where the substring appears in
+    EITHER subject or object. Used by the graph's right-click
+    "Expand around this node" action to fetch a 1-hop ego network in
+    one query without changing the subject/object filter boxes.
 
     Returns at most `limit` rows (capped at 1000), with pagination via
     offset. Each row has the source paper title joined in for the GUI
@@ -1564,6 +1570,7 @@ async def api_kg(
     pred_q = predicate.strip()
     obj_q = object.strip()
     doc_q = document_id.strip()
+    any_q = any_side.strip()
     params: dict = {
         "limit": limit,
         "offset": offset,
@@ -1571,6 +1578,7 @@ async def api_kg(
         "predicate_q": pred_q or None,
         "object_q": f"%{obj_q}%" if obj_q else None,
         "doc_q": doc_q or None,
+        "any_q": f"%{any_q}%" if any_q else None,
     }
 
     with get_session() as session:
@@ -1581,6 +1589,8 @@ async def api_kg(
               AND (:predicate_q IS NULL OR kg.predicate = :predicate_q)
               AND (:object_q    IS NULL OR kg.object ILIKE :object_q)
               AND (:doc_q       IS NULL OR kg.source_doc_id::text = :doc_q)
+              AND (:any_q       IS NULL OR kg.subject ILIKE :any_q
+                                        OR kg.object  ILIKE :any_q)
         """), params).scalar()
 
         rows = session.execute(text("""
@@ -1593,6 +1603,8 @@ async def api_kg(
               AND (:predicate_q IS NULL OR kg.predicate = :predicate_q)
               AND (:object_q    IS NULL OR kg.object ILIKE :object_q)
               AND (:doc_q       IS NULL OR kg.source_doc_id::text = :doc_q)
+              AND (:any_q       IS NULL OR kg.subject ILIKE :any_q
+                                        OR kg.object  ILIKE :any_q)
             ORDER BY kg.confidence DESC, kg.subject
             LIMIT :limit OFFSET :offset
         """), params).fetchall()
@@ -5334,9 +5346,51 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .kg-invert-btn {{ margin-left: 8px; font-size: 11px;
                   padding: 3px 10px; border: 1px solid var(--border);
                   background: var(--bg-elevated); color: var(--fg);
-                  border-radius: 4px; cursor: pointer; }}
+                  border-radius: 4px; cursor: pointer;
+                  white-space: nowrap; }}
 .kg-invert-btn:hover {{ background: var(--accent); color: #fff;
                         border-color: var(--accent); }}
+/* Secondary toolbar row: search + color mode + sliders + action buttons */
+.kg-controls-2 {{ margin-top: 2px; margin-bottom: 10px; }}
+.kg-chip-group {{ display: flex; gap: 4px; align-items: center;
+                  padding: 2px 4px; border-radius: 4px;
+                  background: var(--bg-elevated); }}
+.kg-search-input {{ font-size: 12px; padding: 3px 8px;
+                    border: 1px solid var(--border); border-radius: 4px;
+                    background: var(--bg-elevated); color: var(--fg);
+                    min-width: 140px; flex: 0 0 160px; }}
+.kg-search-input:focus {{ outline: none; border-color: var(--accent);
+                          box-shadow: 0 0 0 2px rgba(79,158,255,0.15); }}
+.kg-select {{ font-size: 11px; padding: 2px 4px;
+              border: 1px solid var(--border); border-radius: 3px;
+              background: var(--bg); color: var(--fg); }}
+.kg-slider {{ width: 90px; accent-color: var(--accent); }}
+.kg-slider-short {{ width: 70px; }}
+/* Floating right-click context menu */
+#kg-context-menu {{ display: none; position: fixed;
+                    background: var(--bg-elevated);
+                    border: 1px solid var(--border); border-radius: 6px;
+                    box-shadow: 0 10px 24px rgba(0,0,0,0.3);
+                    min-width: 200px; padding: 4px 0; z-index: 10001;
+                    font-size: 12px; }}
+#kg-context-menu .kg-menu-item {{ display: flex; align-items: center;
+                                  gap: 8px; width: 100%; text-align: left;
+                                  border: 0; background: transparent;
+                                  color: var(--fg); cursor: pointer;
+                                  padding: 6px 12px; font-size: 12px;
+                                  font-family: var(--font-sans); }}
+#kg-context-menu .kg-menu-item:hover {{ background: var(--accent);
+                                        color: #fff; }}
+#kg-context-menu .kg-menu-hint {{ margin-left: auto;
+                                  color: var(--fg-muted);
+                                  font-size: 10px;
+                                  font-family: var(--font-mono); }}
+#kg-context-menu .kg-menu-item:hover .kg-menu-hint {{ color: #fff;
+                                                      opacity: 0.8; }}
+#kg-context-menu .kg-menu-sep {{ height: 1px; margin: 4px 8px;
+                                 background: var(--border); }}
+/* Edge paths should receive hover + right-click events */
+#kg-graph-canvas .kg-edge {{ pointer-events: stroke; cursor: pointer; }}
 /* Phase 30 — persistent global task bar (top of viewport, full width).
    Visible whenever a job is running, regardless of SPA navigation.
    Designed to be unobtrusive: ~40px tall, mono font for the numerics,
@@ -6704,11 +6758,51 @@ body.task-bar-open {{ padding-top: 40px; }}
             &#8646; Invert
           </button>
         </div>
+        <div class="kg-controls kg-controls-2">
+          <input type="search" id="kg-search" class="kg-search-input"
+                 placeholder="Search nodes…"
+                 oninput="kgSearch(this.value)"
+                 title="Filter nodes by label (substring). Pulse-matches stay bright, everything else dims."/>
+          <label class="kg-chip-group" title="Color scheme for nodes + edges">
+            <span class="kg-controls-label">Color</span>
+            <select class="kg-select" onchange="kgSetColorBy(this.value)">
+              <option value="cluster">Cluster</option>
+              <option value="predicate">Predicate family</option>
+              <option value="theme">Plain</option>
+            </select>
+          </label>
+          <label class="kg-chip-group" title="Label size">
+            <span class="kg-controls-label">Labels</span>
+            <input type="range" min="0.5" max="2.0" step="0.05" value="1.0"
+                   class="kg-slider" oninput="kgSetLabelScale(this.value)"/>
+          </label>
+          <label class="kg-chip-group" title="Hide nodes whose degree exceeds this (tames hubs)">
+            <span class="kg-controls-label">Max deg</span>
+            <input type="range" min="1" max="99" step="1" value="99"
+                   class="kg-slider kg-slider-short"
+                   oninput="kgSetDegFilter(this.value)"/>
+            <span id="kg-degfilter-label" class="kg-controls-label">&infin;</span>
+          </label>
+          <button class="kg-invert-btn" onclick="kgToggleFreeze()"
+                  title="Freeze / resume the force simulation (Space)">
+            &#9208; Freeze
+          </button>
+          <button class="kg-invert-btn" onclick="kgResetView()"
+                  title="Re-center camera, unhide all nodes, clear search">
+            &#8634; Reset
+          </button>
+          <button class="kg-invert-btn" onclick="kgDownloadPng()"
+                  title="Download the current view as a high-DPI PNG">
+            &#128247; PNG
+          </button>
+        </div>
         <div id="kg-graph-canvas" style="border:1px solid var(--border);border-radius:6px;"></div>
         <p style="font-size:10px;color:var(--fg-muted);margin-top:6px;">
-          &middot; Drag the background to orbit &middot; drag a node to reposition &middot; scroll to zoom &middot; click a node (without dragging) to filter the table to triples involving that entity.
+          &middot; Drag the background to orbit &middot; drag a node to reposition &middot; scroll to zoom &middot; click a node to center the camera on it &middot; right-click for a context menu (pin, hide, expand, copy, show paper) &middot; Space freezes / resumes physics.
         </p>
       </div>
+      <!-- Phase 48 context menu for node / edge / background right-click -->
+      <div id="kg-context-menu" role="menu"></div>
       <!-- Table tab pane -->
       <div id="kg-table-pane" style="display:none;max-height:60vh;overflow-y:auto;">
         <div id="kg-results"></div>
@@ -7645,22 +7739,249 @@ function _initKgThemeChips() {{
   window._kgChipsReady = true;
 }}
 
+// Phase 48b — Okabe-Ito-derived palette for Louvain community coloring.
+// Colorblind-safe, eight distinct hues; paired (mid, outer) stops give
+// each cluster a sphere-shaded gradient without a full per-theme
+// cluster palette. The 9th entry is a neutral gray for overflow.
+const KG_CLUSTER_PALETTE = [
+  {{ mid: '#56B4E9', outer: '#0c3850' }},  // sky blue
+  {{ mid: '#E69F00', outer: '#50300c' }},  // orange
+  {{ mid: '#009E73', outer: '#0a3d2c' }},  // bluish green
+  {{ mid: '#F0E442', outer: '#504a0c' }},  // yellow
+  {{ mid: '#0072B2', outer: '#001f3a' }},  // blue
+  {{ mid: '#D55E00', outer: '#3d1a00' }},  // vermillion
+  {{ mid: '#CC79A7', outer: '#3e1f32' }},  // reddish purple
+  {{ mid: '#8ed6a5', outer: '#234a31' }},  // mint
+  {{ mid: '#999999', outer: '#333333' }},  // overflow gray
+];
+
+// Predicate family → semantic category → color. Follows VOWL/WebVOWL
+// convention of grouping predicates by what they *do* rather than
+// coloring every predicate separately (unreadable above ~8 hues).
+const KG_PREDICATE_FAMILIES = {{
+  causal:      {{ color: '#D55E00', glyph: '\\u2192',
+                 keys: ['cause', 'increase', 'decrease', 'induce', 'affect',
+                        'drive', 'reduce', 'enhance', 'inhibit', 'trigger',
+                        'lead to', 'result in', 'contribute', 'produce'] }},
+  measurement: {{ color: '#0072B2', glyph: '\\u2248',
+                 keys: ['measure', 'observe', 'detect', 'record', 'sample',
+                        'estimate', 'quantify', 'report', 'find', 'show'] }},
+  taxonomic:   {{ color: '#009E73', glyph: '\\u2282',
+                 keys: ['is a', 'is-a', 'type', 'subtype', 'part of',
+                        'part-of', 'contains', 'includes', 'belongs',
+                        'kind of', 'category'] }},
+  compositional:{{ color: '#8ed6a5', glyph: '\\u25c6',
+                 keys: ['uses', 'use', 'composed', 'consists', 'built',
+                        'based on', 'based-on', 'relies', 'applies'] }},
+  citational:  {{ color: '#999999', glyph: '\\u00a7',
+                 keys: ['cite', 'reference', 'evidence', 'support',
+                        'contradict', 'agree', 'disagree', 'extend'] }},
+  other:       {{ color: '#CC79A7', glyph: '\\u2022', keys: [] }},
+}};
+
+function _kgPredicateFamily(pred) {{
+  const p = (pred || '').toLowerCase();
+  for (const fam of ['causal', 'measurement', 'taxonomic', 'compositional', 'citational']) {{
+    for (const key of KG_PREDICATE_FAMILIES[fam].keys) {{
+      if (p.indexOf(key) !== -1) return fam;
+    }}
+  }}
+  return 'other';
+}}
+
+// Louvain community detection (one-level local-moving pass). Input:
+// number of nodes + edges with source/target/count. Output: array of
+// community index per node, densely reindexed from 0. Fast enough for
+// n ≤ 500 (≈ ms on a modern laptop); the one-level variant skips the
+// aggregation step but still produces clusters good enough to drive
+// node coloring + gravity wells for our scale.
+function _kgLouvain(numNodes, edges) {{
+  if (numNodes === 0) return [];
+  // Build weighted undirected adjacency
+  const adj = [];
+  for (let i = 0; i < numNodes; i++) adj.push(new Map());
+  let m2 = 0;
+  edges.forEach(e => {{
+    if (e.source === e.target) return;
+    const w = Math.max(1, e.count || 1);
+    adj[e.source].set(e.target, (adj[e.source].get(e.target) || 0) + w);
+    adj[e.target].set(e.source, (adj[e.target].get(e.source) || 0) + w);
+    m2 += 2 * w;
+  }});
+  if (m2 === 0) return new Array(numNodes).fill(0);
+  const degree = new Array(numNodes);
+  for (let i = 0; i < numNodes; i++) {{
+    let d = 0;
+    for (const w of adj[i].values()) d += w;
+    degree[i] = d;
+  }}
+  const community = new Array(numNodes);
+  for (let i = 0; i < numNodes; i++) community[i] = i;
+  const commSum = {{}};
+  for (let i = 0; i < numNodes; i++) commSum[i] = degree[i];
+
+  let changed = true, iter = 0;
+  while (changed && iter < 12) {{
+    changed = false; iter++;
+    for (let i = 0; i < numNodes; i++) {{
+      const cur = community[i];
+      // Sum of weights from i to each neighboring community
+      const wToComm = new Map();
+      for (const [j, w] of adj[i]) {{
+        const c = community[j];
+        wToComm.set(c, (wToComm.get(c) || 0) + w);
+      }}
+      // Temporarily remove i from its community for the gain calc
+      commSum[cur] -= degree[i];
+      let bestC = cur, bestGain = 0;
+      const kI = degree[i];
+      for (const [c, kIin] of wToComm) {{
+        if (c === cur) continue;
+        const sigmaTot = commSum[c] || 0;
+        const gain = kIin - (sigmaTot * kI) / m2;
+        if (gain > bestGain) {{ bestGain = gain; bestC = c; }}
+      }}
+      // Stay in cur if no better community
+      commSum[bestC] = (commSum[bestC] || 0) + degree[i];
+      if (bestC !== cur) {{ community[i] = bestC; changed = true; }}
+    }}
+  }}
+  // Relabel to dense 0..k
+  const remap = new Map();
+  let k = 0;
+  const result = new Array(numNodes);
+  for (let i = 0; i < numNodes; i++) {{
+    const c = community[i];
+    if (!remap.has(c)) remap.set(c, k++);
+    result[i] = remap.get(c);
+  }}
+  return result;
+}}
+
+// Inject per-cluster gradient defs into the SVG so node `fill` can
+// reference `url(#kg-cluster-N)`. Called once after Louvain runs and
+// again on theme changes (so the gradient inner/stroke stays coherent).
+function _applyKgClusterDefs(svg, theme, numClusters) {{
+  const defs = svg.querySelector('defs');
+  if (!defs) return;
+  let extra = '';
+  for (let i = 0; i < numClusters; i++) {{
+    const p = KG_CLUSTER_PALETTE[i % KG_CLUSTER_PALETTE.length];
+    extra +=
+      '<radialGradient id="kg-cluster-' + i + '" cx="30%" cy="30%" r="75%">' +
+        '<stop offset="0%" stop-color="' + theme.nodeInner + '"/>' +
+        '<stop offset="35%" stop-color="' + p.mid + '"/>' +
+        '<stop offset="100%" stop-color="' + p.outer + '"/>' +
+      '</radialGradient>';
+  }}
+  // Append to the existing defs (which _applyKgDefs already populated)
+  defs.insertAdjacentHTML('beforeend', extra);
+}}
+
+// Cubic ease-in-out for the center-on-node camera tween.
+function _kgEase(t) {{
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}}
+
+// Render/hide the floating context menu. The <div> lives in the modal
+// HTML so any menu action has access to the current simulation closure
+// via the global canvas._kgSim handle.
+function _kgShowMenu(x, y, items) {{
+  const menu = document.getElementById('kg-context-menu');
+  if (!menu) return;
+  menu.innerHTML = '';
+  items.forEach(item => {{
+    if (item === '-') {{
+      const sep = document.createElement('div');
+      sep.className = 'kg-menu-sep';
+      menu.appendChild(sep);
+      return;
+    }}
+    const btn = document.createElement('button');
+    btn.className = 'kg-menu-item';
+    btn.textContent = item.label;
+    if (item.hint) {{
+      const hint = document.createElement('span');
+      hint.className = 'kg-menu-hint';
+      hint.textContent = item.hint;
+      btn.appendChild(hint);
+    }}
+    btn.addEventListener('click', () => {{
+      _kgHideMenu();
+      try {{ item.onClick(); }} catch (e) {{ console.error(e); }}
+    }});
+    menu.appendChild(btn);
+  }});
+  // Position; clamp to viewport
+  menu.style.display = 'block';
+  const mw = menu.offsetWidth, mh = menu.offsetHeight;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  menu.style.left = Math.min(x, vw - mw - 8) + 'px';
+  menu.style.top  = Math.min(y, vh - mh - 8) + 'px';
+}}
+function _kgHideMenu() {{
+  const menu = document.getElementById('kg-context-menu');
+  if (menu) menu.style.display = 'none';
+}}
+// Dismiss the menu on any outside click or Escape
+document.addEventListener('click', (e) => {{
+  const menu = document.getElementById('kg-context-menu');
+  if (menu && menu.style.display === 'block' && !menu.contains(e.target)) {{
+    _kgHideMenu();
+  }}
+}});
+document.addEventListener('keydown', (e) => {{
+  if (e.key === 'Escape') _kgHideMenu();
+}});
+
+// Toolbar click/input handlers. Defined at module scope so the HTML can
+// reference them via onclick; each forwards to the live simulation via
+// canvas._kgSim.
+function kgToggleFreeze() {{
+  const c = document.getElementById('kg-graph-canvas');
+  if (c && c._kgSim && c._kgSim.togglePause) c._kgSim.togglePause();
+}}
+function kgResetView() {{
+  const c = document.getElementById('kg-graph-canvas');
+  if (c && c._kgSim && c._kgSim.resetView) c._kgSim.resetView();
+}}
+function kgDownloadPng() {{
+  const c = document.getElementById('kg-graph-canvas');
+  if (c && c._kgSim && c._kgSim.downloadPng) c._kgSim.downloadPng();
+}}
+function kgSetColorBy(mode) {{
+  const c = document.getElementById('kg-graph-canvas');
+  if (c && c._kgSim && c._kgSim.setColorBy) c._kgSim.setColorBy(mode);
+}}
+function kgSetLabelScale(v) {{
+  const c = document.getElementById('kg-graph-canvas');
+  if (c && c._kgSim && c._kgSim.setLabelScale) c._kgSim.setLabelScale(parseFloat(v));
+}}
+function kgSetDegFilter(v) {{
+  const c = document.getElementById('kg-graph-canvas');
+  if (c && c._kgSim && c._kgSim.setDegFilter) c._kgSim.setDegFilter(parseInt(v, 10));
+  const lbl = document.getElementById('kg-degfilter-label');
+  if (lbl) lbl.textContent = (parseInt(v, 10) >= 99 ? '∞' : v);
+}}
+function kgSearch(q) {{
+  const c = document.getElementById('kg-graph-canvas');
+  if (c && c._kgSim && c._kgSim.search) c._kgSim.search(q);
+}}
+
 // Phase 48 — interactive 3D knowledge graph. Every unique entity is a
-// node in a real 3D world; triples are springs. A continuous rAF loop
-// integrates forces and redraws. The orbit camera rotates around the
-// origin (drag background), nodes can be grabbed and repositioned
-// (drag node), and the wheel zooms in/out (camera distance). Sphere
-// shading comes from a single radial gradient fill + depth-based size
-// and opacity. Palette is swappable via the theme chip row in the
-// modal (KG_THEMES). No extra deps — still pure SVG.
+// node in a real 3D world; triples are weighted edges (same-pair
+// triples merged into one visual edge with count + family info). A
+// continuous rAF loop runs a ForceAtlas2-derived physics model
+// (log-weighted attraction with dissuade-hubs, repulsion scaled by
+// degree, per-cluster gravity wells) + a 3D orbit camera. Interactions
+// include drag-to-orbit, drag-nodes, wheel-zoom, hover-dim-1-hop,
+// spacebar-freeze, right-click context menu, search, center-on-click,
+// PNG export. Palette + coloring mode are swappable live without
+// restarting the simulation. No extra deps — still pure SVG.
 function _renderKgGraph(triples) {{
   const canvas = document.getElementById('kg-graph-canvas');
   if (!canvas) return;
-  // Wire up theme chips the first time a graph renders (chips live in
-  // the modal HTML from page load, but their palette swatches + click
-  // handlers depend on KG_THEMES which is defined in this same script).
   _initKgThemeChips();
-  // Tear down any previous simulation (re-renders come from loadKg)
   if (canvas._kgSim) {{ try {{ canvas._kgSim.stop(); }} catch (e) {{}} }}
   canvas.innerHTML = '';
   if (!triples || triples.length === 0) {{
@@ -7671,7 +7992,12 @@ function _renderKgGraph(triples) {{
   const W = canvas.clientWidth || 800;
   const H = 520;
 
-  // ── Build graph ────────────────────────────────────────────────
+  // ── Build nodes + aggregated edges ─────────────────────────────
+  // Multiple triples between the same (subject, object) pair collapse
+  // into one logical edge with a `count` and the list of source
+  // triples (so right-click → "source paper" still works for each
+  // underlying claim). Direction is preserved — a→b and b→a stay
+  // separate edges and get opposite curvature offsets.
   const nodeIndex = new Map();
   const nodes = [];
   function ensureNode(label) {{
@@ -7679,30 +8005,105 @@ function _renderKgGraph(triples) {{
       nodeIndex.set(label, nodes.length);
       nodes.push({{
         id: nodes.length, label: label,
-        x: (Math.random() - 0.5) * 300,
-        y: (Math.random() - 0.5) * 300,
-        z: (Math.random() - 0.5) * 300,
-        vx: 0, vy: 0, vz: 0,
-        fixed: false, degree: 0,
+        x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0,
+        fixed: false, hidden: false, degree: 0, cluster: 0,
       }});
     }}
     return nodeIndex.get(label);
   }}
-  const edges = triples.map(t => {{
-    const s = ensureNode((t.subject || '').substring(0, 60));
-    const o = ensureNode((t.object || '').substring(0, 60));
-    nodes[s].degree++; nodes[o].degree++;
-    return {{ source: s, target: o, predicate: t.predicate }};
+  const edgeMap = new Map();  // "s→t" → edge
+  triples.forEach(t => {{
+    const sLab = (t.subject || '').substring(0, 60);
+    const oLab = (t.object  || '').substring(0, 60);
+    if (!sLab || !oLab || sLab === oLab) return;
+    const s = ensureNode(sLab), o = ensureNode(oLab);
+    const key = s + '\\u2192' + o;
+    let e = edgeMap.get(key);
+    if (!e) {{
+      e = {{ source: s, target: o, count: 0,
+             triples: [], families: new Set(), predicates: new Set() }};
+      edgeMap.set(key, e);
+    }}
+    e.count++;
+    e.predicates.add(t.predicate || '');
+    e.families.add(_kgPredicateFamily(t.predicate || ''));
+    e.triples.push({{
+      predicate: t.predicate || '',
+      doc_id: t.source_doc_id,
+      doc_title: t.source_title,
+      confidence: t.confidence,
+    }});
   }});
+  const edges = Array.from(edgeMap.values());
+  edges.forEach(e => {{ nodes[e.source].degree++; nodes[e.target].degree++; }});
   function nodeLabel(label) {{
     return label.length > 24 ? label.substring(0, 24) + '\\u2026' : label;
   }}
 
-  // ── Camera (orbit around origin) ───────────────────────────────
-  const cam = {{ rotX: -0.22, rotY: 0.55, dist: 850, fov: 680 }};
+  // ── Community detection (Louvain, undirected, count-weighted) ──
+  const communities = _kgLouvain(nodes.length, edges);
+  const numClusters = Math.max(1, (communities.length
+    ? Math.max.apply(null, communities) + 1 : 1));
+  nodes.forEach((n, i) => {{ n.cluster = communities[i] || 0; }});
 
-  // ── SVG scaffold (built once; event listeners stable across frames) ─
+  // Place cluster centroids on a sphere (Fibonacci lattice), scaled by
+  // √numClusters so the per-well radius stays roughly constant.
+  const clusterCenters = [];
+  const wellR = 180 + 30 * Math.sqrt(numClusters);
+  for (let c = 0; c < numClusters; c++) {{
+    const frac = (c + 0.5) / numClusters;
+    const phi = Math.acos(1 - 2 * frac);
+    const theta = Math.PI * (1 + Math.sqrt(5)) * c;
+    clusterCenters.push({{
+      x: wellR * Math.sin(phi) * Math.cos(theta),
+      y: wellR * Math.sin(phi) * Math.sin(theta),
+      z: wellR * Math.cos(phi),
+    }});
+  }}
+  // Seed node positions inside their cluster so layout converges fast
+  nodes.forEach(n => {{
+    const c = clusterCenters[n.cluster % clusterCenters.length];
+    n.x = c.x + (Math.random() - 0.5) * 80;
+    n.y = c.y + (Math.random() - 0.5) * 80;
+    n.z = c.z + (Math.random() - 0.5) * 80;
+  }});
+
+  // ── Curve-bundle offsets (parallel + bidirectional edges) ──────
+  // For each unordered pair {{u,v}}, count how many edges connect them
+  // and assign each an offset index so they fan out around the line.
+  // A→B and B→A flip sign of the offset so they sit on opposite sides.
+  const bundleCount = new Map();
+  edges.forEach(e => {{
+    const lo = Math.min(e.source, e.target);
+    const hi = Math.max(e.source, e.target);
+    const pair = lo + '|' + hi;
+    const n = bundleCount.get(pair) || 0;
+    e._pair = pair;
+    e._bundleIdx = n;
+    e._dirSign = (e.source < e.target) ? 1 : -1;
+    bundleCount.set(pair, n + 1);
+  }});
+  edges.forEach(e => {{
+    const total = bundleCount.get(e._pair);
+    const mid = (total - 1) / 2;
+    // Bundle offset lives in screen-space px; ±15 per lane works well
+    e._offset = (e._bundleIdx - mid) * 15 * e._dirSign;
+  }});
+
+  // ── Camera + view state ────────────────────────────────────────
+  const cam = {{ rotX: -0.22, rotY: 0.55, dist: 850, fov: 680 }};
+  const camDefault = {{ rotX: -0.22, rotY: 0.55, dist: 850 }};
   let theme = KG_THEMES[_kgActiveTheme] || KG_THEMES['deep-space'];
+  let colorBy = 'cluster';  // 'cluster' | 'predicate' | 'theme'
+  let labelScale = 1.0;
+  let degFilter = 999;       // max degree; nodes above this are hidden
+  let hoverId = -1;          // node id under the mouse (-1 if none)
+  let hoverNeighbors = null; // Set<id> of 1-hop neighbors when hovering
+  let hoverEdgeSet = null;   // Set<edge-index> of edges incident to hover
+  let searchMatches = null;  // Set<id> of nodes matching the live search
+  let running = true, paused = false, raf = null;
+
+  // ── SVG scaffold ───────────────────────────────────────────────
   const svgNS = 'http://www.w3.org/2000/svg';
   const svg = document.createElementNS(svgNS, 'svg');
   svg.setAttribute('viewBox', (-W/2) + ' ' + (-H/2) + ' ' + W + ' ' + H);
@@ -7714,11 +8115,12 @@ function _renderKgGraph(triples) {{
     '<g class="kg-edges"></g><g class="kg-nodes"></g>';
   canvas.appendChild(svg);
   _applyKgDefs(svg, theme);
+  _applyKgClusterDefs(svg, theme, numClusters);
   canvas.style.background = theme.canvasBg;
   const edgeLayer = svg.querySelector('.kg-edges');
   const nodeLayer = svg.querySelector('.kg-nodes');
 
-  // ── 3D projection (Y-rotate → X-rotate → perspective divide) ───
+  // ── Projection ─────────────────────────────────────────────────
   function project(n) {{
     const cy = Math.cos(cam.rotY), sy = Math.sin(cam.rotY);
     const cx = Math.cos(cam.rotX), sxA = Math.sin(cam.rotX);
@@ -7732,102 +8134,188 @@ function _renderKgGraph(triples) {{
     const scale = cam.fov / zcam;
     return {{ sx: xr * scale, sy: yc * scale, zcam: zcam, scale: scale }};
   }}
-  // Inverse-project a screen-space delta at a given camera depth to
-  // a world-space delta. Used so that dragging a node keeps it under
-  // the cursor at its original depth while the camera is rotated.
   function worldDelta(dx, dy, zcam) {{
     const scale = cam.fov / Math.max(zcam, 1);
     const dxc = dx / scale, dyc = dy / scale;
     const cx = Math.cos(cam.rotX), sxA = Math.sin(cam.rotX);
     const cy = Math.cos(cam.rotY), sy = Math.sin(cam.rotY);
-    // Inverse X-rotation of camera-space (dxc, dyc, 0)
     const xr = dxc, yr = dyc * cx, zr = -dyc * sxA;
-    // Inverse Y-rotation
     return {{ x: xr * cy - zr * sy, y: yr, z: xr * sy + zr * cy }};
   }}
 
-  // ── Force simulation ───────────────────────────────────────────
-  const baseLen = 140;
-  const repel = 3500;
-  const springK = 0.02;
-  const damping = 0.82;
-  const centering = 0.006;
+  // ── ForceAtlas2-derived physics ────────────────────────────────
+  // Repulsion scales with (deg+1)(deg+1) so hubs push each other away
+  // strongly (the FA2 "dissuade-hubs" trick). Attraction uses log(1+d)
+  // — the linLog mode of Noack/FA2 — which gives dramatically better
+  // hub separation than d² on real citation graphs. Edge weight is
+  // log(1+count) so a single high-count merged edge can't collapse
+  // the layout. A weak attractor at each Louvain centroid keeps
+  // communities visually together.
+  const KR = 120;             // repulsion strength
+  const KA = 0.08;            // attraction strength
+  const KW = 0.0025;          // cluster-well strength
+  const KC = 0.0004;          // origin-centering strength
+  const DAMP = 0.78;
   function step() {{
+    if (paused) return;
     for (let i = 0; i < nodes.length; i++) {{
       nodes[i].ax = 0; nodes[i].ay = 0; nodes[i].az = 0;
     }}
-    // Pairwise repulsion (O(n²) — fine for ≤200 nodes)
+    // Repulsion (O(n²); fine ≤ 500 nodes)
     for (let i = 0; i < nodes.length; i++) {{
+      if (nodes[i].hidden) continue;
       for (let j = i + 1; j < nodes.length; j++) {{
+        if (nodes[j].hidden) continue;
         const a = nodes[i], b = nodes[j];
         const dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
         const d2 = dx*dx + dy*dy + dz*dz + 1;
         const d = Math.sqrt(d2);
-        const f = repel / d2;
+        const k = KR * (a.degree + 1) * (b.degree + 1);
+        const f = k / d2;
         const ux = dx/d, uy = dy/d, uz = dz/d;
         a.ax += ux*f; a.ay += uy*f; a.az += uz*f;
         b.ax -= ux*f; b.ay -= uy*f; b.az -= uz*f;
       }}
     }}
-    // Edge springs
+    // Attraction (linLog, log-count-weighted, /degree for hub dissuade)
     edges.forEach(e => {{
       const a = nodes[e.source], b = nodes[e.target];
+      if (a.hidden || b.hidden) return;
       const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
       const d = Math.sqrt(dx*dx + dy*dy + dz*dz) + 0.01;
-      const f = springK * (d - baseLen);
+      const w = Math.log(1 + e.count);
+      const f = KA * w * Math.log(1 + d);
       const ux = dx/d, uy = dy/d, uz = dz/d;
-      a.ax += ux*f; a.ay += uy*f; a.az += uz*f;
-      b.ax -= ux*f; b.ay -= uy*f; b.az -= uz*f;
+      const fa = f / Math.max(a.degree + 1, 1);
+      const fb = f / Math.max(b.degree + 1, 1);
+      a.ax += ux * fa; a.ay += uy * fa; a.az += uz * fa;
+      b.ax -= ux * fb; b.ay -= uy * fb; b.az -= uz * fb;
     }});
-    // Weak pull to origin keeps the cloud framed
+    // Cluster gravity wells + weak origin pull
     nodes.forEach(n => {{
-      n.ax -= n.x * centering;
-      n.ay -= n.y * centering;
-      n.az -= n.z * centering;
+      if (n.hidden) return;
+      const c = clusterCenters[n.cluster % clusterCenters.length];
+      n.ax += (c.x - n.x) * KW;
+      n.ay += (c.y - n.y) * KW;
+      n.az += (c.z - n.z) * KW;
+      n.ax -= n.x * KC;
+      n.ay -= n.y * KC;
+      n.az -= n.z * KC;
       if (n.fixed) {{ n.vx = 0; n.vy = 0; n.vz = 0; return; }}
-      n.vx = (n.vx + n.ax) * damping;
-      n.vy = (n.vy + n.ay) * damping;
-      n.vz = (n.vz + n.az) * damping;
+      n.vx = (n.vx + n.ax) * DAMP;
+      n.vy = (n.vy + n.ay) * DAMP;
+      n.vz = (n.vz + n.az) * DAMP;
       n.x += n.vx; n.y += n.vy; n.z += n.vz;
     }});
   }}
 
   // ── Render ─────────────────────────────────────────────────────
+  function edgeColor(e) {{
+    if (colorBy === 'predicate') {{
+      // If the edge has multiple families, pick the first by family
+      // priority order so the color is stable across frames
+      const prio = ['causal', 'measurement', 'taxonomic', 'compositional', 'citational', 'other'];
+      for (const fam of prio) {{
+        if (e.families.has(fam)) return KG_PREDICATE_FAMILIES[fam].color;
+      }}
+      return KG_PREDICATE_FAMILIES.other.color;
+    }}
+    return theme.edge;
+  }}
+  function nodeFill(n) {{
+    if (n.fixed) return 'url(#kg-nodeh)';
+    if (colorBy === 'cluster' && numClusters > 1) {{
+      return 'url(#kg-cluster-' + (n.cluster % KG_CLUSTER_PALETTE.length) + ')';
+    }}
+    return 'url(#kg-nodeg)';
+  }}
+  function nodeVisible(n) {{
+    if (n.hidden) return false;
+    if (n.degree > degFilter) return false;
+    return true;
+  }}
+
   function render() {{
     const proj = nodes.map(n => ({{ n: n, p: project(n) }}));
-    // Far-to-near order so near nodes paint on top
     const order = proj.slice().sort((a, b) => b.p.zcam - a.p.zcam);
+
+    // Dim rules: while hovering a node, non-neighbors fade; same for
+    // search matches. The effects compose — a match that isn't a
+    // hover-neighbor is both search-boosted and hover-dimmed.
+    function nodeDim(id) {{
+      let k = 1.0;
+      if (hoverNeighbors && !hoverNeighbors.has(id)) k *= 0.18;
+      if (searchMatches && !searchMatches.has(id)) k *= 0.35;
+      return k;
+    }}
+    function edgeDim(ei, srcId, tgtId) {{
+      let k = 1.0;
+      if (hoverEdgeSet && !hoverEdgeSet.has(ei)) k *= 0.15;
+      if (searchMatches && !searchMatches.has(srcId) && !searchMatches.has(tgtId)) k *= 0.35;
+      return k;
+    }}
+
+    // Edges as curved quadratic Béziers
     let eHtml = '';
-    edges.forEach(e => {{
+    edges.forEach((e, ei) => {{
+      const a = nodes[e.source], b = nodes[e.target];
+      if (!nodeVisible(a) || !nodeVisible(b)) return;
       const pa = proj[e.source].p, pb = proj[e.target].p;
+      const dxs = pb.sx - pa.sx, dys = pb.sy - pa.sy;
+      const len = Math.sqrt(dxs*dxs + dys*dys) + 0.01;
+      const nx = -dys / len, ny = dxs / len;
+      const mx = (pa.sx + pb.sx) / 2 + nx * e._offset;
+      const my = (pa.sy + pb.sy) / 2 + ny * e._offset;
       const avg = (pa.zcam + pb.zcam) / 2;
-      const op = Math.max(0.12, Math.min(0.78, 900 / avg));
-      const w = Math.max(0.4, Math.min(2.4, 1.2 * Math.min(pa.scale, pb.scale)));
-      eHtml += '<line x1="' + pa.sx.toFixed(1) + '" y1="' + pa.sy.toFixed(1) +
-               '" x2="' + pb.sx.toFixed(1) + '" y2="' + pb.sy.toFixed(1) +
-               '" stroke="' + theme.edge + '" stroke-width="' + w.toFixed(2) +
-               '" opacity="' + op.toFixed(2) + '" pointer-events="none"/>';
+      const baseOp = Math.max(0.12, Math.min(0.78, 900 / avg));
+      const op = baseOp * edgeDim(ei, e.source, e.target);
+      const w = Math.max(0.5, Math.min(3.2,
+                    0.9 * Math.min(pa.scale, pb.scale) *
+                    (1 + Math.log(1 + e.count))));
+      eHtml += '<path class="kg-edge" data-ei="' + ei + '" ' +
+               'd="M ' + pa.sx.toFixed(1) + ' ' + pa.sy.toFixed(1) +
+               ' Q ' + mx.toFixed(1) + ' ' + my.toFixed(1) +
+               ' ' + pb.sx.toFixed(1) + ' ' + pb.sy.toFixed(1) + '" ' +
+               'stroke="' + edgeColor(e) + '" stroke-width="' + w.toFixed(2) +
+               '" fill="none" opacity="' + op.toFixed(2) + '"/>';
+      // Count badge for merged edges (3+ triples)
+      if (e.count >= 3 && pa.scale > 0.5) {{
+        const bx = mx, by = my;
+        eHtml += '<circle cx="' + bx.toFixed(1) + '" cy="' + by.toFixed(1) +
+                 '" r="6" fill="' + theme.canvasBg +
+                 '" stroke="' + edgeColor(e) + '" stroke-width="1" opacity="' +
+                 (op * 1.3).toFixed(2) + '" pointer-events="none"/>';
+        eHtml += '<text x="' + bx.toFixed(1) + '" y="' + (by + 2.5).toFixed(1) +
+                 '" text-anchor="middle" font-size="8" fill="' + theme.label +
+                 '" pointer-events="none" style="font-family:var(--font-mono);">' +
+                 e.count + '</text>';
+      }}
     }});
     edgeLayer.innerHTML = eHtml;
+
+    // Nodes
     let nHtml = '';
     order.forEach(item => {{
       const n = item.n, p = item.p;
-      const deg = Math.min(n.degree, 10);
-      const rBase = 5 + deg * 0.8;
+      if (!nodeVisible(n)) return;
+      const rBase = 4 + Math.sqrt(Math.min(n.degree, 25)) * 2;
       const r = Math.max(2, rBase * p.scale);
-      const op = Math.max(0.35, Math.min(1.0, 1200 / p.zcam));
-      const fill = n.fixed ? 'url(#kg-nodeh)' : 'url(#kg-nodeg)';
+      const baseOp = Math.max(0.35, Math.min(1.0, 1200 / p.zcam));
+      const op = baseOp * nodeDim(n.id);
+      const fill = nodeFill(n);
+      const isHover = (n.id === hoverId);
+      const rEff = r * (isHover ? 1.25 : 1.0);
       nHtml += '<g class="kg-node" data-id="' + n.id + '" opacity="' + op.toFixed(2) + '">';
-      // Soft halo — bigger, more transparent, behind the main ball
       nHtml += '<circle cx="' + p.sx.toFixed(1) + '" cy="' + p.sy.toFixed(1) +
-               '" r="' + (r * 2.2).toFixed(2) + '" fill="' + fill +
+               '" r="' + (rEff * 2.2).toFixed(2) + '" fill="' + fill +
                '" opacity="0.18" pointer-events="none"/>';
       nHtml += '<circle cx="' + p.sx.toFixed(1) + '" cy="' + p.sy.toFixed(1) +
-               '" r="' + r.toFixed(2) + '" fill="' + fill +
-               '" stroke="' + theme.nodeStroke + '" stroke-width="0.7"/>';
+               '" r="' + rEff.toFixed(2) + '" fill="' + fill +
+               '" stroke="' + (isHover ? theme.label : theme.nodeStroke) +
+               '" stroke-width="' + (isHover ? '1.6' : '0.7') + '"/>';
       if (p.scale > 0.45) {{
-        const fs = Math.max(8, 10.5 * p.scale);
-        nHtml += '<text x="' + (p.sx + r + 3).toFixed(1) + '" y="' +
+        const fs = Math.max(8, 10.5 * p.scale) * labelScale;
+        nHtml += '<text x="' + (p.sx + rEff + 3).toFixed(1) + '" y="' +
                  (p.sy + 3).toFixed(1) + '" font-size="' + fs.toFixed(1) +
                  '" fill="' + theme.label + '" pointer-events="none" ' +
                  'style="font-family:var(--font-sans);paint-order:stroke;' +
@@ -7839,26 +8327,37 @@ function _renderKgGraph(triples) {{
     nodeLayer.innerHTML = nHtml;
   }}
 
-  // Let the simulation settle a bit before the first paint
-  for (let i = 0; i < 80; i++) step();
+  // Settle
+  for (let i = 0; i < 120; i++) step();
 
-  let running = true, raf = null;
   function loop() {{
     if (!running) return;
-    step();
+    if (!paused) step();
     render();
     raf = requestAnimationFrame(loop);
   }}
   loop();
 
-  // ── Interaction ────────────────────────────────────────────────
+  // ── Interaction: drag/orbit/wheel + hover dim + right-click menu ─
   let drag = null;
   function localPoint(evt) {{
     const rect = svg.getBoundingClientRect();
     return {{ x: evt.clientX - rect.left - rect.width / 2,
              y: evt.clientY - rect.top - rect.height / 2 }};
   }}
+  function neighborsOf(id) {{
+    const ns = new Set([id]);
+    const es = new Set();
+    edges.forEach((e, ei) => {{
+      if (e.source === id) {{ ns.add(e.target); es.add(ei); }}
+      else if (e.target === id) {{ ns.add(e.source); es.add(ei); }}
+    }});
+    return {{ ns: ns, es: es }};
+  }}
+
   svg.addEventListener('mousedown', (evt) => {{
+    if (evt.button !== 0) return;  // left-click only for drag
+    _kgHideMenu();
     const pt = localPoint(evt);
     const el = evt.target.closest && evt.target.closest('.kg-node');
     if (el) {{
@@ -7899,40 +8398,279 @@ function _renderKgGraph(triples) {{
     svg.classList.remove('kg-grabbing');
     if (d.mode === 'node') {{
       const n = nodes[d.id];
-      n.fixed = false;  // release to physics
+      // If shift was held on mousedown we'd keep it pinned; but SVG
+      // doesn't report modifier state at mouseup reliably, so we use
+      // right-click → Pin for persistent pinning. Default mouseup
+      // releases the node back to physics.
+      n.fixed = false;
       if (!d.moved) {{
-        // True click (no movement) — filter the table to this entity
-        document.getElementById('kg-subject').value = n.label;
-        switchKgTab('kg-table');
-        loadKg(0);
+        // Tap-center: tween the camera so this node is framed at origin
+        tweenCenterOn(n);
       }}
     }}
   }}
   window.addEventListener('mousemove', onMove);
   window.addEventListener('mouseup', onUp);
+
+  // Hover: dim everything except node + 1-hop neighbors. Delegation
+  // via mouseover/mouseout on svg + target.closest('.kg-node') —
+  // works even though the DOM is rebuilt every frame, because the
+  // listener is on the stable <svg>, not per-node.
+  svg.addEventListener('mouseover', (evt) => {{
+    const el = evt.target.closest && evt.target.closest('.kg-node');
+    if (!el) return;
+    const id = parseInt(el.getAttribute('data-id'), 10);
+    if (isNaN(id)) return;
+    hoverId = id;
+    const {{ ns, es }} = neighborsOf(id);
+    hoverNeighbors = ns;
+    hoverEdgeSet = es;
+  }});
+  svg.addEventListener('mouseout', (evt) => {{
+    const rel = evt.relatedTarget;
+    if (!rel || !svg.contains(rel) ||
+        !(rel.closest && rel.closest('.kg-node'))) {{
+      hoverId = -1; hoverNeighbors = null; hoverEdgeSet = null;
+    }}
+  }});
+
+  // Right-click context menu. Actions differ for node / edge /
+  // background (each branch ends with a `_kgShowMenu` call).
+  svg.addEventListener('contextmenu', (evt) => {{
+    evt.preventDefault();
+    const nodeEl = evt.target.closest && evt.target.closest('.kg-node');
+    const edgeEl = evt.target.closest && evt.target.closest('.kg-edge');
+    if (nodeEl) {{
+      const id = parseInt(nodeEl.getAttribute('data-id'), 10);
+      const n = nodes[id];
+      _kgShowMenu(evt.clientX, evt.clientY, [
+        {{ label: 'Expand around here', onClick: () => kgEgoExpand(n.label) }},
+        {{ label: (n.fixed ? 'Unpin' : 'Pin node'),
+           onClick: () => {{ n.fixed = !n.fixed; }} }},
+        {{ label: 'Center view', onClick: () => tweenCenterOn(n) }},
+        {{ label: 'Hide node', onClick: () => {{ n.hidden = true; }} }},
+        '-',
+        {{ label: 'Show in table',
+           onClick: () => {{
+             document.getElementById('kg-subject').value = n.label;
+             switchKgTab('kg-table');
+             loadKg(0);
+           }} }},
+        {{ label: 'Copy label',
+           onClick: () => {{ try {{ navigator.clipboard.writeText(n.label); }} catch(e) {{}} }} }},
+      ]);
+      return;
+    }}
+    if (edgeEl) {{
+      const ei = parseInt(edgeEl.getAttribute('data-ei'), 10);
+      const e = edges[ei];
+      const firstT = e.triples[0] || {{}};
+      const title = (firstT.doc_title || '(unknown source)').substring(0, 70);
+      const preds = Array.from(e.predicates).slice(0, 3).join(', ');
+      _kgShowMenu(evt.clientX, evt.clientY, [
+        {{ label: 'Source: ' + title, hint: '',
+           onClick: () => {{}} }},
+        {{ label: 'Predicates: ' + preds, hint: '',
+           onClick: () => {{}} }},
+        '-',
+        {{ label: 'Copy triple',
+           onClick: () => {{
+             const txt = nodes[e.source].label + '  [' + preds + ']  ' + nodes[e.target].label;
+             try {{ navigator.clipboard.writeText(txt); }} catch (ex) {{}}
+           }} }},
+        {{ label: 'Show this paper in table',
+           onClick: () => {{
+             if (firstT.doc_id) {{
+               document.getElementById('kg-subject').value = '';
+               document.getElementById('kg-object').value = '';
+               kgSearchByDoc(firstT.doc_id);
+             }}
+           }} }},
+        {{ label: 'Filter by first predicate',
+           onClick: () => {{
+             const p = (firstT.predicate || '').trim();
+             if (!p) return;
+             const sel = document.getElementById('kg-predicate');
+             const has = Array.from(sel.options).some(o => o.value === p);
+             if (!has) {{
+               const opt = document.createElement('option');
+               opt.value = p; opt.textContent = p; sel.appendChild(opt);
+             }}
+             sel.value = p; loadKg(0);
+           }} }},
+      ]);
+      return;
+    }}
+    // Background menu
+    _kgShowMenu(evt.clientX, evt.clientY, [
+      {{ label: (paused ? 'Resume physics' : 'Freeze physics'),
+         hint: 'Space', onClick: () => {{ paused = !paused; }} }},
+      {{ label: 'Reset view', onClick: () => {{ resetView(); }} }},
+      {{ label: 'Unhide all nodes',
+         onClick: () => {{ nodes.forEach(n => {{ n.hidden = false; }}); }} }},
+      '-',
+      {{ label: 'Download PNG', onClick: () => downloadPng() }},
+    ]);
+  }});
+
   svg.addEventListener('wheel', (evt) => {{
     evt.preventDefault();
     const factor = Math.exp(evt.deltaY * 0.0015);
     cam.dist = Math.max(250, Math.min(3000, cam.dist * factor));
   }}, {{ passive: false }});
 
-  // Expose teardown + live theme swap so the chip row and loadKg can
-  // both talk to the running simulation without having to restart it.
+  // Keyboard: Space toggles freeze; only when KG modal is open and
+  // focus isn't in an input. Prevents the page from scrolling on Space.
+  function onKey(evt) {{
+    const modal = document.getElementById('kg-modal');
+    if (!modal || modal.style.display === 'none') return;
+    const tag = (evt.target && evt.target.tagName) || '';
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    if (evt.code === 'Space') {{
+      paused = !paused; evt.preventDefault();
+    }}
+  }}
+  window.addEventListener('keydown', onKey);
+
+  // ── Camera tween: smoothly frame a node at origin ──────────────
+  function tweenCenterOn(n) {{
+    const startRotX = cam.rotX, startRotY = cam.rotY, startDist = cam.dist;
+    // Pick rotation so the node's world vector points toward -Z (into
+    // screen), then back off to a comfortable distance. Clamp pitch so
+    // we don't flip through the poles.
+    const len = Math.sqrt(n.x*n.x + n.y*n.y + n.z*n.z) + 0.01;
+    const targetRotY = Math.atan2(n.x, Math.max(n.z, 0.01));
+    const targetRotX = Math.max(-1.4, Math.min(1.4,
+                         -Math.atan2(n.y, Math.sqrt(n.x*n.x + n.z*n.z) + 0.01)));
+    const targetDist = Math.max(400, Math.min(1200, len * 1.8 + 300));
+    const t0 = performance.now();
+    function frame(t) {{
+      const k = Math.min((t - t0) / 450, 1);
+      const e = _kgEase(k);
+      cam.rotX = startRotX + (targetRotX - startRotX) * e;
+      cam.rotY = startRotY + (targetRotY - startRotY) * e;
+      cam.dist = startDist + (targetDist - startDist) * e;
+      if (k < 1) requestAnimationFrame(frame);
+    }}
+    requestAnimationFrame(frame);
+  }}
+
+  // ── Reset view ─────────────────────────────────────────────────
+  function resetView() {{
+    cam.rotX = camDefault.rotX;
+    cam.rotY = camDefault.rotY;
+    cam.dist = camDefault.dist;
+    nodes.forEach(n => {{ n.hidden = false; n.fixed = false; }});
+    searchMatches = null;
+    const s = document.getElementById('kg-search');
+    if (s) s.value = '';
+  }}
+
+  // ── Search: live-highlight nodes whose label contains the query ─
+  function doSearch(q) {{
+    q = (q || '').trim().toLowerCase();
+    if (!q) {{ searchMatches = null; return; }}
+    const m = new Set();
+    nodes.forEach(n => {{
+      if (n.label.toLowerCase().indexOf(q) !== -1) m.add(n.id);
+    }});
+    searchMatches = m;
+    // Auto-center on the first match
+    for (const id of m) {{ tweenCenterOn(nodes[id]); break; }}
+  }}
+
+  // ── PNG export: serialize SVG → <img> → canvas → blob → download ─
+  function downloadPng() {{
+    const xml = new XMLSerializer().serializeToString(svg);
+    const svgBlob = new Blob(
+      ['<?xml version="1.0" encoding="UTF-8"?>' + xml],
+      {{ type: 'image/svg+xml;charset=utf-8' }});
+    const url = URL.createObjectURL(svgBlob);
+    const img = new Image();
+    const outW = svg.clientWidth || W;
+    const outH = svg.clientHeight || H;
+    img.onload = () => {{
+      const cvs = document.createElement('canvas');
+      cvs.width = outW * 2; cvs.height = outH * 2;  // 2× for retina
+      const ctx = cvs.getContext('2d');
+      ctx.fillStyle = theme.canvasBg;
+      ctx.fillRect(0, 0, cvs.width, cvs.height);
+      ctx.drawImage(img, 0, 0, cvs.width, cvs.height);
+      URL.revokeObjectURL(url);
+      cvs.toBlob(b => {{
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(b);
+        a.download = 'knowledge-graph.png';
+        document.body.appendChild(a); a.click(); a.remove();
+      }}, 'image/png');
+    }};
+    img.onerror = () => {{ URL.revokeObjectURL(url); }};
+    img.src = url;
+  }}
+
+  // ── Expose sim controls ────────────────────────────────────────
   canvas._kgSim = {{
     stop: () => {{
       running = false;
       if (raf) cancelAnimationFrame(raf);
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('keydown', onKey);
     }},
     setTheme: (name) => {{
       if (!KG_THEMES[name]) return;
       theme = KG_THEMES[name];
       _applyKgDefs(svg, theme);
+      _applyKgClusterDefs(svg, theme, numClusters);
       canvas.style.background = theme.canvasBg;
-      // render() reads `theme` closure-variable → next frame repaints
     }},
+    togglePause: () => {{ paused = !paused; }},
+    setColorBy: (mode) => {{ if (mode) colorBy = mode; }},
+    setLabelScale: (v) => {{ labelScale = Math.max(0.4, Math.min(2.2, v)); }},
+    setDegFilter: (v) => {{ degFilter = (v >= 99) ? 999 : v; }},
+    search: doSearch,
+    resetView: resetView,
+    centerOn: tweenCenterOn,
+    downloadPng: downloadPng,
   }};
+}}
+
+// ── Module-scope KG helpers used by the context menu + toolbar ────
+
+// Replace the current graph view with the 1-hop ego network around a
+// label (fetched via the `any_side` API parameter so we get edges on
+// either direction in a single query).
+async function kgEgoExpand(label) {{
+  const params = new URLSearchParams({{ any_side: label, limit: 200 }});
+  try {{
+    const res = await fetch('/api/kg?' + params.toString());
+    const data = await res.json();
+    _kgTriples = data.triples || [];
+    document.getElementById('kg-status').textContent =
+      'Expanded around "' + label + '" · ' + _kgTriples.length + ' triple(s)';
+    _renderKgTable(_kgTriples);
+    _renderKgGraph(_kgTriples.slice(0, 100));
+  }} catch (e) {{
+    document.getElementById('kg-status').textContent = 'Error: ' + e.message;
+  }}
+}}
+
+// Fetch all triples for a given document and re-render. Used by the
+// edge context menu's "Show this paper" action.
+async function kgSearchByDoc(docId) {{
+  const params = new URLSearchParams({{ document_id: docId, limit: 200 }});
+  try {{
+    const res = await fetch('/api/kg?' + params.toString());
+    const data = await res.json();
+    _kgTriples = data.triples || [];
+    document.getElementById('kg-status').textContent =
+      'Showing triples from selected paper · ' + _kgTriples.length;
+    _renderKgTable(_kgTriples);
+    _renderKgGraph(_kgTriples.slice(0, 100));
+    switchKgTab('kg-graph');
+  }} catch (e) {{
+    document.getElementById('kg-status').textContent = 'Error: ' + e.message;
+  }}
 }}
 
 // ── Phase 30: Export modal ────────────────────────────────────────────
