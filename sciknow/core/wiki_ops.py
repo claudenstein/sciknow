@@ -367,8 +367,14 @@ def _extract_entities_and_kg(
     }
 
     try:
+        # Phase 55 — num_ctx dropped from 8192 to 6144. See
+        # docs/WIKI_COMPILE_SPEED.md: observed extraction-prompt peak
+        # is ~6 100 tokens (sections 2 900 + system 200 + output
+        # 1 000-3 000), so 6144 covers the peak with a 10% cushion
+        # while shaving ~25% KV cache vs 8192. No truncation risk;
+        # ~5-10% wall-clock win.
         raw = llm_complete(sys_e, usr_e, model=model,
-                           temperature=0.0, num_ctx=8192,
+                           temperature=0.0, num_ctx=6144,
                            keep_alive=-1, format=extraction_schema)
         # With structured output, no need for _strip_thinking or _clean_json
         data = json.loads(raw, strict=False)

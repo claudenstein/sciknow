@@ -7479,6 +7479,23 @@ def l1_phase54_wiki_browsing_mvp() -> None:
     ):
         assert needle in src, f"phase 54.4 facts surface missing: {needle!r}"
 
+    # Phase 55 — wiki compile speed changes. num_ctx reduced; prompt
+    # sections go through a head+tail slicer.
+    from sciknow.core import wiki_ops as _wo2
+    from sciknow.rag import wiki_prompts as _wp
+    assert "num_ctx=6144" in _inspect.getsource(_wo2._extract_entities_and_kg), (
+        "wiki extraction still uses num_ctx=8192 — Phase 55 shrink not applied"
+    )
+    assert hasattr(_wp, "_head_tail_slice"), (
+        "wiki_prompts._head_tail_slice missing — head+tail section budget not wired"
+    )
+    assert _wp._head_tail_slice("short", total_budget=100) == "short"
+    out = _wp._head_tail_slice("A" * 100 + "B" * 500 + "C" * 100,
+                               total_budget=200)
+    assert out.startswith("A"), "head prefix missing from slice"
+    assert out.endswith("C"), "tail suffix missing from slice"
+    assert "section body omitted" in out, "middle-omitted marker missing"
+
     # Backlinks scanner contract on synthetic page content. Uses the
     # `base_dir` override so we don't have to mutate Pydantic Settings
     # (which are frozen).

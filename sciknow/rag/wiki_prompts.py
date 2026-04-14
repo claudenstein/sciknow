@@ -128,12 +128,38 @@ Return JSON:
 }}"""
 
 
+def _head_tail_slice(text: str, total_budget: int = 2000) -> str:
+    """Phase 55 — when the full `sections` blob exceeds our token
+    budget, split the budget between the head (methods / intro
+    opening) and the tail (results / conclusion). Covers both the
+    claims triple-extraction wants from the top of the paper and
+    the findings triple-extraction wants from the bottom. The
+    middle is dropped with a visible marker so the model doesn't
+    stitch two disjoint passages into one sentence.
+
+    If the text already fits in the budget, it's returned
+    unchanged."""
+    t = text or ""
+    if len(t) <= total_budget:
+        return t
+    half = total_budget // 2
+    head = t[:half]
+    tail = t[-half:]
+    return f"{head}\n\n[…section body omitted; {len(t) - total_budget} chars…]\n\n{tail}"
+
+
 def wiki_extract_entities(
     title: str, authors: str, year: str, keywords: str, domains: str,
     abstract: str, existing_slugs: list[str],
     slug: str = "", sections: str = "",
 ) -> tuple[str, str]:
     slug_str = ", ".join(existing_slugs[:300]) if existing_slugs else "(none yet)"
+    # Phase 55 — sections budget shrunk from 6000 → 2000 chars via
+    # head+tail slicing. See docs/WIKI_COMPILE_SPEED.md: BioREx §4.2 +
+    # LangExtract chunked-extraction guidance both confirm that for
+    # triple extraction specifically, abstract + conclusion + first
+    # methods paragraph carry ≥90% of the signal. Head+tail (not
+    # head-only) preserves methods opening AND findings closure.
     return (
         EXTRACT_ENTITIES_SYSTEM,
         EXTRACT_ENTITIES_USER.format(
@@ -142,7 +168,7 @@ def wiki_extract_entities(
             year=year or "n.d.", keywords=keywords or "N/A",
             domains=domains or "N/A",
             abstract=(abstract or "N/A")[:2000],
-            sections=(sections or "")[:6000],
+            sections=_head_tail_slice(sections or "", total_budget=2000),
             existing_slugs=slug_str,
         ),
     )
