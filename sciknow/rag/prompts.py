@@ -1588,7 +1588,18 @@ Source passages the draft was based on:
 
 ---
 
-Score the draft."""
+Before returning the JSON, think briefly about these four questions — do \
+NOT include your answers in the JSON, they are only to ground the scoring:
+
+  1. What does this draft get right? Cite specific sentences.
+  2. What does it get wrong? Identify specific claims that are unsupported,
+     mis-hedged, or misrepresent a source.
+  3. Are the numbers defensible? Check every quantitative claim against
+     the source passages.
+  4. Is the level of detail appropriate, or is the draft padded / bloated
+     relative to what the evidence supports?
+
+Now score the draft. Return the JSON only."""
 
 
 def score_draft(

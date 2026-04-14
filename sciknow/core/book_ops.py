@@ -3691,6 +3691,36 @@ def _autowrite_section_body(
     # the kept content, not a discarded revision.
     _telemetry_prev_word_count = len(content.split())
 
+    # Phase 53 — autoreason "four conditions" refinement gate.
+    # Advisory-only for this release: we emit the gate's recommendation
+    # as an event + log line, but the revision loop still runs
+    # regardless. After a release cycle of observation we can switch to
+    # a hard skip. Gate inputs:
+    #   - num_retrieval_hits: how much external verification signal we
+    #     have for the scorer's groundedness dimension to actually work.
+    #   - has_explicit_outline: True when use_plan triggered a sentence-
+    #     plan or a chapter outline was available.
+    from sciknow.core.refinement_gate import should_run_refinement
+    _gate = should_run_refinement(
+        section_type=section_type,
+        target_words=target_words,
+        num_retrieval_hits=len(results or []),
+        has_explicit_outline=bool(use_plan),
+    )
+    if not _gate.recommend_refinement:
+        reason_str = "; ".join(f"{n}: {m}" for n, m in _gate.reasons)
+        yield {
+            "type": "refinement_gate",
+            "recommendation": "warn",
+            "summary": _gate.summary(),
+            "failed_conditions": [n for n, _ in _gate.reasons],
+        }
+        log.event(
+            "refinement_gate_warning",
+            failed=[n for n, _ in _gate.reasons],
+            detail=reason_str[:300],
+        )
+
     for iteration in range(max_iter):
         yield {"type": "iteration_start", "iteration": iteration + 1, "max": max_iter}
         log.event("iteration_start", iteration=iteration + 1, max=max_iter)

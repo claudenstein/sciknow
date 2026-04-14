@@ -7196,6 +7196,177 @@ def l1_phase52_dedup_and_repair_surface() -> None:
         assert required in cmd_names, f"db.{required} command missing"
 
 
+def l1_phase53_cot_judge_and_length_ctrl() -> None:
+    """Phase 53 #2 — CoT preamble in SCORE_USER + length-controlled eval.
+
+    Static: scorer prompt now includes the four autoreason questions.
+    Functional: length-control utility truncates to the median word
+    count and reports trim counts correctly.
+    """
+    from sciknow.rag import prompts as rag_prompts
+    from sciknow.testing.length_controlled_eval import (
+        LengthControlledPair,
+        compare_at_matched_length,
+        equalize_lengths,
+        truncate_to_words,
+    )
+
+    # (2a) Scorer prompt must carry the four CoT questions verbatim
+    # (match-all so a rewording triggers this guard).
+    needles = [
+        "What does this draft get right",
+        "What does it get wrong",
+        "Are the numbers defensible",
+        "Is the level of detail appropriate",
+    ]
+    missing = [n for n in needles if n not in rag_prompts.SCORE_USER]
+    assert not missing, f"SCORE_USER missing CoT questions: {missing}"
+
+    # (2b) truncate_to_words is byte-level safe and length-correct
+    text = " ".join(f"w{i}" for i in range(100))
+    assert truncate_to_words(text, 20).split() == [f"w{i}" for i in range(20)]
+    assert truncate_to_words(text, 0) == ""
+    assert truncate_to_words("short", 50) == "short"
+
+    # (2c) equalize_lengths trims to the median (not min) so a single
+    # short outlier doesn't penalise the rest.
+    a = " ".join(["w"] * 100)
+    b = " ".join(["x"] * 200)
+    c = " ".join(["y"] * 300)
+    pairs = equalize_lengths([("A", a), ("B", b), ("C", c)])
+    # Median of [100, 200, 300] = 200
+    assert all(isinstance(p, LengthControlledPair) for p in pairs)
+    assert pairs[0].clipped_words == 100  # A is already under median
+    assert pairs[1].clipped_words == 200  # B at median (no change)
+    assert pairs[2].clipped_words == 200  # C truncated down to median
+
+    # (2d) compare_at_matched_length returns a summary with the right
+    # median + trimmed_count.
+    report = compare_at_matched_length([("A", a), ("B", b), ("C", c)])
+    assert report.median_words == 200
+    assert report.trimmed_count == 1   # only C was shortened
+    assert report.max_original_words == 300
+    assert report.min_original_words == 100
+
+
+def l1_phase53_refinement_gate() -> None:
+    """Phase 53 #3 — four-conditions gate decision logic.
+
+    The gate is advisory-only in the current rollout, so we test its
+    predicate behaviour rather than any autowrite-loop branching.
+    Covers all four condition failure modes + the happy path.
+    """
+    from sciknow.core.refinement_gate import (
+        GateDecision,
+        should_run_refinement,
+    )
+
+    # Happy path: all four conditions met
+    d = should_run_refinement(
+        section_type="introduction",
+        target_words=800,
+        num_retrieval_hits=12,
+        has_explicit_outline=True,
+    )
+    assert d.recommend_refinement is True
+    assert d.reasons == []
+    assert "recommended" in d.summary().lower()
+
+    # External verification fails (too few hits)
+    d = should_run_refinement(
+        section_type="introduction",
+        target_words=800,
+        num_retrieval_hits=1,
+        has_explicit_outline=True,
+    )
+    assert d.recommend_refinement is False
+    failed = {n for n, _ in d.reasons}
+    assert "external_verification" in failed
+
+    # Constrained scope fails: unbounded section without target_words
+    d = should_run_refinement(
+        section_type="discussion",
+        target_words=None,
+        num_retrieval_hits=8,
+        has_explicit_outline=True,
+    )
+    assert d.recommend_refinement is False
+    assert "constrained_scope" in {n for n, _ in d.reasons}
+
+    # Structured reasoning fails: no outline
+    d = should_run_refinement(
+        section_type="introduction",
+        target_words=800,
+        num_retrieval_hits=8,
+        has_explicit_outline=False,
+    )
+    assert d.recommend_refinement is False
+    assert "structured_reasoning" in {n for n, _ in d.reasons}
+
+    # Decision space fails: too-short target_words
+    d = should_run_refinement(
+        section_type="introduction",
+        target_words=50,
+        num_retrieval_hits=8,
+        has_explicit_outline=True,
+    )
+    assert d.recommend_refinement is False
+    assert "decision_space" in {n for n, _ in d.reasons}
+
+    # Multiple failures accumulate in `reasons`
+    d = should_run_refinement(
+        section_type="discussion",
+        target_words=None,
+        num_retrieval_hits=0,
+        has_explicit_outline=False,
+    )
+    assert d.recommend_refinement is False
+    assert len(d.reasons) >= 3
+
+
+def l1_phase53_bootstrap_and_mcnemar() -> None:
+    """Phase 53 #4 — bootstrap CI + McNemar's paired test."""
+    from sciknow.testing.stats import (
+        bootstrap_ci,
+        compare_paired_binary,
+        mcnemar_test,
+    )
+
+    # Bootstrap invariants: mean is sandwiched by (lo, hi); empty data
+    # yields a zero-filled result without exploding.
+    r = bootstrap_ci([1.0] * 50 + [0.0] * 50, n_resamples=400, seed=123)
+    assert 0.0 <= r.lo <= r.mean <= r.hi <= 1.0
+    assert r.n_samples == 100
+    # A pure-1 series has a degenerate CI (lo == mean == hi == 1.0)
+    r_ones = bootstrap_ci([1.0] * 20, n_resamples=200, seed=0)
+    assert r_ones.mean == 1.0 and r_ones.lo == 1.0 and r_ones.hi == 1.0
+    # Empty is safe
+    r_empty = bootstrap_ci([], n_resamples=10, seed=0)
+    assert r_empty.n_samples == 0
+
+    # McNemar's: when every pair agrees, b = c = 0 → tie + p = 1
+    tie = mcnemar_test([(True, True)] * 10 + [(False, False)] * 5)
+    assert tie.b == 0 and tie.c == 0
+    assert tie.direction == "tie" and tie.p_value == 1.0
+
+    # Clear advantage to arm B: A wrong, B right on 10 pairs → p small
+    pairs = [(False, True)] * 10 + [(True, True)] * 20
+    res = mcnemar_test(pairs)
+    assert res.b == 10 and res.c == 0
+    assert res.direction == "B_better"
+    assert res.p_value < 0.05, f"expected p<0.05, got {res.p_value:.3f}"
+
+    # compare_paired_binary composes both: A rate and B rate CIs +
+    # McNemar verdict in one call.
+    cmp = compare_paired_binary(pairs, n_resamples=200, seed=7)
+    assert cmp.a_rate.n_samples == len(pairs)
+    assert cmp.b_rate.n_samples == len(pairs)
+    assert cmp.mcnemar.direction == "B_better"
+    # A is correct on 20/30 pairs, B on 30/30
+    assert abs(cmp.a_rate.mean - (20 / 30)) < 0.01
+    assert abs(cmp.b_rate.mean - 1.0) < 0.01
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -7378,6 +7549,10 @@ L1_TESTS: list[Callable] = [
     l1_phase52_chunker_version_stamp,
     # Phase 52 — chunk dedup + db repair (mempalace P2+P6)
     l1_phase52_dedup_and_repair_surface,
+    # Phase 53 — autoreason adoptions (#2 CoT + length, #3 gate, #4 stats)
+    l1_phase53_cot_judge_and_length_ctrl,
+    l1_phase53_refinement_gate,
+    l1_phase53_bootstrap_and_mcnemar,
 ]
 
 L2_TESTS: list[Callable] = [
