@@ -7479,22 +7479,30 @@ def l1_phase54_wiki_browsing_mvp() -> None:
     ):
         assert needle in src, f"phase 54.4 facts surface missing: {needle!r}"
 
-    # Phase 55 — wiki compile speed changes. num_ctx reduced; prompt
-    # sections go through a head+tail slicer.
+    # Phase 55 / 55.2 — wiki extraction context + sections budget.
+    # Phase 55 dropped num_ctx to 6144 and sections to 2 KB head+tail;
+    # Phase 55.2 rolled BOTH back because the 2 KB cut was too
+    # aggressive and the 6144 ceiling left no headroom under the
+    # larger sections budget. Current state: num_ctx=8192, sections
+    # [:8000] linear. _head_tail_slice stays available for callers
+    # that explicitly want it.
     from sciknow.core import wiki_ops as _wo2
     from sciknow.rag import wiki_prompts as _wp
-    assert "num_ctx=6144" in _inspect.getsource(_wo2._extract_entities_and_kg), (
-        "wiki extraction still uses num_ctx=8192 — Phase 55 shrink not applied"
+    assert "num_ctx=8192" in _inspect.getsource(_wo2._extract_entities_and_kg), (
+        "wiki extraction should be at num_ctx=8192 (Phase 55.2 rollback)"
+    )
+    assert "sections=(sections or \"\")[:8000]" in _inspect.getsource(_wp.wiki_extract_entities), (
+        "wiki_extract_entities should feed sections as a linear [:8000] slice "
+        "(Phase 55.2 rollback of the 2 KB head+tail cut)"
     )
     assert hasattr(_wp, "_head_tail_slice"), (
-        "wiki_prompts._head_tail_slice missing — head+tail section budget not wired"
+        "_head_tail_slice kept available as a helper even after rollback"
     )
     assert _wp._head_tail_slice("short", total_budget=100) == "short"
     out = _wp._head_tail_slice("A" * 100 + "B" * 500 + "C" * 100,
                                total_budget=200)
-    assert out.startswith("A"), "head prefix missing from slice"
-    assert out.endswith("C"), "tail suffix missing from slice"
-    assert "section body omitted" in out, "middle-omitted marker missing"
+    assert out.startswith("A") and out.endswith("C")
+    assert "section body omitted" in out
 
     # Phase 54.5 — annotation endpoints + j/k list navigation surface.
     assert "/api/wiki/page/{slug}/annotation" in route_paths, (

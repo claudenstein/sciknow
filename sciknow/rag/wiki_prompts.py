@@ -154,12 +154,13 @@ def wiki_extract_entities(
     slug: str = "", sections: str = "",
 ) -> tuple[str, str]:
     slug_str = ", ".join(existing_slugs[:300]) if existing_slugs else "(none yet)"
-    # Phase 55 — sections budget shrunk from 6000 → 2000 chars via
-    # head+tail slicing. See docs/WIKI_COMPILE_SPEED.md: BioREx §4.2 +
-    # LangExtract chunked-extraction guidance both confirm that for
-    # triple extraction specifically, abstract + conclusion + first
-    # methods paragraph carry ≥90% of the signal. Head+tail (not
-    # head-only) preserves methods opening AND findings closure.
+    # Phase 55.2 — rollback. The Phase 55 head+tail cut to 2 KB was
+    # too aggressive — for multi-section papers it shaved the middle
+    # methodology/results paragraphs that *do* carry triple-extraction
+    # signal. Restore a simple linear slice at 8 KB (up from the
+    # pre-Phase-55 default of 6 KB) so the model sees enough context
+    # to extract a full set of triples. `_head_tail_slice` stays
+    # available for callers that explicitly want it.
     return (
         EXTRACT_ENTITIES_SYSTEM,
         EXTRACT_ENTITIES_USER.format(
@@ -168,7 +169,7 @@ def wiki_extract_entities(
             year=year or "n.d.", keywords=keywords or "N/A",
             domains=domains or "N/A",
             abstract=(abstract or "N/A")[:2000],
-            sections=_head_tail_slice(sections or "", total_budget=2000),
+            sections=(sections or "")[:8000],
             existing_slugs=slug_str,
         ),
     )
