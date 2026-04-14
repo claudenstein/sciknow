@@ -7507,13 +7507,23 @@ def l1_phase54_wiki_browsing_mvp() -> None:
     assert "ThreadPoolExecutor" in compile_all_src, (
         "wiki compile_all should have a ThreadPoolExecutor branch"
     )
-    assert "llm_parallel_workers" in compile_all_src, (
-        "wiki compile_all should size worker count from "
-        "settings.llm_parallel_workers"
+    assert "wiki_compile_workers" in compile_all_src, (
+        "wiki compile_all should read settings.wiki_compile_workers"
     )
     assert "OLLAMA_NUM_PARALLEL" in compile_all_src, (
         "compile_all parallel branch should document the Ollama "
         "head-of-line-blocking pairing constraint inline"
+    )
+    # Default opts OUT of parallelism — user must measure first.
+    from sciknow.config import settings as _settings
+    assert _settings.wiki_compile_workers == 1, (
+        "wiki_compile_workers default must stay at 1 (opt-in); the "
+        "MoE + single-GPU speedup is hardware-dependent and can be "
+        "negative under VRAM pressure"
+    )
+    assert "elapsed_seconds" in compile_all_src, (
+        "compile_all should emit wall-clock timing so users can "
+        "measure the effect of raising wiki_compile_workers"
     )
     for needle in (
         "wiki-annotation-body",    # textarea id

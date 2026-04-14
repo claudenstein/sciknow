@@ -596,11 +596,13 @@ def compile_all(
         """)).fetchall()
 
     total = len(rows)
-    workers = max(1, int(settings.llm_parallel_workers or 1))
-    # Don't spin up extra threads if there's less than two papers of
-    # work; sequential path is slightly simpler and keeps the per-
-    # token SSE stream intact for the CLI's single-paper case.
+    # Phase 55.1.1 — opt-in parallelism. Defaults to 1 because the
+    # speedup is hardware-dependent on MoE models and single-GPU
+    # setups; raise `WIKI_COMPILE_WORKERS` and set a matching
+    # `OLLAMA_NUM_PARALLEL` only after benchmarking on your box.
+    workers = max(1, int(settings.wiki_compile_workers or 1))
     effective_workers = min(workers, max(1, total))
+    compile_wall_t0 = time.monotonic()
     yield {"type": "compile_start", "total": total,
            "workers": effective_workers}
 
@@ -749,10 +751,24 @@ def compile_all(
     # Phase 54.2 — drop the backlinks cache so the next reader request
     # rebuilds against the fresh set of pages on disk.
     invalidate_backlinks()
-    _append_log(f"compile-all | {compiled} new, {skipped} skipped, {failed} failed from {total} papers")
+    # Phase 55.1.1 — wall-clock timing so the user can compare
+    # WIKI_COMPILE_WORKERS settings empirically. The per-paper avg
+    # is computed over `compiled + failed` (skipped papers didn't do
+    # real work and would bias the average downward).
+    compile_wall_elapsed = time.monotonic() - compile_wall_t0
+    did_real_work = max(1, compiled + failed)
+    avg_sec_per_paper = compile_wall_elapsed / did_real_work
+    _append_log(
+        f"compile-all | {compiled} new, {skipped} skipped, {failed} failed "
+        f"from {total} papers in {compile_wall_elapsed:.1f}s "
+        f"(workers={effective_workers}, {avg_sec_per_paper:.1f}s/paper)"
+    )
 
     yield {"type": "completed", "compiled": compiled, "skipped": skipped,
-           "failed": failed, "total": total}
+           "failed": failed, "total": total,
+           "elapsed_seconds": round(compile_wall_elapsed, 1),
+           "workers": effective_workers,
+           "avg_sec_per_paper": round(avg_sec_per_paper, 1)}
 
 
 # ── compile_synthesis ────────────────────────────────────────────────────────

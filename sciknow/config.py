@@ -118,6 +118,16 @@ class Settings(BaseSettings):
     enrich_workers: int = 8            # concurrent Crossref/OpenAlex lookups
     expand_download_workers: int = 6   # concurrent OA PDF lookups/downloads
     llm_parallel_workers: int = 4      # concurrent LLM calls (match OLLAMA_NUM_PARALLEL)
+    # Phase 55.1.1 — wiki compile worker count. DELIBERATELY defaults to 1
+    # rather than llm_parallel_workers, because the "parallel requests to the
+    # same Ollama model speed up bulk compile" story is hardware-dependent:
+    # on a 24 GB 3090 with qwen3:30b-a3b MoE (~18 GB weights) + KV cache
+    # for multiple slots, VRAM headroom is tight and the MoE routing often
+    # serialises on the same expert, netting out closer to 0–25 % gain than
+    # the 40–60 % published numbers from dense-model / multi-GPU benches.
+    # Opt in explicitly by raising this (set OLLAMA_NUM_PARALLEL to at least
+    # the same value) and measure with `sciknow wiki compile` timing output.
+    wiki_compile_workers: int = 1
 
     # Ingestion worker processes for `sciknow ingest directory`. Each worker
     # loads its own Marker (~5GB VRAM peak) + bge-m3 (~2.2GB). On a 24GB GPU
