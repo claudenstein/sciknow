@@ -3422,3 +3422,280 @@ def download_dois(
         f"[red]✗ {failed_dl} no OA PDF[/red]"
         + (f"  [red]✗ {failed_ingest} ingest failed[/red]" if failed_ingest else "")
     )
+
+
+# ── Phase 54.6.4 — three new expansion methods ───────────────────────
+# Each is a thin wrapper that delegates to `sciknow/core/expand_ops.py`
+# for the candidate-finding logic (so the web preview endpoints and
+# the CLI share the same code path), then funnels the candidate DOIs
+# into the existing parallel download + ingest pipeline.
+
+def _expand_common_download_and_ingest(
+    candidates: list[dict], *, download_dir,
+    workers: int, ingest: bool, dry_run: bool,
+) -> None:
+    """Shared tail for expand-cites / expand-topic / expand-coauthors."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from sciknow.config import settings
+    from sciknow.ingestion.downloader import find_and_download
+
+    if dry_run:
+        console.print(
+            f"\n[bold]Dry run — would attempt to download "
+            f"{len(candidates)} paper(s):[/bold]"
+        )
+        for c in candidates[:30]:
+            year_str = f"({c.get('year')})" if c.get("year") else "(n.d.)"
+            score = c.get("relevance_score")
+            sc = f" score={score:.2f}" if score is not None else ""
+            console.print(
+                f"  [dim]{(c.get('doi') or '?')[:40]:<40}[/dim] "
+                f"[cyan]{year_str}[/cyan]{sc} {(c.get('title') or '')[:60]}"
+            )
+        if len(candidates) > 30:
+            console.print(f"  … and {len(candidates) - 30} more")
+        raise typer.Exit(0)
+
+    if download_dir is None:
+        download_dir = settings.data_dir / "downloads"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    no_oa_cache_file = download_dir / ".no_oa_cache"
+    no_oa_cache: set[str] = (
+        set(no_oa_cache_file.read_text().splitlines())
+        if no_oa_cache_file.exists() else set()
+    )
+    dl_workers = max(1, getattr(settings, "expand_download_workers", 4))
+    downloaded = failed_dl = 0
+    to_ingest = []
+
+    def _dl(item):
+        doi = item.get("doi") or ""
+        title = (item.get("title") or "")[:80]
+        doi_key = doi.lower()
+        safe = doi.replace("/", "_").replace(":", "_")
+        dest = download_dir / f"{safe}.pdf"
+        if doi_key in no_oa_cache:
+            return ("cached", doi_key, title, dest, None)
+        if dest.exists():
+            return ("exists", doi_key, title, dest, None)
+        ok, source = find_and_download(
+            doi=doi, arxiv_id=None, dest_path=dest,
+            email=settings.crossref_email,
+        )
+        return ("downloaded" if ok else "no_oa", doi_key, title, dest, source)
+
+    with Progress(
+        SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+        BarColumn(), MofNCompleteColumn(), TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task(
+            f"Downloading ({dl_workers} workers)", total=len(candidates)
+        )
+        with ThreadPoolExecutor(max_workers=dl_workers) as pool:
+            futures = {pool.submit(_dl, c): c for c in candidates}
+            for fut in as_completed(futures):
+                try:
+                    status, doi_key, title, dest, source = fut.result()
+                except Exception:
+                    failed_dl += 1
+                    progress.advance(task)
+                    continue
+                short = title[:50]
+                if status == "downloaded":
+                    downloaded += 1
+                    progress.update(task, description=f"[green]↓ {source}[/green] {short}")
+                    to_ingest.append((doi_key, title, dest))
+                elif status == "exists":
+                    to_ingest.append((doi_key, title, dest))
+                elif status == "no_oa":
+                    failed_dl += 1
+                    with no_oa_cache_file.open("a") as f:
+                        f.write(doi_key + "\n")
+                else:
+                    failed_dl += 1
+                progress.advance(task)
+
+    ingested = failed_ingest = 0
+    if ingest and to_ingest:
+        from sciknow.cli.ingest import _run_parallel_workers
+        from sciknow.ingestion.embedder import release_model as _release_embedder
+
+        ingest_workers = workers if workers > 0 else max(1, settings.ingest_workers)
+        ingest_workers = min(ingest_workers, len(to_ingest))
+        _release_embedder()
+
+        def _on_file_done(path, status, error):
+            nonlocal ingested, failed_ingest
+            if status in ("done", "skipped"):
+                ingested += 1
+            elif status == "failed":
+                failed_ingest += 1
+
+        ingest_results = {"done": 0, "skipped": 0, "failed": 0}
+        ingest_failed_files = []
+        worker_note = f" ({ingest_workers} workers)" if ingest_workers > 1 else ""
+        console.print(f"\nIngesting [bold]{len(to_ingest)}[/bold] new PDF(s){worker_note}…")
+
+        with Progress(
+            SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+            BarColumn(), MofNCompleteColumn(), TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            itask = progress.add_task("Ingesting", total=len(to_ingest))
+            _run_parallel_workers(
+                [dest for _, _, dest in to_ingest],
+                progress, itask, ingest_results, ingest_failed_files,
+                force=False, num_workers=ingest_workers,
+                ingest_source="expand",
+                on_file_done=_on_file_done,
+            )
+
+    console.print(
+        f"\n[bold]Summary:[/bold] "
+        f"[green]↓ {downloaded} downloaded[/green]  "
+        f"[green]✓ {ingested} ingested[/green]  "
+        f"[red]✗ {failed_dl} no OA PDF[/red]"
+        + (f"  [red]✗ {failed_ingest} ingest failed[/red]" if failed_ingest else "")
+    )
+
+
+@app.command(name="expand-cites")
+def expand_cites(
+    per_seed_cap: int = typer.Option(50, "--per-seed-cap",
+        help="Max papers per seed (corpus paper). Default 50."),
+    total_limit: int = typer.Option(500, "--total-limit",
+        help="Hard cap on total candidate pool (pre-filter)."),
+    relevance: bool = typer.Option(True, "--relevance/--no-relevance"),
+    relevance_query: str = typer.Option("", "--relevance-query", "-q"),
+    relevance_threshold: float = typer.Option(0.0, "--relevance-threshold"),
+    download_dir: Path = typer.Option(None, "--download-dir", "-d"),
+    workers: int = typer.Option(0, "--workers", "-w"),
+    ingest: bool = typer.Option(True, "--ingest/--no-ingest"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+):
+    """Phase 54.6.4 — Inbound-citation discovery.
+
+    Query OpenAlex for papers that CITE each paper in your corpus.
+    Dedup, score, rank, download + ingest. Mirror of `db expand`
+    (outbound) — catches forward-in-time work.
+    """
+    from sciknow.cli import preflight
+    preflight()
+    from sciknow.core.expand_ops import find_inbound_citation_candidates
+
+    console.print("\n[bold]Expand by inbound citations[/bold]")
+    console.print("[dim]OpenAlex /works?filter=cites:W… per seed[/dim]\n")
+    result = find_inbound_citation_candidates(
+        per_seed_cap=per_seed_cap, total_limit=total_limit,
+        relevance_query=relevance_query, score_relevance=relevance,
+    )
+    cands = result["candidates"]
+    info = result["info"]
+    console.print(
+        f"Resolved {info.get('seeds_resolved', 0)} seed work(s) of "
+        f"{info.get('seeds_requested', 0)}; {info.get('raw', 0)} raw citers, "
+        f"dedup'd {info.get('dedup_dropped', 0)}."
+    )
+    if relevance_threshold > 0:
+        before = len(cands)
+        cands = [c for c in cands if (c.get("relevance_score") or 0.0) >= relevance_threshold]
+        console.print(f"Threshold {relevance_threshold:.2f} kept {len(cands)} / {before}.")
+    if not cands:
+        console.print("[yellow]Nothing to download.[/yellow]")
+        raise typer.Exit(0)
+    _expand_common_download_and_ingest(
+        cands, download_dir=download_dir, workers=workers, ingest=ingest, dry_run=dry_run
+    )
+
+
+@app.command(name="expand-topic")
+def expand_topic(
+    query: Annotated[str, typer.Argument(help="Free-text topic query.")],
+    limit: int = typer.Option(500, "--limit", "-l"),
+    relevance: bool = typer.Option(True, "--relevance/--no-relevance"),
+    relevance_query: str = typer.Option("", "--relevance-query", "-q"),
+    relevance_threshold: float = typer.Option(0.0, "--relevance-threshold"),
+    download_dir: Path = typer.Option(None, "--download-dir", "-d"),
+    workers: int = typer.Option(0, "--workers", "-w"),
+    ingest: bool = typer.Option(True, "--ingest/--no-ingest"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+):
+    """Phase 54.6.4 — Topic-driven expansion.
+
+    Free-text OpenAlex /works?search=QUERY sorted by citation count.
+    Solves bootstrap / sideways-expansion `db expand` can't address.
+    """
+    from sciknow.cli import preflight
+    preflight()
+    from sciknow.core.expand_ops import find_topic_candidates
+
+    console.print(f"\n[bold]Expand by topic search[/bold]: {query!r}")
+    console.print("[dim]OpenAlex /works?search=… sort=cited_by_count:desc[/dim]\n")
+    result = find_topic_candidates(
+        query, limit=limit,
+        relevance_query=relevance_query, score_relevance=relevance,
+    )
+    cands = result["candidates"]
+    info = result["info"]
+    console.print(
+        f"Fetched {info.get('raw', 0)} candidate(s), "
+        f"dedup'd {info.get('dedup_dropped', 0)} against corpus."
+    )
+    if relevance_threshold > 0:
+        before = len(cands)
+        cands = [c for c in cands if (c.get("relevance_score") or 0.0) >= relevance_threshold]
+        console.print(f"Threshold {relevance_threshold:.2f} kept {len(cands)} / {before}.")
+    if not cands:
+        console.print("[yellow]Nothing to download.[/yellow]")
+        raise typer.Exit(0)
+    _expand_common_download_and_ingest(
+        cands, download_dir=download_dir, workers=workers, ingest=ingest, dry_run=dry_run
+    )
+
+
+@app.command(name="expand-coauthors")
+def expand_coauthors(
+    depth: int = typer.Option(1, "--depth"),
+    per_author_cap: int = typer.Option(10, "--per-author-cap"),
+    total_limit: int = typer.Option(500, "--total-limit"),
+    relevance: bool = typer.Option(True, "--relevance/--no-relevance"),
+    relevance_query: str = typer.Option("", "--relevance-query", "-q"),
+    relevance_threshold: float = typer.Option(0.0, "--relevance-threshold"),
+    download_dir: Path = typer.Option(None, "--download-dir", "-d"),
+    workers: int = typer.Option(0, "--workers", "-w"),
+    ingest: bool = typer.Option(True, "--ingest/--no-ingest"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+):
+    """Phase 54.6.4 — Coauthor-network snowball.
+
+    Every OpenAlex author on any corpus paper → fetch up to
+    ``--per-author-cap`` of their works. Captures the invisible
+    college of same-lab researchers who don't cite each other.
+    """
+    from sciknow.cli import preflight
+    preflight()
+    from sciknow.core.expand_ops import find_coauthor_candidates
+
+    console.print(f"\n[bold]Expand by coauthor snowball[/bold] (depth={depth})")
+    console.print("[dim]Corpus authors → OpenAlex /works?filter=author.id:…[/dim]\n")
+    result = find_coauthor_candidates(
+        depth=depth, per_author_cap=per_author_cap, total_limit=total_limit,
+        relevance_query=relevance_query, score_relevance=relevance,
+    )
+    cands = result["candidates"]
+    info = result["info"]
+    console.print(
+        f"Seed authors: {info.get('seed_authors', 0)}. "
+        f"Raw: {info.get('raw', 0)}, dedup'd {info.get('dedup_dropped', 0)}."
+    )
+    if relevance_threshold > 0:
+        before = len(cands)
+        cands = [c for c in cands if (c.get("relevance_score") or 0.0) >= relevance_threshold]
+        console.print(f"Threshold {relevance_threshold:.2f} kept {len(cands)} / {before}.")
+    if not cands:
+        console.print("[yellow]Nothing to download.[/yellow]")
+        raise typer.Exit(0)
+    _expand_common_download_and_ingest(
+        cands, download_dir=download_dir, workers=workers, ingest=ingest, dry_run=dry_run
+    )

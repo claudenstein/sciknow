@@ -143,3 +143,344 @@ def find_author_candidates(
         "candidate_authors": info.get("candidates", []),
     }
     return {"candidates": candidates, "info": out_info}
+
+
+# ── Phase 54.6.4 — three new expansion methods ──────────────────────────
+#
+# Each returns the same {"candidates": [...], "info": {...}} shape as
+# ``find_author_candidates`` so the web preview modal can render them
+# uniformly. Candidates carry DOI, title, authors, year, relevance_score.
+#
+# All three hit OpenAlex's /works endpoint with different filters. We
+# reuse the HTTP settings from ``ingestion.author_search`` (User-Agent,
+# polite-pool mailto) rather than inventing a new client.
+
+import requests as _requests
+import time as _time
+
+
+_OPENALEX_PER_PAGE = 200
+_HTTP_TIMEOUT = 30
+
+
+def _openalex_headers_params():
+    headers = {
+        "User-Agent": f"sciknow ({settings.crossref_email or 'noreply@example.com'})"
+    }
+    params_base: dict[str, Any] = {"per-page": _OPENALEX_PER_PAGE}
+    if settings.crossref_email:
+        params_base["mailto"] = settings.crossref_email
+    return headers, params_base
+
+
+def _work_to_ref_dict(work: dict) -> dict[str, Any] | None:
+    """Convert an OpenAlex /works record into our candidate dict shape.
+
+    Drops works without a DOI (download pipeline can't route without one).
+    """
+    doi_url = (work.get("doi") or "").strip()
+    if not doi_url:
+        return None
+    # OpenAlex returns DOIs as "https://doi.org/10.xxxx/..." — strip prefix.
+    doi = doi_url.replace("https://doi.org/", "").replace("http://doi.org/", "")
+    title = work.get("title") or work.get("display_name") or ""
+    year = work.get("publication_year")
+    authors = []
+    for a in (work.get("authorships") or [])[:20]:
+        nm = (a.get("author") or {}).get("display_name")
+        if nm:
+            authors.append(nm)
+    return {
+        "doi": doi.strip(),
+        "arxiv_id": None,
+        "title": title,
+        "authors": authors,
+        "year": year if isinstance(year, int) else None,
+        "relevance_score": None,  # set later by the relevance-scoring pass
+        "openalex_id": (work.get("id") or "").rsplit("/", 1)[-1],
+        "cited_by_count": work.get("cited_by_count") or 0,
+    }
+
+
+def _paginate_works(filter_value: str, *, limit: int, delay: float = 0.2,
+                    extra_params: dict[str, Any] | None = None,
+                    sort: str | None = None) -> list[dict]:
+    """Cursor-paginate /works?filter=... until we have `limit` results."""
+    headers, params_base = _openalex_headers_params()
+    params = dict(params_base)
+    params["filter"] = filter_value
+    if sort:
+        params["sort"] = sort
+    if extra_params:
+        params.update(extra_params)
+    params["cursor"] = "*"
+    out: list[dict] = []
+    while True:
+        try:
+            r = _requests.get(
+                "https://api.openalex.org/works",
+                params=params, headers=headers, timeout=_HTTP_TIMEOUT,
+            )
+            r.raise_for_status()
+            data = r.json()
+        except Exception as exc:
+            logger.warning("OpenAlex /works paginate failed: %s", exc)
+            break
+        results = data.get("results") or []
+        out.extend(results)
+        nxt = (data.get("meta") or {}).get("next_cursor")
+        if not nxt or not results or (limit > 0 and len(out) >= limit):
+            break
+        params["cursor"] = nxt
+        _time.sleep(delay)
+    if limit > 0:
+        out = out[:limit]
+    return out
+
+
+def _score_and_dedup(raw: list[dict], *, relevance_query: str,
+                     score_relevance: bool) -> tuple[list[dict], int, str | None]:
+    """Shared tail for all three methods: dedup vs corpus by DOI, score
+    against corpus centroid (or user query), sort. Returns
+    (candidates, dedup_dropped, relevance_query_used).
+    """
+    # Dedup against existing corpus by DOI.
+    with get_session() as session:
+        existing = session.execute(sql_text(
+            "SELECT LOWER(doi) FROM paper_metadata WHERE doi IS NOT NULL"
+        )).fetchall()
+    existing_dois = {r[0] for r in existing}
+    before = len(raw)
+    raw = [c for c in raw if c.get("doi") and c["doi"].lower() not in existing_dois]
+    dedup_dropped = before - len(raw)
+
+    relevance_query_used: str | None = None
+    if score_relevance and raw:
+        try:
+            from sciknow.retrieval.relevance import (
+                compute_corpus_centroid, embed_query, score_candidates,
+            )
+            anchor = (
+                embed_query(relevance_query)
+                if (relevance_query or "").strip()
+                else compute_corpus_centroid()
+            )
+            titles = [c["title"] or "" for c in raw]
+            scores = score_candidates(titles, anchor)
+            for c, s in zip(raw, scores):
+                c["relevance_score"] = float(s)
+            relevance_query_used = (
+                relevance_query.strip() if (relevance_query or "").strip()
+                else "centroid"
+            )
+        except Exception as exc:
+            logger.warning("relevance scoring failed: %s", exc)
+
+    raw.sort(
+        key=lambda c: (
+            c.get("relevance_score") if c.get("relevance_score") is not None else -1.0,
+            c.get("year") or 0,
+        ),
+        reverse=True,
+    )
+    return raw, dedup_dropped, relevance_query_used
+
+
+def find_inbound_citation_candidates(
+    *, per_seed_cap: int = 50, total_limit: int = 500,
+    relevance_query: str = "", score_relevance: bool = True,
+) -> dict[str, Any]:
+    """Find papers that **cite** papers already in the corpus.
+
+    For each of the corpus's OpenAlex-indexed works, query
+    ``/works?filter=cites:W123``, pull up to ``per_seed_cap`` citers,
+    union across seeds, dedup by DOI, relevance-score, sort.
+    """
+    # Step 1: resolve existing corpus DOIs to OpenAlex work IDs.
+    with get_session() as session:
+        existing_dois = [
+            r[0] for r in session.execute(sql_text(
+                "SELECT doi FROM paper_metadata WHERE doi IS NOT NULL "
+                "ORDER BY created_at DESC LIMIT 500"
+            )).fetchall() if r[0]
+        ]
+    if not existing_dois:
+        return {"candidates": [], "info": {
+            "seeds": 0, "raw": 0, "dedup_dropped": 0,
+            "message": "corpus has no DOIs — nothing to expand from",
+        }}
+
+    headers, params_base = _openalex_headers_params()
+    seed_work_ids: list[str] = []
+    # Batch-resolve DOIs → work IDs via /works?filter=doi:...
+    # OpenAlex caps filter|... at ~50 per request.
+    batch_size = 50
+    for i in range(0, len(existing_dois), batch_size):
+        batch = existing_dois[i:i + batch_size]
+        params = dict(params_base)
+        params["filter"] = "doi:" + "|".join(batch)
+        try:
+            r = _requests.get(
+                "https://api.openalex.org/works",
+                params=params, headers=headers, timeout=_HTTP_TIMEOUT,
+            )
+            r.raise_for_status()
+            results = (r.json() or {}).get("results") or []
+            for w in results:
+                wid = (w.get("id") or "").rsplit("/", 1)[-1]
+                if wid:
+                    seed_work_ids.append(wid)
+        except Exception as exc:
+            logger.warning("doi→work_id batch failed: %s", exc)
+        _time.sleep(0.1)
+
+    # Step 2: for each seed work, fetch up to per_seed_cap citers.
+    raw_by_doi: dict[str, dict] = {}
+    for i, wid in enumerate(seed_work_ids):
+        if total_limit and len(raw_by_doi) >= total_limit:
+            break
+        works = _paginate_works(f"cites:{wid}", limit=per_seed_cap)
+        for w in works:
+            d = _work_to_ref_dict(w)
+            if d and d["doi"] not in raw_by_doi:
+                raw_by_doi[d["doi"]] = d
+        _time.sleep(0.05)
+
+    raw_list = list(raw_by_doi.values())
+    cands, dropped, rq_used = _score_and_dedup(
+        raw_list, relevance_query=relevance_query,
+        score_relevance=score_relevance,
+    )
+    return {"candidates": cands, "info": {
+        "seeds_resolved": len(seed_work_ids),
+        "seeds_requested": len(existing_dois),
+        "raw": len(raw_list),
+        "dedup_dropped": dropped,
+        "relevance_query_used": rq_used,
+    }}
+
+
+def find_topic_candidates(
+    query: str, *, limit: int = 500,
+    relevance_query: str = "", score_relevance: bool = True,
+) -> dict[str, Any]:
+    """Free-text OpenAlex /works search, ranked by citation count."""
+    if not query.strip():
+        raise ValueError("query required")
+    headers, params_base = _openalex_headers_params()
+    params = dict(params_base)
+    params["search"] = query.strip()
+    params["sort"] = "cited_by_count:desc"
+    params["cursor"] = "*"
+    raw: list[dict] = []
+    while True:
+        try:
+            r = _requests.get(
+                "https://api.openalex.org/works",
+                params=params, headers=headers, timeout=_HTTP_TIMEOUT,
+            )
+            r.raise_for_status()
+            data = r.json()
+        except Exception as exc:
+            logger.warning("topic /works search failed: %s", exc)
+            break
+        for w in data.get("results") or []:
+            d = _work_to_ref_dict(w)
+            if d:
+                raw.append(d)
+        nxt = (data.get("meta") or {}).get("next_cursor")
+        if not nxt or (limit > 0 and len(raw) >= limit):
+            break
+        params["cursor"] = nxt
+        _time.sleep(0.2)
+    if limit > 0:
+        raw = raw[:limit]
+
+    # Default relevance anchor to the query itself for topic search —
+    # the user's query is literally the anchor.
+    rq = relevance_query if relevance_query.strip() else query
+    cands, dropped, rq_used = _score_and_dedup(
+        raw, relevance_query=rq, score_relevance=score_relevance,
+    )
+    return {"candidates": cands, "info": {
+        "query": query, "raw": len(raw),
+        "dedup_dropped": dropped,
+        "relevance_query_used": rq_used,
+    }}
+
+
+def find_coauthor_candidates(
+    *, depth: int = 1, per_author_cap: int = 10, total_limit: int = 500,
+    relevance_query: str = "", score_relevance: bool = True,
+) -> dict[str, Any]:
+    """Fetch papers by every OpenAlex author already in the corpus.
+
+    depth=1: papers by authors already on corpus papers.
+    depth=2: ALSO coauthors-of-coauthors — can explode, use carefully.
+    """
+    if depth not in (1, 2):
+        raise ValueError("depth must be 1 or 2")
+    # Step 1: enumerate corpus authors via OpenAlex author IDs stored
+    # in crossref_raw / authors JSONB. Cheapest path: query OpenAlex
+    # /works?filter=doi:... on the existing corpus DOIs and extract
+    # authorships[].author.id.
+    with get_session() as session:
+        existing_dois = [
+            r[0] for r in session.execute(sql_text(
+                "SELECT doi FROM paper_metadata WHERE doi IS NOT NULL "
+                "ORDER BY created_at DESC LIMIT 300"
+            )).fetchall() if r[0]
+        ]
+    if not existing_dois:
+        return {"candidates": [], "info": {
+            "seed_authors": 0, "message": "corpus has no DOIs"
+        }}
+
+    headers, params_base = _openalex_headers_params()
+    author_ids: set[str] = set()
+    batch_size = 50
+    for i in range(0, len(existing_dois), batch_size):
+        batch = existing_dois[i:i + batch_size]
+        params = dict(params_base)
+        params["filter"] = "doi:" + "|".join(batch)
+        try:
+            r = _requests.get(
+                "https://api.openalex.org/works",
+                params=params, headers=headers, timeout=_HTTP_TIMEOUT,
+            )
+            r.raise_for_status()
+            for w in (r.json() or {}).get("results") or []:
+                for a in (w.get("authorships") or []):
+                    aid = ((a.get("author") or {}).get("id") or "").rsplit("/", 1)[-1]
+                    if aid:
+                        author_ids.add(aid)
+        except Exception as exc:
+            logger.warning("doi→authors batch failed: %s", exc)
+        _time.sleep(0.1)
+
+    # Step 2: for each author, fetch their works (capped).
+    raw_by_doi: dict[str, dict] = {}
+    for aid in list(author_ids):
+        if total_limit and len(raw_by_doi) >= total_limit:
+            break
+        works = _paginate_works(
+            f"author.id:{aid}", limit=per_author_cap,
+            sort="cited_by_count:desc",
+        )
+        for w in works:
+            d = _work_to_ref_dict(w)
+            if d and d["doi"] not in raw_by_doi:
+                raw_by_doi[d["doi"]] = d
+        _time.sleep(0.05)
+
+    raw_list = list(raw_by_doi.values())
+    cands, dropped, rq_used = _score_and_dedup(
+        raw_list, relevance_query=relevance_query,
+        score_relevance=score_relevance,
+    )
+    return {"candidates": cands, "info": {
+        "seed_authors": len(author_ids),
+        "raw": len(raw_list),
+        "dedup_dropped": dropped,
+        "relevance_query_used": rq_used,
+    }}

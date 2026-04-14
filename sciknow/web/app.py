@@ -4330,6 +4330,76 @@ async def api_corpus_expand_author_download_selected(request: Request):
     })
 
 
+@app.post("/api/corpus/expand-cites/preview")
+async def api_corpus_expand_cites_preview(
+    per_seed_cap: int = Form(50),
+    total_limit: int = Form(500),
+    relevance_query: str = Form(""),
+):
+    """Phase 54.6.4 — preview inbound-citation candidates (blocking JSON)."""
+    from sciknow.core.expand_ops import find_inbound_citation_candidates
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: find_inbound_citation_candidates(
+                per_seed_cap=int(per_seed_cap), total_limit=int(total_limit),
+                relevance_query=relevance_query, score_relevance=True,
+            ),
+        )
+    except Exception as exc:
+        logger.exception("expand-cites preview failed")
+        raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}")
+    return JSONResponse(result)
+
+
+@app.post("/api/corpus/expand-topic/preview")
+async def api_corpus_expand_topic_preview(
+    query: str = Form(""),
+    limit: int = Form(500),
+    relevance_query: str = Form(""),
+):
+    """Phase 54.6.4 — preview topic-search candidates."""
+    if not query.strip():
+        raise HTTPException(status_code=400, detail="query required")
+    from sciknow.core.expand_ops import find_topic_candidates
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: find_topic_candidates(
+                query, limit=int(limit),
+                relevance_query=relevance_query, score_relevance=True,
+            ),
+        )
+    except Exception as exc:
+        logger.exception("expand-topic preview failed")
+        raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}")
+    return JSONResponse(result)
+
+
+@app.post("/api/corpus/expand-coauthors/preview")
+async def api_corpus_expand_coauthors_preview(
+    depth: int = Form(1),
+    per_author_cap: int = Form(10),
+    total_limit: int = Form(500),
+    relevance_query: str = Form(""),
+):
+    """Phase 54.6.4 — preview coauthor-snowball candidates."""
+    from sciknow.core.expand_ops import find_coauthor_candidates
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: find_coauthor_candidates(
+                depth=int(depth), per_author_cap=int(per_author_cap),
+                total_limit=int(total_limit),
+                relevance_query=relevance_query, score_relevance=True,
+            ),
+        )
+    except Exception as exc:
+        logger.exception("expand-coauthors preview failed")
+        raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}")
+    return JSONResponse(result)
+
+
 @app.post("/api/corpus/cleanup-downloads")
 async def api_corpus_cleanup_downloads(
     dry_run: bool = Form(False),
@@ -8041,6 +8111,89 @@ body.task-bar-open {{ padding-top: 40px; }}
             </button>
             <span style="font-size:11px;color:var(--fg-muted);">
               Preview lets you cherry-pick; Auto uses the relevance threshold.
+            </span>
+          </div>
+        </div>
+
+        <!-- Phase 54.6.4 — Inbound cites panel -->
+        <div id="corp-inbound-pane" style="display:none;border:1px solid var(--border);border-radius:6px;padding:10px;">
+          <div style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;">
+            Find papers that <strong>cite</strong> papers already in your
+            corpus — the forward-in-time mirror of <code>db expand</code>.
+            Calls OpenAlex's <code>/works?filter=cites:W…</code> per seed.
+            Mirrors <code>sciknow db expand-cites</code>.
+          </div>
+          <div class="field" style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;">
+            <div style="flex:1;min-width:120px;"><label>Per-seed cap</label>
+              <input type="number" id="tl-inb-seed" value="30" min="1" title="Max papers per seed."></div>
+            <div style="flex:1;min-width:100px;"><label>Total limit</label>
+              <input type="number" id="tl-inb-total" value="300" min="10"></div>
+          </div>
+          <div class="field" style="margin-top:4px;">
+            <label>Relevance anchor query (optional)</label>
+            <input type="text" id="tl-inb-relq" placeholder="(corpus centroid if blank)">
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
+            <button class="btn-primary" onclick="openExpandInboundPreview()">&#128269; Preview candidates</button>
+            <span style="font-size:11px;color:var(--fg-muted);">
+              Takes 30s–2min depending on corpus size (each seed hits OpenAlex once).
+            </span>
+          </div>
+        </div>
+
+        <!-- Phase 54.6.4 — Topic search panel -->
+        <div id="corp-topic-pane" style="display:none;border:1px solid var(--border);border-radius:6px;padding:10px;">
+          <div style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;">
+            Free-text OpenAlex search. Push-based expansion — solves the
+            bootstrap / sideways-expansion problem <code>expand</code> can't
+            address. Mirrors <code>sciknow db expand-topic "QUERY"</code>.
+          </div>
+          <div class="field">
+            <label>Topic query</label>
+            <input type="text" id="tl-top-q" placeholder="e.g. thermospheric cooling"
+                   onkeydown="if(event.key==='Enter')openExpandTopicPreview()">
+          </div>
+          <div class="field" style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;">
+            <div style="flex:1;min-width:100px;"><label>Limit</label>
+              <input type="number" id="tl-top-limit" value="300" min="10"></div>
+            <div style="flex:3;min-width:200px;"><label>Relevance anchor (defaults to the query itself)</label>
+              <input type="text" id="tl-top-relq" placeholder="(query if blank)"></div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
+            <button class="btn-primary" onclick="openExpandTopicPreview()">&#128269; Preview candidates</button>
+            <span style="font-size:11px;color:var(--fg-muted);">
+              Results sorted by citation count, then filtered by relevance.
+            </span>
+          </div>
+        </div>
+
+        <!-- Phase 54.6.4 — Coauthor snowball panel -->
+        <div id="corp-coauth-pane" style="display:none;border:1px solid var(--border);border-radius:6px;padding:10px;">
+          <div style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;">
+            Fetch papers by every OpenAlex author on any paper in the
+            corpus (depth=1). Captures the <em>invisible college</em> —
+            researchers in the same lab who don't always cite each
+            other directly. Mirrors <code>sciknow db expand-coauthors</code>.
+          </div>
+          <div class="field" style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;">
+            <div style="flex:1;min-width:100px;"><label>Depth</label>
+              <select id="tl-coa-depth">
+                <option value="1" selected>1 (recommended)</option>
+                <option value="2">2 (noisy — use with strict threshold)</option>
+              </select></div>
+            <div style="flex:1;min-width:120px;"><label>Per-author cap</label>
+              <input type="number" id="tl-coa-per" value="8" min="1" title="Max papers per author."></div>
+            <div style="flex:1;min-width:100px;"><label>Total limit</label>
+              <input type="number" id="tl-coa-total" value="300" min="10"></div>
+          </div>
+          <div class="field" style="margin-top:4px;">
+            <label>Relevance anchor query (optional)</label>
+            <input type="text" id="tl-coa-relq" placeholder="(corpus centroid if blank)">
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
+            <button class="btn-primary" onclick="openExpandCoauthPreview()">&#128269; Preview candidates</button>
+            <span style="font-size:11px;color:var(--fg-muted);">
+              Best with a tight relevance threshold (0.6+) — this method has the noisiest recall.
             </span>
           </div>
         </div>
@@ -14029,6 +14182,107 @@ async function openExpandCitesPreview() {{
       source.close();
     }}
   }};
+}}
+
+// ── Phase 54.6.4 — three more preview flows (inbound / topic / coauth).
+// All three use the same modal + eapRender as expand-author preview,
+// just different backing endpoints and input fields.
+
+async function _eapFetchPreview(url, fd, titleHtml, loadingMsg, loadingSub) {{
+  _eapResetModal(titleHtml, loadingMsg, loadingSub);
+  try {{
+    const res = await fetch(url, {{method: 'POST', body: fd}});
+    if (!res.ok) {{
+      const detail = await res.text();
+      throw new Error('HTTP ' + res.status + ': ' + detail);
+    }}
+    const data = await res.json();
+    _eapCandidates = data.candidates || [];
+    const info = data.info || {{}};
+    // Default: pre-select all with score >= threshold (or all if no scores).
+    const thr = 0.55;
+    document.getElementById('eap-threshold').value = thr.toFixed(2);
+    _eapSelected = new Set();
+    _eapCandidates.forEach(c => {{
+      if (c.doi && (c.relevance_score == null || c.relevance_score >= thr)) {{
+        _eapSelected.add(c.doi);
+      }}
+    }});
+    // Info banner — method-specific summary.
+    const bits = [];
+    if (info.raw != null) bits.push('<strong>' + info.raw + '</strong> raw');
+    if (info.dedup_dropped != null)
+      bits.push(info.dedup_dropped + ' already in corpus');
+    if (info.seeds_resolved != null)
+      bits.push(info.seeds_resolved + '/' + (info.seeds_requested || 0) + ' seeds resolved');
+    if (info.seed_authors != null)
+      bits.push(info.seed_authors + ' seed authors');
+    if (info.relevance_query_used)
+      bits.push('anchor: <code>' + _escHtml(info.relevance_query_used) + '</code>');
+    document.getElementById('eap-info').innerHTML = bits.join(' · ');
+    document.getElementById('eap-loading').style.display = 'none';
+    if (!_eapCandidates.length) {{
+      document.getElementById('eap-error').style.display = 'block';
+      document.getElementById('eap-error').textContent =
+        'No candidates returned. '
+        + 'Try a different query / lower threshold / wider seed cap.';
+      return;
+    }}
+    document.getElementById('eap-content').style.display = 'block';
+    eapRender();
+  }} catch (exc) {{
+    document.getElementById('eap-loading').style.display = 'none';
+    document.getElementById('eap-error').style.display = 'block';
+    document.getElementById('eap-error').textContent = 'Preview failed: ' + exc.message;
+  }}
+}}
+
+async function openExpandInboundPreview() {{
+  const fd = new FormData();
+  fd.append('per_seed_cap', document.getElementById('tl-inb-seed').value || '30');
+  fd.append('total_limit',  document.getElementById('tl-inb-total').value || '300');
+  const relq = document.getElementById('tl-inb-relq').value.trim();
+  if (relq) fd.append('relevance_query', relq);
+  await _eapFetchPreview(
+    '/api/corpus/expand-cites/preview', fd,
+    '&#128258; Inbound-citation &mdash; Preview Candidates',
+    'Querying OpenAlex for papers that cite your corpus…',
+    '(30s–2 min: one API call per seed paper)'
+  );
+}}
+
+async function openExpandTopicPreview() {{
+  const q = document.getElementById('tl-top-q').value.trim();
+  if (!q) {{
+    alert('Enter a topic query first.');
+    return;
+  }}
+  const fd = new FormData();
+  fd.append('query', q);
+  fd.append('limit', document.getElementById('tl-top-limit').value || '300');
+  const relq = document.getElementById('tl-top-relq').value.trim();
+  if (relq) fd.append('relevance_query', relq);
+  await _eapFetchPreview(
+    '/api/corpus/expand-topic/preview', fd,
+    '&#128269; Topic search &mdash; Preview Candidates',
+    'Searching OpenAlex for "' + _escHtml(q) + '"…',
+    '(5–20s: paginated /works?search sorted by citation count)'
+  );
+}}
+
+async function openExpandCoauthPreview() {{
+  const fd = new FormData();
+  fd.append('depth', document.getElementById('tl-coa-depth').value || '1');
+  fd.append('per_author_cap', document.getElementById('tl-coa-per').value || '8');
+  fd.append('total_limit',    document.getElementById('tl-coa-total').value || '300');
+  const relq = document.getElementById('tl-coa-relq').value.trim();
+  if (relq) fd.append('relevance_query', relq);
+  await _eapFetchPreview(
+    '/api/corpus/expand-coauthors/preview', fd,
+    '&#128101; Coauthor snowball &mdash; Preview Candidates',
+    'Enumerating corpus authors → fetching their works…',
+    '(30s–3 min: scales with author count × per-author cap)'
+  );
 }}
 
 function eapRender() {{
