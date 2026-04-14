@@ -7429,6 +7429,18 @@ def l1_phase54_wiki_browsing_mvp() -> None:
     ):
         assert needle in src, f"phase 54 surface missing: {needle!r}"
 
+    # Phase 54.1 polish: staleness banner, KaTeX, keyboard chord router.
+    for needle in (
+        "wiki-stale-banner",       # staleness banner markup + CSS
+        "needs_rewrite",           # exposed on /api/wiki/page response
+        "renderMathInElement",     # KaTeX integration call
+        "katex.min.js",            # KaTeX script tag
+        "kb-help",                 # keyboard cheatsheet modal
+        "openKbHelp",              # cheatsheet toggle
+        "_kbChord",                # g-prefix chord state machine
+    ):
+        assert needle in src, f"phase 54.1 surface missing: {needle!r}"
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.

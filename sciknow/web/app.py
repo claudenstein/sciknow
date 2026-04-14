@@ -2809,13 +2809,17 @@ async def api_wiki_page(slug: str):
             row = session.execute(text("""
                 SELECT title, page_type, word_count,
                        array_length(source_doc_ids, 1) AS n_sources,
-                       updated_at
+                       updated_at, needs_rewrite
                 FROM wiki_pages WHERE slug = :slug
             """), {"slug": slug}).fetchone()
         if row:
             page.update({
                 "title": row[0], "page_type": row[1], "word_count": row[2] or 0,
                 "n_sources": row[3] or 0, "updated_at": str(row[4]),
+                # Phase 54.1 — surface the staleness flag so the reader
+                # can render a banner on pages that are older than their
+                # source and would benefit from `wiki compile --rewrite-stale`.
+                "needs_rewrite": (str(row[5]).lower() == "true") if row[5] else False,
             })
     except Exception:
         pass
@@ -5409,6 +5413,45 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
                            border-bottom-width: 2px;
                            border-radius: 2px;
                            background: var(--bg-elevated); }}
+/* Phase 54.1 — staleness banner on wiki pages whose source drifted
+   since last compile. The yellow-warning idiom matches the standard
+   scientific-paper staleness flag. */
+.wiki-stale-banner {{ background: rgba(255, 210, 100, 0.15);
+                       border-left: 3px solid #e6b800;
+                       color: var(--fg);
+                       padding: 10px 14px;
+                       margin-bottom: var(--sp-3);
+                       border-radius: 0 var(--r-md) var(--r-md) 0;
+                       font-size: 12px; line-height: 1.5; }}
+.wiki-stale-banner code {{ font-family: var(--font-mono);
+                            font-size: 11px; padding: 1px 5px;
+                            background: rgba(0,0,0,0.15);
+                            border-radius: 3px; }}
+/* Phase 54.1 — keyboard cheatsheet overlay (? shortcut). */
+.kb-help {{ position: fixed; inset: 0;
+            background: rgba(0,0,0,0.55); z-index: 10500;
+            display: none; align-items: center; justify-content: center; }}
+.kb-help .kb-box {{ background: var(--bg-elevated);
+                    border: 1px solid var(--border);
+                    border-radius: var(--r-md);
+                    padding: 24px 28px; width: 520px;
+                    max-width: 94vw;
+                    box-shadow: 0 10px 30px rgba(0,0,0,0.3); }}
+.kb-help h4 {{ margin: 0 0 var(--sp-3); font-size: 14px; }}
+.kb-help dl {{ margin: 0; display: grid;
+               grid-template-columns: auto 1fr; gap: 8px 16px;
+               font-size: 12px; line-height: 1.5; }}
+.kb-help dt {{ font-family: var(--font-mono);
+               color: var(--fg-muted);
+               white-space: nowrap; }}
+.kb-help dt kbd {{ font-family: var(--font-mono); font-size: 11px;
+                    padding: 1px 6px;
+                    border: 1px solid var(--border);
+                    border-bottom-width: 2px;
+                    border-radius: 3px;
+                    background: var(--bg); color: var(--fg); }}
+.kb-help .kb-hint {{ margin-top: var(--sp-3); font-size: 11px;
+                     color: var(--fg-muted); text-align: right; }}
 /* Phase 15 — live streaming stats footer (tok/s, elapsed, model) */
 .stream-stats {{ display: flex; align-items: center; gap: var(--sp-3);
                 font-family: var(--font-mono); font-size: 11px;
@@ -6123,6 +6166,11 @@ body.task-bar-open {{ padding-top: 40px; }}
             <kbd class="wiki-kbd-hint">Press <kbd>Ctrl</kbd>+<kbd>K</kbd> to jump to any page</kbd>
           </div>
           <div id="wiki-page-meta" style="font-size:11px;color:var(--fg-muted);margin:8px 0 12px 0;"></div>
+          <div id="wiki-stale-banner" class="wiki-stale-banner" style="display:none;">
+            &#9888;&#65039; This page is flagged as stale — run
+            <code>sciknow wiki compile --rewrite-stale</code>
+            to refresh it from the current sources.
+          </div>
           <div class="wiki-detail-layout">
             <aside id="wiki-toc" class="wiki-toc"></aside>
             <div id="wiki-page-content" class="wiki-page-content"></div>
@@ -6130,6 +6178,37 @@ body.task-bar-open {{ padding-top: 40px; }}
         </div>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- Phase 54.1 — KaTeX math rendering (loaded from the jsDelivr CDN
+     with Subresource Integrity so first load is verified; falls
+     back silently if the network is offline — math just renders as
+     its raw `$...$` source). ~90KB JS + ~60KB CSS gzipped. -->
+<link rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css"
+      integrity="sha384-nB0miv6/jRmo5UMMR1wu3Gz6NLsoTkbqJghGIsx//Rlm+ZU03BU6SQNC66uf4l5+"
+      crossorigin="anonymous"/>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"
+        integrity="sha384-7zkQWkzuo3B5mTepMUcHkMB5jZaolc2xDwL6VFqjFALcbeS9Ggm/Yr2r3Dy4lfFB"
+        crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+        integrity="sha384-43gviWU0YVjaDtb/GhzOouOXtZMP/7XUzwPTstBeZFe/+rCMvRwr4yROQP43s0Xk"
+        crossorigin="anonymous"></script>
+
+<!-- Phase 54.1 — keyboard shortcuts cheatsheet (? to toggle) -->
+<div id="kb-help" class="kb-help" onclick="if(event.target===this)closeKbHelp()">
+  <div class="kb-box">
+    <h4>Keyboard shortcuts</h4>
+    <dl>
+      <dt><kbd>Ctrl</kbd>+<kbd>K</kbd></dt><dd>Quick-jump to any wiki page</dd>
+      <dt><kbd>/</kbd></dt><dd>Focus the palette search box</dd>
+      <dt><kbd>g</kbd> then <kbd>w</kbd></dt><dd>Go to Wiki (Browse)</dd>
+      <dt><kbd>g</kbd> then <kbd>h</kbd></dt><dd>Go home (close all modals)</dd>
+      <dt><kbd>Esc</kbd></dt><dd>Close modal / palette / help</dd>
+      <dt><kbd>?</kbd></dt><dd>Toggle this help</dd>
+    </dl>
+    <div class="kb-hint">press <kbd>Esc</kbd> or click outside to close</div>
   </div>
 </div>
 
@@ -11555,6 +11634,27 @@ async function openWikiPage(slug) {{
     meta.innerHTML = metaParts.join(' · ');
     content.innerHTML = data.content_html || '<em>(empty page)</em>';
 
+    // Phase 54.1 — render math via KaTeX auto-render if loaded.
+    // Falls back silently to the raw `$...$` when KaTeX isn't
+    // available (e.g. offline on first-ever page load).
+    if (window.renderMathInElement) {{
+      try {{
+        window.renderMathInElement(content, {{
+          delimiters: [
+            {{ left: '$$', right: '$$', display: true }},
+            {{ left: '$',  right: '$',  display: false }},
+            {{ left: '\\\\(', right: '\\\\)', display: false }},
+            {{ left: '\\\\[', right: '\\\\]', display: true }},
+          ],
+          throwOnError: false,
+        }});
+      }} catch (e) {{ /* render failure is non-fatal */ }}
+    }}
+
+    // Phase 54.1 — staleness banner (surfaces wiki_pages.needs_rewrite).
+    const banner = document.getElementById('wiki-stale-banner');
+    if (banner) banner.style.display = data.needs_rewrite ? 'block' : 'none';
+
     // Phase 54 — build the TOC from the rendered headings.
     _buildWikiTOC();
     // Phase 54 — honour `?h=<heading-id>` in the hash if present.
@@ -11800,6 +11900,82 @@ document.addEventListener('keydown', (evt) => {{
     // Allow command palette from anywhere, including other inputs.
     evt.preventDefault();
     openWikiPalette();
+  }}
+}});
+
+// ── Phase 54.1 — keyboard shortcut router (?, /, g-chord) ─────────────
+// A small state machine for the "g then h / g then w" two-key chord,
+// plus single-key shortcuts that only fire outside form fields so we
+// don't swallow user typing.
+
+let _kbChord = null;            // 'g' while waiting for the second key
+let _kbChordTimer = null;
+
+function _inFormField(el) {{
+  if (!el) return false;
+  const tag = (el.tagName || '').toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || tag === 'select') return true;
+  return !!el.isContentEditable;
+}}
+
+function openKbHelp() {{
+  const el = document.getElementById('kb-help');
+  if (el) el.style.display = 'flex';
+}}
+function closeKbHelp() {{
+  const el = document.getElementById('kb-help');
+  if (el) el.style.display = 'none';
+}}
+
+document.addEventListener('keydown', (evt) => {{
+  // Chord continuation always fires, even inside form fields,
+  // because we only enter a chord state outside form fields below.
+  if (_kbChord === 'g') {{
+    _kbChord = null;
+    if (_kbChordTimer) {{ clearTimeout(_kbChordTimer); _kbChordTimer = null; }}
+    if (evt.key === 'w' || evt.key === 'W') {{
+      evt.preventDefault();
+      window.location.hash = '#wiki';
+      return;
+    }}
+    if (evt.key === 'h' || evt.key === 'H') {{
+      evt.preventDefault();
+      // Close every open modal overlay.
+      document.querySelectorAll('.modal-overlay').forEach(m => {{
+        m.style.display = 'none';
+      }});
+      history.pushState(null, '', window.location.pathname);
+      return;
+    }}
+    // Unknown second key — drop the chord and fall through.
+  }}
+  if (_inFormField(evt.target)) return;
+  // Don't intercept when modifier keys are held — Ctrl-K etc. has
+  // its own handler above.
+  if (evt.metaKey || evt.ctrlKey || evt.altKey) return;
+
+  if (evt.key === '?') {{
+    evt.preventDefault();
+    const el = document.getElementById('kb-help');
+    if (el && el.style.display === 'flex') closeKbHelp(); else openKbHelp();
+    return;
+  }}
+  if (evt.key === 'Escape') {{
+    closeKbHelp();
+    // Let the rest of the app's Escape handlers (modal, menu) run too.
+    return;
+  }}
+  if (evt.key === '/') {{
+    evt.preventDefault();
+    openWikiPalette();
+    return;
+  }}
+  if (evt.key === 'g' || evt.key === 'G') {{
+    _kbChord = 'g';
+    // Abandon the chord if the user doesn't follow up within 1.2 s.
+    if (_kbChordTimer) clearTimeout(_kbChordTimer);
+    _kbChordTimer = setTimeout(() => {{ _kbChord = null; }}, 1200);
+    return;
   }}
 }});
 
