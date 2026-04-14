@@ -176,6 +176,13 @@ def _create_job(job_type: str) -> tuple[str, asyncio.Queue]:
             "target_words": None,
             "stream_state": "streaming",  # streaming | done | error
             "error_message": None,
+            # Phase 50.A — reasoning-steps trace. Collected automatically
+            # by _observe_event_for_stats from the same event stream the
+            # task bar already watches; persisted to the new draft's
+            # custom_metadata.reasoning_trace in _run_generator_in_thread's
+            # finally block. Capped to avoid log-level bloat.
+            "reasoning_trace": [],
+            "reasoning_draft_id": None,
         }
     return job_id, queue
 
@@ -232,12 +239,84 @@ def _observe_event_for_stats(job_id: str, event: dict) -> None:
             job["stream_state"] = "error"
             job["error_message"] = str(event.get("message") or "unknown")[:200]
 
+        # Phase 50.A — reasoning-steps trace. Record a compact entry
+        # for every event that isn't pure token streaming (skip 'token'
+        # — too noisy; skip unknown-type). Each entry stays ≤300 bytes
+        # so an autowrite run with ~30 step transitions accumulates a
+        # trace well under 10 KB.
+        if et not in ("token",):
+            trace = job.get("reasoning_trace")
+            if trace is not None and len(trace) < 60:
+                entry: dict = {
+                    "t": round(time.monotonic() - job["started_at"], 3),
+                    "type": et,
+                }
+                for key in ("phase", "stage", "detail", "progress",
+                            "score", "iteration", "step", "model",
+                            "writer_model", "target_words", "words"):
+                    val = event.get(key)
+                    if val is None:
+                        continue
+                    if isinstance(val, (int, float, bool)):
+                        entry[key] = val
+                    elif isinstance(val, str):
+                        entry[key] = val[:140]
+                trace.append(entry)
+            # Capture the first draft_id we see so _run_generator_in_thread
+            # can persist the trace at the end even if later events swap it
+            did = event.get("draft_id") or event.get("new_draft_id")
+            if did and not job.get("reasoning_draft_id"):
+                job["reasoning_draft_id"] = str(did)
+
 
 def _finish_job(job_id: str):
     with _job_lock:
         if job_id in _jobs:
             _jobs[job_id]["status"] = "done"
             _jobs[job_id]["finished_at"] = time.monotonic()
+
+
+def _persist_reasoning_trace(job_id: str) -> None:
+    """Phase 50.A — append the per-job reasoning trace to the draft's
+    custom_metadata once the streaming generator finishes. Stored
+    under the `reasoning_trace` key in drafts.custom_metadata (JSONB)
+    so retrieval can read it via the existing draft row without a
+    schema migration. Best-effort: any exception is swallowed — the
+    trace is a debug nicety and must never affect the draft save."""
+    with _job_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return
+        trace = job.get("reasoning_trace") or []
+        draft_id = job.get("reasoning_draft_id")
+        job_type = job.get("type") or "unknown"
+    if not trace or not draft_id:
+        return
+    try:
+        from sqlalchemy import text as _sql_text
+        from sciknow.storage.db import get_session
+        with get_session() as session:
+            # Merge into the existing custom_metadata JSON object in a
+            # single statement so we don't clobber other keys (e.g.
+            # Phase 17 autowrite telemetry already writes there).
+            session.execute(_sql_text("""
+                UPDATE drafts
+                   SET custom_metadata = COALESCE(custom_metadata, '{}'::jsonb)
+                       || jsonb_build_object(
+                            'reasoning_trace',
+                            CAST(:trace AS jsonb),
+                            'reasoning_op',
+                            CAST(:op AS text)
+                          )
+                 WHERE id::text = :did
+            """), {
+                "trace": json.dumps(trace),
+                "op": job_type,
+                "did": draft_id,
+            })
+            session.commit()
+    except Exception as exc:
+        logger.debug("reasoning-trace persist skipped for %s: %s", draft_id, exc)
 
 
 def _persist_llm_usage(job_id: str) -> None:
@@ -2312,6 +2391,9 @@ def _run_generator_in_thread(job_id: str, generator_fn, loop):
         # argue/gaps/autowrite/plan/...) so the dashboard's Total
         # Compute panel reflects all ops, not just autowrite.
         _persist_llm_usage(job_id)
+        # Phase 50.A — also flush the reasoning-steps trace onto the
+        # resulting draft row (no-op if no draft_id was observed).
+        _persist_reasoning_trace(job_id)
         _finish_job(job_id)
 
 
@@ -2685,6 +2767,84 @@ async def api_wiki_query(question: str = Form(...), model: str = Form(None)):
         target=_run_generator_in_thread, args=(job_id, gen, loop), daemon=True
     ).start()
     return JSONResponse({"job_id": job_id})
+
+
+# ── Phase 50.B — user feedback capture (LambdaMART feedstock) ────────────
+
+@app.post("/api/feedback")
+async def api_feedback(
+    op: str = Form("ask"),
+    score: int = Form(...),
+    query: str = Form(""),
+    preview: str = Form(""),
+    comment: str = Form(""),
+    draft_id: str = Form(""),
+    chunk_ids: str = Form(""),
+):
+    """Record one thumbs-up / thumbs-down row.
+
+    Called from a 👍/👎 button next to any generated answer in the
+    reader. Fields are permissive — only `op` and `score` are required
+    structurally; everything else is optional metadata the eventual
+    LambdaMART trainer will project.
+
+    Returns {id, created_at} so the client can render a confirmation
+    toast or offer an undo via a follow-up PATCH."""
+    if score not in (-1, 0, 1):
+        return JSONResponse(
+            {"error": "score must be -1, 0, or +1"}, status_code=400
+        )
+    chunks = [c.strip() for c in (chunk_ids or "").split(",") if c.strip()]
+    did: str | None = None
+    if draft_id:
+        with get_session() as session:
+            row = session.execute(text(
+                "SELECT id::text FROM drafts WHERE id::text LIKE :q LIMIT 1"
+            ), {"q": f"{draft_id.strip()}%"}).fetchone()
+        if not row:
+            return JSONResponse(
+                {"error": f"no draft matches {draft_id!r}"}, status_code=404
+            )
+        did = row[0]
+    with get_session() as session:
+        row = session.execute(text("""
+            INSERT INTO feedback (op, query, response_preview, score, comment,
+                                  draft_id, chunk_ids, extras)
+            VALUES (:op, :q, :preview, :score, :comment,
+                    CAST(:did AS uuid), CAST(:chunks AS jsonb), '{}'::jsonb)
+            RETURNING id::text, created_at
+        """), {
+            "op": op[:40] or "ask",
+            "q": (query or "")[:4000] or None,
+            "preview": (preview or "")[:1000] or None,
+            "score": score,
+            "comment": (comment or "")[:2000] or None,
+            "did": did,
+            "chunks": json.dumps(chunks),
+        })
+        session.commit()
+        fb_id, created_at = row.fetchone()
+    return {"id": fb_id, "created_at": created_at.isoformat()}
+
+
+@app.get("/api/feedback/stats")
+async def api_feedback_stats():
+    """Counts by op × score for the sidebar badge."""
+    with get_session() as session:
+        rows = session.execute(text("""
+            SELECT op, score, COUNT(*) FROM feedback GROUP BY op, score
+        """)).fetchall()
+    out: dict = {"total": 0, "by_op": {}}
+    for op, score, n in rows:
+        out["total"] += int(n)
+        bucket = out["by_op"].setdefault(op, {"pos": 0, "zero": 0, "neg": 0})
+        if score > 0:
+            bucket["pos"] += int(n)
+        elif score < 0:
+            bucket["neg"] += int(n)
+        else:
+            bucket["zero"] += int(n)
+    return out
 
 
 @app.post("/api/ask")

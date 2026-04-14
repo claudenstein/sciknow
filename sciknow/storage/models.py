@@ -736,3 +736,53 @@ class KnowledgeGraphTriple(Base):
         Index("idx_kg_predicate", "predicate"),
         Index("idx_kg_source", "source_doc_id"),
     )
+
+
+class Feedback(Base):
+    """Phase 50.B — user feedback capture.
+
+    Every answer the system produces (ask / write / review / autowrite
+    section / KG edge click / whatever) can be rated. Fields are
+    deliberately loose so new op types don't need schema changes —
+    just insert a row with op='my_new_op' and the UI knows to show
+    the thumbs-up/down next to it.
+
+    Longer-term consumer: the parked LambdaMART learn-to-rank upgrade
+    (see docs/EXPAND_RESEARCH.md). (query, chunk_ids, score) triples
+    out of this table feed directly into LightGBM's pairwise training
+    once ≥500 labeled positives accumulate."""
+
+    __tablename__ = "feedback"
+
+    id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    # Which op produced the rated answer — e.g. 'ask', 'write',
+    # 'autowrite', 'review', 'kg_edge'. Not an enum so new ops can
+    # land without a migration.
+    op: Mapped[str] = mapped_column(Text, nullable=False)
+    query: Mapped[str | None] = mapped_column(Text)
+    response_preview: Mapped[str | None] = mapped_column(Text)
+    # -1 negative, 0 neutral, +1 positive. SmallInt keeps the column
+    # semantically boolean-ish while leaving room for granular ratings.
+    score: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    comment: Mapped[str | None] = mapped_column(Text)
+    draft_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("drafts.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # chunk_ids is an array of the Qdrant point ids used to generate
+    # the rated answer — this is the part LambdaMART consumes.
+    chunk_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    # Free-form op-specific payload (e.g. section_type for write, kg
+    # triple id for kg_edge, model name). Keeps the core schema stable.
+    extras: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("idx_feedback_op", "op"),
+        Index("idx_feedback_score", "score"),
+        Index("idx_feedback_created_at", "created_at"),
+    )

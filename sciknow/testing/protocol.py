@@ -6861,6 +6861,152 @@ def l1_phase49_expand_rrf_ranker() -> None:
     }, "`sciknow db cleanup-downloads` not registered"
 
 
+def l1_phase50a_reasoning_trace_surface() -> None:
+    """Phase 50.A — reasoning-steps trace on drafts.
+
+    Static checks on the web-layer observer + persist hook: the job
+    state dict is initialised with reasoning_trace/reasoning_draft_id
+    keys, the observer appends entries (and captures draft_id), and
+    _persist_reasoning_trace is wired into the generator-thread
+    finally. No DB, no LLM — we exercise the observer against a
+    hand-built event list and inspect the resulting trace.
+    """
+    import threading as _threading
+    import time as _time
+    from collections import deque
+
+    from sciknow.web import app as web_app
+
+    # Fabricate a job entry with the same shape as the real init.
+    job_id = "test-reason-trace"
+    with web_app._job_lock:
+        web_app._jobs[job_id] = {
+            "queue": None, "status": "running", "type": "autowrite",
+            "cancel": _threading.Event(),
+            "finished_at": None,
+            "started_at": _time.monotonic(),
+            "started_wall": None,
+            "tokens": 0, "token_timestamps": deque(maxlen=200),
+            "model_name": None, "task_desc": "autowrite",
+            "target_words": None, "stream_state": "streaming",
+            "error_message": None,
+            "reasoning_trace": [],
+            "reasoning_draft_id": None,
+        }
+    try:
+        # Feed a plausible sequence of events
+        events = [
+            {"type": "progress", "stage": "retrieve", "detail": "querying"},
+            {"type": "progress", "stage": "score", "iteration": 1},
+            {"type": "token", "text": "The "},  # should be SKIPPED
+            {"type": "token", "text": "climate "},  # should be SKIPPED
+            {"type": "scores", "groundedness": 0.82, "coherence": 0.9},
+            {"type": "progress", "stage": "revise", "iteration": 2},
+            {"type": "verification", "score": 0.9},
+            {"type": "completed", "draft_id": "aabbccdd-1234-0000-0000-000000000000",
+             "phase": "done", "words": 450},
+        ]
+        for evt in events:
+            web_app._observe_event_for_stats(job_id, evt)
+
+        with web_app._job_lock:
+            job = web_app._jobs[job_id]
+            trace = list(job["reasoning_trace"])
+            draft_id = job["reasoning_draft_id"]
+
+        # Token events must NOT show up in the trace
+        assert all(e["type"] != "token" for e in trace), (
+            "token events leaked into reasoning trace — would bloat storage"
+        )
+        # The non-token events we fed (progress x3, scores, verification,
+        # completed) should all be recorded
+        types_seen = [e["type"] for e in trace]
+        for required in ("progress", "scores", "verification", "completed"):
+            assert required in types_seen, (
+                f"event type {required!r} missing from reasoning trace"
+            )
+        # First event's `t` is near 0
+        assert 0.0 <= trace[0]["t"] < 1.0, "timestamps must start near 0"
+        # completed event must have carried draft_id
+        assert draft_id == "aabbccdd-1234-0000-0000-000000000000"
+        # The persistence hook must exist
+        assert hasattr(web_app, "_persist_reasoning_trace"), (
+            "reasoning-trace persistence hook missing"
+        )
+    finally:
+        with web_app._job_lock:
+            web_app._jobs.pop(job_id, None)
+
+
+def l1_phase50b_feedback_surface() -> None:
+    """Phase 50.B — feedback capture (table + CLI + web endpoint).
+
+    Static shape: the ORM class + CLI subapp + FastAPI endpoint are
+    wired in. No DB write — pure import + registration checks so the
+    test stays in L1.
+    """
+    from sciknow.cli import feedback as fb_cli, main as main_cli
+    from sciknow.storage import models
+    from sciknow.web import app as web_app
+
+    # ORM class defined and points at the right table
+    assert hasattr(models, "Feedback"), "Feedback ORM class missing"
+    assert models.Feedback.__tablename__ == "feedback"
+    # CLI subapp registered on the root
+    app_names = {g.name for g in main_cli.app.registered_groups}
+    assert "feedback" in app_names, "`sciknow feedback` subapp not registered"
+    cmd_names = {c.name for c in fb_cli.app.registered_commands}
+    for required in ("add", "list", "stats"):
+        assert required in cmd_names, f"feedback.{required} command missing"
+    # Score alias table covers the standard synonyms
+    aliases = fb_cli._SCORE_ALIASES
+    assert aliases["up"] == 1 and aliases["down"] == -1 and aliases["neutral"] == 0
+    # Web endpoints exist
+    route_paths = {r.path for r in web_app.app.routes if hasattr(r, "path")}
+    assert "/api/feedback" in route_paths, "/api/feedback POST missing"
+    assert "/api/feedback/stats" in route_paths, "/api/feedback/stats GET missing"
+
+
+def l1_phase50c_span_tracer_surface() -> None:
+    """Phase 50.C — span tracer (observability module + CLI + table).
+
+    Static shape + in-memory behaviour check on the contextvars
+    machinery. We don't persist (that would hit the DB and push us
+    to L2); we open a span, inspect the live contextvars, close it,
+    and verify they reset.
+    """
+    from sciknow.cli import main as main_cli, spans as spans_cli
+    from sciknow.observability import (
+        Span, current_trace, current_span, span, start_trace,
+    )
+
+    # Baseline — no trace / span active
+    assert current_trace() is None and current_span() is None
+
+    # Nested spans propagate parent correctly via contextvars.
+    with span("outer", component="test") as outer:
+        assert current_trace() == outer.trace_id
+        assert current_span() == outer.id
+        with span("inner") as inner:
+            assert inner.parent_id == outer.id
+            assert current_span() == inner.id
+        # Inner closed → current_span is outer again
+        assert current_span() == outer.id
+        # Metadata merges
+        outer.update(tokens=42, extra={"foo": "bar"})
+        assert outer.metadata.get("tokens") == 42
+
+    # After the outer closes, trace + span are cleared
+    assert current_trace() is None and current_span() is None
+
+    # CLI subapp registered
+    app_names = {g.name for g in main_cli.app.registered_groups}
+    assert "spans" in app_names, "`sciknow spans` subapp not registered"
+    cmd_names = {c.name for c in spans_cli.app.registered_commands}
+    for required in ("tail", "show", "stats"):
+        assert required in cmd_names, f"spans.{required} command missing"
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -7030,6 +7176,12 @@ L1_TESTS: list[Callable] = [
     l1_phase46g_benchmark_watchlist,
     # Phase 49 — RRF-fused multi-signal expand ranker
     l1_phase49_expand_rrf_ranker,
+    # Phase 50.A — reasoning-steps trace on drafts
+    l1_phase50a_reasoning_trace_surface,
+    # Phase 50.B — user feedback capture
+    l1_phase50b_feedback_surface,
+    # Phase 50.C — span tracer
+    l1_phase50c_span_tracer_surface,
 ]
 
 L2_TESTS: list[Callable] = [

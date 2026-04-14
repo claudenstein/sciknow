@@ -12,9 +12,11 @@ from sciknow.cli import book as book_module
 from sciknow.cli import catalog as catalog_module
 from sciknow.cli import db as db_module
 from sciknow.cli import draft as draft_module
+from sciknow.cli import feedback as feedback_module
 from sciknow.cli import ingest as ingest_module
 from sciknow.cli import project as project_module
 from sciknow.cli import search as search_module
+from sciknow.cli import spans as spans_module
 from sciknow.cli import watch as watch_module
 from sciknow.cli import wiki as wiki_module
 from sciknow.logging_config import setup_logging
@@ -75,6 +77,10 @@ app.add_typer(wiki_module.app, name="wiki")
 app.add_typer(project_module.app, name="project")
 # Phase 45 — upstream repo watchlist.
 app.add_typer(watch_module.app, name="watch")
+# Phase 50.B — user feedback capture (LambdaMART feedstock).
+app.add_typer(feedback_module.app, name="feedback")
+# Phase 50.C — local span tracer (Langfuse-pattern, no service).
+app.add_typer(spans_module.app, name="spans")
 
 
 @app.command(name="test")
