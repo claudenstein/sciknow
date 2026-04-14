@@ -4330,6 +4330,147 @@ async def api_corpus_expand_author_download_selected(request: Request):
     })
 
 
+@app.post("/api/corpus/expand/preview")
+async def api_corpus_expand_preview(
+    limit: int = Form(0),
+    strategy: str = Form("rrf"),
+    budget: int = Form(50),
+    relevance: bool = Form(True),
+    relevance_threshold: float = Form(0.0),
+    relevance_query: str = Form(""),
+    resolve: bool = Form(False),
+):
+    """Phase 54.6.3 — Preview the citation-expansion shortlist without
+    downloading anything.
+
+    Spawns ``sciknow db expand --dry-run --shortlist-tsv <tmp>`` as a
+    subprocess so SSE streams its progress; the tempfile path is
+    stored on the job record so the follow-up GET
+    ``/api/corpus/expand/preview/{job_id}/candidates`` can parse it
+    once the job has completed.
+
+    Why subprocess + TSV rather than an in-process helper like
+    expand-author: the citation expansion pipeline is ~250 lines of
+    intertwined reference extraction, multi-source RRF ranking, and
+    console output — far riskier to duplicate than ``find_author_-
+    candidates``. Using the shortlist TSV keeps us bit-for-bit
+    identical to the CLI path.
+    """
+    import tempfile
+    import uuid
+
+    tmp_dir = Path(tempfile.gettempdir()) / "sciknow-expand-preview"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    tsv_path = tmp_dir / f"shortlist-{uuid.uuid4().hex[:12]}.tsv"
+
+    job_id, _queue = _create_job("corpus_expand_preview")
+    # Stash the tempfile path so the candidates GET can find it.
+    _jobs[job_id]["preview_tsv"] = str(tsv_path)
+
+    loop = asyncio.get_event_loop()
+    argv = [
+        "db", "expand",
+        "--dry-run",
+        "--shortlist-tsv", str(tsv_path),
+        "--limit", str(int(limit)),
+        "--strategy", (strategy or "rrf"),
+        "--budget", str(int(budget) if budget else 50),
+        "--relevance-threshold", str(float(relevance_threshold or 0.0)),
+    ]
+    argv.append("--relevance" if relevance else "--no-relevance")
+    argv.append("--resolve" if resolve else "--no-resolve")
+    if relevance_query.strip():
+        argv += ["--relevance-query", relevance_query.strip()]
+
+    _spawn_cli_streaming(job_id, argv, loop)
+    return JSONResponse({"job_id": job_id, "tsv_key": job_id})
+
+
+@app.get("/api/corpus/expand/preview/{job_id}/candidates")
+async def api_corpus_expand_preview_candidates(job_id: str):
+    """Parse the shortlist TSV produced by a preview job and return
+    JSON candidates (same shape as expand-author preview so the same
+    UI can render both).
+    """
+    import csv
+    with _job_lock:
+        job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    tsv_path = Path(job.get("preview_tsv", ""))
+    if not tsv_path.exists():
+        raise HTTPException(404, "Preview TSV not found (job may still be running)")
+
+    candidates: list[dict] = []
+    kept = 0
+    dropped = 0
+    drop_reasons: dict[str, int] = {}
+    with tsv_path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        for row in reader:
+            decision = (row.get("decision") or "").upper()
+            doi = (row.get("doi") or "").strip() or None
+            if decision == "KEEP":
+                kept += 1
+            else:
+                dropped += 1
+                reason = row.get("drop_reason") or "unspecified"
+                drop_reasons[reason] = drop_reasons.get(reason, 0) + 1
+            # Parse optional numerics.
+            def _f(k):
+                v = row.get(k)
+                if not v or v in ("None", "nan"):
+                    return None
+                try:
+                    return float(v)
+                except Exception:
+                    return None
+            def _i(k):
+                v = row.get(k)
+                if not v or v in ("None", "nan"):
+                    return None
+                try:
+                    return int(float(v))
+                except Exception:
+                    return None
+            year = _i("year")
+            candidates.append({
+                "doi": doi,
+                "arxiv_id": (row.get("arxiv_id") or "").strip() or None,
+                "title": (row.get("title") or "").strip(),
+                "authors": [],
+                "year": year,
+                "relevance_score": _f("bge_m3_cosine"),
+                "rrf_score": _f("rrf_score"),
+                "decision": decision or None,
+                "drop_reason": (row.get("drop_reason") or "").strip() or None,
+                "signals": {
+                    "co_citation":       _f("co_citation"),
+                    "bib_coupling":      _f("bib_coupling"),
+                    "pagerank":          _f("pagerank"),
+                    "influential_cites": _i("influential_cites"),
+                    "cited_by":          _i("cited_by"),
+                    "velocity":          _f("velocity"),
+                    "concept_overlap":   _f("concept_overlap"),
+                    "venue":             (row.get("venue") or "").strip() or None,
+                },
+            })
+    # Clean up after parse — one-shot read, no reason to leave on disk.
+    try:
+        tsv_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return JSONResponse({
+        "candidates": candidates,
+        "info": {
+            "total": kept + dropped,
+            "kept": kept,
+            "dropped": dropped,
+            "drop_reasons": drop_reasons,
+        },
+    })
+
+
 @app.post("/api/corpus/expand")
 async def api_corpus_expand(
     limit: int = Form(0),
@@ -5518,6 +5659,11 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
           max-width: 720px; max-height: 80vh; display: flex; flex-direction: column;
           overflow: hidden; animation: slideUp .18s ease; }}
 .modal.wide {{ max-width: 920px; }}
+/* Phase 54.6.3 — the candidate-preview modals render a table with many
+   columns (title / authors / year / score) that cramps at the default
+   width. Scale them to the viewport so the user actually gets to see
+   full titles without wrap hell. */
+.modal.xwide {{ width: 92vw; max-width: 1400px; max-height: 88vh; }}
 .modal-header {{ padding: var(--sp-4) var(--sp-5); border-bottom: 1px solid var(--border);
                 display: flex; align-items: center; justify-content: space-between; }}
 .modal-header h3 {{ font-size: 16px; font-weight: 600; color: var(--fg); }}
@@ -7768,7 +7914,18 @@ body.task-bar-open {{ padding-top: 40px; }}
               </select>
             </div>
           </div>
-          <button class="btn-primary" style="margin-top:8px;" onclick="doToolCorpus('expand')">Run Expand</button>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
+            <button class="btn-primary" onclick="openExpandCitesPreview()">
+              &#128269; Preview candidates
+            </button>
+            <button class="btn-secondary" onclick="doToolCorpus('expand')"
+                    title="Skip preview — run the full pipeline with auto-download using the relevance threshold.">
+              &#9889; Auto-download (override)
+            </button>
+            <span style="font-size:11px;color:var(--fg-muted);">
+              Preview shows the ranked shortlist (RRF signals) and lets you check papers one-by-one.
+            </span>
+          </div>
         </div>
 
         <!-- Phase 46.E — Expand by author panel -->
@@ -7868,17 +8025,18 @@ body.task-bar-open {{ padding-top: 40px; }}
      relevance scores annotated. User cherry-picks via checkboxes and
      clicks "Download selected" which hits
      /api/corpus/expand-author/download-selected. -->
-<div class="modal-overlay" id="expand-author-preview-modal"
-     onclick="if(event.target===this)closeModal('expand-author-preview-modal')">
-  <div class="modal wide">
+<div class="modal-overlay" id="candidates-preview-modal"
+     onclick="if(event.target===this)closeModal('candidates-preview-modal')">
+  <div class="modal wide xwide">
     <div class="modal-header">
-      <h3>&#128269; Expand-by-Author &mdash; Preview Candidates</h3>
-      <button class="modal-close" onclick="closeModal('expand-author-preview-modal')">&times;</button>
+      <h3 id="eap-title">&#128269; Preview Candidates</h3>
+      <button class="modal-close" onclick="closeModal('candidates-preview-modal')">&times;</button>
     </div>
     <div class="modal-body">
       <div id="eap-loading" style="display:none;padding:20px;text-align:center;color:var(--fg-muted);">
-        <div style="font-size:14px;">Searching OpenAlex + Crossref&hellip;</div>
-        <div style="font-size:11px;margin-top:4px;">(typically 10-30s depending on author's paper count)</div>
+        <div id="eap-loading-msg" style="font-size:14px;">Searching&hellip;</div>
+        <div id="eap-loading-sub" style="font-size:11px;margin-top:4px;color:var(--fg-muted);"></div>
+        <pre id="eap-loading-log" style="display:none;margin-top:10px;max-height:240px;overflow:auto;background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);border-radius:4px;padding:8px;font-size:11px;font-family:ui-monospace,monospace;white-space:pre-wrap;text-align:left;"></pre>
       </div>
       <div id="eap-error" style="display:none;padding:10px;background:var(--danger-bg,#fee);color:var(--danger,#c53030);border:1px solid var(--danger,#c53030);border-radius:4px;margin-bottom:10px;"></div>
       <div id="eap-content" style="display:none;">
@@ -13632,6 +13790,23 @@ function selectExpandAuthor(author) {{
 let _eapCandidates = [];   // all candidates from the last preview
 let _eapSelected = new Set(); // doi set — source of truth for selection
 
+function _eapResetModal(title, loadingMsg, loadingSub) {{
+  _eapCandidates = [];
+  _eapSelected = new Set();
+  document.getElementById('eap-title').innerHTML = title;
+  document.getElementById('eap-loading-msg').textContent = loadingMsg || 'Loading…';
+  document.getElementById('eap-loading-sub').textContent = loadingSub || '';
+  document.getElementById('eap-loading-log').style.display = 'none';
+  document.getElementById('eap-loading-log').textContent = '';
+  document.getElementById('eap-loading').style.display = 'block';
+  document.getElementById('eap-error').style.display = 'none';
+  document.getElementById('eap-content').style.display = 'none';
+  document.getElementById('eap-log').style.display = 'none';
+  document.getElementById('eap-log').textContent = '';
+  document.getElementById('eap-status').textContent = '';
+  openModal('candidates-preview-modal');
+}}
+
 async function openExpandAuthorPreview() {{
   const name = document.getElementById('tl-eauth-q').value.trim();
   const orcid = document.getElementById('tl-eauth-orcid').value.trim();
@@ -13639,16 +13814,11 @@ async function openExpandAuthorPreview() {{
     alert('Type an author name (or ORCID) first.');
     return;
   }}
-  // Reset modal state
-  _eapCandidates = [];
-  _eapSelected = new Set();
-  document.getElementById('eap-loading').style.display = 'block';
-  document.getElementById('eap-error').style.display = 'none';
-  document.getElementById('eap-content').style.display = 'none';
-  document.getElementById('eap-log').style.display = 'none';
-  document.getElementById('eap-log').textContent = '';
-  document.getElementById('eap-status').textContent = '';
-  openModal('expand-author-preview-modal');
+  _eapResetModal(
+    '&#128269; Expand-by-Author &mdash; Preview Candidates',
+    'Searching OpenAlex + Crossref…',
+    '(typically 10-30s depending on author\\'s paper count)'
+  );
 
   // Gather params from the panel
   const fd = new FormData();
@@ -13713,6 +13883,112 @@ async function openExpandAuthorPreview() {{
     document.getElementById('eap-error').style.display = 'block';
     document.getElementById('eap-error').textContent = 'Preview failed: ' + exc.message;
   }}
+}}
+
+// ── Phase 54.6.3 — Expand-Citations preview ───────────────────────────
+// The expand-citations pipeline is 30s-3min depending on corpus size
+// (four ref-extraction sources + multi-signal RRF ranking), so unlike
+// expand-author we stream progress from a subprocess and fetch the
+// parsed shortlist TSV once the job completes.
+async function openExpandCitesPreview() {{
+  _eapResetModal(
+    '&#127760; Expand-Citations &mdash; Preview Candidates',
+    'Running dry-run…',
+    '(this can take 30s–3min: reference extraction + multi-signal RRF ranking)'
+  );
+  document.getElementById('eap-loading-log').style.display = 'block';
+  const logEl = document.getElementById('eap-loading-log');
+
+  // Build form from the existing expand-citations panel inputs.
+  const fd = new FormData();
+  const limit = parseInt(document.getElementById('tl-exp-limit').value || '0', 10);
+  if (limit > 0) fd.append('limit', limit);
+  const relthr = parseFloat(document.getElementById('tl-exp-relthr').value || '0');
+  fd.append('relevance_threshold', relthr);
+  fd.append('relevance', document.getElementById('tl-exp-relevance').checked);
+  fd.append('resolve', document.getElementById('tl-exp-resolve').checked);
+  const relq = document.getElementById('tl-exp-relq').value.trim();
+  if (relq) fd.append('relevance_query', relq);
+
+  let res;
+  try {{
+    res = await fetch('/api/corpus/expand/preview', {{method: 'POST', body: fd}});
+  }} catch (exc) {{
+    document.getElementById('eap-loading').style.display = 'none';
+    document.getElementById('eap-error').style.display = 'block';
+    document.getElementById('eap-error').textContent = 'Request failed: ' + exc.message;
+    return;
+  }}
+  if (!res.ok) {{
+    document.getElementById('eap-loading').style.display = 'none';
+    document.getElementById('eap-error').style.display = 'block';
+    document.getElementById('eap-error').textContent = 'Preview start failed: HTTP ' + res.status;
+    return;
+  }}
+  const data = await res.json();
+  const jobId = data.job_id;
+
+  const source = new EventSource('/api/stream/' + jobId);
+  source.onmessage = async function(e) {{
+    let evt;
+    try {{ evt = JSON.parse(e.data); }} catch (_) {{ return; }}
+    if (evt.type === 'log') {{
+      logEl.textContent += evt.text + '\\n';
+      logEl.scrollTop = logEl.scrollHeight;
+    }} else if (evt.type === 'progress') {{
+      if (evt.detail && evt.detail.startsWith('$ ')) {{
+        logEl.textContent += evt.detail + '\\n';
+      }}
+    }} else if (evt.type === 'completed') {{
+      source.close();
+      // Fetch parsed candidates.
+      try {{
+        const r2 = await fetch('/api/corpus/expand/preview/' + jobId + '/candidates');
+        if (!r2.ok) throw new Error('HTTP ' + r2.status);
+        const cands = await r2.json();
+        _eapCandidates = cands.candidates || [];
+        const info = cands.info || {{}};
+        // Pre-select only the KEEP rows (DROP rows fell below threshold /
+        // had hard filters hit — user can still tick them if they want).
+        _eapSelected = new Set();
+        _eapCandidates.forEach(c => {{
+          if (c.doi && c.decision === 'KEEP') _eapSelected.add(c.doi);
+        }});
+        // Info line
+        const reasonSummary = Object.entries(info.drop_reasons || {{}})
+          .map(([k, v]) => _escHtml(k) + ': ' + v).join(' · ');
+        document.getElementById('eap-info').innerHTML =
+          'Shortlist of <strong>' + (info.total || 0) + '</strong> candidate(s) '
+          + '(<span style="color:var(--success);">' + (info.kept || 0)
+          + ' KEEP</span> · <span style="color:var(--fg-muted);">'
+          + (info.dropped || 0) + ' DROP</span>). '
+          + (reasonSummary ? 'Drop reasons: ' + reasonSummary + '.' : '')
+          + ' Scores from the RRF-fused ranker (bge-m3 cosine shown below; '
+          + 'full multi-signal breakdown in drop_reason / decision).';
+        document.getElementById('eap-loading').style.display = 'none';
+        if (!_eapCandidates.length) {{
+          document.getElementById('eap-error').style.display = 'block';
+          document.getElementById('eap-error').textContent =
+            'No candidates returned. The corpus may have no extractable references, or everything was already deduped.';
+          return;
+        }}
+        document.getElementById('eap-content').style.display = 'block';
+        eapRender();
+      }} catch (exc) {{
+        document.getElementById('eap-loading').style.display = 'none';
+        document.getElementById('eap-error').style.display = 'block';
+        document.getElementById('eap-error').textContent = 'Candidates fetch failed: ' + exc.message;
+      }}
+    }} else if (evt.type === 'error') {{
+      source.close();
+      document.getElementById('eap-loading').style.display = 'none';
+      document.getElementById('eap-error').style.display = 'block';
+      document.getElementById('eap-error').textContent =
+        'Preview failed: ' + (evt.message || 'see log.');
+    }} else if (evt.type === 'done') {{
+      source.close();
+    }}
+  }};
 }}
 
 function eapRender() {{
