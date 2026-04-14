@@ -2465,6 +2465,87 @@ def draft_compare(
                 console.print(f"  [dim]· {d}[/dim]")
 
 
+@app.command(name="promote-lessons")
+def promote_lessons(
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Print what would be promoted; don't write. Recommended "
+             "on the first run after accumulating lessons from >=3 books.",
+    ),
+    min_importance: float = typer.Option(
+        0.8, "--min-importance",
+        help="Minimum per-lesson importance to consider.",
+    ),
+    min_books: int = typer.Option(
+        3, "--min-books",
+        help="Minimum distinct books a lesson must appear in (via "
+             "embedding similarity) to be promoted.",
+    ),
+    cosine_threshold: float = typer.Option(
+        0.85, "--cosine",
+        help="Cosine similarity threshold for bucketing lessons as "
+             "'the same' across books.",
+    ),
+    limit: int = typer.Option(
+        50, "--limit",
+        help="Max lessons to promote in this run.",
+    ),
+):
+    """Phase 47.4 — promote book-scoped autowrite_lessons to the global pool.
+
+    Iterates high-importance lessons, buckets them by embedding
+    similarity, and promotes any bucket that spans N distinct books
+    into scope='global' (cross-project). Subsequent autowrite runs in
+    ANY project will retrieve from both scopes.
+
+    Safe to run repeatedly — lessons already present at global scope
+    (via embedding near-match) are skipped.
+
+    Examples:
+
+      sciknow book promote-lessons --dry-run
+      sciknow book promote-lessons
+      sciknow book promote-lessons --min-books 2   # looser for small libraries
+    """
+    from sciknow.core.book_ops import promote_lessons_to_global
+
+    console.print(
+        f"[bold]Promote lessons to global[/bold] "
+        f"(min_importance={min_importance}, min_books={min_books}, "
+        f"cosine>={cosine_threshold}, limit={limit})"
+    )
+    if dry_run:
+        console.print("[dim]dry-run — no writes[/dim]")
+
+    summary = promote_lessons_to_global(
+        dry_run=dry_run,
+        min_importance=min_importance,
+        min_books=min_books,
+        cosine_threshold=cosine_threshold,
+        limit=limit,
+    )
+
+    console.print(
+        f"\n  candidates:              {summary.get('candidates', 0)}"
+        f"\n  buckets:                 {summary.get('buckets', 0)}"
+        f"\n  promoted:                [green]{summary.get('promoted', 0)}[/green]"
+        f"\n  skipped — too few books: {summary.get('skipped_too_few_books', 0)}"
+        f"\n  skipped — already global:{summary.get('skipped_already_global', 0)}"
+    )
+    details = summary.get("details") or []
+    if details:
+        console.print()
+        console.print(f"[bold]{'Would promote' if dry_run else 'Promoted'}:[/bold]")
+        for i, d in enumerate(details, 1):
+            console.print(
+                f"  [cyan]{i}.[/cyan] [{d['kind']}/{d['dimension']}] "
+                f"(bucket={d['bucket_size']}, books={d['n_books']})"
+            )
+            console.print(f"      [dim]{d['text']}[/dim]")
+    if "error" in summary:
+        console.print(f"[red]Error:[/red] {summary['error']}")
+
+
 @app.command(name="autowrite-bench")
 def autowrite_bench(
     book_ref: Annotated[str, typer.Argument(help="Book title fragment or ID.")],

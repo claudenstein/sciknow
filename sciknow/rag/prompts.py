@@ -527,7 +527,7 @@ Papers available in the collection ({n_papers} total):
 Existing draft sections:
 {draft_list}
 
----
+{rejected_block}---
 
 Identify the most important gaps in this book project:
 
@@ -536,7 +536,33 @@ Identify the most important gaps in this book project:
 3. **Argument gaps**: logical steps missing between chapters
 4. **Draft gaps**: chapters that have no drafts yet (highest writing priority)
 
-Be specific and actionable."""
+Be specific and actionable.
+{rejected_footer}"""
+
+
+def _format_rejected_block(rejected_ideas: list[str] | None) -> tuple[str, str]:
+    """Phase 47.2 — format the rejected-ideas block that goes INTO the
+    user prompt + the footer line that reminds the LLM of the gate.
+
+    Returns ``("" , "")`` when there's nothing to inject so the base
+    prompt is unchanged for cold-start books. Produced by querying
+    ``autowrite_lessons WHERE kind='rejected_idea'`` upstream — see
+    ``sciknow.core.book_ops.analyze_gaps_stream``.
+    """
+    ideas = [str(x).strip() for x in (rejected_ideas or []) if x and str(x).strip()]
+    if not ideas:
+        return "", ""
+    lines = "\n".join(f"  - {t[:240]}" for t in ideas[:10])
+    block = (
+        f"Previously proposed ideas that were tried and scored poorly "
+        f"— DO NOT re-propose these or close variants:\n{lines}\n\n"
+    )
+    footer = (
+        "\nCritically: do not re-surface any of the rejected-ideas "
+        "listed above. If a gap you would have proposed is similar to "
+        "one of them, propose a DIFFERENT angle or skip it."
+    )
+    return block, footer
 
 
 def gaps(
@@ -544,6 +570,8 @@ def gaps(
     chapters: list[dict],
     papers: list[dict],
     drafts: list[dict],
+    *,
+    rejected_ideas: list[str] | None = None,
 ) -> tuple[str, str]:
     chapter_list = "\n".join(
         f"  Ch.{c['number']}: {c['title']} — {c.get('description', '')}"
@@ -557,12 +585,15 @@ def gaps(
         f"  - [{d['section_type']}] {d['title']} (Ch.{d.get('chapter_number', '?')})"
         for d in drafts
     ) or "  (none yet)"
+    rejected_block, rejected_footer = _format_rejected_block(rejected_ideas)
     return GAPS_SYSTEM, GAPS_USER.format(
         book_title=book_title,
         chapter_list=chapter_list,
         n_papers=len(papers),
         paper_list=paper_lines,
         draft_list=draft_lines,
+        rejected_block=rejected_block,
+        rejected_footer=rejected_footer,
     )
 
 
@@ -770,20 +801,60 @@ def write_section_v2(
     # Injected as a "Lessons from prior runs" block in the system prompt
     # so the writer is conditioned by what worked / didn't work last time.
     # Empty list = no block (cold-start, fresh book).
+    #
+    # Phase 47.3 — each lesson can be a STRING (legacy) or a DICT with
+    # ``{"text", "kind", "dimension", "scope"}`` (Phase 47.1 consumer
+    # with ``return_dicts=True``). When dicts are supplied we group the
+    # injection by ``kind`` so the writer handles them differently:
+    # a "knowledge" fact is prepended like a reminder, a "rejected_idea"
+    # is a hard negative, a "decision" is precedent, an "idea" is
+    # a positive suggestion. Same 5-item cap in total (ERL anti-bloat).
     lessons_block = ""
     if lessons:
-        # Cap at 5 — the ERL paper specifically calls out that
-        # concatenating an unbounded experience buffer kills both speed
-        # and quality. Top-K (chosen by the consumer's similarity
-        # ranking) is the right pattern.
         capped = lessons[:5]
-        bullet_lines = "\n".join(f"  - {ls.strip()}" for ls in capped if ls.strip())
-        if bullet_lines:
-            lessons_block = (
-                "\nLessons from prior runs on similar sections "
-                "(distilled from past iteration trajectories — heed these):\n"
-                + bullet_lines + "\n"
-            )
+        # Partition into (kind, text) tuples. Strings default to episode.
+        partitioned: dict[str, list[str]] = {}
+        for ls in capped:
+            if isinstance(ls, dict):
+                t = (ls.get("text") or "").strip()
+                k = (ls.get("kind") or "episode").strip().lower()
+            else:
+                t = (ls or "").strip()
+                k = "episode"
+            if not t:
+                continue
+            partitioned.setdefault(k, []).append(t)
+        if partitioned:
+            # Render in a stable, task-meaningful order: what we know →
+            # what to reuse → what not to do → what to remember from
+            # past decisions → leftover episodes.
+            _KIND_ORDER = [
+                ("knowledge",
+                 "Domain knowledge from prior runs (internalize these):"),
+                ("idea",
+                 "Positive ideas that worked before (consider reusing):"),
+                ("rejected_idea",
+                 "Ideas that were tried and scored poorly (do NOT reuse):"),
+                ("decision",
+                 "Precedent decisions from prior runs on this section:"),
+                ("paper",
+                 "Papers flagged as especially useful for this section:"),
+                ("episode",
+                 "General lessons from prior iteration trajectories:"),
+            ]
+            parts = []
+            for kind, header in _KIND_ORDER:
+                items = partitioned.get(kind) or []
+                if not items:
+                    continue
+                bullets = "\n".join(f"  - {t}" for t in items)
+                parts.append(f"{header}\n{bullets}")
+            if parts:
+                lessons_block = (
+                    "\nLessons from prior runs on similar sections "
+                    "(grouped by kind; heed each group's intent):\n\n"
+                    + "\n\n".join(parts) + "\n"
+                )
 
     plan_block = ""
     if book_plan:
@@ -945,10 +1016,21 @@ there.
 - Tag each lesson with a `dimension` field naming which scoring \
 dimension it's about: groundedness | completeness | coherence | \
 citation_accuracy | hedging_fidelity | length | general.
+- Tag each lesson with a `kind` field — what KIND OF THING it is:
+  * `knowledge`     — a domain fact / convention / nomenclature to \
+remember across runs (e.g. "BP dates are measured from 1950")
+  * `idea`          — a framing or sub-topic that worked well and \
+should be considered again for similar sections
+  * `rejected_idea` — a framing or sub-topic that was tried and \
+scored poorly; the gap-finder should NOT re-propose it
+  * `decision`      — a pivot / rollback / revise verdict made during \
+this run that the writer should internalize
+  * `episode`       — default bucket for per-run lessons that don't fit \
+the categories above (use sparingly — prefer a specific kind)
 
 Output STRICT JSON in this shape:
 {{"lessons": [
-  {{"text": "...", "dimension": "..."}},
+  {{"text": "...", "dimension": "...", "kind": "..."}},
   ...
 ]}}
 
@@ -1550,9 +1632,9 @@ Papers available ({n_papers} total):
 Existing drafts:
 {draft_list}
 
----
+{rejected_block}---
 
-Identify all gaps. Return JSON."""
+Identify all gaps. Return JSON.{rejected_footer}"""
 
 
 def gaps_json(
@@ -1560,6 +1642,8 @@ def gaps_json(
     chapters: list[dict],
     papers: list[dict],
     drafts: list[dict],
+    *,
+    rejected_ideas: list[str] | None = None,
 ) -> tuple[str, str]:
     chapter_list = "\n".join(
         f"  Ch.{c['number']}: {c['title']} — {c.get('description', '')}"
@@ -1573,12 +1657,15 @@ def gaps_json(
         f"  - [{d['section_type']}] {d['title']} (Ch.{d.get('chapter_number', '?')})"
         for d in drafts
     ) or "  (none yet)"
+    rejected_block, rejected_footer = _format_rejected_block(rejected_ideas)
     return GAPS_JSON_SYSTEM, GAPS_JSON_USER.format(
         book_title=book_title,
         chapter_list=chapter_list,
         n_papers=len(papers),
         paper_list=paper_lines,
         draft_list=draft_lines,
+        rejected_block=rejected_block,
+        rejected_footer=rejected_footer,
     )
 
 

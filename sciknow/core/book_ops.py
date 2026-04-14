@@ -820,6 +820,24 @@ def _embed_text_for_lessons(text: str) -> list[float] | None:
         return None
 
 
+_VALID_LESSON_KINDS: tuple[str, ...] = (
+    "episode", "knowledge", "idea", "decision", "rejected_idea", "paper",
+)
+
+_VALID_LESSON_SCOPES: tuple[str, ...] = ("book", "global")
+
+
+def _normalize_kind(kind: str | None) -> str:
+    """Accept any string, return a valid kind or fall back to ``episode``.
+
+    The LLM's output is free-form so we defensively coerce — any kind
+    we don't recognise becomes ``episode`` (the legacy default) rather
+    than crashing the persist call.
+    """
+    k = (kind or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return k if k in _VALID_LESSON_KINDS else "episode"
+
+
 def _persist_lesson(
     *,
     book_id: str | None,
@@ -831,19 +849,36 @@ def _persist_lesson(
     embedding: list[float] | None,
     importance: float,
     dimension: str | None,
+    kind: str | None = None,
+    scope: str = "book",
 ) -> None:
-    """Phase 32.7 — INSERT one lesson row. Fail-soft."""
+    """Phase 32.7 — INSERT one lesson row. Fail-soft.
+
+    Phase 47.1 — accepts ``kind`` and ``scope`` kwargs. ``kind`` is
+    coerced to a known value (unknowns become ``episode``). ``scope``
+    is validated (must be ``book`` or ``global``) — a global scope
+    implies ``book_id=None`` to satisfy the CHECK constraint from
+    migration 0018.
+    """
     if not lesson_text or not lesson_text.strip():
         return
     from sqlalchemy import text
     from sciknow.storage.db import get_session
+
+    k = _normalize_kind(kind)
+    scope = scope if scope in _VALID_LESSON_SCOPES else "book"
+    # Global scope must have book_id=NULL (CK_ autowrite_lessons_scope_book).
+    if scope == "global":
+        book_id = None
+        chapter_id = None
+
     try:
         with get_session() as session:
             session.execute(text("""
                 INSERT INTO autowrite_lessons (
                     book_id, chapter_id, section_slug,
                     lesson_text, source_run_id, score_delta,
-                    embedding, importance, dimension
+                    embedding, importance, dimension, kind, scope
                 ) VALUES (
                     CAST(:book_id AS uuid),
                     CAST(:chapter_id AS uuid),
@@ -853,7 +888,9 @@ def _persist_lesson(
                     :score_delta,
                     CAST(:embedding AS real[]),
                     :importance,
-                    :dimension
+                    :dimension,
+                    :kind,
+                    :scope
                 )
             """), {
                 "book_id": book_id,
@@ -867,6 +904,8 @@ def _persist_lesson(
                 "embedding": embedding,
                 "importance": float(importance),
                 "dimension": dimension,
+                "kind": k,
+                "scope": scope,
             })
             session.commit()
     except Exception as exc:
@@ -985,7 +1024,9 @@ def _distill_lessons_from_run(run_id: str | None) -> int:
             if not isinstance(ls, dict):
                 continue
             text_val = (ls.get("text") or "").strip()
-            dim = (ls.get("dimension") or "general").strip().lower()
+            dim  = (ls.get("dimension") or "general").strip().lower()
+            # Phase 47.1 — kind is LLM-provided; unknowns coerce to 'episode'
+            kind = _normalize_kind(ls.get("kind"))
             if not text_val:
                 continue
             embedding = _embed_text_for_lessons(text_val)
@@ -999,6 +1040,8 @@ def _distill_lessons_from_run(run_id: str | None) -> int:
                 embedding=embedding,
                 importance=importance,
                 dimension=dim,
+                kind=kind,
+                scope="book",
             )
             n_persisted += 1
         return n_persisted
@@ -1013,7 +1056,10 @@ def _get_relevant_lessons(
     query_text: str,
     *,
     top_k: int = _MAX_LESSONS_INJECTED,
-) -> list[str]:
+    kinds: tuple[str, ...] | list[str] | None = None,
+    include_global: bool = True,
+    return_dicts: bool = False,
+) -> list:
     """Phase 32.7 — fetch the top-K relevant lessons for an upcoming
     autowrite run.
 
@@ -1023,31 +1069,58 @@ def _get_relevant_lessons(
     similar section types. Cross-book lessons are slightly downweighted
     by giving them a fixed importance multiplier of 0.7.
 
+    Phase 47.1 — optional ``kinds`` filter (e.g. ``kinds=("idea", "knowledge")``
+    to get only positive lessons, or ``kinds=("rejected_idea",)`` for
+    the gap-finder gate). ``include_global=True`` (default) unions
+    scope=global lessons too — the cross-book pool populated by
+    Phase 47.4 ``promote_to_global``. Pass ``return_dicts=True`` to get
+    ``[{"text", "kind", "dimension", "score", ...}]`` instead of raw
+    strings — Phase 47.3 writer prompt uses this to group by kind.
+
     Ranking: `importance × recency_decay × cosine_similarity`. Recency
     decay is `2^(-age_days / half_life)` so a 30-day-old lesson is at
     half its stored importance.
 
-    Returns a list of lesson texts (strings only). Empty list on
-    cold-start (no lessons exist yet) or any failure.
+    Returns a list of lesson texts (or dicts). Empty list on cold-start
+    (no lessons exist yet) or any failure.
     """
     if not section_slug:
         return []
     from sqlalchemy import text
     from sciknow.storage.db import get_session
+
+    # Normalise the kinds filter into a set of valid values.
+    kinds_set: set[str] | None = None
+    if kinds:
+        kinds_set = {k for k in (_normalize_kind(k) for k in kinds) if k}
+        # If every provided kind normalises away, treat as no filter
+        if not kinds_set:
+            kinds_set = None
+
     try:
         # Embed the query text first. If embedding fails (e.g. embedder
         # OOM), fall back to non-similarity ranking — just importance ×
         # recency, which still surfaces the most useful lessons.
         query_emb = _embed_text_for_lessons(query_text)
 
+        # Scope filter: default includes the active-book lessons AND any
+        # globally-promoted ones. ``scope`` is indexed via the 0018
+        # migration so this stays cheap at 10k+ rows.
+        scope_filter = (
+            "(scope = 'book' OR scope = 'global')"
+            if include_global else
+            "scope = 'book'"
+        )
+
         with get_session() as session:
-            rows = session.execute(text("""
+            rows = session.execute(text(f"""
                 SELECT id::text, lesson_text, embedding, importance,
-                       book_id::text, dimension,
+                       book_id::text, dimension, kind, scope,
                        EXTRACT(EPOCH FROM (now() - created_at)) / 86400.0 AS age_days
                 FROM autowrite_lessons
                 WHERE section_slug = :slug
                   AND lesson_text IS NOT NULL
+                  AND {scope_filter}
                 ORDER BY created_at DESC
                 LIMIT 200
             """), {"slug": section_slug}).fetchall()
@@ -1056,22 +1129,29 @@ def _get_relevant_lessons(
             return []
 
         import math
-        scored: list[tuple[float, str]] = []
+        scored: list[tuple[float, dict]] = []
         for row in rows:
-            lesson_id, lesson_text, embedding, importance, l_book_id, _dim, age_days = row
+            (lesson_id, lesson_text, embedding, importance,
+             l_book_id, dim, kind, scope, age_days) = row
             if not lesson_text:
+                continue
+            # Phase 47.1 — kind filter
+            if kinds_set is not None and (kind or "episode") not in kinds_set:
                 continue
             # Recency decay: exp(-age * ln(2) / half_life) = 2^(-age/half_life)
             recency = 2.0 ** (-(float(age_days or 0)) / _LESSON_RECENCY_HALF_LIFE_DAYS)
             imp = float(importance or 1.0)
-            # Cross-book lessons get a downweight — they're generalized
-            # but less specific to this user's book.
-            if book_id and l_book_id and l_book_id != book_id:
+            # Cross-book book-scoped lessons get a downweight — they're
+            # generalized but less specific to this user's book. Global
+            # promoted lessons are slightly less aggressive (0.85) since
+            # the promote_to_global gate (Phase 47.4) already filtered
+            # for multi-book presence.
+            if scope == "global":
+                imp *= 0.85
+            elif book_id and l_book_id and l_book_id != book_id:
                 imp *= 0.7
             # Cosine similarity if both embeddings are present
             if query_emb and embedding:
-                # Both should be 1024-dim bge-m3 vectors. PG ARRAY gets
-                # back as a Python list of floats.
                 try:
                     a = query_emb
                     b = list(embedding)
@@ -1089,13 +1169,261 @@ def _get_relevant_lessons(
                 # win on importance × recency alone.
                 sim = 0.5
             score = imp * recency * (sim + 0.1)  # +0.1 floor so high-importance still wins on weak similarity
-            scored.append((score, lesson_text))
+            scored.append((score, {
+                "text":      lesson_text,
+                "kind":      kind or "episode",
+                "dimension": dim or "general",
+                "scope":     scope or "book",
+                "score":     round(float(score), 4),
+                "same_book": (l_book_id == book_id) if book_id and l_book_id else False,
+            }))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        return [t for _, t in scored[:top_k]]
+        top = [d for _, d in scored[:top_k]]
+        if return_dicts:
+            return top
+        return [d["text"] for d in top]
     except Exception as exc:
         logger.warning("lesson retrieval failed: %s", exc)
         return []
+
+
+# ════════════════════════════════════════════════════════════════════
+# Phase 47.4 — Cross-book lesson promotion (DeepScientist-style)
+# ════════════════════════════════════════════════════════════════════
+#
+# DeepScientist's Findings Memory (arXiv:2509.26603 §3.2) maintains two
+# scopes — per-quest and global — with an explicit ``promote_to_global``
+# action. sciknow's autowrite_lessons already has the Phase 47.1 scope
+# column; this section is the promotion service.
+#
+# Promotion gate (all three must hold):
+#   1. importance >= _PROMOTE_MIN_IMPORTANCE (default 0.8)
+#   2. score_delta > 0  — the source run actually improved during
+#      iteration (a high-importance lesson from a run that converged
+#      immediately is less trustworthy)
+#   3. the lesson appears in >= _PROMOTE_MIN_BOOKS distinct books via
+#      embedding similarity >= _PROMOTE_COSINE (default 0.85)
+#
+# The third gate is the important one — it distinguishes a "general"
+# writing lesson from a book-idiosyncratic tic. If three independent
+# climate / materials / linguistics books all surface the same
+# "don't overstate causality on correlations" lesson, that's global
+# knowledge worth promoting.
+#
+# Promoted lessons are NEW rows with scope='global' and book_id=NULL
+# (enforced by the migration-0018 CHECK constraint). The book-scoped
+# originals are kept — promotion is additive, not destructive.
+
+
+_PROMOTE_MIN_IMPORTANCE = 0.8
+_PROMOTE_MIN_BOOKS      = 3
+_PROMOTE_COSINE         = 0.85
+_PROMOTE_MAX_BATCH      = 50    # safety cap per run
+
+
+def _cosine(a: list[float] | None, b: list[float] | None) -> float:
+    """Cosine similarity between two 1024-d bge-m3 vectors."""
+    if not a or not b:
+        return 0.0
+    import math
+    try:
+        aa = list(a); bb = list(b)
+        if len(aa) != len(bb):
+            return 0.0
+        dot = sum(x * y for x, y in zip(aa, bb))
+        na = math.sqrt(sum(x * x for x in aa))
+        nb = math.sqrt(sum(y * y for y in bb))
+        return dot / (na * nb) if na > 0 and nb > 0 else 0.0
+    except Exception:
+        return 0.0
+
+
+def promote_lessons_to_global(
+    *,
+    dry_run: bool = False,
+    min_importance: float = _PROMOTE_MIN_IMPORTANCE,
+    min_books: int       = _PROMOTE_MIN_BOOKS,
+    cosine_threshold: float = _PROMOTE_COSINE,
+    limit: int           = _PROMOTE_MAX_BATCH,
+) -> dict:
+    """Phase 47.4 — promote book-scoped lessons to the global pool.
+
+    Iterates book-scoped lessons that pass the importance + score_delta
+    gates, buckets them by embedding similarity, and promotes buckets
+    that span >= ``min_books`` distinct books. Returns a summary dict
+    so the CLI can report what happened.
+
+    Idempotent: if a lesson was previously promoted (a near-duplicate
+    already exists at scope='global'), we skip re-promotion.
+    """
+    from sqlalchemy import text as _text
+    from sciknow.storage.db import get_session
+
+    summary: dict = {
+        "candidates": 0, "buckets": 0, "promoted": 0,
+        "skipped_already_global": 0, "skipped_too_few_books": 0,
+        "dry_run": dry_run,
+        "details": [],
+    }
+
+    try:
+        with get_session() as session:
+            # Candidate pool: book-scoped, non-null embedding, non-null
+            # book_id, passes importance + score_delta gates. Pull only
+            # what we need to avoid round-tripping lesson_text for rows
+            # we'll reject.
+            rows = session.execute(_text("""
+                SELECT id::text, book_id::text, section_slug,
+                       lesson_text, embedding, importance, dimension, kind,
+                       score_delta, created_at
+                FROM autowrite_lessons
+                WHERE scope = 'book'
+                  AND embedding IS NOT NULL
+                  AND book_id IS NOT NULL
+                  AND importance >= :min_imp
+                  AND (score_delta IS NULL OR score_delta > 0)
+                ORDER BY importance DESC, created_at DESC
+            """), {"min_imp": float(min_importance)}).fetchall()
+
+            # Pre-load existing global embeddings so we can avoid
+            # promoting near-duplicates.
+            global_rows = session.execute(_text("""
+                SELECT embedding FROM autowrite_lessons
+                WHERE scope = 'global' AND embedding IS NOT NULL
+            """)).fetchall()
+            global_embeddings = [list(r[0]) for r in global_rows if r[0]]
+    except Exception as exc:
+        logger.warning("promote: candidate fetch failed: %s", exc)
+        summary["error"] = str(exc)
+        return summary
+
+    summary["candidates"] = len(rows)
+    if not rows:
+        return summary
+
+    # Bucket by embedding similarity (union-find style). A bucket is
+    # "represented" by the first-seen candidate's embedding; later
+    # candidates join if cosine >= threshold.
+    buckets: list[dict] = []
+    for r in rows:
+        rid, book_id, slug, txt, emb, imp, dim, kind, sdelta, created = r
+        emb_list = list(emb) if emb else None
+        placed = False
+        for b in buckets:
+            if _cosine(emb_list, b["rep_emb"]) >= cosine_threshold:
+                if book_id not in b["books"]:
+                    b["books"].add(book_id)
+                b["members"].append({
+                    "id": rid, "book_id": book_id, "section_slug": slug,
+                    "text": txt, "importance": float(imp or 1.0),
+                    "kind": kind, "dimension": dim,
+                    "score_delta": float(sdelta) if sdelta is not None else None,
+                    "embedding": emb_list,
+                })
+                placed = True
+                break
+        if not placed:
+            buckets.append({
+                "rep_emb":  emb_list,
+                "rep_text": txt,
+                "rep_kind": kind,
+                "rep_dim":  dim,
+                "rep_section_slug": slug,
+                "books":    {book_id},
+                "members":  [{
+                    "id": rid, "book_id": book_id, "section_slug": slug,
+                    "text": txt, "importance": float(imp or 1.0),
+                    "kind": kind, "dimension": dim,
+                    "score_delta": float(sdelta) if sdelta is not None else None,
+                    "embedding": emb_list,
+                }],
+            })
+
+    summary["buckets"] = len(buckets)
+    logger.info(
+        "promote_to_global: %d candidates → %d buckets (cosine>=%.2f)",
+        len(rows), len(buckets), cosine_threshold,
+    )
+
+    # Promote buckets that span enough distinct books
+    to_promote: list[dict] = []
+    for b in buckets:
+        if len(b["books"]) < min_books:
+            summary["skipped_too_few_books"] += 1
+            continue
+        # Skip if a near-duplicate already exists in global
+        is_dupe = False
+        for gemb in global_embeddings:
+            if _cosine(b["rep_emb"], gemb) >= cosine_threshold:
+                is_dupe = True
+                break
+        if is_dupe:
+            summary["skipped_already_global"] += 1
+            continue
+        # Choose a representative text — the highest-importance
+        # member, then longest text as a tie-breaker.
+        rep = max(
+            b["members"],
+            key=lambda m: (m["importance"], len(m["text"] or "")),
+        )
+        to_promote.append({
+            "bucket_size": len(b["members"]),
+            "n_books":     len(b["books"]),
+            "text":        rep["text"],
+            "kind":        rep["kind"] or "episode",
+            "dimension":   rep["dimension"] or "general",
+            "importance":  rep["importance"],
+            "embedding":   rep["embedding"],
+            "section_slug": rep["section_slug"],
+        })
+        if len(to_promote) >= limit:
+            break
+
+    if dry_run:
+        summary["details"] = [
+            {
+                "text": p["text"][:140],
+                "bucket_size": p["bucket_size"],
+                "n_books": p["n_books"],
+                "kind": p["kind"],
+                "dimension": p["dimension"],
+            }
+            for p in to_promote
+        ]
+        return summary
+
+    # Actually write them
+    n_ok = 0
+    for p in to_promote:
+        try:
+            _persist_lesson(
+                book_id=None, chapter_id=None,
+                section_slug=p["section_slug"],
+                lesson_text=p["text"],
+                source_run_id=None,
+                score_delta=None,
+                embedding=p["embedding"],
+                importance=p["importance"],
+                dimension=p["dimension"],
+                kind=p["kind"],
+                scope="global",
+            )
+            n_ok += 1
+        except Exception as exc:
+            logger.warning("promote: persist failed: %s", exc)
+    summary["promoted"] = n_ok
+    summary["details"] = [
+        {
+            "text": p["text"][:140],
+            "bucket_size": p["bucket_size"],
+            "n_books": p["n_books"],
+            "kind": p["kind"],
+            "dimension": p["dimension"],
+        }
+        for p in to_promote[:n_ok]
+    ]
+    return summary
 
 
 # ── Phase 32.9 — Compound learning Layer 4: DPO preference dataset ──────
@@ -2499,10 +2827,43 @@ def run_gaps_stream(
     p_list = [{"title": p[0], "year": p[1]} for p in papers if p[0]]
     d_list = [{"title": d[0], "section_type": d[1], "chapter_number": d[2]} for d in drafts_rows]
 
+    # Phase 47.2 — rejected-idea gate. Query lessons with kind='rejected_idea'
+    # scoped to this book OR globally-promoted (Phase 47.4), across any
+    # section of this book. The gap generator is book-level, so we
+    # concatenate hits from every section_slug on this book's chapters.
+    rejected_ideas: list[str] = []
+    try:
+        with get_session() as session:
+            rej_rows = session.execute(text("""
+                SELECT DISTINCT lesson_text
+                FROM autowrite_lessons
+                WHERE kind = 'rejected_idea'
+                  AND lesson_text IS NOT NULL
+                  AND (
+                    (scope = 'book' AND book_id = CAST(:bid AS uuid))
+                    OR scope = 'global'
+                  )
+                ORDER BY lesson_text
+                LIMIT 12
+            """), {"bid": book_id}).fetchall()
+        rejected_ideas = [r[0] for r in rej_rows if r[0]]
+    except Exception as exc:
+        logger.warning("gap gate: rejected-idea lookup failed: %s", exc)
+    if rejected_ideas:
+        yield {
+            "type": "progress", "stage": "rejected_ideas_loaded",
+            "detail": (
+                f"Phase 47.2: blocking {len(rejected_ideas)} "
+                "previously-rejected idea(s) from re-surfacing."
+            ),
+            "n_rejected_ideas": len(rejected_ideas),
+        }
+
     # Pass 1: human-readable narrative (streamed)
     yield {"type": "progress", "stage": "analyzing", "detail": "Running gap analysis..."}
     system, user = prompts.gaps(
         book_title=book[1], chapters=ch_list, papers=p_list, drafts=d_list,
+        rejected_ideas=rejected_ideas or None,
     )
     for tok in llm_stream(system, user, model=model, num_ctx=16384):
         yield {"type": "token", "text": tok}
@@ -2512,6 +2873,7 @@ def run_gaps_stream(
         yield {"type": "progress", "stage": "extracting", "detail": "Extracting structured gaps..."}
         sys_j, usr_j = prompts.gaps_json(
             book_title=book[1], chapters=ch_list, papers=p_list, drafts=d_list,
+            rejected_ideas=rejected_ideas or None,
         )
         try:
             raw = llm_complete(sys_j, usr_j, model=model, temperature=0.0, num_ctx=16384)
@@ -3147,13 +3509,28 @@ def _autowrite_section_body(
     _lessons_query = " ".join(filter(None, [
         section_type, topic, (section_plan or "")[:500],
     ]))
+    # Phase 47.3 — return kind-dicts so the writer prompt can group
+    # lessons by kind (knowledge / idea / decision / paper / episode).
+    # Exclude ``rejected_idea`` — that kind is for the gap-finder gate
+    # (Phase 47.2), NOT for the writer (the writer shouldn't try to
+    # actively AVOID writing about a topic; that's a planner-level gate).
     relevant_lessons = _get_relevant_lessons(
         book_id, section_type, _lessons_query,
+        kinds=("knowledge", "idea", "decision", "paper", "episode"),
+        return_dicts=True,
     )
     if relevant_lessons:
+        by_kind: dict[str, int] = {}
+        for l in relevant_lessons:
+            by_kind[l["kind"]] = by_kind.get(l["kind"], 0) + 1
+        breakdown = ", ".join(f"{k}={n}" for k, n in sorted(by_kind.items()))
         yield {"type": "progress", "stage": "lessons",
-               "detail": f"Layer 1: injecting {len(relevant_lessons)} lesson(s) from prior runs"}
-        log.event("lessons_loaded", count=len(relevant_lessons))
+               "detail": (
+                   f"Layer 1: injecting {len(relevant_lessons)} lesson(s) "
+                   f"from prior runs — {breakdown}"
+               )}
+        log.event("lessons_loaded",
+                  count=len(relevant_lessons), by_kind=by_kind)
 
     # Phase 32.10 — Layer 5: fetch the book's style fingerprint, if it
     # exists. Returns None on cold-start (no approved drafts yet).

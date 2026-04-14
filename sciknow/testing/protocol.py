@@ -5479,6 +5479,156 @@ def l1_phase46f_setup_wizard_surface() -> None:
     assert ".sw-step.active" in tpl, "wizard trail active style missing"
 
 
+def l1_phase47_lesson_kind_scope() -> None:
+    """Phase 47.1 — kind + scope on autowrite_lessons.
+
+    Verifies the helpers (without hitting the DB — that's L2 material)
+    and the _normalize_kind coercion across every canonical + weird
+    input. Also asserts that _persist_lesson signature now accepts
+    kind + scope kwargs.
+    """
+    import inspect
+
+    from sciknow.core import book_ops
+
+    assert hasattr(book_ops, "_normalize_kind"), "_normalize_kind missing"
+    assert hasattr(book_ops, "_VALID_LESSON_KINDS"), "valid-kinds tuple missing"
+    assert hasattr(book_ops, "_VALID_LESSON_SCOPES"), "valid-scopes tuple missing"
+
+    # Every canonical kind round-trips cleanly
+    for k in ("episode", "knowledge", "idea", "decision",
+              "rejected_idea", "paper"):
+        assert book_ops._normalize_kind(k) == k, f"kind {k} did not round-trip"
+    # Weird inputs coerce sensibly
+    assert book_ops._normalize_kind("REJECTED-IDEA") == "rejected_idea"
+    assert book_ops._normalize_kind("Rejected Idea") == "rejected_idea"
+    assert book_ops._normalize_kind(None)            == "episode"
+    assert book_ops._normalize_kind("")              == "episode"
+    assert book_ops._normalize_kind("bogus")         == "episode"
+
+    # _persist_lesson takes kind + scope kwargs
+    sig = inspect.signature(book_ops._persist_lesson)
+    for p in ("kind", "scope"):
+        assert p in sig.parameters, f"_persist_lesson missing {p!r} kwarg"
+
+    # _get_relevant_lessons accepts the new consumer kwargs
+    sig = inspect.signature(book_ops._get_relevant_lessons)
+    for p in ("kinds", "include_global", "return_dicts"):
+        assert p in sig.parameters, (
+            f"_get_relevant_lessons missing {p!r} kwarg (Phase 47.1)"
+        )
+
+    # Distill prompt instructs the LLM to emit a `kind` field
+    from sciknow.rag import prompts as rag_prompts
+    sys_d, _ = rag_prompts.distill_lessons(
+        section_slug="overview", final_overall=0.8, score_delta=0.2,
+        iterations_used=2, converged=True, iterations=[],
+    )
+    assert "kind" in sys_d, "distill prompt doesn't ask for kind"
+    assert "rejected_idea" in sys_d, "rejected_idea kind not documented"
+    assert "knowledge" in sys_d and "idea" in sys_d and "decision" in sys_d
+
+
+def l1_phase47_rejected_idea_gate() -> None:
+    """Phase 47.2 — gaps prompt injects the rejected-idea block."""
+    from sciknow.rag import prompts as rag_prompts
+
+    # Without ideas: no block
+    sys1, usr1 = rag_prompts.gaps("My Book", [], [], [])
+    assert "Previously proposed ideas" not in usr1
+    # With ideas: block + footer both present
+    sys2, usr2 = rag_prompts.gaps("My Book", [], [], [],
+        rejected_ideas=["Tried X but scored low",
+                        "Tried Y (cite-heavy but thin)"])
+    assert "Previously proposed ideas" in usr2
+    assert "DO NOT re-propose" in usr2
+    assert "Tried X but scored low" in usr2
+    assert "Critically: do not re-surface" in usr2
+    # gaps_json variant has the same injection
+    sys3, usr3 = rag_prompts.gaps_json("My Book", [], [], [],
+        rejected_ideas=["One rejected idea."])
+    assert "Previously proposed" in usr3
+    assert "One rejected idea" in usr3
+
+    # Body caller queries kind='rejected_idea' — source grep
+    import inspect as _inspect
+    from sciknow.core import book_ops
+    src = _inspect.getsource(book_ops.run_gaps_stream)
+    assert "kind = 'rejected_idea'" in src, (
+        "run_gaps_stream must query autowrite_lessons for "
+        "kind='rejected_idea' before calling prompts.gaps"
+    )
+    assert "rejected_ideas=rejected_ideas" in src, (
+        "run_gaps_stream must pass rejected_ideas to prompts.gaps*"
+    )
+
+
+def l1_phase47_kind_filtered_writer() -> None:
+    """Phase 47.3 — writer prompt groups injected lessons by kind."""
+    from sciknow.rag import prompts as rag_prompts
+
+    # legacy string shape still works
+    sys_a, _ = rag_prompts.write_section_v2(
+        "results", "x", [], book_plan=None, prior_summaries=None,
+        lessons=["Generic lesson one.", "Generic lesson two."],
+    )
+    assert "Lessons from prior runs" in sys_a
+
+    # dict shape produces headered groups
+    sys_b, _ = rag_prompts.write_section_v2(
+        "results", "x", [], book_plan=None, prior_summaries=None,
+        lessons=[
+            {"text": "BP 1950 radiocarbon convention.", "kind": "knowledge"},
+            {"text": "Narrow-to-broad framing worked.", "kind": "idea"},
+            {"text": "DISCARD pivot on iteration 2.",  "kind": "decision"},
+        ],
+    )
+    assert "Domain knowledge"    in sys_b, "knowledge header missing"
+    assert "Positive ideas"      in sys_b, "idea header missing"
+    assert "Precedent decisions" in sys_b, "decision header missing"
+
+    # The autowrite caller asks _get_relevant_lessons for dicts +
+    # excludes rejected_idea (source grep)
+    import inspect as _inspect
+    from sciknow.core import book_ops
+    src = _inspect.getsource(book_ops._autowrite_section_body)
+    assert "return_dicts=True" in src
+    assert '"knowledge", "idea", "decision", "paper", "episode"' in src
+
+
+def l1_phase47_promote_to_global_surface() -> None:
+    """Phase 47.4 — promote-to-global helper + CLI."""
+    import inspect
+
+    from sciknow.core import book_ops
+    from sciknow.cli import book as book_cli
+
+    # Helper exists with the right signature
+    assert callable(getattr(book_ops, "promote_lessons_to_global", None))
+    sig = inspect.signature(book_ops.promote_lessons_to_global)
+    for p in ("dry_run", "min_importance", "min_books",
+              "cosine_threshold", "limit"):
+        assert p in sig.parameters, (
+            f"promote_lessons_to_global missing {p!r} kwarg"
+        )
+    # Thresholds sanity
+    assert 0.0 <  book_ops._PROMOTE_MIN_IMPORTANCE <= 1.5
+    assert book_ops._PROMOTE_MIN_BOOKS >= 2
+    assert 0.5 <= book_ops._PROMOTE_COSINE <= 0.99
+
+    # Cosine helper works end-to-end
+    assert book_ops._cosine([1, 0, 0], [1, 0, 0]) == 1.0
+    assert abs(book_ops._cosine([1, 0], [0, 1])) < 1e-9
+    assert book_ops._cosine(None, [1, 0]) == 0.0
+    assert book_ops._cosine([], [1, 2]) == 0.0
+
+    # CLI command registered
+    callbacks = {c.callback for c in book_cli.app.registered_commands}
+    assert book_cli.promote_lessons in callbacks, (
+        "`sciknow book promote-lessons` not registered"
+    )
+
+
 def l1_bench_harness_surface() -> None:
     """Phase 44 — the bench harness module loads and exposes the expected
     surface (run/run_layer/LAYERS/BenchMetric). Each layer has >= 1
@@ -6546,6 +6696,11 @@ L1_TESTS: list[Callable] = [
     l1_phase46c_ensemble_review_surface,
     l1_phase46e_web_expand_surface,
     l1_phase46f_setup_wizard_surface,
+    # Phase 47 — typed compound memory (DeepScientist port bundle)
+    l1_phase47_lesson_kind_scope,
+    l1_phase47_rejected_idea_gate,
+    l1_phase47_kind_filtered_writer,
+    l1_phase47_promote_to_global_surface,
 ]
 
 L2_TESTS: list[Callable] = [
