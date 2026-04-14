@@ -676,6 +676,26 @@ Likely next-up candidates (in priority order, from the original lit sweep's runn
 4. ~~**MADAM-RAG**~~ — **shipped in Phase 34** as MADAM-RAG-lite (prompt-only core). The tree planner tags contradiction-heavy paragraphs with pro/con source lists; the writer renders explicit ⚡ CONTRADICTION guidance. Full multi-agent debate deferred to DGX Spark.
 5. **Soft RAPTOR clustering** — use the GMM `proba` matrix the build already computes to allow chunks to contribute to multiple cluster summaries above a probability threshold. Polish on Phase 12.
 
+6. **Visuals as first-class evidence (figures / tables / equations picker + write-loop integration)** — MinerU already emits typed blocks for images, tables (HTML), and equations (LaTeX) into `data/mineru_output/{doc_id}/content_list.json` during ingestion; today the chunker drops the image blocks and `db tag-multimodal` only sets boolean `has_table` / `has_equation` flags on chunk payloads. The full pipeline would:
+
+   a. **Foundation (Phase 21.a).** New `visuals` table: `id, document_id, kind (figure|table|equation), block_idx, asset_path, caption, surrounding_paragraph, figure_num, in_text_refs_count, quality_score`. Extractor walks existing `content_list.json` — no re-ingestion needed. `GET /api/media/{doc_id}/{asset}` serves image files. Quality score = `min(1, len(caption)/200) × has_quantitative_tokens × log(1 + in_text_refs)`.
+
+   b. **Retrieval (Phase 21.b).** New Qdrant collection `visuals_bge` on `caption + surrounding_paragraph`. Hybrid dense + sparse + `bge-reranker-v2-m3` — reuses the existing stack. CLI `sciknow visuals search "..."` + `POST /api/visuals/search`.
+
+   c. **Writer UI (Phase 21.c).** "Visuals" panel adjacent to Sources; thumbnail / KaTeX / HTML-table preview per result; "Insert at cursor" drops markdown / HTML / `$$LaTeX$$`. Inserted visuals register in the draft's `sources` JSONB so Verify + Export treat them like citations.
+
+   d. **VLM enrichment (Phase 21.d, the retrieval-quality lever).** Qwen2-VL-7B or MiniCPM-V-2.6 via Ollama generates a dense enriched caption per image ("what axes, what's plotted, one-line takeaway"). Re-embed with `original + enriched + surrounding_paragraph`. This is the single biggest quality jump reported in the SciCap / SciGraph literature — caption-only retrieval tops out well below what enriched-caption + hybrid achieves on scientific figures. Co-resident with bge-m3 is tight on a 3090 but works with `_release_embedder()` during the enrichment pass; trivial on DGX Spark. One-shot ~4–10 h for a 5k-paper corpus.
+
+   e. **Write-loop integration (Phase 21.e, the writing-quality lever).** Add visuals to the same retrieval pool as chunks inside `book write` / `book autowrite`. Prompt change: "when a retrieved figure directly demonstrates your claim, reference it inline as `[Fig. N]`." Extend the existing deterministic `[N]` insertion pass + `book insert-citations` + `book verify-citations` to handle visual refs. Result: generated prose naturally reads "as shown in Smith et al. (2020), Fig. 3 …" because the figure was evidence the writer saw, not an afterthought the UI dropped in.
+
+   f. **Quality gates (Phase 21.f).** CC-BY / CC-BY-NC license flag on the `visuals` row; auto-attribution footer in Export; manual override requires explicit confirmation. Mandatory before any publication. Stretch: chart-data OCR (pix2struct / chartqa-class) to extract (x, y) series for replotting — legally safer, editorially richer, but a genuinely separate project.
+
+   **Recommended ordering.** 21.a+b+c = MVP picker with caption-only retrieval (~3 days). 21.d is the quality lever — don't ship without it. 21.e is the writing-quality lever and the reason to do any of this. 21.f before publishing.
+
+   **Open decisions (answer before starting).** (i) Scope: is the goal visuals-as-first-class-evidence-in-the-write-loop (requires 21.e) or just a manual-picker UI (stops at 21.c)? (ii) VLM backend: Qwen2-VL-7B via Ollama (simple integration, already in stack) vs dedicated vLLM server (faster batched, more fiddly). (iii) Eval set: seed ~30 hand-picked "for this claim, which figure fits best" pairs at Phase 21.a so 21.d can be measured, not felt. (iv) Licensing: track on `documents` row during ingestion, gate insertion at the UI.
+
+   **Depends on / related.** Builds on Phase 21 (MinerU VLM backend, already partially planned). Parallels §6 (multimodal chunk tagging) but extracts structured visuals rather than text flags. Orthogonal to RAPTOR (§19).
+
 ---
 
 ## Considered and Rejected
