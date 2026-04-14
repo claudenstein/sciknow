@@ -7081,6 +7081,68 @@ def l1_phase51_enrich_multi_signal() -> None:
     assert "0.78" in src, "enrich default threshold did not drop to 0.78"
 
 
+def l1_phase52_query_sanitizer() -> None:
+    """Phase 52 — query sanitiser correctly classifies all four paths.
+
+    Hand-built inputs cover the fallback ladder:
+      - short clean query → passthrough
+      - long query with trailing question → question_extraction
+      - long declarative query → tail_sentence
+      - pathological very-long input → tail_truncate
+    """
+    from sciknow.retrieval.query_sanitizer import sanitize_query
+
+    r = sanitize_query("What is solar variability?")
+    assert r.method == "passthrough"
+    assert r.clean_query == "What is solar variability?"
+
+    long_preamble = (
+        "You are a helpful scientific assistant. Respond in ≤ 500 words. "
+        "Follow these 17 rules carefully. " * 20
+    )
+    r = sanitize_query(long_preamble + "What caused the Little Ice Age?")
+    assert r.method in ("question_extraction", "tail_sentence"), (
+        f"expected extraction path, got {r.method}"
+    )
+    assert "Little Ice Age" in r.clean_query
+
+    # No question mark → tail_sentence (or tail_truncate for pathological lengths)
+    long_statement = "X " * 500 + "The target claim about solar activity."
+    r = sanitize_query(long_statement)
+    assert r.method in ("tail_sentence", "tail_truncate")
+    assert r.clean_len <= 500
+
+    # Pathological input hits tail_truncate
+    pathological = "A " * 5000
+    r = sanitize_query(pathological)
+    assert r.clean_len <= 500
+
+    # Empty input is safe
+    r = sanitize_query("")
+    assert r.clean_query == "" and r.original_len == 0
+
+
+def l1_phase52_chunker_version_stamp() -> None:
+    """Phase 52 — CHUNKER_VERSION stamp + needs_rechunk predicate."""
+    from sciknow.ingestion import chunker
+    from sciknow.storage.models import Chunk, PaperSection
+
+    # Stamp present on the code side
+    assert isinstance(chunker.CHUNKER_VERSION, int)
+    assert chunker.CHUNKER_VERSION >= 1
+
+    # Staleness predicate: None and 0 are stale, current is not
+    assert chunker.needs_rechunk(None) is True
+    assert chunker.needs_rechunk(0) is True
+    assert chunker.needs_rechunk(chunker.CHUNKER_VERSION) is False
+    # Nonsensically-high versions are not stale (future-proofing)
+    assert chunker.needs_rechunk(chunker.CHUNKER_VERSION + 100) is False
+
+    # ORM columns exist on both carrier tables
+    assert "chunker_version" in Chunk.__table__.columns.keys()
+    assert "chunker_version" in PaperSection.__table__.columns.keys()
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -7258,6 +7320,9 @@ L1_TESTS: list[Callable] = [
     l1_phase50c_span_tracer_surface,
     # Phase 51 — multi-signal enrich scorer
     l1_phase51_enrich_multi_signal,
+    # Phase 52 — query sanitiser + chunker version stamp (mempalace P1+P3)
+    l1_phase52_query_sanitizer,
+    l1_phase52_chunker_version_stamp,
 ]
 
 L2_TESTS: list[Callable] = [

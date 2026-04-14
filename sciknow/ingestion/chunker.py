@@ -24,6 +24,24 @@ import tiktoken
 _TOKENIZER = tiktoken.get_encoding("cl100k_base")
 
 
+# Phase 52 — stamp every chunk with this integer. Bump when
+# `_SECTION_PATTERNS`, `_SKIP_SECTIONS`, `_PARAMS`, or the chunking
+# functions change in a way that invalidates stored output. Pipeline
+# and `db repair --rebuild-paper` read this to detect staleness.
+#
+# Version history:
+#   0 = pre-Phase-52 (server_default for existing rows post-migration 0022)
+#   1 = Phase 52 initial stamp. No semantic change vs 0; the bump
+#       exercises the staleness-detection path end-to-end.
+CHUNKER_VERSION: int = 1
+
+
+def needs_rechunk(stored_version: int | None) -> bool:
+    """True if a chunk stored with `stored_version` is older than the
+    code's current `CHUNKER_VERSION`. Treats None / 0 as stale."""
+    return (stored_version or 0) < CHUNKER_VERSION
+
+
 # ---------------------------------------------------------------------------
 # Section type classification  (shared by both entry points)
 # ---------------------------------------------------------------------------

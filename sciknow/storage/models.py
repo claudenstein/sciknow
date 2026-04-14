@@ -131,6 +131,11 @@ class PaperSection(Base):
     section_index: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     word_count: Mapped[int | None] = mapped_column(Integer)
+    # Phase 52 — stamp of the chunker version that parsed these
+    # sections. Same motivation as Chunk.chunker_version.
+    chunker_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -164,6 +169,12 @@ class Chunk(Base):
     qdrant_point_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
     embedded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     embedding_model: Mapped[str | None] = mapped_column(Text)
+    # Phase 52 — integer stamp of the chunker version that produced
+    # this row. Compared against ingestion.chunker.CHUNKER_VERSION
+    # to detect staleness when the chunker implementation changes.
+    chunker_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
 
     # Character offsets in original markdown
     char_start: Mapped[int | None] = mapped_column(Integer)

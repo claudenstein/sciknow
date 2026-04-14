@@ -6,12 +6,15 @@ Returns up to `candidate_k` results (default 50) ready to be passed to the reran
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from uuid import UUID
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import Filter, FieldCondition, MatchValue, Range, SparseVector
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger("sciknow.retrieval.hybrid_search")
 
 from sciknow.storage.qdrant import PAPERS_COLLECTION
 
@@ -607,9 +610,21 @@ def search(
     """
     from sciknow.config import settings
 
-    effective_query = query
+    # Phase 52 — sanitise the incoming query before embedding. Defends
+    # against the "MCP client leaks a 2000-char system prompt in
+    # front of the real question" failure mode where bge-m3's output
+    # ends up dominated by boilerplate and recall silently collapses.
+    # Passthrough path is zero-cost for short clean queries.
+    from sciknow.retrieval.query_sanitizer import sanitize_query as _sanitize
+    _san = _sanitize(query)
+    if _san.method != "passthrough":
+        logger.info(
+            "query sanitised: method=%s original_len=%d clean_len=%d",
+            _san.method, _san.original_len, _san.clean_len,
+        )
+    effective_query = _san.clean_query or query
     if use_query_expansion:
-        effective_query = expand_query(query)
+        effective_query = expand_query(effective_query)
 
     dense_vec, sparse_vec = _embed_query(effective_query)
     qdrant_filter = _build_qdrant_filter(
