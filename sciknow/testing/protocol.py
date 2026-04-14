@@ -7469,6 +7469,16 @@ def l1_phase54_wiki_browsing_mvp() -> None:
     ):
         assert needle in src, f"phase 54.3 ask surface missing: {needle!r}"
 
+    # Phase 54.4 — Facts from the corpus (concept-page KG triples).
+    for needle in (
+        "wiki-facts-block",      # section container
+        "wiki-facts-list",       # list class
+        "_renderWikiFacts",      # JS renderer
+        "related_triples",       # payload field on /api/wiki/page/<slug>
+        "wf-fam-causal",         # predicate-family colour class
+    ):
+        assert needle in src, f"phase 54.4 facts surface missing: {needle!r}"
+
     # Backlinks scanner contract on synthetic page content. Uses the
     # `base_dir` override so we don't have to mutate Pydantic Settings
     # (which are frozen).

@@ -2947,6 +2947,40 @@ async def api_wiki_page(slug: str):
     except Exception:
         pass
 
+    # Phase 54.4 — for concept pages, include the knowledge_graph
+    # triples whose subject or object matches this concept (by title
+    # or slug, lowercased). Turns stub concept pages into useful
+    # "Facts from the corpus" views without waiting for
+    # `wiki compile --rewrite-stale` to fill out the prose.
+    if page.get("page_type") == "concept":
+        try:
+            title_lower = (page.get("title") or slug).lower()
+            slug_spaced = slug.replace("-", " ").lower()
+            with get_session() as session:
+                tri_rows = session.execute(text("""
+                    SELECT kg.subject, kg.predicate, kg.object,
+                           kg.source_doc_id::text, kg.confidence,
+                           pm.title, kg.source_sentence
+                    FROM knowledge_graph kg
+                    LEFT JOIN paper_metadata pm ON pm.document_id = kg.source_doc_id
+                    WHERE LOWER(kg.subject) IN (:t, :s)
+                       OR LOWER(kg.object)  IN (:t, :s)
+                    ORDER BY kg.confidence DESC, kg.subject
+                    LIMIT 50
+                """), {"t": title_lower, "s": slug_spaced}).fetchall()
+            page["related_triples"] = [
+                {
+                    "subject": r[0], "predicate": r[1], "object": r[2],
+                    "source_doc_id": r[3],
+                    "confidence": float(r[4] or 1.0),
+                    "source_title": r[5],
+                    "source_sentence": r[6],
+                }
+                for r in tri_rows
+            ]
+        except Exception:
+            page["related_triples"] = []
+
     page["content_html"] = _md_to_html(page.get("content", ""))
     return JSONResponse(page)
 
@@ -5630,6 +5664,38 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
                       border-radius: var(--r-md);
                       font-size: 11px; color: var(--fg-muted); }}
 .wiki-ask-sources ol {{ padding-left: var(--sp-3); margin: 4px 0; }}
+/* Phase 54.4 — Facts from the corpus (KG triples scoped to a concept). */
+.wiki-extras-head {{ display: flex; justify-content: space-between;
+                     align-items: center; margin-bottom: var(--sp-2); }}
+.wiki-extras-head .wiki-extras-h {{ margin: 0; }}
+.wiki-facts-kglink {{ font-size: 11px; color: var(--accent);
+                      text-decoration: none; }}
+.wiki-facts-kglink:hover {{ text-decoration: underline; }}
+.wiki-facts-list {{ list-style: none; padding: 0; margin: 0;
+                    display: flex; flex-direction: column; gap: 6px;
+                    max-height: 360px; overflow-y: auto; }}
+.wiki-facts-list li {{ font-size: 13px; line-height: 1.45;
+                       padding: 6px 10px;
+                       background: var(--bg);
+                       border-left: 3px solid var(--accent);
+                       border-radius: 0 var(--r-md) var(--r-md) 0; }}
+.wiki-facts-list .wf-subject, .wiki-facts-list .wf-object {{
+    font-weight: 600; color: var(--fg); }}
+.wiki-facts-list .wf-pred {{ color: var(--fg-muted);
+                              font-family: var(--font-mono);
+                              font-size: 11px;
+                              padding: 0 4px; }}
+.wiki-facts-list .wf-src {{ display: block; font-size: 11px;
+                             color: var(--fg-muted);
+                             font-style: italic;
+                             margin-top: 2px; }}
+/* Colour the border by predicate family when the client has detected one */
+.wiki-facts-list li.wf-fam-causal       {{ border-left-color: #D55E00; }}
+.wiki-facts-list li.wf-fam-measurement  {{ border-left-color: #0072B2; }}
+.wiki-facts-list li.wf-fam-taxonomic    {{ border-left-color: #009E73; }}
+.wiki-facts-list li.wf-fam-compositional{{ border-left-color: #8ed6a5; }}
+.wiki-facts-list li.wf-fam-citational   {{ border-left-color: #999999; }}
+.wiki-facts-list li.wf-fam-other        {{ border-left-color: #CC79A7; }}
 /* Phase 15 — live streaming stats footer (tok/s, elapsed, model) */
 .stream-stats {{ display: flex; align-items: center; gap: var(--sp-3);
                 font-family: var(--font-mono); font-size: 11px;
@@ -6353,6 +6419,17 @@ body.task-bar-open {{ padding-top: 40px; }}
             <aside id="wiki-toc" class="wiki-toc"></aside>
             <div>
               <div id="wiki-page-content" class="wiki-page-content"></div>
+              <!-- Phase 54.4 — "Facts from the corpus" on concept pages -->
+              <section id="wiki-facts-block" class="wiki-extras" style="display:none;">
+                <div class="wiki-extras-head">
+                  <h3 class="wiki-extras-h">Facts from the corpus</h3>
+                  <a id="wiki-facts-kg-link" class="wiki-facts-kglink"
+                     href="#" title="Open this concept in the 3D knowledge graph">
+                    &#127760; open in graph
+                  </a>
+                </div>
+                <ul id="wiki-facts-list" class="wiki-facts-list"></ul>
+              </section>
               <!-- Phase 54.3 — Ask this page inline RAG -->
               <section id="wiki-ask-block" class="wiki-extras wiki-ask-extras">
                 <h3 class="wiki-extras-h">Ask a question about this page</h3>
@@ -11879,6 +11956,9 @@ async function openWikiPage(slug) {{
     // non-empty. No blocking — the main content paints first.
     _loadWikiRelated(slug);
     _loadWikiBacklinks(slug);
+
+    // Phase 54.4 — Facts from the corpus (concept pages only).
+    _renderWikiFacts(data);
     // Phase 54 — honour `?h=<heading-id>` in the hash if present.
     const m = (window.location.hash || '').match(/\\?h=([^&]+)$/);
     if (m) {{
@@ -12005,6 +12085,79 @@ async function askWikiPage() {{
     try {{ source.close(); }} catch (e) {{}}
     _wikiAskSource = null;
   }};
+}}
+
+// Phase 54.4 — Render the "Facts from the corpus" block using the
+// triples the API attaches to concept pages (server-side join
+// against the knowledge_graph table). Hidden when the page isn't a
+// concept or no triples matched.
+function _renderWikiFacts(data) {{
+  const block = document.getElementById('wiki-facts-block');
+  const list = document.getElementById('wiki-facts-list');
+  const link = document.getElementById('wiki-facts-kg-link');
+  if (!block || !list) return;
+  const triples = (data && data.related_triples) || [];
+  if (data.page_type !== 'concept' || !triples.length) {{
+    block.style.display = 'none';
+    return;
+  }}
+  // "Open in graph" — use the KG modal's existing share-URL convention
+  // so the concept opens pinned at the centre of the 3D orbit view.
+  if (link && typeof KG_THEMES !== 'undefined') {{
+    try {{
+      const shareState = {{
+        f: {{ s: '', p: '', o: '' }},
+        c: {{ rx: -0.22, ry: 0.55, d: 850 }},
+        p: [ (data.title || _currentWikiSlug).toLowerCase() ],
+      }};
+      const hash = '#kg=' + btoa(unescape(encodeURIComponent(
+        JSON.stringify(shareState))));
+      link.href = hash;
+      // Also pre-fill the subject filter when the user lands in the KG
+      link.addEventListener('click', (evt) => {{
+        evt.preventDefault();
+        const subj = document.getElementById('kg-subject');
+        if (subj) subj.value = data.title || _currentWikiSlug;
+        window.location.hash = hash;
+      }}, {{ once: true }});
+    }} catch (e) {{ /* leave link as-is on encode failure */ }}
+  }}
+
+  // Classify each triple by predicate family so the left-border
+  // matches the KG colour scheme. Reuses KG_PREDICATE_FAMILIES
+  // from the KG modal script if it's loaded.
+  function _family(predicate) {{
+    try {{
+      if (typeof _kgPredicateFamily === 'function') return _kgPredicateFamily(predicate);
+    }} catch (e) {{}}
+    return 'other';
+  }}
+
+  list.innerHTML = triples.slice(0, 40).map(t => {{
+    const fam = _family(t.predicate || '');
+    const sent = t.source_sentence || '';
+    const docTitle = t.source_title || '';
+    const tipParts = [];
+    if (docTitle) tipParts.push(docTitle);
+    if (sent) tipParts.push('“' + sent + '”');
+    const tipAttr = tipParts.length
+      ? ' title="' + escapeHtml(tipParts.join(' — ')) + '"'
+      : '';
+    let srcHtml = '';
+    if (sent) {{
+      const short = sent.length > 140 ? sent.substring(0, 140) + '…' : sent;
+      srcHtml = '<span class="wf-src">' + escapeHtml(short) + '</span>';
+    }}
+    return (
+      '<li class="wf-fam-' + fam + '"' + tipAttr + '>' +
+      '<span class="wf-subject">' + escapeHtml(t.subject || '') + '</span>' +
+      '<span class="wf-pred"> ' + escapeHtml(t.predicate || '') + ' </span>' +
+      '<span class="wf-object">' + escapeHtml(t.object || '') + '</span>' +
+      srcHtml +
+      '</li>'
+    );
+  }}).join('');
+  block.style.display = 'block';
 }}
 
 // Phase 54.2 — Related / backlinks loaders.
