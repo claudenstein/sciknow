@@ -5391,6 +5391,61 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
                                  background: var(--border); }}
 /* Edge paths should receive hover + right-click events */
 #kg-graph-canvas .kg-edge {{ pointer-events: stroke; cursor: pointer; }}
+/* Custom color pickers: compact inline "swatch" buttons. The native
+   <input type="color"> renders as a small rounded rectangle showing
+   the picked color — paired with a short text tag (BG/Aa/Ed/No) so
+   users don't need a tooltip to know which channel each one controls. */
+.kg-color-box {{ display: inline-flex; gap: 3px; align-items: center;
+                 padding: 1px 4px 1px 5px; border-radius: 4px;
+                 background: var(--bg-elevated);
+                 border: 1px solid var(--border); cursor: pointer;
+                 font-size: 10px; line-height: 1;
+                 color: var(--fg-muted); }}
+.kg-color-box:hover {{ border-color: var(--accent); }}
+.kg-color-tag {{ font-family: var(--font-mono);
+                 text-transform: uppercase;
+                 letter-spacing: 0.05em; }}
+.kg-color-box input[type="color"] {{
+  width: 22px; height: 18px; padding: 0; border: 0;
+  background: transparent; cursor: pointer;
+}}
+.kg-color-box input[type="color"]::-webkit-color-swatch-wrapper {{ padding: 0; }}
+.kg-color-box input[type="color"]::-webkit-color-swatch {{
+  border: 1px solid var(--border); border-radius: 3px;
+}}
+.kg-color-box input[type="color"]::-moz-color-swatch {{
+  border: 1px solid var(--border); border-radius: 3px;
+}}
+.kg-sep {{ width: 1px; height: 20px; background: var(--border);
+           margin: 0 6px; display: inline-block; }}
+.kg-invert-btn-sm {{ padding: 2px 8px; font-size: 13px;
+                     line-height: 1; margin-left: 0; }}
+/* Fullscreen for the KG graph pane: pane fills the viewport, canvas
+   fills the available vertical space after the toolbar + status line. */
+#kg-graph-pane:fullscreen {{
+  background: var(--bg);
+  padding: 16px 20px;
+  overflow: auto;
+  width: 100vw;
+  height: 100vh;
+  box-sizing: border-box;
+}}
+#kg-graph-pane:-webkit-full-screen {{
+  background: var(--bg);
+  padding: 16px 20px;
+  overflow: auto;
+  width: 100vw;
+  height: 100vh;
+  box-sizing: border-box;
+}}
+#kg-graph-pane:fullscreen #kg-graph-canvas {{
+  height: calc(100vh - 160px);
+  min-height: 400px;
+}}
+#kg-graph-pane:-webkit-full-screen #kg-graph-canvas {{
+  height: calc(100vh - 160px);
+  min-height: 400px;
+}}
 /* Phase 30 — persistent global task bar (top of viewport, full width).
    Visible whenever a job is running, regardless of SPA navigation.
    Designed to be unobtrusive: ~40px tall, mono font for the numerics,
@@ -6757,6 +6812,43 @@ body.task-bar-open {{ padding-top: 40px; }}
                   title="Swap to the paired light/dark preset">
             &#8646; Invert
           </button>
+          <span class="kg-sep"></span>
+          <span class="kg-controls-label">Custom</span>
+          <label class="kg-color-box" title="Background color (any RGB)">
+            <span class="kg-color-tag">BG</span>
+            <input type="color" id="kg-color-bg"
+                   oninput="kgSetCustomColor('bg', this.value)"
+                   value="#060b18"/>
+          </label>
+          <label class="kg-color-box" title="Letter / label color — stroke auto-contrasts">
+            <span class="kg-color-tag">Aa</span>
+            <input type="color" id="kg-color-label"
+                   oninput="kgSetCustomColor('label', this.value)"
+                   value="#e6f0ff"/>
+          </label>
+          <label class="kg-color-box" title="Edge (connection line) color">
+            <span class="kg-color-tag">Ed</span>
+            <input type="color" id="kg-color-edge"
+                   oninput="kgSetCustomColor('edge', this.value)"
+                   value="#7fb6ff"/>
+          </label>
+          <label class="kg-color-box" title="Node accent color (sphere gradient mid stop)">
+            <span class="kg-color-tag">No</span>
+            <input type="color" id="kg-color-node"
+                   oninput="kgSetCustomColor('node', this.value)"
+                   value="#8fc3ff"/>
+          </label>
+          <button class="kg-invert-btn kg-invert-btn-sm"
+                  onclick="kgClearCustomColors()"
+                  title="Clear custom colors — revert to the active preset">
+            &#8634;
+          </button>
+          <span class="kg-sep"></span>
+          <button id="kg-fullscreen-btn" class="kg-invert-btn"
+                  onclick="kgToggleFullscreen()"
+                  title="Fill the screen with just the graph pane (Esc to exit)">
+            &#9974; Fullscreen
+          </button>
         </div>
         <div class="kg-controls kg-controls-2">
           <input type="search" id="kg-search" class="kg-search-input"
@@ -7518,6 +7610,11 @@ function dismissTaskBar() {{
 
 // ── Phase 30/31: Knowledge Graph browse modal (Graph + Table tabs) ────
 async function openKgModal() {{
+  // Restore the user's saved palette / overrides BEFORE the first
+  // render so the canvas opens in the last theme they used instead
+  // of briefly flashing the default. (Chip swatches + color pickers
+  // get initialised inside _initKgThemeChips on the first render.)
+  _kgLoadPrefs();
   openModal('kg-modal');
   switchKgTab('kg-graph');
   await loadKg(0);
@@ -7675,6 +7772,149 @@ const KG_THEMES = {{
   }},
 }};
 let _kgActiveTheme = 'deep-space';
+// Per-user color overrides layered on top of the active preset. Empty
+// object = pure preset. Any key in here wins over the same key in
+// KG_THEMES[_kgActiveTheme] when the sim reads its colors. Persisted
+// to localStorage alongside _kgActiveTheme so the last palette the
+// user picked (preset + any custom tweaks) is restored next session.
+let _kgCustomOverrides = {{}};
+
+// Choose a readable text color (black or white) given a background hex,
+// using the standard luminance formula. Used so that picking a label
+// color auto-sets the label stroke to maintain contrast against
+// whatever background the node happens to be over.
+function _kgContrast(hex) {{
+  const m = (hex || '').replace('#', '').trim();
+  if (m.length !== 6 && m.length !== 3) return '#000000';
+  const full = m.length === 3
+    ? m.split('').map(c => c + c).join('')
+    : m;
+  const r = parseInt(full.slice(0, 2), 16);
+  const g = parseInt(full.slice(2, 4), 16);
+  const b = parseInt(full.slice(4, 6), 16);
+  const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return lum > 0.55 ? '#0a0a0a' : '#ffffff';
+}}
+
+// Darken a hex color by a 0..1 factor (0.7 = 70% of original). Used to
+// derive the outer shading stop of a sphere-shaded node when the user
+// picks the node's main color.
+function _kgDarken(hex, factor) {{
+  const m = (hex || '').replace('#', '').trim();
+  if (m.length !== 6) return hex;
+  const r = Math.max(0, Math.min(255, Math.round(parseInt(m.slice(0, 2), 16) * factor)));
+  const g = Math.max(0, Math.min(255, Math.round(parseInt(m.slice(2, 4), 16) * factor)));
+  const b = Math.max(0, Math.min(255, Math.round(parseInt(m.slice(4, 6), 16) * factor)));
+  const toHex = (v) => v.toString(16).padStart(2, '0');
+  return '#' + toHex(r) + toHex(g) + toHex(b);
+}}
+
+// Merged palette: active preset with overrides applied on top. Callers
+// that need colors should go through this, never read KG_THEMES
+// directly, so custom tweaks are respected.
+function _kgEffectiveTheme() {{
+  const base = KG_THEMES[_kgActiveTheme] || KG_THEMES['deep-space'];
+  return Object.assign({{}}, base, _kgCustomOverrides || {{}});
+}}
+
+// Persist theme + overrides across sessions. The key is versioned
+// (`_v1`) so we can evolve the shape later without loading stale data.
+function _kgSavePrefs() {{
+  try {{
+    localStorage.setItem('kg_prefs_v1', JSON.stringify({{
+      theme: _kgActiveTheme,
+      overrides: _kgCustomOverrides,
+    }}));
+  }} catch (e) {{ /* localStorage can throw in private mode */ }}
+}}
+function _kgLoadPrefs() {{
+  try {{
+    const s = localStorage.getItem('kg_prefs_v1');
+    if (!s) return;
+    const p = JSON.parse(s);
+    if (p && p.theme && KG_THEMES[p.theme]) _kgActiveTheme = p.theme;
+    if (p && p.overrides && typeof p.overrides === 'object') {{
+      _kgCustomOverrides = p.overrides;
+    }}
+  }} catch (e) {{ /* ignore corrupted prefs */ }}
+}}
+
+// Push the effective theme into the running simulation without
+// restarting it. Called after any preset / override change.
+function _kgRefreshLiveTheme() {{
+  const c = document.getElementById('kg-graph-canvas');
+  if (c && c._kgSim && c._kgSim.refreshTheme) c._kgSim.refreshTheme();
+  // Keep the color-picker inputs in sync with the effective theme so
+  // reopening the modal doesn't show stale values against a live bg.
+  const t = _kgEffectiveTheme();
+  const bgPicker = document.getElementById('kg-color-bg');
+  const lbPicker = document.getElementById('kg-color-label');
+  const edPicker = document.getElementById('kg-color-edge');
+  const ndPicker = document.getElementById('kg-color-node');
+  if (bgPicker) bgPicker.value = t.canvasBg || t.bgOuter || '#060b18';
+  if (lbPicker) lbPicker.value = t.label || '#e6f0ff';
+  if (edPicker) edPicker.value = t.edge || '#7fb6ff';
+  if (ndPicker) ndPicker.value = t.nodeMid || '#8fc3ff';
+}}
+
+// Handler for each color-picker input (BG / Label / Edge / Node). For
+// BG we set all three bg stops to the same color (solid fill); for
+// Label we auto-derive the stroke as the contrast color so labels
+// remain readable. Overrides are saved to localStorage immediately.
+function kgSetCustomColor(kind, value) {{
+  if (!value || typeof value !== 'string') return;
+  if (kind === 'bg') {{
+    _kgCustomOverrides.canvasBg = value;
+    _kgCustomOverrides.bgInner = value;
+    _kgCustomOverrides.bgOuter = value;
+  }} else if (kind === 'label') {{
+    _kgCustomOverrides.label = value;
+    _kgCustomOverrides.labelStroke = _kgContrast(value);
+  }} else if (kind === 'edge') {{
+    _kgCustomOverrides.edge = value;
+  }} else if (kind === 'node') {{
+    _kgCustomOverrides.nodeMid = value;
+    _kgCustomOverrides.nodeOuter = _kgDarken(value, 0.35);
+    _kgCustomOverrides.nodeStroke = _kgDarken(value, 0.2);
+  }} else {{
+    return;
+  }}
+  _kgSavePrefs();
+  _kgRefreshLiveTheme();
+}}
+
+// Wipe all per-user overrides, snapping the live theme back to whatever
+// preset is currently active.
+function kgClearCustomColors() {{
+  _kgCustomOverrides = {{}};
+  _kgSavePrefs();
+  _kgRefreshLiveTheme();
+}}
+
+// Toggle fullscreen for the KG graph pane. Using the pane (not the
+// whole modal) means the toolbar + canvas fill the screen while the
+// rest of the modal chrome is hidden by the browser's fullscreen UI.
+function kgToggleFullscreen() {{
+  const target = document.getElementById('kg-graph-pane');
+  if (!target) return;
+  const isFs = !!(document.fullscreenElement || document.webkitFullscreenElement);
+  if (!isFs) {{
+    const req = target.requestFullscreen || target.webkitRequestFullscreen;
+    if (req) req.call(target).catch(() => {{}});
+  }} else {{
+    const ex = document.exitFullscreen || document.webkitExitFullscreen;
+    if (ex) ex.call(document).catch(() => {{}});
+  }}
+}}
+// Keep the fullscreen button label accurate across user-initiated
+// enter/exit (e.g. ESC or browser chrome).
+document.addEventListener('fullscreenchange', () => {{
+  const btn = document.getElementById('kg-fullscreen-btn');
+  if (!btn) return;
+  btn.innerHTML = document.fullscreenElement
+    ? '\\u2922 Exit fullscreen'
+    : '\\u26F6 Fullscreen';
+}});
 
 // Apply a theme's gradient stops to the SVG <defs>. Called on init and
 // whenever the user picks a new preset — the render() loop then paints
@@ -7699,18 +7939,19 @@ function _applyKgDefs(svg, theme) {{
     '</radialGradient>';
 }}
 
-// Switch the active KG theme. Safe to call before the graph is built
-// (just stores the preference for the next _renderKgGraph).
+// Switch the active KG theme. Clicking a preset clears any custom
+// overrides (the chip is meant as a reset-to-known-good). Safe to
+// call before the graph is built — it just updates state that the
+// next _renderKgGraph will read.
 function setKgTheme(name) {{
   if (!KG_THEMES[name]) return;
   _kgActiveTheme = name;
-  const canvas = document.getElementById('kg-graph-canvas');
-  if (canvas && canvas._kgSim && canvas._kgSim.setTheme) {{
-    canvas._kgSim.setTheme(name);
-  }}
+  _kgCustomOverrides = {{}};
+  _kgSavePrefs();
   document.querySelectorAll('.kg-theme-chip').forEach(c => {{
     c.classList.toggle('active', c.getAttribute('data-theme') === name);
   }});
+  _kgRefreshLiveTheme();
 }}
 
 // One-click swap to the paired light/dark preset of the current theme.
@@ -7720,10 +7961,12 @@ function invertKgTheme() {{
 }}
 
 // Paint each theme chip with a tiny radial preview of its palette
-// (one-time; chips live inside the modal markup). Chip click handlers
-// are delegated through setKgTheme.
+// (one-time; chips live inside the modal markup). Also loads the
+// persisted prefs from the last session so the initial render uses
+// the user's saved theme + overrides instead of the defaults.
 function _initKgThemeChips() {{
   if (window._kgChipsReady) return;
+  _kgLoadPrefs();
   document.querySelectorAll('.kg-theme-chip').forEach(chip => {{
     const name = chip.getAttribute('data-theme');
     const t = KG_THEMES[name];
@@ -7735,6 +7978,18 @@ function _initKgThemeChips() {{
     chip.title = t.name;
     chip.classList.toggle('active', name === _kgActiveTheme);
     chip.addEventListener('click', () => setKgTheme(name));
+  }});
+  // Seed the color pickers from the effective theme.
+  const t = _kgEffectiveTheme();
+  const pairs = [
+    ['kg-color-bg', t.canvasBg],
+    ['kg-color-label', t.label],
+    ['kg-color-edge', t.edge],
+    ['kg-color-node', t.nodeMid],
+  ];
+  pairs.forEach(([id, val]) => {{
+    const el = document.getElementById(id);
+    if (el && val) el.value = val;
   }});
   window._kgChipsReady = true;
 }}
@@ -8093,7 +8348,7 @@ function _renderKgGraph(triples) {{
   // ── Camera + view state ────────────────────────────────────────
   const cam = {{ rotX: -0.22, rotY: 0.55, dist: 850, fov: 680 }};
   const camDefault = {{ rotX: -0.22, rotY: 0.55, dist: 850 }};
-  let theme = KG_THEMES[_kgActiveTheme] || KG_THEMES['deep-space'];
+  let theme = _kgEffectiveTheme();
   let colorBy = 'cluster';  // 'cluster' | 'predicate' | 'theme'
   let labelScale = 1.0;
   let degFilter = 999;       // max degree; nodes above this are hidden
@@ -8340,10 +8595,19 @@ function _renderKgGraph(triples) {{
 
   // ── Interaction: drag/orbit/wheel + hover dim + right-click menu ─
   let drag = null;
+  // Convert a pointer event to local coordinates in the SVG's viewBox
+  // space. Returns both the raw screen-space delta (`sx/sy`, used for
+  // orbit sensitivity tuning) and viewBox-space coordinates (`x/y`,
+  // used for node drag) so dragging a node stays under the cursor
+  // even when the SVG is scaled (e.g. in fullscreen, where 1 screen
+  // pixel ≠ 1 viewBox unit).
   function localPoint(evt) {{
     const rect = svg.getBoundingClientRect();
-    return {{ x: evt.clientX - rect.left - rect.width / 2,
-             y: evt.clientY - rect.top - rect.height / 2 }};
+    const sx = evt.clientX - rect.left - rect.width / 2;
+    const sy = evt.clientY - rect.top - rect.height / 2;
+    const scaleX = W / Math.max(rect.width, 1);
+    const scaleY = H / Math.max(rect.height, 1);
+    return {{ x: sx * scaleX, y: sy * scaleY, sx: sx, sy: sy }};
   }}
   function neighborsOf(id) {{
     const ns = new Set([id]);
@@ -8365,11 +8629,16 @@ function _renderKgGraph(triples) {{
       const n = nodes[id];
       const p = project(n);
       n.fixed = true;
-      drag = {{ mode: 'node', id: id, startX: pt.x, startY: pt.y,
+      // startX/Y are viewBox-space; startSX/SY are screen-px — both
+      // kept so orbit and node drag each use the right scale.
+      drag = {{ mode: 'node', id: id,
+                startX: pt.x, startY: pt.y,
+                startSX: pt.sx, startSY: pt.sy,
                 startWX: n.x, startWY: n.y, startWZ: n.z,
                 startZcam: p.zcam, moved: false }};
     }} else {{
       drag = {{ mode: 'orbit', startX: pt.x, startY: pt.y,
+                startSX: pt.sx, startSY: pt.sy,
                 startRotX: cam.rotX, startRotY: cam.rotY }};
     }}
     svg.classList.add('kg-grabbing');
@@ -8378,12 +8647,18 @@ function _renderKgGraph(triples) {{
   function onMove(evt) {{
     if (!drag) return;
     const pt = localPoint(evt);
-    const dx = pt.x - drag.startX, dy = pt.y - drag.startY;
     if (drag.mode === 'orbit') {{
-      cam.rotY = drag.startRotY + dx * 0.006;
-      cam.rotX = Math.max(-1.45, Math.min(1.45, drag.startRotX + dy * 0.006));
+      // Orbit uses screen-px delta so sensitivity stays consistent
+      // regardless of how the SVG is scaled on screen.
+      const dsx = pt.sx - drag.startSX, dsy = pt.sy - drag.startSY;
+      cam.rotY = drag.startRotY + dsx * 0.006;
+      cam.rotX = Math.max(-1.45, Math.min(1.45, drag.startRotX + dsy * 0.006));
     }} else {{
-      if (Math.abs(dx) + Math.abs(dy) > 2) drag.moved = true;
+      // Node drag uses viewBox-space delta so the node stays exactly
+      // under the cursor even when the SVG is scaled (fullscreen).
+      const dx = pt.x - drag.startX, dy = pt.y - drag.startY;
+      const dsx = pt.sx - drag.startSX, dsy = pt.sy - drag.startSY;
+      if (Math.abs(dsx) + Math.abs(dsy) > 2) drag.moved = true;
       const d = worldDelta(dx, dy, drag.startZcam);
       const n = nodes[drag.id];
       n.x = drag.startWX + d.x;
@@ -8618,8 +8893,18 @@ function _renderKgGraph(triples) {{
       window.removeEventListener('keydown', onKey);
     }},
     setTheme: (name) => {{
-      if (!KG_THEMES[name]) return;
-      theme = KG_THEMES[name];
+      if (name && KG_THEMES[name]) _kgActiveTheme = name;
+      theme = _kgEffectiveTheme();
+      _applyKgDefs(svg, theme);
+      _applyKgClusterDefs(svg, theme, numClusters);
+      canvas.style.background = theme.canvasBg;
+    }},
+    refreshTheme: () => {{
+      // Called after custom-color overrides change OR after a preset
+      // swap. Reads the effective (preset + overrides) theme and
+      // repushes the gradient stops. No simulation restart; the
+      // render loop picks up the new `theme` closure next frame.
+      theme = _kgEffectiveTheme();
       _applyKgDefs(svg, theme);
       _applyKgClusterDefs(svg, theme, numClusters);
       canvas.style.background = theme.canvasBg;

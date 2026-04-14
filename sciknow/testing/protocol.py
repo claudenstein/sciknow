@@ -3216,6 +3216,29 @@ def l1_phase31_kg_graph_view() -> None:
     assert 'id="kg-search"' in src, (
         "KG live search input missing from Graph tab"
     )
+    # Phase 48c — fullscreen + custom color pickers + persistent prefs.
+    assert "kgToggleFullscreen" in src and "id=\"kg-fullscreen-btn\"" in src, (
+        "KG fullscreen button missing"
+    )
+    assert "kgSetCustomColor" in src and "kgClearCustomColors" in src, (
+        "KG custom color pickers missing"
+    )
+    for pid in ("kg-color-bg", "kg-color-label", "kg-color-edge", "kg-color-node"):
+        assert f'id="{pid}"' in src, f"KG custom color picker {pid} missing"
+    assert "_kgSavePrefs" in src and "_kgLoadPrefs" in src, (
+        "KG localStorage persistence missing"
+    )
+    assert "_kgEffectiveTheme" in src and "_kgCustomOverrides" in src, (
+        "KG effective-theme merge (preset + overrides) missing"
+    )
+    assert "kg_prefs_v1" in src, (
+        "KG prefs localStorage key missing — versioned key protects "
+        "against stale data if the shape evolves"
+    )
+    assert ":fullscreen" in src, (
+        "KG :fullscreen CSS rules missing — canvas won't resize when "
+        "the pane is fullscreened"
+    )
 
 
 def l1_phase31_read_button_section_filter() -> None:
