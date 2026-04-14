@@ -6840,8 +6840,25 @@ def l1_phase49_expand_rrf_ranker() -> None:
     # CLI flags are wired (static signature check — avoids running the command)
     src = _inspect.getsource(db_cli.expand)
     for flag in ("--strategy", "--budget", "--no-openalex",
-                 "--no-semantic-scholar", "--shortlist-tsv"):
+                 "--no-semantic-scholar", "--shortlist-tsv",
+                 # Phase 49.1 — downloads/ hygiene + failure memory
+                 "--cleanup", "--retry-failed"):
         assert flag in src, f"expand CLI missing flag {flag!r}"
+
+    # Phase 49.1 — downloads hygiene helpers
+    assert hasattr(db_cli, "_normalise_title_for_dedup"), (
+        "title-normalised dedup helper missing"
+    )
+    assert db_cli._normalise_title_for_dedup("  Foo, Bar!  ") == "foo bar", (
+        "title normalisation contract changed"
+    )
+    assert hasattr(db_cli, "_move_downloaded_pdf"), (
+        "downloads/ auto-move helper missing"
+    )
+    # Standalone cleanup command registered
+    assert "cleanup-downloads" in {
+        c.name for c in db_cli.app.registered_commands
+    }, "`sciknow db cleanup-downloads` not registered"
 
 
 # ════════════════════════════════════════════════════════════════════════════

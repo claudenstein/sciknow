@@ -17,6 +17,74 @@ app = typer.Typer(help="Database and infrastructure management.")
 console = Console()
 
 
+# ── Phase 49.1 — downloads/ hygiene helpers ────────────────────────────
+# Every expand run deposits PDFs directly into <download_dir>/*.pdf.
+# Historically they stayed there forever: successful ingests kept the
+# PDF next to failed ones, users couldn't tell at a glance which were
+# still actionable, and re-running expand kept re-trying PDFs whose
+# ingest had already failed for intrinsic reasons (mangled PDF, image-
+# only scan, MinerU timeout). These helpers move each PDF to one of
+# two subfolders right after the pipeline's verdict lands, plus a
+# persistent `.ingest_failed` cache so a second run skips the known-
+# bad ones unless the user passes `--retry-failed`.
+
+_PROCESSED_SUBDIR = "processed"
+_FAILED_SUBDIR = "failed_ingest"
+
+
+def _normalise_title_for_dedup(title: str) -> str:
+    """Collapse a paper title into a stable dedup key. Lowercase,
+    strip non-word chars to single spaces, clip to 140 chars.
+    Catches duplicates where two references point at the same paper
+    via different identifiers (preprint DOI vs published DOI, arXiv
+    id vs journal DOI). Very conservative — won't match near-dupes
+    with different wording; that's a job for embedding similarity
+    which the Phase-49 ranker already does downstream."""
+    import re as _re
+    s = (title or "").lower()
+    s = _re.sub(r"[^\w\s]", " ", s)
+    s = _re.sub(r"\s+", " ", s).strip()
+    return s[:140]
+
+
+def _move_downloaded_pdf(
+    dest: Path, outcome: str, download_dir: Path, error_msg: str = ""
+) -> Path | None:
+    """Move a PDF into `processed/` or `failed_ingest/` based on the
+    ingest outcome. Returns the new path (or None if nothing moved —
+    e.g. file was already missing). Safe to call repeatedly: existing
+    files at the target are overwritten. Never raises.
+
+    `outcome` is one of: 'done', 'skipped' (already in DB), 'failed'.
+    """
+    if not dest.exists():
+        return None
+    try:
+        if outcome == "failed":
+            sub = download_dir / _FAILED_SUBDIR
+        else:
+            sub = download_dir / _PROCESSED_SUBDIR
+        sub.mkdir(parents=True, exist_ok=True)
+        target = sub / dest.name
+        # os.replace is atomic on the same filesystem and silently
+        # overwrites the target if present — perfect for this flow.
+        os.replace(dest, target)
+        if outcome == "failed" and error_msg:
+            # Drop a sibling .error.txt so the user can see WHY the
+            # ingest failed without digging through expand.log.
+            try:
+                (sub / (dest.stem + ".error.txt")).write_text(
+                    error_msg[:4000], encoding="utf-8"
+                )
+            except Exception:
+                pass
+        return target
+    except Exception:
+        # File-system hiccup (cross-device rename, permission) —
+        # leave the PDF where it was rather than fail the whole run.
+        return None
+
+
 # ── Phase 49 — RRF-fused expand ranker orchestrator ───────────────────────
 # Lives at module scope so L1 tests can import it without instantiating
 # the whole Typer app. See docs/EXPAND_RESEARCH.md for the design
@@ -1217,6 +1285,15 @@ def expand(
                                               help="Write the full ranked shortlist (kept + dropped, every signal) "
                                                    "to this TSV path. Implies --dry-run when set. Default in RRF dry-"
                                                    "run mode: <download_dir>/expand_shortlist.tsv."),
+    # ── Phase 49.1 — downloads/ hygiene + persistent failure memory
+    cleanup:      bool  = typer.Option(True,  "--cleanup/--no-cleanup",
+                                        help="After each ingest, move the downloaded PDF into <download_dir>/processed/ "
+                                             "(success or dedup) or <download_dir>/failed_ingest/ (ingest failed, with a "
+                                             ".error.txt sibling). Keeps the root of <download_dir> empty so it's easy "
+                                             "to see what's still being worked on. Default ON."),
+    retry_failed: bool  = typer.Option(False, "--retry-failed",
+                                        help="Ignore the .ingest_failed cache and re-try permanently-failed refs from "
+                                             "a prior run. Default OFF (failed refs are skipped to save compute)."),
 ):
     """
     Expand the collection by following references in existing papers.
@@ -1279,6 +1356,16 @@ def expand(
 
         existing_dois    = {r[0].lower() for r in papers if r[0]}
         existing_arxivs  = {r[1].lower() for r in papers if r[1]}
+        # Phase 49.1 — title-normalised dedup. Catches duplicates where
+        # the incoming reference points at the same paper via a
+        # different identifier (preprint DOI vs journal DOI, arXiv id
+        # vs DOI, Crossref vs OpenAlex). Built alongside the DOI/arXiv
+        # sets so the dedup step downstream has all three to check.
+        existing_titles_norm = {
+            _normalise_title_for_dedup(r[2])
+            for r in papers if r[2]
+        }
+        existing_titles_norm.discard("")
 
     console.print(f"Collection: [bold]{len(papers)}[/bold] papers, "
                   f"{len(existing_dois)} with DOI, {len(existing_arxivs)} with arXiv ID")
@@ -1372,6 +1459,7 @@ def expand(
     # ── Step 3: deduplicate references against each other and the collection ─
     seen: set[str] = set()
     candidates = []
+    skipped_by_title = 0
     for ref in all_refs:
         key = (ref.doi or "").lower() or (ref.arxiv_id or "").lower()
         if not key and not ref.title:
@@ -1381,12 +1469,26 @@ def expand(
             continue
         if ref.arxiv_id and ref.arxiv_id.lower() in existing_arxivs:
             continue
+        # Phase 49.1 — title-normalised check. Catches the same paper
+        # under a different identifier (preprint DOI vs published,
+        # arXiv vs Crossref). Conservative: exact match on the
+        # normalised form, no fuzzy matching.
+        if ref.title:
+            tnorm = _normalise_title_for_dedup(ref.title)
+            if tnorm and tnorm in existing_titles_norm:
+                skipped_by_title += 1
+                continue
         # Deduplicate within this batch
         dedup_key = key or ref.title.lower()[:60]
         if dedup_key in seen:
             continue
         seen.add(dedup_key)
         candidates.append(ref)
+    if skipped_by_title:
+        console.print(
+            f"[dim]Skipped {skipped_by_title} reference(s) already in the corpus "
+            f"under a different identifier (title-dedup).[/dim]"
+        )
 
     console.print(f"New references not yet in collection: [bold]{len(candidates)}[/bold]")
 
@@ -1548,16 +1650,28 @@ def expand(
     #                 Skipped on future runs to avoid redundant API calls.
     # .ingest_done  — identifiers whose PDF was downloaded AND successfully
     #                 ingested. Skipped entirely on re-runs.
-    no_oa_cache_file  = download_dir / ".no_oa_cache"
-    ingest_done_file  = download_dir / ".ingest_done"
+    no_oa_cache_file   = download_dir / ".no_oa_cache"
+    ingest_done_file   = download_dir / ".ingest_done"
+    ingest_failed_file = download_dir / ".ingest_failed"  # Phase 49.1
 
     no_oa_cache: set[str] = set()
     ingest_done: set[str] = set()
+    ingest_failed: set[str] = set()
 
     if no_oa_cache_file.exists():
         no_oa_cache = set(no_oa_cache_file.read_text().splitlines())
     if ingest_done_file.exists():
         ingest_done = set(ingest_done_file.read_text().splitlines())
+    # Phase 49.1 — persistent failure memory. A previously-failed ingest
+    # usually fails again for intrinsic reasons (bad PDF, image-only
+    # scan, MinerU timeout). Skip unless the user explicitly retries.
+    if ingest_failed_file.exists() and not retry_failed:
+        ingest_failed = set(ingest_failed_file.read_text().splitlines())
+        if ingest_failed:
+            console.print(
+                f"[dim]{len(ingest_failed)} ref(s) cached as previously failed — "
+                f"will skip. Pass --retry-failed to force a retry.[/dim]"
+            )
 
     # ── Step 7: download phase (parallel) + ingest phase (serial, in-process) ─
     #
@@ -1599,8 +1713,15 @@ def expand(
 
     def _download_one(ref, ref_key, dest, title):
         """I/O-bound: runs in a worker thread. Never touches caches/logs/DB."""
-        if ref_key in ingest_done or ref_key in no_oa_cache:
+        if ref_key in no_oa_cache or ref_key in ingest_failed:
             return ("cached", None)
+        # Phase 49.1 — a prior run that successfully ingested this ref
+        # either wrote to the legacy `.ingest_done` cache OR moved the
+        # PDF into <download_dir>/processed/. Either signal means
+        # "already handled; don't re-download, don't re-ingest".
+        processed_copy = download_dir / _PROCESSED_SUBDIR / dest.name
+        if ref_key in ingest_done or processed_copy.exists():
+            return ("already_done", None)
         if dest.exists():
             return ("exists", None)
         ok, source = find_and_download(
@@ -1648,12 +1769,24 @@ def expand(
                     continue
 
                 if status == "cached":
-                    if ref_key in ingest_done:
-                        skipped += 1
-                        _log(f"SKIP   {ref_key}  | {title}")
-                    else:
-                        failed_dl += 1
-                        _log(f"NO_OA  {ref_key}  | {title}  (cached)")
+                    # ingest_failed / no_oa_cache → count as non-download but
+                    # not a new failure (the prior decision stands).
+                    skipped += 1
+                    reason = (
+                        "ingest previously failed"
+                        if ref_key in ingest_failed
+                        else "no OA PDF"
+                    )
+                    _log(f"SKIP   {ref_key}  | {title}  ({reason}, cached)")
+                    progress.advance(task)
+                    continue
+
+                if status == "already_done":
+                    # Phase 49.1 — prior successful ingest (either via legacy
+                    # .ingest_done cache or because its PDF lives in the
+                    # processed/ subfolder).
+                    skipped += 1
+                    _log(f"SKIP   {ref_key}  | {title}  (already in corpus)")
                     progress.advance(task)
                     continue
 
@@ -1723,6 +1856,23 @@ def expand(
             elif status == "failed":
                 failed_ingest += 1
                 _log(f"INGEST_FAIL {ref_key}  | {title}  | {error or ''}")
+                # Phase 49.1 — persist the failure so the next run
+                # skips this ref by default. User can force a retry
+                # with `--retry-failed`.
+                try:
+                    with ingest_failed_file.open("a") as _ff:
+                        _ff.write(ref_key + "\n")
+                    ingest_failed.add(ref_key)
+                except Exception:
+                    pass
+            # Phase 49.1 — move the PDF into a processed/ or
+            # failed_ingest/ subfolder so <download_dir> stays tidy.
+            # The user can `--no-cleanup` to keep the old behaviour
+            # (everything at the root of download_dir).
+            if cleanup:
+                _move_downloaded_pdf(
+                    path, status, download_dir, error_msg=error or ""
+                )
 
         worker_note = f" ({ingest_workers} workers)" if ingest_workers > 1 else ""
         console.print(
@@ -1811,6 +1961,89 @@ def expand(
                 console.print(f"[dim]✓ Backfilled {new_links} citation cross-links.[/dim]")
         except Exception as exc:
             console.print(f"[dim]citation link-backfill skipped: {exc}[/dim]")
+
+
+@app.command(name="cleanup-downloads")
+def cleanup_downloads(
+    download_dir: Path = typer.Option(None, "--download-dir", "-d",
+                                       help="Directory to tidy (default: <project data>/downloads)."),
+    dry_run: bool = typer.Option(False, "--dry-run",
+                                  help="Show what would move, don't move anything."),
+    delete_dupes: bool = typer.Option(False, "--delete-dupes",
+                                       help="Delete PDFs that match a paper already in the DB by SHA-256 "
+                                            "instead of moving them to processed/. Saves disk but loses the "
+                                            "audit trail — only use if you're sure."),
+):
+    """Phase 49.1 — one-shot cleanup for pre-existing <download_dir>
+    accumulation (files left over from pre-cleanup runs).
+
+    For every PDF in the root of <download_dir>:
+      * If its SHA-256 matches a `documents` row with status='complete',
+        move it to <download_dir>/processed/ (or delete with
+        --delete-dupes) — its content is already in the corpus.
+      * Otherwise leave it alone — it might be mid-run or genuinely new.
+
+    The live expand flow now auto-moves files as they're processed;
+    this command is for retrofitting old download_dirs."""
+    from sciknow.cli import preflight
+    preflight()
+    import hashlib
+    from sqlalchemy import text as sql_text
+    from sciknow.config import settings
+    from sciknow.storage.db import get_session
+
+    if download_dir is None:
+        download_dir = settings.data_dir / "downloads"
+    if not download_dir.exists():
+        console.print(f"[yellow]{download_dir} does not exist — nothing to clean.[/yellow]")
+        raise typer.Exit(0)
+
+    root_pdfs = sorted(
+        p for p in download_dir.iterdir() if p.is_file() and p.suffix.lower() == ".pdf"
+    )
+    if not root_pdfs:
+        console.print(f"[green]{download_dir} is already tidy — no loose PDFs at root.[/green]")
+        raise typer.Exit(0)
+
+    console.print(f"Scanning [bold]{len(root_pdfs)}[/bold] loose PDF(s) in {download_dir}…")
+
+    # Build SHA → document_id index for the corpus.
+    with get_session() as session:
+        rows = session.execute(sql_text(
+            "SELECT file_hash, id FROM documents WHERE ingestion_status = 'complete'"
+        )).fetchall()
+    sha_to_doc = {r[0]: r[1] for r in rows if r[0]}
+
+    moved = deleted = kept = 0
+    for p in root_pdfs:
+        try:
+            h = hashlib.sha256(p.read_bytes()).hexdigest()
+        except Exception as exc:
+            console.print(f"  [red]skip[/red] {p.name}: {exc}")
+            kept += 1
+            continue
+        if h in sha_to_doc:
+            if dry_run:
+                console.print(f"  [dim]would move[/dim] {p.name} (SHA match)")
+                moved += 1
+            elif delete_dupes:
+                p.unlink()
+                deleted += 1
+            else:
+                new = _move_downloaded_pdf(
+                    p, outcome="skipped", download_dir=download_dir,
+                )
+                moved += 1 if new else 0
+        else:
+            kept += 1
+
+    verb = "Would move" if dry_run else "Moved"
+    console.print(
+        f"\n[bold]Summary:[/bold] "
+        f"[green]✓ {moved} {verb.lower()} to processed/[/green]  "
+        f"[yellow]↷ {kept} kept (not in DB yet)[/yellow]"
+        + (f"  [red]✗ {deleted} deleted[/red]" if deleted else "")
+    )
 
 
 @app.command(name="link-citations")
