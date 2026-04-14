@@ -3148,14 +3148,23 @@ def l1_phase31_kg_graph_view() -> None:
     assert "_renderKgGraph" in src and "_renderKgTable" in src, (
         "KG render helpers missing"
     )
-    assert "_renderKgGraph" in src and "Fruchterman" in src or "spring simulation" in src, (
-        "KG graph doesn't have a force-directed layout"
+    # Phase 48 — graph is a continuous 3D orbit force simulation
+    # (replaces the Phase 31 static Fruchterman 2D layout). Guard the
+    # key markers so we don't silently regress back to the static view.
+    assert "_renderKgGraph" in src, "KG render function missing"
+    assert "cam.rotX" in src and "cam.rotY" in src, (
+        "KG graph missing 3D orbit camera"
     )
-
-    # CSS for nodes/edges
-    assert ".kg-node" in src and ".kg-edge" in src, (
-        "KG graph CSS missing"
+    assert "worldDelta" in src, (
+        "KG graph missing inverse-projection for node dragging"
     )
+    assert "requestAnimationFrame" in src and "canvas._kgSim" in src, (
+        "KG graph missing continuous simulation loop + teardown hook"
+    )
+    assert "kg-nodeg" in src, (
+        "KG graph missing radial gradient (3D sphere shading)"
+    )
+    assert ".kg-node" in src, "KG graph CSS missing"
     assert "#kg-graph-canvas" in src
 
 

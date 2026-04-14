@@ -5304,26 +5304,17 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .kg-table .kg-source {{ color: var(--fg-muted); font-size: 10px;
                       max-width: 220px; overflow: hidden;
                       text-overflow: ellipsis; white-space: nowrap; }}
-/* Phase 31 — KG force-directed graph (SVG nodes + edges) */
-#kg-graph-canvas {{ width: 100%; height: 520px; cursor: grab; }}
-#kg-graph-canvas svg {{ width: 100%; height: 100%; display: block; }}
-#kg-graph-canvas .kg-node circle {{ fill: var(--accent); stroke: var(--bg-elevated);
-                                    stroke-width: 2; cursor: pointer;
-                                    transition: r 0.15s ease, fill 0.15s ease; }}
-#kg-graph-canvas .kg-node:hover circle {{ fill: var(--accent-hover); r: 9; }}
-#kg-graph-canvas .kg-node text {{ font-size: 10px; fill: var(--fg);
-                                  pointer-events: none;
-                                  font-family: var(--font-sans); }}
-#kg-graph-canvas .kg-edge {{ stroke: var(--fg-muted); stroke-width: 1;
-                            opacity: 0.5; }}
-#kg-graph-canvas .kg-edge.highlighted {{ stroke: var(--accent);
-                                         stroke-width: 2; opacity: 1; }}
-#kg-graph-canvas .kg-edge-label {{ font-size: 8px; fill: var(--fg-muted);
-                                   pointer-events: none;
-                                   font-family: var(--font-mono); }}
-#kg-graph-canvas .kg-node.selected circle {{ fill: var(--success);
-                                             stroke: var(--success-light);
-                                             stroke-width: 3; r: 10; }}
+/* Phase 48 — 3D KG canvas (orbit camera, drag nodes, wheel zoom). CSS is
+   intentionally minimal so the inline presentation attributes (radial
+   gradients, per-node opacity/scale) aren't shadowed by class rules. */
+#kg-graph-canvas {{ width: 100%; height: 520px; border-radius: 6px;
+                   overflow: hidden; user-select: none; touch-action: none;
+                   background: #060b18; }}
+#kg-graph-canvas svg {{ width: 100%; height: 100%; display: block;
+                       cursor: grab; }}
+#kg-graph-canvas svg.kg-grabbing {{ cursor: grabbing; }}
+#kg-graph-canvas .kg-node {{ cursor: grab; }}
+#kg-graph-canvas .kg-node:hover circle {{ filter: brightness(1.25); }}
 /* Phase 30 — persistent global task bar (top of viewport, full width).
    Visible whenever a job is running, regardless of SPA navigation.
    Designed to be unobtrusive: ~40px tall, mono font for the numerics,
@@ -6679,7 +6670,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       <div id="kg-graph-pane" style="display:block;">
         <div id="kg-graph-canvas" style="border:1px solid var(--border);border-radius:6px;background:var(--toolbar-bg);"></div>
         <p style="font-size:10px;color:var(--fg-muted);margin-top:6px;">
-          &middot; Drag nodes to reposition. Click any node to filter the table to triples involving that entity. Showing the top 100 highest-confidence triples in the current filter.
+          &middot; Drag the background to orbit &middot; drag a node to reposition &middot; scroll to zoom &middot; click a node (without dragging) to filter the table to triples involving that entity.
         </p>
       </div>
       <!-- Table tab pane -->
@@ -7469,22 +7460,28 @@ function _renderKgTable(triples) {{
   document.getElementById('kg-results').innerHTML = html;
 }}
 
-// Phase 31 — render the KG as an actual force-directed SVG graph.
-// Pure SVG + minimal JS (no D3 dep). Each unique entity becomes a
-// node; each triple becomes a labeled edge. Layout is a tiny
-// Fruchterman-Reingold-style spring simulation that runs for ~150
-// iterations on load.
+// Phase 48 — interactive 3D knowledge graph. Every unique entity is a
+// node in a real 3D world; triples are springs. A continuous rAF loop
+// integrates forces and redraws. The orbit camera rotates around the
+// origin (drag background), nodes can be grabbed and repositioned
+// (drag node), and the wheel zooms in/out (camera distance). Sphere
+// shading comes from a single radial gradient fill + depth-based size
+// and opacity. No extra deps — still pure SVG.
 function _renderKgGraph(triples) {{
   const canvas = document.getElementById('kg-graph-canvas');
   if (!canvas) return;
+  // Tear down any previous simulation (re-renders come from loadKg)
+  if (canvas._kgSim) {{ try {{ canvas._kgSim.stop(); }} catch (e) {{}} }}
+  canvas.innerHTML = '';
   if (!triples || triples.length === 0) {{
     canvas.innerHTML = '<div style="padding:80px 24px;text-align:center;color:var(--fg-muted);font-size:12px;">No triples match your filter.</div>';
     return;
   }}
-  const width = canvas.clientWidth || 800;
-  const height = 520;
 
-  // Build node + edge sets
+  const W = canvas.clientWidth || 800;
+  const H = 520;
+
+  // ── Build graph ────────────────────────────────────────────────
   const nodeIndex = new Map();
   const nodes = [];
   function ensureNode(label) {{
@@ -7492,99 +7489,262 @@ function _renderKgGraph(triples) {{
       nodeIndex.set(label, nodes.length);
       nodes.push({{
         id: nodes.length, label: label,
-        x: Math.random() * width, y: Math.random() * height,
-        vx: 0, vy: 0,
+        x: (Math.random() - 0.5) * 300,
+        y: (Math.random() - 0.5) * 300,
+        z: (Math.random() - 0.5) * 300,
+        vx: 0, vy: 0, vz: 0,
+        fixed: false, degree: 0,
       }});
     }}
     return nodeIndex.get(label);
   }}
-  const edges = triples.map(t => ({{
-    source: ensureNode((t.subject || '').substring(0, 60)),
-    target: ensureNode((t.object || '').substring(0, 60)),
-    predicate: t.predicate,
-  }}));
-
-  // Truncate node label for display
+  const edges = triples.map(t => {{
+    const s = ensureNode((t.subject || '').substring(0, 60));
+    const o = ensureNode((t.object || '').substring(0, 60));
+    nodes[s].degree++; nodes[o].degree++;
+    return {{ source: s, target: o, predicate: t.predicate }};
+  }});
   function nodeLabel(label) {{
     return label.length > 24 ? label.substring(0, 24) + '\\u2026' : label;
   }}
 
-  // Tiny spring simulation: F-R-style with cooling
-  const k = Math.sqrt((width * height) / Math.max(nodes.length, 1)) * 0.4;
-  let temperature = width / 10;
-  for (let iter = 0; iter < 150; iter++) {{
-    // Repulsion
-    for (let i = 0; i < nodes.length; i++) {{
-      nodes[i].vx = 0; nodes[i].vy = 0;
-      for (let j = 0; j < nodes.length; j++) {{
-        if (i === j) continue;
-        const dx = nodes[i].x - nodes[j].x;
-        const dy = nodes[i].y - nodes[j].y;
-        const d2 = dx * dx + dy * dy + 0.01;
-        const f = (k * k) / d2;
-        nodes[i].vx += dx * f;
-        nodes[i].vy += dy * f;
-      }}
-    }}
-    // Attraction along edges
-    edges.forEach(e => {{
-      const a = nodes[e.source], b = nodes[e.target];
-      const dx = a.x - b.x, dy = a.y - b.y;
-      const d = Math.sqrt(dx * dx + dy * dy) + 0.01;
-      const f = (d * d) / k;
-      const fx = (dx / d) * f;
-      const fy = (dy / d) * f;
-      a.vx -= fx; a.vy -= fy;
-      b.vx += fx; b.vy += fy;
-    }});
-    // Apply velocity capped by temperature
-    nodes.forEach(n => {{
-      const v = Math.sqrt(n.vx * n.vx + n.vy * n.vy);
-      const lim = Math.min(v, temperature);
-      n.x += (n.vx / (v || 1)) * lim;
-      n.y += (n.vy / (v || 1)) * lim;
-      // Stay inside the canvas
-      n.x = Math.max(20, Math.min(width - 20, n.x));
-      n.y = Math.max(20, Math.min(height - 20, n.y));
-    }});
-    temperature *= 0.97;
+  // ── Camera (orbit around origin) ───────────────────────────────
+  const cam = {{ rotX: -0.22, rotY: 0.55, dist: 850, fov: 680 }};
+
+  // ── SVG scaffold (built once; event listeners stable across frames) ─
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(svgNS, 'svg');
+  svg.setAttribute('viewBox', (-W/2) + ' ' + (-H/2) + ' ' + W + ' ' + H);
+  svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+  svg.innerHTML =
+    '<defs>' +
+      '<radialGradient id="kg-nodeg" cx="30%" cy="30%" r="75%">' +
+        '<stop offset="0%" stop-color="#ffffff" stop-opacity="1"/>' +
+        '<stop offset="35%" stop-color="#8fc3ff" stop-opacity="1"/>' +
+        '<stop offset="100%" stop-color="#0e2a54" stop-opacity="1"/>' +
+      '</radialGradient>' +
+      '<radialGradient id="kg-nodeh" cx="30%" cy="30%" r="75%">' +
+        '<stop offset="0%" stop-color="#ffffff" stop-opacity="1"/>' +
+        '<stop offset="30%" stop-color="#ffd98a" stop-opacity="1"/>' +
+        '<stop offset="100%" stop-color="#6a3e00" stop-opacity="1"/>' +
+      '</radialGradient>' +
+      '<radialGradient id="kg-bg" cx="50%" cy="50%" r="80%">' +
+        '<stop offset="0%" stop-color="#1e2a44" stop-opacity="1"/>' +
+        '<stop offset="100%" stop-color="#060b18" stop-opacity="1"/>' +
+      '</radialGradient>' +
+    '</defs>' +
+    '<rect class="kg-bg" x="' + (-W/2) + '" y="' + (-H/2) + '" width="' + W +
+      '" height="' + H + '" fill="url(#kg-bg)" pointer-events="all"/>' +
+    '<g class="kg-edges"></g><g class="kg-nodes"></g>';
+  canvas.appendChild(svg);
+  const edgeLayer = svg.querySelector('.kg-edges');
+  const nodeLayer = svg.querySelector('.kg-nodes');
+
+  // ── 3D projection (Y-rotate → X-rotate → perspective divide) ───
+  function project(n) {{
+    const cy = Math.cos(cam.rotY), sy = Math.sin(cam.rotY);
+    const cx = Math.cos(cam.rotX), sxA = Math.sin(cam.rotX);
+    const xr = n.x * cy + n.z * sy;
+    const zr = -n.x * sy + n.z * cy;
+    const yr = n.y;
+    const yc = yr * cx - zr * sxA;
+    const zc = yr * sxA + zr * cx;
+    const zcam = zc + cam.dist;
+    if (zcam <= 1) return {{ sx: 0, sy: 0, zcam: 1, scale: 0.0001 }};
+    const scale = cam.fov / zcam;
+    return {{ sx: xr * scale, sy: yc * scale, zcam: zcam, scale: scale }};
+  }}
+  // Inverse-project a screen-space delta at a given camera depth to
+  // a world-space delta. Used so that dragging a node keeps it under
+  // the cursor at its original depth while the camera is rotated.
+  function worldDelta(dx, dy, zcam) {{
+    const scale = cam.fov / Math.max(zcam, 1);
+    const dxc = dx / scale, dyc = dy / scale;
+    const cx = Math.cos(cam.rotX), sxA = Math.sin(cam.rotX);
+    const cy = Math.cos(cam.rotY), sy = Math.sin(cam.rotY);
+    // Inverse X-rotation of camera-space (dxc, dyc, 0)
+    const xr = dxc, yr = dyc * cx, zr = -dyc * sxA;
+    // Inverse Y-rotation
+    return {{ x: xr * cy - zr * sy, y: yr, z: xr * sy + zr * cy }};
   }}
 
-  // Render the SVG
-  let svg = '<svg viewBox="0 0 ' + width + ' ' + height + '">';
-  // Edges first so nodes render on top
-  edges.forEach((e, i) => {{
-    const a = nodes[e.source], b = nodes[e.target];
-    svg += '<line class="kg-edge" x1="' + a.x.toFixed(1) + '" y1="' + a.y.toFixed(1) +
-           '" x2="' + b.x.toFixed(1) + '" y2="' + b.y.toFixed(1) +
-           '" data-edge-i="' + i + '"></line>';
-    // Edge label at midpoint
-    const mx = ((a.x + b.x) / 2).toFixed(1);
-    const my = ((a.y + b.y) / 2).toFixed(1);
-    svg += '<text class="kg-edge-label" x="' + mx + '" y="' + my + '" text-anchor="middle">' +
-           escapeHtml(e.predicate) + '</text>';
-  }});
-  // Nodes
-  nodes.forEach(n => {{
-    svg += '<g class="kg-node" data-node-id="' + n.id + '" data-label="' + escapeHtml(n.label) + '" ' +
-           'transform="translate(' + n.x.toFixed(1) + ',' + n.y.toFixed(1) + ')">';
-    svg += '<circle r="6"></circle>';
-    svg += '<text x="9" y="3">' + escapeHtml(nodeLabel(n.label)) + '</text>';
-    svg += '</g>';
-  }});
-  svg += '</svg>';
-  canvas.innerHTML = svg;
-
-  // Click handler — clicking a node fills the subject filter and
-  // re-runs loadKg, effectively zooming into that entity.
-  canvas.querySelectorAll('.kg-node').forEach(g => {{
-    g.addEventListener('click', () => {{
-      const label = g.getAttribute('data-label');
-      document.getElementById('kg-subject').value = label;
-      switchKgTab('kg-table');
-      loadKg(0);
+  // ── Force simulation ───────────────────────────────────────────
+  const baseLen = 140;
+  const repel = 3500;
+  const springK = 0.02;
+  const damping = 0.82;
+  const centering = 0.006;
+  function step() {{
+    for (let i = 0; i < nodes.length; i++) {{
+      nodes[i].ax = 0; nodes[i].ay = 0; nodes[i].az = 0;
+    }}
+    // Pairwise repulsion (O(n²) — fine for ≤200 nodes)
+    for (let i = 0; i < nodes.length; i++) {{
+      for (let j = i + 1; j < nodes.length; j++) {{
+        const a = nodes[i], b = nodes[j];
+        const dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+        const d2 = dx*dx + dy*dy + dz*dz + 1;
+        const d = Math.sqrt(d2);
+        const f = repel / d2;
+        const ux = dx/d, uy = dy/d, uz = dz/d;
+        a.ax += ux*f; a.ay += uy*f; a.az += uz*f;
+        b.ax -= ux*f; b.ay -= uy*f; b.az -= uz*f;
+      }}
+    }}
+    // Edge springs
+    edges.forEach(e => {{
+      const a = nodes[e.source], b = nodes[e.target];
+      const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+      const d = Math.sqrt(dx*dx + dy*dy + dz*dz) + 0.01;
+      const f = springK * (d - baseLen);
+      const ux = dx/d, uy = dy/d, uz = dz/d;
+      a.ax += ux*f; a.ay += uy*f; a.az += uz*f;
+      b.ax -= ux*f; b.ay -= uy*f; b.az -= uz*f;
     }});
+    // Weak pull to origin keeps the cloud framed
+    nodes.forEach(n => {{
+      n.ax -= n.x * centering;
+      n.ay -= n.y * centering;
+      n.az -= n.z * centering;
+      if (n.fixed) {{ n.vx = 0; n.vy = 0; n.vz = 0; return; }}
+      n.vx = (n.vx + n.ax) * damping;
+      n.vy = (n.vy + n.ay) * damping;
+      n.vz = (n.vz + n.az) * damping;
+      n.x += n.vx; n.y += n.vy; n.z += n.vz;
+    }});
+  }}
+
+  // ── Render ─────────────────────────────────────────────────────
+  function render() {{
+    const proj = nodes.map(n => ({{ n: n, p: project(n) }}));
+    // Far-to-near order so near nodes paint on top
+    const order = proj.slice().sort((a, b) => b.p.zcam - a.p.zcam);
+    let eHtml = '';
+    edges.forEach(e => {{
+      const pa = proj[e.source].p, pb = proj[e.target].p;
+      const avg = (pa.zcam + pb.zcam) / 2;
+      const op = Math.max(0.12, Math.min(0.78, 900 / avg));
+      const w = Math.max(0.4, Math.min(2.4, 1.2 * Math.min(pa.scale, pb.scale)));
+      eHtml += '<line x1="' + pa.sx.toFixed(1) + '" y1="' + pa.sy.toFixed(1) +
+               '" x2="' + pb.sx.toFixed(1) + '" y2="' + pb.sy.toFixed(1) +
+               '" stroke="#7fb6ff" stroke-width="' + w.toFixed(2) +
+               '" opacity="' + op.toFixed(2) + '" pointer-events="none"/>';
+    }});
+    edgeLayer.innerHTML = eHtml;
+    let nHtml = '';
+    order.forEach(item => {{
+      const n = item.n, p = item.p;
+      const deg = Math.min(n.degree, 10);
+      const rBase = 5 + deg * 0.8;
+      const r = Math.max(2, rBase * p.scale);
+      const op = Math.max(0.35, Math.min(1.0, 1200 / p.zcam));
+      const fill = n.fixed ? 'url(#kg-nodeh)' : 'url(#kg-nodeg)';
+      nHtml += '<g class="kg-node" data-id="' + n.id + '" opacity="' + op.toFixed(2) + '">';
+      // Soft halo — bigger, more transparent, behind the main ball
+      nHtml += '<circle cx="' + p.sx.toFixed(1) + '" cy="' + p.sy.toFixed(1) +
+               '" r="' + (r * 2.2).toFixed(2) + '" fill="' + fill +
+               '" opacity="0.18" pointer-events="none"/>';
+      nHtml += '<circle cx="' + p.sx.toFixed(1) + '" cy="' + p.sy.toFixed(1) +
+               '" r="' + r.toFixed(2) + '" fill="' + fill +
+               '" stroke="#0a1a33" stroke-width="0.7"/>';
+      if (p.scale > 0.45) {{
+        const fs = Math.max(8, 10.5 * p.scale);
+        nHtml += '<text x="' + (p.sx + r + 3).toFixed(1) + '" y="' +
+                 (p.sy + 3).toFixed(1) + '" font-size="' + fs.toFixed(1) +
+                 '" fill="#e6f0ff" pointer-events="none" ' +
+                 'style="font-family:var(--font-sans);paint-order:stroke;' +
+                 'stroke:#040914;stroke-width:2.5px;">' +
+                 escapeHtml(nodeLabel(n.label)) + '</text>';
+      }}
+      nHtml += '</g>';
+    }});
+    nodeLayer.innerHTML = nHtml;
+  }}
+
+  // Let the simulation settle a bit before the first paint
+  for (let i = 0; i < 80; i++) step();
+
+  let running = true, raf = null;
+  function loop() {{
+    if (!running) return;
+    step();
+    render();
+    raf = requestAnimationFrame(loop);
+  }}
+  loop();
+
+  // ── Interaction ────────────────────────────────────────────────
+  let drag = null;
+  function localPoint(evt) {{
+    const rect = svg.getBoundingClientRect();
+    return {{ x: evt.clientX - rect.left - rect.width / 2,
+             y: evt.clientY - rect.top - rect.height / 2 }};
+  }}
+  svg.addEventListener('mousedown', (evt) => {{
+    const pt = localPoint(evt);
+    const el = evt.target.closest && evt.target.closest('.kg-node');
+    if (el) {{
+      const id = parseInt(el.getAttribute('data-id'), 10);
+      const n = nodes[id];
+      const p = project(n);
+      n.fixed = true;
+      drag = {{ mode: 'node', id: id, startX: pt.x, startY: pt.y,
+                startWX: n.x, startWY: n.y, startWZ: n.z,
+                startZcam: p.zcam, moved: false }};
+    }} else {{
+      drag = {{ mode: 'orbit', startX: pt.x, startY: pt.y,
+                startRotX: cam.rotX, startRotY: cam.rotY }};
+    }}
+    svg.classList.add('kg-grabbing');
+    evt.preventDefault();
   }});
+  function onMove(evt) {{
+    if (!drag) return;
+    const pt = localPoint(evt);
+    const dx = pt.x - drag.startX, dy = pt.y - drag.startY;
+    if (drag.mode === 'orbit') {{
+      cam.rotY = drag.startRotY + dx * 0.006;
+      cam.rotX = Math.max(-1.45, Math.min(1.45, drag.startRotX + dy * 0.006));
+    }} else {{
+      if (Math.abs(dx) + Math.abs(dy) > 2) drag.moved = true;
+      const d = worldDelta(dx, dy, drag.startZcam);
+      const n = nodes[drag.id];
+      n.x = drag.startWX + d.x;
+      n.y = drag.startWY + d.y;
+      n.z = drag.startWZ + d.z;
+      n.vx = 0; n.vy = 0; n.vz = 0;
+    }}
+  }}
+  function onUp() {{
+    if (!drag) return;
+    const d = drag; drag = null;
+    svg.classList.remove('kg-grabbing');
+    if (d.mode === 'node') {{
+      const n = nodes[d.id];
+      n.fixed = false;  // release to physics
+      if (!d.moved) {{
+        // True click (no movement) — filter the table to this entity
+        document.getElementById('kg-subject').value = n.label;
+        switchKgTab('kg-table');
+        loadKg(0);
+      }}
+    }}
+  }}
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('mouseup', onUp);
+  svg.addEventListener('wheel', (evt) => {{
+    evt.preventDefault();
+    const factor = Math.exp(evt.deltaY * 0.0015);
+    cam.dist = Math.max(250, Math.min(3000, cam.dist * factor));
+  }}, {{ passive: false }});
+
+  // Expose teardown so the next loadKg can stop this loop cleanly
+  canvas._kgSim = {{ stop: () => {{
+    running = false;
+    if (raf) cancelAnimationFrame(raf);
+    window.removeEventListener('mousemove', onMove);
+    window.removeEventListener('mouseup', onUp);
+  }} }};
 }}
 
 // ── Phase 30: Export modal ────────────────────────────────────────────

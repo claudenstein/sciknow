@@ -34,7 +34,7 @@ A local-first scientific knowledge system that ingests papers, builds a compiled
 
 **Knowledge Wiki** (Karpathy LLM-wiki pattern)
 - **Compiled knowledge layer** — papers synthesized into interconnected wiki pages (summaries, concept pages, synthesis overviews)
-- **Knowledge graph** — entity-relationship triples extracted during compilation (GraphRAG-style)
+- **Knowledge graph** — entity-relationship triples extracted during compilation (GraphRAG-style), visualized as an interactive 3D orbit graph in the browser (drag background to rotate, drag nodes, wheel to zoom)
 - **Consensus mapping** — tracks agreement/disagreement across the corpus over time
 - **Contradiction detection** — LLM-based lint finds disagreements between papers
 
