@@ -7,9 +7,24 @@ This doc captures the research that justifies what's shipped and what's
 deferred — written so the next session can pick the right next move
 without re-running the analysis.
 
-## Status (Phase 48b)
+## Status (Phase 48c)
 
-### Shipped
+### Shipped — Phase 48c (ergonomics + persistence)
+- **Fullscreen view** — Fullscreen button on the Graph toolbar calls
+  `requestFullscreen()` on the graph pane; canvas + toolbar fill the
+  viewport, Esc exits. `localPoint` now returns both viewBox-space
+  and screen-space pointer coords so node drag stays under the
+  cursor at any SVG scale while orbit sensitivity remains consistent.
+- **Full-palette custom colors** — four native color pickers (BG, Aa,
+  Ed, No) layer as overrides on top of the active preset. Label
+  picker auto-derives the stroke as a contrast color; node picker
+  auto-derives the outer sphere-shading stop. "↺" clears overrides.
+- **Persistent prefs** — `localStorage["kg_prefs_v1"]` stores the
+  active preset + custom overrides; loaded in `openKgModal` before
+  the first render and seeded into the color pickers so the next
+  session opens exactly where the user left off.
+
+### Shipped — Phase 48 / 48b (core graph experience)
 - 3D orbit camera + drag-to-reposition + wheel zoom (Phase 48)
 - Seven theme presets + one-click Invert (Phase 48)
 - **Louvain community detection**, per-cluster Okabe-Ito coloring, and
