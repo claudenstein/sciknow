@@ -33,23 +33,32 @@ console = Console()
 def list_cmd(
     check: bool = typer.Option(
         False, "--check",
-        help="Hit GitHub for each watched repo first, then print the "
-             "fresh state. Default behaviour prints whatever was "
+        help="Hit GitHub + HF for each watched entry first, then print "
+             "the fresh state. Default behaviour prints whatever was "
              "recorded at last check (so the command is fast + offline).",
     ),
     force: bool = typer.Option(
         False, "--force", "-f",
-        help="With --check, bypass the 24h per-repo cooldown. Use "
+        help="With --check, bypass the 24h per-entry cooldown. Use "
              "sparingly — the anonymous GitHub API allows only 60 "
              "requests/hour.",
     ),
 ):
-    """Show the watchlist. Green rows had new activity since last check."""
+    """Show the watchlist (repos + HF benchmarks).
+
+    Green rows in the repo table had new commits since last check;
+    the benchmark table flags regime changes (new #1 model).
+    """
     wl.seed_if_empty()
+    wl.seed_benchmarks_if_missing()
     if check:
-        console.print("[dim]fetching GitHub for each watched repo (cooldown 24h)…[/dim]")
+        console.print("[dim]fetching GitHub + HF for each watched entry (cooldown 24h)…[/dim]")
         n_checked, n_cached, n_err = 0, 0, 0
         for _repo, status in wl.check_all(force=force):
+            if status == "checked": n_checked += 1
+            elif status == "cached": n_cached += 1
+            else: n_err += 1
+        for _bench, status in wl.check_all_benchmarks(force=force):
             if status == "checked": n_checked += 1
             elif status == "cached": n_cached += 1
             else: n_err += 1
@@ -89,9 +98,39 @@ def list_cmd(
             (r.note or "")[:100],
         )
     console.print(table)
+
+    # Phase 46.G — render the benchmark table below the repo table.
+    benches = wl.list_watched_benchmarks()
+    if benches:
+        btable = Table(title="Watched Benchmarks", expand=True)
+        btable.add_column("Benchmark (HF dataset)", style="bold")
+        btable.add_column("Top model", overflow="fold")
+        btable.add_column("Score", justify="right", width=8)
+        btable.add_column("Modified", style="dim", width=10)
+        btable.add_column("Checked",  style="dim", width=10)
+        btable.add_column("Note",     overflow="fold")
+        for b in benches:
+            top_name = ""
+            top_score = ""
+            if b.top_models:
+                tm = b.top_models[0]
+                top_name  = str(tm.get("name", ""))
+                s = tm.get("score")
+                top_score = f"{s}" if s is not None else ""
+            # Regime-change badge when the #1 just moved
+            if b.top_changed_since_last_check:
+                top_name = f"[green]🆕 {top_name}[/green]"
+            btable.add_row(
+                b.dataset, top_name, top_score,
+                (b.last_modified or "")[:10],
+                (b.last_checked_at or "")[:10],
+                (b.note or "")[:100],
+            )
+        console.print(btable)
+
     if not check:
         console.print(
-            "[dim]Run `sciknow watch list --check` to refresh from GitHub.[/dim]"
+            "[dim]Run `sciknow watch list --check` to refresh from GitHub + HF.[/dim]"
         )
 
 
@@ -108,23 +147,64 @@ def add(
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(2)
     console.print(f"[green]✓ Watching[/green] {r.key}" + (f" — {note}" if note else ""))
-    console.print("[dim]Run `sciknow watch check` to fetch current HEAD.[/dim]")
+
+
+@app.command(name="add-benchmark")
+def add_benchmark(
+    dataset: str = typer.Argument(
+        ...,
+        help="HuggingFace dataset slug OR URL "
+             "(e.g. 'allenai/olmOCR-bench' or the full URL).",
+    ),
+    note: str = typer.Option("", "--note", "-n",
+                              help="Free-form note about why this benchmark matters."),
+):
+    """Phase 46.G — start tracking an HF benchmark leaderboard.
+
+    Each check re-fetches the dataset's ``lastModified`` + ``sha`` and
+    best-effort-parses the README for a top-5 ranked model table. When
+    the #1 model changes between checks, the row is flagged on
+    ``sciknow watch list``.
+    """
+    try:
+        b = wl.add_benchmark(dataset, note=note)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2)
+    console.print(
+        f"[green]✓ Watching benchmark[/green] {b.dataset}"
+        + (f" — {note}" if note else "")
+    )
+    console.print(
+        "[dim]Run `sciknow watch list --check` to fetch current top-5.[/dim]"
+    )
 
 
 @app.command()
 def remove(
-    url_or_key: str = typer.Argument(..., help="GitHub URL or owner/repo key."),
+    url_or_key: str = typer.Argument(
+        ...,
+        help="GitHub URL / owner/repo key (repos) OR HF dataset slug (benchmarks).",
+    ),
 ):
-    """Stop tracking a repo (keeps the log event for auditability)."""
+    """Stop tracking a repo or benchmark (keeps the log event for auditability).
+
+    Tries repo removal first, then benchmark removal.
+    """
+    # Repo path
     try:
         removed = wl.remove(url_or_key)
-    except ValueError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(2)
-    if not removed:
-        console.print(f"[yellow]{url_or_key!r} isn't on the watchlist.[/yellow]")
-        raise typer.Exit(1)
-    console.print(f"[green]✓ Removed[/green] {url_or_key}")
+        if removed:
+            console.print(f"[green]✓ Removed repo[/green] {url_or_key}")
+            return
+    except ValueError:
+        pass   # not a valid github URL — try benchmarks
+    # Benchmark path
+    if wl.remove_benchmark(url_or_key):
+        console.print(f"[green]✓ Removed benchmark[/green] {url_or_key}")
+        return
+    console.print(f"[yellow]{url_or_key!r} isn't on the watchlist.[/yellow]")
+    raise typer.Exit(1)
 
 
 @app.command()
@@ -148,6 +228,33 @@ def check(
     API budget to 5k/hour).
     """
     if url_or_key:
+        # Route: is this a repo we're watching, or a benchmark? If it
+        # matches a known bench slug exactly, go down the benchmark
+        # path; otherwise try the repo path first.
+        bench_keys = {b.dataset for b in wl.list_watched_benchmarks()}
+        if url_or_key.strip() in bench_keys:
+            try:
+                b = wl.check_benchmark(url_or_key, force=force)
+            except wl.RateLimited as rl:
+                cached = rl.cached
+                top = cached.top_models[0].get("name") if cached.top_models else "?"
+                console.print(
+                    f"[bold]{cached.key}[/bold]  top: {top}  modified {cached.last_modified}  "
+                    f"[yellow](cached; next check in {rl.hours_remaining:.1f}h — pass --force to override)[/yellow]"
+                )
+                return
+            except Exception as exc:
+                console.print(f"[red]bench check failed:[/red] {exc}")
+                raise typer.Exit(1)
+            top = b.top_models[0].get("name") if b.top_models else "(no leaderboard parsed)"
+            score = b.top_models[0].get("score") if b.top_models else ""
+            flag = " [green](NEW #1)[/green]" if b.top_changed_since_last_check else ""
+            console.print(
+                f"[bold]{b.dataset}[/bold]  top: {top}"
+                + (f" ({score})" if score != "" else "") + f"{flag}  modified {b.last_modified}"
+            )
+            return
+
         try:
             r = wl.check(url_or_key, force=force)
         except wl.RateLimited as rl:
@@ -168,7 +275,7 @@ def check(
             f"[bold]{r.key}[/bold]  ★ {r.stars:,}  pushed {r.last_pushed_at}  {mark}"
         )
         return
-    table = Table(title=f"Check results (24h cooldown{' — BYPASSED' if force else ''})",
+    table = Table(title=f"Check results — repos (24h cooldown{' — BYPASSED' if force else ''})",
                   show_lines=False)
     table.add_column("Repo", style="bold")
     table.add_column("★", justify="right")
@@ -190,6 +297,34 @@ def check(
             status_mark,
         )
     console.print(table)
+
+    # Phase 46.G — benchmarks table
+    btable = Table(title="Check results — benchmarks", show_lines=False)
+    btable.add_column("Benchmark", style="bold")
+    btable.add_column("Top model", overflow="fold")
+    btable.add_column("Score", justify="right")
+    btable.add_column("Modified", style="dim")
+    btable.add_column("Δ #1", justify="center")
+    btable.add_column("Status", style="dim")
+    ran_any = False
+    for b, status in wl.check_all_benchmarks(force=force):
+        ran_any = True
+        top_name = (b.top_models[0].get("name") if b.top_models else "") or "—"
+        top_score = (b.top_models[0].get("score") if b.top_models else "")
+        top_score_str = f"{top_score}" if top_score != "" else ""
+        delta_mark = "[green]NEW[/green]" if b.top_changed_since_last_check else "[dim]—[/dim]"
+        status_mark = (
+            "[green]✓[/green]" if status == "checked" else
+            "[yellow]cached[/yellow]" if status == "cached" else
+            "[red]err[/red]"
+        )
+        btable.add_row(
+            b.dataset, top_name, top_score_str,
+            (b.last_modified or "")[:10],
+            delta_mark, status_mark,
+        )
+    if ran_any:
+        console.print(btable)
 
 
 @app.command()

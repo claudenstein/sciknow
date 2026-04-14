@@ -106,6 +106,33 @@ SEED_REPOS: list[dict] = [
 ]
 
 
+# Phase 46.G — HuggingFace benchmark leaderboards.
+#
+# Each entry is an HF dataset slug that acts as a benchmark. The check
+# path hits /api/datasets/<slug> for lastModified + sha (which moves
+# whenever a new model is evaluated or the README is updated) and
+# best-effort-parses the README for a top-N model ranking. HF does
+# not expose the leaderboard via a structured JSON API, so
+# README-table scraping is the reliable signal.
+SEED_BENCHMARKS: list[dict] = [
+    {
+        "dataset": "allenai/olmOCR-bench",
+        "note": "Third-party OCR benchmark from AllenAI, independent of "
+                "OmniDocBench's self-scoring. sciknow's MinerU 2.5 is NOT "
+                "on this leaderboard (only MinerU 1.3.10 at 61.5). Top "
+                "today: Infinity-Parser2-Pro 86.7, Chandra-2 85.9. See "
+                "docs/INGESTION.md for the audit.",
+    },
+    {
+        "dataset": "opendatalab/OmniDocBench",
+        "note": "OpenDataLab (MinerU team) — self-scored numbers. "
+                "MinerU 2.5 pipeline = 86.2 (v1.5), MinerU 2.5-Pro VLM = "
+                "95.69 (v1.6). Trust with caveats — author-run — but "
+                "still the primary scientific-paper parsing benchmark.",
+    },
+]
+
+
 # ── Data types ─────────────────────────────────────────────────────────
 
 
@@ -142,6 +169,50 @@ class WatchedRepo:
         }
 
 
+@dataclass
+class WatchedBenchmark:
+    """Phase 46.G — an HF benchmark leaderboard watched for regime changes.
+
+    Identified by the HF dataset slug (``owner/dataset``). ``top_models``
+    is a best-effort parse of the README's leaderboard table — each
+    entry is ``{"rank": int, "name": str, "score": float | None}``.
+    ``last_modified`` + ``sha`` come straight from the HF API; either
+    changing means *something* moved, even if the README parse fails.
+    """
+    dataset: str
+    url: str
+    note: str = ""
+    last_modified: str | None = None
+    sha: str | None = None
+    likes: int = 0
+    downloads: int = 0
+    top_models: list[dict] = field(default_factory=list)
+    prev_top_models: list[dict] = field(default_factory=list)
+    last_checked_at: str | None = None
+
+    @property
+    def key(self) -> str:
+        return self.dataset
+
+    @property
+    def top_model_name(self) -> str | None:
+        return (self.top_models[0].get("name")
+                if self.top_models else None)
+
+    @property
+    def top_changed_since_last_check(self) -> bool:
+        """True iff the #1 model differs between the last two checks.
+
+        Regime-change signal — a new entrant just took the top spot.
+        False when prev_top_models is empty (first check) or when the
+        top name is unchanged.
+        """
+        if not self.top_models or not self.prev_top_models:
+            return False
+        return (self.top_models[0].get("name")
+                != self.prev_top_models[0].get("name"))
+
+
 # ── URL parsing ────────────────────────────────────────────────────────
 
 
@@ -160,6 +231,124 @@ def parse_github_url(url: str) -> tuple[str, str]:
             "Non-GitHub watchlist entries aren't supported yet."
         )
     return m.group("owner"), m.group("repo")
+
+
+# ── HF dataset slug parsing + README leaderboard scraping (Phase 46.G) ──
+
+_HF_SLUG_RE = re.compile(
+    r"(?:https?://huggingface\.co/datasets/)?"
+    r"(?P<slug>[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)/?$"
+)
+
+
+def parse_hf_dataset_slug(url_or_slug: str) -> str:
+    """Accept ``owner/dataset`` OR ``https://huggingface.co/datasets/owner/dataset``.
+
+    Returns the normalized ``owner/dataset`` slug. Raises ValueError
+    on malformed input.
+    """
+    m = _HF_SLUG_RE.match((url_or_slug or "").strip())
+    if not m:
+        raise ValueError(
+            f"not a valid HF dataset slug or URL: {url_or_slug!r}. "
+            "Expected 'owner/dataset' or "
+            "'https://huggingface.co/datasets/owner/dataset'."
+        )
+    return m.group("slug")
+
+
+# Match a pipe-delimited Markdown table row in a README: looks for any
+# row with a cell that resembles a model name + a numeric score cell.
+# We deliberately keep this lenient — leaderboard table shapes vary
+# across READMEs — and validate the extracted rows downstream.
+_MD_TABLE_ROW_RE = re.compile(r"^\s*\|\s*(.+?)\s*\|\s*$", re.MULTILINE)
+_MODEL_NAME_HINT = re.compile(
+    r"[A-Za-z][A-Za-z0-9._\-]*(?:/[A-Za-z0-9._\-]+)?"
+)
+
+
+def _parse_readme_leaderboard(readme: str, *, top_n: int = 5) -> list[dict]:
+    """Best-effort extraction of a top-N ranked model list from a README.
+
+    Heuristic: locate the LAST pipe-delimited table (leaderboards tend
+    to live near the bottom of HF dataset READMEs) whose header row
+    mentions ``model`` AND the first cell of its data rows looks like
+    a model name. Score = the LAST numeric column on the same row, on
+    the assumption that most OCR benchmarks put the "Overall" score on
+    the right. Returns ``[{"rank", "name", "score"}]`` with up to
+    ``top_n`` entries, sorted by score desc.
+
+    Fails gracefully: any parsing surprise produces an empty list, not
+    an exception. The dataset-info sha change is still a useful signal
+    on its own when this returns nothing.
+    """
+    if not readme or "|" not in readme:
+        return []
+
+    # Split into candidate tables (contiguous runs of 2+ pipe-rows)
+    lines = readme.splitlines()
+    tables: list[list[str]] = []
+    cur: list[str] = []
+    for ln in lines:
+        if ln.lstrip().startswith("|"):
+            cur.append(ln)
+        else:
+            if len(cur) >= 3:   # header + separator + ≥1 data row
+                tables.append(cur)
+            cur = []
+    if len(cur) >= 3:
+        tables.append(cur)
+    if not tables:
+        return []
+
+    # Prefer the last table whose header mentions 'model' (case-insens).
+    leaderboard_table: list[str] | None = None
+    for tbl in reversed(tables):
+        header = tbl[0].lower()
+        if "model" in header or "method" in header or "system" in header:
+            leaderboard_table = tbl
+            break
+    if leaderboard_table is None:
+        leaderboard_table = tables[-1]
+
+    # Parse rows. Skip separator rows (|---|---|).
+    parsed: list[tuple[str, float]] = []
+    for ln in leaderboard_table[2:]:      # skip header + separator
+        cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+        if not cells or all(c.startswith(":") or c in {"-", "---", ""}
+                            or set(c) <= set("-: ") for c in cells):
+            continue
+        name_cell = cells[0]
+        # Strip markdown emphasis (**X**, *X*, `X`, [X](url))
+        name = re.sub(r"\*\*|\*|`", "", name_cell)
+        m_link = re.match(r"\[([^\]]+)\]\([^)]+\)", name)
+        if m_link:
+            name = m_link.group(1)
+        name = name.strip()
+        if not name or not _MODEL_NAME_HINT.search(name):
+            continue
+        # Score: walk right-to-left for the last numeric cell.
+        score: float | None = None
+        for c in reversed(cells[1:]):
+            # Strip confidence intervals like "76.3 ± 1.1"
+            c_clean = c.split("±")[0].strip().replace(",", "")
+            c_clean = re.sub(r"\*\*|\*|`", "", c_clean)
+            try:
+                score = float(c_clean)
+                break
+            except ValueError:
+                continue
+        if score is None:
+            continue
+        parsed.append((name, score))
+
+    if not parsed:
+        return []
+    parsed.sort(key=lambda x: x[1], reverse=True)
+    return [
+        {"rank": i + 1, "name": name, "score": score}
+        for i, (name, score) in enumerate(parsed[:top_n])
+    ]
 
 
 # ── Persistence (append-only JSONL log + replay-on-read index) ────────
@@ -231,6 +420,11 @@ def _replay() -> dict[str, WatchedRepo]:
             except Exception:
                 continue
             kind = ev.get("kind") or ""
+            # Phase 46.G — benchmark events share the same log; branch
+            # by event kind. Benchmark events begin with "bench_".
+            if kind.startswith("bench_"):
+                continue   # handled by _replay_benchmarks
+
             owner = ev.get("owner") or ""
             repo  = ev.get("repo")  or ""
             if not owner or not repo:
@@ -257,14 +451,61 @@ def _replay() -> dict[str, WatchedRepo]:
     return index
 
 
+def _replay_benchmarks() -> dict[str, WatchedBenchmark]:
+    """Phase 46.G — rebuild the benchmark index from the same log."""
+    index: dict[str, WatchedBenchmark] = {}
+    path = _log_path()
+    if not path.exists():
+        return index
+    with path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except Exception:
+                continue
+            kind = ev.get("kind") or ""
+            if not kind.startswith("bench_"):
+                continue
+            slug = ev.get("dataset") or ""
+            if not slug:
+                continue
+            if kind == "bench_add":
+                index[slug] = WatchedBenchmark(
+                    dataset=slug,
+                    url=ev.get("url") or f"https://huggingface.co/datasets/{slug}",
+                    note=ev.get("note") or "",
+                )
+            elif kind == "bench_remove":
+                index.pop(slug, None)
+            elif kind == "bench_check" and slug in index:
+                b = index[slug]
+                # Preserve last-known top_models so the next check can
+                # compare for regime changes.
+                b.prev_top_models  = list(b.top_models) if b.top_models else list(b.prev_top_models)
+                b.last_modified    = ev.get("last_modified")    or b.last_modified
+                b.sha              = ev.get("sha")              or b.sha
+                b.likes            = int(ev.get("likes", b.likes) or 0)
+                b.downloads        = int(ev.get("downloads", b.downloads) or 0)
+                if ev.get("top_models") is not None:
+                    b.top_models   = ev.get("top_models") or []
+                b.last_checked_at  = ev.get("ts")
+            elif kind == "bench_note" and slug in index:
+                index[slug].note = ev.get("note", index[slug].note)
+    return index
+
+
 def seed_if_empty() -> int:
     """Pre-populate the watchlist with SEED_REPOS on first use.
 
-    Returns the number of repos added. No-op if the log already exists
-    with any content. Safe to call at CLI startup.
+    Returns the number of repos + benchmarks added. No-op if the log
+    already exists with any content. Safe to call at CLI startup.
     """
     index = _replay()
-    if index:
+    bench_index = _replay_benchmarks()
+    if index or bench_index:
         return 0
     added = 0
     for s in SEED_REPOS:
@@ -278,6 +519,42 @@ def seed_if_empty() -> int:
             added += 1
         except Exception as exc:
             logger.debug("seed failed for %s: %s", s.get("url"), exc)
+    for b in SEED_BENCHMARKS:
+        try:
+            slug = parse_hf_dataset_slug(b["dataset"])
+            _append({
+                "kind": "bench_add",
+                "dataset": slug,
+                "url": f"https://huggingface.co/datasets/{slug}",
+                "note": b.get("note", ""),
+            })
+            added += 1
+        except Exception as exc:
+            logger.debug("seed bench failed for %s: %s", b.get("dataset"), exc)
+    return added
+
+
+def seed_benchmarks_if_missing() -> int:
+    """Phase 46.G — add SEED_BENCHMARKS to the existing log if they're
+    not already present. Safe to call repeatedly. Useful for existing
+    sciknow installs whose log predates the benchmark feature.
+    """
+    bench_index = _replay_benchmarks()
+    added = 0
+    for b in SEED_BENCHMARKS:
+        try:
+            slug = parse_hf_dataset_slug(b["dataset"])
+        except Exception:
+            continue
+        if slug in bench_index:
+            continue
+        _append({
+            "kind": "bench_add",
+            "dataset": slug,
+            "url": f"https://huggingface.co/datasets/{slug}",
+            "note": b.get("note", ""),
+        })
+        added += 1
     return added
 
 
@@ -463,3 +740,140 @@ def check_all(
         except Exception as exc:
             logger.warning("check %s failed: %s", r.key, exc)
             yield r, "error"
+
+
+# ── Benchmark public API (Phase 46.G) ─────────────────────────────────
+
+
+def list_watched_benchmarks() -> list[WatchedBenchmark]:
+    """Current benchmark watchlist, sorted by (last_modified desc, key)."""
+    index = _replay_benchmarks()
+    return sorted(
+        index.values(),
+        key=lambda b: (b.last_modified or "", b.key),
+        reverse=True,
+    )
+
+
+def add_benchmark(dataset: str, note: str = "") -> WatchedBenchmark:
+    """Add a benchmark (HF dataset slug). Idempotent — re-adding updates the note."""
+    slug = parse_hf_dataset_slug(dataset)
+    _append({
+        "kind": "bench_add",
+        "dataset": slug,
+        "url":  f"https://huggingface.co/datasets/{slug}",
+        "note": note,
+    })
+    return WatchedBenchmark(
+        dataset=slug,
+        url=f"https://huggingface.co/datasets/{slug}",
+        note=note,
+    )
+
+
+def remove_benchmark(dataset: str) -> bool:
+    """Remove a benchmark. Returns True if it was present."""
+    try:
+        slug = parse_hf_dataset_slug(dataset)
+    except ValueError:
+        return False
+    if slug not in _replay_benchmarks():
+        return False
+    _append({"kind": "bench_remove", "dataset": slug})
+    return True
+
+
+def check_benchmark(
+    dataset: str,
+    *,
+    force: bool = False,
+    cooldown_hours: float | None = None,
+) -> WatchedBenchmark:
+    """Hit the HF dataset API + fetch README; record current state.
+
+    Anonymous HF API has no strict published cap (~soft limits at
+    several hundred/min), so the same daily cooldown applies for
+    politeness + to keep the watchlist cheap.
+
+    Writes a ``bench_check`` event with the current ``lastModified``,
+    ``sha``, ``likes``, ``downloads``, and the parsed top-5 ranked
+    model list (empty if the README shape didn't match). Raises
+    ``RateLimited`` if called inside the cooldown window.
+    """
+    import httpx
+    slug = parse_hf_dataset_slug(dataset)
+
+    index  = _replay_benchmarks()
+    cached = index.get(slug)
+    cooldown = cooldown_hours if cooldown_hours is not None else CHECK_COOLDOWN_HOURS
+    if not force and cached is not None and cached.last_checked_at:
+        hrs = _hours_since(cached.last_checked_at)
+        if hrs is not None and hrs < cooldown:
+            raise RateLimited(
+                hours_remaining=round(cooldown - hrs, 2),
+                cached=cached,  # type: ignore[arg-type]
+            )
+
+    ua = "sciknow/0.1 (+https://github.com/claudenstein/sciknow)"
+    with httpx.Client(timeout=15.0, headers={"User-Agent": ua}) as client:
+        meta_r = client.get(f"https://huggingface.co/api/datasets/{slug}")
+        meta_r.raise_for_status()
+        meta = meta_r.json()
+
+        # Fetch the README — best-effort; if it 404s the sha-delta
+        # remains the signal.
+        readme_text = ""
+        try:
+            readme_r = client.get(
+                f"https://huggingface.co/datasets/{slug}/raw/main/README.md"
+            )
+            if readme_r.status_code == 200:
+                readme_text = readme_r.text
+        except Exception as exc:
+            logger.debug("bench_check readme fetch failed: %s", exc)
+
+    top_models = _parse_readme_leaderboard(readme_text, top_n=5)
+
+    ev = {
+        "kind":          "bench_check",
+        "dataset":       slug,
+        "last_modified": meta.get("lastModified"),
+        "sha":           meta.get("sha"),
+        "likes":         meta.get("likes", 0),
+        "downloads":     meta.get("downloads", 0),
+        "top_models":    top_models,
+    }
+    _append(ev)
+
+    prev = list(cached.top_models) if cached and cached.top_models else []
+    return WatchedBenchmark(
+        dataset=slug,
+        url=f"https://huggingface.co/datasets/{slug}",
+        note=(cached.note if cached is not None else ""),
+        last_modified=meta.get("lastModified"),
+        sha=meta.get("sha"),
+        likes=int(meta.get("likes") or 0),
+        downloads=int(meta.get("downloads") or 0),
+        top_models=top_models,
+        prev_top_models=prev,
+        last_checked_at=_ts(),
+    )
+
+
+def check_all_benchmarks(
+    *,
+    force: bool = False,
+    cooldown_hours: float | None = None,
+) -> Iterable[tuple[WatchedBenchmark, str]]:
+    """Mirror of ``check_all`` for benchmarks; yields ``(bench, status)``."""
+    for b in list_watched_benchmarks():
+        try:
+            got = check_benchmark(
+                b.dataset, force=force, cooldown_hours=cooldown_hours,
+            )
+            yield got, "checked"
+        except RateLimited as rl:
+            yield rl.cached, "cached"   # type: ignore[misc]
+        except Exception as exc:
+            logger.warning("bench_check %s failed: %s", b.key, exc)
+            yield b, "error"

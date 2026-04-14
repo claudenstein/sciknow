@@ -5629,6 +5629,79 @@ def l1_phase47_promote_to_global_surface() -> None:
     )
 
 
+def l1_phase46g_benchmark_watchlist() -> None:
+    """Phase 46.G — HF benchmark leaderboards on the watchlist surface.
+
+    Static checks: parser, dataclass, public API, CLI command, seed
+    list. No network.
+    """
+    import inspect as _inspect
+
+    from sciknow.core import watchlist as wl
+    from sciknow.cli import watch as watch_cli
+
+    # Data types
+    assert hasattr(wl, "WatchedBenchmark"), "WatchedBenchmark missing"
+    b = wl.WatchedBenchmark(dataset="allenai/olmOCR-bench",
+                             url="https://huggingface.co/datasets/allenai/olmOCR-bench")
+    assert b.key == "allenai/olmOCR-bench"
+    assert b.top_model_name is None
+    assert b.top_changed_since_last_check is False
+    # Regime change detection
+    b.top_models = [{"rank": 1, "name": "Chandra-2", "score": 85.9}]
+    b.prev_top_models = [{"rank": 1, "name": "olmOCR-2", "score": 82.4}]
+    assert b.top_changed_since_last_check is True
+    assert b.top_model_name == "Chandra-2"
+
+    # Parse
+    slug = wl.parse_hf_dataset_slug("https://huggingface.co/datasets/allenai/olmOCR-bench")
+    assert slug == "allenai/olmOCR-bench"
+    slug2 = wl.parse_hf_dataset_slug("allenai/olmOCR-bench")
+    assert slug2 == "allenai/olmOCR-bench"
+    try:
+        wl.parse_hf_dataset_slug("not a slug")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("parse_hf_dataset_slug should reject non-slugs")
+
+    # README table parser on a synthetic leaderboard
+    synth = """
+    # Some Benchmark
+    intro text
+    ## Leaderboard
+    | **Model**          | Overall |
+    |--------------------|---------|
+    | top-model          | **86.7**|
+    | middle-model       | 85.9    |
+    | third              | 83.1 ± 1.1 |
+    """
+    parsed = wl._parse_readme_leaderboard(synth, top_n=3)
+    assert len(parsed) == 3
+    assert parsed[0]["name"] == "top-model"
+    assert parsed[0]["score"] == 86.7
+    assert parsed[1]["score"] == 85.9
+    # CI stripped
+    assert parsed[2]["score"] == 83.1
+
+    # Public API: add_benchmark / check_benchmark / list_watched_benchmarks
+    for name in ("add_benchmark", "remove_benchmark", "check_benchmark",
+                 "check_all_benchmarks", "list_watched_benchmarks",
+                 "seed_benchmarks_if_missing", "SEED_BENCHMARKS"):
+        assert hasattr(wl, name), f"watchlist missing {name!r}"
+
+    # Seed list has the expected slugs
+    seed_slugs = {b["dataset"] for b in wl.SEED_BENCHMARKS}
+    assert "allenai/olmOCR-bench"       in seed_slugs
+    assert "opendatalab/OmniDocBench"   in seed_slugs
+
+    # CLI
+    callbacks = {c.callback for c in watch_cli.app.registered_commands}
+    assert watch_cli.add_benchmark in callbacks, (
+        "`sciknow watch add-benchmark` not registered"
+    )
+
+
 def l1_bench_harness_surface() -> None:
     """Phase 44 — the bench harness module loads and exposes the expected
     surface (run/run_layer/LAYERS/BenchMetric). Each layer has >= 1
@@ -6701,6 +6774,8 @@ L1_TESTS: list[Callable] = [
     l1_phase47_rejected_idea_gate,
     l1_phase47_kind_filtered_writer,
     l1_phase47_promote_to_global_surface,
+    # Phase 46.G — HF benchmark watchlist
+    l1_phase46g_benchmark_watchlist,
 ]
 
 L2_TESTS: list[Callable] = [
