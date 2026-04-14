@@ -7500,6 +7500,21 @@ def l1_phase54_wiki_browsing_mvp() -> None:
     assert "/api/wiki/page/{slug}/annotation" in route_paths, (
         "/api/wiki/page/<slug>/annotation endpoint missing"
     )
+
+    # Phase 55.1 — wiki compile parallel-worker path.
+    from sciknow.core import wiki_ops as _wop
+    compile_all_src = _inspect.getsource(_wop.compile_all)
+    assert "ThreadPoolExecutor" in compile_all_src, (
+        "wiki compile_all should have a ThreadPoolExecutor branch"
+    )
+    assert "llm_parallel_workers" in compile_all_src, (
+        "wiki compile_all should size worker count from "
+        "settings.llm_parallel_workers"
+    )
+    assert "OLLAMA_NUM_PARALLEL" in compile_all_src, (
+        "compile_all parallel branch should document the Ollama "
+        "head-of-line-blocking pairing constraint inline"
+    )
     for needle in (
         "wiki-annotation-body",    # textarea id
         "saveWikiAnnotation",      # save handler

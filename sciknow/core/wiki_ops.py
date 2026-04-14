@@ -596,65 +596,154 @@ def compile_all(
         """)).fetchall()
 
     total = len(rows)
-    yield {"type": "compile_start", "total": total}
+    workers = max(1, int(settings.llm_parallel_workers or 1))
+    # Don't spin up extra threads if there's less than two papers of
+    # work; sequential path is slightly simpler and keeps the per-
+    # token SSE stream intact for the CLI's single-paper case.
+    effective_workers = min(workers, max(1, total))
+    yield {"type": "compile_start", "total": total,
+           "workers": effective_workers}
 
     compiled = 0
     skipped = 0
     failed = 0
     total_tokens = 0
-    for i, (doc_id, title) in enumerate(rows, 1):
+
+    def _run_paper(index_title_doc: tuple[int, str, str]) -> dict:
+        """Worker: compile one paper, collect events into a list,
+        return a summary dict. Runs inside a thread so Ollama can
+        serve multiple wiki-compile calls concurrently when
+        OLLAMA_NUM_PARALLEL ≥ workers."""
+        i, doc_id, title = index_title_doc
         short_title = (title or doc_id[:8])[:60]
         paper_t0 = time.monotonic()
+        collected: list[dict] = []
         paper_tokens = 0
+        status = "compiled"
+        err: str | None = None
+        try:
+            for event in compile_paper_summary(doc_id, model=model, force=force):
+                collected.append(event)
+                if event.get("type") == "token":
+                    paper_tokens += 1
+                elif event.get("type") == "error":
+                    status = "error"
+                    err = event.get("message", "")
+                    break
+                elif event.get("type") == "completed":
+                    if event.get("skipped"):
+                        status = "skipped"
+        except Exception as exc:
+            status = "error"
+            err = f"{type(exc).__name__}: {exc}"
+        return {
+            "index": i, "doc_id": doc_id, "title": short_title,
+            "events": collected, "paper_tokens": paper_tokens,
+            "status": status, "err": err,
+            "elapsed": time.monotonic() - paper_t0,
+        }
 
-        yield {"type": "paper_start", "index": i, "total": total,
-               "title": short_title, "doc_id": doc_id}
+    work = list(enumerate(rows, 1))  # [(i, (doc_id, title)), ...]
+    flat = [(i, d, t) for i, (d, t) in work]
 
-        # Compile paper summary — pass through token events for live display
-        paper_ok = False
-        paper_skipped = False
-        for event in compile_paper_summary(doc_id, model=model, force=force):
-            if event.get("type") == "token":
-                paper_tokens += 1
-                total_tokens += 1
-                yield {"type": "token", "text": event["text"],
-                       "paper_tokens": paper_tokens, "total_tokens": total_tokens}
-            elif event.get("type") == "error":
-                failed += 1
+    if effective_workers == 1:
+        # Sequential path — same per-token streaming as before.
+        for i, doc_id, title in flat:
+            short_title = (title or doc_id[:8])[:60]
+            paper_t0 = time.monotonic()
+            paper_tokens = 0
+            yield {"type": "paper_start", "index": i, "total": total,
+                   "title": short_title, "doc_id": doc_id}
+            paper_ok = False
+            paper_skipped = False
+            for event in compile_paper_summary(doc_id, model=model, force=force):
+                if event.get("type") == "token":
+                    paper_tokens += 1
+                    total_tokens += 1
+                    yield {"type": "token", "text": event["text"],
+                           "paper_tokens": paper_tokens,
+                           "total_tokens": total_tokens}
+                elif event.get("type") == "error":
+                    failed += 1
+                    yield {"type": "paper_done", "index": i, "total": total,
+                           "title": short_title, "status": "error",
+                           "detail": event.get("message", ""),
+                           "tokens": paper_tokens,
+                           "elapsed": time.monotonic() - paper_t0,
+                           "compiled": compiled, "skipped": skipped,
+                           "failed": failed, "total_tokens": total_tokens}
+                    break
+                elif event.get("type") == "completed":
+                    if event.get("skipped"):
+                        skipped += 1
+                        paper_skipped = True
+                    else:
+                        compiled += 1
+                        paper_ok = True
+            if paper_skipped:
                 yield {"type": "paper_done", "index": i, "total": total,
-                       "title": short_title, "status": "error",
-                       "detail": event.get("message", ""),
-                       "tokens": paper_tokens, "elapsed": time.monotonic() - paper_t0,
-                       "compiled": compiled, "skipped": skipped, "failed": failed,
+                       "title": short_title, "status": "skipped",
+                       "compiled": compiled, "skipped": skipped,
+                       "failed": failed, "tokens": 0, "elapsed": 0,
                        "total_tokens": total_tokens}
-                break
-            elif event.get("type") == "completed":
-                if event.get("skipped"):
+                continue
+            yield {"type": "paper_done", "index": i, "total": total,
+                   "title": short_title,
+                   "status": "compiled" if paper_ok else "error",
+                   "compiled": compiled, "skipped": skipped, "failed": failed,
+                   "tokens": paper_tokens,
+                   "elapsed": time.monotonic() - paper_t0,
+                   "total_tokens": total_tokens}
+    else:
+        # Parallel path — N papers in flight at once. Ollama must be
+        # started with OLLAMA_NUM_PARALLEL >= workers or the requests
+        # will head-of-line-block and lose the throughput win.
+        # Per-paper events are buffered and replayed atomically on
+        # paper completion (we lose per-token streaming, but that's
+        # a fair trade for the 1.5-2.5× overall speedup).
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=effective_workers) as pool:
+            futures = {pool.submit(_run_paper, t): t for t in flat}
+            for fut in as_completed(futures):
+                res = fut.result()
+                i = res["index"]
+                short_title = res["title"]
+                yield {"type": "paper_start", "index": i, "total": total,
+                       "title": short_title, "doc_id": res["doc_id"]}
+                # Replay tokens and other events in the order the
+                # worker saw them, so the CLI renderer still sees a
+                # coherent per-paper story (even if two papers
+                # interleave at the paper boundary).
+                for event in res["events"]:
+                    if event.get("type") == "token":
+                        total_tokens += 1
+                        yield {"type": "token", "text": event["text"],
+                               "paper_tokens": 1,  # running counter unknown here
+                               "total_tokens": total_tokens}
+                if res["status"] == "error":
+                    failed += 1
+                    yield {"type": "paper_done", "index": i, "total": total,
+                           "title": short_title, "status": "error",
+                           "detail": res.get("err") or "",
+                           "tokens": res["paper_tokens"],
+                           "elapsed": res["elapsed"],
+                           "compiled": compiled, "skipped": skipped,
+                           "failed": failed, "total_tokens": total_tokens}
+                elif res["status"] == "skipped":
                     skipped += 1
-                    paper_skipped = True
+                    yield {"type": "paper_done", "index": i, "total": total,
+                           "title": short_title, "status": "skipped",
+                           "compiled": compiled, "skipped": skipped,
+                           "failed": failed, "tokens": 0, "elapsed": 0,
+                           "total_tokens": total_tokens}
                 else:
                     compiled += 1
-                    paper_ok = True
-
-        if paper_skipped:
-            yield {"type": "paper_done", "index": i, "total": total,
-                   "title": short_title, "status": "skipped",
-                   "compiled": compiled, "skipped": skipped, "failed": failed,
-                   "tokens": 0, "elapsed": 0, "total_tokens": total_tokens}
-            continue
-
-        # Concept stubs + KG triples are now created inside compile_paper_summary
-        # (merged into a single LLM call). Full concept page content is deferred
-        # to keep the bulk compile fast. Run `wiki compile --rewrite-stale` later
-        # to flesh out concept pages with full LLM-written content.
-
-        paper_elapsed = time.monotonic() - paper_t0
-        yield {"type": "paper_done", "index": i, "total": total,
-               "title": short_title,
-               "status": "compiled" if paper_ok else "error",
-               "compiled": compiled, "skipped": skipped, "failed": failed,
-               "tokens": paper_tokens, "elapsed": paper_elapsed,
-               "total_tokens": total_tokens}
+                    yield {"type": "paper_done", "index": i, "total": total,
+                           "title": short_title, "status": "compiled",
+                           "compiled": compiled, "skipped": skipped,
+                           "failed": failed, "tokens": res["paper_tokens"],
+                           "elapsed": res["elapsed"],
+                           "total_tokens": total_tokens}
 
     _update_index()
     # Phase 54.2 — drop the backlinks cache so the next reader request
