@@ -2773,6 +2773,50 @@ async def api_wiki_pages(page_type: str = None, page: int = 1, per_page: int = 5
     })
 
 
+@app.get("/api/wiki/page/{slug}/annotation")
+async def api_wiki_annotation_get(slug: str):
+    """Phase 54.5 — fetch the user's "My take" annotation for a
+    page. Returns an empty body if none exists (no 404 — the reader
+    treats absence as an empty textarea)."""
+    with get_session() as session:
+        row = session.execute(text("""
+            SELECT body, updated_at FROM wiki_annotations WHERE slug = :s
+        """), {"s": slug}).fetchone()
+    if not row:
+        return JSONResponse({"slug": slug, "body": "", "updated_at": None})
+    return JSONResponse({
+        "slug": slug, "body": row[0] or "", "updated_at": str(row[1]),
+    })
+
+
+@app.put("/api/wiki/page/{slug}/annotation")
+async def api_wiki_annotation_put(slug: str, body: str = Form("")):
+    """Phase 54.5 — upsert the annotation. Empty body deletes the row
+    so the page goes back to "no annotation" cleanly."""
+    body = (body or "").strip()
+    with get_session() as session:
+        if not body:
+            session.execute(text(
+                "DELETE FROM wiki_annotations WHERE slug = :s"
+            ), {"s": slug})
+            session.commit()
+            return JSONResponse({"slug": slug, "deleted": True})
+        session.execute(text("""
+            INSERT INTO wiki_annotations (slug, body, updated_at)
+            VALUES (:s, :b, now())
+            ON CONFLICT (slug) DO UPDATE
+                SET body = EXCLUDED.body, updated_at = now()
+        """), {"s": slug, "b": body[:20000]})
+        session.commit()
+        row = session.execute(text(
+            "SELECT updated_at FROM wiki_annotations WHERE slug = :s"
+        ), {"s": slug}).fetchone()
+    return JSONResponse({
+        "slug": slug, "deleted": False,
+        "updated_at": str(row[0]) if row else None,
+    })
+
+
 @app.post("/api/wiki/page/{slug}/ask")
 async def api_wiki_page_ask(
     slug: str,
@@ -5696,6 +5740,25 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .wiki-facts-list li.wf-fam-compositional{{ border-left-color: #8ed6a5; }}
 .wiki-facts-list li.wf-fam-citational   {{ border-left-color: #999999; }}
 .wiki-facts-list li.wf-fam-other        {{ border-left-color: #CC79A7; }}
+/* Phase 54.5 — "My take" annotation. */
+.wiki-annotation-extras {{ background: var(--bg-elevated); }}
+#wiki-annotation-body {{ width: 100%; box-sizing: border-box;
+                          padding: 10px 12px;
+                          border: 1px solid var(--border);
+                          border-radius: var(--r-md);
+                          background: var(--bg); color: var(--fg);
+                          font-family: var(--font-sans); font-size: 13px;
+                          line-height: 1.5; resize: vertical;
+                          min-height: 80px; }}
+#wiki-annotation-body:focus {{ outline: none; border-color: var(--accent); }}
+.wiki-annotation-actions {{ display: flex; gap: var(--sp-2);
+                             align-items: center; margin-top: var(--sp-2);
+                             flex-wrap: wrap; }}
+/* Phase 54.5 — Active row in the wiki browse list for j/k nav. */
+.wiki-page-list li.active-row,
+.wiki-page-list tr.active-row {{ outline: 2px solid var(--accent);
+                                  outline-offset: -2px;
+                                  background: rgba(79,158,255,0.08); }}
 /* Phase 15 — live streaming stats footer (tok/s, elapsed, model) */
 .stream-stats {{ display: flex; align-items: center; gap: var(--sp-3);
                 font-family: var(--font-mono); font-size: 11px;
@@ -6429,6 +6492,21 @@ body.task-bar-open {{ padding-top: 40px; }}
                   </a>
                 </div>
                 <ul id="wiki-facts-list" class="wiki-facts-list"></ul>
+              </section>
+              <!-- Phase 54.5 — "My take" user annotation -->
+              <section id="wiki-annotation-block" class="wiki-extras wiki-annotation-extras">
+                <div class="wiki-extras-head">
+                  <h3 class="wiki-extras-h">My take</h3>
+                  <span id="wiki-annotation-ts" class="wiki-facts-kglink" style="color:var(--fg-muted);"></span>
+                </div>
+                <textarea id="wiki-annotation-body"
+                          placeholder="Your own notes on this page — disagreements, follow-up questions, how it connects to other work. Saved locally in your project database."
+                          rows="4"></textarea>
+                <div class="wiki-annotation-actions">
+                  <button class="btn-primary" onclick="saveWikiAnnotation()" id="wiki-annotation-save">Save note</button>
+                  <button class="btn-secondary" onclick="deleteWikiAnnotation()" id="wiki-annotation-delete">Clear</button>
+                  <span id="wiki-annotation-status" class="wiki-ask-status"></span>
+                </div>
               </section>
               <!-- Phase 54.3 — Ask this page inline RAG -->
               <section id="wiki-ask-block" class="wiki-extras wiki-ask-extras">
@@ -11901,6 +11979,14 @@ async function openWikiPage(slug) {{
   if (_askStream) _askStream.textContent = '';
   if (_askSources) {{ _askSources.style.display = 'none'; _askSources.innerHTML = ''; }}
   if (_wikiAskSource) {{ try {{ _wikiAskSource.close(); }} catch (e) {{}} _wikiAskSource = null; }}
+  // Phase 54.5 — reset annotation textarea + status between pages so
+  // a stale note from the previous page isn't mistakenly kept.
+  const _annBody = document.getElementById('wiki-annotation-body');
+  const _annStatus = document.getElementById('wiki-annotation-status');
+  const _annTs = document.getElementById('wiki-annotation-ts');
+  if (_annBody) _annBody.value = '';
+  if (_annStatus) _annStatus.textContent = '';
+  if (_annTs) _annTs.textContent = '';
   _currentWikiSlug = slug;
 
   // Phase 54 — reflect the open page in the URL hash so back/forward
@@ -11959,6 +12045,9 @@ async function openWikiPage(slug) {{
 
     // Phase 54.4 — Facts from the corpus (concept pages only).
     _renderWikiFacts(data);
+
+    // Phase 54.5 — load the user's "My take" annotation for this page.
+    _loadWikiAnnotation(slug);
     // Phase 54 — honour `?h=<heading-id>` in the hash if present.
     const m = (window.location.hash || '').match(/\\?h=([^&]+)$/);
     if (m) {{
@@ -12086,6 +12175,111 @@ async function askWikiPage() {{
     _wikiAskSource = null;
   }};
 }}
+
+// Phase 54.5 — "My take" annotation: load / save / delete.
+async function _loadWikiAnnotation(slug) {{
+  const body = document.getElementById('wiki-annotation-body');
+  const ts = document.getElementById('wiki-annotation-ts');
+  const status = document.getElementById('wiki-annotation-status');
+  if (!body) return;
+  body.value = '';
+  if (ts) ts.textContent = '';
+  if (status) status.textContent = '';
+  try {{
+    const res = await fetch('/api/wiki/page/' + encodeURIComponent(slug) +
+                            '/annotation');
+    if (!res.ok) return;
+    const d = await res.json();
+    body.value = d.body || '';
+    if (d.updated_at && ts) {{
+      ts.textContent = 'last saved ' + d.updated_at.substring(0, 16).replace('T', ' ');
+    }}
+  }} catch (e) {{ /* silent — empty textarea is the fallback */ }}
+}}
+
+async function saveWikiAnnotation() {{
+  if (!_currentWikiSlug) return;
+  const body = document.getElementById('wiki-annotation-body');
+  const status = document.getElementById('wiki-annotation-status');
+  const ts = document.getElementById('wiki-annotation-ts');
+  if (!body) return;
+  const fd = new FormData();
+  fd.append('body', body.value || '');
+  status.textContent = 'saving…';
+  try {{
+    const res = await fetch(
+      '/api/wiki/page/' + encodeURIComponent(_currentWikiSlug) + '/annotation',
+      {{ method: 'PUT', body: fd }},
+    );
+    const d = await res.json();
+    if (d.deleted) {{
+      status.textContent = 'cleared';
+      if (ts) ts.textContent = '';
+    }} else {{
+      status.textContent = 'saved';
+      if (ts && d.updated_at) {{
+        ts.textContent = 'last saved ' + d.updated_at.substring(0, 16).replace('T', ' ');
+      }}
+    }}
+    setTimeout(() => {{ if (status.textContent === 'saved' || status.textContent === 'cleared') status.textContent = ''; }}, 2000);
+  }} catch (e) {{
+    status.textContent = 'save failed: ' + e.message;
+  }}
+}}
+
+async function deleteWikiAnnotation() {{
+  const body = document.getElementById('wiki-annotation-body');
+  if (body) body.value = '';
+  await saveWikiAnnotation();
+}}
+
+// Phase 54.5 — j/k navigation through the wiki browse list.
+// Only active when the browse-list pane is visible, nobody's typing
+// in a form field, and no modifier keys are held.
+let _wikiListIdx = -1;
+function _wikiListItems() {{
+  return document.querySelectorAll(
+    '#wiki-browse-list [data-slug], #wiki-browse-list tr[data-slug], #wiki-browse-list li[data-slug]'
+  );
+}}
+function _setWikiListActive(idx) {{
+  const items = _wikiListItems();
+  if (!items.length) return;
+  _wikiListIdx = Math.max(0, Math.min(idx, items.length - 1));
+  items.forEach((n, i) => n.classList.toggle('active-row', i === _wikiListIdx));
+  items[_wikiListIdx].scrollIntoView({{ block: 'nearest' }});
+}}
+document.addEventListener('keydown', (evt) => {{
+  // Only fire when the browse list is on-screen and no other
+  // input is focused.
+  const listVisible = (() => {{
+    const el = document.getElementById('wiki-browse-list');
+    if (!el) return false;
+    if (el.style.display === 'none') return false;
+    const detail = document.getElementById('wiki-page-detail');
+    return !(detail && detail.style.display !== 'none');
+  }})();
+  if (!listVisible) return;
+  const tag = (evt.target && evt.target.tagName) || '';
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if (evt.metaKey || evt.ctrlKey || evt.altKey) return;
+  if (evt.key === 'j') {{
+    evt.preventDefault();
+    _setWikiListActive(_wikiListIdx < 0 ? 0 : _wikiListIdx + 1);
+  }} else if (evt.key === 'k') {{
+    evt.preventDefault();
+    _setWikiListActive(_wikiListIdx < 0 ? 0 : _wikiListIdx - 1);
+  }} else if (evt.key === 'Enter') {{
+    const items = _wikiListItems();
+    if (_wikiListIdx >= 0 && items[_wikiListIdx]) {{
+      const slug = items[_wikiListIdx].dataset.slug;
+      if (slug) {{
+        evt.preventDefault();
+        window.location.hash = '#wiki/' + encodeURIComponent(slug);
+      }}
+    }}
+  }}
+}});
 
 // Phase 54.4 — Render the "Facts from the corpus" block using the
 // triples the API attaches to concept pages (server-side join

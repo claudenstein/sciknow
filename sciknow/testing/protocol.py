@@ -7496,6 +7496,21 @@ def l1_phase54_wiki_browsing_mvp() -> None:
     assert out.endswith("C"), "tail suffix missing from slice"
     assert "section body omitted" in out, "middle-omitted marker missing"
 
+    # Phase 54.5 — annotation endpoints + j/k list navigation surface.
+    assert "/api/wiki/page/{slug}/annotation" in route_paths, (
+        "/api/wiki/page/<slug>/annotation endpoint missing"
+    )
+    for needle in (
+        "wiki-annotation-body",    # textarea id
+        "saveWikiAnnotation",      # save handler
+        "deleteWikiAnnotation",    # delete handler
+        "_loadWikiAnnotation",     # loader
+        "_wikiListIdx",            # j/k state
+        "active-row",              # j/k highlight class
+        "_setWikiListActive",      # j/k nav helper
+    ):
+        assert needle in src, f"phase 54.5 annotation/jk surface missing: {needle!r}"
+
     # Backlinks scanner contract on synthetic page content. Uses the
     # `base_dir` override so we don't have to mutate Pydantic Settings
     # (which are frozen).
