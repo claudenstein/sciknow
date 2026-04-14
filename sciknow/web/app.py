@@ -5057,7 +5057,26 @@ TEMPLATE = """\
 * {{ margin:0; padding:0; box-sizing:border-box; }}
 html {{ -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }}
 body {{ font-family: var(--font-sans); color: var(--fg); background: var(--bg);
-        display: flex; height: 100vh; font-size: 14px; }}
+        display: flex; flex-direction: column; height: 100vh; font-size: 14px; }}
+/* Phase 54.6 — top bar spans the full viewport width above the sidebar+main.
+   Holds app-level navigation (Plan, Settings, Ask, Wiki, KG, Papers, Tools,
+   Setup, Dashboard, Projects) so the per-chapter toolbar stays focused on
+   writing actions. */
+.topbar {{ display: flex; align-items: center; justify-content: flex-end;
+           gap: 2px; padding: 6px 16px; min-height: 44px;
+           background: var(--toolbar-bg); border-bottom: 1px solid var(--border);
+           flex-shrink: 0; flex-wrap: wrap; }}
+.topbar .topbar-brand {{ font-size: 13px; font-weight: 700; letter-spacing: -0.01em;
+                         color: var(--fg-muted); margin-right: auto; padding-left: 4px; }}
+.topbar .nav-btn {{ font-size: 12px; font-weight: 500; padding: 6px 12px;
+                    border: 1px solid transparent; border-radius: var(--r-md);
+                    cursor: pointer; background: transparent; color: var(--fg);
+                    transition: all .12s ease; display: inline-flex;
+                    align-items: center; gap: 6px; line-height: 1; }}
+.topbar .nav-btn:hover {{ background: var(--bg-elevated); border-color: var(--border);
+                          box-shadow: var(--shadow-sm); }}
+.topbar .nav-btn:active {{ transform: translateY(1px); }}
+.app-body {{ display: flex; flex: 1; overflow: hidden; min-height: 0; }}
 button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 /* Sidebar */
 .sidebar {{ width: 280px; background: var(--sidebar-bg); border-right: 1px solid var(--border);
@@ -5206,20 +5225,6 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .main {{ flex: 1; overflow-y: auto; padding: var(--sp-6) 48px; max-width: 980px; }}
 .main h1 {{ font-size: 28px; font-weight: 700; letter-spacing: -0.02em;
             margin-bottom: var(--sp-1); color: var(--fg); }}
-/* Phase 54.6 — top-bar app-nav icons (Plan / Settings / Ask / Wiki / KG / Papers / Tools).
-   Split out of the per-chapter toolbar so writing actions stay focused. */
-.main .page-header {{ display: flex; align-items: flex-start; justify-content: space-between;
-                      gap: var(--sp-3); margin-bottom: var(--sp-1); }}
-.main .page-header h1 {{ margin-bottom: 0; flex: 1; min-width: 0; }}
-.nav-icons {{ display: flex; gap: 2px; flex-shrink: 0; flex-wrap: wrap;
-              padding-top: 6px; align-items: center; }}
-.nav-icon {{ font-size: 18px; padding: 6px 9px; border: 1px solid transparent;
-             border-radius: var(--r-md); cursor: pointer; background: transparent;
-             color: var(--fg); transition: all .12s ease; line-height: 1;
-             display: inline-flex; align-items: center; justify-content: center; }}
-.nav-icon:hover {{ background: var(--bg-elevated); border-color: var(--border);
-                   box-shadow: var(--shadow-sm); }}
-.nav-icon:active {{ transform: translateY(1px); }}
 .main .subtitle {{ font-size: 13px; color: var(--fg-muted); margin-bottom: var(--sp-3);
                    display: flex; align-items: center; gap: var(--sp-2); }}
 .main p {{ font-family: var(--font-serif); font-size: 16px; line-height: 1.78;
@@ -6252,6 +6257,23 @@ body.task-bar-open {{ padding-top: 40px; }}
   <button class="tb-dismiss" id="tb-dismiss" onclick="dismissTaskBar()" title="Dismiss" style="display:none;">&times;</button>
 </div>
 
+<!-- Phase 54.6 — full-width top bar with app-level navigation (right-aligned icon + text buttons).
+     The per-chapter writing toolbar stays inside <main> so it scrolls with the draft. -->
+<header class="topbar" id="topbar">
+  <button class="nav-btn" onclick="openPlanModal()" title="View / edit / regenerate the book plan (the leitmotiv)">&#128221; Plan</button>
+  <button class="nav-btn" onclick="openBookSettings()" title="Consolidated per-book settings: title, description, plan, length target, style fingerprint">&#9881; Settings</button>
+  <button class="nav-btn" onclick="openAskModal()" title="Full corpus RAG question (sciknow ask question)">&#128270; Ask Corpus</button>
+  <button class="nav-btn" onclick="openWikiModal()" title="Query the compiled knowledge wiki (sciknow wiki query)">&#128218; Wiki Query</button>
+  <button class="nav-btn" onclick="openKgModal()" title="Browse the knowledge graph (extracted entity-relationship triples)">&#128279; KG</button>
+  <button class="nav-btn" onclick="openCatalogModal()" title="Browse the paper catalog (sciknow catalog list)">&#128194; Browse Papers</button>
+  <button class="nav-btn" onclick="openToolsModal()" title="CLI tools in the GUI: search, synthesize, topics, corpus enrich/expand">&#128736; Tools</button>
+  <button class="nav-btn" onclick="openSetupWizard()" title="End-to-end setup: create project → upload PDFs → ingest → build indices → create book. Phase 46.F.">&#128295; Setup</button>
+  <button class="nav-btn" onclick="showDashboard()" title="Book dashboard with stats + heatmap">&#128200; Dashboard</button>
+  <button class="nav-btn" onclick="openProjectsModal()" title="Manage sciknow projects (list / switch / create / destroy). See `sciknow project --help`."><span id="proj-btn-label">&#128193; Projects</span></button>
+</header>
+
+<div class="app-body">
+
 <!-- Sidebar -->
 <nav class="sidebar">
   <h2>{book_title}</h2>
@@ -6292,18 +6314,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 
 <!-- Main content -->
 <main class="main" id="content">
-  <div class="page-header">
-    <h1 id="draft-title">{active_title}</h1>
-    <div class="nav-icons" id="nav-icons">
-      <button class="nav-icon" onclick="openPlanModal()" title="Plan — view / edit / regenerate the book plan (the leitmotiv)">&#128221;</button>
-      <button class="nav-icon" onclick="openBookSettings()" title="Settings — consolidated per-book settings: title, description, plan, length target, style fingerprint">&#9881;</button>
-      <button class="nav-icon" onclick="openAskModal()" title="Ask Corpus — full corpus RAG question (sciknow ask question)">&#128270;</button>
-      <button class="nav-icon" onclick="openWikiModal()" title="Wiki Query — query the compiled knowledge wiki (sciknow wiki query)">&#128218;</button>
-      <button class="nav-icon" onclick="openKgModal()" title="KG — browse the knowledge graph (extracted entity-relationship triples)">&#128279;</button>
-      <button class="nav-icon" onclick="openCatalogModal()" title="Browse Papers — paper catalog (sciknow catalog list)">&#128194;</button>
-      <button class="nav-icon" onclick="openToolsModal()" title="Tools — CLI tools in the GUI: search, synthesize, topics, corpus enrich/expand">&#128736;</button>
-    </div>
-  </div>
+  <h1 id="draft-title">{active_title}</h1>
   <div class="subtitle" id="draft-subtitle">
     Version <span id="draft-version">{active_version}</span> &middot;
     <span id="draft-words">{active_words}</span> words
@@ -6349,13 +6360,6 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button onclick="openExportModal()" title="Export this section, chapter, or the whole book to text or printable HTML/PDF">&#128229; Export</button>
       <button onclick="showCorkboard()" title="Visual card-based view">Corkboard</button>
       <button onclick="showChapterReader()" title="Read entire chapter as continuous scroll">Read</button>
-      <button onclick="showDashboard()" title="Book dashboard with stats + heatmap">Dashboard</button>
-    </div>
-    <div class="sep"></div>
-    <div class="tg">
-      <button onclick="openSetupWizard()"
-              title="End-to-end setup: create project → upload PDFs → ingest → build indices → create book. Phase 46.F.">&#128736; Setup</button>
-      <button onclick="openProjectsModal()" title="Manage sciknow projects (list / switch / create / destroy). See `sciknow project --help`."><span id="proj-btn-label">&#128193; Projects</span></button>
     </div>
   </div>
 
@@ -6438,6 +6442,8 @@ body.task-bar-open {{ padding-top: 40px; }}
     <button type="submit">Add Comment</button>
   </form>
 </aside>
+
+</div> <!-- /.app-body -->
 
 <!-- ── Phase 14 modals ─────────────────────────────────────────────────── -->
 
