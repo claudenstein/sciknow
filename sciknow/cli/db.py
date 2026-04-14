@@ -1125,7 +1125,7 @@ def enrich(
     with get_session() as session:
         rows = session.execute(text("""
             SELECT pm.id::text, pm.title, pm.authors, pm.arxiv_id, pm.metadata_source,
-                   pm.year
+                   pm.year, pm.abstract
             FROM paper_metadata pm
             WHERE pm.doi IS NULL AND pm.title IS NOT NULL
             ORDER BY pm.year DESC NULLS LAST, pm.title
@@ -1151,7 +1151,7 @@ def enrich(
     def _lookup(row) -> tuple[str, str, PaperMeta | None, str, int | None]:
         """Pure API lookup — runs in worker thread, never touches the DB.
         Returns (pm_id, title, meta_or_none, status, year)."""
-        pm_id, title, authors, arxiv_id, _meta_src, pm_year = row
+        pm_id, title, authors, arxiv_id, _meta_src, pm_year, pm_abstract = row
 
         if _is_garbage_title(title) or len(title.strip()) < 15:
             return pm_id, title, None, "skip", pm_year
@@ -1164,6 +1164,7 @@ def enrich(
             title, first_author,
             threshold=threshold,
             year=pm_year,
+            our_abstract=pm_abstract,
             author_threshold=author_threshold,
             year_tolerance=year_tolerance,
         )
@@ -1172,6 +1173,7 @@ def enrich(
                 title, first_author,
                 threshold=threshold,
                 year=pm_year,
+                our_abstract=pm_abstract,
                 author_threshold=author_threshold,
                 year_tolerance=year_tolerance,
             )

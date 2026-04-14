@@ -1043,6 +1043,123 @@ def b_autowrite_log_convergence() -> Iterable[BenchMetric]:
                       note="runs that stopped before max rounds")
 
 
+# ── Phase 51.2 — new fast benches ───────────────────────────────────
+# Three additions covering gaps the bench harness didn't previously
+# measure: (1) KG triple health, (2) chunk-size distribution, and
+# (3) PDF-converter backend mix. All are SQL-only → fast layer.
+
+
+def b_kg_quality() -> Iterable[BenchMetric]:
+    """Triples per paper, source-sentence coverage, predicate family mix.
+
+    Surfaces a few known failure modes of `wiki compile`:
+      - triples_per_paper very low (<3) → extraction prompt is truncating
+      - source_sentence_coverage low → pre-0019 triples or model wasn't
+        honouring the "copy exactly" instruction in the prompt
+      - predicate diversity low → the LLM is collapsing everything into
+        a generic 'related_to'
+    """
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+
+    with get_session() as session:
+        try:
+            n_triples = session.execute(
+                text("SELECT COUNT(*) FROM knowledge_graph")
+            ).scalar() or 0
+        except Exception:
+            yield BenchMetric("kg_present", "no", note="knowledge_graph table missing")
+            return
+        n_papers_with_triples = session.execute(text("""
+            SELECT COUNT(DISTINCT source_doc_id) FROM knowledge_graph
+        """)).scalar() or 0
+        n_with_sent = session.execute(text("""
+            SELECT COUNT(*) FROM knowledge_graph
+            WHERE source_sentence IS NOT NULL AND length(source_sentence) > 0
+        """)).scalar() or 0
+        n_distinct_pred = session.execute(text("""
+            SELECT COUNT(DISTINCT predicate) FROM knowledge_graph
+        """)).scalar() or 0
+
+    yield BenchMetric("kg_triples_total", n_triples, "triples")
+    yield BenchMetric("kg_papers_with_triples", n_papers_with_triples, "papers")
+    if n_papers_with_triples:
+        yield BenchMetric(
+            "kg_triples_per_paper_avg",
+            round(n_triples / n_papers_with_triples, 1),
+            "avg",
+        )
+    if n_triples:
+        yield BenchMetric(
+            "kg_source_sentence_coverage",
+            round(100 * n_with_sent / n_triples, 1),
+            "%",
+            note="pre-0019 rows have NULL; re-compile wiki to backfill",
+        )
+    yield BenchMetric("kg_distinct_predicates", n_distinct_pred, "predicates")
+
+
+def b_corpus_chunk_size_distribution() -> Iterable[BenchMetric]:
+    """Token-length percentiles across all chunks. Regressions here
+    usually trace to changes in the per-section _PARAMS tuning — e.g.
+    dropping overlap or widening the target too aggressively wrecks
+    retrieval recall."""
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+
+    with get_session() as session:
+        rows = session.execute(text("""
+            SELECT
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY content_tokens) AS p50,
+                percentile_cont(0.95) WITHIN GROUP (ORDER BY content_tokens) AS p95,
+                MAX(content_tokens) AS max_tc,
+                MIN(content_tokens) AS min_tc,
+                COUNT(*) AS n
+            FROM chunks
+            WHERE content_tokens IS NOT NULL
+        """)).fetchone()
+    if not rows or not rows[4]:
+        yield BenchMetric("chunks_with_token_count", 0, "chunks",
+                          note="no token_count populated — check chunker")
+        return
+    yield BenchMetric("chunks_token_p50", int(rows[0] or 0), "tokens")
+    yield BenchMetric("chunks_token_p95", int(rows[1] or 0), "tokens")
+    yield BenchMetric("chunks_token_min", int(rows[3] or 0), "tokens")
+    yield BenchMetric("chunks_token_max", int(rows[2] or 0), "tokens")
+
+
+def b_pdf_backend_mix() -> Iterable[BenchMetric]:
+    """Which PDF converter backend produced each complete document?
+    Inferred from `mineru_output_path`: set → MinerU (primary), NULL →
+    Marker (legacy fallback). A sudden swing toward Marker usually
+    means MinerU is failing silently — worth surfacing weekly."""
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+
+    with get_session() as session:
+        n_mineru = session.execute(text("""
+            SELECT COUNT(*) FROM documents
+            WHERE ingestion_status = 'complete'
+              AND mineru_output_path IS NOT NULL
+        """)).scalar() or 0
+        n_marker = session.execute(text("""
+            SELECT COUNT(*) FROM documents
+            WHERE ingestion_status = 'complete'
+              AND mineru_output_path IS NULL
+        """)).scalar() or 0
+    total = n_mineru + n_marker or 1
+    yield BenchMetric(
+        "pdf_backend_mineru",
+        round(100 * n_mineru / total, 1),
+        "%", note=f"{n_mineru} papers",
+    )
+    yield BenchMetric(
+        "pdf_backend_marker_fallback",
+        round(100 * n_marker / total, 1),
+        "%", note=f"{n_marker} papers",
+    )
+
+
 # ════════════════════════════════════════════════════════════════════
 # Layer registry
 # ════════════════════════════════════════════════════════════════════
@@ -1052,10 +1169,13 @@ _FAST: list[tuple[str, BenchFn]] = [
     ("corpus", b_corpus_sizes),
     ("corpus", b_corpus_metadata_source_mix),
     ("corpus", b_corpus_chunk_stats),
+    ("corpus", b_corpus_chunk_size_distribution),  # Phase 51.2
     ("corpus", b_corpus_section_coverage),
     ("corpus", b_corpus_year_distribution),
+    ("corpus", b_pdf_backend_mix),                  # Phase 51.2
     ("qdrant", b_qdrant_collection_stats),
     ("qdrant", b_qdrant_raptor_levels),
+    ("kg",     b_kg_quality),                       # Phase 51.2
     ("books",  b_books_draft_stats),
     ("books",  b_books_groundedness_distribution),
     ("books",  b_books_citation_density),

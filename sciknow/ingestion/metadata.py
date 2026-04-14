@@ -431,15 +431,72 @@ def _year_matches(our_year: int | None, candidate_year: int | None,
     return abs(int(our_year) - int(candidate_year)) <= tolerance
 
 
+def _strip_jats(s: str) -> str:
+    """Crossref returns abstracts with embedded JATS XML tags like
+    <jats:p>. Strip them so similarity scoring sees plain text."""
+    if not s:
+        return ""
+    return re.sub(r"<[^>]+>", " ", s)
+
+
+def _decode_openalex_abstract(inv: dict | None) -> str:
+    """Reconstruct abstract text from OpenAlex's `abstract_inverted_index`
+    (a map word → [positions]). Returns empty string if the input is
+    missing or malformed."""
+    if not isinstance(inv, dict) or not inv:
+        return ""
+    try:
+        total = 0
+        for positions in inv.values():
+            if positions:
+                total = max(total, max(positions) + 1)
+        words = [""] * total
+        for word, positions in inv.items():
+            for pos in positions:
+                if 0 <= pos < total:
+                    words[pos] = word
+        return " ".join(w for w in words if w)
+    except Exception:
+        return ""
+
+
+def _abstract_similarity(a: str, b: str) -> float:
+    """Similarity between two abstracts. Uses the word-level
+    token_set_ratio (order-invariant, handles rearranged sentences).
+    Both inputs are truncated to ~800 chars for speed — any abstract
+    longer than that is enough signal."""
+    na = _norm_title(_strip_jats(a))[:800]
+    nb = _norm_title(_strip_jats(b))[:800]
+    if not na or not nb:
+        return 0.0
+    return _token_set_ratio(na, nb)
+
+
 def _accept_match(
     title_score: float,
     author_match: bool,
     year_match: bool | None,
+    abstract_score: float = 0.0,
     *,
     threshold_title: float,
     threshold_dual: float,
+    threshold_abstract: float = 0.85,
+    threshold_multi_title: float = 0.65,
+    threshold_multi_abstract: float = 0.65,
 ) -> tuple[bool, str]:
-    """Apply the two-tier accept rule. Returns (accept?, reason)."""
+    """Apply the four-tier accept rule. Returns (accept?, reason).
+
+    Phase 51.1 — added abstract as a signal. Abstracts are 250+ words
+    so high abstract similarity is strong evidence even when the
+    title looks different (common for truncated-title PDF extractions).
+    The four tiers in priority order:
+
+      1. title single-signal           title_score ≥ threshold_title
+      2. title + author + year         title_score ≥ threshold_dual
+      3. abstract single-signal        abstract_score ≥ threshold_abstract
+      4. title + abstract multi-signal title_score ≥ threshold_multi_title
+                                       AND abstract_score ≥ threshold_multi_abstract
+    """
     if title_score >= threshold_title:
         return True, f"title={title_score:.2f}>={threshold_title:.2f}"
     if author_match and title_score >= threshold_dual and year_match is not False:
@@ -448,7 +505,16 @@ def _accept_match(
             f"title={title_score:.2f}>={threshold_dual:.2f} "
             f"+author+{ytag}"
         )
-    return False, f"title={title_score:.2f}"
+    if abstract_score >= threshold_abstract:
+        return True, f"abstract={abstract_score:.2f}>={threshold_abstract:.2f}"
+    if (title_score >= threshold_multi_title
+            and abstract_score >= threshold_multi_abstract):
+        return True, (
+            f"title={title_score:.2f}+abstract={abstract_score:.2f} multi"
+        )
+    return False, (
+        f"title={title_score:.2f} abstract={abstract_score:.2f}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -461,6 +527,7 @@ def search_crossref_by_title(
     threshold: float = 0.78,
     *,
     year: int | None = None,
+    our_abstract: str | None = None,
     author_threshold: float = 0.70,
     year_tolerance: int = 1,
 ) -> "PaperMeta | None":
@@ -485,7 +552,10 @@ def search_crossref_by_title(
         # noisy on generic queries, and the right paper is often at rank
         # 6–12 for short/common titles.
         "rows": 20,
-        "select": "DOI,title,author,issued",
+        # Phase 51.1 — abstract is included so the accept rule's
+        # abstract-based tier can fire when the title signal is weak
+        # (truncated / noisy / slightly different between sources).
+        "select": "DOI,title,author,issued,abstract",
     }
     if first_author:
         params["query.author"] = first_author
@@ -526,13 +596,21 @@ def search_crossref_by_title(
             )
             a_match = _authors_overlap(first_author, item_authors)
             y_match = _year_matches(year, item_year, tolerance=year_tolerance)
+            # Phase 51.1 — abstract signal. Crossref's `abstract` field
+            # comes as JATS XML, so strip tags before scoring.
+            a_score = _abstract_similarity(
+                our_abstract or "", item.get("abstract") or ""
+            )
+            # Pick best by the maximum of title and abstract score
+            # (whichever signal is stronger for this pair).
+            combined_score = max(t_score, a_score)
             accept, reason = _accept_match(
-                t_score, a_match, y_match,
+                t_score, a_match, y_match, a_score,
                 threshold_title=threshold,
                 threshold_dual=author_threshold,
             )
-            if t_score > best_score:
-                best_score = t_score
+            if combined_score > best_score:
+                best_score = combined_score
                 best = item
                 best_accept = accept
                 best_reason = reason
@@ -554,6 +632,7 @@ def search_openalex_by_title(
     threshold: float = 0.78,
     *,
     year: int | None = None,
+    our_abstract: str | None = None,
     author_threshold: float = 0.70,
     year_tolerance: int = 1,
 ) -> "PaperMeta | None":
@@ -613,13 +692,20 @@ def search_openalex_by_title(
                 year, int(item_year) if item_year else None,
                 tolerance=year_tolerance,
             )
+            # Phase 51.1 — decode OpenAlex's abstract_inverted_index
+            # and score against our stored abstract.
+            cand_abstract = _decode_openalex_abstract(
+                item.get("abstract_inverted_index")
+            )
+            a_score = _abstract_similarity(our_abstract or "", cand_abstract)
+            combined_score = max(t_score, a_score)
             accept, _reason = _accept_match(
-                t_score, a_match, y_match,
+                t_score, a_match, y_match, a_score,
                 threshold_title=threshold,
                 threshold_dual=author_threshold,
             )
-            if t_score > best_score:
-                best_score = t_score
+            if combined_score > best_score:
+                best_score = combined_score
                 best = item
                 best_accept = accept
 
