@@ -7143,6 +7143,59 @@ def l1_phase52_chunker_version_stamp() -> None:
     assert "chunker_version" in PaperSection.__table__.columns.keys()
 
 
+def l1_phase52_dedup_and_repair_surface() -> None:
+    """Phase 52 — chunk dedup + db repair module + CLI surface.
+
+    Static checks: modules importable, greedy-keep-longest behaves
+    correctly on hand-built cases, RepairScanReport.ok() rule, CLI
+    commands registered on the db subapp. No DB, no Qdrant — pure
+    logic + import-surface checks.
+    """
+    import numpy as np
+
+    from sciknow.cli import db as db_cli
+    from sciknow.maintenance import dedup, repair
+
+    # Dedup — greedy keep-longest on synthetic 4-D vectors.
+    # v2 shares most magnitude with v1 so cos(v1,v2) ≈ 0.95 — above the
+    # default 0.92 threshold, below a tighter 0.99 threshold.
+    v1 = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    v2 = np.array([0.8, 0.6, 0.0, 0.0], dtype=np.float32)  # cos(v1,v2)=0.8
+    v3 = np.array([0.95, 0.3122, 0.0, 0.0], dtype=np.float32)  # cos(v1,v3)≈0.95
+    v4 = np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32)  # unrelated
+    items = [
+        ("c1", "d1", v1, 500),   # longest
+        ("c3", "d1", v3, 400),   # near-dup of c1 at 0.95 → flagged at 0.92
+        ("c2", "d1", v2, 350),   # further away from c1 (0.8) → keep at 0.92
+        ("c4", "d1", v4, 300),   # distinct → keep
+    ]
+    to_delete = dedup._greedy_keep_longest(items, threshold=0.92)
+    assert to_delete == ["c3"], (
+        f"expected c3 marked for deletion only at threshold 0.92; got {to_delete}"
+    )
+    # A tighter threshold (0.99) must leave c3 alone too.
+    to_delete = dedup._greedy_keep_longest(items, threshold=0.99)
+    assert to_delete == [], (
+        f"tighter 0.99 threshold must keep all four separate; got {to_delete}"
+    )
+
+    # Cosine helper
+    assert abs(dedup._cosine(v1, v1) - 1.0) < 1e-6
+    assert abs(dedup._cosine(v1, v4)) < 1e-6  # v4 is orthogonal to v1
+    assert dedup._cosine(np.zeros(4), v1) == 0.0  # zero-vector guard
+
+    # Repair — ok() rule
+    assert repair.RepairScanReport(10, 10, [], [], 0).ok() is True
+    assert repair.RepairScanReport(10, 10, ["x"], [], 0).ok() is False
+    assert repair.RepairScanReport(10, 10, [], ["q"], 0).ok() is False
+    assert repair.RepairScanReport(10, 10, [], [], 3).ok() is False
+
+    # CLI commands registered
+    cmd_names = {c.name for c in db_cli.app.registered_commands}
+    for required in ("repair", "dedup"):
+        assert required in cmd_names, f"db.{required} command missing"
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -7323,6 +7376,8 @@ L1_TESTS: list[Callable] = [
     # Phase 52 — query sanitiser + chunker version stamp (mempalace P1+P3)
     l1_phase52_query_sanitizer,
     l1_phase52_chunker_version_stamp,
+    # Phase 52 — chunk dedup + db repair (mempalace P2+P6)
+    l1_phase52_dedup_and_repair_surface,
 ]
 
 L2_TESTS: list[Callable] = [

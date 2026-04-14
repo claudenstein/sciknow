@@ -2222,6 +2222,142 @@ def cleanup_downloads(
     )
 
 
+@app.command(name="repair")
+def repair_cmd(
+    scan:     bool = typer.Option(False, "--scan",
+                                   help="Diff PG chunks vs Qdrant points; report orphans in both directions."),
+    prune:    bool = typer.Option(False, "--prune",
+                                   help="Delete orphan Qdrant points (safe; PG is the source of truth)."),
+    rebuild_paper: str = typer.Option("", "--rebuild-paper",
+                                       help="Re-chunk + re-embed one document by id / id-prefix."),
+):
+    """Phase 52 — surgical middle ground between `db stats` (read-only)
+    and `db reset` (destructive). Picks up where `db stats` leaves off.
+
+    Three operations; exactly one must be chosen:
+
+    \\b
+      --scan             audit PG vs Qdrant orphans
+      --prune            delete orphan Qdrant points
+      --rebuild-paper <id>  re-chunk + re-embed one paper
+    """
+    from sciknow.cli import preflight
+    preflight()
+    from sciknow.maintenance import repair as _repair
+
+    flags = sum([scan, prune, bool(rebuild_paper)])
+    if flags != 1:
+        console.print(
+            "[red]pass exactly one of --scan / --prune / --rebuild-paper <id>[/red]"
+        )
+        raise typer.Exit(2)
+
+    if scan:
+        report = _repair.repair_scan()
+        console.print(
+            f"[bold]Scan:[/bold] PG chunks = {report.pg_chunks_total:,}, "
+            f"Qdrant points = {report.qdrant_points_total:,}"
+        )
+        console.print(
+            f"  PG orphans (chunk row but no Qdrant point): [yellow]{len(report.pg_orphans)}[/yellow]"
+        )
+        console.print(
+            f"  Qdrant orphans (point but no chunk row):    [yellow]{len(report.qdrant_orphans)}[/yellow]"
+        )
+        console.print(
+            f"  Chunks on an older chunker_version:         [yellow]{report.stale_chunker_version}[/yellow]"
+        )
+        if report.ok():
+            console.print("[green]✓ No repair needed.[/green]")
+        else:
+            console.print(
+                "[dim]Next: `db repair --prune` to remove Qdrant orphans. "
+                "For PG orphans, `db repair --rebuild-paper <doc_id>` "
+                "re-embeds one document.[/dim]"
+            )
+        return
+
+    if prune:
+        report = _repair.repair_scan()
+        if not report.qdrant_orphans:
+            console.print("[green]✓ No Qdrant orphans to prune.[/green]")
+            return
+        console.print(
+            f"Pruning [bold]{len(report.qdrant_orphans)}[/bold] orphan Qdrant points…"
+        )
+        n = _repair.repair_prune(report.qdrant_orphans)
+        console.print(f"[green]✓ Deleted {n} orphan Qdrant points.[/green]")
+        return
+
+    # rebuild_paper
+    try:
+        n_chunks, n_vectors = _repair.rebuild_paper(rebuild_paper)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+    console.print(
+        f"[green]✓ Rebuilt paper {rebuild_paper[:8]}…: "
+        f"{n_chunks} chunks, {n_vectors} vectors.[/green]"
+    )
+
+
+@app.command(name="dedup")
+def dedup_cmd(
+    threshold: float = typer.Option(0.92, "--threshold",
+                                     help="Cosine similarity above which chunks count as duplicates. "
+                                          "Default 0.92 — tight enough that paraphrases don't collapse "
+                                          "but near-identical copies do."),
+    cross_document: bool = typer.Option(False, "--cross-document",
+                                         help="Also scan across documents. Groups chunks by "
+                                              "(section_type, first-60-chars-of-content) as a coarse "
+                                              "pre-filter, then cosine-dedups within each bucket. "
+                                              "Catches preprint-v1 / journal-version near-duplicates "
+                                              "that SHA-256 at ingest can't. More work (more Qdrant "
+                                              "hits) than the default within-document scan."),
+    dry_run: bool = typer.Option(True, "--dry-run/--apply",
+                                  help="Default is --dry-run: report what would be deleted. "
+                                       "Pass --apply to actually remove duplicate chunks + vectors."),
+    limit_docs: int = typer.Option(0, "--limit-docs",
+                                    help="Only scan N documents (0 = all). Handy for a test pass."),
+):
+    """Phase 52 — chunk-level near-duplicate dedup.
+
+    Catches the 'expand pulled preprint v1 + v2 + journal version'
+    case where SHA-256 at ingest doesn't fire (files aren't byte-
+    identical but share 95%+ of the text). Groups chunks, fetches
+    their dense vectors from Qdrant, greedy-keeps the longest chunk
+    in each cluster, deletes the rest.
+    """
+    from sciknow.cli import preflight
+    preflight()
+    from sciknow.maintenance import dedup as _dedup
+
+    mode = "across documents" if cross_document else "within documents"
+    verb = "Scanning (dry-run)" if dry_run else "Applying dedup"
+    console.print(
+        f"[bold]{verb}[/bold]  threshold={threshold}  mode={mode}"
+    )
+    report = _dedup.dedup_corpus(
+        threshold=threshold,
+        cross_document=cross_document,
+        dry_run=dry_run,
+        limit_docs=limit_docs,
+    )
+    console.print(
+        f"[bold]Summary:[/bold]  groups={report.groups_seen:,}  "
+        f"chunks_scanned={report.chunks_scanned:,}  "
+        f"[yellow]duplicates={report.duplicates_found:,}[/yellow]  "
+        + (f"[green]deleted={report.chunks_deleted:,}[/green]"
+           if not dry_run else "[dim](dry-run — no deletes)[/dim]")
+    )
+    if dry_run and report.duplicates_found:
+        console.print(
+            "[dim]Pass --apply to actually delete. "
+            "Run --dry-run first with --cross-document if you want to "
+            "find arXiv/journal near-duplicates too.[/dim]"
+        )
+
+
 @app.command(name="link-citations")
 def link_citations(
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be linked without making changes."),
