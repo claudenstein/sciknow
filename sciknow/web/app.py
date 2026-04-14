@@ -2697,6 +2697,43 @@ async def api_autowrite(
     return JSONResponse({"job_id": job_id})
 
 
+@app.post("/api/insert-citations/{draft_id}")
+async def api_insert_citations(
+    draft_id: str,
+    model: str = Form(None),
+    candidate_k: int = Form(8),
+    max_needs: int = Form(0),
+    dry_run: bool = Form(False),
+):
+    """Phase 46.A — auditable [N]-citation insertion over a saved draft.
+
+    Two-pass LLM flow wrapped by ``book_ops.insert_citations_stream``: pass
+    1 finds locations where a citation is needed, pass 2 retrieves top-K
+    candidates via hybrid search and picks (or rejects) per claim. Events
+    are streamed over the usual ``/api/stream/{job_id}`` SSE channel.
+    """
+    from sciknow.core.book_ops import insert_citations_stream
+
+    job_id, queue = _create_job("insert_citations")
+    loop = asyncio.get_event_loop()
+
+    def gen():
+        return insert_citations_stream(
+            draft_id,
+            model=(model or None),
+            candidate_k=max(1, int(candidate_k)),
+            max_needs=(int(max_needs) if max_needs and max_needs > 0 else None),
+            dry_run=bool(dry_run),
+            save=True,
+        )
+
+    thread = threading.Thread(
+        target=_run_generator_in_thread, args=(job_id, gen, loop), daemon=True)
+    thread.start()
+
+    return JSONResponse({"job_id": job_id})
+
+
 # ── Phase 14: Web v2 endpoints ──────────────────────────────────────────────
 #
 # These add CLI parity to the GUI: score history viewer (Phase 13), wiki
@@ -3039,6 +3076,51 @@ async def api_wiki_query(question: str = Form(...), model: str = Form(None)):
 
     def gen():
         return query_wiki(question, model=model or None)
+
+    threading.Thread(
+        target=_run_generator_in_thread, args=(job_id, gen, loop), daemon=True
+    ).start()
+    return JSONResponse({"job_id": job_id})
+
+
+@app.post("/api/wiki/lint")
+async def api_wiki_lint(deep: bool = Form(False), model: str = Form(None)):
+    """Phase 54.6.2 — stream `sciknow wiki lint` over SSE.
+
+    Yields lint_issue events per problem found, plus a final completed
+    event with the aggregate count. deep=True adds LLM-based
+    cross-paper contradiction detection (slow).
+    """
+    from sciknow.core.wiki_ops import lint_wiki
+
+    job_id, queue = _create_job("wiki_lint")
+    loop = asyncio.get_event_loop()
+
+    def gen():
+        return lint_wiki(deep=bool(deep), model=(model or None))
+
+    threading.Thread(
+        target=_run_generator_in_thread, args=(job_id, gen, loop), daemon=True
+    ).start()
+    return JSONResponse({"job_id": job_id})
+
+
+@app.post("/api/wiki/consensus")
+async def api_wiki_consensus(topic: str = Form(...), model: str = Form(None)):
+    """Phase 54.6.2 — stream `sciknow wiki consensus` over SSE.
+
+    Emits a single consensus event with the structured claims dict, then
+    a completed event. The generator also persists a synthesis wiki page.
+    """
+    if not topic.strip():
+        raise HTTPException(status_code=400, detail="topic required")
+    from sciknow.core.wiki_ops import consensus_map
+
+    job_id, queue = _create_job("wiki_consensus")
+    loop = asyncio.get_event_loop()
+
+    def gen():
+        return consensus_map(topic.strip(), model=(model or None))
 
     threading.Thread(
         target=_run_generator_in_thread, args=(job_id, gen, loop), daemon=True
@@ -4681,6 +4763,42 @@ async def api_projects_destroy(request: Request):
         if f.exists():
             f.unlink()
     return JSONResponse({"ok": not errors, "errors": errors, "qdrant_dropped": n_dropped})
+
+
+@app.post("/api/server/shutdown")
+async def api_server_shutdown(request: Request):
+    """Phase 54.6.2 — cleanly stop the running ``sciknow book serve``.
+
+    We can't hot-swap the DB/Qdrant singletons against the new
+    ``.active-project``, so switching projects mid-session requires a
+    restart. Rather than asking the user to switch to a terminal and
+    Ctrl-C, this endpoint fires SIGTERM at the server's own PID — the
+    uvicorn event loop handles the signal, shuts down gracefully, and
+    the terminal returns to ``$``. The user then re-runs
+    ``sciknow book serve <book>`` to pick up the new project.
+
+    The frontend confirms twice before calling this (it IS a destructive
+    UX — any unsaved job is killed).
+    """
+    import os as _os
+    import signal as _signal
+    import threading as _threading
+    import time as _time
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    # Delay 200ms so the HTTP response can flush before the process dies.
+    def _fire():
+        _time.sleep(0.2)
+        _os.kill(_os.getpid(), _signal.SIGTERM)
+    _threading.Thread(target=_fire, daemon=True).start()
+    return JSONResponse({
+        "ok": True,
+        "message": "Server shutting down. Re-run `sciknow book serve <book>`"
+                   " in your terminal to pick up the new active project.",
+    })
 
 
 # ── HTML rendering helpers ───────────────────────────────────────────────────
@@ -6483,6 +6601,7 @@ body.task-bar-open {{ padding-top: 40px; }}
     <div class="sep"></div>
     <div class="tg">
       <button onclick="doVerify()" title="Verify citations against sources (Phases 7+11)">&#10003; Verify</button>
+      <button onclick="doInsertCitations()" title="Two-pass LLM inserts [N] citation markers where needed; mirrors `sciknow book insert-citations`. Saves a new version.">&#128209; Insert Citations</button>
       <button onclick="showScoresPanel()" title="Phase 13 — convergence trajectory for autowrite drafts">&#9783; Scores</button>
       <button onclick="promptArgue()" title="Map evidence for/against a claim">Argue</button>
       <button onclick="doGaps()" title="Analyse gaps in the book">Gaps</button>
@@ -6588,6 +6707,8 @@ body.task-bar-open {{ padding-top: 40px; }}
     <div class="tabs">
       <button class="tab active" data-tab="wiki-query" onclick="switchWikiTab('wiki-query')">&#128270; Query</button>
       <button class="tab" data-tab="wiki-browse" onclick="switchWikiTab('wiki-browse')">&#128194; Browse pages</button>
+      <button class="tab" data-tab="wiki-lint" onclick="switchWikiTab('wiki-lint')">&#9888;&#65039; Lint</button>
+      <button class="tab" data-tab="wiki-consensus" onclick="switchWikiTab('wiki-consensus')">&#9878;&#65039; Consensus</button>
     </div>
     <div class="modal-body">
       <!-- Query tab -->
@@ -6687,6 +6808,48 @@ body.task-bar-open {{ padding-top: 40px; }}
             </div>
           </div>
         </div>
+      </div>
+      <!-- Phase 54.6.2 — Lint tab: surfaces `sciknow wiki lint` in the GUI. -->
+      <div class="tab-pane" id="wiki-lint-pane" style="display:none;">
+        <div style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;">
+          Check wiki health: broken links, stale pages, orphaned concepts,
+          missing summaries, and optionally contradictions across paper
+          summaries (deep mode uses the LLM — slower).
+        </div>
+        <div class="field" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+            <input type="checkbox" id="wiki-lint-deep"> deep (LLM contradiction detection)
+          </label>
+          <button class="btn-primary" id="wiki-lint-run" onclick="doWikiLint()">Run Lint</button>
+          <button class="btn-secondary" id="wiki-lint-stop" onclick="stopWikiLint()" style="display:none;">Stop</button>
+        </div>
+        <div id="wiki-lint-status" style="margin-top:8px;font-size:12px;color:var(--fg-muted);"></div>
+        <div id="wiki-lint-summary" style="margin-top:8px;"></div>
+        <div id="wiki-lint-issues" style="margin-top:10px;max-height:400px;overflow:auto;"></div>
+      </div>
+      <!-- Phase 54.6.2 — Consensus tab: surfaces `sciknow wiki consensus` in the GUI. -->
+      <div class="tab-pane" id="wiki-consensus-pane" style="display:none;">
+        <div style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;">
+          Map the agreement landscape for a topic. Uses the knowledge graph
+          plus paper summaries to classify claims as strong / moderate /
+          weak / contested, identify supporting vs contradicting papers,
+          and flag the most-debated sub-topics. The result is saved as a
+          wiki synthesis page under <code>/synthesis/</code>.
+        </div>
+        <div class="field">
+          <label>Topic</label>
+          <input type="text" id="wiki-consensus-topic"
+                 placeholder="e.g. cosmic ray cloud nucleation"
+                 onkeydown="if(event.key==='Enter')doWikiConsensus()">
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button class="btn-primary" id="wiki-consensus-run" onclick="doWikiConsensus()">Map Consensus</button>
+          <button class="btn-secondary" id="wiki-consensus-stop" onclick="stopWikiConsensus()" style="display:none;">Stop</button>
+        </div>
+        <div id="wiki-consensus-status" style="margin-top:8px;font-size:12px;color:var(--fg-muted);"></div>
+        <div id="wiki-consensus-summary" style="margin-top:8px;font-size:13px;"></div>
+        <div id="wiki-consensus-claims" style="margin-top:10px;max-height:400px;overflow:auto;"></div>
+        <div id="wiki-consensus-debated" style="margin-top:10px;"></div>
       </div>
     </div>
   </div>
@@ -11188,6 +11351,80 @@ function applyVerificationColors(vd) {{
   }});
 }}
 
+// ── Phase 46.A — Auto-insert [N] citations (two-pass LLM) ───────────────
+async function doInsertCitations() {{
+  if (!currentDraftId) {{
+    showEmptyHint("No draft selected &mdash; click a section in the sidebar, or click <strong>Start writing</strong> under any chapter to create a first draft.");
+    return;
+  }}
+  if (!confirm(
+    "Auto-insert [N] citation markers?\\n\\n"
+    + "This scans the draft for claims that need citations, hybrid-searches "
+    + "your corpus for top-8 candidates per claim, and saves a new version "
+    + "with the accepted citations applied.\\n\\n"
+    + "Takes ~1-3 minutes depending on draft length. Mirrors "
+    + "`sciknow book insert-citations`."
+  )) return;
+  showStreamPanel('Inserting citations...');
+  const fd = new FormData();
+  const res = await fetch('/api/insert-citations/' + currentDraftId, {{
+    method: 'POST', body: fd
+  }});
+  const data = await res.json();
+  currentJobId = data.job_id;
+  if (currentEventSource) currentEventSource.close();
+  const source = new EventSource('/api/stream/' + data.job_id);
+  currentEventSource = source;
+  const body = document.getElementById('stream-body');
+  const status = document.getElementById('stream-status');
+  body.innerHTML =
+    '<div id="ic-summary" style="font-size:16px;margin-bottom:12px;"></div>'
+    + '<div id="ic-log" style="font-size:12px;font-family:ui-monospace,monospace;'
+    + 'max-height:320px;overflow:auto;padding:8px;background:var(--toolbar-bg);'
+    + 'border-radius:4px;"></div>';
+  const summary = document.getElementById('ic-summary');
+  const log = document.getElementById('ic-log');
+  function _append(html) {{ log.innerHTML += html; log.scrollTop = log.scrollHeight; }}
+  source.onmessage = function(e) {{
+    const evt = JSON.parse(e.data);
+    if (evt.type === 'progress') {{
+      status.textContent = evt.detail || evt.stage;
+      _append('<div style="color:var(--fg-muted);">' + (evt.detail || evt.stage) + '</div>');
+    }} else if (evt.type === 'citation_needs') {{
+      summary.innerHTML = '<strong>' + evt.count + '</strong> location(s) flagged for citation';
+      status.textContent = 'Retrieving candidates...';
+    }} else if (evt.type === 'citation_candidates') {{
+      _append('<div>#' + (evt.index + 1) + ': ' + evt.n_candidates + ' candidate(s)</div>');
+    }} else if (evt.type === 'citation_selected') {{
+      const conf = (evt.confidence != null) ? evt.confidence.toFixed(2) : '?';
+      _append('<div style="color:var(--success);">&nbsp;&nbsp;&#10003; #'
+        + (evt.index + 1) + ' picked (conf ' + conf + ')</div>');
+    }} else if (evt.type === 'citation_skipped') {{
+      _append('<div style="color:var(--fg-muted);">&nbsp;&nbsp;&mdash; #'
+        + (evt.index + 1) + ' skipped (' + (evt.reason || 'no match') + ')</div>');
+    }} else if (evt.type === 'citation_inserted') {{
+      // Total count emitted right before completed
+    }} else if (evt.type === 'completed') {{
+      const msg = evt.message
+        || ('Inserted ' + (evt.n_inserted || 0) + ' / ' + (evt.n_needs || 0) + ' citations');
+      status.textContent = msg;
+      summary.innerHTML = '<span style="color:var(--success);font-weight:bold;">&#10003; '
+        + msg + '</span>';
+      source.close(); currentEventSource = null; currentJobId = null;
+      if ((evt.n_inserted || 0) > 0 && currentDraftId) {{
+        setTimeout(() => loadSection(currentDraftId), 800);
+      }}
+      setTimeout(() => hideStreamPanel(), 3500);
+    }} else if (evt.type === 'error') {{
+      status.textContent = 'Error: ' + evt.message;
+      summary.innerHTML = '<span style="color:var(--danger);">&#10007; ' + evt.message + '</span>';
+      source.close(); currentEventSource = null; currentJobId = null;
+    }} else if (evt.type === 'done') {{
+      source.close(); currentEventSource = null; currentJobId = null;
+    }}
+  }};
+}}
+
 // ── Citation Popovers (Phase 5a) ─────────────────────────────────────
 function buildPopovers() {{
   // Extract source data from the sources panel
@@ -12133,9 +12370,208 @@ function switchWikiTab(name) {{
   document.querySelectorAll('#wiki-modal .tab').forEach(t => {{
     t.classList.toggle('active', t.dataset.tab === name);
   }});
-  document.getElementById('wiki-query-pane').style.display = (name === 'wiki-query') ? 'block' : 'none';
-  document.getElementById('wiki-browse-pane').style.display = (name === 'wiki-browse') ? 'block' : 'none';
+  ['wiki-query', 'wiki-browse', 'wiki-lint', 'wiki-consensus'].forEach(tab => {{
+    const pane = document.getElementById(tab + '-pane');
+    if (pane) pane.style.display = (name === tab) ? 'block' : 'none';
+  }});
   if (name === 'wiki-browse') loadWikiPages(1);
+}}
+
+// ── Phase 54.6.2 — Wiki Lint + Consensus (surface CLI in GUI) ───────────
+let _wikiLintJob = null;
+let _wikiLintSource = null;
+
+async function doWikiLint() {{
+  const deep = document.getElementById('wiki-lint-deep').checked;
+  const runBtn = document.getElementById('wiki-lint-run');
+  const stopBtn = document.getElementById('wiki-lint-stop');
+  const status = document.getElementById('wiki-lint-status');
+  const summary = document.getElementById('wiki-lint-summary');
+  const issuesEl = document.getElementById('wiki-lint-issues');
+  runBtn.disabled = true;
+  stopBtn.style.display = 'inline-block';
+  status.textContent = 'Running structural checks…';
+  summary.innerHTML = '';
+  issuesEl.innerHTML = '';
+
+  const fd = new FormData();
+  fd.append('deep', deep);
+  let res;
+  try {{
+    res = await fetch('/api/wiki/lint', {{method: 'POST', body: fd}});
+  }} catch (exc) {{
+    status.textContent = 'Request failed: ' + exc.message;
+    runBtn.disabled = false; stopBtn.style.display = 'none';
+    return;
+  }}
+  const data = await res.json();
+  _wikiLintJob = data.job_id;
+  const source = new EventSource('/api/stream/' + _wikiLintJob);
+  _wikiLintSource = source;
+  const bySeverity = {{ high: [], medium: [], low: [] }};
+
+  source.onmessage = function(e) {{
+    const evt = JSON.parse(e.data);
+    if (evt.type === 'progress') {{
+      status.textContent = evt.detail || evt.stage;
+    }} else if (evt.type === 'lint_issue') {{
+      const sev = (evt.severity || 'low').toLowerCase();
+      (bySeverity[sev] || bySeverity.low).push(evt);
+      _renderWikiLintIssues(bySeverity);
+    }} else if (evt.type === 'completed') {{
+      const n = evt.issues_count || 0;
+      status.textContent = n === 0 ? 'All checks passed.' : (n + ' issue(s) found.');
+      summary.innerHTML = (n === 0)
+        ? '<div style="color:var(--success);font-weight:bold;">&#10003; Wiki is clean.</div>'
+        : '<div>'
+          + '<span style="color:var(--danger);font-weight:bold;">' + (bySeverity.high.length) + '</span> high · '
+          + '<span style="color:var(--warning);font-weight:bold;">' + (bySeverity.medium.length) + '</span> medium · '
+          + '<span style="color:var(--fg-muted);font-weight:bold;">' + (bySeverity.low.length) + '</span> low'
+          + '</div>';
+      source.close(); _wikiLintSource = null; _wikiLintJob = null;
+      runBtn.disabled = false; stopBtn.style.display = 'none';
+    }} else if (evt.type === 'error') {{
+      status.textContent = 'Error: ' + evt.message;
+      source.close(); _wikiLintSource = null; _wikiLintJob = null;
+      runBtn.disabled = false; stopBtn.style.display = 'none';
+    }} else if (evt.type === 'done') {{
+      source.close(); _wikiLintSource = null; _wikiLintJob = null;
+      runBtn.disabled = false; stopBtn.style.display = 'none';
+    }}
+  }};
+}}
+
+function _renderWikiLintIssues(bySeverity) {{
+  const el = document.getElementById('wiki-lint-issues');
+  const order = ['high', 'medium', 'low'];
+  const colors = {{high:'var(--danger)', medium:'var(--warning)', low:'var(--fg-muted)'}};
+  const labels = {{high:'HIGH', medium:'MEDIUM', low:'LOW'}};
+  let html = '';
+  for (const sev of order) {{
+    const issues = bySeverity[sev] || [];
+    if (!issues.length) continue;
+    html += '<div style="margin-top:8px;"><div style="font-weight:bold;color:'
+      + colors[sev] + ';font-size:11px;letter-spacing:0.05em;">' + labels[sev]
+      + ' (' + issues.length + ')</div>';
+    for (const i of issues) {{
+      const kind = i.type_ || i.kind || 'issue';
+      html += '<div style="padding:6px 8px;margin-top:4px;border-left:3px solid '
+        + colors[sev] + ';background:var(--toolbar-bg);border-radius:4px;font-size:12px;">'
+        + '<code style="font-size:10px;color:var(--fg-muted);">' + _escHtml(kind) + '</code> '
+        + _escHtml(i.detail || i.message || JSON.stringify(i)) + '</div>';
+    }}
+    html += '</div>';
+  }}
+  el.innerHTML = html;
+}}
+
+async function stopWikiLint() {{
+  if (_wikiLintJob) {{
+    await fetch('/api/jobs/' + _wikiLintJob, {{method: 'DELETE'}});
+  }}
+}}
+
+let _wikiConsensusJob = null;
+let _wikiConsensusSource = null;
+
+async function doWikiConsensus() {{
+  const topic = document.getElementById('wiki-consensus-topic').value.trim();
+  if (!topic) {{ alert('Enter a topic first.'); return; }}
+  const runBtn = document.getElementById('wiki-consensus-run');
+  const stopBtn = document.getElementById('wiki-consensus-stop');
+  const status = document.getElementById('wiki-consensus-status');
+  const summaryEl = document.getElementById('wiki-consensus-summary');
+  const claimsEl = document.getElementById('wiki-consensus-claims');
+  const debatedEl = document.getElementById('wiki-consensus-debated');
+  runBtn.disabled = true;
+  stopBtn.style.display = 'inline-block';
+  status.textContent = 'Gathering evidence…';
+  summaryEl.innerHTML = '';
+  claimsEl.innerHTML = '';
+  debatedEl.innerHTML = '';
+
+  const fd = new FormData();
+  fd.append('topic', topic);
+  const res = await fetch('/api/wiki/consensus', {{method: 'POST', body: fd}});
+  const data = await res.json();
+  _wikiConsensusJob = data.job_id;
+  const source = new EventSource('/api/stream/' + _wikiConsensusJob);
+  _wikiConsensusSource = source;
+
+  source.onmessage = function(e) {{
+    const evt = JSON.parse(e.data);
+    if (evt.type === 'progress') {{
+      status.textContent = evt.detail || evt.stage;
+    }} else if (evt.type === 'consensus') {{
+      _renderConsensus(evt.data || {{}}, summaryEl, claimsEl, debatedEl);
+    }} else if (evt.type === 'completed') {{
+      const slug = evt.slug || '';
+      const claims = evt.claims || 0;
+      status.innerHTML = 'Saved <strong>' + claims + '</strong> claim(s)'
+        + (slug ? ' as <a href="#" onclick="event.preventDefault();switchWikiTab(\\'wiki-browse\\');openWikiPage(\\'' + _escHtml(slug) + '\\');">' + _escHtml(slug) + '</a>.' : '.');
+      source.close(); _wikiConsensusSource = null; _wikiConsensusJob = null;
+      runBtn.disabled = false; stopBtn.style.display = 'none';
+    }} else if (evt.type === 'error') {{
+      status.textContent = 'Error: ' + evt.message;
+      source.close(); _wikiConsensusSource = null; _wikiConsensusJob = null;
+      runBtn.disabled = false; stopBtn.style.display = 'none';
+    }} else if (evt.type === 'done') {{
+      source.close(); _wikiConsensusSource = null; _wikiConsensusJob = null;
+      runBtn.disabled = false; stopBtn.style.display = 'none';
+    }}
+  }};
+}}
+
+function _renderConsensus(data, summaryEl, claimsEl, debatedEl) {{
+  if (data.summary) {{
+    summaryEl.innerHTML = '<div style="padding:8px;background:var(--toolbar-bg);border-radius:4px;">'
+      + _escHtml(data.summary) + '</div>';
+  }}
+  const colorOf = {{
+    strong: 'var(--success)', moderate: 'var(--accent)',
+    weak: 'var(--warning)', contested: 'var(--danger)',
+  }};
+  const claims = data.claims || [];
+  if (claims.length) {{
+    let html = '<div style="font-size:11px;font-weight:bold;color:var(--fg-muted);margin:8px 0;">CLAIMS</div>';
+    for (const c of claims) {{
+      const level = (c.consensus_level || 'unknown').toLowerCase();
+      const color = colorOf[level] || 'var(--fg-muted)';
+      const trend = c.trend ? (' · trend: ' + c.trend) : '';
+      const sup = c.supporting_papers || [];
+      const con = c.contradicting_papers || [];
+      html += '<div style="padding:8px 10px;margin-top:6px;border-left:3px solid '
+        + color + ';background:var(--toolbar-bg);border-radius:4px;font-size:12px;">'
+        + '<span style="font-weight:bold;color:' + color + ';text-transform:uppercase;font-size:10px;letter-spacing:0.05em;">'
+        + _escHtml(level) + '</span>'
+        + '<span style="color:var(--fg-muted);font-size:10px;">' + _escHtml(trend) + '</span>'
+        + '<div style="margin-top:4px;">' + _escHtml(c.claim || '') + '</div>';
+      if (sup.length) {{
+        html += '<div style="margin-top:4px;color:var(--success);font-size:11px;">Supports ('
+          + sup.length + '): ' + sup.slice(0, 4).map(_escHtml).join(', ')
+          + (sup.length > 4 ? ' +' + (sup.length - 4) : '') + '</div>';
+      }}
+      if (con.length) {{
+        html += '<div style="margin-top:2px;color:var(--danger);font-size:11px;">Contradicts ('
+          + con.length + '): ' + con.slice(0, 4).map(_escHtml).join(', ')
+          + (con.length > 4 ? ' +' + (con.length - 4) : '') + '</div>';
+      }}
+      html += '</div>';
+    }}
+    claimsEl.innerHTML = html;
+  }}
+  const debated = data.most_debated || [];
+  if (debated.length) {{
+    debatedEl.innerHTML = '<div style="font-size:11px;font-weight:bold;color:var(--fg-muted);margin-bottom:4px;">MOST DEBATED</div>'
+      + '<ul style="margin:0 0 0 20px;padding:0;font-size:12px;">'
+      + debated.map(d => '<li>' + _escHtml(d) + '</li>').join('') + '</ul>';
+  }}
+}}
+
+async function stopWikiConsensus() {{
+  if (_wikiConsensusJob) {{
+    await fetch('/api/jobs/' + _wikiConsensusJob, {{method: 'DELETE'}});
+  }}
 }}
 
 let wikiBrowsePage = 1;
@@ -16144,15 +16580,71 @@ async function useProject(slug) {{
     }}
     _projMsg(data.message || ('Active project: ' + slug), 'ok');
     if (data.restart_required) {{
-      alert('Active project is now "' + slug + '".\\n\\n'
-          + 'This running web reader will keep serving the original book from "'
-          + data.running_slug + '". To work on the new project, stop this server '
-          + '(Ctrl+C in the terminal) and run:\\n\\n'
-          + '  sciknow --project ' + slug + ' book serve "<book title in ' + slug + '>"');
+      renderProjectSwitchBanner(slug, data.running_slug);
     }}
     refreshProjectsList();
   }} catch (exc) {{
     _projMsg('Use failed: ' + exc, 'error');
+  }}
+}}
+
+function renderProjectSwitchBanner(newSlug, runningSlug) {{
+  // Phase 54.6.2 — after a successful /api/projects/use, replace the
+  // old "Ctrl-C your terminal" alert with an inline banner that offers
+  // a one-click graceful shutdown. The user still needs to rerun
+  // `sciknow book serve` themselves (no supervisor to auto-restart)
+  // but at least they don't have to leave the browser.
+  const dest = document.getElementById('proj-detail');
+  if (!dest) return;
+  const safeNew = _escHtml(newSlug);
+  const safeRun = _escHtml(runningSlug || '?');
+  const cmd = 'sciknow --project ' + safeNew + ' book serve "<book title>"';
+  dest.innerHTML =
+    '<div style="margin-top:14px;padding:14px;border:2px solid var(--accent);'
+    + 'border-radius:8px;background:var(--bg-elevated);">'
+    + '<div style="font-weight:bold;margin-bottom:6px;">&#9888;&#65039; Restart required</div>'
+    + '<div style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;">'
+    + 'The <code>.active-project</code> file now points at <strong>' + safeNew
+    + '</strong>, but this server is still bound to <strong>' + safeRun
+    + '</strong>. DB / Qdrant clients can&rsquo;t hot-swap, so you need to '
+    + 'restart the server to work on the new project.'
+    + '</div>'
+    + '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">'
+    + '<button class="btn-primary" onclick="shutdownServer()" '
+    + 'title="Graceful shutdown — your terminal will return to $, ready for the re-run command below">'
+    + '&#9211; Stop this server</button>'
+    + '<code style="flex:1;padding:4px 8px;background:var(--toolbar-bg);border-radius:4px;font-size:12px;cursor:pointer;"'
+    + ' onclick="navigator.clipboard.writeText(this.textContent);_projMsg(&quot;Command copied.&quot;,&quot;ok&quot;);" '
+    + 'title="Click to copy">' + _escHtml(cmd) + '</code>'
+    + '</div>'
+    + '<div style="margin-top:8px;font-size:11px;color:var(--fg-muted);">'
+    + 'After stopping, paste the command into your terminal and edit '
+    + '<code>"&lt;book title&gt;"</code> to a book that exists in <strong>'
+    + safeNew + '</strong>.</div>'
+    + '</div>';
+}}
+
+async function shutdownServer() {{
+  if (!confirm(
+    'Stop the running sciknow server?\\n\\n'
+    + 'This will return your terminal to the shell prompt. Any in-flight LLM job '
+    + 'will be killed. You will need to rerun `sciknow book serve ...` manually '
+    + 'to open the reader again.'
+  )) return;
+  _projMsg('Shutting down…');
+  try {{
+    await fetch('/api/server/shutdown', {{method: 'POST'}});
+    document.body.innerHTML =
+      '<div style="padding:40px;max-width:620px;margin:60px auto;font-family:-apple-system,sans-serif;'
+      + 'border:1px solid #ddd;border-radius:8px;background:#f8f8f8;">'
+      + '<h2 style="margin:0 0 12px;">Server stopped</h2>'
+      + '<p>Your terminal is back at <code>$</code>. To pick up the new active project, run:</p>'
+      + '<pre style="padding:10px;background:#fff;border:1px solid #ddd;border-radius:4px;">'
+      + 'sciknow book serve "&lt;book title&gt;"</pre>'
+      + '<p style="font-size:12px;color:#666;margin:12px 0 0;">Then reload this browser tab.</p>'
+      + '</div>';
+  }} catch (exc) {{
+    _projMsg('Shutdown request failed: ' + exc, 'error');
   }}
 }}
 
