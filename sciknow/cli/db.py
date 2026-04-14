@@ -1673,6 +1673,34 @@ def expand(
                 f"will skip. Pass --retry-failed to force a retry.[/dim]"
             )
 
+    # Phase 49.2 — also skip anything the main ingest pipeline already
+    # tried and failed on (status='failed' rows in `documents`). The
+    # pipeline copies/symlinks such PDFs into `data/failed/` via
+    # `_archive_pdf`, which is exactly the "duplicates in the failed
+    # folder" the user was seeing: they're the canonical record of a
+    # prior failed attempt. Look them up by DOI/arXiv id so that
+    # db expand doesn't re-download a paper the pipeline has already
+    # chewed on. `--retry-failed` still bypasses this branch.
+    if not retry_failed:
+        with get_session() as session:
+            prior_failed = session.execute(sql_text("""
+                SELECT pm.doi, pm.arxiv_id
+                FROM paper_metadata pm
+                JOIN documents d ON d.id = pm.document_id
+                WHERE d.ingestion_status = 'failed'
+            """)).fetchall()
+        added_from_db = 0
+        for doi_val, arxiv_val in prior_failed:
+            k = (doi_val or arxiv_val or "").lower().strip()
+            if k and k not in ingest_failed:
+                ingest_failed.add(k)
+                added_from_db += 1
+        if added_from_db:
+            console.print(
+                f"[dim]{added_from_db} additional ref(s) found in "
+                f"documents table with status='failed' — will skip.[/dim]"
+            )
+
     # ── Step 7: download phase (parallel) + ingest phase (serial, in-process) ─
     #
     # Phase split (expand v2):
@@ -1966,83 +1994,161 @@ def expand(
 @app.command(name="cleanup-downloads")
 def cleanup_downloads(
     download_dir: Path = typer.Option(None, "--download-dir", "-d",
-                                       help="Directory to tidy (default: <project data>/downloads)."),
+                                       help="Override for <download_dir> (default: <project data>/downloads)."),
     dry_run: bool = typer.Option(False, "--dry-run",
-                                  help="Show what would move, don't move anything."),
+                                  help="Show what would change, don't touch any files."),
     delete_dupes: bool = typer.Option(False, "--delete-dupes",
-                                       help="Delete PDFs that match a paper already in the DB by SHA-256 "
-                                            "instead of moving them to processed/. Saves disk but loses the "
-                                            "audit trail — only use if you're sure."),
+                                       help="DELETE duplicate / already-in-DB PDFs instead of moving them "
+                                            "to processed/. Saves disk but loses the audit trail — only "
+                                            "use if you're sure."),
 ):
-    """Phase 49.1 — one-shot cleanup for pre-existing <download_dir>
-    accumulation (files left over from pre-cleanup runs).
+    """Phase 49.2 — comprehensive dedup of every place a PDF can end up.
 
-    For every PDF in the root of <download_dir>:
-      * If its SHA-256 matches a `documents` row with status='complete',
-        move it to <download_dir>/processed/ (or delete with
-        --delete-dupes) — its content is already in the corpus.
-      * Otherwise leave it alone — it might be mid-run or genuinely new.
+    Scans ALL of these locations for PDFs:
 
-    The live expand flow now auto-moves files as they're processed;
-    this command is for retrofitting old download_dirs."""
+    \\b
+      * <download_dir>/                      (loose files from interrupted expand runs)
+      * <download_dir>/processed/            (Phase 49.1 success archive)
+      * <download_dir>/failed_ingest/        (Phase 49.1 ingest-failed archive)
+      * <data_dir>/processed/                (main pipeline success archive)
+      * <data_dir>/failed/                   (main pipeline failure archive)
+
+    For each PDF, SHA-256 its bytes. Group by hash and pick a
+    canonical location (priority: data/processed > downloads/processed
+    > downloads root > data/failed > downloads/failed_ingest). Every
+    other copy is a duplicate and gets moved to the canonical
+    subfolder (or deleted with --delete-dupes).
+
+    Why this matters: the main ingest pipeline's `_archive_pdf`
+    already moves downloads/*.pdf into data/{processed,failed}/ on
+    its own, so a successful db expand ingest leaves TWO archives —
+    one via the pipeline, one via Phase 49.1's `_move_downloaded_pdf`
+    — if we don't cross-reference them. This command is the unified
+    cross-reference."""
     from sciknow.cli import preflight
     preflight()
     import hashlib
+    from collections import defaultdict
     from sqlalchemy import text as sql_text
     from sciknow.config import settings
     from sciknow.storage.db import get_session
 
     if download_dir is None:
         download_dir = settings.data_dir / "downloads"
-    if not download_dir.exists():
-        console.print(f"[yellow]{download_dir} does not exist — nothing to clean.[/yellow]")
+    data_dir = settings.data_dir
+
+    # Scan locations in canonical-preference order — the first one a
+    # given SHA appears in is "kept", later ones are dupes.
+    scan_locations: list[tuple[str, Path]] = [
+        ("data/processed",            data_dir / "processed"),
+        ("downloads/processed",       download_dir / _PROCESSED_SUBDIR),
+        ("downloads (root)",          download_dir),
+        ("data/failed",               data_dir / "failed"),
+        ("downloads/failed_ingest",   download_dir / _FAILED_SUBDIR),
+    ]
+
+    def _pdfs_in(p: Path) -> list[Path]:
+        if not p.exists():
+            return []
+        # Non-recursive — we scan each location individually.
+        return sorted(
+            f for f in p.iterdir()
+            if f.is_file() and not f.is_symlink() and f.suffix.lower() == ".pdf"
+        )
+
+    found: list[tuple[str, Path]] = []
+    for label, loc in scan_locations:
+        for pdf in _pdfs_in(loc):
+            found.append((label, pdf))
+    if not found:
+        console.print("[green]No PDF files found across any archive location.[/green]")
         raise typer.Exit(0)
 
-    root_pdfs = sorted(
-        p for p in download_dir.iterdir() if p.is_file() and p.suffix.lower() == ".pdf"
-    )
-    if not root_pdfs:
-        console.print(f"[green]{download_dir} is already tidy — no loose PDFs at root.[/green]")
-        raise typer.Exit(0)
+    console.print(f"Scanning [bold]{len(found)}[/bold] PDF(s) across all archive locations…")
 
-    console.print(f"Scanning [bold]{len(root_pdfs)}[/bold] loose PDF(s) in {download_dir}…")
-
-    # Build SHA → document_id index for the corpus.
+    # Build SHA → document_row index for the corpus so we can cross-
+    # reference disk content against DB state too.
     with get_session() as session:
         rows = session.execute(sql_text(
-            "SELECT file_hash, id FROM documents WHERE ingestion_status = 'complete'"
+            "SELECT file_hash, ingestion_status FROM documents WHERE file_hash IS NOT NULL"
         )).fetchall()
-    sha_to_doc = {r[0]: r[1] for r in rows if r[0]}
+    sha_status = {r[0]: r[1] for r in rows if r[0]}
+
+    # Hash every file. Group by SHA.
+    by_sha: dict[str, list[tuple[str, Path]]] = defaultdict(list)
+    for label, pdf in found:
+        try:
+            h = hashlib.sha256(pdf.read_bytes()).hexdigest()
+        except Exception as exc:
+            console.print(f"  [red]skip[/red] {pdf}: {exc}")
+            continue
+        by_sha[h].append((label, pdf))
 
     moved = deleted = kept = 0
-    for p in root_pdfs:
-        try:
-            h = hashlib.sha256(p.read_bytes()).hexdigest()
-        except Exception as exc:
-            console.print(f"  [red]skip[/red] {p.name}: {exc}")
-            kept += 1
-            continue
-        if h in sha_to_doc:
-            if dry_run:
-                console.print(f"  [dim]would move[/dim] {p.name} (SHA match)")
-                moved += 1
-            elif delete_dupes:
-                p.unlink()
-                deleted += 1
+    archived_orphans = 0
+    for sha, locs in by_sha.items():
+        # Canonical = first in scan_locations order that appears
+        locs_sorted = sorted(locs, key=lambda x: [i for i, (_, p) in enumerate(scan_locations) if p == x[1].parent][0] if any(p == x[1].parent for _, p in scan_locations) else 99)
+        canonical_label, canonical_path = locs_sorted[0]
+        dupes = locs_sorted[1:]
+        # If every disk copy is an orphan (file not in DB at all) and
+        # there are multiple copies, still dedupe — keep the first.
+        if sha in sha_status:
+            if sha_status[sha] == "complete":
+                # Corpus knows this paper — dupes can go.
+                kept += 1
             else:
-                new = _move_downloaded_pdf(
-                    p, outcome="skipped", download_dir=download_dir,
-                )
-                moved += 1 if new else 0
+                # status='failed' or 'pending' — still dedupe but the
+                # canonical may need to stay in data/failed for pipeline
+                # retries. Prefer data/failed as canonical for failed docs.
+                for i, (lbl, _p) in enumerate(locs_sorted):
+                    if lbl == "data/failed":
+                        canonical_label, canonical_path = lbl, _p
+                        dupes = locs_sorted[:i] + locs_sorted[i+1:]
+                        break
+                kept += 1
         else:
-            kept += 1
+            # Not in DB — might be genuinely new or orphaned.
+            if len(dupes) == 0:
+                kept += 1
+                continue
+            archived_orphans += 1
 
-    verb = "Would move" if dry_run else "Moved"
+        for lbl, dupe_path in dupes:
+            if dry_run:
+                console.print(
+                    f"  [dim]would remove[/dim] {lbl}/{dupe_path.name} "
+                    f"(dup of {canonical_label}/{canonical_path.name})"
+                )
+                moved += 1
+                continue
+            try:
+                if delete_dupes:
+                    dupe_path.unlink()
+                    deleted += 1
+                else:
+                    # Park in downloads/processed as the "safe keep"
+                    # location. Preserves content; avoids cluttering
+                    # pipeline archive dirs.
+                    parked = _move_downloaded_pdf(
+                        dupe_path, outcome="skipped", download_dir=download_dir,
+                    )
+                    # If the move target already has a same-named file
+                    # (would clobber), just delete the dupe instead.
+                    if parked is None and dupe_path.exists():
+                        dupe_path.unlink()
+                        deleted += 1
+                    else:
+                        moved += 1
+            except Exception as exc:
+                console.print(f"  [red]skip[/red] {dupe_path}: {exc}")
+
+    verb = "Would remove" if dry_run else ("Deleted" if delete_dupes else "Moved to processed/")
     console.print(
         f"\n[bold]Summary:[/bold] "
-        f"[green]✓ {moved} {verb.lower()} to processed/[/green]  "
-        f"[yellow]↷ {kept} kept (not in DB yet)[/yellow]"
-        + (f"  [red]✗ {deleted} deleted[/red]" if deleted else "")
+        f"[green]✓ {moved + deleted} duplicate copies {verb.lower()}[/green]  "
+        f"[yellow]↷ {kept} canonical copies kept[/yellow]"
+        + (f"  [dim]({archived_orphans} not-in-DB groups consolidated)[/dim]" if archived_orphans else "")
     )
 
 
