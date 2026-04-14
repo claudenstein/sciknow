@@ -5206,6 +5206,20 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .main {{ flex: 1; overflow-y: auto; padding: var(--sp-6) 48px; max-width: 980px; }}
 .main h1 {{ font-size: 28px; font-weight: 700; letter-spacing: -0.02em;
             margin-bottom: var(--sp-1); color: var(--fg); }}
+/* Phase 54.6 — top-bar app-nav icons (Plan / Settings / Ask / Wiki / KG / Papers / Tools).
+   Split out of the per-chapter toolbar so writing actions stay focused. */
+.main .page-header {{ display: flex; align-items: flex-start; justify-content: space-between;
+                      gap: var(--sp-3); margin-bottom: var(--sp-1); }}
+.main .page-header h1 {{ margin-bottom: 0; flex: 1; min-width: 0; }}
+.nav-icons {{ display: flex; gap: 2px; flex-shrink: 0; flex-wrap: wrap;
+              padding-top: 6px; align-items: center; }}
+.nav-icon {{ font-size: 18px; padding: 6px 9px; border: 1px solid transparent;
+             border-radius: var(--r-md); cursor: pointer; background: transparent;
+             color: var(--fg); transition: all .12s ease; line-height: 1;
+             display: inline-flex; align-items: center; justify-content: center; }}
+.nav-icon:hover {{ background: var(--bg-elevated); border-color: var(--border);
+                   box-shadow: var(--shadow-sm); }}
+.nav-icon:active {{ transform: translateY(1px); }}
 .main .subtitle {{ font-size: 13px; color: var(--fg-muted); margin-bottom: var(--sp-3);
                    display: flex; align-items: center; gap: var(--sp-2); }}
 .main p {{ font-family: var(--font-serif); font-size: 16px; line-height: 1.78;
@@ -6278,7 +6292,18 @@ body.task-bar-open {{ padding-top: 40px; }}
 
 <!-- Main content -->
 <main class="main" id="content">
-  <h1 id="draft-title">{active_title}</h1>
+  <div class="page-header">
+    <h1 id="draft-title">{active_title}</h1>
+    <div class="nav-icons" id="nav-icons">
+      <button class="nav-icon" onclick="openPlanModal()" title="Plan — view / edit / regenerate the book plan (the leitmotiv)">&#128221;</button>
+      <button class="nav-icon" onclick="openBookSettings()" title="Settings — consolidated per-book settings: title, description, plan, length target, style fingerprint">&#9881;</button>
+      <button class="nav-icon" onclick="openAskModal()" title="Ask Corpus — full corpus RAG question (sciknow ask question)">&#128270;</button>
+      <button class="nav-icon" onclick="openWikiModal()" title="Wiki Query — query the compiled knowledge wiki (sciknow wiki query)">&#128218;</button>
+      <button class="nav-icon" onclick="openKgModal()" title="KG — browse the knowledge graph (extracted entity-relationship triples)">&#128279;</button>
+      <button class="nav-icon" onclick="openCatalogModal()" title="Browse Papers — paper catalog (sciknow catalog list)">&#128194;</button>
+      <button class="nav-icon" onclick="openToolsModal()" title="Tools — CLI tools in the GUI: search, synthesize, topics, corpus enrich/expand">&#128736;</button>
+    </div>
+  </div>
   <div class="subtitle" id="draft-subtitle">
     Version <span id="draft-version">{active_version}</span> &middot;
     <span id="draft-words">{active_words}</span> words
@@ -6315,16 +6340,6 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button onclick="showScoresPanel()" title="Phase 13 — convergence trajectory for autowrite drafts">&#9783; Scores</button>
       <button onclick="promptArgue()" title="Map evidence for/against a claim">Argue</button>
       <button onclick="doGaps()" title="Analyse gaps in the book">Gaps</button>
-    </div>
-    <div class="sep"></div>
-    <div class="tg">
-      <button onclick="openPlanModal()" title="View / edit / regenerate the book plan (the leitmotiv)">&#128221; Plan</button>
-      <button onclick="openBookSettings()" title="Consolidated per-book settings: title, description, plan, length target, style fingerprint">&#9881; Settings</button>
-      <button onclick="openAskModal()" title="Full corpus RAG question (sciknow ask question)">&#128270; Ask Corpus</button>
-      <button onclick="openWikiModal()" title="Query the compiled knowledge wiki (sciknow wiki query)">&#128218; Wiki Query</button>
-      <button onclick="openKgModal()" title="Browse the knowledge graph (extracted entity-relationship triples)">&#128279; KG</button>
-      <button onclick="openCatalogModal()" title="Browse the paper catalog (sciknow catalog list)">&#128194; Browse Papers</button>
-      <button onclick="openToolsModal()" title="CLI tools in the GUI: search, synthesize, topics, corpus enrich/expand">&#128736; Tools</button>
     </div>
     <div class="sep"></div>
     <div class="tg">
