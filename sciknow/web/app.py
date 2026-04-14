@@ -3665,13 +3665,17 @@ def _sciknow_cli_bin() -> str:
     return str(candidate) if candidate.exists() else "sciknow"
 
 
-def _spawn_cli_streaming(job_id: str, argv: list[str], loop):
+def _spawn_cli_streaming(job_id: str, argv: list[str], loop, on_finish=None):
     """Run `sciknow <argv...>` as a subprocess and forward its output as
     SSE events. Each stdout line becomes `{type: "log", text: ...}`.
 
     The subprocess is terminated on job cancel. stderr is merged into
     stdout so Rich progress bars and error messages all surface in the
     same log pane.
+
+    ``on_finish`` (optional) runs once the process has exited, regardless
+    of success/failure/cancel. Useful for cleaning up tempfiles tied to
+    the job (see ``/api/corpus/expand-author/download-selected``).
     """
     import shutil  # lazy — only used when cancelling
 
@@ -3722,6 +3726,11 @@ def _spawn_cli_streaming(job_id: str, argv: list[str], loop):
         else:
             yield {"type": "error",
                    "message": f"CLI exited with code {rc}"}
+        if on_finish is not None:
+            try:
+                on_finish()
+            except Exception as exc:
+                logger.warning("_spawn_cli_streaming on_finish failed: %s", exc)
         _ = shutil  # silence lint for the lazy import
 
     threading.Thread(
@@ -4069,6 +4078,56 @@ async def api_setup_status():
     return JSONResponse(out)
 
 
+@app.post("/api/corpus/expand-author/preview")
+async def api_corpus_expand_author_preview(
+    name: str = Form(""),
+    orcid: str = Form(""),
+    year_from: int = Form(0),
+    year_to: int = Form(0),
+    limit: int = Form(0),
+    strict_author: bool = Form(True),
+    all_matches: bool = Form(False),
+    relevance_query: str = Form(""),
+):
+    """Phase 54.6.1 — preview candidates without downloading.
+
+    Runs search + corpus-dedup + relevance scoring, returns JSON. The UI
+    renders a checkboxed list so the user can cherry-pick which DOIs to
+    download via ``/api/corpus/expand-author/download-selected`` — the
+    existing ``POST /api/corpus/expand-author`` still exists for the
+    "auto-download by relevance threshold" override path.
+
+    May take 10-30s due to external API calls. Blocking — not SSE.
+    """
+    if not name.strip() and not orcid.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="provide either author name or ORCID",
+        )
+    from sciknow.core.expand_ops import find_author_candidates
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: find_author_candidates(
+                name=name,
+                orcid=(orcid.strip() or None),
+                year_from=(year_from or None),
+                year_to=(year_to or None),
+                limit=limit,
+                all_matches=all_matches,
+                strict_author=strict_author,
+                relevance_query=relevance_query,
+                score_relevance=True,
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("expand-author preview failed")
+        raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}")
+    return JSONResponse(result)
+
+
 @app.post("/api/corpus/expand-author")
 async def api_corpus_expand_author(
     name: str = Form(...),
@@ -4115,6 +4174,78 @@ async def api_corpus_expand_author(
         argv.append("--dry-run")
     _spawn_cli_streaming(job_id, argv, loop)
     return JSONResponse({"job_id": job_id})
+
+
+@app.post("/api/corpus/expand-author/download-selected")
+async def api_corpus_expand_author_download_selected(request: Request):
+    """Phase 54.6.1 — download + ingest the user-chosen subset from the
+    Expand-by-Author preview modal.
+
+    Body: JSON ``{"candidates": [{"doi": "...", "title": "...",
+    "year": 2020}, ...], "workers": int, "ingest": bool}``.
+
+    Spawns ``sciknow db download-dois --dois-file <tmp.json>`` and streams
+    stdout as SSE. Tmp file is cleaned up when the job finishes.
+    """
+    import json as _json
+    import tempfile
+
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    raw_cands = body.get("candidates") or []
+    if not isinstance(raw_cands, list) or not raw_cands:
+        raise HTTPException(status_code=400, detail="candidates list required")
+
+    # Sanitize to {doi, title, year}, drop entries missing DOI.
+    clean: list[dict] = []
+    for c in raw_cands:
+        if not isinstance(c, dict):
+            continue
+        doi = (c.get("doi") or "").strip()
+        if not doi:
+            continue
+        clean.append({
+            "doi": doi,
+            "title": (c.get("title") or "")[:500],
+            "year": c.get("year") if isinstance(c.get("year"), int) else None,
+        })
+    if not clean:
+        raise HTTPException(status_code=400, detail="no valid DOIs in candidates")
+
+    workers = int(body.get("workers") or 0)
+    ingest = bool(body.get("ingest", True))
+
+    # Persist the DOI list to a tempfile the CLI will read. Use the
+    # project's data dir so it's namespaced per-project and survives
+    # subprocess launch. We delete it after the job wraps in the finish
+    # hook; until then the CLI has read access.
+    tmp_dir = Path(tempfile.gettempdir()) / "sciknow-selected"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    import uuid
+    tmp_path = tmp_dir / f"dois-{uuid.uuid4().hex[:12]}.json"
+    tmp_path.write_text(_json.dumps(clean))
+
+    job_id, _queue = _create_job("corpus_download_selected")
+    loop = asyncio.get_event_loop()
+    argv = [
+        "db", "download-dois",
+        "--dois-file", str(tmp_path),
+        "--workers", str(workers),
+    ]
+    argv.append("--ingest" if ingest else "--no-ingest")
+
+    def _cleanup_tmp():
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    _spawn_cli_streaming(job_id, argv, loop, on_finish=_cleanup_tmp)
+    return JSONResponse({
+        "job_id": job_id,
+        "n_selected": len(clean),
+    })
 
 
 @app.post("/api/corpus/expand")
@@ -7541,9 +7672,18 @@ body.task-bar-open {{ padding-top: 40px; }}
             <input type="text" id="tl-eauth-relq"
                    placeholder="(corpus centroid if blank)">
           </div>
-          <button class="btn-primary" style="margin-top:8px;" onclick="doToolCorpus('expand-author')">
-            Run Expand-by-Author
-          </button>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
+            <button class="btn-primary" onclick="openExpandAuthorPreview()">
+              &#128269; Preview candidates
+            </button>
+            <button class="btn-secondary" onclick="doToolCorpus('expand-author')"
+                    title="Skip preview — run the full pipeline with the relevance-filter threshold auto-downloading everything above it. Equivalent to `sciknow db expand-author --relevance`.">
+              &#9889; Auto-download (override)
+            </button>
+            <span style="font-size:11px;color:var(--fg-muted);">
+              Preview lets you cherry-pick; Auto uses the relevance threshold.
+            </span>
+          </div>
         </div>
 
         <div style="display:flex;gap:8px;align-items:center;margin-top:12px;">
@@ -7556,6 +7696,87 @@ body.task-bar-open {{ padding-top: 40px; }}
         <pre id="tl-corpus-log" style="margin-top:8px;max-height:360px;overflow:auto;background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:11px;font-family:ui-monospace,monospace;white-space:pre-wrap;"></pre>
       </div>
 
+    </div>
+  </div>
+</div>
+
+<!-- Phase 54.6.1 — Expand-by-Author preview modal.
+     Shows all candidates found by search (post corpus-dedup), with
+     relevance scores annotated. User cherry-picks via checkboxes and
+     clicks "Download selected" which hits
+     /api/corpus/expand-author/download-selected. -->
+<div class="modal-overlay" id="expand-author-preview-modal"
+     onclick="if(event.target===this)closeModal('expand-author-preview-modal')">
+  <div class="modal wide">
+    <div class="modal-header">
+      <h3>&#128269; Expand-by-Author &mdash; Preview Candidates</h3>
+      <button class="modal-close" onclick="closeModal('expand-author-preview-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div id="eap-loading" style="display:none;padding:20px;text-align:center;color:var(--fg-muted);">
+        <div style="font-size:14px;">Searching OpenAlex + Crossref&hellip;</div>
+        <div style="font-size:11px;margin-top:4px;">(typically 10-30s depending on author's paper count)</div>
+      </div>
+      <div id="eap-error" style="display:none;padding:10px;background:var(--danger-bg,#fee);color:var(--danger,#c53030);border:1px solid var(--danger,#c53030);border-radius:4px;margin-bottom:10px;"></div>
+      <div id="eap-content" style="display:none;">
+        <div id="eap-info" style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;padding:8px;background:var(--bg-alt,#f8f8f8);border-radius:4px;"></div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
+          <button class="btn-secondary" onclick="eapSelectAll(true)">Select all</button>
+          <button class="btn-secondary" onclick="eapSelectAll(false)">Select none</button>
+          <label style="font-size:12px;display:flex;align-items:center;gap:4px;">
+            Select where score &ge;
+            <input type="number" id="eap-threshold" value="0.55" min="0" max="1" step="0.05"
+                   style="width:70px;font-size:12px;padding:2px 4px;">
+            <button class="btn-secondary" onclick="eapSelectByThreshold()"
+                    style="font-size:11px;padding:2px 8px;">Apply</button>
+          </label>
+          <label style="font-size:12px;display:flex;align-items:center;gap:4px;">
+            Sort:
+            <select id="eap-sort" onchange="eapRender()"
+                    style="font-size:12px;padding:2px 4px;">
+              <option value="score">by relevance score</option>
+              <option value="year">by year (newest)</option>
+              <option value="title">by title (A-Z)</option>
+            </select>
+          </label>
+          <span id="eap-selected-count" style="margin-left:auto;font-size:12px;color:var(--fg-muted);"></span>
+        </div>
+        <div id="eap-table-wrap"
+             style="max-height:360px;overflow:auto;border:1px solid var(--border);border-radius:4px;">
+          <table id="eap-table" style="width:100%;border-collapse:collapse;font-size:12px;">
+            <thead style="background:var(--bg-alt,#f8f8f8);position:sticky;top:0;z-index:1;">
+              <tr>
+                <th style="width:32px;padding:6px 8px;text-align:left;">
+                  <input type="checkbox" id="eap-header-cb"
+                         onchange="eapSelectAll(this.checked)">
+                </th>
+                <th style="padding:6px 8px;text-align:left;">Title</th>
+                <th style="padding:6px 8px;text-align:left;white-space:nowrap;">Authors</th>
+                <th style="padding:6px 8px;text-align:left;white-space:nowrap;">Year</th>
+                <th style="padding:6px 8px;text-align:left;white-space:nowrap;">Score</th>
+              </tr>
+            </thead>
+            <tbody id="eap-tbody"></tbody>
+          </table>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:12px;flex-wrap:wrap;">
+          <label style="font-size:12px;display:flex;align-items:center;gap:4px;">
+            Workers:
+            <input type="number" id="eap-workers" value="0" min="0"
+                   style="width:60px;font-size:12px;padding:2px 4px;"
+                   title="0 = INGEST_WORKERS from .env">
+          </label>
+          <label style="font-size:12px;display:flex;align-items:center;gap:4px;">
+            <input type="checkbox" id="eap-ingest" checked> ingest after download
+          </label>
+          <button class="btn-primary" id="eap-download-btn"
+                  onclick="eapDownloadSelected()" style="margin-left:auto;">
+            &#128229; Download selected
+          </button>
+        </div>
+        <div id="eap-status" style="margin-top:8px;font-size:12px;color:var(--fg-muted);"></div>
+        <pre id="eap-log" style="margin-top:6px;max-height:260px;overflow:auto;background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);border-radius:4px;padding:8px;font-size:11px;font-family:ui-monospace,monospace;white-space:pre-wrap;display:none;"></pre>
+      </div>
     </div>
   </div>
 </div>
@@ -12887,8 +13108,21 @@ function switchCorpusTab(name) {{
 // Debounced 200ms. Hits /api/catalog/authors?q=…&limit=15 and renders a
 // clickable list; clicking a row sets window._selectedExpandAuthorName
 // and populates the input + orcid + selected-line.
+//
+// Phase 54.6.1 — clicking a row was dead because the old implementation
+// inline-interpolated JSON.stringify(a) into an onclick attribute wrapped
+// in double quotes. The inner quotes terminated the attribute and
+// corrupted everything after. Fixed by caching the author list and
+// dispatching via event delegation (data-idx → closure lookup).
 let _authorSearchTimer = null;
+let _lastAuthorResults = [];
 window._selectedExpandAuthorName = null;
+
+function _escHtml(s) {{
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}}
 
 function onExpandAuthorSearchInput(_event) {{
   if (_authorSearchTimer) clearTimeout(_authorSearchTimer);
@@ -12904,15 +13138,18 @@ async function runExpandAuthorSearch() {{
     const res = await fetch(url);
     const data = await res.json();
     const authors = data.authors || [];
+    _lastAuthorResults = authors;
     if (!authors.length) {{
       box.style.display = 'block';
       box.innerHTML = '<div style="padding:10px;color:var(--fg-muted);">No authors match.</div>';
       return;
     }}
-    const rows = authors.map(a => {{
-      const safe = a.name.replace(/"/g, '&quot;');
-      const orcidBit = a.orcid ? ` <span style=\"color:var(--fg-muted);\">orcid ${{a.orcid}}</span>` : '';
-      return `<div class="eauth-row" onclick="selectExpandAuthor(${{JSON.stringify(a)}})"
+    const rows = authors.map((a, i) => {{
+      const safe = _escHtml(a.name);
+      const orcidBit = a.orcid
+        ? ` <span style="color:var(--fg-muted);">orcid ${{_escHtml(a.orcid)}}</span>`
+        : '';
+      return `<div class="eauth-row" data-idx="${{i}}"
         style="padding:6px 10px;cursor:pointer;border-bottom:1px solid var(--border);"
         onmouseenter="this.style.background='var(--accent-light,#eef2ff)';"
         onmouseleave="this.style.background='';">
@@ -12924,6 +13161,14 @@ async function runExpandAuthorSearch() {{
     }}).join('');
     box.innerHTML = rows;
     box.style.display = 'block';
+    // Event delegation — robust to any characters in author.name.
+    box.querySelectorAll('.eauth-row').forEach(row => {{
+      row.addEventListener('click', () => {{
+        const idx = parseInt(row.dataset.idx, 10);
+        const author = _lastAuthorResults[idx];
+        if (author) selectExpandAuthor(author);
+      }});
+    }});
   }} catch (exc) {{
     box.style.display = 'block';
     box.innerHTML = `<div style="padding:10px;color:var(--danger,#c53030);">Search failed: ${{exc}}</div>`;
@@ -12940,6 +13185,261 @@ function selectExpandAuthor(author) {{
     + author.name + '</strong>'
     + (author.orcid ? ' <code>' + author.orcid + '</code>' : '')
     + ' — ' + author.n_papers + ' paper(s), ' + author.n_citations + ' citation(s) in this corpus';
+}}
+
+
+// ── Phase 54.6.1 — Expand-by-Author preview modal ──────────────────────
+// openExpandAuthorPreview() pulls the params from the panel, POSTs to
+// /api/corpus/expand-author/preview, and renders a checkboxed table of
+// candidates. User cherry-picks → eapDownloadSelected() ships the DOIs
+// to /api/corpus/expand-author/download-selected (SSE-streamed CLI).
+let _eapCandidates = [];   // all candidates from the last preview
+let _eapSelected = new Set(); // doi set — source of truth for selection
+
+async function openExpandAuthorPreview() {{
+  const name = document.getElementById('tl-eauth-q').value.trim();
+  const orcid = document.getElementById('tl-eauth-orcid').value.trim();
+  if (!name && !orcid) {{
+    alert('Type an author name (or ORCID) first.');
+    return;
+  }}
+  // Reset modal state
+  _eapCandidates = [];
+  _eapSelected = new Set();
+  document.getElementById('eap-loading').style.display = 'block';
+  document.getElementById('eap-error').style.display = 'none';
+  document.getElementById('eap-content').style.display = 'none';
+  document.getElementById('eap-log').style.display = 'none';
+  document.getElementById('eap-log').textContent = '';
+  document.getElementById('eap-status').textContent = '';
+  openModal('expand-author-preview-modal');
+
+  // Gather params from the panel
+  const fd = new FormData();
+  fd.append('name', name);
+  if (orcid) fd.append('orcid', orcid);
+  const yFrom = parseInt(document.getElementById('tl-eauth-yfrom').value || '0', 10);
+  const yTo = parseInt(document.getElementById('tl-eauth-yto').value || '0', 10);
+  if (yFrom) fd.append('year_from', yFrom);
+  if (yTo) fd.append('year_to', yTo);
+  const limit = parseInt(document.getElementById('tl-eauth-limit').value || '0', 10);
+  if (limit > 0) fd.append('limit', limit);
+  fd.append('strict_author', document.getElementById('tl-eauth-strict').checked);
+  fd.append('all_matches', document.getElementById('tl-eauth-all').checked);
+  const relq = document.getElementById('tl-eauth-relq').value.trim();
+  if (relq) fd.append('relevance_query', relq);
+
+  try {{
+    const res = await fetch('/api/corpus/expand-author/preview', {{
+      method: 'POST',
+      body: fd,
+    }});
+    if (!res.ok) {{
+      const detail = await res.text();
+      throw new Error('HTTP ' + res.status + ': ' + detail);
+    }}
+    const data = await res.json();
+    _eapCandidates = data.candidates || [];
+    const info = data.info || {{}};
+    // Pre-select everything above the default threshold; otherwise all.
+    const threshold = info.relevance_threshold || 0.0;
+    document.getElementById('eap-threshold').value = threshold.toFixed(2);
+    _eapCandidates.forEach(c => {{
+      if (c.doi && (c.relevance_score == null || c.relevance_score >= threshold)) {{
+        _eapSelected.add(c.doi);
+      }}
+    }});
+    // Render info line
+    const pickedAuthors = (info.picked_authors || [])
+      .map(a => a.display_name || a.name || '').filter(Boolean).slice(0, 3).join(', ');
+    const pickedSuffix = pickedAuthors
+      ? ` · matched author(s): ${{_escHtml(pickedAuthors)}}` : '';
+    document.getElementById('eap-info').innerHTML =
+      `Found <strong>${{info.merged || 0}}</strong> paper(s) `
+      + `(<span title="from OpenAlex canonical author search">${{info.openalex || 0}} OA</span> + `
+      + `<span title="from Crossref surname search — may include false positives for common names">${{info.crossref_extra || 0}} CR</span>), `
+      + `dropped <strong>${{info.dedup_dropped || 0}}</strong> already in corpus`
+      + (info.relevance_query_used
+          ? ` · relevance anchor: <code>${{_escHtml(info.relevance_query_used)}}</code>`
+          : ` · no relevance scoring`)
+      + pickedSuffix + '.';
+    document.getElementById('eap-loading').style.display = 'none';
+    if (!_eapCandidates.length) {{
+      document.getElementById('eap-error').style.display = 'block';
+      document.getElementById('eap-error').textContent =
+        'No candidates returned. Everything may already be in your corpus, or the search found nothing.';
+      return;
+    }}
+    document.getElementById('eap-content').style.display = 'block';
+    eapRender();
+  }} catch (exc) {{
+    document.getElementById('eap-loading').style.display = 'none';
+    document.getElementById('eap-error').style.display = 'block';
+    document.getElementById('eap-error').textContent = 'Preview failed: ' + exc.message;
+  }}
+}}
+
+function eapRender() {{
+  const tbody = document.getElementById('eap-tbody');
+  const sort = document.getElementById('eap-sort').value;
+  const sorted = _eapCandidates.slice();
+  if (sort === 'year') {{
+    sorted.sort((a, b) => (b.year || 0) - (a.year || 0));
+  }} else if (sort === 'title') {{
+    sorted.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
+  }} else {{
+    sorted.sort((a, b) => (b.relevance_score || -1) - (a.relevance_score || -1));
+  }}
+  const rows = sorted.map(c => {{
+    const checked = _eapSelected.has(c.doi) ? 'checked' : '';
+    const scoreText = (c.relevance_score == null)
+      ? '<span style="color:var(--fg-muted);">—</span>'
+      : c.relevance_score.toFixed(3);
+    const authors = (c.authors || []).slice(0, 3).join(', ')
+      + ((c.authors || []).length > 3 ? ` +${{c.authors.length - 3}}` : '');
+    const doi = c.doi
+      ? `<a href="https://doi.org/${{_escHtml(c.doi)}}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;font-family:ui-monospace,monospace;font-size:10px;" onclick="event.stopPropagation();">${{_escHtml(c.doi)}}</a>`
+      : '<span style="color:var(--fg-muted);">(no DOI)</span>';
+    return `<tr style="border-top:1px solid var(--border);cursor:pointer;" data-doi="${{_escHtml(c.doi || '')}}">
+      <td style="padding:6px 8px;"><input type="checkbox" class="eap-row-cb" ${{checked}}
+           data-doi="${{_escHtml(c.doi || '')}}" onclick="event.stopPropagation();"></td>
+      <td style="padding:6px 8px;">
+        <div style="font-weight:500;">${{_escHtml(c.title || '(untitled)')}}</div>
+        <div style="font-size:10px;margin-top:2px;">${{doi}}</div>
+      </td>
+      <td style="padding:6px 8px;color:var(--fg-muted);">${{_escHtml(authors)}}</td>
+      <td style="padding:6px 8px;color:var(--fg-muted);">${{c.year || '—'}}</td>
+      <td style="padding:6px 8px;font-family:ui-monospace,monospace;">${{scoreText}}</td>
+    </tr>`;
+  }}).join('');
+  tbody.innerHTML = rows;
+  // Row click toggles the row's checkbox (but not on link click — event.stopPropagation above).
+  tbody.querySelectorAll('tr').forEach(row => {{
+    row.addEventListener('click', () => {{
+      const cb = row.querySelector('.eap-row-cb');
+      if (!cb || !cb.dataset.doi) return;
+      cb.checked = !cb.checked;
+      if (cb.checked) _eapSelected.add(cb.dataset.doi);
+      else _eapSelected.delete(cb.dataset.doi);
+      eapUpdateCount();
+    }});
+  }});
+  tbody.querySelectorAll('.eap-row-cb').forEach(cb => {{
+    cb.addEventListener('change', () => {{
+      if (!cb.dataset.doi) return;
+      if (cb.checked) _eapSelected.add(cb.dataset.doi);
+      else _eapSelected.delete(cb.dataset.doi);
+      eapUpdateCount();
+    }});
+  }});
+  eapUpdateCount();
+}}
+
+function eapUpdateCount() {{
+  const tot = _eapCandidates.length;
+  const sel = _eapSelected.size;
+  document.getElementById('eap-selected-count').textContent =
+    `${{sel}} of ${{tot}} selected`;
+  const hdr = document.getElementById('eap-header-cb');
+  if (hdr) {{
+    hdr.checked = sel > 0 && sel === tot;
+    hdr.indeterminate = sel > 0 && sel < tot;
+  }}
+}}
+
+function eapSelectAll(on) {{
+  _eapSelected = new Set();
+  if (on) {{
+    _eapCandidates.forEach(c => {{ if (c.doi) _eapSelected.add(c.doi); }});
+  }}
+  eapRender();
+}}
+
+function eapSelectByThreshold() {{
+  const thr = parseFloat(document.getElementById('eap-threshold').value || '0');
+  _eapSelected = new Set();
+  _eapCandidates.forEach(c => {{
+    if (!c.doi) return;
+    if (c.relevance_score == null || c.relevance_score >= thr) {{
+      _eapSelected.add(c.doi);
+    }}
+  }});
+  eapRender();
+}}
+
+async function eapDownloadSelected() {{
+  if (!_eapSelected.size) {{
+    alert('Pick at least one paper (or use "Select all").');
+    return;
+  }}
+  const chosen = _eapCandidates.filter(c => c.doi && _eapSelected.has(c.doi));
+  const payload = {{
+    candidates: chosen.map(c => ({{
+      doi: c.doi, title: c.title || '', year: c.year || null,
+    }})),
+    workers: parseInt(document.getElementById('eap-workers').value || '0', 10),
+    ingest: document.getElementById('eap-ingest').checked,
+  }};
+  const btn = document.getElementById('eap-download-btn');
+  btn.disabled = true;
+  btn.textContent = 'Starting…';
+  document.getElementById('eap-status').textContent = '';
+  document.getElementById('eap-log').style.display = 'block';
+  document.getElementById('eap-log').textContent = '';
+  try {{
+    const res = await fetch('/api/corpus/expand-author/download-selected', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify(payload),
+    }});
+    if (!res.ok) {{
+      const detail = await res.text();
+      throw new Error('HTTP ' + res.status + ': ' + detail);
+    }}
+    const data = await res.json();
+    const jobId = data.job_id;
+    document.getElementById('eap-status').textContent =
+      `Job started (${{data.n_selected}} DOI(s)). Streaming log below…`;
+    btn.textContent = 'Running…';
+    startGlobalJob(jobId, {{
+      type: 'download-selected',
+      taskDesc: `download-selected (${{data.n_selected}} papers)`,
+    }});
+    const es = new EventSource('/api/stream/' + jobId);
+    const logEl = document.getElementById('eap-log');
+    es.onmessage = function(ev) {{
+      let evt;
+      try {{ evt = JSON.parse(ev.data); }} catch (_) {{ return; }}
+      if (evt.type === 'log') {{
+        logEl.textContent += evt.text + '\\n';
+        logEl.scrollTop = logEl.scrollHeight;
+      }} else if (evt.type === 'progress') {{
+        document.getElementById('eap-status').textContent = evt.detail || evt.stage || '';
+      }} else if (evt.type === 'completed') {{
+        es.close();
+        document.getElementById('eap-status').textContent = 'Completed.';
+        btn.innerHTML = '&#10003; Done';
+        btn.disabled = false;
+      }} else if (evt.type === 'error') {{
+        es.close();
+        document.getElementById('eap-status').textContent =
+          'Failed: ' + (evt.message || 'see log.');
+        btn.innerHTML = '&#128229; Download selected';
+        btn.disabled = false;
+      }} else if (evt.type === 'done') {{
+        es.close();
+      }}
+    }};
+    es.onerror = function() {{
+      es.close();
+      btn.disabled = false;
+      btn.innerHTML = '&#128229; Download selected';
+    }};
+  }} catch (exc) {{
+    document.getElementById('eap-status').textContent = 'Failed: ' + exc.message;
+    btn.innerHTML = '&#128229; Download selected';
+    btn.disabled = false;
+  }}
 }}
 
 

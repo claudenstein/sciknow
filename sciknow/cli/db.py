@@ -3109,3 +3109,199 @@ def expand_author(
             f"\nNew PDFs in [bold]{download_dir}[/bold]. "
             f"Run [bold]sciknow catalog stats[/bold] to see updated counts."
         )
+
+
+@app.command(name="download-dois")
+def download_dois(
+    dois: str = typer.Option(
+        "", "--dois",
+        help="Comma-separated DOI list. Either this or --dois-file is required.",
+    ),
+    dois_file: Path = typer.Option(
+        None, "--dois-file",
+        help="JSON file with either a list of DOI strings OR a list of "
+             "{doi, title, year} dicts. Title/year are used for progress "
+             "display only — the download pipeline only needs the DOI.",
+    ),
+    download_dir: Path = typer.Option(
+        None, "--download-dir", "-d",
+        help="Directory where new PDFs are saved (default: <project data>/downloads).",
+    ),
+    workers: int = typer.Option(0, "--workers", "-w",
+        help="Parallel ingestion workers (0 = INGEST_WORKERS from .env)."),
+    ingest: bool = typer.Option(True, "--ingest/--no-ingest",
+        help="Ingest downloaded PDFs immediately."),
+):
+    """Download + ingest a specific list of DOIs.
+
+    This is the primitive behind the "Download selected" button in the web
+    Expand-by-Author preview modal (Phase 54.6.1). Shares the 6-source
+    OA discovery pipeline and the parallel ingest worker pool with
+    `db expand-author` — just skips search / dedup / relevance scoring.
+
+    Examples:
+
+      sciknow db download-dois --dois "10.1038/nature12345,10.1126/science.abc"
+
+      sciknow db download-dois --dois-file selected.json --workers 4
+    """
+    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from sciknow.cli import preflight
+    preflight()
+
+    from sciknow.config import settings
+    from sciknow.ingestion.downloader import find_and_download
+
+    if download_dir is None:
+        download_dir = settings.data_dir / "downloads"
+
+    # ── Parse input ──────────────────────────────────────────────────────
+    doi_list: list[tuple[str, str, int | None]] = []  # (doi, title, year)
+    if dois_file:
+        raw = json.loads(Path(dois_file).read_text())
+        if not isinstance(raw, list):
+            console.print("[red]--dois-file must contain a JSON list.[/red]")
+            raise typer.Exit(2)
+        for item in raw:
+            if isinstance(item, str):
+                doi_list.append((item, "", None))
+            elif isinstance(item, dict) and item.get("doi"):
+                doi_list.append((
+                    item["doi"],
+                    item.get("title", "") or "",
+                    item.get("year"),
+                ))
+            else:
+                console.print(f"[yellow]Skipping malformed entry: {item!r}[/yellow]")
+    if dois:
+        for d in dois.split(","):
+            d = d.strip()
+            if d:
+                doi_list.append((d, "", None))
+
+    # dedup by DOI
+    seen: set[str] = set()
+    doi_list = [
+        (d, t, y) for (d, t, y) in doi_list
+        if (d.lower() not in seen and not seen.add(d.lower()))
+    ]
+
+    if not doi_list:
+        console.print("[red]No DOIs provided (use --dois or --dois-file).[/red]")
+        raise typer.Exit(2)
+
+    console.print(
+        f"[bold]Downloading {len(doi_list)} DOI(s)[/bold] into {download_dir}\n"
+    )
+
+    # ── Download phase ───────────────────────────────────────────────────
+    download_dir.mkdir(parents=True, exist_ok=True)
+    no_oa_cache_file = download_dir / ".no_oa_cache"
+    no_oa_cache: set[str] = (
+        set(no_oa_cache_file.read_text().splitlines())
+        if no_oa_cache_file.exists() else set()
+    )
+
+    dl_workers = max(1, getattr(settings, "expand_download_workers", 4))
+    downloaded = failed_dl = 0
+    to_ingest: list[tuple[str, str, Path]] = []
+
+    def _download_one(item):
+        doi, title, _year = item
+        doi_key = doi.lower()
+        safe_name = doi.replace("/", "_").replace(":", "_")
+        dest = download_dir / f"{safe_name}.pdf"
+        label = title[:80] or doi
+        if doi_key in no_oa_cache:
+            return ("cached", doi_key, label, dest, None)
+        if dest.exists():
+            return ("exists", doi_key, label, dest, None)
+        ok, source = find_and_download(
+            doi=doi, arxiv_id=None,
+            dest_path=dest, email=settings.crossref_email,
+        )
+        return ("downloaded" if ok else "no_oa", doi_key, label, dest, source)
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task(
+            f"Downloading ({dl_workers} workers)", total=len(doi_list)
+        )
+        with ThreadPoolExecutor(max_workers=dl_workers) as pool:
+            futures = {pool.submit(_download_one, it): it for it in doi_list}
+            for fut in as_completed(futures):
+                try:
+                    status, doi_key, label, dest, source = fut.result()
+                except Exception:
+                    failed_dl += 1
+                    progress.advance(task)
+                    continue
+                short = label[:50]
+                if status == "downloaded":
+                    downloaded += 1
+                    progress.update(task, description=f"[green]↓ {source}[/green] {short}")
+                    to_ingest.append((doi_key, label, dest))
+                elif status == "exists":
+                    to_ingest.append((doi_key, label, dest))
+                elif status == "no_oa":
+                    failed_dl += 1
+                    with no_oa_cache_file.open("a") as f:
+                        f.write(doi_key + "\n")
+                else:
+                    failed_dl += 1
+                progress.advance(task)
+
+    # ── Ingest phase ─────────────────────────────────────────────────────
+    ingested = failed_ingest = 0
+    if ingest and to_ingest:
+        from sciknow.cli.ingest import _run_parallel_workers
+        from sciknow.ingestion.embedder import release_model as _release_embedder
+
+        ingest_workers = workers if workers > 0 else max(1, settings.ingest_workers)
+        ingest_workers = min(ingest_workers, len(to_ingest))
+        _release_embedder()
+
+        def _on_file_done(path, status, error):
+            nonlocal ingested, failed_ingest
+            if status in ("done", "skipped"):
+                ingested += 1
+            elif status == "failed":
+                failed_ingest += 1
+
+        ingest_results = {"done": 0, "skipped": 0, "failed": 0}
+        ingest_failed_files: list[tuple[str, str]] = []
+        worker_note = f" ({ingest_workers} workers)" if ingest_workers > 1 else ""
+        console.print(f"\nIngesting [bold]{len(to_ingest)}[/bold] new PDF(s){worker_note}…")
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            itask = progress.add_task("Ingesting", total=len(to_ingest))
+            _run_parallel_workers(
+                [dest for _, _, dest in to_ingest],
+                progress, itask, ingest_results, ingest_failed_files,
+                force=False, num_workers=ingest_workers,
+                ingest_source="expand",
+                on_file_done=_on_file_done,
+            )
+
+    console.print(
+        f"\n[bold]Summary:[/bold] "
+        f"[green]↓ {downloaded} downloaded[/green]  "
+        f"[green]✓ {ingested} ingested[/green]  "
+        f"[red]✗ {failed_dl} no OA PDF[/red]"
+        + (f"  [red]✗ {failed_ingest} ingest failed[/red]" if failed_ingest else "")
+    )
