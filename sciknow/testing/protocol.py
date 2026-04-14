@@ -7441,6 +7441,48 @@ def l1_phase54_wiki_browsing_mvp() -> None:
     ):
         assert needle in src, f"phase 54.1 surface missing: {needle!r}"
 
+    # Phase 54.2: backlinks + related-pages surface.
+    for needle in (
+        "wiki-related-block",       # right-side panel markup
+        "wiki-backlinks-block",     # referenced-by panel markup
+        "_loadWikiRelated",         # fetch-related-pages loader
+        "_loadWikiBacklinks",       # fetch-backlinks loader
+    ):
+        assert needle in src, f"phase 54.2 surface missing: {needle!r}"
+    route_paths = {r.path for r in web_app.app.routes if hasattr(r, "path")}
+    assert "/api/wiki/page/{slug}/backlinks" in route_paths, (
+        "/api/wiki/page/<slug>/backlinks endpoint missing"
+    )
+    assert "/api/wiki/page/{slug}/related" in route_paths, (
+        "/api/wiki/page/<slug>/related endpoint missing"
+    )
+
+    # Backlinks scanner contract on synthetic page content. Uses the
+    # `base_dir` override so we don't have to mutate Pydantic Settings
+    # (which are frozen).
+    from sciknow.core import wiki_ops as _wo
+    import tempfile as _tempfile
+    from pathlib import Path as _Path
+    with _tempfile.TemporaryDirectory() as _tmp:
+        root = _Path(_tmp)
+        (root / "papers").mkdir()
+        (root / "papers" / "paper-a.md").write_text(
+            "See [[concept-x]] and [[concept-y|fancy alias]].\n"
+        )
+        (root / "papers" / "paper-b.md").write_text(
+            "Only mentions [[concept-x]] too.\n"
+        )
+        idx = _wo._scan_backlinks_index(base_dir=root)
+    assert "concept-x" in idx, "concept-x should have backlinks"
+    from_slugs = {e["from_slug"] for e in idx["concept-x"]}
+    assert from_slugs == {"paper-a", "paper-b"}, (
+        f"concept-x backlink sources mismatch: {from_slugs}"
+    )
+    alias_entries = [e for e in idx.get("concept-y", []) if e["alt"]]
+    assert alias_entries and alias_entries[0]["alt"] == "fancy alias", (
+        "alt-text variant not captured in backlinks index"
+    )
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.

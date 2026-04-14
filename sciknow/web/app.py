@@ -2773,6 +2773,34 @@ async def api_wiki_pages(page_type: str = None, page: int = 1, per_page: int = 5
     })
 
 
+@app.get("/api/wiki/page/{slug}/backlinks")
+async def api_wiki_backlinks(slug: str):
+    """Phase 54.2 — pages that link to this one via ``[[slug]]``.
+
+    Backed by an in-process cache built lazily from a walk of every
+    markdown page on disk. Rebuild is O(N_pages × page_size) and
+    runs at most once every 10 minutes without an explicit
+    invalidate call."""
+    from sciknow.core.wiki_ops import get_backlinks_for
+    try:
+        return JSONResponse(get_backlinks_for(slug))
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.get("/api/wiki/page/{slug}/related")
+async def api_wiki_related(slug: str, limit: int = 5):
+    """Phase 54.2 — top-N pages nearest in the WIKI_COLLECTION
+    embedding space, excluding the source. Uses the same bge-m3
+    vectors that power wiki search."""
+    from sciknow.core.wiki_ops import get_related_pages
+    limit = max(1, min(int(limit or 5), 20))
+    try:
+        return JSONResponse(get_related_pages(slug, limit=limit))
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @app.get("/api/wiki/titles")
 async def api_wiki_titles():
     """Phase 54 — compact title/slug index for the Ctrl-K command palette.
@@ -5452,6 +5480,34 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
                     background: var(--bg); color: var(--fg); }}
 .kb-help .kb-hint {{ margin-top: var(--sp-3); font-size: 11px;
                      color: var(--fg-muted); text-align: right; }}
+/* Phase 54.2 — Related + Referenced-by sections below wiki content. */
+.wiki-extras {{ margin-top: var(--sp-4); padding: var(--sp-3);
+                background: var(--toolbar-bg);
+                border: 1px solid var(--border);
+                border-radius: var(--r-md); }}
+.wiki-extras-h {{ margin: 0 0 var(--sp-2); font-size: 12px;
+                   text-transform: uppercase; letter-spacing: 0.08em;
+                   color: var(--fg-muted); font-weight: 600; }}
+.wiki-compact-list {{ list-style: none; padding: 0; margin: 0;
+                       display: grid; gap: 6px; }}
+.wiki-compact-list li {{ display: flex; justify-content: space-between;
+                          gap: var(--sp-2); align-items: center; }}
+.wiki-compact-list a {{ flex: 1; color: var(--accent);
+                         text-decoration: none; font-size: 13px;
+                         line-height: 1.35;
+                         overflow: hidden; text-overflow: ellipsis;
+                         white-space: nowrap; }}
+.wiki-compact-list a:hover {{ text-decoration: underline; }}
+.wiki-compact-list .wp-type {{ font-size: 9px;
+                                font-family: var(--font-mono);
+                                color: var(--fg-muted);
+                                padding: 1px 5px;
+                                border: 1px solid var(--border);
+                                border-radius: 2px;
+                                flex: 0 0 auto; }}
+.wiki-compact-list .wp-alt {{ font-size: 11px;
+                               color: var(--fg-muted);
+                               font-style: italic; }}
 /* Phase 15 — live streaming stats footer (tok/s, elapsed, model) */
 .stream-stats {{ display: flex; align-items: center; gap: var(--sp-3);
                 font-family: var(--font-mono); font-size: 11px;
@@ -6173,7 +6229,17 @@ body.task-bar-open {{ padding-top: 40px; }}
           </div>
           <div class="wiki-detail-layout">
             <aside id="wiki-toc" class="wiki-toc"></aside>
-            <div id="wiki-page-content" class="wiki-page-content"></div>
+            <div>
+              <div id="wiki-page-content" class="wiki-page-content"></div>
+              <section id="wiki-related-block" class="wiki-extras" style="display:none;">
+                <h3 class="wiki-extras-h">Related pages</h3>
+                <ol id="wiki-related-list" class="wiki-compact-list"></ol>
+              </section>
+              <section id="wiki-backlinks-block" class="wiki-extras" style="display:none;">
+                <h3 class="wiki-extras-h">Referenced by</h3>
+                <ol id="wiki-backlinks-list" class="wiki-compact-list"></ol>
+              </section>
+            </div>
           </div>
         </div>
       </div>
@@ -11657,6 +11723,12 @@ async function openWikiPage(slug) {{
 
     // Phase 54 — build the TOC from the rendered headings.
     _buildWikiTOC();
+
+    // Phase 54.2 — Related pages + Referenced-by (backlinks) panels.
+    // Fire both in parallel; render each section only when it returns
+    // non-empty. No blocking — the main content paints first.
+    _loadWikiRelated(slug);
+    _loadWikiBacklinks(slug);
     // Phase 54 — honour `?h=<heading-id>` in the hash if present.
     const m = (window.location.hash || '').match(/\\?h=([^&]+)$/);
     if (m) {{
@@ -11706,6 +11778,54 @@ document.addEventListener('click', (evt) => {{
     }}
   }}
 }});
+
+// Phase 54.2 — Related / backlinks loaders.
+async function _loadWikiRelated(slug) {{
+  const block = document.getElementById('wiki-related-block');
+  const list = document.getElementById('wiki-related-list');
+  if (!block || !list) return;
+  block.style.display = 'none';
+  try {{
+    const res = await fetch('/api/wiki/page/' + encodeURIComponent(slug) +
+                            '/related?limit=5');
+    if (!res.ok) return;
+    const items = await res.json();
+    if (!Array.isArray(items) || items.length === 0) return;
+    list.innerHTML = items.map(t =>
+      '<li>' +
+      '<a href="#wiki/' + encodeURIComponent(t.slug) + '">' +
+         escapeHtml(t.title) + '</a>' +
+      '<span class="wp-type">' + (t.page_type || '').replace(/_/g, ' ') + '</span>' +
+      '</li>'
+    ).join('');
+    block.style.display = 'block';
+  }} catch (e) {{ /* silent — related pages is best-effort */ }}
+}}
+
+async function _loadWikiBacklinks(slug) {{
+  const block = document.getElementById('wiki-backlinks-block');
+  const list = document.getElementById('wiki-backlinks-list');
+  if (!block || !list) return;
+  block.style.display = 'none';
+  try {{
+    const res = await fetch('/api/wiki/page/' + encodeURIComponent(slug) +
+                            '/backlinks');
+    if (!res.ok) return;
+    const items = await res.json();
+    if (!Array.isArray(items) || items.length === 0) return;
+    list.innerHTML = items.map(t => {{
+      const alt = t.alt && t.alt !== t.from_slug
+        ? ' <span class="wp-alt">&ldquo;' + escapeHtml(t.alt) + '&rdquo;</span>'
+        : '';
+      return '<li>' +
+        '<a href="#wiki/' + encodeURIComponent(t.from_slug) + '">' +
+           escapeHtml(t.from_title || t.from_slug) + '</a>' +
+        alt +
+        '</li>';
+    }}).join('');
+    block.style.display = 'block';
+  }} catch (e) {{ /* silent */ }}
+}}
 
 function closeWikiPageDetail() {{
   document.getElementById('wiki-browse-list').style.display = 'block';

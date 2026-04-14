@@ -651,6 +651,9 @@ def compile_all(
                "total_tokens": total_tokens}
 
     _update_index()
+    # Phase 54.2 — drop the backlinks cache so the next reader request
+    # rebuilds against the fresh set of pages on disk.
+    invalidate_backlinks()
     _append_log(f"compile-all | {compiled} new, {skipped} skipped, {failed} failed from {total} papers")
 
     yield {"type": "completed", "compiled": compiled, "skipped": skipped,
@@ -1091,3 +1094,196 @@ def show_page(slug: str) -> dict | None:
                 "content": path.read_text(encoding="utf-8"),
             }
     return None
+
+
+# ── Phase 54.2 — wiki backlinks + related pages ──────────────────────
+# Backlinks live on disk (every page is a .md under data/wiki/).
+# Scanning all files costs O(N_pages × avg_page_size) per build, so
+# cache the result at module level and invalidate only when the
+# caller tells us to (`wiki compile` will call invalidate_backlinks()
+# after writing; the cache is also time-bounded as a safety net).
+
+import time as _time
+import threading as _threading
+import re as _re
+
+_BACKLINKS_CACHE: dict[str, list[dict]] | None = None
+_BACKLINKS_CACHE_TS: float = 0.0
+_BACKLINKS_CACHE_TTL = 10 * 60  # 10 minutes — upper bound even without
+                                # an explicit invalidate_backlinks() call
+_BACKLINKS_LOCK = _threading.Lock()
+
+
+def _scan_backlinks_index(base_dir=None) -> dict[str, list[dict]]:
+    """Walk every .md page under ``base_dir`` (or ``settings.wiki_dir``
+    if not given) and build a reverse index:
+    ``{target_slug: [{from_slug, from_title, alt}]}``. Links of both
+    shapes are collected — ``[[slug]]`` (no alt text) and
+    ``[[slug|alt text]]``. A self-link (`from == target`) is skipped
+    silently. ``base_dir`` is overridable so L1 tests can point at a
+    tmp tree without mutating Pydantic Settings (which are frozen)."""
+    from sqlalchemy import text as _sql_text
+    from sciknow.storage.db import get_session
+
+    base = base_dir if base_dir is not None else settings.wiki_dir
+    out: dict[str, list[dict]] = {}
+    if not base.exists():
+        return out
+
+    # Pull slug → title once so we can annotate backlinks without a
+    # per-row DB round trip later.
+    slug_to_title: dict[str, str] = {}
+    try:
+        with get_session() as session:
+            rows = session.execute(_sql_text(
+                "SELECT slug, title FROM wiki_pages"
+            )).fetchall()
+        for s, t in rows:
+            slug_to_title[s] = t or s
+    except Exception:
+        pass
+
+    # Compile the regexes once; they run against every file.
+    alt_re = _re.compile(r"\[\[([^\]\|]+)\|([^\]]+)\]\]")
+    bare_re = _re.compile(r"\[\[([^\]\|]+)\]\]")
+
+    for subdir in ("papers", "concepts", "synthesis"):
+        d = base / subdir
+        if not d.exists():
+            continue
+        for p in d.glob("*.md"):
+            from_slug = p.stem
+            try:
+                txt = p.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            seen: set[tuple[str, str]] = set()
+            # [[slug|alt]] first so bare-re doesn't double-count the
+            # same span when the two patterns overlap.
+            for m in alt_re.finditer(txt):
+                target, alt = m.group(1), m.group(2)
+                if target == from_slug:
+                    continue
+                key = (target, alt)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.setdefault(target, []).append({
+                    "from_slug": from_slug,
+                    "from_title": slug_to_title.get(from_slug, from_slug),
+                    "alt": alt,
+                })
+            # Strip [[slug|alt]] before searching for bare [[slug]] so
+            # we don't double-count.
+            txt_no_alt = alt_re.sub("", txt)
+            for m in bare_re.finditer(txt_no_alt):
+                target = m.group(1)
+                if target == from_slug:
+                    continue
+                key = (target, "")
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.setdefault(target, []).append({
+                    "from_slug": from_slug,
+                    "from_title": slug_to_title.get(from_slug, from_slug),
+                    "alt": "",
+                })
+    return out
+
+
+def invalidate_backlinks() -> None:
+    """Drop the cached backlinks index. `wiki compile` calls this
+    after writing new / rewritten pages so readers pick up the fresh
+    graph without a server restart."""
+    global _BACKLINKS_CACHE, _BACKLINKS_CACHE_TS
+    with _BACKLINKS_LOCK:
+        _BACKLINKS_CACHE = None
+        _BACKLINKS_CACHE_TS = 0.0
+
+
+def get_backlinks_for(slug: str) -> list[dict]:
+    """Return the list of pages that link to `slug`. Rebuilds the
+    cache lazily if cold / expired."""
+    global _BACKLINKS_CACHE, _BACKLINKS_CACHE_TS
+    now = _time.monotonic()
+    with _BACKLINKS_LOCK:
+        stale = (
+            _BACKLINKS_CACHE is None
+            or (now - _BACKLINKS_CACHE_TS) > _BACKLINKS_CACHE_TTL
+        )
+    if stale:
+        fresh = _scan_backlinks_index()
+        with _BACKLINKS_LOCK:
+            _BACKLINKS_CACHE = fresh
+            _BACKLINKS_CACHE_TS = now
+    return list((_BACKLINKS_CACHE or {}).get(slug, []))
+
+
+def get_related_pages(slug: str, *, limit: int = 5) -> list[dict]:
+    """Top-N pages whose WIKI_COLLECTION embedding is nearest to
+    `slug`. Returns ``[{slug, title, page_type, score}]`` sorted by
+    cosine descending, excluding the source page itself. Empty list
+    when the source has no Qdrant embedding (e.g. stub concept page
+    that hasn't been compiled yet)."""
+    from sqlalchemy import text as _sql_text
+    from sciknow.storage.db import get_session
+    from sciknow.storage.qdrant import WIKI_COLLECTION, get_client
+
+    with get_session() as session:
+        row = session.execute(_sql_text(
+            "SELECT qdrant_point_id::text FROM wiki_pages WHERE slug = :s"
+        ), {"s": slug}).fetchone()
+    if not row or not row[0]:
+        return []
+    point_id = row[0]
+
+    try:
+        client = get_client()
+        anchor = client.retrieve(
+            collection_name=WIKI_COLLECTION,
+            ids=[point_id],
+            with_vectors=True,
+        )
+    except Exception:
+        return []
+    if not anchor:
+        return []
+    v = anchor[0].vector
+    if isinstance(v, dict):
+        # Named-vector schema: take the dense vector.
+        v = v.get("dense") or next(iter(v.values()))
+
+    try:
+        hits = client.search(
+            collection_name=WIKI_COLLECTION,
+            query_vector=v,
+            limit=limit + 1,
+            with_payload=False,
+        )
+    except Exception:
+        return []
+
+    # Drop the source page itself if it showed up first (it usually
+    # does since the query vector is its own embedding).
+    ids = [str(h.id) for h in hits if str(h.id) != point_id][:limit]
+    score_by_id = {str(h.id): h.score for h in hits}
+    if not ids:
+        return []
+    with get_session() as session:
+        rows = session.execute(_sql_text("""
+            SELECT slug, title, page_type, qdrant_point_id::text
+            FROM wiki_pages
+            WHERE qdrant_point_id::text = ANY(:ids)
+        """), {"ids": ids}).fetchall()
+    lookup = {r[3]: (r[0], r[1], r[2]) for r in rows}
+    out = []
+    for pid in ids:
+        meta = lookup.get(pid)
+        if meta:
+            out.append({
+                "slug": meta[0], "title": meta[1] or meta[0],
+                "page_type": meta[2],
+                "score": float(score_by_id.get(pid, 0.0)),
+            })
+    return out
