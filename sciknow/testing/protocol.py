@@ -7007,6 +7007,80 @@ def l1_phase50c_span_tracer_surface() -> None:
         assert required in cmd_names, f"spans.{required} command missing"
 
 
+def l1_phase51_enrich_multi_signal() -> None:
+    """Phase 51 — multi-signal enrich matcher.
+
+    Static checks on the new scoring primitives + CLI flags. We test
+    the scoring logic on hand-built cases (no network) and confirm
+    the three new CLI flags land in the expand command signature.
+    """
+    import inspect as _inspect
+
+    from sciknow.cli import db as db_cli
+    from sciknow.ingestion import metadata as md
+
+    # _title_similarity must be word-order invariant on reordered titles
+    s_reorder = md._title_similarity(
+        "Climate change and solar activity",
+        "Solar activity and climate change",
+    )
+    assert s_reorder >= 0.85, (
+        f"token-set path should score word-reorder >= 0.85, got {s_reorder:.3f}"
+    )
+    # Near-identical titles with one word substituted score high
+    s_sub = md._title_similarity(
+        "A reconstruction of temperature variability",
+        "A reconstruction of climate variability",
+    )
+    assert s_sub >= 0.80, (
+        f"one-word-substitution should still score >= 0.80, got {s_sub:.3f}"
+    )
+    # Disjoint titles score low
+    s_bad = md._title_similarity(
+        "Volcanic eruptions of the Holocene",
+        "Deep learning for natural language processing",
+    )
+    assert s_bad < 0.45, (
+        f"disjoint titles must score < 0.45, got {s_bad:.3f}"
+    )
+
+    # Author overlap
+    assert md._authors_overlap("Smith, John", ["Jane Smith", "Alice Brown"]) is True
+    assert md._authors_overlap("John Smith", ["Alice Brown", "Bob Carter"]) is False
+    assert md._authors_overlap(None, ["Any Author"]) is False
+
+    # Year matching: None when either side missing, True in range, False outside
+    assert md._year_matches(2020, 2021, tolerance=1) is True
+    assert md._year_matches(2020, 2022, tolerance=1) is False
+    assert md._year_matches(None, 2020) is None
+    assert md._year_matches(2020, None) is None
+
+    # Accept rule — single-signal high confidence
+    ok, _ = md._accept_match(0.90, False, None,
+                              threshold_title=0.78, threshold_dual=0.70)
+    assert ok, "title >= 0.78 should accept single-signal"
+    # Accept rule — dual signal with author + year
+    ok, _ = md._accept_match(0.72, True, True,
+                              threshold_title=0.78, threshold_dual=0.70)
+    assert ok, "dual-signal 0.72 + author + year should accept"
+    # Reject — author missing, title too low for single-signal
+    ok, _ = md._accept_match(0.72, False, None,
+                              threshold_title=0.78, threshold_dual=0.70)
+    assert not ok, "dual-signal without author must reject"
+    # Reject — year disagrees even though author matches
+    ok, _ = md._accept_match(0.72, True, False,
+                              threshold_title=0.78, threshold_dual=0.70)
+    assert not ok, "explicit year disagreement must reject"
+
+    # CLI flags wired
+    src = _inspect.getsource(db_cli.enrich)
+    for flag in ("--threshold", "--author-threshold", "--year-tolerance",
+                 "--shortlist-tsv"):
+        assert flag in src, f"enrich CLI missing flag {flag!r}"
+    # Default bumped from 0.85 → 0.78
+    assert "0.78" in src, "enrich default threshold did not drop to 0.78"
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -7182,6 +7256,8 @@ L1_TESTS: list[Callable] = [
     l1_phase50b_feedback_surface,
     # Phase 50.C — span tracer
     l1_phase50c_span_tracer_surface,
+    # Phase 51 — multi-signal enrich scorer
+    l1_phase51_enrich_multi_signal,
 ]
 
 L2_TESTS: list[Callable] = [

@@ -313,26 +313,179 @@ def _layer_crossref(meta: PaperMeta) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Phase 51 — multi-signal title matching for db enrich
+# ---------------------------------------------------------------------------
+# The historical title search used raw difflib.SequenceMatcher at a
+# 0.85 cut-off. That's a single-signal character-level similarity, so a
+# legitimate match with "A" / "The" prefix swap, a subtitle reorder, or
+# a minor word-substitution (climatic↔climate) scored below 0.85 and
+# got dropped. The new matcher fuses three signals — max-of(sequence,
+# token-set) similarity on the title, surname match on the first
+# author, and ±1-year tolerance — so a paper with a lower raw title
+# similarity can still match when one of the other signals agrees.
+#
+# The dual-signal path (title ≥ 0.70 AND author match AND year match)
+# pushes recall without exploding false positives: a false positive
+# has to clear 0.70 title similarity AND share an author surname AND
+# share a publication year, which is empirically very rare across the
+# scientific-paper space.
+
+
+def _norm_title(s: str) -> str:
+    """Lowercase + strip non-[a-z0-9 ] + collapse whitespace."""
+    if not s:
+        return ""
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", s.lower())).strip()
+
+
+def _token_set_ratio(a: str, b: str) -> float:
+    """Word-order-invariant similarity, approximating fuzz.token_set_ratio
+    from RapidFuzz without the dependency. Useful because titles often
+    differ only in subtitle placement or ordering of "X and Y" vs "Y and
+    X"; raw SequenceMatcher penalises those heavily.
+
+    Follows the classic fuzz definition: max of
+      ratio(intersection, sorted(set_a)),
+      ratio(intersection, sorted(set_b)),
+      ratio(sorted(set_a), sorted(set_b)).
+    When the intersection is empty the first two collapse to 0 and
+    only the third (sorted-full-sets char-level ratio) contributes —
+    so disjoint titles correctly score near 0 instead of spuriously
+    matching themselves."""
+    import difflib
+    tokens_a = a.split()
+    tokens_b = b.split()
+    if not tokens_a or not tokens_b:
+        return 0.0
+    set_a, set_b = set(tokens_a), set(tokens_b)
+    inter = " ".join(sorted(set_a & set_b))
+    s_a = " ".join(sorted(set_a))
+    s_b = " ".join(sorted(set_b))
+    r1 = difflib.SequenceMatcher(None, inter, s_a).ratio() if inter else 0.0
+    r2 = difflib.SequenceMatcher(None, inter, s_b).ratio() if inter else 0.0
+    r3 = difflib.SequenceMatcher(None, s_a, s_b).ratio() if s_a and s_b else 0.0
+    return max(r1, r2, r3)
+
+
+def _title_similarity(a: str, b: str) -> float:
+    """Max of char-level SequenceMatcher and word-level token-set —
+    either agrees on substantial overlap = we're comparing the same
+    paper. The char-level score catches near-identical titles with
+    one-word substitution; the token-set catches reorder / subtitle
+    placement differences."""
+    import difflib
+    na = _norm_title(a)
+    nb = _norm_title(b)
+    if not na or not nb:
+        return 0.0
+    return max(
+        difflib.SequenceMatcher(None, na, nb).ratio(),
+        _token_set_ratio(na, nb),
+    )
+
+
+def _surnames_from_name(name: str) -> set[str]:
+    """Extract lower-cased surname(s) from an author name string.
+    Handles both 'Last, First' and 'First Last' formats."""
+    if not name:
+        return set()
+    s = name.strip()
+    if "," in s:
+        head = s.split(",", 1)[0]
+        stripped = re.sub(r"[^a-zA-Z]", "", head).lower()
+        return {stripped} if stripped else set()
+    parts = [p for p in re.split(r"\s+", s) if p]
+    if not parts:
+        return set()
+    # Last token — lowercase, letters only
+    stripped = re.sub(r"[^a-zA-Z]", "", parts[-1]).lower()
+    return {stripped} if stripped else set()
+
+
+def _authors_overlap(
+    our_first_author: str | None, candidate_authors: list[str],
+) -> bool:
+    """True if our first-author surname appears in the candidate's
+    author list. One positive is enough — we don't require the full
+    author lists to match (often one side is truncated)."""
+    if not our_first_author:
+        return False
+    ours = _surnames_from_name(our_first_author)
+    if not ours:
+        return False
+    theirs: set[str] = set()
+    for name in candidate_authors:
+        theirs |= _surnames_from_name(name)
+    ours.discard("")
+    theirs.discard("")
+    return bool(ours & theirs)
+
+
+def _year_matches(our_year: int | None, candidate_year: int | None,
+                  tolerance: int = 1) -> bool | None:
+    """Return True if years are within ±tolerance, False if they
+    disagree by more, None if either side is missing — the caller
+    treats None as neutral (doesn't penalise)."""
+    if not our_year or not candidate_year:
+        return None
+    return abs(int(our_year) - int(candidate_year)) <= tolerance
+
+
+def _accept_match(
+    title_score: float,
+    author_match: bool,
+    year_match: bool | None,
+    *,
+    threshold_title: float,
+    threshold_dual: float,
+) -> tuple[bool, str]:
+    """Apply the two-tier accept rule. Returns (accept?, reason)."""
+    if title_score >= threshold_title:
+        return True, f"title={title_score:.2f}>={threshold_title:.2f}"
+    if author_match and title_score >= threshold_dual and year_match is not False:
+        ytag = "year_ok" if year_match is True else "year_missing"
+        return True, (
+            f"title={title_score:.2f}>={threshold_dual:.2f} "
+            f"+author+{ytag}"
+        )
+    return False, f"title={title_score:.2f}"
+
+
+# ---------------------------------------------------------------------------
 # Crossref title search (for papers without a DOI)
 # ---------------------------------------------------------------------------
 
 def search_crossref_by_title(
     title: str,
     first_author: str | None = None,
-    threshold: float = 0.85,
+    threshold: float = 0.78,
+    *,
+    year: int | None = None,
+    author_threshold: float = 0.70,
+    year_tolerance: int = 1,
 ) -> "PaperMeta | None":
+    """Phase 51 — multi-signal Crossref title search.
+
+    Returns a fully-populated PaperMeta when either:
+      * title similarity ≥ `threshold` (single-signal high confidence), or
+      * title similarity ≥ `author_threshold` AND first-author surname
+        appears in the candidate's author list AND (year missing or
+        within ±year_tolerance of the candidate's) — dual-signal.
+
+    The default thresholds (0.78 / 0.70) are deliberately lower than the
+    pre-Phase-51 single-signal 0.85 because the author+year validation
+    covers the false-positive space that a lower single-signal cutoff
+    would open on its own.
     """
-    Search Crossref by title (and optionally first author) to find a DOI.
-    Returns a fully populated PaperMeta if a confident match is found,
-    or None if no match exceeds the similarity threshold.
-    """
-    import difflib
     import html as _html
 
     params: dict = {
         "query.title": title,
-        "rows": 5,
-        "select": "DOI,title",
+        # Phase 51 — top-20 instead of top-5; Crossref's title ranker is
+        # noisy on generic queries, and the right paper is often at rank
+        # 6–12 for short/common titles.
+        "rows": 20,
+        "select": "DOI,title,author,issued",
     }
     if first_author:
         params["query.author"] = first_author
@@ -350,14 +503,10 @@ def search_crossref_by_title(
         if not items:
             return None
 
-        # Normalise for comparison: lowercase, strip non-alphanumeric
-        def _norm(s: str) -> str:
-            return re.sub(r'[^a-z0-9 ]', '', s.lower()).strip()
-
-        norm_query = _norm(_html.unescape(title))
-
-        best_doi: str | None = None
+        best: dict | None = None
         best_score = 0.0
+        best_accept = False
+        best_reason = ""
         for item in items:
             item_titles = item.get("title", [])
             if not item_titles:
@@ -365,17 +514,33 @@ def search_crossref_by_title(
             item_doi = item.get("DOI", "")
             if not item_doi:
                 continue
-            norm_item = _norm(_html.unescape(item_titles[0]))
-            score = difflib.SequenceMatcher(None, norm_query, norm_item).ratio()
-            if score > best_score:
-                best_score = score
-                best_doi = item_doi
+            item_authors = [
+                f'{(a.get("given") or "").strip()} {(a.get("family") or "").strip()}'.strip()
+                for a in (item.get("author") or [])
+            ]
+            issued = (item.get("issued") or {}).get("date-parts") or []
+            item_year = int(issued[0][0]) if issued and issued[0] else None
 
-        if best_score < threshold or not best_doi:
+            t_score = _title_similarity(
+                _html.unescape(title), _html.unescape(item_titles[0])
+            )
+            a_match = _authors_overlap(first_author, item_authors)
+            y_match = _year_matches(year, item_year, tolerance=year_tolerance)
+            accept, reason = _accept_match(
+                t_score, a_match, y_match,
+                threshold_title=threshold,
+                threshold_dual=author_threshold,
+            )
+            if t_score > best_score:
+                best_score = t_score
+                best = item
+                best_accept = accept
+                best_reason = reason
+
+        if not best or not best_accept:
             return None
 
-        # Fetch full metadata via the standard Crossref layer
-        meta = PaperMeta(doi=normalize_doi(best_doi))
+        meta = PaperMeta(doi=normalize_doi(best.get("DOI", "")))
         _layer_crossref(meta)
         return meta if meta.title else None
 
@@ -386,19 +551,26 @@ def search_crossref_by_title(
 def search_openalex_by_title(
     title: str,
     first_author: str | None = None,
-    threshold: float = 0.85,
+    threshold: float = 0.78,
+    *,
+    year: int | None = None,
+    author_threshold: float = 0.70,
+    year_tolerance: int = 1,
 ) -> "PaperMeta | None":
+    """Phase 51 — multi-signal OpenAlex title search.
+
+    Fallback to Crossref's title search (OpenAlex covers preprints,
+    book chapters, and some older works Crossref misses). Same
+    two-tier accept rule: 0.78 title single-signal, or 0.70 title
+    with author + year validation.
     """
-    Search OpenAlex by title as a fallback to Crossref.
-    OpenAlex covers many works Crossref misses (e.g. some preprints, book chapters).
-    Returns a PaperMeta with at least a DOI set, or None on no confident match.
-    """
-    import difflib
     import html as _html
 
     params: dict = {
         "search": title,
-        "per-page": 5,
+        # Phase 51 — top-20 (matches Crossref). OpenAlex also paginates
+        # noisily on generic queries.
+        "per-page": 20,
         "select": "doi,title,authorships,publication_year,primary_location,abstract_inverted_index",
         "mailto": settings.crossref_email,
     }
@@ -408,9 +580,6 @@ def search_openalex_by_title(
 
     url = "https://api.openalex.org/works"
     headers = {"User-Agent": f"sciknow/0.1 (mailto:{settings.crossref_email})"}
-
-    def _norm(s: str) -> str:
-        return re.sub(r'[^a-z0-9 ]', '', s.lower()).strip()
 
     try:
         with httpx.Client(timeout=15) as client:
@@ -422,23 +591,39 @@ def search_openalex_by_title(
         if not items:
             return None
 
-        norm_query = _norm(_html.unescape(title))
-
         best: dict | None = None
         best_score = 0.0
+        best_accept = False
         for item in items:
             item_title = item.get("title") or ""
             item_doi = item.get("doi") or ""
             if not item_title or not item_doi:
                 continue
-            # OpenAlex DOIs come as full URLs: "https://doi.org/10.xxx/yyy"
-            norm_item = _norm(_html.unescape(item_title))
-            score = difflib.SequenceMatcher(None, norm_query, norm_item).ratio()
-            if score > best_score:
-                best_score = score
-                best = item
+            item_authors = [
+                (a.get("author") or {}).get("display_name") or ""
+                for a in (item.get("authorships") or [])
+            ]
+            item_year = item.get("publication_year")
 
-        if best_score < threshold or best is None:
+            t_score = _title_similarity(
+                _html.unescape(title), _html.unescape(item_title)
+            )
+            a_match = _authors_overlap(first_author, item_authors)
+            y_match = _year_matches(
+                year, int(item_year) if item_year else None,
+                tolerance=year_tolerance,
+            )
+            accept, _reason = _accept_match(
+                t_score, a_match, y_match,
+                threshold_title=threshold,
+                threshold_dual=author_threshold,
+            )
+            if t_score > best_score:
+                best_score = t_score
+                best = item
+                best_accept = accept
+
+        if not best or not best_accept:
             return None
 
         raw_doi = best.get("doi", "")

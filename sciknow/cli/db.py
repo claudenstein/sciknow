@@ -1068,7 +1068,20 @@ def refresh_metadata(
 @app.command()
 def enrich(
     dry_run:   bool  = typer.Option(False,  "--dry-run",   help="Show what would be updated without making changes."),
-    threshold: float = typer.Option(0.85,   "--threshold", help="Minimum title-similarity score to accept a Crossref match (0–1)."),
+    threshold: float = typer.Option(0.78,   "--threshold",
+                                     help="Minimum title-similarity score to accept a single-signal match (0–1). "
+                                          "Phase 51: lowered from 0.85 → 0.78 because the dual-signal author+year "
+                                          "validation now covers the false-positive space a lower single-signal "
+                                          "cutoff would open on its own. Bump back to 0.85 for a stricter run."),
+    author_threshold: float = typer.Option(0.70, "--author-threshold",
+                                            help="Minimum title similarity when author surname AND year also agree "
+                                                 "— the dual-signal 'abarcative' floor. Default 0.70."),
+    year_tolerance: int = typer.Option(1, "--year-tolerance",
+                                        help="±years by which candidate publication_year can differ from ours "
+                                             "and still count as a year-match. Default ±1."),
+    shortlist_tsv: Path = typer.Option(None, "--shortlist-tsv",
+                                        help="Dump every paper + its best candidate + all three signals to this "
+                                             "TSV for HITL review. Useful for tuning thresholds or manual DOI entry."),
     limit:     int   = typer.Option(0,      "--limit",     help="Max papers to process (0 = all)."),
     delay:     float = typer.Option(0.2,    "--delay",     help="Seconds between Crossref API calls (be polite)."),
 ):
@@ -1111,7 +1124,8 @@ def enrich(
 
     with get_session() as session:
         rows = session.execute(text("""
-            SELECT pm.id::text, pm.title, pm.authors, pm.arxiv_id, pm.metadata_source
+            SELECT pm.id::text, pm.title, pm.authors, pm.arxiv_id, pm.metadata_source,
+                   pm.year
             FROM paper_metadata pm
             WHERE pm.doi IS NULL AND pm.title IS NOT NULL
             ORDER BY pm.year DESC NULLS LAST, pm.title
@@ -1134,27 +1148,40 @@ def enrich(
 
     matched = failed = skipped = 0
 
-    def _lookup(row) -> tuple[str, str, PaperMeta | None, str]:
-        """Pure API lookup — runs in worker thread, never touches the DB."""
-        pm_id, title, authors, arxiv_id, _ = row
+    def _lookup(row) -> tuple[str, str, PaperMeta | None, str, int | None]:
+        """Pure API lookup — runs in worker thread, never touches the DB.
+        Returns (pm_id, title, meta_or_none, status, year)."""
+        pm_id, title, authors, arxiv_id, _meta_src, pm_year = row
 
         if _is_garbage_title(title) or len(title.strip()) < 15:
-            return pm_id, title, None, "skip"
+            return pm_id, title, None, "skip", pm_year
 
         first_author: str | None = None
         if authors:
             first_author = (authors[0] or {}).get("name")
 
-        meta = search_crossref_by_title(title, first_author, threshold=threshold)
+        meta = search_crossref_by_title(
+            title, first_author,
+            threshold=threshold,
+            year=pm_year,
+            author_threshold=author_threshold,
+            year_tolerance=year_tolerance,
+        )
         if meta is None:
-            meta = search_openalex_by_title(title, first_author, threshold=threshold)
+            meta = search_openalex_by_title(
+                title, first_author,
+                threshold=threshold,
+                year=pm_year,
+                author_threshold=author_threshold,
+                year_tolerance=year_tolerance,
+            )
         if meta is None and arxiv_id:
             stub = PaperMeta(arxiv_id=arxiv_id)
             _layer_arxiv(stub)
             if stub.title:
                 meta = stub
 
-        return pm_id, title, meta, "ok" if meta else "no_match"
+        return pm_id, title, meta, "ok" if meta else "no_match", pm_year
 
     with Progress(
         SpinnerColumn(),
@@ -1170,13 +1197,27 @@ def enrich(
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [pool.submit(_lookup, row) for row in rows]
 
+            # Phase 51 — shortlist rows (optional HITL review output)
+            shortlist_rows: list[dict] = []
+
             for fut in as_completed(futures):
                 try:
-                    pm_id, title, meta, status = fut.result()
+                    pm_id, title, meta, status, pm_year = fut.result()
                 except Exception:
                     failed += 1
                     progress.advance(task)
                     continue
+                if shortlist_tsv:
+                    shortlist_rows.append({
+                        "pm_id": pm_id,
+                        "title": title or "",
+                        "year": pm_year,
+                        "status": status,
+                        "matched_doi": (meta.doi if meta else "") or "",
+                        "matched_title": (meta.title if meta else "") or "",
+                        "matched_year": (meta.year if meta else None),
+                        "source": (meta.source if meta else "") or "",
+                    })
 
                 progress.update(task, description=f"[dim]{title[:55]}[/dim]")
 
@@ -1227,10 +1268,37 @@ def enrich(
 
                 progress.advance(task)
 
+    # Phase 51 — dump the shortlist TSV if requested. Includes every
+    # row (matched + rejected + skipped) so the user can grep for
+    # near-misses and bump --threshold or fill a DOI by hand.
+    if shortlist_tsv and shortlist_rows:
+        shortlist_tsv.parent.mkdir(parents=True, exist_ok=True)
+        with shortlist_tsv.open("w", encoding="utf-8") as f:
+            f.write("\t".join([
+                "pm_id", "status", "our_title", "our_year",
+                "matched_doi", "matched_title", "matched_year", "source",
+            ]) + "\n")
+            for r in shortlist_rows:
+                f.write("\t".join([
+                    r["pm_id"],
+                    r["status"],
+                    (r["title"] or "").replace("\t", " ").replace("\n", " ")[:200],
+                    str(r["year"] or ""),
+                    r["matched_doi"],
+                    (r["matched_title"] or "").replace("\t", " ")[:200],
+                    str(r["matched_year"] or ""),
+                    r["source"],
+                ]) + "\n")
+        console.print(
+            f"[dim]Shortlist TSV: {shortlist_tsv}  ({len(shortlist_rows)} rows)[/dim]"
+        )
+
     console.print(
         f"\n[green]✓ Matched & updated {matched}[/green]  "
         f"[yellow]no match {skipped}[/yellow]  "
-        f"[red]failed {failed}[/red]"
+        f"[red]failed {failed}[/red]  "
+        f"[dim]thresholds: title≥{threshold:.2f} single, "
+        f"≥{author_threshold:.2f} + author/year dual[/dim]"
     )
     if not dry_run and matched:
         console.print(
