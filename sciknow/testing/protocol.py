@@ -7456,6 +7456,18 @@ def l1_phase54_wiki_browsing_mvp() -> None:
     assert "/api/wiki/page/{slug}/related" in route_paths, (
         "/api/wiki/page/<slug>/related endpoint missing"
     )
+    # Phase 54.3 — "Ask this page" inline RAG scoped to source docs.
+    assert "/api/wiki/page/{slug}/ask" in route_paths, (
+        "/api/wiki/page/<slug>/ask endpoint missing"
+    )
+    for needle in (
+        "wiki-ask-block",    # bottom-of-page chat section markup
+        "askWikiPage",       # JS handler
+        "wiki-ask-form",     # form CSS class
+        "wiki-ask-broaden",  # broaden-to-corpus toggle
+        "_wikiAskSource",    # EventSource tracking var
+    ):
+        assert needle in src, f"phase 54.3 ask surface missing: {needle!r}"
 
     # Backlinks scanner contract on synthetic page content. Uses the
     # `base_dir` override so we don't have to mutate Pydantic Settings

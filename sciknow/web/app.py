@@ -2773,6 +2773,101 @@ async def api_wiki_pages(page_type: str = None, page: int = 1, per_page: int = 5
     })
 
 
+@app.post("/api/wiki/page/{slug}/ask")
+async def api_wiki_page_ask(
+    slug: str,
+    question: str = Form(...),
+    model: str = Form(None),
+    context_k: int = Form(6),
+    broaden: bool = Form(False),
+):
+    """Phase 54.3 — "Ask this page" inline RAG.
+
+    Runs hybrid search and an LLM-streamed answer scoped to the wiki
+    page's ``source_doc_ids``. That scope is the right default for
+    questions a reader forms while mid-read (e.g. "What's the effect
+    size in the Results section?") — nothing cross-paper slips in.
+    Pass ``broaden=true`` to fall back to the full corpus if the
+    scoped retrieval returned too few hits.
+    """
+    from sciknow.rag import prompts as rag_prompts
+    from sciknow.rag.llm import stream as llm_stream
+    from sciknow.retrieval import context_builder, hybrid_search, reranker
+    from sciknow.storage.qdrant import get_client
+
+    # Resolve the page's source_doc_ids so we know what to scope to.
+    with get_session() as session:
+        row = session.execute(text("""
+            SELECT array_remove(source_doc_ids, NULL)::text[]
+            FROM wiki_pages WHERE slug = :s
+        """), {"s": slug}).fetchone()
+    source_doc_ids: list[str] = list(row[0]) if row and row[0] else []
+    source_set = {d.lower() for d in source_doc_ids}
+
+    job_id, queue = _create_job("wiki_page_ask")
+    loop = asyncio.get_event_loop()
+
+    def gen():
+        qdrant = get_client()
+        yield {"type": "progress", "stage": "retrieving",
+               "detail": (
+                   f"Searching this page's {len(source_doc_ids)} source paper(s)..."
+                   if source_doc_ids and not broaden
+                   else "Searching the whole corpus..."
+               )}
+
+        # Scoped retrieval: over-fetch, then keep only chunks whose
+        # document_id is in the page's source set. If the page has no
+        # source_doc_ids OR `broaden` is explicitly set, skip the
+        # filter and run a normal corpus-wide search.
+        over_k = 200 if (source_set and not broaden) else 50
+        with get_session() as session:
+            candidates = hybrid_search.search(
+                query=question, qdrant_client=qdrant, session=session,
+                candidate_k=over_k,
+            )
+            if source_set and not broaden:
+                candidates = [
+                    c for c in candidates
+                    if (c.document_id or "").lower() in source_set
+                ]
+            if not candidates:
+                if source_set and not broaden:
+                    yield {
+                        "type": "error",
+                        "message": (
+                            "No matching passages in this page's source papers. "
+                            "Try the 'broaden to full corpus' toggle."
+                        ),
+                    }
+                else:
+                    yield {"type": "error",
+                           "message": "No relevant passages found."}
+                return
+            candidates = reranker.rerank(
+                question, candidates, top_k=max(1, min(int(context_k or 6), 12)),
+            )
+            results = context_builder.build(candidates, session)
+
+        from sciknow.rag.prompts import format_sources
+        sources_lines = format_sources(results).splitlines()
+        yield {"type": "sources", "sources": sources_lines,
+               "n": len(sources_lines),
+               "scope": "this-page" if (source_set and not broaden) else "corpus"}
+
+        system, user = rag_prompts.qa(question, results)
+        yield {"type": "progress", "stage": "generating",
+               "detail": f"Generating answer from {len(results)} passage(s)..."}
+        for tok in llm_stream(system, user, model=model or None):
+            yield {"type": "token", "text": tok}
+        yield {"type": "completed"}
+
+    threading.Thread(
+        target=_run_generator_in_thread, args=(job_id, gen, loop), daemon=True
+    ).start()
+    return JSONResponse({"job_id": job_id, "scope_size": len(source_doc_ids)})
+
+
 @app.get("/api/wiki/page/{slug}/backlinks")
 async def api_wiki_backlinks(slug: str):
     """Phase 54.2 — pages that link to this one via ``[[slug]]``.
@@ -5508,6 +5603,33 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .wiki-compact-list .wp-alt {{ font-size: 11px;
                                color: var(--fg-muted);
                                font-style: italic; }}
+/* Phase 54.3 — Ask this page inline chat. Follows the same SSE
+   contract the book reader's ask modal uses; rendered here as an
+   inline section so it's one scroll away from the page content. */
+.wiki-ask-extras {{ background: var(--bg-elevated); }}
+.wiki-ask-form {{ display: flex; gap: var(--sp-2); align-items: center;
+                   flex-wrap: wrap; }}
+.wiki-ask-form input[type="text"] {{ flex: 1; min-width: 220px;
+                                      padding: 8px 12px;
+                                      border: 1px solid var(--border);
+                                      border-radius: var(--r-md);
+                                      background: var(--bg);
+                                      color: var(--fg); font-size: 14px; }}
+.wiki-ask-form input[type="text"]:focus {{ outline: none;
+                                            border-color: var(--accent); }}
+.wiki-ask-broaden {{ font-size: 11px; color: var(--fg-muted);
+                      display: inline-flex; gap: 4px; align-items: center; }}
+.wiki-ask-status {{ margin-top: var(--sp-2); font-size: 11px;
+                     color: var(--fg-muted); font-family: var(--font-mono); }}
+.wiki-ask-stream {{ margin-top: var(--sp-2); font-size: 14px;
+                     line-height: 1.55; white-space: pre-wrap;
+                     font-family: var(--font-serif); }}
+.wiki-ask-sources {{ margin-top: var(--sp-3); padding: var(--sp-2) var(--sp-3);
+                      background: var(--toolbar-bg);
+                      border: 1px solid var(--border);
+                      border-radius: var(--r-md);
+                      font-size: 11px; color: var(--fg-muted); }}
+.wiki-ask-sources ol {{ padding-left: var(--sp-3); margin: 4px 0; }}
 /* Phase 15 — live streaming stats footer (tok/s, elapsed, model) */
 .stream-stats {{ display: flex; align-items: center; gap: var(--sp-3);
                 font-family: var(--font-mono); font-size: 11px;
@@ -6231,6 +6353,22 @@ body.task-bar-open {{ padding-top: 40px; }}
             <aside id="wiki-toc" class="wiki-toc"></aside>
             <div>
               <div id="wiki-page-content" class="wiki-page-content"></div>
+              <!-- Phase 54.3 — Ask this page inline RAG -->
+              <section id="wiki-ask-block" class="wiki-extras wiki-ask-extras">
+                <h3 class="wiki-extras-h">Ask a question about this page</h3>
+                <form class="wiki-ask-form" onsubmit="event.preventDefault(); askWikiPage();">
+                  <input type="text" id="wiki-ask-input"
+                         placeholder="e.g. What effect size is reported?"
+                         autocomplete="off"/>
+                  <label class="wiki-ask-broaden" title="Search the whole corpus instead of just this page's sources">
+                    <input type="checkbox" id="wiki-ask-broaden"/> broaden
+                  </label>
+                  <button type="submit" class="btn-primary" id="wiki-ask-submit">Ask</button>
+                </form>
+                <div id="wiki-ask-status" class="wiki-ask-status"></div>
+                <div id="wiki-ask-stream" class="wiki-ask-stream"></div>
+                <div id="wiki-ask-sources" class="wiki-ask-sources" style="display:none;"></div>
+              </section>
               <section id="wiki-related-block" class="wiki-extras" style="display:none;">
                 <h3 class="wiki-extras-h">Related pages</h3>
                 <ol id="wiki-related-list" class="wiki-compact-list"></ol>
@@ -11674,6 +11812,18 @@ async function openWikiPage(slug) {{
   detail.style.display = 'block';
   content.innerHTML = '<div style="padding:24px;text-align:center;color:var(--fg-muted);">Loading...</div>';
   if (toc) toc.innerHTML = '';
+  // Phase 54.3 — reset the inline "Ask this page" state when the
+  // active page changes so a stale answer doesn't hang around on
+  // the new page.
+  const _askInput = document.getElementById('wiki-ask-input');
+  const _askStatus = document.getElementById('wiki-ask-status');
+  const _askStream = document.getElementById('wiki-ask-stream');
+  const _askSources = document.getElementById('wiki-ask-sources');
+  if (_askInput) _askInput.value = '';
+  if (_askStatus) _askStatus.textContent = '';
+  if (_askStream) _askStream.textContent = '';
+  if (_askSources) {{ _askSources.style.display = 'none'; _askSources.innerHTML = ''; }}
+  if (_wikiAskSource) {{ try {{ _wikiAskSource.close(); }} catch (e) {{}} _wikiAskSource = null; }}
   _currentWikiSlug = slug;
 
   // Phase 54 — reflect the open page in the URL hash so back/forward
@@ -11778,6 +11928,84 @@ document.addEventListener('click', (evt) => {{
     }}
   }}
 }});
+
+// Phase 54.3 — "Ask this page" inline RAG. Hits the new
+// /api/wiki/page/<slug>/ask endpoint, streams tokens into the
+// page's inline chat box via the same SSE contract the book-
+// reader uses.
+let _wikiAskSource = null;
+async function askWikiPage() {{
+  const q = (document.getElementById('wiki-ask-input').value || '').trim();
+  if (!q || !_currentWikiSlug) return;
+  const broaden = document.getElementById('wiki-ask-broaden').checked;
+  const status = document.getElementById('wiki-ask-status');
+  const streamEl = document.getElementById('wiki-ask-stream');
+  const sourcesEl = document.getElementById('wiki-ask-sources');
+  const submit = document.getElementById('wiki-ask-submit');
+
+  status.textContent = 'Retrieving and generating…';
+  streamEl.textContent = '';
+  sourcesEl.style.display = 'none';
+  sourcesEl.innerHTML = '';
+  submit.disabled = true;
+
+  const fd = new FormData();
+  fd.append('question', q);
+  if (broaden) fd.append('broaden', 'true');
+
+  let data;
+  try {{
+    const res = await fetch('/api/wiki/page/' + encodeURIComponent(_currentWikiSlug) + '/ask',
+                            {{ method: 'POST', body: fd }});
+    data = await res.json();
+  }} catch (e) {{
+    status.textContent = 'Error: ' + e.message;
+    submit.disabled = false;
+    return;
+  }}
+
+  if (_wikiAskSource) {{ try {{ _wikiAskSource.close(); }} catch (e) {{}} _wikiAskSource = null; }}
+  const source = new EventSource('/api/stream/' + data.job_id);
+  _wikiAskSource = source;
+  let collected = null;
+  let scope = null;
+
+  source.onmessage = function(e) {{
+    const evt = JSON.parse(e.data);
+    if (evt.type === 'token') {{
+      streamEl.textContent += evt.text;
+    }} else if (evt.type === 'progress') {{
+      status.textContent = evt.detail || evt.stage;
+    }} else if (evt.type === 'sources') {{
+      collected = evt.sources;
+      scope = evt.scope || 'corpus';
+      status.textContent = 'Generating from ' + (evt.n || collected.length) +
+                           ' passage(s) · scope=' + scope;
+    }} else if (evt.type === 'completed') {{
+      status.textContent = 'Done' + (scope ? ' · scope=' + scope : '');
+      submit.disabled = false;
+      if (collected && collected.length) {{
+        let html = '<div style="font-weight:600;color:var(--fg);margin-bottom:6px;">Sources (' +
+                   collected.length + ')</div><ol>';
+        collected.forEach(s => {{ html += '<li>' + escapeHtml(s) + '</li>'; }});
+        html += '</ol>';
+        sourcesEl.innerHTML = html;
+        sourcesEl.style.display = 'block';
+      }}
+      source.close(); _wikiAskSource = null;
+    }} else if (evt.type === 'error') {{
+      status.textContent = 'Error: ' + evt.message;
+      submit.disabled = false;
+      source.close(); _wikiAskSource = null;
+    }}
+  }};
+  source.onerror = function() {{
+    status.textContent = 'Stream disconnected';
+    submit.disabled = false;
+    try {{ source.close(); }} catch (e) {{}}
+    _wikiAskSource = null;
+  }};
+}}
 
 // Phase 54.2 — Related / backlinks loaders.
 async function _loadWikiRelated(slug) {{
