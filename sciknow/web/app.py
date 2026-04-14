@@ -5308,15 +5308,35 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
                       text-overflow: ellipsis; white-space: nowrap; }}
 /* Phase 48 — 3D KG canvas (orbit camera, drag nodes, wheel zoom). CSS is
    intentionally minimal so the inline presentation attributes (radial
-   gradients, per-node opacity/scale) aren't shadowed by class rules. */
+   gradients, per-node opacity/scale) aren't shadowed by class rules.
+   The `background` color is set inline from the active theme. */
 #kg-graph-canvas {{ width: 100%; height: 520px; border-radius: 6px;
-                   overflow: hidden; user-select: none; touch-action: none;
-                   background: #060b18; }}
+                   overflow: hidden; user-select: none; touch-action: none; }}
 #kg-graph-canvas svg {{ width: 100%; height: 100%; display: block;
                        cursor: grab; }}
 #kg-graph-canvas svg.kg-grabbing {{ cursor: grabbing; }}
 #kg-graph-canvas .kg-node {{ cursor: grab; }}
 #kg-graph-canvas .kg-node:hover circle {{ filter: brightness(1.25); }}
+/* KG theme chip row (Graph tab) */
+.kg-controls {{ display: flex; gap: 6px; align-items: center;
+                margin: 0 0 8px 0; flex-wrap: wrap; }}
+.kg-controls-label {{ font-size: 11px; color: var(--fg-muted);
+                      margin-right: 4px; text-transform: uppercase;
+                      letter-spacing: 0.06em; }}
+.kg-theme-chip {{ width: 22px; height: 22px; padding: 0;
+                  border: 2px solid transparent; border-radius: 50%;
+                  cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+                  transition: border-color 0.15s, transform 0.1s; }}
+.kg-theme-chip:hover {{ transform: scale(1.12); }}
+.kg-theme-chip.active {{ border-color: var(--accent);
+                         box-shadow: 0 0 0 2px var(--bg-elevated),
+                                     0 0 0 4px var(--accent); }}
+.kg-invert-btn {{ margin-left: 8px; font-size: 11px;
+                  padding: 3px 10px; border: 1px solid var(--border);
+                  background: var(--bg-elevated); color: var(--fg);
+                  border-radius: 4px; cursor: pointer; }}
+.kg-invert-btn:hover {{ background: var(--accent); color: #fff;
+                        border-color: var(--accent); }}
 /* Phase 30 — persistent global task bar (top of viewport, full width).
    Visible whenever a job is running, regardless of SPA navigation.
    Designed to be unobtrusive: ~40px tall, mono font for the numerics,
@@ -6670,7 +6690,21 @@ body.task-bar-open {{ padding-top: 40px; }}
       <div id="kg-status" style="font-size:11px;color:var(--fg-muted);margin:8px 0;"></div>
       <!-- Graph tab pane (default) -->
       <div id="kg-graph-pane" style="display:block;">
-        <div id="kg-graph-canvas" style="border:1px solid var(--border);border-radius:6px;background:var(--toolbar-bg);"></div>
+        <div class="kg-controls">
+          <span class="kg-controls-label">Theme</span>
+          <button class="kg-theme-chip" data-theme="deep-space"></button>
+          <button class="kg-theme-chip" data-theme="paper"></button>
+          <button class="kg-theme-chip" data-theme="blueprint"></button>
+          <button class="kg-theme-chip" data-theme="solarized"></button>
+          <button class="kg-theme-chip" data-theme="solarized-light"></button>
+          <button class="kg-theme-chip" data-theme="terminal"></button>
+          <button class="kg-theme-chip" data-theme="neon"></button>
+          <button class="kg-invert-btn" onclick="invertKgTheme()"
+                  title="Swap to the paired light/dark preset">
+            &#8646; Invert
+          </button>
+        </div>
+        <div id="kg-graph-canvas" style="border:1px solid var(--border);border-radius:6px;"></div>
         <p style="font-size:10px;color:var(--fg-muted);margin-top:6px;">
           &middot; Drag the background to orbit &middot; drag a node to reposition &middot; scroll to zoom &middot; click a node (without dragging) to filter the table to triples involving that entity.
         </p>
@@ -7462,16 +7496,170 @@ function _renderKgTable(triples) {{
   document.getElementById('kg-results').innerHTML = html;
 }}
 
+// Phase 48 — KG color presets. Each preset defines the full palette:
+// the canvas gradient background, the node sphere shading (inner →
+// mid → outer gradient stops), the highlight (fixed/pinned) gradient,
+// the edge line color, and the label fill + outline. `inverse` names
+// the paired light/dark preset for the Invert button.
+const KG_THEMES = {{
+  'deep-space': {{
+    name: 'Deep Space',
+    canvasBg: '#060b18',
+    bgInner: '#1e2a44', bgOuter: '#060b18',
+    nodeInner: '#ffffff', nodeMid: '#8fc3ff', nodeOuter: '#0e2a54',
+    hiMid: '#ffd98a', hiOuter: '#6a3e00',
+    nodeStroke: '#0a1a33',
+    edge: '#7fb6ff',
+    label: '#e6f0ff', labelStroke: '#040914',
+    inverse: 'paper',
+  }},
+  'paper': {{
+    name: 'Paper',
+    canvasBg: '#f3f5f9',
+    bgInner: '#ffffff', bgOuter: '#d8ddea',
+    nodeInner: '#ffffff', nodeMid: '#6c8ec8', nodeOuter: '#1f3a6b',
+    hiMid: '#d48f2d', hiOuter: '#7a3f00',
+    nodeStroke: '#1f3a6b',
+    edge: '#5a7bb0',
+    label: '#0a1a33', labelStroke: '#ffffff',
+    inverse: 'deep-space',
+  }},
+  'terminal': {{
+    name: 'Terminal',
+    canvasBg: '#020402',
+    bgInner: '#0a1a0a', bgOuter: '#000000',
+    nodeInner: '#f0ffe8', nodeMid: '#55e86b', nodeOuter: '#083015',
+    hiMid: '#ffef40', hiOuter: '#5a4a00',
+    nodeStroke: '#062008',
+    edge: '#3ccc6a',
+    label: '#bfffc6', labelStroke: '#000000',
+    inverse: 'paper',
+  }},
+  'blueprint': {{
+    name: 'Blueprint',
+    canvasBg: '#061530',
+    bgInner: '#123466', bgOuter: '#040d22',
+    nodeInner: '#ffffff', nodeMid: '#6bf2ff', nodeOuter: '#033a55',
+    hiMid: '#ffb347', hiOuter: '#5c3500',
+    nodeStroke: '#02101f',
+    edge: '#7bd5ff',
+    label: '#eafaff', labelStroke: '#02101f',
+    inverse: 'paper',
+  }},
+  'solarized': {{
+    name: 'Solarized',
+    canvasBg: '#002b36',
+    bgInner: '#08414e', bgOuter: '#001820',
+    nodeInner: '#fdf6e3', nodeMid: '#b58900', nodeOuter: '#3a2a00',
+    hiMid: '#cb4b16', hiOuter: '#4a1e00',
+    nodeStroke: '#001820',
+    edge: '#268bd2',
+    label: '#eee8d5', labelStroke: '#002b36',
+    inverse: 'solarized-light',
+  }},
+  'solarized-light': {{
+    name: 'Solarized Light',
+    canvasBg: '#fdf6e3',
+    bgInner: '#ffffff', bgOuter: '#eee8d5',
+    nodeInner: '#fdf6e3', nodeMid: '#b58900', nodeOuter: '#3a2a00',
+    hiMid: '#cb4b16', hiOuter: '#4a1e00',
+    nodeStroke: '#3a2a00',
+    edge: '#268bd2',
+    label: '#073642', labelStroke: '#fdf6e3',
+    inverse: 'solarized',
+  }},
+  'neon': {{
+    name: 'Neon',
+    canvasBg: '#000000',
+    bgInner: '#1a0030', bgOuter: '#000000',
+    nodeInner: '#ffffff', nodeMid: '#ff3db7', nodeOuter: '#3a0028',
+    hiMid: '#2affd5', hiOuter: '#003d3a',
+    nodeStroke: '#0a0014',
+    edge: '#c66bff',
+    label: '#ffd6ff', labelStroke: '#0a0014',
+    inverse: 'paper',
+  }},
+}};
+let _kgActiveTheme = 'deep-space';
+
+// Apply a theme's gradient stops to the SVG <defs>. Called on init and
+// whenever the user picks a new preset — the render() loop then paints
+// next frame with the new palette without restarting the simulation.
+function _applyKgDefs(svg, theme) {{
+  const defs = svg.querySelector('defs');
+  if (!defs) return;
+  defs.innerHTML =
+    '<radialGradient id="kg-nodeg" cx="30%" cy="30%" r="75%">' +
+      '<stop offset="0%" stop-color="' + theme.nodeInner + '"/>' +
+      '<stop offset="35%" stop-color="' + theme.nodeMid + '"/>' +
+      '<stop offset="100%" stop-color="' + theme.nodeOuter + '"/>' +
+    '</radialGradient>' +
+    '<radialGradient id="kg-nodeh" cx="30%" cy="30%" r="75%">' +
+      '<stop offset="0%" stop-color="' + theme.nodeInner + '"/>' +
+      '<stop offset="30%" stop-color="' + theme.hiMid + '"/>' +
+      '<stop offset="100%" stop-color="' + theme.hiOuter + '"/>' +
+    '</radialGradient>' +
+    '<radialGradient id="kg-bg" cx="50%" cy="50%" r="80%">' +
+      '<stop offset="0%" stop-color="' + theme.bgInner + '"/>' +
+      '<stop offset="100%" stop-color="' + theme.bgOuter + '"/>' +
+    '</radialGradient>';
+}}
+
+// Switch the active KG theme. Safe to call before the graph is built
+// (just stores the preference for the next _renderKgGraph).
+function setKgTheme(name) {{
+  if (!KG_THEMES[name]) return;
+  _kgActiveTheme = name;
+  const canvas = document.getElementById('kg-graph-canvas');
+  if (canvas && canvas._kgSim && canvas._kgSim.setTheme) {{
+    canvas._kgSim.setTheme(name);
+  }}
+  document.querySelectorAll('.kg-theme-chip').forEach(c => {{
+    c.classList.toggle('active', c.getAttribute('data-theme') === name);
+  }});
+}}
+
+// One-click swap to the paired light/dark preset of the current theme.
+function invertKgTheme() {{
+  const cur = KG_THEMES[_kgActiveTheme];
+  if (cur && cur.inverse) setKgTheme(cur.inverse);
+}}
+
+// Paint each theme chip with a tiny radial preview of its palette
+// (one-time; chips live inside the modal markup). Chip click handlers
+// are delegated through setKgTheme.
+function _initKgThemeChips() {{
+  if (window._kgChipsReady) return;
+  document.querySelectorAll('.kg-theme-chip').forEach(chip => {{
+    const name = chip.getAttribute('data-theme');
+    const t = KG_THEMES[name];
+    if (!t) return;
+    chip.style.background =
+      'radial-gradient(circle at 35% 35%, ' +
+      t.nodeMid + ' 0%, ' + t.nodeOuter + ' 55%, ' +
+      t.bgOuter + ' 100%)';
+    chip.title = t.name;
+    chip.classList.toggle('active', name === _kgActiveTheme);
+    chip.addEventListener('click', () => setKgTheme(name));
+  }});
+  window._kgChipsReady = true;
+}}
+
 // Phase 48 — interactive 3D knowledge graph. Every unique entity is a
 // node in a real 3D world; triples are springs. A continuous rAF loop
 // integrates forces and redraws. The orbit camera rotates around the
 // origin (drag background), nodes can be grabbed and repositioned
 // (drag node), and the wheel zooms in/out (camera distance). Sphere
 // shading comes from a single radial gradient fill + depth-based size
-// and opacity. No extra deps — still pure SVG.
+// and opacity. Palette is swappable via the theme chip row in the
+// modal (KG_THEMES). No extra deps — still pure SVG.
 function _renderKgGraph(triples) {{
   const canvas = document.getElementById('kg-graph-canvas');
   if (!canvas) return;
+  // Wire up theme chips the first time a graph renders (chips live in
+  // the modal HTML from page load, but their palette swatches + click
+  // handlers depend on KG_THEMES which is defined in this same script).
+  _initKgThemeChips();
   // Tear down any previous simulation (re-renders come from loadKg)
   if (canvas._kgSim) {{ try {{ canvas._kgSim.stop(); }} catch (e) {{}} }}
   canvas.innerHTML = '';
@@ -7514,31 +7702,19 @@ function _renderKgGraph(triples) {{
   const cam = {{ rotX: -0.22, rotY: 0.55, dist: 850, fov: 680 }};
 
   // ── SVG scaffold (built once; event listeners stable across frames) ─
+  let theme = KG_THEMES[_kgActiveTheme] || KG_THEMES['deep-space'];
   const svgNS = 'http://www.w3.org/2000/svg';
   const svg = document.createElementNS(svgNS, 'svg');
   svg.setAttribute('viewBox', (-W/2) + ' ' + (-H/2) + ' ' + W + ' ' + H);
   svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
   svg.innerHTML =
-    '<defs>' +
-      '<radialGradient id="kg-nodeg" cx="30%" cy="30%" r="75%">' +
-        '<stop offset="0%" stop-color="#ffffff" stop-opacity="1"/>' +
-        '<stop offset="35%" stop-color="#8fc3ff" stop-opacity="1"/>' +
-        '<stop offset="100%" stop-color="#0e2a54" stop-opacity="1"/>' +
-      '</radialGradient>' +
-      '<radialGradient id="kg-nodeh" cx="30%" cy="30%" r="75%">' +
-        '<stop offset="0%" stop-color="#ffffff" stop-opacity="1"/>' +
-        '<stop offset="30%" stop-color="#ffd98a" stop-opacity="1"/>' +
-        '<stop offset="100%" stop-color="#6a3e00" stop-opacity="1"/>' +
-      '</radialGradient>' +
-      '<radialGradient id="kg-bg" cx="50%" cy="50%" r="80%">' +
-        '<stop offset="0%" stop-color="#1e2a44" stop-opacity="1"/>' +
-        '<stop offset="100%" stop-color="#060b18" stop-opacity="1"/>' +
-      '</radialGradient>' +
-    '</defs>' +
+    '<defs></defs>' +
     '<rect class="kg-bg" x="' + (-W/2) + '" y="' + (-H/2) + '" width="' + W +
       '" height="' + H + '" fill="url(#kg-bg)" pointer-events="all"/>' +
     '<g class="kg-edges"></g><g class="kg-nodes"></g>';
   canvas.appendChild(svg);
+  _applyKgDefs(svg, theme);
+  canvas.style.background = theme.canvasBg;
   const edgeLayer = svg.querySelector('.kg-edges');
   const nodeLayer = svg.querySelector('.kg-nodes');
 
@@ -7629,7 +7805,7 @@ function _renderKgGraph(triples) {{
       const w = Math.max(0.4, Math.min(2.4, 1.2 * Math.min(pa.scale, pb.scale)));
       eHtml += '<line x1="' + pa.sx.toFixed(1) + '" y1="' + pa.sy.toFixed(1) +
                '" x2="' + pb.sx.toFixed(1) + '" y2="' + pb.sy.toFixed(1) +
-               '" stroke="#7fb6ff" stroke-width="' + w.toFixed(2) +
+               '" stroke="' + theme.edge + '" stroke-width="' + w.toFixed(2) +
                '" opacity="' + op.toFixed(2) + '" pointer-events="none"/>';
     }});
     edgeLayer.innerHTML = eHtml;
@@ -7648,14 +7824,14 @@ function _renderKgGraph(triples) {{
                '" opacity="0.18" pointer-events="none"/>';
       nHtml += '<circle cx="' + p.sx.toFixed(1) + '" cy="' + p.sy.toFixed(1) +
                '" r="' + r.toFixed(2) + '" fill="' + fill +
-               '" stroke="#0a1a33" stroke-width="0.7"/>';
+               '" stroke="' + theme.nodeStroke + '" stroke-width="0.7"/>';
       if (p.scale > 0.45) {{
         const fs = Math.max(8, 10.5 * p.scale);
         nHtml += '<text x="' + (p.sx + r + 3).toFixed(1) + '" y="' +
                  (p.sy + 3).toFixed(1) + '" font-size="' + fs.toFixed(1) +
-                 '" fill="#e6f0ff" pointer-events="none" ' +
+                 '" fill="' + theme.label + '" pointer-events="none" ' +
                  'style="font-family:var(--font-sans);paint-order:stroke;' +
-                 'stroke:#040914;stroke-width:2.5px;">' +
+                 'stroke:' + theme.labelStroke + ';stroke-width:2.5px;">' +
                  escapeHtml(nodeLabel(n.label)) + '</text>';
       }}
       nHtml += '</g>';
@@ -7740,13 +7916,23 @@ function _renderKgGraph(triples) {{
     cam.dist = Math.max(250, Math.min(3000, cam.dist * factor));
   }}, {{ passive: false }});
 
-  // Expose teardown so the next loadKg can stop this loop cleanly
-  canvas._kgSim = {{ stop: () => {{
-    running = false;
-    if (raf) cancelAnimationFrame(raf);
-    window.removeEventListener('mousemove', onMove);
-    window.removeEventListener('mouseup', onUp);
-  }} }};
+  // Expose teardown + live theme swap so the chip row and loadKg can
+  // both talk to the running simulation without having to restart it.
+  canvas._kgSim = {{
+    stop: () => {{
+      running = false;
+      if (raf) cancelAnimationFrame(raf);
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    }},
+    setTheme: (name) => {{
+      if (!KG_THEMES[name]) return;
+      theme = KG_THEMES[name];
+      _applyKgDefs(svg, theme);
+      canvas.style.background = theme.canvasBg;
+      // render() reads `theme` closure-variable → next frame repaints
+    }},
+  }};
 }}
 
 // ── Phase 30: Export modal ────────────────────────────────────────────

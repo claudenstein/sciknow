@@ -3166,6 +3166,21 @@ def l1_phase31_kg_graph_view() -> None:
     )
     assert ".kg-node" in src, "KG graph CSS missing"
     assert "#kg-graph-canvas" in src
+    # Phase 48 — theme presets + invert button. Guard the chip row
+    # markup, the theme dictionary, and the live theme-swap hook so we
+    # don't silently lose the palette picker.
+    assert "KG_THEMES" in src and "_applyKgDefs" in src, (
+        "KG theme system missing"
+    )
+    assert "setKgTheme" in src and "invertKgTheme" in src, (
+        "KG theme setter/invert hooks missing"
+    )
+    assert 'data-theme="deep-space"' in src and 'data-theme="paper"' in src, (
+        "KG theme chip row missing core presets"
+    )
+    assert "kg-theme-chip" in src and "kg-invert-btn" in src, (
+        "KG theme chip CSS/markup missing"
+    )
 
 
 def l1_phase31_read_button_section_filter() -> None:
