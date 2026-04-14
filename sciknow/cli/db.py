@@ -2071,8 +2071,13 @@ def cleanup_downloads(
                                        help="DELETE duplicate / already-in-DB PDFs instead of moving them "
                                             "to processed/. Saves disk but loses the audit trail — only "
                                             "use if you're sure."),
+    cross_project: bool = typer.Option(True, "--cross-project/--no-cross-project",
+                                        help="Also query OTHER projects' DBs for ingested file_hashes. "
+                                             "Default ON — catches the common case where an expand run in "
+                                             "project B re-downloaded papers already ingested in project A. "
+                                             "Phase 54.6.4."),
 ):
-    """Phase 49.2 — comprehensive dedup of every place a PDF can end up.
+    """Phase 49.2 + 54.6.4 — comprehensive dedup of every place a PDF can end up.
 
     Scans ALL of these locations for PDFs:
 
@@ -2089,6 +2094,13 @@ def cleanup_downloads(
     other copy is a duplicate and gets moved to the canonical
     subfolder (or deleted with --delete-dupes).
 
+    With ``--cross-project`` (default ON), the command also queries every
+    OTHER sciknow project's DB for ``documents.file_hash`` — so a PDF
+    downloaded into project B that's already ingested in project A is
+    recognised as a dupe and cleaned up. This is the common case when
+    you run expand in a fresh project that overlaps with an existing
+    one's corpus (the 82-PDF situation from Phase 54.6.2 repro).
+
     Why this matters: the main ingest pipeline's `_archive_pdf`
     already moves downloads/*.pdf into data/{processed,failed}/ on
     its own, so a successful db expand ingest leaves TWO archives —
@@ -2099,9 +2111,10 @@ def cleanup_downloads(
     preflight()
     import hashlib
     from collections import defaultdict
-    from sqlalchemy import text as sql_text
+    from sqlalchemy import create_engine, text as sql_text
     from sciknow.config import settings
     from sciknow.storage.db import get_session
+    from sciknow.core.project import get_active_project, list_projects
 
     if download_dir is None:
         download_dir = settings.data_dir / "downloads"
@@ -2137,12 +2150,75 @@ def cleanup_downloads(
     console.print(f"Scanning [bold]{len(found)}[/bold] PDF(s) across all archive locations…")
 
     # Build SHA → document_row index for the corpus so we can cross-
-    # reference disk content against DB state too.
-    with get_session() as session:
-        rows = session.execute(sql_text(
-            "SELECT file_hash, ingestion_status FROM documents WHERE file_hash IS NOT NULL"
-        )).fetchall()
-    sha_status = {r[0]: r[1] for r in rows if r[0]}
+    # reference disk content against DB state too. When --cross-project
+    # is on (default), enumerate every sciknow project's DB and union
+    # their file_hash columns — a PDF ingested anywhere counts.
+    #
+    # NOTE: we connect EXPLICITLY to active.pg_database rather than
+    # relying on get_session(), because settings.pg_database is read
+    # from .env at import time and may not reflect the active project
+    # when the user has switched via .active-project. Direct SQL on
+    # the resolved name is the only correct thing to do here.
+    sha_status: dict[str, str] = {}
+    sha_project: dict[str, str] = {}  # which project has it (for verbose reporting)
+    active = get_active_project()
+    try:
+        eng_active = create_engine(
+            f"postgresql://{settings.pg_user}:{settings.pg_password}"
+            f"@{settings.pg_host}:{settings.pg_port}/{active.pg_database}"
+        )
+        with eng_active.connect() as conn:
+            rows = conn.execute(sql_text(
+                "SELECT file_hash, ingestion_status FROM documents "
+                "WHERE file_hash IS NOT NULL"
+            )).fetchall()
+        for h, st in rows:
+            if h:
+                sha_status[h] = st
+                sha_project[h] = active.slug
+    except Exception as exc:
+        console.print(
+            f"[yellow]warn:[/yellow] could not read active project DB "
+            f"({active.pg_database}): {exc}. Continuing with cross-project "
+            f"lookup only."
+        )
+
+    if cross_project:
+        # list_projects() only returns projects under projects/<slug>/. The
+        # legacy `default` project lives at the repo root so it's NOT in
+        # that list — add it manually if the active project isn't default.
+        from sciknow.core.project import Project as _Project
+        other_projects = [p for p in list_projects() if p.slug != active.slug]
+        if not active.is_default and not any(p.is_default for p in other_projects):
+            other_projects.append(_Project.default())
+        for proj in other_projects:
+            try:
+                eng = create_engine(
+                    f"postgresql://{settings.pg_user}:{settings.pg_password}"
+                    f"@{settings.pg_host}:{settings.pg_port}/{proj.pg_database}"
+                )
+                with eng.connect() as conn:
+                    prows = conn.execute(sql_text(
+                        "SELECT file_hash, ingestion_status FROM documents "
+                        "WHERE file_hash IS NOT NULL"
+                    )).fetchall()
+                    for h, st in prows:
+                        if not h:
+                            continue
+                        # Only promote to sha_status if the cross-project hit is
+                        # 'complete' — a foreign 'failed' shouldn't mask a local
+                        # 'pending'. The local project's own status wins ties.
+                        if h not in sha_status or (st == "complete"
+                                                   and sha_status.get(h) != "complete"):
+                            sha_status[h] = st
+                            sha_project[h] = proj.slug
+            except Exception as exc:
+                console.print(f"  [dim]skip {proj.slug} DB: {exc}[/dim]")
+        if other_projects:
+            console.print(
+                f"[dim]Cross-referenced {len(other_projects)} other project DB(s): "
+                f"{', '.join(p.slug for p in other_projects)}[/dim]"
+            )
 
     # Hash every file. Group by SHA.
     by_sha: dict[str, list[tuple[str, Path]]] = defaultdict(list)
@@ -2156,14 +2232,47 @@ def cleanup_downloads(
 
     moved = deleted = kept = 0
     archived_orphans = 0
+    foreign_ingested = 0  # 54.6.4: hits that are only ingested in OTHER projects
     for sha, locs in by_sha.items():
         # Canonical = first in scan_locations order that appears
         locs_sorted = sorted(locs, key=lambda x: [i for i, (_, p) in enumerate(scan_locations) if p == x[1].parent][0] if any(p == x[1].parent for _, p in scan_locations) else 99)
         canonical_label, canonical_path = locs_sorted[0]
         dupes = locs_sorted[1:]
-        # If every disk copy is an orphan (file not in DB at all) and
-        # there are multiple copies, still dedupe — keep the first.
-        if sha in sha_status:
+        # Phase 54.6.4 — if the SHA is already ingested in ANOTHER project
+        # (and not in the local one's completed set), copies sitting in
+        # THIS project's downloads area are redundant. We DO NOT touch
+        # the pipeline archives (data/processed/, data/failed/) because
+        # those may still be referenced by their ingestion_status rows
+        # via documents.original_path; the conservative thing is to
+        # leave them alone and just clean the downloads clutter.
+        cross_hit = (sha in sha_status
+                     and sha_status[sha] == "complete"
+                     and sha_project.get(sha) != active.slug)
+        if cross_hit:
+            # Only mark files under downloads/* as dupes — preserve the
+            # pipeline archive copies to avoid breaking original_path.
+            downloads_locs = [
+                (lbl, p) for (lbl, p) in locs_sorted
+                if lbl.startswith("downloads")
+            ]
+            archive_locs = [
+                (lbl, p) for (lbl, p) in locs_sorted
+                if not lbl.startswith("downloads")
+            ]
+            if downloads_locs:
+                foreign_ingested += len(downloads_locs)
+                dupes = downloads_locs[:]
+                if archive_locs:
+                    canonical_label, canonical_path = archive_locs[0]
+                else:
+                    canonical_label = f"(ingested in project '{sha_project[sha]}')"
+                    canonical_path = None
+            else:
+                # Only archive copies — leave them alone.
+                cross_hit = False
+                kept += 1
+                dupes = []
+        elif sha in sha_status:
             if sha_status[sha] == "complete":
                 # Corpus knows this paper — dupes can go.
                 kept += 1
@@ -2186,14 +2295,21 @@ def cleanup_downloads(
 
         for lbl, dupe_path in dupes:
             if dry_run:
+                canon_name = (canonical_path.name if canonical_path is not None
+                              else canonical_label)
                 console.print(
                     f"  [dim]would remove[/dim] {lbl}/{dupe_path.name} "
-                    f"(dup of {canonical_label}/{canonical_path.name})"
+                    f"(dup of {canonical_label}/{canon_name})"
                 )
                 moved += 1
                 continue
             try:
-                if delete_dupes:
+                if delete_dupes or cross_hit:
+                    # Cross-project hits are ALWAYS deleted — keeping a
+                    # second archive of a paper that's already sitting in
+                    # another project's data/processed/ is just wasted
+                    # disk, and "moving to processed/" for a project that
+                    # will never ingest the file is meaningless.
                     dupe_path.unlink()
                     deleted += 1
                 else:
@@ -2218,6 +2334,7 @@ def cleanup_downloads(
         f"\n[bold]Summary:[/bold] "
         f"[green]✓ {moved + deleted} duplicate copies {verb.lower()}[/green]  "
         f"[yellow]↷ {kept} canonical copies kept[/yellow]"
+        + (f"  [cyan]↷ {foreign_ingested} already-ingested-in-other-project[/cyan]" if foreign_ingested else "")
         + (f"  [dim]({archived_orphans} not-in-DB groups consolidated)[/dim]" if archived_orphans else "")
     )
 

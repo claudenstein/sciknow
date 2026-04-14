@@ -4330,6 +4330,31 @@ async def api_corpus_expand_author_download_selected(request: Request):
     })
 
 
+@app.post("/api/corpus/cleanup-downloads")
+async def api_corpus_cleanup_downloads(
+    dry_run: bool = Form(False),
+    delete_dupes: bool = Form(True),
+    cross_project: bool = Form(True),
+):
+    """Phase 54.6.4 — trigger `sciknow db cleanup-downloads` from the GUI.
+
+    Streams the subprocess log over SSE. Defaults: dry_run=False,
+    delete_dupes=True, cross_project=True — so a single click removes
+    all downloads that are already ingested anywhere (including other
+    projects), which is the ask from the '82-PDF' follow-up.
+    """
+    job_id, _queue = _create_job("corpus_cleanup_downloads")
+    loop = asyncio.get_event_loop()
+    argv = ["db", "cleanup-downloads"]
+    if dry_run:
+        argv.append("--dry-run")
+    if delete_dupes:
+        argv.append("--delete-dupes")
+    argv.append("--cross-project" if cross_project else "--no-cross-project")
+    _spawn_cli_streaming(job_id, argv, loop)
+    return JSONResponse({"job_id": job_id})
+
+
 @app.post("/api/corpus/expand/preview")
 async def api_corpus_expand_preview(
     limit: int = Form(0),
@@ -7843,17 +7868,31 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div id="tl-topics-papers"></div>
       </div>
 
-      <!-- Corpus tab (Phase 46.E — full expand surface: enrich / expand-citations / expand-author) -->
+      <!-- Corpus tab (Phase 46.E + 54.6.4 — expand/enrich/cleanup) -->
       <div id="tl-corpus-pane" style="display:none;">
         <p style="font-size:11px;color:var(--fg-muted);margin-bottom:12px;">
           Grow and enrich the paper corpus from the browser. Pick one of
-          three modes. All are long-running; the log streams below. Cancel
-          with the red button.
+          the modes below. All are long-running; the log streams at the
+          bottom. Cancel with the red button.
         </p>
+        <!-- Phase 54.6.4 — cleanup utility (top-of-tab so it's always
+             one click away regardless of which subtab is active). -->
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;padding:8px;background:var(--bg-alt,#f8f8f8);border-radius:6px;font-size:12px;">
+          <button class="btn-secondary" onclick="doToolCorpus('cleanup')"
+                  title="Remove PDFs from downloads/ that are already ingested in this or any other project's DB. Frees disk without touching the pipeline archive.">
+            &#129529; Cleanup downloads
+          </button>
+          <span style="color:var(--fg-muted);">
+            Deletes download duplicates that are already ingested (checks every project's DB).
+          </span>
+        </div>
         <div class="tabs" style="margin-bottom:10px;">
           <button class="tab active" data-ctab="corp-enrich" onclick="switchCorpusTab('corp-enrich')">&#128270; Enrich</button>
           <button class="tab" data-ctab="corp-cites" onclick="switchCorpusTab('corp-cites')">&#127760; Expand (citations)</button>
           <button class="tab" data-ctab="corp-author" onclick="switchCorpusTab('corp-author')">&#128100; Expand by author</button>
+          <button class="tab" data-ctab="corp-inbound" onclick="switchCorpusTab('corp-inbound')">&#128258; Inbound cites</button>
+          <button class="tab" data-ctab="corp-topic" onclick="switchCorpusTab('corp-topic')">&#128269; Topic search</button>
+          <button class="tab" data-ctab="corp-coauth" onclick="switchCorpusTab('corp-coauth')">&#128101; Coauthors</button>
         </div>
 
         <!-- Enrich (metadata) panel -->
@@ -13691,7 +13730,8 @@ function switchCorpusTab(name) {{
   document.querySelectorAll('#tl-corpus-pane .tab').forEach(t => {{
     t.classList.toggle('active', t.dataset.ctab === name);
   }});
-  ['corp-enrich', 'corp-cites', 'corp-author'].forEach(n => {{
+  ['corp-enrich', 'corp-cites', 'corp-author',
+   'corp-inbound', 'corp-topic', 'corp-coauth'].forEach(n => {{
     const pane = document.getElementById(n + '-pane');
     if (pane) pane.style.display = (n === name) ? 'block' : 'none';
   }});
@@ -14397,7 +14437,19 @@ async function doToolCorpus(action) {{
   cancelBtn.style.display = 'inline-block';
 
   const fd = new FormData();
-  if (action === 'enrich') {{
+  if (action === 'cleanup') {{
+    // Phase 54.6.4 — cleanup-downloads; the `cleanup-downloads` endpoint
+    // takes dry_run / delete_dupes / cross_project. Defaults: delete,
+    // cross-project on. No-parameter GUI button = "just clean it".
+    const res0 = await fetch('/api/corpus/cleanup-downloads', {{method: 'POST', body: new FormData()}});
+    const data0 = await res0.json();
+    if (!res0.ok) {{
+      status.textContent = 'Cleanup failed to start: ' + (data0.detail || res0.status);
+      cancelBtn.style.display = 'none';
+      return;
+    }}
+    _toolsCorpusJob = data0.job_id;
+  }} else if (action === 'enrich') {{
     fd.append('limit', document.getElementById('tl-enr-limit').value || '0');
     fd.append('threshold', document.getElementById('tl-enr-thresh').value || '0.85');
     fd.append('dry_run', document.getElementById('tl-enr-dry').checked ? 'true' : 'false');
@@ -14437,19 +14489,21 @@ async function doToolCorpus(action) {{
     if (rq) fd.append('relevance_query', rq);
   }}
 
-  try {{
-    const res = await fetch('/api/corpus/' + action, {{method: 'POST', body: fd}});
-    const data = await res.json();
-    if (!res.ok) {{
-      status.textContent = 'Failed to start: ' + (data.detail || res.status);
+  if (action !== 'cleanup') {{
+    try {{
+      const res = await fetch('/api/corpus/' + action, {{method: 'POST', body: fd}});
+      const data = await res.json();
+      if (!res.ok) {{
+        status.textContent = 'Failed to start: ' + (data.detail || res.status);
+        cancelBtn.style.display = 'none';
+        return;
+      }}
+      _toolsCorpusJob = data.job_id;
+    }} catch (exc) {{
+      status.textContent = 'Failed to start: ' + exc;
       cancelBtn.style.display = 'none';
       return;
     }}
-    _toolsCorpusJob = data.job_id;
-  }} catch (exc) {{
-    status.textContent = 'Failed to start: ' + exc;
-    cancelBtn.style.display = 'none';
-    return;
   }}
 
   const source = new EventSource('/api/stream/' + _toolsCorpusJob);
