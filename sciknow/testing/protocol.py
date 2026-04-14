@@ -7367,6 +7367,69 @@ def l1_phase53_bootstrap_and_mcnemar() -> None:
     assert abs(cmp.b_rate.mean - 1.0) < 0.01
 
 
+def l1_phase54_wiki_browsing_mvp() -> None:
+    """Phase 54 — wiki MVP quartet.
+
+    Four upgrades per ``docs/WIKI_UX_RESEARCH.md``:
+      1. SPA-style hash route (#wiki / #wiki/<slug>)
+      2. [[wiki-slug]] and [[slug|alt]] rendered as real hyperlinks
+      3. Heading anchors with stable slug-safe ids (for TOC + deep link)
+      4. Ctrl-K / Cmd-K command palette with fuzzy title match + an
+         /api/wiki/titles endpoint backing it
+    """
+    import inspect as _inspect
+    from sciknow.web import app as web_app
+
+    # (1) [[wiki-slug]] renders as an <a class="wiki-link" href="#wiki/slug">
+    html = web_app._md_to_html("see [[foo-bar]] for details")
+    assert 'class="wiki-link" href="#wiki/foo-bar"' in html, (
+        "plain [[slug]] did not render as a wiki-link hyperlink"
+    )
+
+    # (2) [[slug|alt text]] uses the alt text as display
+    html = web_app._md_to_html("more on [[x-slug|custom title]]")
+    assert 'href="#wiki/x-slug"' in html and ">custom title<" in html, (
+        "[[slug|alt]] aliasing did not render the alt text as link body"
+    )
+
+    # (3) Headings get slug-safe ids, counter-suffix on collisions
+    html = web_app._md_to_html("# My Header\n\n## My Header\n\n### sub")
+    assert 'id="my-header"' in html, "first heading missing its id"
+    assert 'id="my-header-1"' in html, (
+        "collision counter did not suffix the second same-text heading"
+    )
+    assert 'id="sub"' in html, "h3 anchor missing"
+
+    # (4) _slugify_heading is idempotent per-seen-dict and strips
+    # punctuation-only titles down to 'section'
+    seen: dict = {}
+    assert web_app._slugify_heading("??!!", seen) == "section"
+    # Two empty-style headings get disambiguated
+    assert web_app._slugify_heading("", seen) == "section-1"
+
+    # (5) /api/wiki/titles route registered
+    route_paths = {r.path for r in web_app.app.routes if hasattr(r, "path")}
+    assert "/api/wiki/titles" in route_paths, (
+        "/api/wiki/titles endpoint missing — Ctrl-K palette won't work"
+    )
+
+    # (6) Template markers: hash router, palette HTML + keydown hook,
+    # TOC builder, wiki-link CSS class
+    src = _inspect.getsource(web_app)
+    for needle in (
+        "_wikiRouteFromHash",     # hash router
+        "openWikiPalette",         # palette opener
+        "wiki-palette-modal",      # palette DOM class
+        "_buildWikiTOC",           # TOC builder
+        "wiki-toc-list",           # TOC CSS class
+        "wiki-link",               # wiki-link CSS class
+        "copyWikiPermalink",       # permalink copy fn
+        "wiki-detail-layout",      # two-column layout
+        "evt.key === 'k'",         # Ctrl-K handler
+    ):
+        assert needle in src, f"phase 54 surface missing: {needle!r}"
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -7553,6 +7616,8 @@ L1_TESTS: list[Callable] = [
     l1_phase53_cot_judge_and_length_ctrl,
     l1_phase53_refinement_gate,
     l1_phase53_bootstrap_and_mcnemar,
+    # Phase 54 — wiki browsing MVP (SPA route, wiki-links, TOC, palette)
+    l1_phase54_wiki_browsing_mvp,
 ]
 
 L2_TESTS: list[Callable] = [

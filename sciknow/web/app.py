@@ -435,24 +435,76 @@ def _get_book_data():
     return book, chapters, drafts, gaps, comments
 
 
+def _slugify_heading(text: str, seen: dict) -> str:
+    """Turn a heading string into a URL-safe id. Counter-suffixes repeats
+    so two headings with the same text still get unique ids. Empty /
+    punctuation-only falls back to 'section'."""
+    s = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")[:60]
+    if not s:
+        s = "section"
+    n = seen.get(s, 0)
+    seen[s] = n + 1
+    return s if n == 0 else f"{s}-{n}"
+
+
 def _md_to_html(text_content: str) -> str:
-    """Simple markdown -> HTML conversion for draft content."""
+    """Markdown -> HTML conversion for draft + wiki content.
+
+    Phase 54 additions (Wiki UX research doc #2 + #5):
+      - Every heading gets a slug-safe `id=` so TOC + deep-link
+        scrolling work (``#wiki/<slug>#heading-id`` handled client-
+        side).
+      - ``[[slug]]`` and ``[[slug|alt text]]`` render as real
+        hyperlinks into the wiki SPA route. Previously the syntax was
+        parsed by the linter but never made it past the renderer.
+
+    All edits stay backwards-compatible: book-draft content that
+    happens to use either syntax is free to. Wiki-links to slugs that
+    don't exist are still emitted as links — the router surfaces a
+    "no such page" state on follow, which is the MediaWiki convention.
+    """
     if not text_content:
         return ""
     html = text_content
-    # Headers
-    html = re.sub(r'^### (.+)$', r'<h4>\1</h4>', html, flags=re.MULTILINE)
-    html = re.sub(r'^## (.+)$', r'<h3>\1</h3>', html, flags=re.MULTILINE)
-    html = re.sub(r'^# (.+)$', r'<h2>\1</h2>', html, flags=re.MULTILINE)
+
+    # Wiki-links go BEFORE emphasis so ``**[[foo]]**`` still becomes
+    # a bold wiki-link rather than a bold-then-link mismatch.
+    # [[slug|alt text]]
+    html = re.sub(
+        r"\[\[([^\]\|]+)\|([^\]]+)\]\]",
+        r'<a class="wiki-link" href="#wiki/\1">\2</a>',
+        html,
+    )
+    # [[slug]]  (use the slug itself as display text)
+    html = re.sub(
+        r"\[\[([^\]]+)\]\]",
+        r'<a class="wiki-link" href="#wiki/\1">\1</a>',
+        html,
+    )
+
+    # Headers with IDs for auto-TOC + deep linking.
+    _heading_seen: dict[str, int] = {}
+
+    def _h_sub(tag: str):
+        def _inner(match):
+            text_val = match.group(1)
+            hid = _slugify_heading(text_val, _heading_seen)
+            return f'<{tag} id="{hid}">{text_val}</{tag}>'
+        return _inner
+
+    html = re.sub(r"^### (.+)$", _h_sub("h4"), html, flags=re.MULTILINE)
+    html = re.sub(r"^## (.+)$",  _h_sub("h3"), html, flags=re.MULTILINE)
+    html = re.sub(r"^# (.+)$",   _h_sub("h2"), html, flags=re.MULTILINE)
+
     # Bold and italic
-    html = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', html)
-    html = re.sub(r'\*(.+?)\*', r'<em>\1</em>', html)
+    html = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", html)
+    html = re.sub(r"\*(.+?)\*", r"<em>\1</em>", html)
     # Citation references [N] -> styled spans
-    html = re.sub(r'\[(\d+)\]', r'<span class="citation" data-ref="\1">[\1]</span>', html)
+    html = re.sub(r"\[(\d+)\]", r'<span class="citation" data-ref="\1">[\1]</span>', html)
     # Paragraphs
-    paragraphs = html.split('\n\n')
-    html = ''.join(
-        f'<p data-para="{i}">{p.strip()}</p>' if not p.strip().startswith('<h')
+    paragraphs = html.split("\n\n")
+    html = "".join(
+        f'<p data-para="{i}">{p.strip()}</p>' if not p.strip().startswith("<h")
         else p.strip()
         for i, p in enumerate(paragraphs) if p.strip()
     )
@@ -2719,6 +2771,26 @@ async def api_wiki_pages(page_type: str = None, page: int = 1, per_page: int = 5
         "pages": all_pages[start:end],
         "available_types": available_types,
     })
+
+
+@app.get("/api/wiki/titles")
+async def api_wiki_titles():
+    """Phase 54 — compact title/slug index for the Ctrl-K command palette.
+
+    Returns every wiki page's (slug, title, page_type) in one shot so
+    the client can do fuzzy-filter locally without round-tripping. The
+    payload is bounded by the wiki size (typically ≤ a few hundred
+    pages) so sending it whole is fine."""
+    with get_session() as session:
+        rows = session.execute(text("""
+            SELECT slug, title, page_type
+            FROM wiki_pages
+            ORDER BY title
+        """)).fetchall()
+    return JSONResponse([
+        {"slug": r[0], "title": r[1] or r[0], "page_type": r[2]}
+        for r in rows
+    ])
 
 
 @app.get("/api/wiki/page/{slug}")
@@ -5240,21 +5312,103 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
                           border-radius: 999px; background: var(--accent-light);
                           color: var(--accent); text-transform: uppercase;
                           letter-spacing: 0.04em; font-weight: 600; }}
-.wiki-page-content {{ font-family: var(--font-serif); font-size: 15px;
-                     line-height: 1.7; color: var(--fg); padding: var(--sp-3);
-                     max-height: 60vh; overflow-y: auto;
+/* Phase 54 — wiki reading surface. Two-column layout: sticky TOC on
+   the left, 72ch serif column on the right. Wider + more legible
+   than the pre-54 600px cramped modal body. */
+.wiki-detail-toolbar {{ display: flex; gap: var(--sp-2);
+                        align-items: center; flex-wrap: wrap; }}
+.wiki-kbd-hint {{ margin-left: auto; font-size: 11px;
+                  color: var(--fg-muted); font-family: var(--font-sans); }}
+.wiki-kbd-hint kbd {{ font-family: var(--font-mono); font-size: 10px;
+                      padding: 1px 5px; border: 1px solid var(--border);
+                      border-bottom-width: 2px; border-radius: 3px;
+                      background: var(--bg-elevated); }}
+.wiki-detail-layout {{ display: grid; grid-template-columns: 180px 1fr;
+                       gap: var(--sp-4); align-items: start; }}
+@media (max-width: 900px) {{
+  .wiki-detail-layout {{ grid-template-columns: 1fr; }}
+  .wiki-toc {{ display: none; }}
+}}
+.wiki-toc {{ position: sticky; top: 0; max-height: 70vh;
+             overflow-y: auto; font-size: 12px;
+             padding-right: var(--sp-2);
+             border-right: 1px solid var(--border); }}
+.wiki-toc-heading {{ text-transform: uppercase; font-size: 10px;
+                     letter-spacing: 0.1em; color: var(--fg-muted);
+                     margin-bottom: var(--sp-2); font-weight: 600; }}
+.wiki-toc-list {{ list-style: none; padding: 0; margin: 0; }}
+.wiki-toc-list li {{ padding: 2px 0; line-height: 1.4; }}
+.wiki-toc-list li.wiki-toc-h3 {{ padding-left: var(--sp-2); }}
+.wiki-toc-list li.wiki-toc-h4 {{ padding-left: var(--sp-4); }}
+.wiki-toc-list a {{ color: var(--fg-muted); text-decoration: none;
+                     cursor: pointer; }}
+.wiki-toc-list a:hover,
+.wiki-toc-list a.active {{ color: var(--accent); }}
+.wiki-page-content {{ font-family: var(--font-serif); font-size: 16px;
+                     line-height: 1.65; color: var(--fg);
+                     padding: var(--sp-3) var(--sp-4);
+                     max-width: 72ch;
+                     max-height: 72vh; overflow-y: auto;
                      background: var(--toolbar-bg); border-radius: var(--r-md);
                      border: 1px solid var(--border); }}
 .wiki-page-content h1, .wiki-page-content h2, .wiki-page-content h3, .wiki-page-content h4 {{
     margin: var(--sp-4) 0 var(--sp-2); font-family: var(--font-sans);
-    font-weight: 600; color: var(--fg); }}
-.wiki-page-content h1 {{ font-size: 22px; }}
-.wiki-page-content h2 {{ font-size: 18px; }}
-.wiki-page-content h3 {{ font-size: 15px; }}
+    font-weight: 600; color: var(--fg); scroll-margin-top: 16px; }}
+.wiki-page-content h1 {{ font-size: 24px; }}
+.wiki-page-content h2 {{ font-size: 20px; }}
+.wiki-page-content h3 {{ font-size: 17px; }}
+.wiki-page-content h4 {{ font-size: 15px; color: var(--fg-muted); }}
 .wiki-page-content p {{ margin-bottom: var(--sp-3); }}
+.wiki-page-content p:first-of-type {{ /* lead paragraph accent */
+    font-size: 1.1em; line-height: 1.55;
+    padding-left: var(--sp-3);
+    border-left: 3px solid var(--accent);
+    color: var(--fg); }}
 .wiki-page-content code {{ font-family: var(--font-mono); font-size: 13px;
                            padding: 1px 6px; background: var(--bg);
                            border-radius: 3px; }}
+/* Phase 54 — [[wiki-slug]] links rendered by _md_to_html */
+.wiki-page-content .wiki-link {{ color: var(--accent);
+    border-bottom: 1px solid rgba(79,158,255,0.35);
+    text-decoration: none;
+    transition: border-bottom-color .1s ease; }}
+.wiki-page-content .wiki-link:hover {{
+    border-bottom-color: var(--accent); }}
+/* Phase 54 — Ctrl-K command palette */
+.wiki-palette-modal {{ padding: 0 !important; width: 600px !important;
+                       max-width: 92vw !important; }}
+#wiki-palette {{ align-items: flex-start; padding-top: 15vh; }}
+#wiki-palette-input {{ width: 100%; border: 0; border-bottom: 1px solid var(--border);
+                        padding: 14px 18px; font-size: 16px;
+                        background: var(--bg-elevated); color: var(--fg);
+                        outline: none; box-sizing: border-box; }}
+#wiki-palette-input:focus {{ border-bottom-color: var(--accent); }}
+#wiki-palette-results {{ list-style: none; margin: 0; padding: 4px 0;
+                          max-height: 50vh; overflow-y: auto; }}
+.wiki-palette-item {{ display: flex; justify-content: space-between;
+                       align-items: center; gap: var(--sp-3);
+                       padding: 8px 18px; cursor: pointer; }}
+.wiki-palette-item:hover, .wiki-palette-item.active {{
+    background: var(--accent); color: #fff; }}
+.wiki-palette-item:hover .wp-type,
+.wiki-palette-item.active .wp-type {{ color: rgba(255,255,255,0.8); }}
+.wp-title {{ flex: 1; overflow: hidden; text-overflow: ellipsis;
+             white-space: nowrap; font-size: 14px; }}
+.wp-type {{ font-size: 10px; font-family: var(--font-mono);
+            text-transform: uppercase; color: var(--fg-muted);
+            padding: 1px 6px; border: 1px solid var(--border);
+            border-radius: 3px; flex: 0 0 auto; }}
+.wiki-palette-empty {{ padding: 16px 18px; color: var(--fg-muted);
+                        text-align: center; font-size: 13px; }}
+.wiki-palette-foot {{ padding: 8px 18px; border-top: 1px solid var(--border);
+                       color: var(--fg-muted); font-size: 10px;
+                       text-align: right; background: var(--toolbar-bg); }}
+.wiki-palette-foot kbd {{ font-family: var(--font-mono);
+                           padding: 0 4px;
+                           border: 1px solid var(--border);
+                           border-bottom-width: 2px;
+                           border-radius: 2px;
+                           background: var(--bg-elevated); }}
 /* Phase 15 — live streaming stats footer (tok/s, elapsed, model) */
 .stream-stats {{ display: flex; align-items: center; gap: var(--sp-3);
                 font-family: var(--font-mono); font-size: 11px;
@@ -5963,11 +6117,35 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div id="wiki-browse-list" style="margin-top:12px;"></div>
         <!-- Detail view (hidden until a page is opened) -->
         <div id="wiki-page-detail" style="display:none;">
-          <button class="btn-secondary" style="margin-bottom:12px;" onclick="closeWikiPageDetail()">&larr; Back to list</button>
-          <div id="wiki-page-meta" style="font-size:11px;color:var(--fg-muted);margin-bottom:12px;"></div>
-          <div id="wiki-page-content" class="wiki-page-content"></div>
+          <div class="wiki-detail-toolbar">
+            <button class="btn-secondary" onclick="closeWikiPageDetail()">&larr; Back to list</button>
+            <button class="btn-secondary" onclick="copyWikiPermalink()" title="Copy permalink to this page">&#128279; Copy link</button>
+            <kbd class="wiki-kbd-hint">Press <kbd>Ctrl</kbd>+<kbd>K</kbd> to jump to any page</kbd>
+          </div>
+          <div id="wiki-page-meta" style="font-size:11px;color:var(--fg-muted);margin:8px 0 12px 0;"></div>
+          <div class="wiki-detail-layout">
+            <aside id="wiki-toc" class="wiki-toc"></aside>
+            <div id="wiki-page-content" class="wiki-page-content"></div>
+          </div>
         </div>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- Phase 54 — Ctrl-K wiki command palette (quick-jump by fuzzy title) -->
+<div class="modal-overlay" id="wiki-palette" onclick="if(event.target===this)closeWikiPalette()" style="display:none;">
+  <div class="modal wiki-palette-modal">
+    <input type="text" id="wiki-palette-input"
+           placeholder="Jump to wiki page… (type to filter)"
+           autocomplete="off"
+           oninput="_renderWikiPalette()"
+           onkeydown="_wikiPaletteKey(event)"/>
+    <ol id="wiki-palette-results"></ol>
+    <div class="wiki-palette-foot">
+      <kbd>&uarr;</kbd><kbd>&darr;</kbd> navigate
+      &nbsp;&nbsp;<kbd>&crarr;</kbd> open
+      &nbsp;&nbsp;<kbd>Esc</kbd> close
     </div>
   </div>
 </div>
@@ -11336,19 +11514,36 @@ async function loadWikiPages(page) {{
   }}
 }}
 
+// Phase 54 — track the currently-viewed wiki slug so the TOC + Copy
+// Permalink know what to point at, and so the hashchange handler
+// can short-circuit no-op re-renders.
+let _currentWikiSlug = null;
+
 async function openWikiPage(slug) {{
   const list = document.getElementById('wiki-browse-list');
   const detail = document.getElementById('wiki-page-detail');
   const meta = document.getElementById('wiki-page-meta');
   const content = document.getElementById('wiki-page-content');
+  const toc = document.getElementById('wiki-toc');
   list.style.display = 'none';
   detail.style.display = 'block';
   content.innerHTML = '<div style="padding:24px;text-align:center;color:var(--fg-muted);">Loading...</div>';
+  if (toc) toc.innerHTML = '';
+  _currentWikiSlug = slug;
+
+  // Phase 54 — reflect the open page in the URL hash so back/forward
+  // work and permalinks are shareable. Use pushState only when the
+  // hash isn't already right, to avoid loops with the hashchange
+  // listener below.
+  const target = '#wiki/' + encodeURIComponent(slug);
+  if (window.location.hash !== target) {{
+    history.pushState(null, '', target);
+  }}
 
   try {{
     const res = await fetch('/api/wiki/page/' + encodeURIComponent(slug));
     if (!res.ok) {{
-      content.innerHTML = '<div style="color:var(--danger);">Page not found.</div>';
+      content.innerHTML = '<div style="color:var(--danger);padding:24px;">Wiki page <code>' + slug + '</code> not found.</div>';
       return;
     }}
     const data = await res.json();
@@ -11359,20 +11554,254 @@ async function openWikiPage(slug) {{
     if (data.updated_at) metaParts.push('updated ' + data.updated_at.substring(0, 10));
     meta.innerHTML = metaParts.join(' · ');
     content.innerHTML = data.content_html || '<em>(empty page)</em>';
+
+    // Phase 54 — build the TOC from the rendered headings.
+    _buildWikiTOC();
+    // Phase 54 — honour `?h=<heading-id>` in the hash if present.
+    const m = (window.location.hash || '').match(/\\?h=([^&]+)$/);
+    if (m) {{
+      const el = document.getElementById(decodeURIComponent(m[1]));
+      if (el) el.scrollIntoView({{ behavior: 'instant', block: 'start' }});
+    }} else {{
+      content.scrollTop = 0;
+    }}
   }} catch (e) {{
     content.innerHTML = '<div style="color:var(--danger);">Error: ' + e.message + '</div>';
   }}
 }}
 
+// Phase 54 — post-render TOC builder. Scans h2/h3/h4 inside
+// #wiki-page-content, emits a sticky sidebar nav with click-to-
+// scroll handlers. Zero-cost for pages without headings — the
+// sidebar just renders empty.
+function _buildWikiTOC() {{
+  const host = document.getElementById('wiki-toc');
+  const content = document.getElementById('wiki-page-content');
+  if (!host || !content) return;
+  const heads = content.querySelectorAll('h2, h3, h4');
+  if (!heads.length) {{ host.innerHTML = ''; return; }}
+  let html = '<div class="wiki-toc-heading">On this page</div><ol class="wiki-toc-list">';
+  heads.forEach(h => {{
+    if (!h.id) return;
+    const cls = 'wiki-toc-' + h.tagName.toLowerCase();
+    html += '<li class="' + cls + '"><a data-heading="' + h.id + '">' +
+            escapeHtml(h.textContent) + '</a></li>';
+  }});
+  html += '</ol>';
+  host.innerHTML = html;
+}}
+// Delegated click → smooth-scroll the target heading into view.
+document.addEventListener('click', (evt) => {{
+  const a = evt.target.closest && evt.target.closest('#wiki-toc [data-heading]');
+  if (!a) return;
+  evt.preventDefault();
+  const el = document.getElementById(a.dataset.heading);
+  if (el) {{
+    el.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+    // Also update the hash to make the heading shareable.
+    if (_currentWikiSlug) {{
+      const target = '#wiki/' + encodeURIComponent(_currentWikiSlug) +
+                     '?h=' + encodeURIComponent(a.dataset.heading);
+      history.replaceState(null, '', target);
+    }}
+  }}
+}});
+
 function closeWikiPageDetail() {{
   document.getElementById('wiki-browse-list').style.display = 'block';
   document.getElementById('wiki-page-detail').style.display = 'none';
+  _currentWikiSlug = null;
+  if ((window.location.hash || '').startsWith('#wiki/')) {{
+    history.pushState(null, '', '#wiki');
+  }}
+}}
+
+function copyWikiPermalink() {{
+  if (!_currentWikiSlug) return;
+  const url = window.location.origin + window.location.pathname +
+              '#wiki/' + encodeURIComponent(_currentWikiSlug);
+  navigator.clipboard.writeText(url).then(
+    () => {{
+      const btn = event.target.closest('button');
+      if (btn) {{
+        const prev = btn.innerHTML;
+        btn.innerHTML = '&check; Copied';
+        setTimeout(() => {{ btn.innerHTML = prev; }}, 1500);
+      }}
+    }},
+    () => prompt('Copy this link:', url),
+  );
 }}
 
 function openWikiModal() {{
   openModal('wiki-modal');
   setTimeout(() => document.getElementById('wiki-query-input').focus(), 100);
 }}
+
+// Phase 54 — hash router for the wiki SPA surface.
+// Supports:
+//   #wiki             → open modal on Browse list
+//   #wiki/<slug>      → open modal on page detail
+//   #wiki/<slug>?h=X  → open page detail + scroll to heading id X
+function _wikiRouteFromHash() {{
+  const h = window.location.hash || '';
+  if (!h.startsWith('#wiki')) return false;
+  const rest = h.substring(5); // strip "#wiki"
+  const modal = document.getElementById('wiki-modal');
+  if (modal && modal.style.display !== 'flex' && modal.style.display !== 'block') {{
+    openModal('wiki-modal');
+  }}
+  switchWikiTab('wiki-browse');
+  if (!rest || rest === '' || rest === '/') {{
+    closeWikiPageDetail();
+    loadWikiPages(1);
+    return true;
+  }}
+  // rest is "/slug" optionally followed by "?h=heading"
+  const m = rest.match(/^\\/([^?]+)(?:\\?h=(.+))?$/);
+  if (!m) return true;
+  const slug = decodeURIComponent(m[1]);
+  if (slug !== _currentWikiSlug) {{
+    openWikiPage(slug);
+  }}
+  return true;
+}}
+window.addEventListener('hashchange', _wikiRouteFromHash);
+window.addEventListener('DOMContentLoaded', () => {{
+  if ((window.location.hash || '').startsWith('#wiki')) {{
+    _wikiRouteFromHash();
+  }}
+}});
+
+// ── Phase 54 — Ctrl-K / Cmd-K wiki command palette ─────────────────
+// Fuzzy-filter over wiki page titles + slugs, keyboard-navigable.
+// Titles are fetched once per session and cached in-memory; the
+// wiki size is bounded (a few hundred pages typical) so shipping the
+// whole list is fine.
+
+let _wikiTitlesCache = null;
+let _wikiPaletteIdx = 0;
+
+async function _loadWikiTitles() {{
+  if (_wikiTitlesCache) return _wikiTitlesCache;
+  try {{
+    const res = await fetch('/api/wiki/titles');
+    if (res.ok) _wikiTitlesCache = await res.json();
+    else _wikiTitlesCache = [];
+  }} catch (e) {{ _wikiTitlesCache = []; }}
+  return _wikiTitlesCache;
+}}
+
+// Tiny fuzzy scorer — substring hit dominates; char-in-order fallback
+// for typos / abbreviations. Good enough for a few hundred items.
+function _wikiFuzzyScore(needle, hay) {{
+  if (!needle) return 1;
+  needle = needle.toLowerCase();
+  hay = (hay || '').toLowerCase();
+  const idx = hay.indexOf(needle);
+  if (idx !== -1) return 1000 - idx;  // earlier hits rank higher
+  let hi = 0, hits = 0;
+  for (const ch of needle) {{
+    const i = hay.indexOf(ch, hi);
+    if (i === -1) return 0;
+    hits += 1;
+    hi = i + 1;
+  }}
+  return hits;
+}}
+
+async function _renderWikiPalette() {{
+  const q = document.getElementById('wiki-palette-input').value.trim();
+  const titles = await _loadWikiTitles();
+  let items;
+  if (!q) {{
+    items = titles.slice(0, 10);
+  }} else {{
+    items = titles
+      .map(t => ({{
+        ...t,
+        _s: _wikiFuzzyScore(q, t.title) + _wikiFuzzyScore(q, t.slug) * 0.5,
+      }}))
+      .filter(t => t._s > 0)
+      .sort((a, b) => b._s - a._s)
+      .slice(0, 10);
+  }}
+  _wikiPaletteIdx = 0;
+  const host = document.getElementById('wiki-palette-results');
+  if (!items.length) {{
+    host.innerHTML = '<li class="wiki-palette-empty">No pages match</li>';
+    return;
+  }}
+  host.innerHTML = items.map((t, i) => {{
+    const cls = (i === 0) ? 'wiki-palette-item active' : 'wiki-palette-item';
+    return '<li class="' + cls + '" data-slug="' + t.slug + '">' +
+           '<span class="wp-title">' + escapeHtml(t.title) + '</span>' +
+           '<span class="wp-type">' + (t.page_type || '').replace(/_/g, ' ') + '</span>' +
+           '</li>';
+  }}).join('');
+}}
+
+function _wikiPaletteKey(evt) {{
+  const host = document.getElementById('wiki-palette-results');
+  const items = host.querySelectorAll('.wiki-palette-item');
+  if (evt.key === 'Escape') {{
+    evt.preventDefault(); closeWikiPalette(); return;
+  }}
+  if (!items.length) return;
+  if (evt.key === 'ArrowDown' || evt.key === 'ArrowUp') {{
+    evt.preventDefault();
+    items[_wikiPaletteIdx].classList.remove('active');
+    _wikiPaletteIdx = (evt.key === 'ArrowDown')
+      ? (_wikiPaletteIdx + 1) % items.length
+      : (_wikiPaletteIdx - 1 + items.length) % items.length;
+    items[_wikiPaletteIdx].classList.add('active');
+    items[_wikiPaletteIdx].scrollIntoView({{ block: 'nearest' }});
+    return;
+  }}
+  if (evt.key === 'Enter') {{
+    evt.preventDefault();
+    const slug = items[_wikiPaletteIdx].dataset.slug;
+    closeWikiPalette();
+    window.location.hash = '#wiki/' + encodeURIComponent(slug);
+    return;
+  }}
+}}
+
+function openWikiPalette() {{
+  const modal = document.getElementById('wiki-palette');
+  if (!modal) return;
+  modal.style.display = 'flex';
+  const input = document.getElementById('wiki-palette-input');
+  input.value = '';
+  _renderWikiPalette();
+  setTimeout(() => input.focus(), 30);
+}}
+
+function closeWikiPalette() {{
+  const modal = document.getElementById('wiki-palette');
+  if (modal) modal.style.display = 'none';
+}}
+
+// Delegated click on a palette row → navigate.
+document.addEventListener('click', (evt) => {{
+  const item = evt.target.closest && evt.target.closest('.wiki-palette-item');
+  if (!item) return;
+  const slug = item.dataset.slug;
+  if (!slug) return;
+  closeWikiPalette();
+  window.location.hash = '#wiki/' + encodeURIComponent(slug);
+}});
+
+// Global Ctrl-K / Cmd-K — open the palette. Skip if the user is
+// typing in a textarea / input (except the palette itself, whose
+// input handler takes arrow keys + Escape via onkeydown).
+document.addEventListener('keydown', (evt) => {{
+  if ((evt.metaKey || evt.ctrlKey) && (evt.key === 'k' || evt.key === 'K')) {{
+    // Allow command palette from anywhere, including other inputs.
+    evt.preventDefault();
+    openWikiPalette();
+  }}
+}});
 
 async function doWikiQuery() {{
   const q = document.getElementById('wiki-query-input').value.trim();
