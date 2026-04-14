@@ -4448,12 +4448,14 @@ def _render_sidebar(items, active_id):
 
 def _render_sources(sources):
     """Render the right-panel sources list. Phase 22 — escapes each
-    source string. Without this, an APA citation containing characters
-    like '<' or '&' (rare but possible from a paper title) would either
-    silently corrupt the page or open an XSS hole."""
+    source string. Phase 48 — the source strings already carry their
+    own `[1]`, `[2]` prefix (emitted by the writer prompt), so we
+    suppress the <ol> auto-numbering to avoid the redundant
+    "1. [1] Smith et al…" rendering. The <li> tag itself stays so that
+    buildPopovers can still query `#panel-sources li` in order."""
     if not sources:
         return "<em>No sources.</em>"
-    out = "<ol>"
+    out = '<ol style="list-style:none;padding-left:0;margin-left:0;">'
     for i, s in enumerate(sources):
         if s:
             out += f'<li id="source-{i+1}">{_esc(s)}</li>'
