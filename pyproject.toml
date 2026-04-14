@@ -32,6 +32,26 @@ sciknow = "sciknow.cli.main:app"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.uv]
+# opencv-python and opencv-python-headless install to the SAME `cv2/`
+# directory on disk and clobber each other — whichever was installed
+# second ends up corrupted (the `cv2` module loads but has zero
+# attributes, so `cv2.imread` is missing and MinerU dies with
+# "module 'cv2' has no attribute 'imread'" on every PDF).
+#
+# Our tree has both in its dep graph: `mineru` requires `opencv-python`
+# and `albumentations`/`albucore` require `opencv-python-headless`.
+# Pick opencv-python (superset of headless; albumentations still finds
+# cv2 at runtime) and force-skip headless via an impossible marker so
+# it won't be resolved or installed.
+#
+# If you hit "module 'cv2' has no attribute ..." again, reinstall via:
+#   uv pip uninstall -y opencv-python opencv-python-headless
+#   uv pip install --force-reinstall --no-deps opencv-python
+override-dependencies = [
+    "opencv-python-headless; sys_platform == 'never'",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

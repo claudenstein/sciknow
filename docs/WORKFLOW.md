@@ -59,6 +59,48 @@ uv run sciknow book create "Global Cooling"
 uv run sciknow book serve
 ```
 
+## Gotcha: broken `cv2` after `uv sync` (MinerU backend fails on every PDF)
+
+Symptom: `ingest directory` runs, prints per-file lines like
+
+```
+  somefile.pdf: All configured PDF converter backends failed for somefile.pdf:
+  MinerU: module 'cv2' has no a…
+```
+
+for every PDF, and `db stats` shows zero documents ingested.
+
+Cause: `opencv-python` and `opencv-python-headless` both install to the
+same `cv2/` directory on disk and clobber each other's files. Our
+dependency graph transitively pulls both in (MinerU wants
+`opencv-python`; albumentations / albucore want `opencv-python-headless`).
+When both land in the same venv, whichever installed second ends up
+with a corrupted module — `import cv2` works but every attribute lookup
+(`cv2.imread`, `cv2.dnn`, etc.) fails with `AttributeError: module 'cv2'
+has no attribute …`.
+
+Permanent fix (in `pyproject.toml`): a `[tool.uv]` override with an
+impossible marker excludes `opencv-python-headless` from resolution,
+so `uv sync` only installs `opencv-python` (superset — albumentations
+still finds `cv2` at runtime):
+
+```toml
+[tool.uv]
+override-dependencies = [
+    "opencv-python-headless; sys_platform == 'never'",
+]
+```
+
+If you hit the error anyway (e.g., after a `uv sync` that removed the
+wrong file set and left a half-installed `opencv-python`), restore it:
+
+```bash
+uv pip uninstall -y opencv-python opencv-python-headless
+uv pip install --force-reinstall --no-deps opencv-python
+uv run python -c "import cv2; print(cv2.__version__, bool(cv2.imread))"
+# Expect: 4.13.0 True
+```
+
 ## Gotcha: shell metacharacters in folder paths
 
 Symptom: you run `ingest directory` against a folder you can see in the
