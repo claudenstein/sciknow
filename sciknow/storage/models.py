@@ -721,6 +721,11 @@ class KnowledgeGraphTriple(Base):
         PG_UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=True
     )
     confidence: Mapped[float] = mapped_column(nullable=False, server_default="1.0")
+    # Phase 48d — verbatim sentence from the source paper that
+    # evidences the triple. Nullable: the extraction LLM doesn't
+    # always pin a triple to one sentence, and pre-0019 rows have
+    # NULL. Backfill via `wiki compile --rebuild`.
+    source_sentence: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

@@ -93,7 +93,11 @@ Rules:
 - Extract 3–8 key concepts (scientific phenomena, theories, metrics)
 - Extract 1–4 methods (techniques, models, algorithms)
 - Extract 0–3 datasets (named datasets or data sources)
-- Extract 5–15 knowledge graph triples (subject, predicate, object)
+- Extract 5–15 knowledge graph triples (subject, predicate, object, source_sentence)
+- For each triple, also capture "source_sentence": the single verbatim
+  sentence from the paper text above that evidences the claim. Copy it
+  exactly (≤ 300 chars). If no single sentence supports the triple,
+  use an empty string — do NOT paraphrase or synthesize.
 - Reuse existing concept names provided in the user message where applicable
 - Use lowercase-hyphenated slug format for new concepts (e.g. "total-solar-irradiance")
 - Respond ONLY with valid JSON."""
@@ -118,7 +122,7 @@ Return JSON:
   "methods": ["method-slug-1", ...],
   "datasets": ["dataset-slug-1", ...],
   "triples": [
-    {{"subject": "...", "predicate": "uses_method|studies|finds|supports|contradicts|related_to", "object": "..."}},
+    {{"subject": "...", "predicate": "uses_method|studies|finds|supports|contradicts|related_to", "object": "...", "source_sentence": "verbatim sentence from the paper that evidences the triple"}},
     ...
   ]
 }}"""

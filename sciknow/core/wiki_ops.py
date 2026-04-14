@@ -355,6 +355,10 @@ def _extract_entities_and_kg(
                     "subject": {"type": "string"},
                     "predicate": {"type": "string"},
                     "object": {"type": "string"},
+                    # Phase 48d — verbatim source sentence. Not required
+                    # (the LLM may legitimately fail to pin one); empty
+                    # string is acceptable and flows through as NULL.
+                    "source_sentence": {"type": "string"},
                 },
                 "required": ["subject", "predicate", "object"],
             }},
@@ -391,11 +395,18 @@ def _extract_entities_and_kg(
                 subj = (t.get("subject") or "").strip().lower()[:200]
                 pred = (t.get("predicate") or "").strip().lower()[:100]
                 obj = (t.get("object") or "").strip().lower()[:200]
+                # Phase 48d — empty / whitespace-only source sentence
+                # flows through as NULL so the UI can render "(no
+                # source sentence)" consistently instead of "".
+                sent_raw = (t.get("source_sentence") or "").strip()[:500]
+                sent = sent_raw if sent_raw else None
                 if subj and pred and obj:
                     session.execute(text("""
-                        INSERT INTO knowledge_graph (subject, predicate, object, source_doc_id)
-                        VALUES (:subj, :pred, :obj, CAST(:did AS uuid))
-                    """), {"subj": subj, "pred": pred, "obj": obj, "did": doc_id})
+                        INSERT INTO knowledge_graph
+                            (subject, predicate, object, source_doc_id, source_sentence)
+                        VALUES (:subj, :pred, :obj, CAST(:did AS uuid), :sent)
+                    """), {"subj": subj, "pred": pred, "obj": obj,
+                            "did": doc_id, "sent": sent})
                     kg_count += 1
             session.commit()
 

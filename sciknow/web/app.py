@@ -1596,7 +1596,7 @@ async def api_kg(
         rows = session.execute(text("""
             SELECT kg.subject, kg.predicate, kg.object,
                    kg.source_doc_id::text, kg.confidence,
-                   pm.title
+                   pm.title, kg.source_sentence
             FROM knowledge_graph kg
             LEFT JOIN paper_metadata pm ON pm.document_id = kg.source_doc_id
             WHERE (:subject_q   IS NULL OR kg.subject ILIKE :subject_q)
@@ -1625,6 +1625,8 @@ async def api_kg(
                 "subject": r[0], "predicate": r[1], "object": r[2],
                 "source_doc_id": r[3], "confidence": float(r[4] or 1.0),
                 "source_title": r[5],
+                # Phase 48d — may be None for pre-migration-0019 triples
+                "source_sentence": r[6],
             }
             for r in rows
         ],
@@ -6849,6 +6851,10 @@ body.task-bar-open {{ padding-top: 40px; }}
                   title="Fill the screen with just the graph pane (Esc to exit)">
             &#9974; Fullscreen
           </button>
+          <button class="kg-invert-btn" onclick="kgCopyShareLink()"
+                  title="Copy a URL that opens this view — theme, filters, camera, pinned nodes — on any other machine.">
+            &#128279; Share
+          </button>
         </div>
         <div class="kg-controls kg-controls-2">
           <input type="search" id="kg-search" class="kg-search-input"
@@ -7615,10 +7621,41 @@ async function openKgModal() {{
   // of briefly flashing the default. (Chip swatches + color pickers
   // get initialised inside _initKgThemeChips on the first render.)
   _kgLoadPrefs();
+  // Phase 48d — if the page was loaded with a #kg=… share URL, pre-
+  // fill the filter inputs from its payload so the initial loadKg
+  // fetches exactly the same slice. Theme + overrides were already
+  // applied by _kgMaybeParseHashOnLoad; camera + pins get applied
+  // inside the first render frame via _kgApplyPendingShare.
+  const pending = window._kgPendingShare;
+  if (pending && pending.f) {{
+    const subj = document.getElementById('kg-subject');
+    const pred = document.getElementById('kg-predicate');
+    const obj  = document.getElementById('kg-object');
+    if (subj) subj.value = pending.f.s || '';
+    if (pred) {{
+      // Predicate options are populated on first loadKg; adding a
+      // stub option ensures the current value survives the reload.
+      const v = pending.f.p || '';
+      if (v && !Array.from(pred.options).some(o => o.value === v)) {{
+        const opt = document.createElement('option');
+        opt.value = v; opt.textContent = v;
+        pred.appendChild(opt);
+      }}
+      pred.value = v;
+    }}
+    if (obj)  obj.value  = pending.f.o || '';
+  }}
   openModal('kg-modal');
   switchKgTab('kg-graph');
   await loadKg(0);
 }}
+// Phase 48d — auto-open the modal when the URL has a #kg=… share hash
+// so a shared link lands the recipient directly in the graph view.
+window.addEventListener('DOMContentLoaded', () => {{
+  if (window._kgPendingShare) {{
+    try {{ openKgModal(); }} catch (e) {{}}
+  }}
+}});
 
 function switchKgTab(name) {{
   document.querySelectorAll('#kg-modal .tab').forEach(t => {{
@@ -8223,6 +8260,120 @@ function kgSearch(q) {{
   if (c && c._kgSim && c._kgSim.search) c._kgSim.search(q);
 }}
 
+// Phase 48d — cached layout per filter. Stores the final node
+// positions for a given filter combination in localStorage so
+// re-opening the same view warm-starts from the prior layout instead
+// of re-running the full settle from random seeds every time.
+
+function _kgLayoutKey() {{
+  const s = (document.getElementById('kg-subject') || {{}}).value || '';
+  const p = (document.getElementById('kg-predicate') || {{}}).value || '';
+  const o = (document.getElementById('kg-object') || {{}}).value || '';
+  // Compact base64 without +/= so the key stays URL-safe and short.
+  const raw = JSON.stringify({{ s: s, p: p, o: o }});
+  try {{
+    return 'kg_layout_' + btoa(raw).replace(/[+/=]/g, '').slice(0, 40);
+  }} catch (e) {{
+    return 'kg_layout_default';
+  }}
+}}
+function _kgLoadLayout(key) {{
+  try {{
+    const s = localStorage.getItem(key);
+    if (!s) return null;
+    const d = JSON.parse(s);
+    return (d && d.nodes) || null;
+  }} catch (e) {{ return null; }}
+}}
+function _kgSaveLayout(key, nodes) {{
+  const positions = nodes.map(n => ({{
+    l: n.label,
+    p: [Math.round(n.x), Math.round(n.y), Math.round(n.z)],
+  }}));
+  const payload = JSON.stringify({{ nodes: positions, ts: Date.now() }});
+  try {{
+    localStorage.setItem(key, payload);
+  }} catch (e) {{
+    // Storage full → evict aggressively then retry once.
+    _kgEvictOldLayouts(5);
+    try {{ localStorage.setItem(key, payload); }} catch (e2) {{ /* give up */ }}
+  }}
+  _kgEvictOldLayouts(30);
+}}
+function _kgEvictOldLayouts(maxCount) {{
+  const keys = [];
+  for (let i = 0; i < localStorage.length; i++) {{
+    const k = localStorage.key(i);
+    if (!k || k.indexOf('kg_layout_') !== 0) continue;
+    try {{
+      const ts = (JSON.parse(localStorage.getItem(k)) || {{}}).ts || 0;
+      keys.push([k, ts]);
+    }} catch (e) {{ /* skip corrupt */ }}
+  }}
+  keys.sort((a, b) => a[1] - b[1]);
+  while (keys.length > maxCount) {{
+    const [k] = keys.shift();
+    try {{ localStorage.removeItem(k); }} catch (e) {{}}
+  }}
+}}
+
+// ── Shareable URL ─────────────────────────────────────────────────
+// Encodes theme + overrides + filter fields + camera + pinned node
+// labels in the URL hash as compact base64 JSON. Anyone who opens
+// the URL gets the KG modal auto-opened on exactly the same view.
+
+function kgCopyShareLink() {{
+  const c = document.getElementById('kg-graph-canvas');
+  if (!c || !c._kgSim || !c._kgSim.getShareState) return;
+  const st = c._kgSim.getShareState();
+  st.t = _kgActiveTheme;
+  st.o = _kgCustomOverrides;
+  st.f = {{
+    s: (document.getElementById('kg-subject') || {{}}).value || '',
+    p: (document.getElementById('kg-predicate') || {{}}).value || '',
+    o: (document.getElementById('kg-object') || {{}}).value || '',
+  }};
+  let enc;
+  try {{
+    enc = btoa(unescape(encodeURIComponent(JSON.stringify(st))));
+  }} catch (e) {{ return; }}
+  const url = window.location.origin + window.location.pathname + '#kg=' + enc;
+  try {{
+    navigator.clipboard.writeText(url).then(() => {{
+      const status = document.getElementById('kg-status');
+      if (status) status.textContent = 'Share link copied to clipboard.';
+    }}, () => window.prompt('Copy this link:', url));
+  }} catch (e) {{ window.prompt('Copy this link:', url); }}
+}}
+// Parse #kg=… on load; if present, stash the state and have openKgModal
+// apply it after the first render completes.
+(function _kgMaybeParseHashOnLoad() {{
+  const m = (window.location.hash || '').match(/^#kg=(.+)$/);
+  if (!m) return;
+  try {{
+    const st = JSON.parse(decodeURIComponent(escape(atob(m[1]))));
+    window._kgPendingShare = st;
+    if (st.t && typeof KG_THEMES !== 'undefined' && KG_THEMES[st.t]) {{
+      _kgActiveTheme = st.t;
+    }}
+    if (st.o) _kgCustomOverrides = st.o;
+  }} catch (e) {{ /* ignore bad hash */ }}
+}})();
+
+// Apply a pending share state (filter + cam + pinned) after the sim
+// has rendered at least once. Called from the first render() frame.
+function _kgApplyPendingShare() {{
+  const st = window._kgPendingShare;
+  if (!st) return;
+  window._kgPendingShare = null;
+  // Filter fields were already set before the load via openKgModal's
+  // hook; re-apply camera + pins now that the sim exists.
+  const c = document.getElementById('kg-graph-canvas');
+  if (c && c._kgSim && c._kgSim.applyShareState) {{
+    c._kgSim.applyShareState(st);
+  }}
+}}
+
 // Phase 48 — interactive 3D knowledge graph. Every unique entity is a
 // node in a real 3D world; triples are weighted edges (same-pair
 // triples merged into one visual edge with count + family info). A
@@ -8287,6 +8438,9 @@ function _renderKgGraph(triples) {{
       doc_id: t.source_doc_id,
       doc_title: t.source_title,
       confidence: t.confidence,
+      // Phase 48d — per-triple verbatim sentence from the source
+      // paper; may be null for rows ingested before migration 0019.
+      source_sentence: t.source_sentence || '',
     }});
   }});
   const edges = Array.from(edgeMap.values());
@@ -8322,6 +8476,23 @@ function _renderKgGraph(triples) {{
     n.y = c.y + (Math.random() - 0.5) * 80;
     n.z = c.z + (Math.random() - 0.5) * 80;
   }});
+  // Phase 48d — warm-start from the cached layout for this filter, if
+  // we have one. Only positions saved under the *current* filter hash
+  // apply; nodes that didn't exist in the cached layout keep their
+  // freshly-seeded cluster coords (the layout still settles, just
+  // faster and with less drift between views).
+  const _kgLayoutKeyCurrent = _kgLayoutKey();
+  const _kgLayoutCached = _kgLoadLayout(_kgLayoutKeyCurrent);
+  if (_kgLayoutCached && Array.isArray(_kgLayoutCached)) {{
+    const byLabel = new Map();
+    _kgLayoutCached.forEach(p => byLabel.set(p.l, p.p));
+    nodes.forEach(n => {{
+      const pos = byLabel.get(n.label);
+      if (pos && pos.length === 3) {{
+        n.x = pos[0]; n.y = pos[1]; n.z = pos[2];
+      }}
+    }});
+  }}
 
   // ── Curve-bundle offsets (parallel + bidirectional edges) ──────
   // For each unordered pair {{u,v}}, count how many edges connect them
@@ -8527,12 +8698,18 @@ function _renderKgGraph(triples) {{
       const w = Math.max(0.5, Math.min(3.2,
                     0.9 * Math.min(pa.scale, pb.scale) *
                     (1 + Math.log(1 + e.count))));
+      // Phase 48d — native SVG <title> gives a 1-line browser tooltip
+      // on edge hover showing the source sentence (if any). Zero
+      // runtime cost; no custom popover to maintain.
+      const tip = (e.triples.find(t => t.source_sentence) || {{}}).source_sentence || '';
+      const tipAttr = tip ? '<title>' + escapeHtml(tip) + '</title>' : '';
       eHtml += '<path class="kg-edge" data-ei="' + ei + '" ' +
                'd="M ' + pa.sx.toFixed(1) + ' ' + pa.sy.toFixed(1) +
                ' Q ' + mx.toFixed(1) + ' ' + my.toFixed(1) +
                ' ' + pb.sx.toFixed(1) + ' ' + pb.sy.toFixed(1) + '" ' +
                'stroke="' + edgeColor(e) + '" stroke-width="' + w.toFixed(2) +
-               '" fill="none" opacity="' + op.toFixed(2) + '"/>';
+               '" fill="none" opacity="' + op.toFixed(2) + '">' +
+               tipAttr + '</path>';
       // Count badge for merged edges (3+ triples)
       if (e.count >= 3 && pa.scale > 0.5) {{
         const bx = mx, by = my;
@@ -8585,10 +8762,27 @@ function _renderKgGraph(triples) {{
   // Settle
   for (let i = 0; i < 120; i++) step();
 
+  // Phase 48d — persist the post-settle layout for this filter so the
+  // next open of the same filter warm-starts from it. Done once, a
+  // few seconds after the main rAF loop starts (gives the live
+  // physics a little more time to refine the cold cluster seeds
+  // without blocking the first paint). Idempotent: re-saves on every
+  // render would be wasteful; one shot is enough.
+  let _kgLayoutSaved = false;
+  setTimeout(() => {{
+    if (_kgLayoutSaved || !nodes.length) return;
+    _kgSaveLayout(_kgLayoutKeyCurrent, nodes);
+    _kgLayoutSaved = true;
+  }}, 2500);
+
   function loop() {{
     if (!running) return;
     if (!paused) step();
     render();
+    // Apply any pending shareable-URL state once the first frame is up
+    if (window._kgPendingShare) {{
+      try {{ _kgApplyPendingShare(); }} catch (e) {{}}
+    }}
     raf = requestAnimationFrame(loop);
   }}
   loop();
@@ -8719,7 +8913,8 @@ function _renderKgGraph(triples) {{
       const id = parseInt(nodeEl.getAttribute('data-id'), 10);
       const n = nodes[id];
       _kgShowMenu(evt.clientX, evt.clientY, [
-        {{ label: 'Expand around here', onClick: () => kgEgoExpand(n.label) }},
+        {{ label: 'Expand 1 hop', onClick: () => kgEgoExpand(n.label, 1) }},
+        {{ label: 'Expand 2 hops', onClick: () => kgEgoExpand(n.label, 2) }},
         {{ label: (n.fixed ? 'Unpin' : 'Pin node'),
            onClick: () => {{ n.fixed = !n.fixed; }} }},
         {{ label: 'Center view', onClick: () => tweenCenterOn(n) }},
@@ -8742,12 +8937,22 @@ function _renderKgGraph(triples) {{
       const firstT = e.triples[0] || {{}};
       const title = (firstT.doc_title || '(unknown source)').substring(0, 70);
       const preds = Array.from(e.predicates).slice(0, 3).join(', ');
+      // Pick the first non-empty source sentence across merged triples
+      const sent = (e.triples.find(t => t.source_sentence)
+                    || {{}}).source_sentence || '';
+      const sentDisplay = sent
+        ? ('\\u201C' + (sent.length > 80 ? sent.substring(0, 80) + '\\u2026' : sent) + '\\u201D')
+        : '(no source sentence — re-compile wiki to backfill)';
       _kgShowMenu(evt.clientX, evt.clientY, [
-        {{ label: 'Source: ' + title, hint: '',
-           onClick: () => {{}} }},
-        {{ label: 'Predicates: ' + preds, hint: '',
-           onClick: () => {{}} }},
+        {{ label: 'Source: ' + title, onClick: () => {{}} }},
+        {{ label: 'Predicates: ' + preds, onClick: () => {{}} }},
+        {{ label: sentDisplay, onClick: () => {{}} }},
         '-',
+        {{ label: sent ? 'Copy sentence' : 'Copy sentence (none)',
+           onClick: () => {{
+             if (!sent) return;
+             try {{ navigator.clipboard.writeText(sent); }} catch (ex) {{}}
+           }} }},
         {{ label: 'Copy triple',
            onClick: () => {{
              const txt = nodes[e.source].label + '  [' + preds + ']  ' + nodes[e.target].label;
@@ -8917,26 +9122,89 @@ function _renderKgGraph(triples) {{
     resetView: resetView,
     centerOn: tweenCenterOn,
     downloadPng: downloadPng,
+    // Phase 48d — return the subset of state that defines the visible
+    // view (camera pose + which nodes are pinned). The share-URL
+    // builder merges this with the theme + filter fields into the
+    // compact base64 blob. We serialize pin by node label (not id)
+    // because ids are per-filter-load and unstable.
+    getShareState: () => ({{
+      c: {{ rx: cam.rotX, ry: cam.rotY, d: cam.dist }},
+      p: nodes.filter(n => n.fixed).map(n => n.label),
+    }}),
+    applyShareState: (st) => {{
+      if (!st) return;
+      if (st.c) {{
+        if (typeof st.c.rx === 'number') cam.rotX = st.c.rx;
+        if (typeof st.c.ry === 'number') cam.rotY = st.c.ry;
+        if (typeof st.c.d  === 'number') cam.dist = Math.max(250, Math.min(3000, st.c.d));
+      }}
+      if (Array.isArray(st.p)) {{
+        const pinSet = new Set(st.p);
+        nodes.forEach(n => {{ if (pinSet.has(n.label)) n.fixed = true; }});
+      }}
+    }},
   }};
 }}
 
 // ── Module-scope KG helpers used by the context menu + toolbar ────
 
-// Replace the current graph view with the 1-hop ego network around a
-// label (fetched via the `any_side` API parameter so we get edges on
-// either direction in a single query).
-async function kgEgoExpand(label) {{
-  const params = new URLSearchParams({{ any_side: label, limit: 200 }});
+// Replace the current graph view with the ego network around a label.
+// depth=1 → just the node's direct 1-hop (single /api/kg call using
+// `any_side`). depth=2 → 1-hop + the 1-hop of each of the top-10
+// most-frequent neighbors (parallel fetches, deduped, confidence-
+// ranked, capped at 200 triples). Two hops is where scientific KGs
+// get interesting — depth 1 is often just a claim, depth 2 is the
+// surrounding context.
+async function kgEgoExpand(label, depth) {{
+  depth = depth || 1;
+  const status = document.getElementById('kg-status');
   try {{
-    const res = await fetch('/api/kg?' + params.toString());
-    const data = await res.json();
-    _kgTriples = data.triples || [];
-    document.getElementById('kg-status').textContent =
-      'Expanded around "' + label + '" · ' + _kgTriples.length + ' triple(s)';
-    _renderKgTable(_kgTriples);
-    _renderKgGraph(_kgTriples.slice(0, 100));
+    if (status) status.textContent = 'Expanding around "' + label + '" (depth ' + depth + ')…';
+    const r1 = await fetch('/api/kg?' + new URLSearchParams({{ any_side: label, limit: 200 }}));
+    let all = ((await r1.json()).triples) || [];
+    if (depth >= 2 && all.length) {{
+      // Count neighbor frequency to pick who to expand next
+      const freq = new Map();
+      all.forEach(t => {{
+        const s = (t.subject || '').substring(0, 60);
+        const o = (t.object  || '').substring(0, 60);
+        if (s.toLowerCase() !== label.toLowerCase()) {{
+          freq.set(s, (freq.get(s) || 0) + 1);
+        }}
+        if (o.toLowerCase() !== label.toLowerCase()) {{
+          freq.set(o, (freq.get(o) || 0) + 1);
+        }}
+      }});
+      const topN = Array.from(freq.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 10)
+        .map(entry => entry[0]);
+      // Parallel fetch, 50 triples per neighbor (keeps response time sane)
+      const batches = await Promise.all(topN.map(n =>
+        fetch('/api/kg?' + new URLSearchParams({{ any_side: n, limit: 50 }}))
+          .then(r => r.json()).then(d => d.triples || [])
+          .catch(() => [])
+      ));
+      const seen = new Set();
+      all.forEach(t => seen.add((t.subject || '') + '|' + (t.predicate || '') + '|' + (t.object || '')));
+      batches.forEach(batch => {{
+        batch.forEach(t => {{
+          const k = (t.subject || '') + '|' + (t.predicate || '') + '|' + (t.object || '');
+          if (!seen.has(k)) {{ all.push(t); seen.add(k); }}
+        }});
+      }});
+      // Confidence-sort, cap at 200 so the graph stays navigable
+      all.sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+      all = all.slice(0, 200);
+    }}
+    _kgTriples = all;
+    if (status) status.textContent =
+      'Expanded around "' + label + '" (depth ' + depth + ') · ' +
+      all.length + ' triple(s)';
+    _renderKgTable(all);
+    _renderKgGraph(all.slice(0, 100));
   }} catch (e) {{
-    document.getElementById('kg-status').textContent = 'Error: ' + e.message;
+    if (status) status.textContent = 'Error: ' + e.message;
   }}
 }}
 

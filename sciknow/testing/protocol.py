@@ -3239,6 +3239,25 @@ def l1_phase31_kg_graph_view() -> None:
         "KG :fullscreen CSS rules missing — canvas won't resize when "
         "the pane is fullscreened"
     )
+    # Phase 48d — source-sentence provenance + cached layout + share
+    # URL + depth-2 ego expansion. Guard the full set so no single
+    # piece silently regresses; the four together are what closes the
+    # original KG research backlog.
+    assert "source_sentence" in src, (
+        "KG source-sentence field not wired through /api/kg or UI"
+    )
+    assert "_kgLayoutKey" in src and "_kgLoadLayout" in src and "_kgSaveLayout" in src, (
+        "KG per-filter layout cache missing"
+    )
+    assert "kgCopyShareLink" in src and "#kg=" in src, (
+        "KG shareable URL support missing"
+    )
+    assert "getShareState" in src and "applyShareState" in src, (
+        "KG sim missing share-state hooks on canvas._kgSim"
+    )
+    assert "Expand 2 hops" in src, (
+        "KG context menu missing depth-2 ego expansion"
+    )
 
 
 def l1_phase31_read_button_section_filter() -> None:

@@ -7,7 +7,30 @@ This doc captures the research that justifies what's shipped and what's
 deferred — written so the next session can pick the right next move
 without re-running the analysis.
 
-## Status (Phase 48c)
+## Status (Phase 48d — backlog closed)
+
+### Shipped — Phase 48d (provenance + persistence + depth-2 + sharing)
+- **Source-sentence provenance** — migration `0019` adds
+  `source_sentence TEXT NULL` to `knowledge_graph`; extraction prompt
+  now requires a verbatim quote with each triple; `/api/kg` returns
+  it; edge right-click menu shows a truncated quote + "Copy sentence"
+  action; native SVG `<title>` tooltip on every edge shows the full
+  sentence on hover. Old triples keep NULL and surface as "(no
+  source sentence — re-compile wiki to backfill)"; run
+  `sciknow wiki compile --rebuild` to populate.
+- **Cached layout per filter** — `localStorage["kg_layout_<hash>"]`
+  keyed on the filter tuple `(subject, predicate, object)` caches
+  final node positions; re-opening the same filter warm-starts
+  nodes to their cached coords instead of random cluster seeds.
+  Oldest-first eviction at 30 entries; graceful fallback on quota.
+- **Shareable URL** — `#kg=<base64>` hash encodes theme + overrides
+  + filters + camera pose + pinned node labels. "🔗 Share" button
+  in the toolbar copies the URL; opening a shared URL auto-opens
+  the KG modal and restores the exact view.
+- **Depth-2 ego expansion** — `kgEgoExpand(label, 2)` fetches the
+  1-hop neighborhood, ranks neighbors by frequency, parallel-fetches
+  the top 10 neighbors' 1-hops, dedupes, confidence-caps to 200.
+  Wired into the node context menu next to "Expand 1 hop".
 
 ### Shipped — Phase 48c (ergonomics + persistence)
 - **Fullscreen view** — Fullscreen button on the Graph toolbar calls
@@ -50,17 +73,19 @@ without re-running the analysis.
   compositional / citational / other) using Okabe-Ito colorblind-safe
   categorical palette
 
-### Still in the backlog (in rough priority order)
-1. **"Explain this edge" popover** with the source *sentence* (not just
-   paper title). Requires schema migration to store sentence offsets
-   at extraction time — biggest feature remaining, biggest lift.
-2. **Cached layout per filter** (localStorage by filter-hash) for warm
-   starts when users alternate filters.
-3. **Shareable URL** encoding camera + filter + pinned set in the hash.
-4. **Ego expansion at depth ≥ 2** (currently depth 1).
-5. **Barnes-Hut** only once we hit n ≈ 800 or profile shows > 8 ms/frame.
-6. **Lasso selection**, **keyboard graph walk**, **minimap** — all
-   explicitly parked as low-ROI for this tool.
+### Parked (not worth shipping for this tool)
+1. **Barnes-Hut octree** — only worthwhile once `n ≈ 800` or profile
+   shows > 8 ms/frame. We're at n ≤ 100 by default.
+2. **Lasso selection** — nontrivial in 3D (needs screen-space polygon
+   → frustum test). High effort, niche.
+3. **Keyboard graph walk** — low usage outside a11y contexts.
+4. **Minimap** — disorienting under an orbit camera (which projection?).
+5. **Edge bundling** — only pays off above ~500 edges and actively
+   hides which exact pair is connected, which is the point for triple
+   browsing.
+
+If any of these become load-bearing, revisit the sources at the bottom
+of this doc and re-evaluate the trade-offs.
 
 ## Axis-by-axis notes
 
