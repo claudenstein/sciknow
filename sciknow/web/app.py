@@ -8801,6 +8801,24 @@ body.task-bar-open {{ padding-top: 40px; }}
             <input type="range" min="0.5" max="2.0" step="0.05" value="1.0"
                    class="kg-slider" oninput="kgSetLabelScale(this.value)"/>
           </label>
+          <!-- Phase 54.6.10 — label typography picker. The "solid"
+               variants drop the paint-order halo (stroke=none) so the
+               label is one colour instead of two — noticeably more
+               readable on bright themes where the fill + halo combo
+               hurts contrast. -->
+          <label class="kg-chip-group" title="Label typography + solid/halo treatment">
+            <span class="kg-controls-label">Font</span>
+            <select class="kg-select" id="kg-font-select" onchange="kgSetFont(this.value)">
+              <option value="sans-halo">Sans &middot; halo</option>
+              <option value="sans-solid">Sans &middot; solid</option>
+              <option value="serif-solid">Serif &middot; solid</option>
+              <option value="serif-halo">Serif &middot; halo</option>
+              <option value="mono-solid">Mono &middot; solid</option>
+              <option value="mono-halo">Mono &middot; halo</option>
+              <option value="condensed-solid">Condensed &middot; solid</option>
+              <option value="display-solid">Display &middot; solid</option>
+            </select>
+          </label>
           <label class="kg-chip-group" title="Hide nodes whose degree exceeds this (tames hubs)">
             <span class="kg-controls-label">Max deg</span>
             <input type="range" min="1" max="99" step="1" value="99"
@@ -10177,6 +10195,13 @@ function kgSetLabelScale(v) {{
   const c = document.getElementById('kg-graph-canvas');
   if (c && c._kgSim && c._kgSim.setLabelScale) c._kgSim.setLabelScale(parseFloat(v));
 }}
+// Phase 54.6.10 — typography picker for KG labels. Persists the
+// choice in localStorage so it survives modal reopens.
+function kgSetFont(key) {{
+  const c = document.getElementById('kg-graph-canvas');
+  if (c && c._kgSim && c._kgSim.setFont) c._kgSim.setFont(key);
+  try {{ localStorage.setItem('sciknow.kg.font', key); }} catch (_) {{}}
+}}
 function kgSetDegFilter(v) {{
   const c = document.getElementById('kg-graph-canvas');
   if (c && c._kgSim && c._kgSim.setDegFilter) c._kgSim.setDegFilter(parseInt(v, 10));
@@ -10450,6 +10475,39 @@ function _renderKgGraph(triples) {{
   let theme = _kgEffectiveTheme();
   let colorBy = 'cluster';  // 'cluster' | 'predicate' | 'theme'
   let labelScale = 1.0;
+  // Phase 54.6.10 — label typography. Supported families:
+  //   sans (default)   → var(--font-sans)      (Inter + system)
+  //   serif            → var(--font-serif)     (Georgia / TNR)
+  //   mono             → var(--font-mono)      (SF Mono / ui-mono)
+  //   condensed        → Barlow Condensed / Arial Narrow
+  //   display          → Georgia Display / Playfair-style
+  // `solid=true` drops the paint-order halo so the label is one
+  // colour (fill only). On bright themes the halo hurts more than
+  // it helps, so "solid" is the preferred preset for readability.
+  let labelFontFamily = 'var(--font-sans)';
+  let labelSolid = false;
+  // Restore the user's saved typography preference (if any) and
+  // sync the <select> back to it so the dropdown shows the active
+  // choice next time the modal opens.
+  try {{
+    const savedFont = localStorage.getItem('sciknow.kg.font');
+    if (savedFont) {{
+      const fontMap = {{
+        'sans-halo':      ['var(--font-sans)',  false],
+        'sans-solid':     ['var(--font-sans)',  true],
+        'serif-solid':    ['var(--font-serif)', true],
+        'serif-halo':     ['var(--font-serif)', false],
+        'mono-solid':     ['var(--font-mono)',  true],
+        'mono-halo':      ['var(--font-mono)',  false],
+        'condensed-solid':['"Barlow Condensed","Arial Narrow",sans-serif', true],
+        'display-solid':  ['"Playfair Display",Georgia,serif', true],
+      }};
+      const pair = fontMap[savedFont];
+      if (pair) {{ labelFontFamily = pair[0]; labelSolid = pair[1]; }}
+      const sel = document.getElementById('kg-font-select');
+      if (sel) sel.value = savedFont;
+    }}
+  }} catch (_) {{}}
   let degFilter = 999;       // max degree; nodes above this are hidden
   let hoverId = -1;          // node id under the mouse (-1 if none)
   let hoverNeighbors = null; // Set<id> of 1-hop neighbors when hovering
@@ -10675,11 +10733,17 @@ function _renderKgGraph(triples) {{
                '" stroke-width="' + (isHover ? '1.6' : '0.7') + '"/>';
       if (p.scale > 0.45) {{
         const fs = Math.max(8, 10.5 * p.scale) * labelScale;
+        // Phase 54.6.10 — honor the font dropdown. Solid mode
+        // skips the paint-order stroke so the label is one colour
+        // (better contrast on bright themes).
+        const stylePre = 'font-family:' + labelFontFamily + ';';
+        const styleStroke = labelSolid ? ''
+          : ('paint-order:stroke;stroke:' + theme.labelStroke
+             + ';stroke-width:2.5px;');
         nHtml += '<text x="' + (p.sx + rEff + 3).toFixed(1) + '" y="' +
                  (p.sy + 3).toFixed(1) + '" font-size="' + fs.toFixed(1) +
                  '" fill="' + theme.label + '" pointer-events="none" ' +
-                 'style="font-family:var(--font-sans);paint-order:stroke;' +
-                 'stroke:' + theme.labelStroke + ';stroke-width:2.5px;">' +
+                 'style="' + stylePre + styleStroke + '">' +
                  escapeHtml(nodeLabel(n.label)) + '</text>';
       }}
       nHtml += '</g>';
@@ -11045,6 +11109,25 @@ function _renderKgGraph(triples) {{
     togglePause: () => {{ paused = !paused; }},
     setColorBy: (mode) => {{ if (mode) colorBy = mode; }},
     setLabelScale: (v) => {{ labelScale = Math.max(0.4, Math.min(2.2, v)); }},
+    // Phase 54.6.10 — Font: maps the dropdown value to a
+    // (family, solid) pair. Solid strips the label stroke so the
+    // text is single-colour. The render loop reads these closure
+    // vars on the next frame so no restart is needed.
+    setFont: (key) => {{
+      const map = {{
+        'sans-halo':      ['var(--font-sans)',  false],
+        'sans-solid':     ['var(--font-sans)',  true],
+        'serif-solid':    ['var(--font-serif)', true],
+        'serif-halo':     ['var(--font-serif)', false],
+        'mono-solid':     ['var(--font-mono)',  true],
+        'mono-halo':      ['var(--font-mono)',  false],
+        'condensed-solid':['"Barlow Condensed","Arial Narrow",sans-serif', true],
+        'display-solid':  ['"Playfair Display",Georgia,serif', true],
+      }};
+      const pair = map[key] || map['sans-halo'];
+      labelFontFamily = pair[0];
+      labelSolid = pair[1];
+    }},
     setDegFilter: (v) => {{ degFilter = (v >= 99) ? 999 : v; }},
     search: doSearch,
     resetView: resetView,
