@@ -6111,6 +6111,28 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
    them to the viewport so the user actually gets to see full titles
    without wrap hell. */
 .modal.xwide {{ width: 94vw; max-width: 1700px; max-height: calc(100vh - 64px); }}
+/* Phase 54.6.12 — sized container for every ECharts-backed viz tab.
+   70vh works well across the six charts; each chart instance calls
+   .resize() on window resize + tab-switch. */
+.viz-chart {{ width: 100%; height: 70vh; min-height: 420px;
+              background: var(--bg-alt, #f8f8f8);
+              border: 1px solid var(--border); border-radius: 4px; }}
+/* Phase 54.6.12 — Visualize dropdown in the top bar. Keeps the tight
+   top-bar layout while exposing six distinct links. */
+.nav-dropdown {{ position: relative; display: inline-block; }}
+.nav-dropdown-menu {{ display: none; position: absolute; top: 100%;
+                     right: 0; min-width: 220px; padding: 4px;
+                     background: var(--bg-elevated);
+                     border: 1px solid var(--border);
+                     border-radius: var(--r-md);
+                     box-shadow: var(--shadow-lg);
+                     z-index: 900; margin-top: 2px; }}
+.nav-dropdown.open .nav-dropdown-menu {{ display: flex; flex-direction: column; gap: 1px; }}
+.nav-dropdown-menu button {{ all: unset; font-size: 12px;
+                             padding: 7px 10px; cursor: pointer;
+                             color: var(--fg); border-radius: var(--r-sm);
+                             display: flex; gap: 6px; align-items: center; }}
+.nav-dropdown-menu button:hover {{ background: var(--accent-light); }}
 /* Optional — a subset of modals (detailed wiki pages, big tables)
    may want to be user-resizable. Opt-in via `class="modal resizable"`
    — the handle sits in the bottom-right corner. */
@@ -7118,7 +7140,21 @@ body.task-bar-open {{ padding-top: 40px; }}
   <button class="nav-btn" onclick="openPlanModal()" title="View / edit / regenerate the book plan (the leitmotiv)">&#128221; Plan</button>
   <button class="nav-btn" onclick="openBookSettings()" title="Consolidated per-book settings: title, description, plan, length target, style fingerprint">&#9881; Settings</button>
   <button class="nav-btn" onclick="showDashboard()" title="Book dashboard with stats + heatmap">&#128200; Dashboard</button>
-  <button class="nav-btn" onclick="openVizModal()" title="Visualize the corpus — topic map (UMAP), RAPTOR sunburst, consensus landscape, timeline river, ego radial, gap radar">&#128202; Visualize</button>
+  <!-- Phase 54.6.12 — Visualize dropdown: six distinct links each open
+       the modal on the right tab. Keeps the top bar tight while still
+       giving one-click access to every view. -->
+  <div class="nav-dropdown" id="viz-dropdown">
+    <button class="nav-btn" onclick="toggleVizDropdown(event)"
+            title="Six visualizations of the corpus">&#128202; Visualize &#9662;</button>
+    <div class="nav-dropdown-menu" id="viz-dropdown-menu" role="menu">
+      <button role="menuitem" onclick="openVizModal('viz-topic')">&#127760; Topic map (UMAP)</button>
+      <button role="menuitem" onclick="openVizModal('viz-sunburst')">&#127773; RAPTOR sunburst</button>
+      <button role="menuitem" onclick="openVizModal('viz-consensus')">&#9878;&#65039; Consensus landscape</button>
+      <button role="menuitem" onclick="openVizModal('viz-timeline')">&#128200; Timeline river</button>
+      <button role="menuitem" onclick="openVizModal('viz-ego')">&#128269; Ego radial</button>
+      <button role="menuitem" onclick="openVizModal('viz-radar')">&#128504;&#65039; Gap radar</button>
+    </div>
+  </div>
   <button class="nav-btn" onclick="showCorkboard()" title="Visual card-based view of the book">&#128204; Corkboard</button>
   <button class="nav-btn" onclick="showVersions()" title="View version history and diffs">&#128344; History</button>
   <button class="nav-btn" onclick="takeSnapshot()" title="Save a snapshot of current draft content">&#128248; Snapshot</button>
@@ -7498,6 +7534,12 @@ body.task-bar-open {{ padding-top: 40px; }}
         crossorigin="anonymous"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
         integrity="sha384-43gviWU0YVjaDtb/GhzOouOXtZMP/7XUzwPTstBeZFe/+rCMvRwr4yROQP43s0Xk"
+        crossorigin="anonymous"></script>
+<!-- Phase 54.6.12 — ECharts 5 for the Visualize modal. One library
+     covers all six tabs (scatter, sunburst, stacked area, radar,
+     polar) with proper pan / zoom / tooltips built in. ~1 MB from
+     CDN but cached hard. -->
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"
         crossorigin="anonymous"></script>
 
 <!-- Phase 54.1 — keyboard shortcuts cheatsheet (? to toggle) -->
@@ -8972,23 +9014,17 @@ body.task-bar-open {{ padding-top: 40px; }}
           <button class="btn-secondary" onclick="loadTopicMap(true)">Refresh UMAP</button>
           <span id="viz-topic-legend" style="font-size:11px;"></span>
         </div>
-        <svg id="viz-topic-svg" width="100%" height="70vh" viewBox="-1.1 -1.1 2.2 2.2"
-             preserveAspectRatio="xMidYMid meet"
-             style="background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);border-radius:4px;"></svg>
-        <div id="viz-topic-hover" style="font-size:12px;color:var(--fg-muted);margin-top:6px;min-height:18px;"></div>
+        <div id="viz-topic-chart" class="viz-chart"></div>
       </div>
       <!-- RAPTOR sunburst -->
       <div id="viz-sunburst-pane" class="viz-pane" style="display:none;">
         <div style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;">
           Sunburst of the RAPTOR cluster hierarchy. Inner ring = highest-
-          level summaries, outer rings = children. Hover to read
-          summaries; click a slice to zoom in.
+          level summaries, outer rings = children. Click a slice to zoom in,
+          click the centre to zoom back out.
         </div>
         <button class="btn-secondary" onclick="loadSunburst()" style="margin-bottom:6px;">Load</button>
-        <svg id="viz-sunburst-svg" width="100%" height="70vh" viewBox="-1.1 -1.1 2.2 2.2"
-             preserveAspectRatio="xMidYMid meet"
-             style="background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);border-radius:4px;"></svg>
-        <div id="viz-sunburst-hover" style="font-size:12px;color:var(--fg-muted);margin-top:6px;min-height:18px;"></div>
+        <div id="viz-sunburst-chart" class="viz-chart"></div>
       </div>
       <!-- Consensus landscape -->
       <div id="viz-consensus-pane" class="viz-pane" style="display:none;">
@@ -9005,28 +9041,24 @@ body.task-bar-open {{ padding-top: 40px; }}
                  style="flex:1;padding:4px 8px;font-size:12px;">
           <button class="btn-primary" onclick="loadConsensusLandscape()">Map Consensus</button>
         </div>
-        <svg id="viz-consensus-svg" width="100%" height="60vh"
-             style="background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);border-radius:4px;"></svg>
-        <div id="viz-consensus-info" style="font-size:12px;color:var(--fg-muted);margin-top:6px;"></div>
+        <div id="viz-consensus-chart" class="viz-chart"></div>
       </div>
       <!-- Timeline river -->
       <div id="viz-timeline-pane" class="viz-pane" style="display:none;">
         <div style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;">
           Stacked-area of papers per year, coloured by BERTopic cluster.
-          The "history of the field" view. Hover a stripe to read the
-          cluster name; clusters are stacked biggest-first.
+          The "history of the field" view. Drag the mini-map below the
+          axis to zoom into a specific era.
         </div>
         <button class="btn-secondary" onclick="loadTimeline()" style="margin-bottom:6px;">Load</button>
-        <svg id="viz-timeline-svg" width="100%" height="60vh"
-             style="background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);border-radius:4px;"></svg>
-        <div id="viz-timeline-hover" style="font-size:12px;color:var(--fg-muted);margin-top:6px;min-height:18px;"></div>
+        <div id="viz-timeline-chart" class="viz-chart"></div>
       </div>
       <!-- Ego radial -->
       <div id="viz-ego-pane" class="viz-pane" style="display:none;">
         <div style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;">
-          Pick a paper, see its top-K nearest papers arranged radially
-          by cosine distance on the abstract embedding. Closer papers
-          sit nearer the centre.
+          Pick a paper, see its top-K nearest papers arranged on a
+          polar plot. Radius = cosine distance (closer → centre);
+          angle spreads neighbours evenly. Drag to rotate.
         </div>
         <div style="display:flex;gap:6px;margin-bottom:6px;">
           <input type="text" id="viz-ego-docid"
@@ -9037,10 +9069,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                  title="Top-K neighbours">
           <button class="btn-primary" onclick="loadEgoRadial()">Show</button>
         </div>
-        <svg id="viz-ego-svg" width="100%" height="70vh" viewBox="-1.1 -1.1 2.2 2.2"
-             preserveAspectRatio="xMidYMid meet"
-             style="background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);border-radius:4px;"></svg>
-        <div id="viz-ego-hover" style="font-size:12px;color:var(--fg-muted);margin-top:6px;min-height:18px;"></div>
+        <div id="viz-ego-chart" class="viz-chart"></div>
       </div>
       <!-- Gap radar -->
       <div id="viz-radar-pane" class="viz-pane" style="display:none;">
@@ -9051,10 +9080,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           are penalised by any open gap naming the section.
         </div>
         <button class="btn-secondary" onclick="loadGapRadar()" style="margin-bottom:6px;">Load</button>
-        <svg id="viz-radar-svg" width="100%" height="70vh" viewBox="-1.25 -1.25 2.5 2.5"
-             preserveAspectRatio="xMidYMid meet"
-             style="background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);border-radius:4px;"></svg>
-        <div id="viz-radar-legend" style="font-size:11px;color:var(--fg-muted);margin-top:6px;"></div>
+        <div id="viz-radar-chart" class="viz-chart"></div>
       </div>
     </div>
   </div>
@@ -9817,12 +9843,73 @@ function switchKgTab(name) {{
   document.getElementById('kg-table-pane').style.display = (name === 'kg-table') ? 'block' : 'none';
 }}
 
-// ── Phase 54.6.11 — Visualize modal ────────────────────────────────────
-// One modal, six SVG tabs. Each loader + renderer is self-contained.
-function openVizModal() {{
+// ── Phase 54.6.12 — Visualize modal (ECharts rewrite) ──────────────────
+// One modal, six tabs, all backed by ECharts. Each tab has its own
+// chart instance cached in window._vizCharts so we don't reinit on
+// tab swaps — just resize the now-visible one.
+window._vizCharts = window._vizCharts || {{}};
+window._vizLoaded = window._vizLoaded || {{}};
+
+function _vizChart(id) {{
+  // Lazy-init ECharts instance bound to a container div.
+  if (window._vizCharts[id]) return window._vizCharts[id];
+  const el = document.getElementById(id);
+  if (!el || typeof echarts === 'undefined') return null;
+  const c = echarts.init(el, null, {{renderer: 'canvas'}});
+  window._vizCharts[id] = c;
+  // Keep all charts in sync with the viewport on window resize.
+  window.addEventListener('resize', () => c.resize());
+  return c;
+}}
+
+function openVizModal(tab) {{
+  // Close the top-bar dropdown if it was open.
+  const dd = document.getElementById('viz-dropdown');
+  if (dd) dd.classList.remove('open');
   openModal('viz-modal');
-  // Auto-load the topic map on first open; other tabs load lazily.
-  if (!window._vizTopicLoaded) loadTopicMap(false);
+  if (tab) switchVizTab(tab);
+  // Auto-load the active tab on first open.
+  const active = document.querySelector('#viz-modal .tab.active');
+  const name = (active && active.dataset.tab) || 'viz-topic';
+  _vizAutoLoad(name);
+}}
+
+// Top-bar dropdown toggle. Clicking outside closes it.
+function toggleVizDropdown(ev) {{
+  if (ev) ev.stopPropagation();
+  const dd = document.getElementById('viz-dropdown');
+  if (!dd) return;
+  const isOpen = dd.classList.toggle('open');
+  if (isOpen) {{
+    const onDocClick = (e) => {{
+      if (!dd.contains(e.target)) {{
+        dd.classList.remove('open');
+        document.removeEventListener('click', onDocClick);
+      }}
+    }};
+    setTimeout(() => document.addEventListener('click', onDocClick), 0);
+  }}
+}}
+
+function _vizAutoLoad(name) {{
+  if (name === 'viz-topic'     && !_vizLoaded['viz-topic'])     loadTopicMap(false);
+  if (name === 'viz-sunburst'  && !_vizLoaded['viz-sunburst'])  loadSunburst();
+  if (name === 'viz-timeline'  && !_vizLoaded['viz-timeline'])  loadTimeline();
+  if (name === 'viz-radar'     && !_vizLoaded['viz-radar'])     loadGapRadar();
+  // consensus + ego are user-driven (need input), so no auto-load.
+  // Always resize the visible chart to fix "0×0" initial-render bug.
+  const chartIdMap = {{
+    'viz-topic':     'viz-topic-chart',
+    'viz-sunburst':  'viz-sunburst-chart',
+    'viz-consensus': 'viz-consensus-chart',
+    'viz-timeline':  'viz-timeline-chart',
+    'viz-ego':       'viz-ego-chart',
+    'viz-radar':     'viz-radar-chart',
+  }};
+  const cid = chartIdMap[name];
+  if (cid && window._vizCharts[cid]) {{
+    setTimeout(() => window._vizCharts[cid].resize(), 20);
+  }}
 }}
 
 function switchVizTab(name) {{
@@ -9835,6 +9922,7 @@ function switchVizTab(name) {{
       if (p) p.style.display = (n === name) ? 'block' : 'none';
     }});
   document.getElementById('viz-status').textContent = '';
+  _vizAutoLoad(name);
 }}
 
 function _vizSetStatus(msg, kind) {{
@@ -9846,62 +9934,70 @@ function _vizSetStatus(msg, kind) {{
                  : 'var(--fg-muted)';
 }}
 
-// 1. Topic map ─────────────────────────────────────────────────────────
+// 1. Topic map — ECharts scatter with built-in zoom/pan + tooltips.
 async function loadTopicMap(refresh) {{
   _vizSetStatus('Loading topic map' + (refresh ? ' (refreshing UMAP — may take 5-60s)…' : '…'));
-  const svg = document.getElementById('viz-topic-svg');
-  svg.innerHTML = '';
   try {{
     const res = await fetch('/api/viz/topic-map' + (refresh ? '?refresh=true' : ''));
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
-    window._vizTopicLoaded = true;
+    _vizLoaded['viz-topic'] = true;
     if (!data.points || !data.points.length) {{
       _vizSetStatus(data.message || 'no points', 'error');
       return;
     }}
-    _vizSetStatus(data.n_papers + ' papers · ' + (data.clusters || []).length + ' clusters', 'ok');
-    _renderTopicMap(data);
+    _vizSetStatus(data.n_papers + ' papers · ' + (data.clusters || []).length + ' clusters · scroll to zoom, drag to pan', 'ok');
+    const chart = _vizChart('viz-topic-chart');
+    if (!chart) return;
+    const clusterColor = {{}};
+    (data.clusters || []).forEach(c => {{ clusterColor[c.id] = c.color; }});
+    // One series per cluster so the ECharts legend works for toggles.
+    const byCluster = {{}};
+    data.points.forEach(p => {{
+      const key = (p.cluster == null) ? 'noise' : String(p.cluster);
+      (byCluster[key] = byCluster[key] || []).push(p);
+    }});
+    const series = Object.keys(byCluster).map(key => ({{
+      name: 'Cluster ' + key,
+      type: 'scatter',
+      symbolSize: 7,
+      itemStyle: {{color: clusterColor[key] || '#888'}},
+      data: byCluster[key].map(p => ({{
+        value: [p.x, p.y],
+        name: p.title,
+        year: p.year,
+        author: p.first_author,
+        document_id: p.document_id,
+      }})),
+    }}));
+    chart.setOption({{
+      tooltip: {{
+        trigger: 'item',
+        formatter: p => (p.data.year || '?') + ' · ' + (p.data.author || '?')
+          + '<br/><strong>' + (p.data.name || '(untitled)').slice(0, 120) + '</strong>',
+      }},
+      legend: {{type: 'scroll', bottom: 2, textStyle: {{fontSize: 10}}}},
+      xAxis: {{show: false, min: -1.1, max: 1.1, type: 'value'}},
+      yAxis: {{show: false, min: -1.1, max: 1.1, type: 'value'}},
+      dataZoom: [
+        {{type: 'inside', xAxisIndex: 0, filterMode: 'none'}},
+        {{type: 'inside', yAxisIndex: 0, filterMode: 'none'}},
+      ],
+      series: series,
+    }}, true);
+    // Click → copy the document_id into the ego-radial input, handy flow.
+    chart.on('click', params => {{
+      if (params && params.data && params.data.document_id) {{
+        const inp = document.getElementById('viz-ego-docid');
+        if (inp) inp.value = params.data.document_id;
+      }}
+    }});
   }} catch (exc) {{
     _vizSetStatus('Failed: ' + exc.message, 'error');
   }}
 }}
 
-function _renderTopicMap(data) {{
-  const svg = document.getElementById('viz-topic-svg');
-  let html = '';
-  // Cluster legend.
-  const legend = document.getElementById('viz-topic-legend');
-  legend.innerHTML = (data.clusters || []).slice(0, 12).map(c =>
-    '<span style="display:inline-flex;align-items:center;gap:3px;margin-right:8px;">'
-    + '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:'
-    + c.color + ';"></span>' + _escHtml(c.name) + ' (' + c.count + ')</span>'
-  ).join('');
-  // Points.
-  const clusterColor = {{}};
-  (data.clusters || []).forEach(c => {{ clusterColor[c.id] = c.color; }});
-  data.points.forEach((p, i) => {{
-    const color = (p.cluster != null && clusterColor[String(p.cluster)]) || '#888';
-    html += '<circle cx="' + p.x.toFixed(4) + '" cy="' + p.y.toFixed(4) + '" '
-      + 'r="0.012" fill="' + color + '" fill-opacity="0.65" '
-      + 'data-idx="' + i + '" class="viz-topic-dot" '
-      + 'style="cursor:pointer;"/>';
-  }});
-  svg.innerHTML = html;
-  svg.querySelectorAll('.viz-topic-dot').forEach(el => {{
-    el.addEventListener('mouseenter', () => {{
-      const p = data.points[parseInt(el.dataset.idx, 10)];
-      document.getElementById('viz-topic-hover').textContent =
-        (p.year || '?') + ' · ' + (p.first_author || '?') + ' — ' + (p.title || '(untitled)');
-      el.setAttribute('r', '0.022');
-    }});
-    el.addEventListener('mouseleave', () => {{
-      el.setAttribute('r', '0.012');
-    }});
-  }});
-}}
-
-// 2. Sunburst ─────────────────────────────────────────────────────────
+// 2. RAPTOR sunburst — native ECharts sunburst with drill-in + zoom-out.
 async function loadSunburst() {{
   _vizSetStatus('Loading RAPTOR tree…');
   try {{
@@ -9909,119 +10005,83 @@ async function loadSunburst() {{
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const tree = await res.json();
     if (tree.message) {{ _vizSetStatus(tree.message, 'error'); return; }}
-    _vizSetStatus(tree.total_nodes + ' RAPTOR nodes', 'ok');
-    _renderSunburst(tree);
+    _vizSetStatus(tree.total_nodes + ' RAPTOR nodes · click a slice to zoom, click centre to zoom out', 'ok');
+    _vizLoaded['viz-sunburst'] = true;
+    const chart = _vizChart('viz-sunburst-chart');
+    if (!chart) return;
+    chart.setOption({{
+      tooltip: {{trigger: 'item',
+        formatter: p => 'L' + (p.data.level || 0) + ' · '
+          + (p.data.n_docs || 0) + ' docs<br/>' + (p.name || '').slice(0, 160),
+      }},
+      series: [{{
+        type: 'sunburst',
+        radius: ['0', '95%'],
+        nodeClick: 'rootToNode',
+        sort: null,
+        emphasis: {{focus: 'ancestor'}},
+        levels: [{{}}, {{itemStyle: {{borderWidth: 2}}}}],
+        data: (tree.children && tree.children.length) ? tree.children : [{{name: 'empty', value: 1}}],
+      }}],
+    }}, true);
   }} catch (exc) {{
     _vizSetStatus('Failed: ' + exc.message, 'error');
   }}
 }}
 
-function _renderSunburst(tree) {{
-  const svg = document.getElementById('viz-sunburst-svg');
-  // Simple radial partition. Flatten and compute angle ranges per node.
-  let arcs = [];
-  function _layout(node, depth, a0, a1) {{
-    if (!node || depth > 6) return;
-    arcs.push({{node, depth, a0, a1}});
-    const kids = node.children || [];
-    if (!kids.length) return;
-    const total = kids.reduce((s, k) => s + (k.value || 1), 0) || 1;
-    let a = a0;
-    for (const k of kids) {{
-      const span = (a1 - a0) * ((k.value || 1) / total);
-      _layout(k, depth + 1, a, a + span);
-      a += span;
-    }}
-  }}
-  _layout(tree, 0, 0, Math.PI * 2);
-  const ringStep = 0.15;
-  let html = '';
-  arcs.forEach((a, i) => {{
-    if (a.depth === 0) return;
-    const r1 = a.depth * ringStep;
-    const r2 = r1 + ringStep - 0.02;
-    const x1 = r1 * Math.cos(a.a0), y1 = r1 * Math.sin(a.a0);
-    const x2 = r2 * Math.cos(a.a0), y2 = r2 * Math.sin(a.a0);
-    const x3 = r2 * Math.cos(a.a1), y3 = r2 * Math.sin(a.a1);
-    const x4 = r1 * Math.cos(a.a1), y4 = r1 * Math.sin(a.a1);
-    const large = (a.a1 - a.a0) > Math.PI ? 1 : 0;
-    const fill = `hsl(${{(i * 37) % 360}}, 55%, ${{65 - a.depth * 5}}%)`;
-    html += '<path d="M ' + x1.toFixed(4) + ' ' + y1.toFixed(4)
-      + ' L ' + x2.toFixed(4) + ' ' + y2.toFixed(4)
-      + ' A ' + r2.toFixed(4) + ' ' + r2.toFixed(4) + ' 0 ' + large + ' 1 '
-      + x3.toFixed(4) + ' ' + y3.toFixed(4)
-      + ' L ' + x4.toFixed(4) + ' ' + y4.toFixed(4)
-      + ' A ' + r1.toFixed(4) + ' ' + r1.toFixed(4) + ' 0 ' + large + ' 0 '
-      + x1.toFixed(4) + ' ' + y1.toFixed(4) + ' Z" '
-      + 'fill="' + fill + '" stroke="#fff" stroke-width="0.004" '
-      + 'data-idx="' + i + '" class="viz-sun-arc" style="cursor:pointer;"/>';
-  }});
-  svg.innerHTML = html;
-  svg.querySelectorAll('.viz-sun-arc').forEach(el => {{
-    el.addEventListener('mouseenter', () => {{
-      const a = arcs[parseInt(el.dataset.idx, 10)];
-      const n = a.node;
-      document.getElementById('viz-sunburst-hover').textContent =
-        `L${{n.level}} · ${{n.n_docs || 0}} docs · ${{n.name || ''}}`;
-    }});
-  }});
-}}
-
-// 3. Consensus landscape ───────────────────────────────────────────────
+// 3. Consensus landscape — scatter by consensus_level with ECharts tooltips.
 async function loadConsensusLandscape() {{
   const topic = (document.getElementById('viz-consensus-topic').value || '').trim();
   if (!topic) {{ alert('Enter a topic first.'); return; }}
   _vizSetStatus('Running wiki consensus (30s-2min)…');
-  const svg = document.getElementById('viz-consensus-svg');
-  svg.innerHTML = '';
   const fd = new FormData();
   fd.append('topic', topic);
   try {{
     const res = await fetch('/api/viz/consensus-landscape', {{method:'POST', body: fd}});
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
+    _vizLoaded['viz-consensus'] = true;
     _vizSetStatus((data.claims || []).length + ' claim(s)', 'ok');
-    _renderConsensusLandscape(data);
+    const chart = _vizChart('viz-consensus-chart');
+    if (!chart) return;
+    const colors = {{strong:'#059669', moderate:'#0284c7',
+                    weak:'#f59e0b', contested:'#dc2626',
+                    unknown:'#888'}};
+    const byLevel = {{}};
+    (data.claims || []).forEach(c => {{
+      (byLevel[c.consensus_level || 'unknown']
+        = byLevel[c.consensus_level || 'unknown'] || []).push(c);
+    }});
+    const series = Object.keys(byLevel).map(level => ({{
+      name: level,
+      type: 'scatter',
+      symbolSize: d => 10 + Math.min(10, (d[2] || 1)),
+      itemStyle: {{color: colors[level] || '#888', opacity: 0.75}},
+      data: byLevel[level].map(c => ({{
+        value: [c.x, c.y, (c.supporting || []).length + (c.contradicting || []).length],
+        name: c.claim,
+        trend: c.trend,
+      }})),
+    }}));
+    chart.setOption({{
+      tooltip: {{trigger: 'item',
+        formatter: p => '<strong>' + p.seriesName + '</strong>'
+          + (p.data.trend ? ' · ' + p.data.trend : '')
+          + '<br/>' + p.data.value[0] + ' supporting · ' + p.data.value[1] + ' contradicting'
+          + '<br/>' + (p.data.name || '').slice(0, 180),
+      }},
+      legend: {{bottom: 2}},
+      grid: {{left: 50, bottom: 50, right: 20, top: 20}},
+      xAxis: {{type: 'value', name: 'supporting papers →', nameLocation: 'middle', nameGap: 30}},
+      yAxis: {{type: 'value', name: 'contradicting →', nameLocation: 'middle', nameGap: 30}},
+      series: series,
+    }}, true);
   }} catch (exc) {{
     _vizSetStatus('Failed: ' + exc.message, 'error');
   }}
 }}
 
-function _renderConsensusLandscape(data) {{
-  const svg = document.getElementById('viz-consensus-svg');
-  const w = svg.clientWidth || 900, h = svg.clientHeight || 500;
-  svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
-  const colors = {{strong:'#059669', moderate:'#0284c7', weak:'#f59e0b', contested:'#dc2626'}};
-  const claims = data.claims || [];
-  if (!claims.length) {{ svg.innerHTML = '<text x="20" y="30" fill="#888" font-size="13">No claims returned.</text>'; return; }}
-  const maxX = Math.max(1, ...claims.map(c => c.x));
-  const maxY = Math.max(1, ...claims.map(c => c.y));
-  const pad = 50;
-  const sx = v => pad + (v / maxX) * (w - 2*pad);
-  const sy = v => h - pad - (v / maxY) * (h - 2*pad);
-  let html = '';
-  // Axes
-  html += `<line x1="${{pad}}" y1="${{h-pad}}" x2="${{w-pad}}" y2="${{h-pad}}" stroke="#aaa"/>`;
-  html += `<line x1="${{pad}}" y1="${{pad}}" x2="${{pad}}" y2="${{h-pad}}" stroke="#aaa"/>`;
-  html += `<text x="${{w/2}}" y="${{h-10}}" text-anchor="middle" font-size="12" fill="#555">supporting papers →</text>`;
-  html += `<text x="15" y="${{h/2}}" text-anchor="middle" font-size="12" fill="#555" transform="rotate(-90,15,${{h/2}})">contradicting →</text>`;
-  claims.forEach((c, i) => {{
-    const cx = sx(c.x), cy = sy(c.y);
-    const col = colors[c.consensus_level] || '#888';
-    html += `<circle cx="${{cx}}" cy="${{cy}}" r="8" fill="${{col}}" fill-opacity="0.65" stroke="${{col}}" data-idx="${{i}}" class="viz-cl-dot" style="cursor:pointer;"/>`;
-  }});
-  svg.innerHTML = html;
-  svg.querySelectorAll('.viz-cl-dot').forEach(el => {{
-    el.addEventListener('mouseenter', () => {{
-      const c = claims[parseInt(el.dataset.idx, 10)];
-      document.getElementById('viz-consensus-info').innerHTML =
-        '<strong>' + _escHtml(c.consensus_level) + '</strong> · '
-        + (c.x) + ' supp · ' + (c.y) + ' contra — ' + _escHtml(c.claim);
-    }});
-  }});
-}}
-
-// 4. Timeline river ────────────────────────────────────────────────────
+// 4. Timeline river — ECharts stacked line with dataZoom brush.
 async function loadTimeline() {{
   _vizSetStatus('Loading timeline…');
   try {{
@@ -10029,65 +10089,42 @@ async function loadTimeline() {{
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     if (!(data.years || []).length) {{ _vizSetStatus('no data', 'error'); return; }}
-    _vizSetStatus(data.years.length + ' years · ' + data.series.length + ' clusters', 'ok');
-    _renderTimeline(data);
+    _vizLoaded['viz-timeline'] = true;
+    _vizSetStatus(data.years.length + ' years · ' + data.series.length + ' clusters · drag below axis to zoom', 'ok');
+    const chart = _vizChart('viz-timeline-chart');
+    if (!chart) return;
+    const series = (data.series || []).map(ser => ({{
+      name: 'Cluster ' + ser.cluster,
+      type: 'line', stack: 'total',
+      areaStyle: {{opacity: 0.85}},
+      emphasis: {{focus: 'series'}},
+      itemStyle: {{color: ser.color}},
+      showSymbol: false,
+      smooth: 0.15,
+      data: ser.values,
+    }}));
+    chart.setOption({{
+      tooltip: {{trigger: 'axis'}},
+      legend: {{type: 'scroll', top: 0, textStyle: {{fontSize: 10}}}},
+      grid: {{top: 30, left: 45, right: 20, bottom: 70}},
+      xAxis: {{type: 'category', data: data.years, boundaryGap: false}},
+      yAxis: {{type: 'value', name: 'papers'}},
+      dataZoom: [
+        {{type: 'inside'}},
+        {{type: 'slider', height: 20, bottom: 25}},
+      ],
+      series: series,
+    }}, true);
   }} catch (exc) {{
     _vizSetStatus('Failed: ' + exc.message, 'error');
   }}
 }}
 
-function _renderTimeline(data) {{
-  const svg = document.getElementById('viz-timeline-svg');
-  const w = svg.clientWidth || 900, h = svg.clientHeight || 500;
-  svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
-  const years = data.years;
-  const series = data.series;
-  const pad = 40;
-  const nY = years.length;
-  const sx = i => pad + (i / Math.max(1, nY - 1)) * (w - 2*pad);
-  // Stack the series.
-  const stack = years.map(() => 0);
-  const maxTotal = Math.max(1, ...years.map((_, i) =>
-    series.reduce((s, ser) => s + (ser.values[i] || 0), 0)
-  ));
-  const sy = v => h - pad - (v / maxTotal) * (h - 2*pad);
-  let html = '';
-  // Year axis ticks (every ~5 years)
-  years.forEach((y, i) => {{
-    if (i % 5 === 0 || i === nY - 1) {{
-      html += `<text x="${{sx(i)}}" y="${{h-pad+14}}" text-anchor="middle" font-size="10" fill="#666">${{y}}</text>`;
-    }}
-  }});
-  // Stacked areas
-  series.forEach((ser, sidx) => {{
-    let top = '', bot = '';
-    ser.values.forEach((v, i) => {{
-      const y0 = sy(stack[i]);
-      const y1 = sy(stack[i] + v);
-      top += (i === 0 ? 'M ' : ' L ') + sx(i).toFixed(1) + ' ' + y1.toFixed(1);
-      bot = ' L ' + sx(i).toFixed(1) + ' ' + y0.toFixed(1) + bot;
-    }});
-    ser.values.forEach((v, i) => {{ stack[i] += v; }});
-    html += `<path d="${{top}}${{bot}} Z" fill="${{ser.color}}" fill-opacity="0.85" data-sidx="${{sidx}}" class="viz-tl-series" style="cursor:pointer;"/>`;
-  }});
-  svg.innerHTML = html;
-  svg.querySelectorAll('.viz-tl-series').forEach(el => {{
-    el.addEventListener('mouseenter', () => {{
-      const s = series[parseInt(el.dataset.sidx, 10)];
-      document.getElementById('viz-timeline-hover').textContent =
-        'Cluster ' + s.cluster + ' · ' + s.total + ' papers';
-      el.setAttribute('fill-opacity', '1.0');
-    }});
-    el.addEventListener('mouseleave', () => el.setAttribute('fill-opacity', '0.85'));
-  }});
-}}
-
-// 5. Ego radial ────────────────────────────────────────────────────────
+// 5. Ego radial — polar scatter; drag to rotate, wheel to zoom.
 async function loadEgoRadial() {{
   let docId = (document.getElementById('viz-ego-docid').value || '').trim();
   if (!docId) {{ alert('Enter a document UUID or the first ~8 chars.'); return; }}
   const k = parseInt(document.getElementById('viz-ego-k').value || '20', 10);
-  // Resolve short id → full UUID if needed.
   if (docId.length < 32) {{
     try {{
       const rr = await fetch('/api/catalog?q=' + encodeURIComponent(docId) + '&limit=5');
@@ -10103,83 +10140,96 @@ async function loadEgoRadial() {{
     const res = await fetch('/api/viz/ego-radial?document_id=' + encodeURIComponent(docId) + '&k=' + k);
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
-    _vizSetStatus(data.neighbours.length + ' neighbours', 'ok');
-    _renderEgoRadial(data);
+    _vizLoaded['viz-ego'] = true;
+    _vizSetStatus(data.neighbours.length + ' neighbours around ' + (data.centre.title || docId).slice(0, 60), 'ok');
+    const chart = _vizChart('viz-ego-chart');
+    if (!chart) return;
+    // ECharts polar uses (radius, angle). Our API returned x,y so
+    // reverse-derive r + θ for polar coords.
+    const neighbours = (data.neighbours || []).map(n => {{
+      const r = Math.sqrt(n.x*n.x + n.y*n.y);
+      const theta = Math.atan2(n.y, n.x) * 180 / Math.PI;
+      return {{r, theta, ...n}};
+    }});
+    chart.setOption({{
+      tooltip: {{trigger: 'item',
+        formatter: p => (p.data.score != null ? 'sim ' + p.data.score.toFixed(3) + ' · ' : '')
+          + (p.data.year || '?') + ' · ' + (p.data.author || '?')
+          + '<br/>' + (p.data.name || '').slice(0, 180),
+      }},
+      polar: {{radius: '80%'}},
+      angleAxis: {{type: 'value', startAngle: 0, min: -180, max: 180, show: false}},
+      radiusAxis: {{type: 'value', max: 1.0, show: false}},
+      series: [
+        // Edges as thin lines from centre to each neighbour.
+        {{type: 'line', coordinateSystem: 'polar', showSymbol: false,
+          lineStyle: {{color: '#bbb', width: 0.8}},
+          data: neighbours.flatMap(n => [[0, 0], [n.r, n.theta], [NaN, NaN]]),
+        }},
+        // Centre.
+        {{type: 'scatter', coordinateSystem: 'polar', symbolSize: 22,
+          itemStyle: {{color: '#0284c7'}},
+          data: [{{value: [0, 0], name: data.centre.title || '',
+                  year: data.centre.year, author: data.centre.first_author}}],
+          label: {{show: true, position: 'top', fontSize: 11,
+                  fontWeight: 'bold', color: '#0284c7',
+                  formatter: (data.centre.title || '').slice(0, 40)}},
+        }},
+        // Neighbours.
+        {{type: 'scatter', coordinateSystem: 'polar', symbolSize: 14,
+          itemStyle: {{color: '#059669', opacity: 0.8}},
+          data: neighbours.map(n => ({{
+            value: [n.r, n.theta],
+            name: n.title || '',
+            year: n.year, author: n.first_author, score: n.score,
+            document_id: n.document_id,
+          }})),
+        }},
+      ],
+    }}, true);
+    chart.off('click');
+    chart.on('click', params => {{
+      if (params && params.seriesIndex === 2 && params.data.document_id) {{
+        document.getElementById('viz-ego-docid').value = params.data.document_id;
+      }}
+    }});
   }} catch (exc) {{
     _vizSetStatus('Failed: ' + exc.message, 'error');
   }}
 }}
 
-function _renderEgoRadial(data) {{
-  const svg = document.getElementById('viz-ego-svg');
-  let html = '';
-  // Centre
-  html += '<circle cx="0" cy="0" r="0.05" fill="#0284c7"/>';
-  html += '<text x="0" y="-0.09" text-anchor="middle" font-size="0.05" fill="#0284c7" font-weight="bold">' + _escHtml((data.centre.title || '').slice(0, 40)) + '</text>';
-  // Neighbours
-  (data.neighbours || []).forEach((n, i) => {{
-    html += '<line x1="0" y1="0" x2="' + n.x.toFixed(4) + '" y2="' + n.y.toFixed(4) + '" stroke="#aaa" stroke-width="0.002"/>';
-    html += '<circle cx="' + n.x.toFixed(4) + '" cy="' + n.y.toFixed(4) + '" r="0.025" fill="#059669" fill-opacity="0.75" data-idx="' + i + '" class="viz-ego-dot" style="cursor:pointer;"/>';
-  }});
-  svg.innerHTML = html;
-  svg.querySelectorAll('.viz-ego-dot').forEach(el => {{
-    el.addEventListener('mouseenter', () => {{
-      const n = data.neighbours[parseInt(el.dataset.idx, 10)];
-      document.getElementById('viz-ego-hover').textContent =
-        n.score.toFixed(3) + ' · ' + (n.year || '?') + ' · ' + (n.first_author || '?') + ' — ' + (n.title || '');
-    }});
-  }});
-}}
-
-// 6. Gap radar ─────────────────────────────────────────────────────────
+// 6. Gap radar — native ECharts radar chart.
 async function loadGapRadar() {{
   _vizSetStatus('Loading gap radar…');
   try {{
     const res = await fetch('/api/viz/gap-radar');
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
+    _vizLoaded['viz-radar'] = true;
     _vizSetStatus(data.chapters.length + ' chapters', 'ok');
-    _renderGapRadar(data);
+    const chart = _vizChart('viz-radar-chart');
+    if (!chart) return;
+    chart.setOption({{
+      tooltip: {{trigger: 'item'}},
+      legend: {{type: 'scroll', bottom: 2, textStyle: {{fontSize: 10}}}},
+      radar: {{
+        indicator: (data.axes || []).map(a => ({{name: a, max: 1.0}})),
+        radius: '65%',
+        splitNumber: 4,
+        axisName: {{color: '#555', fontSize: 12}},
+      }},
+      series: [{{
+        type: 'radar', areaStyle: {{opacity: 0.12}},
+        emphasis: {{areaStyle: {{opacity: 0.35}}}},
+        data: (data.chapters || []).map(ch => ({{
+          name: 'Ch.' + ch.number + ' ' + ch.title,
+          value: ch.values,
+        }})),
+      }}],
+    }}, true);
   }} catch (exc) {{
     _vizSetStatus('Failed: ' + exc.message, 'error');
   }}
-}}
-
-function _renderGapRadar(data) {{
-  const svg = document.getElementById('viz-radar-svg');
-  const axes = data.axes;
-  const n = axes.length;
-  const rings = [0.25, 0.5, 0.75, 1.0];
-  let html = '';
-  // Rings + axes
-  rings.forEach(r => {{
-    html += '<circle cx="0" cy="0" r="' + r + '" fill="none" stroke="#ddd" stroke-width="0.004"/>';
-  }});
-  axes.forEach((ax, i) => {{
-    const theta = 2*Math.PI * i / n - Math.PI/2;
-    const x = Math.cos(theta), y = Math.sin(theta);
-    html += '<line x1="0" y1="0" x2="' + x.toFixed(4) + '" y2="' + y.toFixed(4) + '" stroke="#ccc" stroke-width="0.003"/>';
-    html += '<text x="' + (x*1.1).toFixed(4) + '" y="' + (y*1.1).toFixed(4) + '" font-size="0.06" text-anchor="middle" fill="#555">' + ax + '</text>';
-  }});
-  // Chapter polygons
-  const colors = ['#0284c7','#059669','#dc2626','#7c3aed','#f59e0b','#db2777','#0891b2','#65a30d'];
-  (data.chapters || []).forEach((ch, idx) => {{
-    const color = colors[idx % colors.length];
-    const pts = ch.values.map((v, i) => {{
-      const theta = 2*Math.PI * i / n - Math.PI/2;
-      return [Math.cos(theta)*v, Math.sin(theta)*v];
-    }});
-    const d = pts.map(p => p[0].toFixed(4) + ',' + p[1].toFixed(4)).join(' ');
-    html += '<polygon points="' + d + '" fill="' + color + '" fill-opacity="0.12" stroke="' + color + '" stroke-width="0.006"/>';
-  }});
-  svg.innerHTML = html;
-  // Legend
-  const leg = document.getElementById('viz-radar-legend');
-  leg.innerHTML = (data.chapters || []).map((ch, idx) =>
-    '<span style="margin-right:10px;"><span style="display:inline-block;width:10px;height:10px;background:'
-    + colors[idx % colors.length] + ';border-radius:2px;margin-right:3px;"></span>Ch.'
-    + ch.number + ' ' + _escHtml(ch.title) + '</span>'
-  ).join('');
 }}
 
 let _kgPredicatesLoaded = false;

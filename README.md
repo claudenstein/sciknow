@@ -55,7 +55,7 @@ A local-first scientific knowledge system that ingests papers, builds a compiled
 - **Web reader** — browser-based authoring with a full-width top bar for app-level navigation (Plan, Settings, Dashboard, Corkboard, History, Snapshot, Export, Ask Corpus, Wiki Query, KG, Browse Papers, Tools, Setup, Projects) separated from the per-chapter writing toolbar (Edit, Autowrite, Write, Review, Revise, Verify, Insert Citations, Scores, Argue, Gaps, Bundles, Read). Live LLM streaming, corkboard view, chapter reader, argument maps, citation popovers, snapshots, version diffs
 - **Knowledge wiki in the browser** — the Wiki modal has four tabs: Query (RAG-streamed answer over compiled pages), Browse (paginated page index with detail view, KaTeX math, backlinks, related pages, per-page inline Ask + personal "My take" notes), **Lint** (broken links, stale pages, orphaned concepts, optional LLM contradiction detection, **Extract / Backfill KG** button for wikis compiled before the combined entity+KG extraction step), **Consensus** (strong / moderate / weak / contested claim classification for a topic with supporting vs contradicting papers)
 - **Regenerate chapter outline from the browser** — the Plans modal now has a "📖 Generate outline" button that runs `sciknow book outline` against your paper library, streams the LLM response, parses the proposed chapter list, and adds any new chapters without touching existing drafts
-- **Six-way corpus visualization** — "📊 Visualize" button in the top bar opens a modal with six SVG tabs driven by live data: **Topic map** (UMAP 2D of abstract embeddings, coloured by BERTopic cluster, cached per project), **RAPTOR sunburst** (hierarchical cluster tree), **Consensus landscape** (claims scattered on supporting × contradicting axes, coloured by consensus_level — runs `wiki consensus` synchronously), **Timeline river** (stacked-area of papers-per-cluster over years), **Ego radial** (top-K nearest papers around one document on the abstract-embedding cosine), and **Gap radar** (per-chapter section-coverage polygon derived from book_gaps)
+- **Six-way corpus visualization** — **📊 Visualize ▾** dropdown in the top bar with six direct links, all backed by ECharts (zoom / pan / tooltips / legend toggles built in). **Topic map** (UMAP 2D of abstract embeddings, coloured by BERTopic cluster, cached per project), **RAPTOR sunburst** (drill-in hierarchical cluster tree), **Consensus landscape** (claims scattered on supporting × contradicting axes, coloured by consensus_level — runs `wiki consensus` synchronously), **Timeline river** (stacked-area of papers-per-cluster over years with brush-zoom), **Ego radial** (top-K nearest papers around one document on the abstract-embedding cosine, drawn on a polar plot), and **Gap radar** (per-chapter section-coverage polygon derived from `book_gaps`)
 - **Compute dashboard** — book-level GPU compute ledger: cumulative tokens, wall time, and per-operation breakdown (write/review/revise/argue/gaps/autowrite) across every LLM call
 - **Tools panel** — CLI-parity in the browser: hybrid corpus search, similarity search, multi-paper synthesis, topic-cluster browser, and five corpus-expansion tabs (Enrich / Expand citations / Expand by author / Inbound cites / Topic search / Coauthors) each with the preview-and-select flow. Cleanup-downloads button at the top of the Corpus tab reclaims disk from already-ingested duplicates in one click
 - **Dashboard gap integration** — the Open Gaps panel has a top-level "🔍 Auto-expand from these gaps" button (runs `book auto-expand` and opens the preview modal with all gaps merged), plus a per-gap "Expand" button that prefills the Topic-search subtab with that specific gap's description
@@ -100,6 +100,50 @@ sciknow book serve "My Book"              # open browser, write from there
 sciknow book autowrite "My Book" --full   # or let it write autonomously
 sciknow book export "My Book" --format latex -o manuscript.tex
 ```
+
+### See everything working end-to-end
+
+The GUI has a lot of surfaces; here's the shortest path from a fresh install
+to every feature populated (every step is idempotent / resumable):
+
+```bash
+# 1. Get a corpus in
+uv run sciknow ingest directory ./papers/          # PDFs → Postgres + Qdrant (parallel OK)
+
+# 2. Derive metadata + structure
+uv run sciknow db enrich                           # fill missing DOIs via Crossref / OpenAlex
+uv run sciknow catalog cluster                     # BERTopic → paper_metadata.topic_cluster
+                                                   #            (feeds the Topic map viz)
+uv run sciknow catalog raptor build                # hierarchical summary tree
+                                                   #            (feeds the RAPTOR sunburst viz)
+
+# 3. Compile the wiki (paper summaries + KG extraction)
+uv run sciknow wiki compile                        # summaries + concept pages
+uv run sciknow wiki extract-kg                     # backfill knowledge_graph triples
+                                                   #            if you're upgrading a wiki
+                                                   #            built before Phase 54.6.8
+
+# 4. Start the web reader (the browser UI uses every surface above)
+uv run sciknow book serve "My Book"                # http://localhost:8765 by default
+```
+
+Once the web reader is up, the top bar gives you:
+
+| Action | What to click |
+|---|---|
+| Browse the compiled wiki (with Year + Authors cols) | 📚 Wiki Query → Browse tab |
+| Lint the wiki + backfill KG | 📚 Wiki Query → Lint tab → "Extract / Backfill KG" |
+| Consensus map for a topic | 📚 Wiki Query → Consensus tab |
+| See the KG in 3D | 🔗 KG (+ the Font dropdown for label typography) |
+| Grow the corpus with preview-and-select | 🛠 Tools → Corpus tab → any of the 6 expansion subtabs |
+| Retry downloads that had no OA PDF | 🛠 Tools → Corpus tab → 📋 Pending downloads |
+| Clean up duplicate downloads | 🛠 Tools → Corpus tab → 🧹 Cleanup downloads |
+| Ask the corpus a question | 🔍 Ask Corpus |
+| Regenerate a chapter outline | 📝 Plan → 📖 Generate outline |
+| Auto-insert citations in a draft | toolbar (per-chapter row) → 📑 Insert Citations |
+| Auto-expand corpus from book gaps | Dashboard → Open Gaps → 🔍 Auto-expand from these gaps |
+| Visualize the corpus | **📊 Visualize ▾** → pick one of six views |
+| Manage projects (switch active / create / destroy) | 📁 Projects |
 
 ### Multi-project workflow
 
