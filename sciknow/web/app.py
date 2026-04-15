@@ -7248,16 +7248,45 @@ body.task-bar-open {{ padding-top: 40px; }}
 <!-- Phase 54.6 — full-width top bar with app-level navigation (right-aligned icon + text buttons).
      The per-chapter writing toolbar stays inside <main> so it scrolls with the draft. -->
 <header class="topbar" id="topbar">
+  <!-- Phase 54.6.16 — consolidated top bar. Plan + Dashboard stay as
+       high-frequency direct buttons. Everything else lives in one of
+       four dropdowns: Book / Explore / Visualize / Manage. The
+       Knowledge Graph moves under Visualize since it's the seventh
+       data-exploration view. -->
   <button class="nav-btn" onclick="openPlanModal()" title="View / edit / regenerate the book plan (the leitmotiv)">&#128221; Plan</button>
-  <button class="nav-btn" onclick="openBookSettings()" title="Consolidated per-book settings: title, description, plan, length target, style fingerprint">&#9881; Settings</button>
   <button class="nav-btn" onclick="showDashboard()" title="Book dashboard with stats + heatmap">&#128200; Dashboard</button>
-  <!-- Phase 54.6.12 — Visualize dropdown: six distinct links each open
-       the modal on the right tab. Keeps the top bar tight while still
-       giving one-click access to every view. -->
+  <!-- Book — state + output surfaces for the current book -->
+  <div class="nav-dropdown" id="book-dropdown">
+    <button class="nav-btn" onclick="toggleNavDropdown('book-dropdown', event)"
+            title="Book-level surfaces: visual browse, history, snapshots, export, settings">
+      &#128214; Book &#9662;
+    </button>
+    <div class="nav-dropdown-menu" role="menu">
+      <button role="menuitem" onclick="showCorkboard()">&#128204; Corkboard</button>
+      <button role="menuitem" onclick="showVersions()">&#128344; History</button>
+      <button role="menuitem" onclick="takeSnapshot()">&#128248; Snapshot</button>
+      <button role="menuitem" onclick="openExportModal()">&#128229; Export</button>
+      <button role="menuitem" onclick="openBookSettings()">&#9881; Settings</button>
+    </div>
+  </div>
+  <!-- Explore — corpus query surfaces -->
+  <div class="nav-dropdown" id="explore-dropdown">
+    <button class="nav-btn" onclick="toggleNavDropdown('explore-dropdown', event)"
+            title="Query the corpus: RAG, compiled wiki, paper catalog">
+      &#128269; Explore &#9662;
+    </button>
+    <div class="nav-dropdown-menu" role="menu">
+      <button role="menuitem" onclick="openAskModal()">&#128270; Ask Corpus</button>
+      <button role="menuitem" onclick="openWikiModal()">&#128218; Wiki Query</button>
+      <button role="menuitem" onclick="openCatalogModal()">&#128194; Browse Papers</button>
+    </div>
+  </div>
+  <!-- Visualize — seven views of the corpus (KG + the six Viz tabs) -->
   <div class="nav-dropdown" id="viz-dropdown">
-    <button class="nav-btn" onclick="toggleVizDropdown(event)"
-            title="Six visualizations of the corpus">&#128202; Visualize &#9662;</button>
+    <button class="nav-btn" onclick="toggleNavDropdown('viz-dropdown', event)"
+            title="Seven visualizations of the corpus">&#128202; Visualize &#9662;</button>
     <div class="nav-dropdown-menu" id="viz-dropdown-menu" role="menu">
+      <button role="menuitem" onclick="openKgModal()">&#128279; Knowledge Graph</button>
       <button role="menuitem" onclick="openVizModal('viz-topic')">&#127760; Topic map (UMAP)</button>
       <button role="menuitem" onclick="openVizModal('viz-sunburst')">&#127773; RAPTOR sunburst</button>
       <button role="menuitem" onclick="openVizModal('viz-consensus')">&#9878;&#65039; Consensus landscape</button>
@@ -7266,17 +7295,18 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button role="menuitem" onclick="openVizModal('viz-radar')">&#128504;&#65039; Gap radar</button>
     </div>
   </div>
-  <button class="nav-btn" onclick="showCorkboard()" title="Visual card-based view of the book">&#128204; Corkboard</button>
-  <button class="nav-btn" onclick="showVersions()" title="View version history and diffs">&#128344; History</button>
-  <button class="nav-btn" onclick="takeSnapshot()" title="Save a snapshot of current draft content">&#128248; Snapshot</button>
-  <button class="nav-btn" onclick="openExportModal()" title="Export this section, chapter, or the whole book to text or printable HTML/PDF">&#128229; Export</button>
-  <button class="nav-btn" onclick="openAskModal()" title="Full corpus RAG question (sciknow ask question)">&#128270; Ask Corpus</button>
-  <button class="nav-btn" onclick="openWikiModal()" title="Query the compiled knowledge wiki (sciknow wiki query)">&#128218; Wiki Query</button>
-  <button class="nav-btn" onclick="openKgModal()" title="Browse the knowledge graph (extracted entity-relationship triples)">&#128279; KG</button>
-  <button class="nav-btn" onclick="openCatalogModal()" title="Browse the paper catalog (sciknow catalog list)">&#128194; Browse Papers</button>
-  <button class="nav-btn" onclick="openToolsModal()" title="CLI tools in the GUI: search, synthesize, topics, corpus enrich/expand">&#128736; Tools</button>
-  <button class="nav-btn" onclick="openSetupWizard()" title="End-to-end setup: create project → upload PDFs → ingest → build indices → create book. Phase 46.F.">&#128295; Setup</button>
-  <button class="nav-btn" onclick="openProjectsModal()" title="Manage sciknow projects (list / switch / create / destroy). See `sciknow project --help`."><span id="proj-btn-label">&#128193; Projects</span></button>
+  <!-- Manage — admin + corpus growth -->
+  <div class="nav-dropdown" id="manage-dropdown">
+    <button class="nav-btn" onclick="toggleNavDropdown('manage-dropdown', event)"
+            title="Tools, setup, projects">
+      &#128736;&#65039; Manage &#9662;
+    </button>
+    <div class="nav-dropdown-menu" role="menu">
+      <button role="menuitem" onclick="openToolsModal()">&#128736; Tools &middot; CLI parity</button>
+      <button role="menuitem" onclick="openSetupWizard()">&#128295; Setup Wizard</button>
+      <button role="menuitem" onclick="openProjectsModal()"><span id="proj-btn-label">&#128193; Projects</span></button>
+    </div>
+  </div>
 </header>
 
 <div class="app-body">
@@ -10039,9 +10069,9 @@ function _vizChart(id) {{
 }}
 
 function openVizModal(tab) {{
-  // Close the top-bar dropdown if it was open.
-  const dd = document.getElementById('viz-dropdown');
-  if (dd) dd.classList.remove('open');
+  // Close whichever nav dropdown was open (Phase 54.6.16 — multiple
+  // possibilities: viz-dropdown, book-dropdown, etc).
+  document.querySelectorAll('.nav-dropdown.open').forEach(d => d.classList.remove('open'));
   openModal('viz-modal');
   _vizLoadPrefs();
   _vizWireControls();
@@ -10052,11 +10082,18 @@ function openVizModal(tab) {{
   _vizAutoLoad(name);
 }}
 
-// Top-bar dropdown toggle. Clicking outside closes it.
-function toggleVizDropdown(ev) {{
+// Generic top-bar dropdown toggle. Clicking outside (or opening another
+// dropdown) closes the current one. Phase 54.6.16 — generalised from
+// the legacy Visualize-only dropdown to support Book / Explore /
+// Visualize / Manage.
+function toggleNavDropdown(id, ev) {{
   if (ev) ev.stopPropagation();
-  const dd = document.getElementById('viz-dropdown');
+  const dd = document.getElementById(id);
   if (!dd) return;
+  // Close any other open nav-dropdowns first.
+  document.querySelectorAll('.nav-dropdown.open').forEach(other => {{
+    if (other !== dd) other.classList.remove('open');
+  }});
   const isOpen = dd.classList.toggle('open');
   if (isOpen) {{
     const onDocClick = (e) => {{
@@ -10068,6 +10105,9 @@ function toggleVizDropdown(ev) {{
     setTimeout(() => document.addEventListener('click', onDocClick), 0);
   }}
 }}
+// Back-compat shim for any external caller that still references the
+// old name. Delegates to the generic toggler.
+function toggleVizDropdown(ev) {{ toggleNavDropdown('viz-dropdown', ev); }}
 
 function _vizAutoLoad(name) {{
   if (name === 'viz-topic'     && !_vizLoaded['viz-topic'])     loadTopicMap(false);
@@ -10393,8 +10433,11 @@ async function loadTopicMap(refresh) {{
     const chart = _vizRender('viz-topic-chart', {{
       tooltip: {{
         trigger: 'item',
-        formatter: p => (p.data.year || '?') + ' · ' + (p.data.author || '?')
-          + '<br/><strong>' + (p.data.name || '(untitled)').slice(0, 120) + '</strong>',
+        confine: true, enterable: true, extraCssText:
+          'max-width: 480px; white-space: normal; word-break: break-word; '
+          + 'line-height: 1.45; padding: 10px 12px;',
+        formatter: p => (p.data.year || '?') + ' · ' + _escHtml(p.data.author || '?')
+          + '<br/><strong>' + _escHtml(p.data.name || '(untitled)') + '</strong>',
       }},
       legend: {{type: 'scroll', bottom: 2, textStyle: {{fontSize: 10}}}},
       xAxis: {{show: false, min: -1.1, max: 1.1, type: 'value'}},
@@ -10431,8 +10474,20 @@ async function loadSunburst() {{
     _vizLoaded['viz-sunburst'] = true;
     _vizRender('viz-sunburst-chart', {{
       tooltip: {{trigger: 'item',
+        // Phase 54.6.16 — show the FULL summary in the tooltip
+        // (previous 160-char slice hid the back half of every long
+        // RAPTOR summary). enterable + confine let the user hover
+        // into the tooltip and scroll, and keep it inside the viewport.
+        confine: true, enterable: true, extraCssText:
+          'max-width: 520px; white-space: normal; word-break: break-word; '
+          + 'line-height: 1.45; max-height: 60vh; overflow-y: auto; '
+          + 'padding: 10px 12px;',
         formatter: p => 'L' + (p.data.level || 0) + ' · '
-          + (p.data.n_docs || 0) + ' docs<br/>' + (p.name || '').slice(0, 160),
+          + (p.data.n_docs || 0) + ' docs'
+          + (p.data.year_min || p.data.year_max
+              ? ' · ' + (p.data.year_min || '?') + '–' + (p.data.year_max || '?')
+              : '')
+          + '<br/><br/>' + _escHtml(p.name || p.data.name || ''),
       }},
       series: [{{
         type: 'sunburst',
@@ -10500,10 +10555,14 @@ async function loadConsensusLandscape() {{
     }}));
     _vizRender('viz-consensus-chart', {{
       tooltip: {{trigger: 'item',
-        formatter: p => '<strong>' + p.seriesName + '</strong>'
-          + (p.data.trend ? ' · ' + p.data.trend : '')
+        confine: true, enterable: true, extraCssText:
+          'max-width: 520px; white-space: normal; word-break: break-word; '
+          + 'line-height: 1.45; max-height: 60vh; overflow-y: auto; '
+          + 'padding: 10px 12px;',
+        formatter: p => '<strong>' + _escHtml(p.seriesName) + '</strong>'
+          + (p.data.trend ? ' · ' + _escHtml(p.data.trend) : '')
           + '<br/>' + p.data.value[0] + ' supporting · ' + p.data.value[1] + ' contradicting'
-          + '<br/>' + (p.data.name || '').slice(0, 180),
+          + '<br/><br/>' + _escHtml(p.data.name || ''),
       }},
       legend: {{bottom: 2}},
       grid: {{left: 50, bottom: 50, right: 20, top: 20}},
@@ -10539,7 +10598,11 @@ async function loadTimeline() {{
       data: ser.values,
     }}));
     _vizRender('viz-timeline-chart', {{
-      tooltip: {{trigger: 'axis'}},
+      tooltip: {{trigger: 'axis',
+        confine: true, enterable: true, extraCssText:
+          'max-width: 420px; white-space: normal; word-break: break-word; '
+          + 'line-height: 1.45; max-height: 60vh; overflow-y: auto; '
+          + 'padding: 10px 12px;'}},
       legend: {{type: 'scroll', top: 0, textStyle: {{fontSize: 10}}}},
       grid: {{top: 30, left: 45, right: 20, bottom: 70}},
       xAxis: {{type: 'category', data: data.years, boundaryGap: false}},
@@ -10586,9 +10649,12 @@ async function loadEgoRadial() {{
     }});
     const chart = _vizRender('viz-ego-chart', {{
       tooltip: {{trigger: 'item',
+        confine: true, enterable: true, extraCssText:
+          'max-width: 480px; white-space: normal; word-break: break-word; '
+          + 'line-height: 1.45; padding: 10px 12px;',
         formatter: p => (p.data.score != null ? 'sim ' + p.data.score.toFixed(3) + ' · ' : '')
-          + (p.data.year || '?') + ' · ' + (p.data.author || '?')
-          + '<br/>' + (p.data.name || '').slice(0, 180),
+          + (p.data.year || '?') + ' · ' + _escHtml(p.data.author || '?')
+          + '<br/>' + _escHtml(p.data.name || ''),
       }},
       polar: {{radius: '80%'}},
       angleAxis: {{type: 'value', startAngle: 0, min: -180, max: 180, show: false}},
@@ -10642,7 +10708,10 @@ async function loadGapRadar() {{
     _vizLoaded['viz-radar'] = true;
     _vizSetStatus(data.chapters.length + ' chapters', 'ok');
     _vizRender('viz-radar-chart', {{
-      tooltip: {{trigger: 'item'}},
+      tooltip: {{trigger: 'item',
+        confine: true, enterable: true, extraCssText:
+          'max-width: 420px; white-space: normal; word-break: break-word; '
+          + 'line-height: 1.45; padding: 10px 12px;'}},
       legend: {{type: 'scroll', bottom: 2, textStyle: {{fontSize: 10}}}},
       radar: {{
         indicator: (data.axes || []).map(a => ({{name: a, max: 1.0}})),
