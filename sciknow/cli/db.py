@@ -2161,11 +2161,20 @@ def cleanup_downloads(
     for label, loc in scan_locations:
         for pdf in _pdfs_in(loc):
             found.append((label, pdf))
-    if not found:
+    if not found and not clean_failed:
         console.print("[green]No PDF files found across any archive location.[/green]")
         raise typer.Exit(0)
-
-    console.print(f"Scanning [bold]{len(found)}[/bold] PDF(s) across all archive locations…")
+    if found:
+        console.print(f"Scanning [bold]{len(found)}[/bold] PDF(s) across all archive locations…")
+    else:
+        # Phase 54.6.21 — even with no loose PDFs we still want to
+        # purge `documents` rows in 'failed' status when --clean-failed
+        # is set. The dedup pass becomes a no-op (empty `by_sha`) and
+        # the function falls through naturally to the failed-cleanup
+        # block. Just signal the user so the empty dedup summary
+        # doesn't look broken.
+        console.print("[dim]No PDF files in archive dirs — skipping dedup, "
+                      "proceeding to documents-row purge.[/dim]")
 
     # Build SHA → document_row index for the corpus so we can cross-
     # reference disk content against DB state too. When --cross-project
@@ -2384,6 +2393,7 @@ def cleanup_downloads(
                     console.print(f"  [red]skip[/red] {pdf}: {exc}")
 
         nuked_rows = 0
+        orphan_wiki = 0
         try:
             eng_purge = create_engine(
                 f"postgresql://{settings.pg_user}:{settings.pg_password}"
@@ -2396,11 +2406,41 @@ def cleanup_downloads(
                         "WHERE ingestion_status = 'failed'"
                     )).scalar()
                     nuked_rows = int(res or 0)
+                    # Phase 54.6.21 — count wiki_pages that WOULD be
+                    # orphaned if we nuked the failed docs. wiki_pages
+                    # has no FK on source_doc_ids (it's a plain UUID
+                    # array), so the cascade-delete that takes care of
+                    # paper_metadata / chunks / sections doesn't touch
+                    # them — they'd be left pointing at dead UUIDs.
+                    res2 = conn.execute(sql_text("""
+                        SELECT COUNT(*) FROM wiki_pages wp
+                        WHERE wp.page_type = 'paper_summary'
+                          AND wp.source_doc_ids IS NOT NULL
+                          AND NOT EXISTS (
+                            SELECT 1 FROM documents d
+                            WHERE d.id = ANY(wp.source_doc_ids)
+                              AND d.ingestion_status <> 'failed'
+                          )
+                    """)).scalar()
+                    orphan_wiki = int(res2 or 0)
                 else:
                     res = conn.execute(sql_text(
                         "DELETE FROM documents WHERE ingestion_status = 'failed'"
                     ))
                     nuked_rows = res.rowcount or 0
+                    # Same cleanup, post-delete: any wiki_page whose
+                    # source_doc_ids no longer matches a live document
+                    # is now orphaned and should go.
+                    res2 = conn.execute(sql_text("""
+                        DELETE FROM wiki_pages wp
+                        WHERE wp.page_type = 'paper_summary'
+                          AND wp.source_doc_ids IS NOT NULL
+                          AND NOT EXISTS (
+                            SELECT 1 FROM documents d
+                            WHERE d.id = ANY(wp.source_doc_ids)
+                          )
+                    """))
+                    orphan_wiki = res2.rowcount or 0
                     conn.commit()
         except Exception as exc:
             console.print(
@@ -2408,9 +2448,13 @@ def cleanup_downloads(
             )
 
         nuke_verb = "Would nuke" if dry_run else "Nuked"
+        wiki_part = (
+            f" + {orphan_wiki} orphan wiki page(s)" if orphan_wiki else ""
+        )
         console.print(
             f"[bold]Failed cleanup:[/bold] "
-            f"[red]✗ {nuke_verb} {nuked_files} failed PDF(s) + {nuked_rows} documents row(s)[/red]"
+            f"[red]✗ {nuke_verb} {nuked_files} failed PDF(s) + "
+            f"{nuked_rows} documents row(s){wiki_part}[/red]"
         )
 
 

@@ -7651,6 +7651,118 @@ def l1_phase54_wiki_browsing_mvp() -> None:
     )
 
 
+def l1_phase54_6_21_audit_fixes() -> None:
+    """Phase 54.6.21 — bundled audit-bug fixes.
+
+    Locks in the contracts so the bugs don't silently regress:
+
+      A) ``.env.overlay`` is loaded before Settings() — overlay values
+         outrank ``.env`` for keys not already in ``os.environ``.
+      B) Qdrant ``init_collections()`` validates existing collections'
+         dense vector size against ``settings.embedding_dim``.
+      C) ``consensus_map`` logs (not silently swallows) KG query failures.
+      D) ``_run_generator_in_thread`` and ``_spawn_cli_streaming`` look
+         up ``_jobs[job_id]`` under ``_job_lock`` instead of bare access.
+      E) ``cleanup-downloads --clean-failed`` purges orphan paper_summary
+         wiki_pages whose ``source_doc_ids`` no longer reference live docs.
+      F) ``_spawn_cli_streaming`` reaps the subprocess inside ``finally``
+         so a mid-stream exception can't leave a zombie behind.
+      G) ``write_active_slug`` is atomic (tempfile + replace).
+      H) Pipeline emits a warning when the chunker returns 0 sections.
+    """
+    import inspect as _inspect
+
+    # A) overlay loader function exists and is called before settings
+    from sciknow import config as _config
+    assert hasattr(_config, "_apply_env_overlay"), (
+        "config._apply_env_overlay missing — overlay loading regressed"
+    )
+    config_src = _inspect.getsource(_config)
+    # The call must precede the Settings() instantiation
+    overlay_call = config_src.find("_apply_env_overlay()")
+    settings_call = config_src.find("settings = Settings()")
+    assert overlay_call > 0 and settings_call > overlay_call, (
+        "_apply_env_overlay() must run BEFORE Settings() — order matters"
+    )
+
+    # B) qdrant init validates dim
+    from sciknow.storage import qdrant as _qdrant
+    qdrant_src = _inspect.getsource(_qdrant.init_collections)
+    assert "settings.embedding_dim" in qdrant_src and "ValueError" in qdrant_src, (
+        "init_collections must raise ValueError on dim mismatch"
+    )
+    assert "drop the" in qdrant_src.lower() or "db reset" in qdrant_src, (
+        "init_collections error message should tell the user how to recover"
+    )
+
+    # C) consensus_map logs KG failures
+    from sciknow.core import wiki_ops as _wo
+    cm_src = _inspect.getsource(_wo.consensus_map)
+    assert "logger.warning" in cm_src and "KG query failed" in cm_src, (
+        "consensus_map must log (not swallow) KG query failures"
+    )
+    # And the unbounded summaries-text bug — check length BEFORE append
+    assert "len(summaries_text) + len(snippet)" in cm_src, (
+        "consensus_map should check length before appending to "
+        "summaries_text, not after"
+    )
+
+    # D) _jobs accessed under _job_lock at top of thread runners
+    from sciknow.web import app as _web_app
+    rg_src = _inspect.getsource(_web_app._run_generator_in_thread)
+    assert "with _job_lock:" in rg_src and "_jobs.get(job_id)" in rg_src, (
+        "_run_generator_in_thread must acquire _job_lock before reading _jobs"
+    )
+    sp_src = _inspect.getsource(_web_app._spawn_cli_streaming)
+    assert "with _job_lock:" in sp_src and "_jobs.get(job_id)" in sp_src, (
+        "_spawn_cli_streaming must acquire _job_lock before reading _jobs"
+    )
+    # F) The loop wait must live inside finally. Pre-fix, the line
+    #    immediately AFTER the `for line in proc.stdout` loop was
+    #    `proc.wait(timeout=5)` — and a mid-stream exception skipped it
+    #    entirely. The loop's reap is now in `finally:` (we keep the
+    #    early-bail wait inside the "job evicted" guard, that's fine).
+    finally_idx = sp_src.find("finally:")
+    assert finally_idx > 0, "_spawn_cli_streaming must keep a finally block"
+    loop_idx = sp_src.find("for line in proc.stdout")
+    except_idx = sp_src.find("except Exception", loop_idx)
+    assert loop_idx > 0 and except_idx > loop_idx, (
+        "stdout iter loop or its except handler missing"
+    )
+    between_loop_and_except = sp_src[loop_idx:except_idx]
+    assert "proc.wait(timeout=5)" not in between_loop_and_except, (
+        "proc.wait moved into finally to prevent zombie subprocess on exception"
+    )
+    assert "proc.wait(timeout=5)" in sp_src[finally_idx:], (
+        "finally block must still wait on the subprocess"
+    )
+
+    # E) cleanup-downloads orphan-wiki cleanup
+    from sciknow.cli import db as _db_cli
+    cleanup_src = _inspect.getsource(_db_cli.cleanup_downloads)
+    assert "orphan_wiki" in cleanup_src and "DELETE FROM wiki_pages" in cleanup_src, (
+        "cleanup-downloads --clean-failed must purge orphan paper_summary wiki_pages"
+    )
+    # And the empty-found-but-clean-failed path doesn't early-exit
+    assert "not found and not clean_failed" in cleanup_src, (
+        "cleanup-downloads should bypass the early exit when --clean-failed is set"
+    )
+
+    # G) atomic .active-project write
+    from sciknow.core import project as _project
+    write_src = _inspect.getsource(_project.write_active_slug)
+    assert ".tmp" in write_src and ".replace(" in write_src, (
+        "write_active_slug must write atomically via tempfile + replace"
+    )
+
+    # H) empty-sections warning in pipeline
+    from sciknow.ingestion import pipeline as _pipeline
+    pl_src = _inspect.getsource(_pipeline)
+    assert "INGEST EMPTY" in pl_src and "0 sections" in pl_src, (
+        "pipeline must emit a warning when chunker returns 0 sections"
+    )
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -7839,6 +7951,8 @@ L1_TESTS: list[Callable] = [
     l1_phase53_bootstrap_and_mcnemar,
     # Phase 54 — wiki browsing MVP (SPA route, wiki-links, TOC, palette)
     l1_phase54_wiki_browsing_mvp,
+    # Phase 54.6.21 — audit fixes batch
+    l1_phase54_6_21_audit_fixes,
 ]
 
 L2_TESTS: list[Callable] = [

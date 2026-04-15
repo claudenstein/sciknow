@@ -371,6 +371,22 @@ def ingest(
                 sections = chunker.parse_sections_from_json(result.json_data)
             else:
                 sections = chunker.parse_sections(result.text)
+
+            # Phase 54.6.21 — defensive log when the chunker returns 0
+            # sections. Pre-fix this silently produced a "complete" doc
+            # with no sections, no chunks, no Qdrant vectors — invisible
+            # to retrieval but indistinguishable from a real ingest in
+            # `db stats`. Now there's a breadcrumb to grep for.
+            if not sections:
+                logger.warning(
+                    "INGEST EMPTY  %s  doc=%s  backend=%s — chunker produced "
+                    "0 sections (PDF likely empty/scanned-without-OCR or all "
+                    "blocks were skipped); will store as complete with no "
+                    "embeddings. Re-ingest with a different backend if this "
+                    "paper matters.",
+                    pdf_path.name, doc_id, result.backend,
+                )
+
             db_sections: dict[int, UUID] = {}
 
             for sec in sections:

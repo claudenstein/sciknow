@@ -237,9 +237,18 @@ def write_active_slug(slug: str) -> None:
 
     Used by ``sciknow project use <slug>`` (Phase 43e). Validates the
     slug before writing so a malformed file can't be left behind.
+
+    Phase 54.6.21 — write atomically via a tempfile + replace so a
+    concurrent reader can never see a partially-written file (would
+    fail ``validate_slug`` on read) and two concurrent writers can't
+    interleave their bytes. ``Path.replace`` is atomic on POSIX and
+    Windows ≥ 10.
     """
     validate_slug(slug)
-    _active_project_file().write_text(slug + "\n")
+    f = _active_project_file()
+    tmp = f.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(slug + "\n")
+    tmp.replace(f)
 
 
 def get_active_project() -> Project:

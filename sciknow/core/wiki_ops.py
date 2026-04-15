@@ -988,6 +988,7 @@ def consensus_map(
 
     # Get KG triples
     triples_text = ""
+    kg_rows: list = []
     with get_session() as session:
         try:
             kg_rows = session.execute(text("""
@@ -1000,8 +1001,12 @@ def consensus_map(
             triples_text = "\n".join(
                 f"({r[0]}) --{r[1]}--> ({r[2]})" for r in kg_rows
             )
-        except Exception:
-            pass  # KG table might not exist yet
+        except Exception as exc:
+            # KG table might not exist yet (older install) — but a real
+            # failure (permissions, malformed query, dead connection)
+            # used to silently degrade to "no triples found" with no
+            # log breadcrumb. Phase 54.6.21: log and continue.
+            logger.warning("consensus_map: KG query failed (%s)", exc)
 
     # Get paper summaries mentioning the topic
     summaries_text = ""
@@ -1010,10 +1015,13 @@ def consensus_map(
         for f in sorted(papers_dir.glob("*.md"))[:50]:
             content = f.read_text(encoding="utf-8")
             if topic.lower() in content.lower():
-                # Take the first 500 chars
-                summaries_text += f"\n---\n{content[:500]}"
-                if len(summaries_text) > 12000:
+                # Take the first 500 chars. Phase 54.6.21 — check
+                # length BEFORE appending so we cap at the budget
+                # instead of overshooting by 500 chars per iter.
+                snippet = f"\n---\n{content[:500]}"
+                if len(summaries_text) + len(snippet) > 12000:
                     break
+                summaries_text += snippet
 
     if not triples_text and not summaries_text:
         yield {"type": "error",

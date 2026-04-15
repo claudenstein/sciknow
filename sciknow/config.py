@@ -258,4 +258,51 @@ class Settings(BaseSettings):
         return self.data_dir / "wiki"
 
 
+def _apply_env_overlay() -> None:
+    """Phase 54.6.21 — apply per-project ``.env.overlay`` BEFORE
+    ``Settings()`` is instantiated.
+
+    The overlay file is created (empty, with helpful comments) by
+    ``sciknow project init`` and lives at ``<project root>/.env.overlay``.
+    It's meant to layer on top of the root ``.env`` so per-project
+    settings (e.g. a different ``LLM_MODEL``) can be set without
+    touching the global config. Pre-Phase-54.6.21 the file was
+    created, surfaced in the GUI/CLI, and bundled by archive/unarchive
+    — but never actually loaded into Settings, so per-project
+    overrides were silently no-ops.
+
+    Precedence (highest first):
+
+      1. ``os.environ`` already-set values (shell exports, --project
+         CLI flag) — stay authoritative
+      2. ``.env.overlay`` — per-project layer
+      3. ``.env`` — global baseline (loaded by pydantic-settings)
+      4. Field defaults
+
+    Best-effort: if the overlay parse fails, we silently skip rather
+    than break Settings() instantiation. Bad overlay content is
+    less harmful than refusing to start.
+    """
+    try:
+        from sciknow.core.project import get_active_project
+        active = get_active_project()
+        overlay = active.env_overlay_path
+        if not overlay.exists():
+            return
+        for line in overlay.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = val
+    except Exception as exc:
+        logging.getLogger("sciknow.config").warning(
+            "env.overlay load skipped: %s", exc
+        )
+
+
+_apply_env_overlay()
 settings = Settings()

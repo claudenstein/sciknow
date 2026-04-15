@@ -2527,9 +2527,22 @@ def _run_generator_in_thread(job_id: str, generator_fn, loop):
     flush partial state. The generator functions in book_ops use
     incremental save at every checkpoint, so the worst case is the
     in-flight iteration's tokens being lost — never the whole draft.
+
+    Phase 54.6.21 — lookup the job under ``_job_lock`` to guard against
+    ``_gc_old_jobs()`` evicting the entry between our scheduling and
+    our first read. Without this, a job that lives longer than
+    ``_JOB_GC_AGE_SECONDS`` after another finishes could KeyError on
+    the first ``_jobs[job_id]`` access.
     """
-    queue = _jobs[job_id]["queue"]
-    cancel = _jobs[job_id]["cancel"]
+    with _job_lock:
+        job = _jobs.get(job_id)
+        if job is None:
+            logger.warning(
+                "_run_generator_in_thread: job %s evicted before start", job_id
+            )
+            return
+        queue = job["queue"]
+        cancel = job["cancel"]
     gen = generator_fn()
     try:
         for event in gen:
@@ -4006,7 +4019,22 @@ def _spawn_cli_streaming(job_id: str, argv: list[str], loop, on_finish=None):
             yield {"type": "error", "message": f"CLI not found: {exc}"}
             return
 
-        cancel = _jobs[job_id]["cancel"]
+        # Phase 54.6.21 — same _jobs race guard as
+        # _run_generator_in_thread. Cheap lock-protected get; if the
+        # job was GC'd between spawn and start, kill the subprocess
+        # and bail rather than KeyError.
+        with _job_lock:
+            job = _jobs.get(job_id)
+        if job is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+            yield {"type": "error",
+                   "message": f"job {job_id} evicted before subprocess start"}
+            return
+        cancel = job["cancel"]
         try:
             assert proc.stdout is not None
             for line in proc.stdout:
@@ -4015,11 +4043,17 @@ def _spawn_cli_streaming(job_id: str, argv: list[str], loop, on_finish=None):
                 line = line.rstrip("\n")
                 if line:
                     yield {"type": "log", "text": line}
-            proc.wait(timeout=5)
         except Exception as exc:
             yield {"type": "error", "message": str(exc)}
             return
         finally:
+            # Phase 54.6.21 — proc.wait moved INTO finally so a mid-
+            # stream exception still reaps the subprocess instead of
+            # leaving it as a zombie. Two paths:
+            #   - Process still alive (cancel break or exception):
+            #     terminate then wait.
+            #   - Process already exited (clean stdout EOF): just
+            #     wait to collect the return code.
             if proc.poll() is None:
                 try:
                     proc.terminate()
@@ -4029,6 +4063,11 @@ def _spawn_cli_streaming(job_id: str, argv: list[str], loop, on_finish=None):
                         proc.kill()
                     except Exception:
                         pass
+            else:
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
         rc = proc.returncode or 0
         if rc == 0:
             yield {"type": "completed", "returncode": 0}

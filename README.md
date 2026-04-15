@@ -171,6 +171,8 @@ See [`docs/PROJECTS.md`](docs/PROJECTS.md) for the full design.
 
 > **Phase 54.6.20:** when an active project is explicitly selected, its `pg_database` and `data_dir` win over `PG_DATABASE` / `DATA_DIR` left in `.env`. The Settings model logs a one-line override warning so a stale `.env` can't silently split state across two projects (DB writes following `.env`, disk writes following the active project — that's how a wiki-compile resume can *appear* to lose work).
 
+> **Phase 54.6.21:** the per-project `.env.overlay` file (created by `project init`, surfaced in the GUI/CLI) is now actually loaded into Settings. Pre-fix, per-project `LLM_MODEL` overrides etc. were silently no-ops. Plus a batch of audit-driven fixes: Qdrant collection-init fails fast on `EMBEDDING_DIM` mismatch instead of silently corrupting vectors; `_jobs` dict accesses in the SSE thread runners are now lock-protected; `_spawn_cli_streaming` reaps the subprocess in `finally` (no zombies on mid-stream exception); `cleanup-downloads --clean-failed` also nukes orphan paper_summary wiki pages whose source documents were just deleted; `write_active_slug` is atomic; the chunker emits a warning when it produces 0 sections (instead of silently storing a complete-but-empty doc); `consensus_map` logs KG query failures instead of swallowing them.
+
 ### When to use what
 
 | I want to... | Use this |

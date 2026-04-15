@@ -125,6 +125,32 @@ def init_collections(client: QdrantClient | None = None) -> None:
 
     existing = {c.name for c in client.get_collections().collections}
 
+    # Phase 54.6.21 — validate that pre-existing collections still
+    # match settings.embedding_dim. Without this check, changing
+    # EMBEDDING_DIM in .env between runs silently produces vectors
+    # sized for the new model in a collection still configured for the
+    # old one — Qdrant returns 422 buried in an upsert log line, or
+    # (worse) silent corruption depending on version. Fail fast and
+    # tell the user how to recover.
+    for coll in (papers_coll, abstracts_coll, wiki_coll):
+        if coll in existing:
+            try:
+                info = client.get_collection(coll)
+                cfg = info.config.params.vectors
+                actual = (
+                    cfg["dense"].size if isinstance(cfg, dict) and "dense" in cfg
+                    else (cfg.size if hasattr(cfg, "size") else None)
+                )
+            except Exception:
+                actual = None  # introspection failed — don't block init
+            if actual is not None and actual != settings.embedding_dim:
+                raise ValueError(
+                    f"Qdrant collection {coll!r} has dense vector size "
+                    f"{actual}, but settings.embedding_dim={settings.embedding_dim}. "
+                    f"Either revert EMBEDDING_DIM in .env or drop the "
+                    f"collection (`sciknow db reset`) and re-ingest."
+                )
+
     if papers_coll not in existing:
         # Scalar int8 quantization trades a tiny recall hit for ~75% memory
         # savings on dense vectors; `always_ram=True` keeps the quantized copy
