@@ -1027,9 +1027,23 @@ def consensus_map(
     sys_c, usr_c = wiki_prompts.wiki_consensus(topic, triples_text, summaries_text)
 
     try:
-        raw = _strip_thinking(llm_complete(sys_c, usr_c, model=model,
-                                            temperature=0.0, num_ctx=16384))
-        data = json.loads(_clean_json(raw), strict=False)
+        # Phase 54.6.13 — same thinking-model headroom fix as the
+        # extract-kg regression (see feedback_thinking_models_json.md):
+        # qwen3:30b-a3b emits 7-9k thinking tokens that blow past a
+        # 16384 ctx on top of ~12k of evidence text. Append /no_think
+        # to the user prompt (skip reasoning on Qwen3) and raise the
+        # ceiling. Empty raw == context overflow — report specifically.
+        usr_c_nt = (usr_c or "").rstrip() + "\n\n/no_think"
+        raw = llm_complete(sys_c, usr_c_nt, model=model,
+                           temperature=0.0, num_ctx=24576)
+        cleaned = _strip_thinking(raw or "").strip()
+        if not cleaned:
+            yield {"type": "error",
+                   "message": "LLM returned empty output (likely context "
+                              "overflow even at ctx=24576). Try a smaller "
+                              "topic or --model qwen3.5:27b."}
+            return
+        data = json.loads(_clean_json(cleaned), strict=False)
         yield {"type": "consensus", "data": data}
     except Exception as exc:
         yield {"type": "error", "message": f"Consensus analysis failed: {exc}"}

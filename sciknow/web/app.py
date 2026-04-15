@@ -9960,8 +9960,26 @@ async function loadTopicMap(refresh) {{
     const series = Object.keys(byCluster).map(key => ({{
       name: 'Cluster ' + key,
       type: 'scatter',
-      symbolSize: 7,
+      symbolSize: 9,
       itemStyle: {{color: clusterColor[key] || '#888'}},
+      // Phase 54.6.13 — labels on every point. "emphasis" means
+      // labels only render on hover/zoom by default; set show:true
+      // to always-render if you want a wall of titles. We use the
+      // first author + two-digit year so the label stays short even
+      // when hundreds of points are visible.
+      label: {{
+        show: true, position: 'right', distance: 4,
+        formatter: p => {{
+          const a = (p.data.author || '').split(/[,;]/)[0].trim();
+          const lastName = a.split(/\\s+/).pop() || '';
+          const yy = p.data.year ? String(p.data.year).slice(-2) : '';
+          return lastName ? (lastName + (yy ? "'" + yy : '')) : '';
+        }},
+        color: '#333', fontSize: 9, backgroundColor: 'rgba(255,255,255,0.55)',
+        padding: [1, 3], borderRadius: 3,
+      }},
+      labelLayout: {{hideOverlap: true}},
+      emphasis: {{scale: 1.4, label: {{fontSize: 11, fontWeight: 'bold'}}}},
       data: byCluster[key].map(p => ({{
         value: [p.x, p.y],
         name: p.title,
@@ -10020,7 +10038,24 @@ async function loadSunburst() {{
         nodeClick: 'rootToNode',
         sort: null,
         emphasis: {{focus: 'ancestor'}},
-        levels: [{{}}, {{itemStyle: {{borderWidth: 2}}}}],
+        // Phase 54.6.13 — labels on every slice. ECharts auto-rotates
+        // them along the arc; we cap at 28 chars + ellipsis so deeper
+        // rings stay legible.
+        label: {{
+          show: true, rotate: 'tangential', overflow: 'truncate',
+          fontSize: 11, color: '#fff', minAngle: 6,
+          formatter: p => {{
+            const s = (p.name || '').toString();
+            return s.length > 28 ? s.slice(0, 28) + '…' : s;
+          }},
+        }},
+        levels: [
+          {{}},
+          {{itemStyle: {{borderWidth: 2}},
+            label: {{fontSize: 12, fontWeight: 'bold'}}}},
+          {{label: {{fontSize: 10}}}},
+          {{label: {{fontSize: 9, color: '#222'}}}},
+        ],
         data: (tree.children && tree.children.length) ? tree.children : [{{name: 'empty', value: 1}}],
       }}],
     }}, true);
@@ -10090,7 +10125,9 @@ async function loadTimeline() {{
     const data = await res.json();
     if (!(data.years || []).length) {{ _vizSetStatus('no data', 'error'); return; }}
     _vizLoaded['viz-timeline'] = true;
-    _vizSetStatus(data.years.length + ' years · ' + data.series.length + ' clusters · drag below axis to zoom', 'ok');
+    const modeLabel = (data.mode === 'decade') ? 'decades (no clusters yet — run `catalog cluster`)' : 'clusters';
+    _vizSetStatus(data.years.length + ' years · ' + data.series.length + ' ' + modeLabel + ' · drag below axis to zoom',
+                  data.mode === 'decade' ? '' : 'ok');
     const chart = _vizChart('viz-timeline-chart');
     if (!chart) return;
     const series = (data.series || []).map(ser => ({{

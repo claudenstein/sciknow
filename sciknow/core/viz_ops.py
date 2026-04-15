@@ -322,41 +322,87 @@ def consensus_landscape(topic: str, *, model: str | None = None) -> dict[str, An
 # ── 4. Timeline river (year × cluster stacked area) ─────────────────────
 
 def timeline() -> dict[str, Any]:
-    """Year × cluster counts for the stacked-area timeline."""
+    """Year × bucket counts for the stacked-area timeline.
+
+    Bucketing rule:
+
+    * If ANY paper has ``topic_cluster`` set, split by cluster. Each
+      cluster is given a name pulled from the first paper in the
+      cluster's keyword set (or ``Cluster {id}`` as a fallback).
+    * Otherwise fall back to a decade split (1960s / 1970s / ...).
+      Still meaningful "history of the field" without having to run
+      `catalog cluster` first — the user sees a real stacked area
+      instead of a single monochrome stream.
+
+    Returns ``{"years": [...], "series": [{cluster, values[], total,
+    color}, ...], "mode": "cluster" | "decade", "message": str?}``.
+    """
     with get_session() as session:
-        rows = session.execute(sql_text("""
-            SELECT pm.year, pm.topic_cluster, COUNT(*) AS n
-            FROM paper_metadata pm
-            JOIN documents d ON d.id = pm.document_id
-            WHERE d.ingestion_status = 'complete'
-              AND pm.year IS NOT NULL
-            GROUP BY pm.year, pm.topic_cluster
-            ORDER BY pm.year
-        """)).fetchall()
+        n_clustered = session.execute(sql_text(
+            "SELECT COUNT(*) FROM paper_metadata WHERE topic_cluster IS NOT NULL"
+        )).scalar() or 0
+
+        if n_clustered > 0:
+            rows = session.execute(sql_text("""
+                SELECT pm.year,
+                       COALESCE(pm.topic_cluster::text, 'noise') AS bucket,
+                       COUNT(*) AS n
+                FROM paper_metadata pm
+                JOIN documents d ON d.id = pm.document_id
+                WHERE d.ingestion_status = 'complete'
+                  AND pm.year IS NOT NULL
+                GROUP BY pm.year, bucket
+                ORDER BY pm.year
+            """)).fetchall()
+            mode = "cluster"
+            msg = None
+        else:
+            # Decade fallback — still year-granular on the x-axis but
+            # the series colour reflects the decade, giving a proper
+            # "history" feel without requiring clustering to be built.
+            rows = session.execute(sql_text("""
+                SELECT pm.year,
+                       CONCAT(10 * (pm.year / 10), 's') AS bucket,
+                       COUNT(*) AS n
+                FROM paper_metadata pm
+                JOIN documents d ON d.id = pm.document_id
+                WHERE d.ingestion_status = 'complete'
+                  AND pm.year IS NOT NULL
+                GROUP BY pm.year, bucket
+                ORDER BY pm.year
+            """)).fetchall()
+            mode = "decade"
+            msg = ("No BERTopic clusters yet — run `sciknow catalog cluster` "
+                   "for a proper cluster-coloured view. Falling back to "
+                   "decade bins for now.")
 
     years_set: set[int] = set()
-    by_cluster: dict[str, dict[int, int]] = {}
-    for year, cid, n in rows:
+    by_bucket: dict[str, dict[int, int]] = {}
+    for year, bucket, n in rows:
         years_set.add(int(year))
-        key = str(cid) if cid is not None else "noise"
-        by_cluster.setdefault(key, {})[int(year)] = int(n)
+        key = str(bucket)
+        by_bucket.setdefault(key, {})[int(year)] = int(n)
 
     if not years_set:
-        return {"years": [], "series": []}
+        return {"years": [], "series": [], "mode": mode, "message": msg}
 
     years = sorted(years_set)
-    # Normalise each cluster series to cover every year (fill 0s).
+    # Build series; pick colours that differ meaningfully. For decade
+    # mode we sort buckets chronologically so the colour sweep feels
+    # natural (earlier decades → cooler, later → warmer).
+    bucket_keys = sorted(by_bucket.keys())
     series = []
-    for i, (cid, per_year) in enumerate(sorted(by_cluster.items())):
+    for i, key in enumerate(bucket_keys):
+        per_year = by_bucket[key]
         series.append({
-            "cluster": cid,
+            "cluster": key,
             "values": [per_year.get(y, 0) for y in years],
             "total": sum(per_year.values()),
             "color": _golden_hue(i),
         })
-    # Sort by total desc so the biggest clusters draw on the bottom.
+    # Sort by total desc so the biggest buckets draw on the bottom.
     series.sort(key=lambda s: s["total"], reverse=True)
-    return {"years": years, "series": series}
+    return {"years": years, "series": series, "mode": mode, "message": msg}
 
 
 # ── 5. Ego radial (top-K similar papers for a given DOI) ────────────────
@@ -386,11 +432,15 @@ def ego_radial(doc_id: str, *, k: int = 20) -> dict[str, Any]:
     tgt_vec = target.vector.get("dense") if isinstance(target.vector, dict) else target.vector
 
     # Top-K neighbours (excluding self via score threshold).
+    # qdrant-client ≥1.9 deprecated .search() in favour of
+    # .query_points(); use the same pattern as hybrid_search.py.
     try:
-        hits = client.search(
-            collection_name=coll, query_vector=("dense", list(tgt_vec)),
+        response = client.query_points(
+            collection_name=coll,
+            query=list(tgt_vec), using="dense",
             limit=k + 1, with_payload=True,
         )
+        hits = response.points
     except Exception as exc:
         raise RuntimeError(f"similarity search failed: {exc}") from exc
 
