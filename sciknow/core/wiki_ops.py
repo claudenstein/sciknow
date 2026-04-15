@@ -367,18 +367,36 @@ def _extract_entities_and_kg(
     }
 
     try:
-        # Phase 55 / 55.2 — kept at 8192 after a rollback: the 6144
-        # ceiling left no headroom once we reverted the sections
-        # heuristic to 8 KB input (below), and the user prefers
-        # "give the model enough context" over shaving a few percent
-        # off KV cache. The extraction peak sits around ~6 500
-        # tokens with 8 KB sections + JSON output, comfortably inside
-        # 8192.
-        raw = llm_complete(sys_e, usr_e, model=model,
-                           temperature=0.0, num_ctx=8192,
+        # Phase 54.6.8 — raised to 24576 + `/no_think` for reasoning
+        # models. The previous 8192 was fine for plain qwen2-class
+        # models but catastrophic for qwen3:30b-a3b and other Q3/R1
+        # thinking models: the chain-of-thought alone blows past
+        # 7-9k tokens, so with ~4k input we overflow the window
+        # and Ollama returns empty / truncated output — json.loads
+        # then fails with "Expecting value: line 1 column 1 (char
+        # 0)" and every paper's extraction silently no-ops. The log
+        # was full of them (see data/sciknow.log circa 2026-04-14).
+        # Appending `/no_think` to the user prompt is a qwen3-
+        # convention no-op flag on other models, so it's safe as a
+        # blanket fix. The 24576 ctx stays as a safety net for
+        # models that don't honor /no_think.
+        usr_e_no_think = (usr_e or "").rstrip() + "\n\n/no_think"
+        raw = llm_complete(sys_e, usr_e_no_think, model=model,
+                           temperature=0.0, num_ctx=24576,
                            keep_alive=-1, format=extraction_schema)
-        # With structured output, no need for _strip_thinking or _clean_json
-        data = json.loads(raw, strict=False)
+        # Thinking models sometimes leak <think>…</think> even under
+        # structured output when /no_think isn't honored — strip them
+        # defensively before json.loads.
+        raw_cleaned = _strip_thinking(raw or "").strip()
+        if not raw_cleaned:
+            logger.warning(
+                "Entity+KG extraction returned empty output for %s "
+                "(likely context overflow — ctx=24576 wasn't enough). "
+                "Consider --model qwen3.5:27b or a non-thinking model.",
+                slug,
+            )
+            return [], 0
+        data = json.loads(raw_cleaned, strict=False)
     except Exception as exc:
         logger.warning("Entity+KG extraction failed for %s: %s", slug, exc)
         return [], 0

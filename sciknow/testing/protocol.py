@@ -7479,17 +7479,25 @@ def l1_phase54_wiki_browsing_mvp() -> None:
     ):
         assert needle in src, f"phase 54.4 facts surface missing: {needle!r}"
 
-    # Phase 55 / 55.2 — wiki extraction context + sections budget.
-    # Phase 55 dropped num_ctx to 6144 and sections to 2 KB head+tail;
-    # Phase 55.2 rolled BOTH back because the 2 KB cut was too
-    # aggressive and the 6144 ceiling left no headroom under the
-    # larger sections budget. Current state: num_ctx=8192, sections
-    # [:8000] linear. _head_tail_slice stays available for callers
-    # that explicitly want it.
+    # Phase 55 / 55.2 / 54.6.8 — wiki extraction context + sections
+    # budget. Phase 55 dropped num_ctx to 6144 and sections to 2 KB;
+    # 55.2 rolled BOTH back; **54.6.8** raised num_ctx to 24576 after
+    # the live corpus run showed qwen3:30b-a3b's thinking output
+    # (~7-9k tokens) blew past the 8192 ceiling and Ollama returned
+    # empty JSON, silently losing every paper's KG triples. Current
+    # state: num_ctx=24576, sections [:8000] linear, /no_think
+    # appended to the user prompt for Qwen3-family models.
     from sciknow.core import wiki_ops as _wo2
     from sciknow.rag import wiki_prompts as _wp
-    assert "num_ctx=8192" in _inspect.getsource(_wo2._extract_entities_and_kg), (
-        "wiki extraction should be at num_ctx=8192 (Phase 55.2 rollback)"
+    src_extract = _inspect.getsource(_wo2._extract_entities_and_kg)
+    assert "num_ctx=24576" in src_extract, (
+        "wiki extraction should be at num_ctx=24576 (Phase 54.6.8 — "
+        "thinking-model headroom after the empty-JSON regression)"
+    )
+    assert "/no_think" in src_extract, (
+        "wiki extraction should append /no_think for Qwen3-family "
+        "models (Phase 54.6.8 — disables reasoning traces that leak "
+        "into structured output)"
     )
     assert "sections=(sections or \"\")[:8000]" in _inspect.getsource(_wp.wiki_extract_entities), (
         "wiki_extract_entities should feed sections as a linear [:8000] slice "
