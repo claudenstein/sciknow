@@ -1,6 +1,8 @@
+import logging
+import os
 from pathlib import Path
 
-from pydantic import Field, computed_field
+from pydantic import Field, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -168,6 +170,59 @@ class Settings(BaseSettings):
     # library, while off-topic references (statistical methods cited from a
     # climate paper, etc.) typically score 0.3-0.45.
     expand_relevance_threshold: float = 0.55
+
+    @model_validator(mode="after")
+    def _project_wins_over_env_overrides(self):
+        """Phase 54.6.20 — when an explicit project is selected (via
+        ``.active-project`` file or ``SCIKNOW_PROJECT``/``--project``),
+        the project's ``pg_database`` and ``data_dir`` win over
+        ``PG_DATABASE`` / ``DATA_DIR`` values pulled from ``.env``.
+
+        Why: ``sciknow project use <slug>`` should actually switch the
+        active project end-to-end. Without this guard, a stale
+        ``PG_DATABASE`` left over in ``.env`` from the legacy
+        single-tenant install silently splits state — disk writes go to
+        the project's data dir but DB writes go to ``.env``'s database
+        name. That's how a wiki-compile run can appear to lose work
+        (the rows landed in the legacy ``sciknow`` DB, not the active
+        project's DB) even though the data is intact.
+
+        Legacy single-tenant installs (no ``.active-project`` file, no
+        ``SCIKNOW_PROJECT`` set) keep working: the validator is a
+        no-op, ``.env`` stays authoritative.
+        """
+        from sciknow.core.project import (
+            get_active_project, read_active_slug_from_file,
+        )
+
+        explicit = (
+            bool(os.environ.get("SCIKNOW_PROJECT", "").strip())
+            or read_active_slug_from_file() is not None
+        )
+        if not explicit:
+            return self
+
+        active = get_active_project()
+        overrides: list[str] = []
+        if self.pg_database != active.pg_database:
+            overrides.append(
+                f"pg_database {self.pg_database!r} → {active.pg_database!r}"
+            )
+            object.__setattr__(self, "pg_database", active.pg_database)
+        try:
+            same_dir = Path(self.data_dir).resolve() == active.data_dir.resolve()
+        except OSError:
+            same_dir = str(self.data_dir) == str(active.data_dir)
+        if not same_dir:
+            overrides.append(f"data_dir {self.data_dir} → {active.data_dir}")
+            object.__setattr__(self, "data_dir", active.data_dir)
+        if overrides:
+            logging.getLogger("sciknow.config").warning(
+                "Active project %r overrides .env: %s. Drop the "
+                "matching key from .env to silence this warning.",
+                active.slug, "; ".join(overrides),
+            )
+        return self
 
     @computed_field
     @property

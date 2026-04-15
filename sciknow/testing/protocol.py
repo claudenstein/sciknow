@@ -5201,6 +5201,40 @@ def l1_phase43_project_resolution() -> None:
     sig = inspect.signature(get_session)
     assert "db_name" in sig.parameters
 
+    # 10) Phase 54.6.20 — explicit project resolution (env or
+    # .active-project file) wins over .env's PG_DATABASE / DATA_DIR
+    # values. Without this guard, `sciknow project use <slug>` was a
+    # silent no-op for the database whenever .env had a stale
+    # PG_DATABASE — disk writes followed the project, DB writes followed
+    # .env, and state split across two locations.
+    from sciknow.config import Settings as _Settings
+    prev_env = os.environ.pop("SCIKNOW_PROJECT", None)
+    prev_pg = os.environ.pop("PG_DATABASE", None)
+    try:
+        # Simulate "user has SCIKNOW_PROJECT=foo and a stale
+        # PG_DATABASE=sciknow lying around in the env": project wins.
+        os.environ["SCIKNOW_PROJECT"] = "explicit-test-proj"
+        os.environ["PG_DATABASE"] = "stale_legacy_db"
+        s2 = _Settings()
+        assert s2.pg_database == "sciknow_explicit_test_proj", (
+            f"Active project's pg_database must override stale "
+            f"PG_DATABASE env (got {s2.pg_database!r})"
+        )
+    finally:
+        for k, v in (("SCIKNOW_PROJECT", prev_env), ("PG_DATABASE", prev_pg)):
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    # And the validator code is wired into Settings (not just an
+    # accidentally-orphaned function) — this guards against a future
+    # rename / deletion silently breaking the contract above.
+    assert any(
+        getattr(v, "info", None) is not None
+        and getattr(v.info, "mode", None) == "after"
+        for v in _Settings.__pydantic_decorators__.model_validators.values()
+    ), "Settings must register a model_validator(mode='after')"
+
 
 def l1_phase45_project_types() -> None:
     """Phase 45 — project_type registry + CLI + Book model column.

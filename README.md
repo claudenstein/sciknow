@@ -169,6 +169,8 @@ sciknow --project <slug> <any subcommand>       # one-shot override
 
 See [`docs/PROJECTS.md`](docs/PROJECTS.md) for the full design.
 
+> **Phase 54.6.20:** when an active project is explicitly selected, its `pg_database` and `data_dir` win over `PG_DATABASE` / `DATA_DIR` left in `.env`. The Settings model logs a one-line override warning so a stale `.env` can't silently split state across two projects (DB writes following `.env`, disk writes following the active project — that's how a wiki-compile resume can *appear* to lose work).
+
 ### When to use what
 
 | I want to... | Use this |
