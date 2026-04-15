@@ -6192,6 +6192,42 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .viz-chart {{ width: 100%; height: 70vh; min-height: 420px;
               background: var(--bg-alt, #f8f8f8);
               border: 1px solid var(--border); border-radius: 4px; }}
+/* Phase 54.6.15 — shared theming / font / fullscreen / download bar. */
+.viz-controls {{ display: flex; align-items: center; gap: 4px;
+                 padding: 6px 12px; border-bottom: 1px solid var(--border);
+                 background: var(--bg-elevated); flex-wrap: wrap;
+                 font-size: 12px; }}
+.viz-controls-label {{ font-size: 10px; color: var(--fg-muted);
+                       text-transform: uppercase; letter-spacing: 0.05em;
+                       font-weight: 600; margin: 0 2px; }}
+.viz-theme-chip {{ width: 18px; height: 18px; border-radius: 50%;
+                   border: 1px solid var(--border); cursor: pointer; padding: 0;
+                   transition: transform 0.1s ease, box-shadow 0.1s ease; }}
+.viz-theme-chip[data-theme="paper"]           {{ background: #f3f5f9; }}
+.viz-theme-chip[data-theme="deep-space"]      {{ background: #060b18; }}
+.viz-theme-chip[data-theme="blueprint"]       {{ background: #061530; }}
+.viz-theme-chip[data-theme="solarized"]       {{ background: #002b36; }}
+.viz-theme-chip[data-theme="solarized-light"] {{ background: #fdf6e3; }}
+.viz-theme-chip[data-theme="terminal"]        {{ background: #020402; }}
+.viz-theme-chip[data-theme="neon"]            {{ background: #000000; }}
+.viz-theme-chip:hover {{ transform: scale(1.15); }}
+.viz-theme-chip.active {{ box-shadow: 0 0 0 2px var(--accent); }}
+.viz-sep {{ width: 1px; align-self: stretch; background: var(--border);
+            margin: 0 4px; }}
+.viz-ctrl-btn {{ font-size: 13px; padding: 3px 7px; border: 1px solid var(--border);
+                 border-radius: var(--r-sm); background: var(--bg);
+                 color: var(--fg); cursor: pointer; line-height: 1; }}
+.viz-ctrl-btn:hover {{ background: var(--accent-light); }}
+.viz-select {{ font-size: 11px; padding: 2px 6px; border: 1px solid var(--border);
+               border-radius: 3px; background: var(--bg); color: var(--fg); }}
+.viz-slider {{ width: 100px; accent-color: var(--accent); }}
+.viz-color-box {{ display: inline-flex; align-items: center; gap: 3px;
+                  padding: 2px 4px; border: 1px solid var(--border);
+                  border-radius: 3px; cursor: pointer; }}
+.viz-color-tag {{ font-size: 9px; color: var(--fg-muted); font-weight: 600;
+                  letter-spacing: 0.04em; }}
+.viz-color-box input[type="color"] {{ width: 16px; height: 16px; border: 0;
+                                      padding: 0; cursor: pointer; }}
 /* Phase 54.6.12 — Visualize dropdown in the top bar. Keeps the tight
    top-bar layout while exposing six distinct links. */
 .nav-dropdown {{ position: relative; display: inline-block; }}
@@ -9082,6 +9118,56 @@ body.task-bar-open {{ padding-top: 40px; }}
       <h3>&#128200; Visualize</h3>
       <button class="modal-close" onclick="closeModal('viz-modal')">&times;</button>
     </div>
+    <!-- Phase 54.6.15 — shared theming bar above the tabs. Theme chips,
+         font, label-size, fullscreen and download PNG apply to ALL six
+         tabs. Swap is instant (no data refetch) because every loadX
+         caches its base option and _vizReapplyTheme() re-decorates. -->
+    <div class="viz-controls" id="viz-controls">
+      <span class="viz-controls-label">Theme</span>
+      <button class="viz-theme-chip" data-theme="paper" title="Paper"></button>
+      <button class="viz-theme-chip" data-theme="deep-space" title="Deep Space"></button>
+      <button class="viz-theme-chip" data-theme="blueprint" title="Blueprint"></button>
+      <button class="viz-theme-chip" data-theme="solarized" title="Solarized"></button>
+      <button class="viz-theme-chip" data-theme="solarized-light" title="Solarized Light"></button>
+      <button class="viz-theme-chip" data-theme="terminal" title="Terminal"></button>
+      <button class="viz-theme-chip" data-theme="neon" title="Neon"></button>
+      <button class="viz-ctrl-btn" onclick="vizInvertTheme()" title="Swap to the paired light/dark preset">&#8646;</button>
+      <span class="viz-sep"></span>
+      <span class="viz-controls-label">Font</span>
+      <select id="viz-font-select" class="viz-select" onchange="vizSetFont(this.value)"
+              title="Label typography across every tab">
+        <option value="sans-solid">Sans</option>
+        <option value="serif-solid">Serif</option>
+        <option value="mono-solid">Mono</option>
+        <option value="condensed-solid">Condensed</option>
+        <option value="display-solid">Display</option>
+      </select>
+      <span class="viz-sep"></span>
+      <span class="viz-controls-label">Labels</span>
+      <input type="range" min="0.6" max="2.0" step="0.05" value="1.0"
+             id="viz-labelscale" class="viz-slider"
+             oninput="vizSetLabelScale(this.value)"
+             title="Global label size multiplier"/>
+      <span class="viz-sep"></span>
+      <span class="viz-controls-label">Custom</span>
+      <label class="viz-color-box" title="Background color">
+        <span class="viz-color-tag">BG</span>
+        <input type="color" id="viz-color-bg"
+               oninput="vizSetCustomColor('bg', this.value)"
+               value="#f3f5f9"/>
+      </label>
+      <label class="viz-color-box" title="Label / axis / legend text color">
+        <span class="viz-color-tag">Aa</span>
+        <input type="color" id="viz-color-label"
+               oninput="vizSetCustomColor('label', this.value)"
+               value="#0a1a33"/>
+      </label>
+      <button class="viz-ctrl-btn" onclick="vizClearCustomColors()"
+              title="Clear custom colors — revert to the active preset">&#8634;</button>
+      <span class="viz-sep"></span>
+      <button class="viz-ctrl-btn" onclick="vizToggleFullscreen()" title="Fill the screen with this modal (Esc to exit)">&#9974;</button>
+      <button class="viz-ctrl-btn" onclick="vizDownloadPng()" title="Download the current tab as PNG">&#128190;</button>
+    </div>
     <div class="tabs">
       <button class="tab active" data-tab="viz-topic" onclick="switchVizTab('viz-topic')">&#127760; Topic map</button>
       <button class="tab" data-tab="viz-sunburst" onclick="switchVizTab('viz-sunburst')">&#127773; RAPTOR</button>
@@ -9957,6 +10043,8 @@ function openVizModal(tab) {{
   const dd = document.getElementById('viz-dropdown');
   if (dd) dd.classList.remove('open');
   openModal('viz-modal');
+  _vizLoadPrefs();
+  _vizWireControls();
   if (tab) switchVizTab(tab);
   // Auto-load the active tab on first open.
   const active = document.querySelector('#viz-modal .tab.active');
@@ -10024,6 +10112,232 @@ function _vizSetStatus(msg, kind) {{
                  : 'var(--fg-muted)';
 }}
 
+// ── Phase 54.6.15 — shared theming for every Viz tab ───────────────────
+// Reuses KG_THEMES (same palette definitions as the Knowledge Graph
+// modal, defined earlier in this bundle) plus its own font / label
+// scale / custom-colour overrides. Every loadX caches its base option
+// in _vizBaseOption so a theme swap re-renders without re-fetching.
+
+let _vizTheme = 'paper';
+let _vizFont = 'sans-solid';
+let _vizLabelScale = 1.0;
+let _vizCustomColors = {{}};  // keys: bg, label
+
+function _vizLoadPrefs() {{
+  try {{
+    _vizTheme = localStorage.getItem('sciknow.viz.theme') || 'paper';
+    _vizFont = localStorage.getItem('sciknow.viz.font') || 'sans-solid';
+    const s = parseFloat(localStorage.getItem('sciknow.viz.labelScale') || '1.0');
+    if (!isNaN(s)) _vizLabelScale = s;
+    const raw = localStorage.getItem('sciknow.viz.custom');
+    if (raw) _vizCustomColors = JSON.parse(raw) || {{}};
+  }} catch (_) {{}}
+}}
+function _vizSavePrefs() {{
+  try {{
+    localStorage.setItem('sciknow.viz.theme', _vizTheme);
+    localStorage.setItem('sciknow.viz.font', _vizFont);
+    localStorage.setItem('sciknow.viz.labelScale', String(_vizLabelScale));
+    localStorage.setItem('sciknow.viz.custom', JSON.stringify(_vizCustomColors));
+  }} catch (_) {{}}
+}}
+
+function _vizFontFamily() {{
+  const map = {{
+    'sans-halo':      'var(--font-sans)',
+    'sans-solid':     'var(--font-sans)',
+    'serif-solid':    'var(--font-serif)',
+    'serif-halo':     'var(--font-serif)',
+    'mono-solid':     'var(--font-mono)',
+    'mono-halo':      'var(--font-mono)',
+    'condensed-solid':'"Barlow Condensed","Arial Narrow",sans-serif',
+    'display-solid':  '"Playfair Display",Georgia,serif',
+  }};
+  return map[_vizFont] || map['sans-solid'];
+}}
+
+function _vizActivePalette() {{
+  const base = (typeof KG_THEMES !== 'undefined' ? KG_THEMES[_vizTheme] : null)
+             || {{canvasBg:'#f3f5f9', label:'#0a1a33', edge:'#5a7bb0', nodeMid:'#6c8ec8'}};
+  return {{
+    bg:    _vizCustomColors.bg    || base.canvasBg,
+    label: _vizCustomColors.label || base.label,
+    edge:  base.edge,
+    node:  base.nodeMid,
+    hi:    base.hiMid || '#f59e0b',
+  }};
+}}
+
+function _vizDecorateOption(option) {{
+  const p = _vizActivePalette();
+  const font = _vizFontFamily();
+  option = option || {{}};
+  option.backgroundColor = p.bg;
+  option.textStyle = Object.assign(
+    {{color: p.label, fontFamily: font}}, option.textStyle || {{}}
+  );
+  // Legend text
+  if (option.legend) {{
+    const arr = Array.isArray(option.legend) ? option.legend : [option.legend];
+    arr.forEach(l => {{
+      l.textStyle = Object.assign({{color: p.label, fontFamily: font}}, l.textStyle || {{}});
+    }});
+  }}
+  // Axis line + labels
+  ['xAxis', 'yAxis'].forEach(ax => {{
+    if (!option[ax]) return;
+    const arr = Array.isArray(option[ax]) ? option[ax] : [option[ax]];
+    arr.forEach(a => {{
+      a.axisLine   = Object.assign({{lineStyle: {{color: p.edge}}}}, a.axisLine || {{}});
+      a.axisLabel  = Object.assign({{color: p.label, fontFamily: font}}, a.axisLabel || {{}});
+      a.nameTextStyle = Object.assign({{color: p.label, fontFamily: font}}, a.nameTextStyle || {{}});
+      a.splitLine  = Object.assign({{lineStyle: {{color: p.edge, opacity: 0.2}}}}, a.splitLine || {{}});
+    }});
+  }});
+  // Radar indicator axes
+  if (option.radar) {{
+    option.radar.axisName = Object.assign(
+      {{color: p.label, fontFamily: font}}, option.radar.axisName || {{}}
+    );
+    option.radar.splitLine = Object.assign({{lineStyle:{{color: p.edge, opacity: 0.25}}}}, option.radar.splitLine || {{}});
+    option.radar.splitArea = {{areaStyle: {{color: ['transparent','transparent']}}}};
+  }}
+  // Series-level label font / size
+  (option.series || []).forEach(ser => {{
+    if (ser.label && typeof ser.label === 'object') {{
+      ser.label.fontFamily = font;
+      if (typeof ser.label.fontSize === 'number') {{
+        ser.label.fontSize = Math.max(8, Math.round(ser.label.fontSize * _vizLabelScale));
+      }} else {{
+        ser.label.fontSize = Math.max(8, Math.round(11 * _vizLabelScale));
+      }}
+      ser.label.color = ser.label.color || p.label;
+    }}
+    if (ser.type === 'sunburst' && ser.label) {{
+      // Sunburst reads label.color per level; give each level a legible text colour.
+      if (ser.levels) {{
+        ser.levels.forEach(lvl => {{
+          if (lvl && lvl.label) {{
+            lvl.label.fontFamily = font;
+            if (typeof lvl.label.fontSize === 'number') {{
+              lvl.label.fontSize = Math.max(8, Math.round(lvl.label.fontSize * _vizLabelScale));
+            }}
+          }}
+        }});
+      }}
+    }}
+  }});
+  return option;
+}}
+
+window._vizBaseOption = window._vizBaseOption || {{}};
+
+function _vizRender(chartId, baseOption) {{
+  const chart = _vizChart(chartId);
+  if (!chart) return null;
+  // Deep-copy so subsequent theme swaps don't share mutated refs.
+  const copy = JSON.parse(JSON.stringify(baseOption));
+  window._vizBaseOption[chartId] = copy;
+  chart.setOption(_vizDecorateOption(JSON.parse(JSON.stringify(copy))), true);
+  return chart;
+}}
+
+function _vizReapplyTheme() {{
+  Object.keys(window._vizBaseOption).forEach(id => {{
+    const chart = _vizChart(id);
+    if (!chart) return;
+    const base = window._vizBaseOption[id];
+    chart.setOption(_vizDecorateOption(JSON.parse(JSON.stringify(base))), true);
+  }});
+  // Theme-chip active state
+  document.querySelectorAll('#viz-modal .viz-theme-chip').forEach(c => {{
+    c.classList.toggle('active', c.dataset.theme === _vizTheme);
+  }});
+  // Font select
+  const fs = document.getElementById('viz-font-select');
+  if (fs) fs.value = _vizFont;
+  // Label slider
+  const ls = document.getElementById('viz-labelscale');
+  if (ls) ls.value = String(_vizLabelScale);
+}}
+
+function vizSetTheme(name) {{
+  if (typeof KG_THEMES !== 'undefined' && !KG_THEMES[name]) return;
+  _vizTheme = name;
+  _vizSavePrefs();
+  _vizReapplyTheme();
+}}
+function vizInvertTheme() {{
+  if (typeof KG_THEMES === 'undefined') return;
+  const inv = (KG_THEMES[_vizTheme] || {{}}).inverse;
+  if (inv) vizSetTheme(inv);
+}}
+function vizSetFont(key) {{
+  _vizFont = key;
+  _vizSavePrefs();
+  _vizReapplyTheme();
+}}
+function vizSetLabelScale(v) {{
+  _vizLabelScale = Math.max(0.6, Math.min(2.0, parseFloat(v)));
+  _vizSavePrefs();
+  _vizReapplyTheme();
+}}
+function vizSetCustomColor(kind, value) {{
+  _vizCustomColors[kind] = value;
+  _vizSavePrefs();
+  _vizReapplyTheme();
+}}
+function vizClearCustomColors() {{
+  _vizCustomColors = {{}};
+  _vizSavePrefs();
+  _vizReapplyTheme();
+}}
+function vizToggleFullscreen() {{
+  const modal = document.querySelector('#viz-modal .modal');
+  if (!modal) return;
+  if (document.fullscreenElement) {{
+    document.exitFullscreen();
+  }} else if (modal.requestFullscreen) {{
+    modal.requestFullscreen();
+  }}
+  // ECharts instances must resize after fullscreen transition.
+  setTimeout(() => Object.values(window._vizCharts || {{}}).forEach(c => {{
+    try {{ c.resize(); }} catch (_) {{}}
+  }}), 150);
+}}
+function vizDownloadPng() {{
+  const active = document.querySelector('#viz-modal .tab.active');
+  const tab = active ? active.dataset.tab : 'viz-topic';
+  const idMap = {{
+    'viz-topic':'viz-topic-chart', 'viz-sunburst':'viz-sunburst-chart',
+    'viz-consensus':'viz-consensus-chart', 'viz-timeline':'viz-timeline-chart',
+    'viz-ego':'viz-ego-chart', 'viz-radar':'viz-radar-chart',
+  }};
+  const chart = window._vizCharts && window._vizCharts[idMap[tab]];
+  if (!chart) {{ alert('Nothing to download for this tab yet.'); return; }}
+  const url = chart.getDataURL({{type: 'png', pixelRatio: 2, backgroundColor: _vizActivePalette().bg}});
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'sciknow-' + tab + '-' + new Date().toISOString().slice(0,10) + '.png';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+}}
+
+// Wire the theme chips once, on first openVizModal.
+function _vizWireControls() {{
+  document.querySelectorAll('#viz-modal .viz-theme-chip').forEach(chip => {{
+    if (chip.dataset.wired) return;
+    chip.dataset.wired = '1';
+    chip.addEventListener('click', () => vizSetTheme(chip.dataset.theme));
+  }});
+  document.querySelectorAll('#viz-modal .viz-theme-chip').forEach(c => {{
+    c.classList.toggle('active', c.dataset.theme === _vizTheme);
+  }});
+  const bgPicker = document.getElementById('viz-color-bg');
+  if (bgPicker && _vizCustomColors.bg) bgPicker.value = _vizCustomColors.bg;
+  const lblPicker = document.getElementById('viz-color-label');
+  if (lblPicker && _vizCustomColors.label) lblPicker.value = _vizCustomColors.label;
+}}
+
 // 1. Topic map — ECharts scatter with built-in zoom/pan + tooltips.
 async function loadTopicMap(refresh) {{
   _vizSetStatus('Loading topic map' + (refresh ? ' (refreshing UMAP — may take 5-60s)…' : '…'));
@@ -10037,8 +10351,6 @@ async function loadTopicMap(refresh) {{
       return;
     }}
     _vizSetStatus(data.n_papers + ' papers · ' + (data.clusters || []).length + ' clusters · scroll to zoom, drag to pan', 'ok');
-    const chart = _vizChart('viz-topic-chart');
-    if (!chart) return;
     const clusterColor = {{}};
     (data.clusters || []).forEach(c => {{ clusterColor[c.id] = c.color; }});
     // One series per cluster so the ECharts legend works for toggles.
@@ -10078,7 +10390,7 @@ async function loadTopicMap(refresh) {{
         document_id: p.document_id,
       }})),
     }}));
-    chart.setOption({{
+    const chart = _vizRender('viz-topic-chart', {{
       tooltip: {{
         trigger: 'item',
         formatter: p => (p.data.year || '?') + ' · ' + (p.data.author || '?')
@@ -10092,8 +10404,10 @@ async function loadTopicMap(refresh) {{
         {{type: 'inside', yAxisIndex: 0, filterMode: 'none'}},
       ],
       series: series,
-    }}, true);
+    }});
+    if (!chart) return;
     // Click → copy the document_id into the ego-radial input, handy flow.
+    chart.off('click');
     chart.on('click', params => {{
       if (params && params.data && params.data.document_id) {{
         const inp = document.getElementById('viz-ego-docid');
@@ -10115,9 +10429,7 @@ async function loadSunburst() {{
     if (tree.message) {{ _vizSetStatus(tree.message, 'error'); return; }}
     _vizSetStatus(tree.total_nodes + ' RAPTOR nodes · click a slice to zoom, click centre to zoom out', 'ok');
     _vizLoaded['viz-sunburst'] = true;
-    const chart = _vizChart('viz-sunburst-chart');
-    if (!chart) return;
-    chart.setOption({{
+    _vizRender('viz-sunburst-chart', {{
       tooltip: {{trigger: 'item',
         formatter: p => 'L' + (p.data.level || 0) + ' · '
           + (p.data.n_docs || 0) + ' docs<br/>' + (p.name || '').slice(0, 160),
@@ -10148,7 +10460,7 @@ async function loadSunburst() {{
         ],
         data: (tree.children && tree.children.length) ? tree.children : [{{name: 'empty', value: 1}}],
       }}],
-    }}, true);
+    }});
   }} catch (exc) {{
     _vizSetStatus('Failed: ' + exc.message, 'error');
   }}
@@ -10167,8 +10479,6 @@ async function loadConsensusLandscape() {{
     const data = await res.json();
     _vizLoaded['viz-consensus'] = true;
     _vizSetStatus((data.claims || []).length + ' claim(s)', 'ok');
-    const chart = _vizChart('viz-consensus-chart');
-    if (!chart) return;
     const colors = {{strong:'#059669', moderate:'#0284c7',
                     weak:'#f59e0b', contested:'#dc2626',
                     unknown:'#888'}};
@@ -10188,7 +10498,7 @@ async function loadConsensusLandscape() {{
         trend: c.trend,
       }})),
     }}));
-    chart.setOption({{
+    _vizRender('viz-consensus-chart', {{
       tooltip: {{trigger: 'item',
         formatter: p => '<strong>' + p.seriesName + '</strong>'
           + (p.data.trend ? ' · ' + p.data.trend : '')
@@ -10200,7 +10510,7 @@ async function loadConsensusLandscape() {{
       xAxis: {{type: 'value', name: 'supporting papers →', nameLocation: 'middle', nameGap: 30}},
       yAxis: {{type: 'value', name: 'contradicting →', nameLocation: 'middle', nameGap: 30}},
       series: series,
-    }}, true);
+    }});
   }} catch (exc) {{
     _vizSetStatus('Failed: ' + exc.message, 'error');
   }}
@@ -10218,8 +10528,6 @@ async function loadTimeline() {{
     const modeLabel = (data.mode === 'decade') ? 'decades (no clusters yet — run `catalog cluster`)' : 'clusters';
     _vizSetStatus(data.years.length + ' years · ' + data.series.length + ' ' + modeLabel + ' · drag below axis to zoom',
                   data.mode === 'decade' ? '' : 'ok');
-    const chart = _vizChart('viz-timeline-chart');
-    if (!chart) return;
     const series = (data.series || []).map(ser => ({{
       name: 'Cluster ' + ser.cluster,
       type: 'line', stack: 'total',
@@ -10230,7 +10538,7 @@ async function loadTimeline() {{
       smooth: 0.15,
       data: ser.values,
     }}));
-    chart.setOption({{
+    _vizRender('viz-timeline-chart', {{
       tooltip: {{trigger: 'axis'}},
       legend: {{type: 'scroll', top: 0, textStyle: {{fontSize: 10}}}},
       grid: {{top: 30, left: 45, right: 20, bottom: 70}},
@@ -10241,7 +10549,7 @@ async function loadTimeline() {{
         {{type: 'slider', height: 20, bottom: 25}},
       ],
       series: series,
-    }}, true);
+    }});
   }} catch (exc) {{
     _vizSetStatus('Failed: ' + exc.message, 'error');
   }}
@@ -10269,8 +10577,6 @@ async function loadEgoRadial() {{
     const data = await res.json();
     _vizLoaded['viz-ego'] = true;
     _vizSetStatus(data.neighbours.length + ' neighbours around ' + (data.centre.title || docId).slice(0, 60), 'ok');
-    const chart = _vizChart('viz-ego-chart');
-    if (!chart) return;
     // ECharts polar uses (radius, angle). Our API returned x,y so
     // reverse-derive r + θ for polar coords.
     const neighbours = (data.neighbours || []).map(n => {{
@@ -10278,7 +10584,7 @@ async function loadEgoRadial() {{
       const theta = Math.atan2(n.y, n.x) * 180 / Math.PI;
       return {{r, theta, ...n}};
     }});
-    chart.setOption({{
+    const chart = _vizRender('viz-ego-chart', {{
       tooltip: {{trigger: 'item',
         formatter: p => (p.data.score != null ? 'sim ' + p.data.score.toFixed(3) + ' · ' : '')
           + (p.data.year || '?') + ' · ' + (p.data.author || '?')
@@ -10313,7 +10619,8 @@ async function loadEgoRadial() {{
           }})),
         }},
       ],
-    }}, true);
+    }});
+    if (!chart) return;
     chart.off('click');
     chart.on('click', params => {{
       if (params && params.seriesIndex === 2 && params.data.document_id) {{
@@ -10334,16 +10641,14 @@ async function loadGapRadar() {{
     const data = await res.json();
     _vizLoaded['viz-radar'] = true;
     _vizSetStatus(data.chapters.length + ' chapters', 'ok');
-    const chart = _vizChart('viz-radar-chart');
-    if (!chart) return;
-    chart.setOption({{
+    _vizRender('viz-radar-chart', {{
       tooltip: {{trigger: 'item'}},
       legend: {{type: 'scroll', bottom: 2, textStyle: {{fontSize: 10}}}},
       radar: {{
         indicator: (data.axes || []).map(a => ({{name: a, max: 1.0}})),
         radius: '65%',
         splitNumber: 4,
-        axisName: {{color: '#555', fontSize: 12}},
+        axisName: {{fontSize: 12}},
       }},
       series: [{{
         type: 'radar', areaStyle: {{opacity: 0.12}},
@@ -10353,7 +10658,7 @@ async function loadGapRadar() {{
           value: ch.values,
         }})),
       }}],
-    }}, true);
+    }});
   }} catch (exc) {{
     _vizSetStatus('Failed: ' + exc.message, 'error');
   }}
