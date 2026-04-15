@@ -4860,6 +4860,91 @@ async def api_corpus_expand(
     return JSONResponse({"job_id": job_id})
 
 
+# ── Phase 54.6.11 — /api/viz/* endpoints for the Visualize modal ───────
+# Six lightweight JSON endpoints backing the six tabs. Heavy work
+# (UMAP fit) is done in the helper and cached on disk per-project.
+
+@app.get("/api/viz/topic-map")
+async def api_viz_topic_map(refresh: bool = False):
+    """UMAP 2D projection of every paper's abstract embedding."""
+    from sciknow.core.viz_ops import topic_map
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: topic_map(refresh=bool(refresh)),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return JSONResponse(result)
+
+
+@app.get("/api/viz/raptor-tree")
+async def api_viz_raptor_tree():
+    """Hierarchical RAPTOR summary tree for the sunburst view."""
+    from sciknow.core.viz_ops import raptor_tree
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(None, raptor_tree)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return JSONResponse(result)
+
+
+@app.post("/api/viz/consensus-landscape")
+async def api_viz_consensus_landscape(topic: str = Form(""), model: str = Form(None)):
+    """Claims scatter for a topic — wraps wiki consensus_map."""
+    if not topic.strip():
+        raise HTTPException(status_code=400, detail="topic required")
+    from sciknow.core.viz_ops import consensus_landscape
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: consensus_landscape(topic, model=(model or None)),
+        )
+    except Exception as exc:
+        logger.exception("viz consensus-landscape failed")
+        raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}")
+    return JSONResponse(result)
+
+
+@app.get("/api/viz/timeline")
+async def api_viz_timeline():
+    """Year × cluster stacked area for the timeline river."""
+    from sciknow.core.viz_ops import timeline
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(None, timeline)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return JSONResponse(result)
+
+
+@app.get("/api/viz/ego-radial")
+async def api_viz_ego_radial(document_id: str, k: int = 20):
+    """Top-K similar papers radially around a document."""
+    if not document_id:
+        raise HTTPException(status_code=400, detail="document_id required")
+    from sciknow.core.viz_ops import ego_radial
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: ego_radial(document_id, k=int(k)),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return JSONResponse(result)
+
+
+@app.get("/api/viz/gap-radar")
+async def api_viz_gap_radar():
+    """Per-chapter coverage radar for the active book."""
+    from sciknow.core.viz_ops import gap_radar
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: gap_radar(_book_id),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return JSONResponse(result)
+
+
 @app.get("/api/stats")
 async def api_stats():
     """Aggregate stats for the enhanced dashboard panel.
@@ -7033,6 +7118,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <button class="nav-btn" onclick="openPlanModal()" title="View / edit / regenerate the book plan (the leitmotiv)">&#128221; Plan</button>
   <button class="nav-btn" onclick="openBookSettings()" title="Consolidated per-book settings: title, description, plan, length target, style fingerprint">&#9881; Settings</button>
   <button class="nav-btn" onclick="showDashboard()" title="Book dashboard with stats + heatmap">&#128200; Dashboard</button>
+  <button class="nav-btn" onclick="openVizModal()" title="Visualize the corpus — topic map (UMAP), RAPTOR sunburst, consensus landscape, timeline river, ego radial, gap radar">&#128202; Visualize</button>
   <button class="nav-btn" onclick="showCorkboard()" title="Visual card-based view of the book">&#128204; Corkboard</button>
   <button class="nav-btn" onclick="showVersions()" title="View version history and diffs">&#128344; History</button>
   <button class="nav-btn" onclick="takeSnapshot()" title="Save a snapshot of current draft content">&#128248; Snapshot</button>
@@ -8854,6 +8940,126 @@ body.task-bar-open {{ padding-top: 40px; }}
   </div>
 </div>
 
+<!-- Phase 54.6.11 — Visualize modal. Six tabs share one SVG canvas
+     element per tab; each render function is independent and pulls
+     from its own /api/viz/* endpoint. -->
+<div class="modal-overlay" id="viz-modal"
+     onclick="if(event.target===this)closeModal('viz-modal')">
+  <div class="modal wide xwide">
+    <div class="modal-header">
+      <h3>&#128200; Visualize</h3>
+      <button class="modal-close" onclick="closeModal('viz-modal')">&times;</button>
+    </div>
+    <div class="tabs">
+      <button class="tab active" data-tab="viz-topic" onclick="switchVizTab('viz-topic')">&#127760; Topic map</button>
+      <button class="tab" data-tab="viz-sunburst" onclick="switchVizTab('viz-sunburst')">&#127773; RAPTOR</button>
+      <button class="tab" data-tab="viz-consensus" onclick="switchVizTab('viz-consensus')">&#9878;&#65039; Consensus</button>
+      <button class="tab" data-tab="viz-timeline" onclick="switchVizTab('viz-timeline')">&#128200; Timeline</button>
+      <button class="tab" data-tab="viz-ego" onclick="switchVizTab('viz-ego')">&#128269; Ego radial</button>
+      <button class="tab" data-tab="viz-radar" onclick="switchVizTab('viz-radar')">&#128504;&#65039; Gap radar</button>
+    </div>
+    <div class="modal-body" style="padding:var(--sp-3);">
+      <div id="viz-status" style="font-size:12px;color:var(--fg-muted);margin-bottom:6px;"></div>
+      <!-- Topic map -->
+      <div id="viz-topic-pane" class="viz-pane">
+        <div style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;">
+          UMAP 2D projection of every paper's abstract embedding,
+          coloured by BERTopic cluster. Click a point to see title /
+          authors / year; click "Refresh" after re-clustering.
+        </div>
+        <div style="display:flex;gap:6px;margin-bottom:6px;">
+          <button class="btn-secondary" onclick="loadTopicMap(false)">Load</button>
+          <button class="btn-secondary" onclick="loadTopicMap(true)">Refresh UMAP</button>
+          <span id="viz-topic-legend" style="font-size:11px;"></span>
+        </div>
+        <svg id="viz-topic-svg" width="100%" height="70vh" viewBox="-1.1 -1.1 2.2 2.2"
+             preserveAspectRatio="xMidYMid meet"
+             style="background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);border-radius:4px;"></svg>
+        <div id="viz-topic-hover" style="font-size:12px;color:var(--fg-muted);margin-top:6px;min-height:18px;"></div>
+      </div>
+      <!-- RAPTOR sunburst -->
+      <div id="viz-sunburst-pane" class="viz-pane" style="display:none;">
+        <div style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;">
+          Sunburst of the RAPTOR cluster hierarchy. Inner ring = highest-
+          level summaries, outer rings = children. Hover to read
+          summaries; click a slice to zoom in.
+        </div>
+        <button class="btn-secondary" onclick="loadSunburst()" style="margin-bottom:6px;">Load</button>
+        <svg id="viz-sunburst-svg" width="100%" height="70vh" viewBox="-1.1 -1.1 2.2 2.2"
+             preserveAspectRatio="xMidYMid meet"
+             style="background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);border-radius:4px;"></svg>
+        <div id="viz-sunburst-hover" style="font-size:12px;color:var(--fg-muted);margin-top:6px;min-height:18px;"></div>
+      </div>
+      <!-- Consensus landscape -->
+      <div id="viz-consensus-pane" class="viz-pane" style="display:none;">
+        <div style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;">
+          Every claim in the corpus for this topic, plotted on
+          (# supporting) × (# contradicting) axes. Colour =
+          consensus_level (strong / moderate / weak / contested).
+          Runs <code>wiki consensus</code> synchronously — 30s-2min.
+        </div>
+        <div style="display:flex;gap:6px;margin-bottom:6px;">
+          <input type="text" id="viz-consensus-topic"
+                 placeholder="Topic (e.g. cosmic ray cloud nucleation)"
+                 onkeydown="if(event.key==='Enter')loadConsensusLandscape()"
+                 style="flex:1;padding:4px 8px;font-size:12px;">
+          <button class="btn-primary" onclick="loadConsensusLandscape()">Map Consensus</button>
+        </div>
+        <svg id="viz-consensus-svg" width="100%" height="60vh"
+             style="background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);border-radius:4px;"></svg>
+        <div id="viz-consensus-info" style="font-size:12px;color:var(--fg-muted);margin-top:6px;"></div>
+      </div>
+      <!-- Timeline river -->
+      <div id="viz-timeline-pane" class="viz-pane" style="display:none;">
+        <div style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;">
+          Stacked-area of papers per year, coloured by BERTopic cluster.
+          The "history of the field" view. Hover a stripe to read the
+          cluster name; clusters are stacked biggest-first.
+        </div>
+        <button class="btn-secondary" onclick="loadTimeline()" style="margin-bottom:6px;">Load</button>
+        <svg id="viz-timeline-svg" width="100%" height="60vh"
+             style="background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);border-radius:4px;"></svg>
+        <div id="viz-timeline-hover" style="font-size:12px;color:var(--fg-muted);margin-top:6px;min-height:18px;"></div>
+      </div>
+      <!-- Ego radial -->
+      <div id="viz-ego-pane" class="viz-pane" style="display:none;">
+        <div style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;">
+          Pick a paper, see its top-K nearest papers arranged radially
+          by cosine distance on the abstract embedding. Closer papers
+          sit nearer the centre.
+        </div>
+        <div style="display:flex;gap:6px;margin-bottom:6px;">
+          <input type="text" id="viz-ego-docid"
+                 placeholder="Document UUID or the first ~8 chars"
+                 style="flex:1;padding:4px 8px;font-size:12px;">
+          <input type="number" id="viz-ego-k" value="20" min="4" max="60"
+                 style="width:70px;padding:4px 8px;font-size:12px;"
+                 title="Top-K neighbours">
+          <button class="btn-primary" onclick="loadEgoRadial()">Show</button>
+        </div>
+        <svg id="viz-ego-svg" width="100%" height="70vh" viewBox="-1.1 -1.1 2.2 2.2"
+             preserveAspectRatio="xMidYMid meet"
+             style="background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);border-radius:4px;"></svg>
+        <div id="viz-ego-hover" style="font-size:12px;color:var(--fg-muted);margin-top:6px;min-height:18px;"></div>
+      </div>
+      <!-- Gap radar -->
+      <div id="viz-radar-pane" class="viz-pane" style="display:none;">
+        <div style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;">
+          Per-chapter section coverage for this book. Each polygon is
+          one chapter over six canonical axes (intro / methods /
+          results / discussion / conclusion / related_work); values
+          are penalised by any open gap naming the section.
+        </div>
+        <button class="btn-secondary" onclick="loadGapRadar()" style="margin-bottom:6px;">Load</button>
+        <svg id="viz-radar-svg" width="100%" height="70vh" viewBox="-1.25 -1.25 2.5 2.5"
+             preserveAspectRatio="xMidYMid meet"
+             style="background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);border-radius:4px;"></svg>
+        <div id="viz-radar-legend" style="font-size:11px;color:var(--fg-muted);margin-top:6px;"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Phase 30 — Export Modal -->
 <div class="modal-overlay" id="export-modal" onclick="if(event.target===this)closeModal('export-modal')">
   <div class="modal">
@@ -9609,6 +9815,371 @@ function switchKgTab(name) {{
   }});
   document.getElementById('kg-graph-pane').style.display = (name === 'kg-graph') ? 'block' : 'none';
   document.getElementById('kg-table-pane').style.display = (name === 'kg-table') ? 'block' : 'none';
+}}
+
+// ── Phase 54.6.11 — Visualize modal ────────────────────────────────────
+// One modal, six SVG tabs. Each loader + renderer is self-contained.
+function openVizModal() {{
+  openModal('viz-modal');
+  // Auto-load the topic map on first open; other tabs load lazily.
+  if (!window._vizTopicLoaded) loadTopicMap(false);
+}}
+
+function switchVizTab(name) {{
+  document.querySelectorAll('#viz-modal .tab').forEach(t => {{
+    t.classList.toggle('active', t.dataset.tab === name);
+  }});
+  ['viz-topic','viz-sunburst','viz-consensus','viz-timeline','viz-ego','viz-radar']
+    .forEach(n => {{
+      const p = document.getElementById(n + '-pane');
+      if (p) p.style.display = (n === name) ? 'block' : 'none';
+    }});
+  document.getElementById('viz-status').textContent = '';
+}}
+
+function _vizSetStatus(msg, kind) {{
+  const el = document.getElementById('viz-status');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.style.color = kind === 'error' ? 'var(--danger)'
+                 : kind === 'ok'    ? 'var(--success)'
+                 : 'var(--fg-muted)';
+}}
+
+// 1. Topic map ─────────────────────────────────────────────────────────
+async function loadTopicMap(refresh) {{
+  _vizSetStatus('Loading topic map' + (refresh ? ' (refreshing UMAP — may take 5-60s)…' : '…'));
+  const svg = document.getElementById('viz-topic-svg');
+  svg.innerHTML = '';
+  try {{
+    const res = await fetch('/api/viz/topic-map' + (refresh ? '?refresh=true' : ''));
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    window._vizTopicLoaded = true;
+    if (!data.points || !data.points.length) {{
+      _vizSetStatus(data.message || 'no points', 'error');
+      return;
+    }}
+    _vizSetStatus(data.n_papers + ' papers · ' + (data.clusters || []).length + ' clusters', 'ok');
+    _renderTopicMap(data);
+  }} catch (exc) {{
+    _vizSetStatus('Failed: ' + exc.message, 'error');
+  }}
+}}
+
+function _renderTopicMap(data) {{
+  const svg = document.getElementById('viz-topic-svg');
+  let html = '';
+  // Cluster legend.
+  const legend = document.getElementById('viz-topic-legend');
+  legend.innerHTML = (data.clusters || []).slice(0, 12).map(c =>
+    '<span style="display:inline-flex;align-items:center;gap:3px;margin-right:8px;">'
+    + '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:'
+    + c.color + ';"></span>' + _escHtml(c.name) + ' (' + c.count + ')</span>'
+  ).join('');
+  // Points.
+  const clusterColor = {{}};
+  (data.clusters || []).forEach(c => {{ clusterColor[c.id] = c.color; }});
+  data.points.forEach((p, i) => {{
+    const color = (p.cluster != null && clusterColor[String(p.cluster)]) || '#888';
+    html += '<circle cx="' + p.x.toFixed(4) + '" cy="' + p.y.toFixed(4) + '" '
+      + 'r="0.012" fill="' + color + '" fill-opacity="0.65" '
+      + 'data-idx="' + i + '" class="viz-topic-dot" '
+      + 'style="cursor:pointer;"/>';
+  }});
+  svg.innerHTML = html;
+  svg.querySelectorAll('.viz-topic-dot').forEach(el => {{
+    el.addEventListener('mouseenter', () => {{
+      const p = data.points[parseInt(el.dataset.idx, 10)];
+      document.getElementById('viz-topic-hover').textContent =
+        (p.year || '?') + ' · ' + (p.first_author || '?') + ' — ' + (p.title || '(untitled)');
+      el.setAttribute('r', '0.022');
+    }});
+    el.addEventListener('mouseleave', () => {{
+      el.setAttribute('r', '0.012');
+    }});
+  }});
+}}
+
+// 2. Sunburst ─────────────────────────────────────────────────────────
+async function loadSunburst() {{
+  _vizSetStatus('Loading RAPTOR tree…');
+  try {{
+    const res = await fetch('/api/viz/raptor-tree');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const tree = await res.json();
+    if (tree.message) {{ _vizSetStatus(tree.message, 'error'); return; }}
+    _vizSetStatus(tree.total_nodes + ' RAPTOR nodes', 'ok');
+    _renderSunburst(tree);
+  }} catch (exc) {{
+    _vizSetStatus('Failed: ' + exc.message, 'error');
+  }}
+}}
+
+function _renderSunburst(tree) {{
+  const svg = document.getElementById('viz-sunburst-svg');
+  // Simple radial partition. Flatten and compute angle ranges per node.
+  let arcs = [];
+  function _layout(node, depth, a0, a1) {{
+    if (!node || depth > 6) return;
+    arcs.push({{node, depth, a0, a1}});
+    const kids = node.children || [];
+    if (!kids.length) return;
+    const total = kids.reduce((s, k) => s + (k.value || 1), 0) || 1;
+    let a = a0;
+    for (const k of kids) {{
+      const span = (a1 - a0) * ((k.value || 1) / total);
+      _layout(k, depth + 1, a, a + span);
+      a += span;
+    }}
+  }}
+  _layout(tree, 0, 0, Math.PI * 2);
+  const ringStep = 0.15;
+  let html = '';
+  arcs.forEach((a, i) => {{
+    if (a.depth === 0) return;
+    const r1 = a.depth * ringStep;
+    const r2 = r1 + ringStep - 0.02;
+    const x1 = r1 * Math.cos(a.a0), y1 = r1 * Math.sin(a.a0);
+    const x2 = r2 * Math.cos(a.a0), y2 = r2 * Math.sin(a.a0);
+    const x3 = r2 * Math.cos(a.a1), y3 = r2 * Math.sin(a.a1);
+    const x4 = r1 * Math.cos(a.a1), y4 = r1 * Math.sin(a.a1);
+    const large = (a.a1 - a.a0) > Math.PI ? 1 : 0;
+    const fill = `hsl(${{(i * 37) % 360}}, 55%, ${{65 - a.depth * 5}}%)`;
+    html += '<path d="M ' + x1.toFixed(4) + ' ' + y1.toFixed(4)
+      + ' L ' + x2.toFixed(4) + ' ' + y2.toFixed(4)
+      + ' A ' + r2.toFixed(4) + ' ' + r2.toFixed(4) + ' 0 ' + large + ' 1 '
+      + x3.toFixed(4) + ' ' + y3.toFixed(4)
+      + ' L ' + x4.toFixed(4) + ' ' + y4.toFixed(4)
+      + ' A ' + r1.toFixed(4) + ' ' + r1.toFixed(4) + ' 0 ' + large + ' 0 '
+      + x1.toFixed(4) + ' ' + y1.toFixed(4) + ' Z" '
+      + 'fill="' + fill + '" stroke="#fff" stroke-width="0.004" '
+      + 'data-idx="' + i + '" class="viz-sun-arc" style="cursor:pointer;"/>';
+  }});
+  svg.innerHTML = html;
+  svg.querySelectorAll('.viz-sun-arc').forEach(el => {{
+    el.addEventListener('mouseenter', () => {{
+      const a = arcs[parseInt(el.dataset.idx, 10)];
+      const n = a.node;
+      document.getElementById('viz-sunburst-hover').textContent =
+        `L${{n.level}} · ${{n.n_docs || 0}} docs · ${{n.name || ''}}`;
+    }});
+  }});
+}}
+
+// 3. Consensus landscape ───────────────────────────────────────────────
+async function loadConsensusLandscape() {{
+  const topic = (document.getElementById('viz-consensus-topic').value || '').trim();
+  if (!topic) {{ alert('Enter a topic first.'); return; }}
+  _vizSetStatus('Running wiki consensus (30s-2min)…');
+  const svg = document.getElementById('viz-consensus-svg');
+  svg.innerHTML = '';
+  const fd = new FormData();
+  fd.append('topic', topic);
+  try {{
+    const res = await fetch('/api/viz/consensus-landscape', {{method:'POST', body: fd}});
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    _vizSetStatus((data.claims || []).length + ' claim(s)', 'ok');
+    _renderConsensusLandscape(data);
+  }} catch (exc) {{
+    _vizSetStatus('Failed: ' + exc.message, 'error');
+  }}
+}}
+
+function _renderConsensusLandscape(data) {{
+  const svg = document.getElementById('viz-consensus-svg');
+  const w = svg.clientWidth || 900, h = svg.clientHeight || 500;
+  svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+  const colors = {{strong:'#059669', moderate:'#0284c7', weak:'#f59e0b', contested:'#dc2626'}};
+  const claims = data.claims || [];
+  if (!claims.length) {{ svg.innerHTML = '<text x="20" y="30" fill="#888" font-size="13">No claims returned.</text>'; return; }}
+  const maxX = Math.max(1, ...claims.map(c => c.x));
+  const maxY = Math.max(1, ...claims.map(c => c.y));
+  const pad = 50;
+  const sx = v => pad + (v / maxX) * (w - 2*pad);
+  const sy = v => h - pad - (v / maxY) * (h - 2*pad);
+  let html = '';
+  // Axes
+  html += `<line x1="${{pad}}" y1="${{h-pad}}" x2="${{w-pad}}" y2="${{h-pad}}" stroke="#aaa"/>`;
+  html += `<line x1="${{pad}}" y1="${{pad}}" x2="${{pad}}" y2="${{h-pad}}" stroke="#aaa"/>`;
+  html += `<text x="${{w/2}}" y="${{h-10}}" text-anchor="middle" font-size="12" fill="#555">supporting papers →</text>`;
+  html += `<text x="15" y="${{h/2}}" text-anchor="middle" font-size="12" fill="#555" transform="rotate(-90,15,${{h/2}})">contradicting →</text>`;
+  claims.forEach((c, i) => {{
+    const cx = sx(c.x), cy = sy(c.y);
+    const col = colors[c.consensus_level] || '#888';
+    html += `<circle cx="${{cx}}" cy="${{cy}}" r="8" fill="${{col}}" fill-opacity="0.65" stroke="${{col}}" data-idx="${{i}}" class="viz-cl-dot" style="cursor:pointer;"/>`;
+  }});
+  svg.innerHTML = html;
+  svg.querySelectorAll('.viz-cl-dot').forEach(el => {{
+    el.addEventListener('mouseenter', () => {{
+      const c = claims[parseInt(el.dataset.idx, 10)];
+      document.getElementById('viz-consensus-info').innerHTML =
+        '<strong>' + _escHtml(c.consensus_level) + '</strong> · '
+        + (c.x) + ' supp · ' + (c.y) + ' contra — ' + _escHtml(c.claim);
+    }});
+  }});
+}}
+
+// 4. Timeline river ────────────────────────────────────────────────────
+async function loadTimeline() {{
+  _vizSetStatus('Loading timeline…');
+  try {{
+    const res = await fetch('/api/viz/timeline');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    if (!(data.years || []).length) {{ _vizSetStatus('no data', 'error'); return; }}
+    _vizSetStatus(data.years.length + ' years · ' + data.series.length + ' clusters', 'ok');
+    _renderTimeline(data);
+  }} catch (exc) {{
+    _vizSetStatus('Failed: ' + exc.message, 'error');
+  }}
+}}
+
+function _renderTimeline(data) {{
+  const svg = document.getElementById('viz-timeline-svg');
+  const w = svg.clientWidth || 900, h = svg.clientHeight || 500;
+  svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+  const years = data.years;
+  const series = data.series;
+  const pad = 40;
+  const nY = years.length;
+  const sx = i => pad + (i / Math.max(1, nY - 1)) * (w - 2*pad);
+  // Stack the series.
+  const stack = years.map(() => 0);
+  const maxTotal = Math.max(1, ...years.map((_, i) =>
+    series.reduce((s, ser) => s + (ser.values[i] || 0), 0)
+  ));
+  const sy = v => h - pad - (v / maxTotal) * (h - 2*pad);
+  let html = '';
+  // Year axis ticks (every ~5 years)
+  years.forEach((y, i) => {{
+    if (i % 5 === 0 || i === nY - 1) {{
+      html += `<text x="${{sx(i)}}" y="${{h-pad+14}}" text-anchor="middle" font-size="10" fill="#666">${{y}}</text>`;
+    }}
+  }});
+  // Stacked areas
+  series.forEach((ser, sidx) => {{
+    let top = '', bot = '';
+    ser.values.forEach((v, i) => {{
+      const y0 = sy(stack[i]);
+      const y1 = sy(stack[i] + v);
+      top += (i === 0 ? 'M ' : ' L ') + sx(i).toFixed(1) + ' ' + y1.toFixed(1);
+      bot = ' L ' + sx(i).toFixed(1) + ' ' + y0.toFixed(1) + bot;
+    }});
+    ser.values.forEach((v, i) => {{ stack[i] += v; }});
+    html += `<path d="${{top}}${{bot}} Z" fill="${{ser.color}}" fill-opacity="0.85" data-sidx="${{sidx}}" class="viz-tl-series" style="cursor:pointer;"/>`;
+  }});
+  svg.innerHTML = html;
+  svg.querySelectorAll('.viz-tl-series').forEach(el => {{
+    el.addEventListener('mouseenter', () => {{
+      const s = series[parseInt(el.dataset.sidx, 10)];
+      document.getElementById('viz-timeline-hover').textContent =
+        'Cluster ' + s.cluster + ' · ' + s.total + ' papers';
+      el.setAttribute('fill-opacity', '1.0');
+    }});
+    el.addEventListener('mouseleave', () => el.setAttribute('fill-opacity', '0.85'));
+  }});
+}}
+
+// 5. Ego radial ────────────────────────────────────────────────────────
+async function loadEgoRadial() {{
+  let docId = (document.getElementById('viz-ego-docid').value || '').trim();
+  if (!docId) {{ alert('Enter a document UUID or the first ~8 chars.'); return; }}
+  const k = parseInt(document.getElementById('viz-ego-k').value || '20', 10);
+  // Resolve short id → full UUID if needed.
+  if (docId.length < 32) {{
+    try {{
+      const rr = await fetch('/api/catalog?q=' + encodeURIComponent(docId) + '&limit=5');
+      const rd = await rr.json();
+      const hit = (rd.papers || rd.results || []).find(p =>
+        (p.document_id || '').toLowerCase().startsWith(docId.toLowerCase())
+      );
+      if (hit) docId = hit.document_id;
+    }} catch (_) {{}}
+  }}
+  _vizSetStatus('Finding neighbours…');
+  try {{
+    const res = await fetch('/api/viz/ego-radial?document_id=' + encodeURIComponent(docId) + '&k=' + k);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    _vizSetStatus(data.neighbours.length + ' neighbours', 'ok');
+    _renderEgoRadial(data);
+  }} catch (exc) {{
+    _vizSetStatus('Failed: ' + exc.message, 'error');
+  }}
+}}
+
+function _renderEgoRadial(data) {{
+  const svg = document.getElementById('viz-ego-svg');
+  let html = '';
+  // Centre
+  html += '<circle cx="0" cy="0" r="0.05" fill="#0284c7"/>';
+  html += '<text x="0" y="-0.09" text-anchor="middle" font-size="0.05" fill="#0284c7" font-weight="bold">' + _escHtml((data.centre.title || '').slice(0, 40)) + '</text>';
+  // Neighbours
+  (data.neighbours || []).forEach((n, i) => {{
+    html += '<line x1="0" y1="0" x2="' + n.x.toFixed(4) + '" y2="' + n.y.toFixed(4) + '" stroke="#aaa" stroke-width="0.002"/>';
+    html += '<circle cx="' + n.x.toFixed(4) + '" cy="' + n.y.toFixed(4) + '" r="0.025" fill="#059669" fill-opacity="0.75" data-idx="' + i + '" class="viz-ego-dot" style="cursor:pointer;"/>';
+  }});
+  svg.innerHTML = html;
+  svg.querySelectorAll('.viz-ego-dot').forEach(el => {{
+    el.addEventListener('mouseenter', () => {{
+      const n = data.neighbours[parseInt(el.dataset.idx, 10)];
+      document.getElementById('viz-ego-hover').textContent =
+        n.score.toFixed(3) + ' · ' + (n.year || '?') + ' · ' + (n.first_author || '?') + ' — ' + (n.title || '');
+    }});
+  }});
+}}
+
+// 6. Gap radar ─────────────────────────────────────────────────────────
+async function loadGapRadar() {{
+  _vizSetStatus('Loading gap radar…');
+  try {{
+    const res = await fetch('/api/viz/gap-radar');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    _vizSetStatus(data.chapters.length + ' chapters', 'ok');
+    _renderGapRadar(data);
+  }} catch (exc) {{
+    _vizSetStatus('Failed: ' + exc.message, 'error');
+  }}
+}}
+
+function _renderGapRadar(data) {{
+  const svg = document.getElementById('viz-radar-svg');
+  const axes = data.axes;
+  const n = axes.length;
+  const rings = [0.25, 0.5, 0.75, 1.0];
+  let html = '';
+  // Rings + axes
+  rings.forEach(r => {{
+    html += '<circle cx="0" cy="0" r="' + r + '" fill="none" stroke="#ddd" stroke-width="0.004"/>';
+  }});
+  axes.forEach((ax, i) => {{
+    const theta = 2*Math.PI * i / n - Math.PI/2;
+    const x = Math.cos(theta), y = Math.sin(theta);
+    html += '<line x1="0" y1="0" x2="' + x.toFixed(4) + '" y2="' + y.toFixed(4) + '" stroke="#ccc" stroke-width="0.003"/>';
+    html += '<text x="' + (x*1.1).toFixed(4) + '" y="' + (y*1.1).toFixed(4) + '" font-size="0.06" text-anchor="middle" fill="#555">' + ax + '</text>';
+  }});
+  // Chapter polygons
+  const colors = ['#0284c7','#059669','#dc2626','#7c3aed','#f59e0b','#db2777','#0891b2','#65a30d'];
+  (data.chapters || []).forEach((ch, idx) => {{
+    const color = colors[idx % colors.length];
+    const pts = ch.values.map((v, i) => {{
+      const theta = 2*Math.PI * i / n - Math.PI/2;
+      return [Math.cos(theta)*v, Math.sin(theta)*v];
+    }});
+    const d = pts.map(p => p[0].toFixed(4) + ',' + p[1].toFixed(4)).join(' ');
+    html += '<polygon points="' + d + '" fill="' + color + '" fill-opacity="0.12" stroke="' + color + '" stroke-width="0.006"/>';
+  }});
+  svg.innerHTML = html;
+  // Legend
+  const leg = document.getElementById('viz-radar-legend');
+  leg.innerHTML = (data.chapters || []).map((ch, idx) =>
+    '<span style="margin-right:10px;"><span style="display:inline-block;width:10px;height:10px;background:'
+    + colors[idx % colors.length] + ';border-radius:2px;margin-right:3px;"></span>Ch.'
+    + ch.number + ' ' + _escHtml(ch.title) + '</span>'
+  ).join('');
 }}
 
 let _kgPredicatesLoaded = false;
