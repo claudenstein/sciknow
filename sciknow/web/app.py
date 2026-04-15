@@ -6290,7 +6290,16 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
                  padding: 10px var(--sp-3); border-bottom: 1px solid var(--border);
                  cursor: pointer; transition: background .12s; }}
 .wiki-page-row:hover {{ background: var(--toolbar-bg); }}
-.wiki-page-row .wp-title {{ flex: 1; font-weight: 500; color: var(--fg); }}
+.wiki-page-row .wp-title {{ flex: 1; font-weight: 500; color: var(--fg); min-width: 0; }}
+/* Phase 54.6.9 — year + authors columns alongside the existing
+   meta/type badges. Year is a fixed-width chip, authors truncates
+   on overflow so the title still dominates the row width. */
+.wiki-page-row .wp-year {{ font-size: 11px; color: var(--fg-muted);
+                           width: 48px; text-align: right; font-variant-numeric: tabular-nums;
+                           font-family: ui-monospace, monospace; flex-shrink: 0; }}
+.wiki-page-row .wp-authors {{ font-size: 11px; color: var(--fg-muted);
+                              flex: 0 1 260px; overflow: hidden; text-overflow: ellipsis;
+                              white-space: nowrap; }}
 .wiki-page-row .wp-meta {{ font-size: 11px; color: var(--fg-muted);
                            white-space: nowrap; }}
 .wiki-page-row .wp-type {{ font-size: 10px; padding: 2px 8px;
@@ -13415,8 +13424,17 @@ async function loadWikiPages(page) {{
     let html = '<div class="wiki-page-list">';
     data.pages.forEach(p => {{
       const slug = (p.slug || '').replace(/'/g, '&#39;');
+      // Phase 54.6.9 — also surface year + authors (served by the
+      // enriched list_pages helper). Year is '' for multi-source
+      // synthesis pages; authors is "" when the linked paper has
+      // no author list. Both are always-present empty strings so the
+      // column widths don't jump between rows.
+      const year = (p.year != null) ? String(p.year) : '';
+      const authors = (p.authors_display || '').replace(/</g, '&lt;');
       html += '<div class="wiki-page-row" data-action="open-wiki-page" data-slug="' + slug + '">';
       html += '<div class="wp-title">' + (p.title || p.slug || '').replace(/</g, '&lt;') + '</div>';
+      html += '<div class="wp-authors" title="' + authors.replace(/"/g, '&quot;') + '">' + authors + '</div>';
+      html += '<div class="wp-year">' + year + '</div>';
       html += '<div class="wp-meta">' + (p.word_count || 0).toLocaleString() + ' words · ' + (p.n_sources || 0) + ' src</div>';
       html += '<div class="wp-type">' + (p.page_type || '').replace(/_/g, ' ') + '</div>';
       html += '</div>';

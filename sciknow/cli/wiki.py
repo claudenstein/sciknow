@@ -304,8 +304,12 @@ def extract_kg(
             """)).fetchall()
         else:
             # Find papers that have a wiki page but no triples in
-            # knowledge_graph. Left-anti-join is simple + fast even
-            # at 10k+ documents.
+            # knowledge_graph. `wiki_pages.source_doc_ids` is a uuid[]
+            # array (not JSONB — see sciknow/storage/models.py:462),
+            # so the previous jsonb_build_array() comparison blew up
+            # with "operator does not exist: uuid[] @> jsonb" and the
+            # whole command silently returned zero rows from the
+            # error-recovery path. Use native array-contains.
             rows = session.execute(sql_text("""
                 SELECT d.id::text, pm.title, pm.abstract, pm.year,
                        pm.authors, pm.keywords, pm.domains
@@ -314,7 +318,7 @@ def extract_kg(
                 WHERE d.ingestion_status = 'complete' AND pm.title IS NOT NULL
                   AND EXISTS (
                       SELECT 1 FROM wiki_pages wp
-                      WHERE wp.source_doc_ids @> jsonb_build_array(d.id::text)
+                      WHERE wp.source_doc_ids @> ARRAY[d.id]::uuid[]
                   )
                   AND NOT EXISTS (
                       SELECT 1 FROM knowledge_graph kg

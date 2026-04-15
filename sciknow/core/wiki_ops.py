@@ -1190,27 +1190,66 @@ def lint_wiki(
 # ── list_pages / show_page ───────────────────────────────────────────────────
 
 def list_pages(*, page_type: str | None = None) -> list[dict]:
-    """Return wiki page metadata from DB."""
+    """Return wiki page metadata from DB.
+
+    Phase 54.6.9 — enriched with ``year`` and ``authors`` from the
+    linked paper when there's exactly one source_doc_id (the common
+    paper_summary case). Synthesis / concept pages can aggregate
+    multiple documents so we don't try to pick a single year/authors
+    string for them — those fields come back as None / [].
+    """
     from sqlalchemy import text
     from sciknow.storage.db import get_session
 
-    where = "WHERE page_type = :ptype" if page_type else ""
+    where = "WHERE wp.page_type = :ptype" if page_type else ""
     params = {"ptype": page_type} if page_type else {}
 
     with get_session() as session:
         rows = session.execute(text(f"""
-            SELECT slug, title, page_type, word_count,
-                   array_length(source_doc_ids, 1) as n_sources,
-                   created_at, updated_at
-            FROM wiki_pages {where}
-            ORDER BY page_type, title
+            SELECT wp.slug, wp.title, wp.page_type, wp.word_count,
+                   array_length(wp.source_doc_ids, 1) AS n_sources,
+                   wp.created_at, wp.updated_at,
+                   -- Join paper_metadata only for single-source pages
+                   -- (paper_summary). LEFT JOIN + aggregation picks the
+                   -- first (and only) linked paper when present.
+                   pm.year, pm.authors
+            FROM wiki_pages wp
+            LEFT JOIN LATERAL (
+                SELECT year, authors FROM paper_metadata
+                WHERE array_length(wp.source_doc_ids, 1) = 1
+                  AND document_id = wp.source_doc_ids[1]
+                LIMIT 1
+            ) pm ON TRUE
+            {where}
+            ORDER BY wp.page_type, wp.title
         """), params).fetchall()
 
-    return [
-        {"slug": r[0], "title": r[1], "page_type": r[2], "word_count": r[3] or 0,
-         "n_sources": r[4] or 0, "created_at": str(r[5]), "updated_at": str(r[6])}
-        for r in rows
-    ]
+    out: list[dict] = []
+    for r in rows:
+        # `authors` in paper_metadata is a JSONB array of dicts /
+        # strings; normalize to a comma-separated display string for
+        # the list view, keeping the raw list in `authors_raw` for
+        # callers that want to format themselves.
+        raw_authors = r[8] or []
+        names: list[str] = []
+        for a in raw_authors[:6]:
+            if isinstance(a, dict):
+                nm = a.get("name") or a.get("full_name") or ""
+                if nm:
+                    names.append(str(nm))
+            elif isinstance(a, str):
+                names.append(a)
+        out.append({
+            "slug": r[0], "title": r[1], "page_type": r[2],
+            "word_count": r[3] or 0,
+            "n_sources": r[4] or 0,
+            "created_at": str(r[5]), "updated_at": str(r[6]),
+            "year": r[7],
+            "authors": names,
+            "authors_display": ", ".join(names)
+                + (f" +{len(raw_authors) - 6}" if len(raw_authors) > 6 else ""),
+        })
+    return out
 
 
 def show_page(slug: str) -> dict | None:
