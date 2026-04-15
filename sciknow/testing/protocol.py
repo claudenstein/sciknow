@@ -6880,6 +6880,23 @@ def l1_phase49_expand_rrf_ranker() -> None:
     assert "cleanup-downloads" in {
         c.name for c in db_cli.app.registered_commands
     }, "`sciknow db cleanup-downloads` not registered"
+    # Phase 54.6.19 — cleanup-downloads grew a --clean-failed flag
+    cleanup_src = _inspect.getsource(db_cli.cleanup_downloads)
+    assert "--clean-failed/--no-clean-failed" in cleanup_src, (
+        "cleanup-downloads must expose --clean-failed (Phase 54.6.19)"
+    )
+    assert "ingestion_status = 'failed'" in cleanup_src, (
+        "cleanup-downloads must purge documents rows with ingestion_status='failed'"
+    )
+    # Web wrapper passes --clean-failed (default ON in GUI)
+    from sciknow.web import app as _web_app
+    cleanup_web_src = _inspect.getsource(_web_app.api_corpus_cleanup_downloads)
+    assert '--clean-failed' in cleanup_web_src, (
+        "GUI cleanup-downloads endpoint must forward --clean-failed"
+    )
+    assert 'clean_failed: bool = Form(True)' in cleanup_web_src, (
+        "GUI cleanup-downloads must default clean_failed=True"
+    )
 
 
 def l1_phase50a_reasoning_trace_surface() -> None:

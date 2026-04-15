@@ -4741,13 +4741,16 @@ async def api_corpus_cleanup_downloads(
     dry_run: bool = Form(False),
     delete_dupes: bool = Form(True),
     cross_project: bool = Form(True),
+    clean_failed: bool = Form(True),
 ):
-    """Phase 54.6.4 — trigger `sciknow db cleanup-downloads` from the GUI.
+    """Phase 54.6.4 + 54.6.19 — trigger `sciknow db cleanup-downloads` from the GUI.
 
     Streams the subprocess log over SSE. Defaults: dry_run=False,
-    delete_dupes=True, cross_project=True — so a single click removes
-    all downloads that are already ingested anywhere (including other
-    projects), which is the ask from the '82-PDF' follow-up.
+    delete_dupes=True, cross_project=True, clean_failed=True — so a
+    single click removes all downloads that are already ingested anywhere
+    (including other projects) AND nukes the failed-ingest archive +
+    associated documents rows. The GUI exposes one button; advanced
+    users can flip the flags via the CLI.
     """
     job_id, _queue = _create_job("corpus_cleanup_downloads")
     loop = asyncio.get_event_loop()
@@ -4757,6 +4760,7 @@ async def api_corpus_cleanup_downloads(
     if delete_dupes:
         argv.append("--delete-dupes")
     argv.append("--cross-project" if cross_project else "--no-cross-project")
+    argv.append("--clean-failed" if clean_failed else "--no-clean-failed")
     _spawn_cli_streaming(job_id, argv, loop)
     return JSONResponse({"job_id": job_id})
 
@@ -7302,7 +7306,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button role="menuitem" onclick="openCorpusModal('corp-topic')">&#128269; Topic search</button>
       <button role="menuitem" onclick="openCorpusModal('corp-coauth')">&#128101; Coauthors</button>
       <div style="height:1px;background:var(--border);margin:2px 0;"></div>
-      <button role="menuitem" onclick="openCorpusModal('corp-enrich');doToolCorpus('cleanup')">&#129529; Cleanup downloads</button>
+      <button role="menuitem" onclick="openCorpusModal('corp-enrich');doToolCorpus('cleanup')">&#129529; Cleanup downloads + failed</button>
       <button role="menuitem" onclick="openPendingDownloadsModal()">&#128203; Pending downloads</button>
     </div>
   </div>
@@ -8607,15 +8611,15 @@ body.task-bar-open {{ padding-top: 40px; }}
              manual acquisition for papers without a legal OA PDF). -->
         <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;padding:8px;background:var(--bg-alt,#f8f8f8);border-radius:6px;font-size:12px;flex-wrap:wrap;">
           <button class="btn-secondary" onclick="doToolCorpus('cleanup')"
-                  title="Remove PDFs from downloads/ that are already ingested in this or any other project's DB. Frees disk without touching the pipeline archive.">
-            &#129529; Cleanup downloads
+                  title="Remove PDFs from downloads/ that are already ingested in this or any other project's DB, AND permanently nuke failed-ingest PDFs (data/failed/ + downloads/failed_ingest/) plus their documents rows. Frees disk; pipeline archive is preserved.">
+            &#129529; Cleanup downloads + failed
           </button>
           <button class="btn-secondary" onclick="openPendingDownloadsModal()"
                   title="Papers you selected but couldn't be auto-downloaded (no legal OA PDF). Retry, mark manually acquired, or export for ILL.">
             &#128203; Pending downloads
           </button>
           <span style="color:var(--fg-muted);">
-            Cleanup removes already-ingested dupes. Pending lists papers still waiting on an OA PDF.
+            Cleanup removes already-ingested dupes <em>and</em> the failed-ingest archive. Pending lists papers still waiting on an OA PDF.
           </span>
         </div>
         <div class="tabs" style="margin-bottom:10px;">

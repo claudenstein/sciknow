@@ -2089,6 +2089,11 @@ def cleanup_downloads(
                                              "Default ON — catches the common case where an expand run in "
                                              "project B re-downloaded papers already ingested in project A. "
                                              "Phase 54.6.4."),
+    clean_failed: bool = typer.Option(False, "--clean-failed/--no-clean-failed",
+                                       help="ALSO permanently remove failed-ingest PDFs (data/failed/ and "
+                                            "downloads/failed_ingest/) plus the corresponding `documents` rows "
+                                            "with ingestion_status='failed'. These are PDFs the pipeline gave "
+                                            "up on; keeping them just wastes disk. Phase 54.6.19."),
 ):
     """Phase 49.2 + 54.6.4 — comprehensive dedup of every place a PDF can end up.
 
@@ -2350,6 +2355,63 @@ def cleanup_downloads(
         + (f"  [cyan]↷ {foreign_ingested} already-ingested-in-other-project[/cyan]" if foreign_ingested else "")
         + (f"  [dim]({archived_orphans} not-in-DB groups consolidated)[/dim]" if archived_orphans else "")
     )
+
+    # Phase 54.6.19 — purge failed-ingest PDFs + their documents rows.
+    # Runs AFTER the dedup pass so any failed file that was actually a
+    # dupe of a complete ingest already got cleaned/moved correctly above.
+    # What's left in failed dirs is the real "pipeline gave up" set.
+    if clean_failed:
+        failed_dirs = [
+            ("data/failed",             data_dir / "failed"),
+            ("downloads/failed_ingest", download_dir / _FAILED_SUBDIR),
+        ]
+        nuked_files = 0
+        for label, d in failed_dirs:
+            if not d.exists():
+                continue
+            for pdf in sorted(d.iterdir()):
+                if not (pdf.is_file() and not pdf.is_symlink()
+                        and pdf.suffix.lower() == ".pdf"):
+                    continue
+                if dry_run:
+                    console.print(f"  [dim]would nuke[/dim] {label}/{pdf.name}")
+                    nuked_files += 1
+                    continue
+                try:
+                    pdf.unlink()
+                    nuked_files += 1
+                except Exception as exc:
+                    console.print(f"  [red]skip[/red] {pdf}: {exc}")
+
+        nuked_rows = 0
+        try:
+            eng_purge = create_engine(
+                f"postgresql://{settings.pg_user}:{settings.pg_password}"
+                f"@{settings.pg_host}:{settings.pg_port}/{active.pg_database}"
+            )
+            with eng_purge.connect() as conn:
+                if dry_run:
+                    res = conn.execute(sql_text(
+                        "SELECT COUNT(*) FROM documents "
+                        "WHERE ingestion_status = 'failed'"
+                    )).scalar()
+                    nuked_rows = int(res or 0)
+                else:
+                    res = conn.execute(sql_text(
+                        "DELETE FROM documents WHERE ingestion_status = 'failed'"
+                    ))
+                    nuked_rows = res.rowcount or 0
+                    conn.commit()
+        except Exception as exc:
+            console.print(
+                f"  [yellow]warn:[/yellow] could not purge failed documents rows: {exc}"
+            )
+
+        nuke_verb = "Would nuke" if dry_run else "Nuked"
+        console.print(
+            f"[bold]Failed cleanup:[/bold] "
+            f"[red]✗ {nuke_verb} {nuked_files} failed PDF(s) + {nuked_rows} documents row(s)[/red]"
+        )
 
 
 @app.command(name="repair")
