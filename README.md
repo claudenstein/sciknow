@@ -24,7 +24,14 @@ A local-first scientific knowledge system that ingests papers, builds a compiled
 - **PDF ingestion** — MinerU 2.5 (SOTA for scientific papers) with Marker fallback. Handles scanned and text PDFs, tables, equations, figures
 - **Metadata extraction** — 4-layer cascade: embedded PDF → Crossref → arXiv → LLM
 - **Citation graph** — extracts references, cross-links corpus papers, boosts highly-cited papers in search
-- **Collection expansion** — follows citations to discover + download open-access papers from 6 sources
+- **Five corpus-expansion vectors**, all sharing a **preview-and-select** flow in the browser (checkbox shortlist, per-row relevance score, "Download selected"):
+  - `db expand` — **outbound** citations (follow references in existing papers)
+  - `db expand-author` — every paper by a **named author** across OpenAlex + Crossref
+  - `db expand-cites` — **inbound** citations (papers that cite yours — forward-in-time mirror)
+  - `db expand-topic` — **free-text topic** search (solves the bootstrap + sideways-expansion problem)
+  - `db expand-coauthors` — **invisible college** (papers by coauthors of your corpus authors)
+  - `book auto-expand` — **gap-driven** auto-expansion: every open `book gaps` entry becomes its own topic search, candidates merged + ranked so papers that close multiple gaps rise to the top
+- **Cross-project dedup** — `db cleanup-downloads --cross-project` (default ON) checks every sciknow project's DB by SHA-256, so a PDF downloaded into project B that's already ingested in project A is recognised and cleaned
 - **Topic clustering** — BERTopic (UMAP + HDBSCAN + c-TF-IDF) assigns papers to named thematic clusters in seconds
 
 **Search & Retrieval**
@@ -41,14 +48,18 @@ A local-first scientific knowledge system that ingests papers, builds a compiled
 **Book Writing Platform**
 - **Structured projects** — book → chapter hierarchy with LLM-generated outlines and per-chapter custom sections
 - **Iterative refinement** — write → review → revise loop with 5-dimension scoring and claim verification
+- **Auditable citation insertion** — `book insert-citations` (also wired to the "Insert Citations" toolbar button) runs a two-pass LLM flow: pass 1 identifies locations needing a citation, pass 2 retrieves top-K candidates per claim and picks (or rejects) with confidence; deterministic rewrite inserts `[N]` markers and saves as a new version
 - **Autowrite** — autonomous convergence loop: generates, scores, verifies, revises until quality target is met
 - **TreeWriter planning** — hierarchical paragraph-level plans before drafting
-- **Web reader** — browser-based authoring with live LLM streaming, corkboard view, chapter reader, argument maps, citation popovers, snapshots, version diffs
+- **Web reader** — browser-based authoring with a full-width top bar for app-level navigation (Plan, Settings, Dashboard, Corkboard, History, Snapshot, Export, Ask Corpus, Wiki Query, KG, Browse Papers, Tools, Setup, Projects) separated from the per-chapter writing toolbar (Edit, Autowrite, Write, Review, Revise, Verify, Insert Citations, Scores, Argue, Gaps, Bundles, Read). Live LLM streaming, corkboard view, chapter reader, argument maps, citation popovers, snapshots, version diffs
+- **Knowledge wiki in the browser** — the Wiki modal has four tabs: Query (RAG-streamed answer over compiled pages), Browse (paginated page index with detail view, KaTeX math, backlinks, related pages, per-page inline Ask + personal "My take" notes), **Lint** (broken links, stale pages, orphaned concepts, optional LLM contradiction detection), **Consensus** (strong / moderate / weak / contested claim classification for a topic with supporting vs contradicting papers)
 - **Compute dashboard** — book-level GPU compute ledger: cumulative tokens, wall time, and per-operation breakdown (write/review/revise/argue/gaps/autowrite) across every LLM call
-- **Tools panel** — CLI-parity in the browser: hybrid corpus search, similarity search, multi-paper synthesis, topic-cluster browser, and one-click corpus enrich / citation expand with live log streaming
+- **Tools panel** — CLI-parity in the browser: hybrid corpus search, similarity search, multi-paper synthesis, topic-cluster browser, and five corpus-expansion tabs (Enrich / Expand citations / Expand by author / Inbound cites / Topic search / Coauthors) each with the preview-and-select flow. Cleanup-downloads button at the top of the Corpus tab reclaims disk from already-ingested duplicates in one click
+- **Dashboard gap integration** — the Open Gaps panel has a top-level "🔍 Auto-expand from these gaps" button (runs `book auto-expand` and opens the preview modal with all gaps merged), plus a per-gap "Expand" button that prefills the Topic-search subtab with that specific gap's description
 - **Per-section model override** — dial expensive models up on the sections that need them (methods, results) and down on the cheap ones (overviews, conclusions); set per section in the Chapter Sections tab
 - **Scoped snapshot bundles** — whole-chapter and whole-book snapshots as a single click before firing autowrite-all; restore is non-destructive (creates new draft versions, existing drafts stay as undo path)
 - **Book Settings panel** — one tabbed modal consolidates title, description, leitmotiv, target word count, and the style fingerprint (with on-demand refresh) so per-book config isn't scattered across four surfaces
+- **Projects modal with graceful restart** — switch active project from the browser; when a restart is required (DB / Qdrant singletons can't hot-swap), a one-click "⏻ Stop this server" button cleanly SIGTERMs the process so the terminal returns to `$` ready for the next `sciknow book serve` invocation
 - **Multi-format export** — Markdown, HTML, PDF (WeasyPrint), EPUB (pandoc), BibTeX, LaTeX, DOCX with global citation dedup, available from both the CLI and the web reader
 
 **Infrastructure**
@@ -119,8 +130,17 @@ See [`docs/PROJECTS.md`](docs/PROJECTS.md) for the full design.
 | **Write a full book** with chapters and review | `sciknow book ...` |
 | **Browse compiled knowledge** about a concept | `sciknow wiki show concept-slug` |
 | **Find contradictions** in your corpus | `sciknow wiki lint --deep` |
+| **Map agreement/disagreement** on a topic | `sciknow wiki consensus "topic"` |
 | **Map evidence for/against a claim** | `sciknow book argue "claim"` |
 | **Find gaps** in a book project | `sciknow book gaps "Book"` |
+| **Auto-fill book gaps** with new papers from OpenAlex | `sciknow book auto-expand "Book"` |
+| **Follow references** of my papers | `sciknow db expand` |
+| **Find papers that cite mine** (forward-in-time) | `sciknow db expand-cites` |
+| **Pull every paper by an author** | `sciknow db expand-author "Solanki"` |
+| **Broad-search OpenAlex** by topic (bootstrap / new direction) | `sciknow db expand-topic "thermospheric cooling"` |
+| **Coauthor snowball** (same-lab researchers) | `sciknow db expand-coauthors` |
+| **Auto-insert citations** into a draft | `sciknow book insert-citations <draft-id>` |
+| **Reclaim disk** from already-ingested downloads | `sciknow db cleanup-downloads` |
 
 ---
 

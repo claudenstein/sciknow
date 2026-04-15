@@ -6,16 +6,58 @@
 
 ## `sciknow db`
 
+### Lifecycle + stats
+
 ```bash
 sciknow db init              # Run migrations + init Qdrant collections
 sciknow db reset             # Wipe everything and re-initialise (use before a full re-ingest)
 sciknow db stats             # Show paper/chunk counts and status breakdown
 sciknow db refresh-metadata  # Re-run metadata extraction for papers with poor-quality metadata
-sciknow db enrich            # Find DOIs for papers that don't have one (Crossref + OpenAlex search by title)
-sciknow db expand            # Discover and download cited papers to grow the collection
 sciknow db backup            # Back up the full collection to a portable archive
 sciknow db restore           # Restore a backup on a new machine
 sciknow db tag-multimodal    # Tag chunks with tables/equations for filtered search
+```
+
+### Corpus growth
+
+Five expansion vectors. All share the `--dry-run`, `--relevance`,
+`--relevance-threshold`, and `--workers` flags and the same
+parallel download → ingest pipeline (6-source OA discovery). In the
+web reader, each has a **"Preview candidates"** button that lets you
+cherry-pick which DOIs to ingest before pulling the trigger.
+
+```bash
+sciknow db enrich                       # Find DOIs for papers missing one (Crossref / OpenAlex / arXiv)
+
+sciknow db expand                       # Outbound — follow references in existing papers
+sciknow db expand --dry-run --shortlist-tsv out.tsv   # Preview with every ranker signal
+sciknow db expand-author "Solanki"      # By author name (OpenAlex + Crossref)
+sciknow db expand-author "Solanki" --orcid 0000-0002-XXXX-XXXX
+sciknow db expand-cites                 # Inbound — papers that CITE yours (forward-in-time mirror of `expand`)
+sciknow db expand-topic "thermospheric cooling"        # Free-text OpenAlex search
+sciknow db expand-coauthors             # Coauthor snowball (invisible college, depth=1)
+sciknow db expand-coauthors --depth 2 --relevance-threshold 0.65  # Wider net with stricter filter
+
+sciknow book auto-expand "Book Title"   # Gap-driven: every open BookGap (topic/evidence) becomes its own
+                                        # topic query; candidates merged + scored across gaps, papers
+                                        # that close MULTIPLE gaps rank highest
+```
+
+### Download primitives + cleanup
+
+```bash
+# Download specific DOIs with optional title/year hints (JSON file or comma list).
+# Backs the "Download selected" button from every preview modal.
+sciknow db download-dois --dois "10.1038/nature12345,10.1126/science.abc"
+sciknow db download-dois --dois-file picked.json --workers 4
+
+# Dedup across every location a PDF can end up (data/processed, data/failed,
+# downloads root, downloads/processed, downloads/failed_ingest). --cross-project
+# (default ON) queries EVERY sciknow project's DB — so a PDF downloaded into
+# project B that's already ingested in project A is recognised and cleaned up.
+sciknow db cleanup-downloads --dry-run
+sciknow db cleanup-downloads --delete-dupes      # aggressive: deletes instead of moving
+sciknow db cleanup-downloads --no-cross-project  # only check the active project's DB
 ```
 
 ---
@@ -250,6 +292,20 @@ sciknow book review 3f2a1b4c
 sciknow book revise 3f2a1b4c -i "expand the section on solar cycles with more evidence"
 sciknow book revise 3f2a1b4c         # applies saved review feedback automatically
 
+# ── Auditable citation insertion (Phase 46.A) ─────────────────────────────
+# Two-pass: pass 1 identifies locations that need a citation, pass 2 runs
+# top-K hybrid search per claim and picks (or rejects) with confidence.
+# Inserts [N] markers and saves a new draft version. Wired to the
+# "Insert Citations" button in the web reader's toolbar.
+
+sciknow book insert-citations 3f2a1b4c
+sciknow book insert-citations 3f2a1b4c --dry-run           # preview, don't save
+sciknow book insert-citations 3f2a1b4c --max-needs 5 -k 12 # cap LLM work
+
+# ── External citation verification (Phase 46.B) ───────────────────────────
+sciknow book verify-citations 3f2a1b4c
+sciknow book verify-citations 3f2a1b4c -o report.json --no-records
+
 # ── Evidence analysis ─────────────────────────────────────────────────────
 
 sciknow book argue "solar activity is the primary driver of 20th century warming"
@@ -259,6 +315,14 @@ sciknow book argue "cosmic rays modulate cloud cover" --save
 
 sciknow book gaps "Global Cooling"
 sciknow book gaps "Global Cooling" --no-save   # informational only
+
+# Gap-driven corpus auto-expansion (Phase 54.6.5): every open topic/
+# evidence gap becomes its own OpenAlex /works search; candidates
+# merged + scored against the corpus centroid; papers that close
+# multiple gaps at once rank highest. Wired to "🔍 Auto-expand from
+# these gaps" in the Dashboard's Open Gaps panel.
+sciknow book auto-expand "Global Cooling"
+sciknow book auto-expand "Global Cooling" --relevance-threshold 0.65 --dry-run
 
 # ── Autowrite (autonomous convergence loop) ───────────────────────────────
 
