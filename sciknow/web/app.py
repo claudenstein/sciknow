@@ -795,7 +795,10 @@ async def api_book_plan_generate(model: str = Form(None)):
 
 
 @app.post("/api/book/outline/generate")
-async def api_book_outline_generate(model: str = Form(None)):
+async def api_book_outline_generate(
+    model: str = Form(None),
+    method: str = Form(""),
+):
     """Phase 54.6.8 — generate + save chapter outline for the active book.
 
     Mirrors ``sciknow book outline``: prompts the LLM with the book title
@@ -803,6 +806,11 @@ async def api_book_outline_generate(model: str = Form(None)):
     whose number isn't already in ``book_chapters``. Streams tokens so
     the user sees progress; existing chapters are preserved (the flow
     is additive, never destructive).
+
+    Phase 54.6.14 — optional ``method`` name from the elicitation
+    catalogue steers the LLM's approach (e.g. "Tree of Thoughts",
+    "First Principles"). Prepended as a one-paragraph preamble to
+    the user prompt.
     """
     job_id, queue = _create_job("book_outline_generate")
     loop = asyncio.get_event_loop()
@@ -812,6 +820,7 @@ async def api_book_outline_generate(model: str = Form(None)):
         from sciknow.rag import prompts as rag_prompts
         from sciknow.rag.llm import stream as llm_stream
         from sciknow.core.project_type import get_project_type
+        from sciknow.core.methods import get_method, method_preamble
 
         with get_session() as session:
             book = session.execute(text("""
@@ -840,6 +849,11 @@ async def api_book_outline_generate(model: str = Form(None)):
                "detail": f"Drafting outline from {len(paper_list)} papers…"}
 
         sys_p, usr_p = rag_prompts.outline(book_title=book[1], papers=paper_list)
+        # Inject method preamble if the user picked one.
+        if method and method.strip():
+            m = get_method("elicitation", method)
+            if m:
+                usr_p = method_preamble(m) + usr_p
         tokens: list[str] = []
         for tok in llm_stream(sys_p, usr_p, model=model or None):
             tokens.append(tok)
@@ -2630,14 +2644,27 @@ async def api_revise(
 
 
 @app.post("/api/gaps")
-async def api_gaps(model: str = Form(None)):
+async def api_gaps(model: str = Form(None), method: str = Form("")):
+    """Phase 54.6.14 — optional ``method`` name from the brainstorming
+    catalogue (e.g. "Reverse Brainstorming", "Five Whys", "Scope
+    Boundaries") steers the LLM's gap-finding approach."""
     from sciknow.core.book_ops import run_gaps_stream
+    from sciknow.core.methods import get_method, method_preamble as _mp
 
     job_id, queue = _create_job("gaps")
     loop = asyncio.get_event_loop()
 
+    preamble = ""
+    if method and method.strip():
+        m = get_method("brainstorming", method)
+        if m:
+            preamble = _mp(m)
+
     def gen():
-        return run_gaps_stream(book_id=_book_id, model=model or None)
+        return run_gaps_stream(
+            book_id=_book_id, model=model or None,
+            method_preamble=preamble,
+        )
 
     thread = threading.Thread(
         target=_run_generator_in_thread, args=(job_id, gen, loop), daemon=True)
@@ -2867,6 +2894,54 @@ async def api_insert_citations(
         target=_run_generator_in_thread, args=(job_id, gen, loop), daemon=True)
     thread.start()
 
+    return JSONResponse({"job_id": job_id})
+
+
+# ── Phase 54.6.14 — method catalogues ──────────────────────────────────
+# Pickers in Plan / Outline / Gaps surface these so the user can steer
+# the LLM's approach (Tree of Thoughts, Five Whys, Pre-mortem, etc.)
+# without rewriting prompts. Data adapted from BMAD-METHOD (MIT).
+
+@app.get("/api/methods")
+async def api_methods(kind: str = "elicitation"):
+    from sciknow.core.methods import list_methods
+    try:
+        return JSONResponse({"methods": list_methods(kind), "kind": kind})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+# ── Phase 54.6.14 — Critic Skills (adversarial review + edge-case hunter) ──
+
+@app.post("/api/adversarial-review/{draft_id}")
+async def api_adversarial_review(draft_id: str, model: str = Form(None)):
+    """BMAD-inspired cynical critic pass — streams findings over SSE."""
+    from sciknow.core.book_ops import adversarial_review_stream
+    job_id, _queue = _create_job("adversarial_review")
+    loop = asyncio.get_event_loop()
+
+    def gen():
+        return adversarial_review_stream(draft_id, model=(model or None))
+
+    threading.Thread(
+        target=_run_generator_in_thread, args=(job_id, gen, loop), daemon=True
+    ).start()
+    return JSONResponse({"job_id": job_id})
+
+
+@app.post("/api/edge-cases/{draft_id}")
+async def api_edge_cases(draft_id: str, model: str = Form(None)):
+    """Exhaustive edge-case hunter — structured JSON findings over SSE."""
+    from sciknow.core.book_ops import edge_case_hunter_stream
+    job_id, _queue = _create_job("edge_case_hunter")
+    loop = asyncio.get_event_loop()
+
+    def gen():
+        return edge_case_hunter_stream(draft_id, model=(model or None))
+
+    threading.Thread(
+        target=_run_generator_in_thread, args=(job_id, gen, loop), daemon=True
+    ).start()
     return JSONResponse({"job_id": job_id})
 
 
@@ -7248,6 +7323,11 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button onclick="showScoresPanel()" title="Phase 13 — convergence trajectory for autowrite drafts">&#9783; Scores</button>
       <button onclick="promptArgue()" title="Map evidence for/against a claim">Argue</button>
       <button onclick="doGaps()" title="Analyse gaps in the book">Gaps</button>
+      <!-- Phase 54.6.14 — BMAD-inspired critic skills. Orthogonal to the
+           graded AI Review: this is a cynical-critic pass + exhaustive
+           edge-case hunter. -->
+      <button onclick="doAdversarialReview()" title="Cynical critic pass — finds ≥10 concrete issues, never graded. BMAD-inspired. Doesn't overwrite review_feedback.">&#128126; Adversarial</button>
+      <button onclick="doEdgeCases()" title="Exhaustive edge-case hunter — walks every scope boundary, counter-case, causal alternative, and quantitative limit. Structured findings.">&#129327; Edge cases</button>
     </div>
     <div class="sep"></div>
     <div class="tg">
@@ -7757,8 +7837,18 @@ body.task-bar-open {{ padding-top: 40px; }}
       <div id="plan-status" style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;"></div>
       <div id="plan-stream-stats" class="stream-stats"></div>
     </div>
-    <div class="modal-footer">
+    <div class="modal-footer" style="flex-wrap:wrap;gap:6px;">
       <button class="btn-secondary" onclick="closeModal('plan-modal')">Close</button>
+      <!-- Phase 54.6.14 — elicitation method picker. Steers outline
+           generation through a named technique (Tree of Thoughts,
+           Peer Review Simulation, etc.) rather than the generic prompt. -->
+      <label style="font-size:11px;display:flex;align-items:center;gap:4px;margin-right:auto;"
+             title="Optional: steer outline generation through a named cognitive method.">
+        Method:
+        <select id="plan-method-select" style="font-size:11px;padding:2px 4px;max-width:220px;">
+          <option value="">(default)</option>
+        </select>
+      </label>
       <button class="btn-secondary" onclick="regenerateOutline()" id="plan-outline-btn"
               title="Ask the LLM to propose a full chapter structure from your paper corpus. Adds new chapters without touching existing ones. Mirrors `sciknow book outline`.">
         &#128214; Generate outline
@@ -12149,11 +12239,66 @@ async function doRevise() {{
 }}
 
 async function doGaps() {{
-  showStreamPanel('Analysing gaps...');
+  // Phase 54.6.14 — let the user pick a brainstorming method to steer
+  // the gap analysis (Reverse Brainstorming, Five Whys, Scope Boundaries,
+  // Missing Control, etc.). Loads the catalogue on demand.
+  const methods = await _loadMethodsOnce('brainstorming');
+  const names = [''].concat(methods.map(m => m.name));
+  const prompt = 'Gap-analysis method (Enter to skip, or type one):\\n\\n'
+    + methods.slice(0, 20).map((m, i) => (i + 1) + '. ' + m.name).join('\\n')
+    + '\\n\\nType the method NAME or NUMBER (blank = default):';
+  let pick = window.prompt(prompt, '');
+  if (pick === null) return;  // cancelled
+  pick = (pick || '').trim();
+  // Number → name
+  const n = parseInt(pick, 10);
+  if (!isNaN(n) && n >= 1 && n <= methods.length) pick = methods[n - 1].name;
+  showStreamPanel('Analysing gaps' + (pick ? ' via ' + pick : '') + '…');
   const fd = new FormData();
+  if (pick) fd.append('method', pick);
   const res = await fetch('/api/gaps', {{method: 'POST', body: fd}});
   const data = await res.json();
   startStream(data.job_id);
+}}
+
+// Shared helper: fetch + cache the methods catalogue.
+async function _loadMethodsOnce(kind) {{
+  window._methodsCache = window._methodsCache || {{}};
+  if (window._methodsCache[kind]) return window._methodsCache[kind];
+  try {{
+    const r = await fetch('/api/methods?kind=' + encodeURIComponent(kind));
+    const d = await r.json();
+    window._methodsCache[kind] = d.methods || [];
+  }} catch (_) {{
+    window._methodsCache[kind] = [];
+  }}
+  return window._methodsCache[kind];
+}}
+
+// Populate a <select> dropdown with methods grouped by category.
+async function _populateMethodSelect(selectId, kind) {{
+  const sel = document.getElementById(selectId);
+  if (!sel || sel.dataset.populated) return;
+  const methods = await _loadMethodsOnce(kind);
+  // Group by category to build <optgroup>s.
+  const byCat = {{}};
+  methods.forEach(m => {{
+    (byCat[m.category] = byCat[m.category] || []).push(m);
+  }});
+  // Keep the (default) option as the first child.
+  for (const cat of Object.keys(byCat).sort()) {{
+    const og = document.createElement('optgroup');
+    og.label = cat;
+    for (const m of byCat[cat]) {{
+      const opt = document.createElement('option');
+      opt.value = m.name;
+      opt.textContent = m.name;
+      opt.title = m.description;
+      og.appendChild(opt);
+    }}
+    sel.appendChild(og);
+  }}
+  sel.dataset.populated = '1';
 }}
 
 // ── Dashboard ─────────────────────────────────────────────────────────────
@@ -12928,6 +13073,135 @@ async function doInsertCitations() {{
       source.close(); currentEventSource = null; currentJobId = null;
     }}
   }};
+}}
+
+// ── Phase 54.6.14 — BMAD-inspired critic skills ─────────────────────────
+// Adversarial review: streams findings as a markdown list into the
+// stream panel. No persistence (doesn't touch review_feedback).
+async function doAdversarialReview() {{
+  if (!currentDraftId) {{
+    showEmptyHint("No draft selected.");
+    return;
+  }}
+  if (!confirm(
+    "Run adversarial critic pass?\\n\\n"
+    + "A cynical reviewer mode that finds AT LEAST 10 concrete issues per\\n"
+    + "draft — unsupported claims, overgeneralisation, weasel words, missing\\n"
+    + "counter-evidence, internal contradictions, loaded framing, etc.\\n\\n"
+    + "Doesn't overwrite the normal review. Takes 30s-2min."
+  )) return;
+  showStreamPanel('Adversarial review in progress…');
+  const fd = new FormData();
+  const res = await fetch('/api/adversarial-review/' + currentDraftId, {{method:'POST', body: fd}});
+  const data = await res.json();
+  currentJobId = data.job_id;
+  if (currentEventSource) currentEventSource.close();
+  const source = new EventSource('/api/stream/' + data.job_id);
+  currentEventSource = source;
+  const body = document.getElementById('stream-body');
+  const status = document.getElementById('stream-status');
+  body.innerHTML = '<h3 style="margin-bottom:10px;">&#128126; Adversarial review</h3>'
+    + '<div id="adv-output" style="font-family:-apple-system,sans-serif;font-size:14px;line-height:1.5;"></div>';
+  const out = document.getElementById('adv-output');
+  let buf = '';
+  source.onmessage = function(e) {{
+    const evt = JSON.parse(e.data);
+    if (evt.type === 'token') {{
+      buf += evt.text;
+      out.innerHTML = _mdSimple(buf);
+    }} else if (evt.type === 'progress') {{
+      status.textContent = evt.detail || evt.stage;
+    }} else if (evt.type === 'completed') {{
+      status.textContent = (evt.n_findings || '?') + ' finding(s)';
+      out.innerHTML = _mdSimple(evt.findings_markdown || buf);
+      source.close(); currentEventSource = null; currentJobId = null;
+    }} else if (evt.type === 'error') {{
+      status.textContent = 'Error: ' + evt.message;
+      source.close(); currentEventSource = null; currentJobId = null;
+    }} else if (evt.type === 'done') {{
+      source.close(); currentEventSource = null; currentJobId = null;
+    }}
+  }};
+}}
+
+// Edge-case hunter: streams structured findings as a sortable table.
+async function doEdgeCases() {{
+  if (!currentDraftId) {{
+    showEmptyHint("No draft selected.");
+    return;
+  }}
+  if (!confirm(
+    "Run edge-case hunter?\\n\\n"
+    + "Walks every branching path and boundary condition in the draft.\\n"
+    + "Reports only UNHANDLED cases — scope boundaries, counter-cases,\\n"
+    + "causal alternatives, quantitative limits, extrapolations, missing\\n"
+    + "controls. Returns a severity-ranked findings table.\\n\\n"
+    + "Takes 30s-2min."
+  )) return;
+  showStreamPanel('Walking edge cases…');
+  const fd = new FormData();
+  const res = await fetch('/api/edge-cases/' + currentDraftId, {{method:'POST', body: fd}});
+  const data = await res.json();
+  currentJobId = data.job_id;
+  if (currentEventSource) currentEventSource.close();
+  const source = new EventSource('/api/stream/' + data.job_id);
+  currentEventSource = source;
+  const body = document.getElementById('stream-body');
+  const status = document.getElementById('stream-status');
+  body.innerHTML = '<h3 style="margin-bottom:10px;">&#129327; Edge-case hunter</h3>'
+    + '<table id="ec-table" style="width:100%;border-collapse:collapse;font-size:13px;">'
+    + '<thead style="background:var(--toolbar-bg);"><tr>'
+    + '<th style="padding:6px 8px;text-align:left;">Sev</th>'
+    + '<th style="padding:6px 8px;text-align:left;">Location</th>'
+    + '<th style="padding:6px 8px;text-align:left;">Unhandled condition</th>'
+    + '<th style="padding:6px 8px;text-align:left;">If triggered, the claim…</th>'
+    + '</tr></thead><tbody></tbody></table>';
+  const tbody = body.querySelector('#ec-table tbody');
+  const sevColor = {{high:'var(--danger)', medium:'var(--warning)', low:'var(--fg-muted)'}};
+  source.onmessage = function(e) {{
+    const evt = JSON.parse(e.data);
+    if (evt.type === 'progress') {{
+      status.textContent = evt.detail || evt.stage;
+    }} else if (evt.type === 'finding') {{
+      const f = evt.data || {{}};
+      const sev = (f.severity || 'low').toLowerCase();
+      const tr = document.createElement('tr');
+      tr.style.borderTop = '1px solid var(--border)';
+      tr.innerHTML =
+        '<td style="padding:6px 8px;vertical-align:top;"><span style="color:'
+          + sevColor[sev] + ';font-weight:bold;font-size:11px;text-transform:uppercase;">'
+          + sev + '</span></td>'
+        + '<td style="padding:6px 8px;vertical-align:top;font-style:italic;">' + _escHtml(f.location || '') + '</td>'
+        + '<td style="padding:6px 8px;vertical-align:top;">' + _escHtml(f.trigger || '') + '</td>'
+        + '<td style="padding:6px 8px;vertical-align:top;color:var(--fg-muted);">' + _escHtml(f.consequence || '') + '</td>';
+      tbody.appendChild(tr);
+    }} else if (evt.type === 'completed') {{
+      status.innerHTML = '<span style="color:var(--success);">&#10003; '
+        + (evt.n_findings || 0) + ' edge case(s) flagged.</span>';
+      source.close(); currentEventSource = null; currentJobId = null;
+    }} else if (evt.type === 'error') {{
+      status.textContent = 'Error: ' + evt.message;
+      source.close(); currentEventSource = null; currentJobId = null;
+    }} else if (evt.type === 'done') {{
+      source.close(); currentEventSource = null; currentJobId = null;
+    }}
+  }};
+}}
+
+// Tiny markdown renderer — paragraphs, numbered lists, bullets, code.
+// Used by the adversarial-review panel; keeps the findings readable
+// without pulling in a whole markdown library.
+function _mdSimple(src) {{
+  let s = _escHtml(src || '');
+  s = s.replace(/^\s*([0-9]+)\.\s+(.*)$/gm,
+    '<li><strong>$1.</strong> $2</li>');
+  s = s.replace(/^\s*[-*]\s+(.*)$/gm, '<li>$1</li>');
+  // Wrap consecutive <li>s in a single <ol>.
+  s = s.replace(/(<li>.*<\/li>\s*)+/gs, m => '<ol style="padding-left:22px;">' + m + '</ol>');
+  s = s.replace(/\\n{{2,}}/g, '</p><p>');
+  s = '<p>' + s + '</p>';
+  s = s.replace(/<p>\s*(<ol[^>]*>)/g, '$1').replace(/(<\/ol>)\s*<\/p>/g, '$1');
+  return s;
 }}
 
 // ── Citation Popovers (Phase 5a) ─────────────────────────────────────
@@ -16347,6 +16621,9 @@ async function openPlanModal(context) {{
     }}
   }}
   _planContext = context;
+  // Phase 54.6.14 — populate the elicitation-method dropdown on first
+  // open. Cached on window to avoid refetching every modal open.
+  _populateMethodSelect('plan-method-select', 'elicitation');
 
   // Phase 32.2 — reset per-chapter editing state every time the modal
   // opens so slug collisions between chapters (e.g. "introduction"
@@ -16898,6 +17175,9 @@ async function regenerateOutline() {{
   btn.disabled = true;
   status.textContent = 'Starting outline generation…';
   const fd = new FormData();
+  // Phase 54.6.14 — forward the selected elicitation method if any.
+  const methodEl = document.getElementById('plan-method-select');
+  if (methodEl && methodEl.value) fd.append('method', methodEl.value);
   let res;
   try {{
     res = await fetch('/api/book/outline/generate', {{method: 'POST', body: fd}});

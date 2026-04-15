@@ -2789,8 +2789,16 @@ def run_gaps_stream(
     *,
     model: str | None = None,
     save: bool = True,
+    method_preamble: str = "",
 ) -> Iterator[Event]:
-    """Run gap analysis on a book."""
+    """Run gap analysis on a book.
+
+    Phase 54.6.14 — ``method_preamble`` (optional) is prepended to the
+    user prompt so callers can steer the LLM's framing via a named
+    brainstorming method (Reverse Brainstorming, Five Whys, Scope
+    Boundaries, etc.). Pass the pre-rendered string; see
+    ``sciknow.core.methods.method_preamble``.
+    """
     from sqlalchemy import text
     from sciknow.rag import prompts
     from sciknow.rag.llm import stream as llm_stream, complete as llm_complete
@@ -2865,6 +2873,8 @@ def run_gaps_stream(
         book_title=book[1], chapters=ch_list, papers=p_list, drafts=d_list,
         rejected_ideas=rejected_ideas or None,
     )
+    if method_preamble:
+        user = method_preamble + user
     for tok in llm_stream(system, user, model=model, num_ctx=16384):
         yield {"type": "token", "text": tok}
 
@@ -5123,4 +5133,187 @@ def ensemble_review_stream(
         "meta": meta,
         "reviews": reviews,
         "saved": save,
+    }
+
+
+# ── Phase 54.6.14 — BMAD-inspired Critic Skills ─────────────────────────
+# Two critic passes that are orthogonal to the existing graded review:
+# adversarial finds ≥10 issues, edge-case hunter exhaustively enumerates
+# unhandled paths. Both adapted from bmad-code-org/BMAD-METHOD (MIT).
+
+
+def adversarial_review_stream(
+    draft_id: str,
+    *,
+    model: str | None = None,
+) -> Iterator[Event]:
+    """Cynical critic pass over a saved draft. Yields tokens + a final
+    ``completed`` event with the full findings markdown. Not persisted
+    to ``review_feedback`` so it coexists with the normal graded
+    review rather than overwriting it.
+    """
+    from sqlalchemy import text
+    from sciknow.rag import prompts as rag_prompts
+    from sciknow.rag.llm import stream as llm_stream
+    from sciknow.storage.db import get_session
+    from sciknow.storage.qdrant import get_client
+
+    with get_session() as session:
+        row = session.execute(text("""
+            SELECT d.id::text, d.title, d.section_type, d.topic, d.content,
+                   d.chapter_id::text
+            FROM drafts d WHERE d.id::text LIKE :q
+            LIMIT 1
+        """), {"q": f"{draft_id}%"}).fetchone()
+    if not row:
+        yield {"type": "error", "message": f"Draft not found: {draft_id}"}
+        return
+    d_id, d_title, d_section, d_topic, d_content, d_chapter_id = row
+
+    if model is None and d_chapter_id and d_section:
+        with get_session() as session:
+            override = _get_section_model(session, d_chapter_id, d_section)
+        if override:
+            model = override
+
+    yield {"type": "progress", "stage": "retrieval",
+           "detail": "Gathering evidence to contrast with…"}
+    qdrant = get_client()
+    search_query = f"{d_section or ''} {d_topic or d_title}"
+    with get_session() as session:
+        results, _ = _retrieve(session, qdrant, search_query, context_k=8)
+
+    yield {"type": "progress", "stage": "adversarial_review",
+           "detail": f"Adversarial review of '{d_title}'…"}
+    sys_p, usr_p = rag_prompts.adversarial_review(
+        d_section, d_topic or d_title, d_content or "", results,
+    )
+    out: list[str] = []
+    # Thinking-model headroom — same rationale as extract-kg / consensus.
+    for tok in llm_stream(sys_p, usr_p, model=model, num_ctx=24576):
+        out.append(tok)
+        yield {"type": "token", "text": tok}
+
+    findings = "".join(out).strip()
+    # Strip any <think> blocks so the returned findings are clean.
+    import re as _re
+    findings = _re.sub(r"<think>.*?</think>\s*", "", findings,
+                       flags=_re.DOTALL).strip()
+
+    # Heuristic: count the findings (numbered list items). If the
+    # model returned <10, flag it in the event so the UI can warn.
+    n_findings = len(_re.findall(r"^\s*(\d+)[\.)]\s", findings, _re.MULTILINE))
+
+    yield {
+        "type": "completed",
+        "draft_id": d_id,
+        "findings_markdown": findings,
+        "n_findings": n_findings,
+    }
+
+
+def edge_case_hunter_stream(
+    draft_id: str,
+    *,
+    model: str | None = None,
+) -> Iterator[Event]:
+    """Exhaustive path enumeration over a draft's claims. Returns
+    structured findings via Ollama's format=json_schema so the UI can
+    render a proper table (location / trigger / consequence / severity).
+    """
+    import json as _json
+    from sqlalchemy import text
+    from sciknow.rag import prompts as rag_prompts
+    from sciknow.rag.llm import complete as llm_complete
+    from sciknow.storage.db import get_session
+    from sciknow.storage.qdrant import get_client
+
+    with get_session() as session:
+        row = session.execute(text("""
+            SELECT d.id::text, d.title, d.section_type, d.topic, d.content,
+                   d.chapter_id::text
+            FROM drafts d WHERE d.id::text LIKE :q
+            LIMIT 1
+        """), {"q": f"{draft_id}%"}).fetchone()
+    if not row:
+        yield {"type": "error", "message": f"Draft not found: {draft_id}"}
+        return
+    d_id, d_title, d_section, d_topic, d_content, d_chapter_id = row
+
+    if model is None and d_chapter_id and d_section:
+        with get_session() as session:
+            override = _get_section_model(session, d_chapter_id, d_section)
+        if override:
+            model = override
+
+    yield {"type": "progress", "stage": "retrieval",
+           "detail": "Pulling context for edge-case analysis…"}
+    qdrant = get_client()
+    search_query = f"{d_section or ''} {d_topic or d_title}"
+    with get_session() as session:
+        results, _ = _retrieve(session, qdrant, search_query, context_k=6)
+
+    yield {"type": "progress", "stage": "edge_cases",
+           "detail": f"Walking branches for '{d_title}'…"}
+    sys_p, usr_p = rag_prompts.edge_case_hunter(
+        d_section, d_topic or d_title, d_content or "", results,
+    )
+    schema = {
+        "type": "object",
+        "properties": {
+            "findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "location":    {"type": "string"},
+                        "trigger":     {"type": "string"},
+                        "consequence": {"type": "string"},
+                        "severity":    {"type": "string",
+                                        "enum": ["high", "medium", "low"]},
+                    },
+                    "required": ["location", "trigger", "consequence"],
+                },
+            },
+        },
+        "required": ["findings"],
+    }
+    try:
+        raw = llm_complete(
+            sys_p, usr_p, model=model,
+            temperature=0.0, num_ctx=24576,
+            format=schema,
+        )
+    except Exception as exc:
+        yield {"type": "error", "message": f"LLM call failed: {exc}"}
+        return
+
+    import re as _re
+    cleaned = _re.sub(r"<think>.*?</think>\s*", "", raw or "",
+                      flags=_re.DOTALL).strip()
+    if not cleaned:
+        yield {"type": "error",
+               "message": "LLM returned empty output (likely context overflow)."}
+        return
+    try:
+        data = _json.loads(cleaned)
+    except Exception as exc:
+        yield {"type": "error", "message": f"JSON parse failed: {exc}"}
+        return
+
+    findings = data.get("findings") or []
+    # Stable ordering — high severity first, then medium, then low.
+    sev_rank = {"high": 0, "medium": 1, "low": 2}
+    findings.sort(key=lambda f: sev_rank.get(
+        (f.get("severity") or "low").lower(), 3))
+
+    # Stream findings one at a time so the UI can render incrementally.
+    for i, f in enumerate(findings):
+        yield {"type": "finding", "index": i, "data": f}
+
+    yield {
+        "type": "completed",
+        "draft_id": d_id,
+        "n_findings": len(findings),
+        "findings": findings,
     }

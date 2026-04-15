@@ -1245,6 +1245,43 @@ def review(
         console.print("[dim]Use `sciknow book revise` to apply the feedback.[/dim]")
 
 
+# ── Phase 54.6.14 — BMAD-inspired critic skills ───────────────────────────────
+
+@app.command(name="adversarial-review")
+def adversarial_review_cmd(
+    draft_id: Annotated[str, typer.Argument(help="Draft ID (first 8+ chars).")],
+    model: str | None = typer.Option(None, "--model"),
+):
+    """Cynical critic pass — finds ≥10 concrete issues per draft.
+
+    Complements `book review` (graded, 5-dim) with an exhaustive
+    criticism pass. Output is a numbered markdown list; nothing is
+    persisted (doesn't overwrite review_feedback).
+    """
+    from sciknow.core.book_ops import adversarial_review_stream
+    console.print()
+    gen = adversarial_review_stream(draft_id, model=model)
+    _consume_events(gen, console)
+
+
+@app.command(name="edge-cases")
+def edge_cases_cmd(
+    draft_id: Annotated[str, typer.Argument(help="Draft ID (first 8+ chars).")],
+    model: str | None = typer.Option(None, "--model"),
+):
+    """Exhaustive path enumeration — reports only unhandled cases.
+
+    For every claim in the draft, walks scope boundaries, counter-cases,
+    causal alternatives, quantitative limits, extrapolations, and
+    missing controls. Returns structured findings with location +
+    trigger + consequence + severity.
+    """
+    from sciknow.core.book_ops import edge_case_hunter_stream
+    console.print()
+    gen = edge_case_hunter_stream(draft_id, model=model)
+    _consume_events(gen, console)
+
+
 # ── revise ─────────────────────────────────────────────────────────────────────
 
 @app.command()

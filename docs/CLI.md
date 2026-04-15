@@ -314,6 +314,19 @@ sciknow book insert-citations 3f2a1b4c
 sciknow book insert-citations 3f2a1b4c --dry-run           # preview, don't save
 sciknow book insert-citations 3f2a1b4c --max-needs 5 -k 12 # cap LLM work
 
+# ── Critic Skills (Phase 54.6.14 — BMAD-inspired) ─────────────────────────
+# Orthogonal to the graded `book review`:
+#   adversarial-review  — cynical critic pass, ≥10 concrete issues, doesn't
+#                         overwrite review_feedback.
+#   edge-cases          — exhaustive path enumeration (scope boundaries,
+#                         counter-cases, causal alternatives, quantitative
+#                         limits, missing controls). Structured findings
+#                         with severity (high/medium/low).
+# Both surface in the web reader's per-chapter toolbar.
+
+sciknow book adversarial-review 3f2a1b4c
+sciknow book edge-cases 3f2a1b4c
+
 # ── External citation verification (Phase 46.B) ───────────────────────────
 sciknow book verify-citations 3f2a1b4c
 sciknow book verify-citations 3f2a1b4c -o report.json --no-records
