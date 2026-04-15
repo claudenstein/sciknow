@@ -5774,18 +5774,28 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .modal-overlay {{ display: none; position: fixed; inset: 0; background: var(--modal-overlay);
                   backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
                   z-index: 1000; align-items: flex-start; justify-content: center;
-                  padding-top: 64px; }}
+                  padding: 40px 0; }}
 .modal-overlay.open {{ display: flex; animation: fadeIn .15s ease; }}
+/* Phase 54.6.6 — modals sized to use the viewport. Default dimensions
+   grew substantially (720×80vh → 1100×calc(100vh-80px)) because the
+   old defaults left ~15-20% of vertical space empty at the bottom on
+   large content (preview tables, wiki pages, catalog browser). The
+   40px overlay padding is the border-space the user asked to keep;
+   modal-body scrolls internally when content overflows. */
 .modal {{ background: var(--bg-elevated); border: 1px solid var(--border);
-          border-radius: var(--r-xl); box-shadow: var(--shadow-lg); width: 90%;
-          max-width: 720px; max-height: 80vh; display: flex; flex-direction: column;
+          border-radius: var(--r-xl); box-shadow: var(--shadow-lg); width: 94%;
+          max-width: 1100px; max-height: calc(100vh - 80px);
+          display: flex; flex-direction: column;
           overflow: hidden; animation: slideUp .18s ease; }}
-.modal.wide {{ max-width: 920px; }}
-/* Phase 54.6.3 — the candidate-preview modals render a table with many
-   columns (title / authors / year / score) that cramps at the default
-   width. Scale them to the viewport so the user actually gets to see
-   full titles without wrap hell. */
-.modal.xwide {{ width: 92vw; max-width: 1400px; max-height: 88vh; }}
+.modal.wide {{ max-width: 1400px; }}
+/* Candidate-preview / KG / catalog modals render wide tables. Scale
+   them to the viewport so the user actually gets to see full titles
+   without wrap hell. */
+.modal.xwide {{ width: 94vw; max-width: 1700px; max-height: calc(100vh - 64px); }}
+/* Optional — a subset of modals (detailed wiki pages, big tables)
+   may want to be user-resizable. Opt-in via `class="modal resizable"`
+   — the handle sits in the bottom-right corner. */
+.modal.resizable {{ resize: both; min-width: 520px; min-height: 320px; }}
 .modal-header {{ padding: var(--sp-4) var(--sp-5); border-bottom: 1px solid var(--border);
                 display: flex; align-items: center; justify-content: space-between; }}
 .modal-header h3 {{ font-size: 16px; font-weight: 600; color: var(--fg); }}
