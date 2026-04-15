@@ -6239,6 +6239,10 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
                      box-shadow: var(--shadow-lg);
                      z-index: 900; margin-top: 2px; }}
 .nav-dropdown.open .nav-dropdown-menu {{ display: flex; flex-direction: column; gap: 1px; }}
+/* Phase 54.6.17 — toolbar dropdowns anchor their menu to the LEFT
+   edge of the trigger (vs the right-aligned top-bar dropdowns) so
+   the menu drops down-and-left inside the chapter toolbar flow. */
+.nav-dropdown.nav-dropdown-left .nav-dropdown-menu {{ right: auto; left: 0; }}
 .nav-dropdown-menu button {{ all: unset; font-size: 12px;
                              padding: 7px 10px; cursor: pointer;
                              color: var(--fg); border-radius: var(--r-sm);
@@ -7375,6 +7379,14 @@ body.task-bar-open {{ padding-top: 40px; }}
        can find the inline editor without hunting for the small
        edit-btn in the subtitle. -->
   <div class="toolbar" id="toolbar">
+    <!-- Phase 54.6.17 — per-chapter toolbar regrouped. The core write
+         loop (Edit / Autowrite / Write / Review / Revise) stays flat
+         as five direct buttons — users hit these every few minutes.
+         The other three groups collapse into dropdowns so the
+         toolbar stays one row wide even on ~1400px screens:
+           🔎 Verify  — provenance / scoring passes
+           🧠 Critique — evidence mapping + critic skills
+           📦 Extras   — whole-chapter snapshots + continuous read -->
     <div class="tg">
       <button class="primary" onclick="toggleEdit()" title="Manually edit the draft content (in-browser markdown editor with autosave)">&#9998; Edit</button>
       <button onclick="doAutowrite()" title="Autonomous AI write → review → revise loop">&#9889; AI Autowrite</button>
@@ -7383,22 +7395,38 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button onclick="doRevise()" title="AI revises based on review feedback">AI Revise</button>
     </div>
     <div class="sep"></div>
-    <div class="tg">
-      <button onclick="doVerify()" title="Verify citations against sources (Phases 7+11)">&#10003; Verify</button>
-      <button onclick="doInsertCitations()" title="Two-pass LLM inserts [N] citation markers where needed; mirrors `sciknow book insert-citations`. Saves a new version.">&#128209; Insert Citations</button>
-      <button onclick="showScoresPanel()" title="Phase 13 — convergence trajectory for autowrite drafts">&#9783; Scores</button>
-      <button onclick="promptArgue()" title="Map evidence for/against a claim">Argue</button>
-      <button onclick="doGaps()" title="Analyse gaps in the book">Gaps</button>
-      <!-- Phase 54.6.14 — BMAD-inspired critic skills. Orthogonal to the
-           graded AI Review: this is a cynical-critic pass + exhaustive
-           edge-case hunter. -->
-      <button onclick="doAdversarialReview()" title="Cynical critic pass — finds ≥10 concrete issues, never graded. BMAD-inspired. Doesn't overwrite review_feedback.">&#128126; Adversarial</button>
-      <button onclick="doEdgeCases()" title="Exhaustive edge-case hunter — walks every scope boundary, counter-case, causal alternative, and quantitative limit. Structured findings.">&#129327; Edge cases</button>
+    <div class="nav-dropdown nav-dropdown-left tb-dropdown" id="verify-tb-dropdown">
+      <button onclick="toggleNavDropdown('verify-tb-dropdown', event)"
+              title="Verify citations, insert [N] markers, view autowrite score history">
+        &#128270; Verify &#9662;
+      </button>
+      <div class="nav-dropdown-menu" role="menu">
+        <button role="menuitem" onclick="doVerify()" title="Verify citations against sources (Phases 7+11)">&#10003; Verify</button>
+        <button role="menuitem" onclick="doInsertCitations()" title="Two-pass LLM inserts [N] citation markers where needed; mirrors `sciknow book insert-citations`. Saves a new version.">&#128209; Insert Citations</button>
+        <button role="menuitem" onclick="showScoresPanel()" title="Phase 13 — convergence trajectory for autowrite drafts">&#9783; Scores</button>
+      </div>
     </div>
-    <div class="sep"></div>
-    <div class="tg">
-      <button onclick="openBundleSnapshots()" title="Snapshot / restore whole chapter or whole book — safety net for autowrite-all">&#128230; Bundles</button>
-      <button onclick="showChapterReader()" title="Read entire chapter as continuous scroll">Read</button>
+    <div class="nav-dropdown nav-dropdown-left tb-dropdown" id="critique-tb-dropdown">
+      <button onclick="toggleNavDropdown('critique-tb-dropdown', event)"
+              title="Evidence mapping + BMAD-inspired critic skills">
+        &#129504; Critique &#9662;
+      </button>
+      <div class="nav-dropdown-menu" role="menu">
+        <button role="menuitem" onclick="promptArgue()" title="Map evidence for/against a claim">&#9878;&#65039; Argue (map claim)</button>
+        <button role="menuitem" onclick="doGaps()" title="Analyse gaps in the book">&#128269; Gaps</button>
+        <button role="menuitem" onclick="doAdversarialReview()" title="Cynical critic pass — finds ≥10 concrete issues, never graded. BMAD-inspired. Doesn't overwrite review_feedback.">&#128126; Adversarial review</button>
+        <button role="menuitem" onclick="doEdgeCases()" title="Exhaustive edge-case hunter — walks every scope boundary, counter-case, causal alternative, and quantitative limit. Structured findings.">&#129327; Edge cases</button>
+      </div>
+    </div>
+    <div class="nav-dropdown nav-dropdown-left tb-dropdown" id="extras-tb-dropdown">
+      <button onclick="toggleNavDropdown('extras-tb-dropdown', event)"
+              title="Chapter-scoped snapshots + continuous read">
+        &#128230; Extras &#9662;
+      </button>
+      <div class="nav-dropdown-menu" role="menu">
+        <button role="menuitem" onclick="openBundleSnapshots()" title="Snapshot / restore whole chapter or whole book — safety net for autowrite-all">&#128230; Bundles (chapter / book)</button>
+        <button role="menuitem" onclick="showChapterReader()" title="Read entire chapter as continuous scroll">&#128214; Chapter reader</button>
+      </div>
     </div>
   </div>
 
