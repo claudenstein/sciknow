@@ -1893,6 +1893,19 @@ def expand(
                     with no_oa_cache_file.open("a") as f:
                         f.write(ref_key + "\n")
                     no_oa_cache.add(ref_key)
+                    # Phase 54.6.7 — also save a human-actionable row
+                    # so the user can retry / manually acquire later.
+                    try:
+                        from sciknow.core.pending_ops import record_failure
+                        record_failure(
+                            doi=ref.doi or "", title=ref.title or "",
+                            authors=list(ref.authors or []),
+                            year=ref.year, arxiv_id=ref.arxiv_id,
+                            source_method="expand",
+                            reason="no_oa",
+                        )
+                    except Exception:
+                        pass
                     _log(f"NO_OA  {ref_key}  | {title}")
                     progress.advance(task)
                     continue
@@ -3167,6 +3180,19 @@ def expand_author(
                     failed_dl += 1
                     with no_oa_cache_file.open("a") as f:
                         f.write(ref_key + "\n")
+                    # Phase 54.6.7 — record for the pending-downloads panel.
+                    try:
+                        from sciknow.core.pending_ops import record_failure
+                        record_failure(
+                            doi=ref.doi or "", title=ref.title or "",
+                            authors=list(ref.authors or []),
+                            year=ref.year, arxiv_id=ref.arxiv_id,
+                            source_method="expand-author",
+                            source_query=name,
+                            reason="no_oa",
+                        )
+                    except Exception:
+                        pass
                 else:  # cached
                     failed_dl += 1
                 progress.advance(task)
@@ -3248,6 +3274,10 @@ def download_dois(
         help="Parallel ingestion workers (0 = INGEST_WORKERS from .env)."),
     ingest: bool = typer.Option(True, "--ingest/--no-ingest",
         help="Ingest downloaded PDFs immediately."),
+    retry_failed: bool = typer.Option(False, "--retry-failed",
+        help="Ignore the .no_oa_cache — re-attempt DOIs that returned no OA PDF "
+             "on prior runs. Used when the pending-downloads panel triggers a "
+             "retry (Unpaywall / S2 / Europe PMC sometimes surface a new link)."),
 ):
     """Download + ingest a specific list of DOIs.
 
@@ -3318,8 +3348,10 @@ def download_dois(
     no_oa_cache_file = download_dir / ".no_oa_cache"
     no_oa_cache: set[str] = (
         set(no_oa_cache_file.read_text().splitlines())
-        if no_oa_cache_file.exists() else set()
+        if (no_oa_cache_file.exists() and not retry_failed) else set()
     )
+    if retry_failed:
+        console.print("[dim]--retry-failed: ignoring .no_oa_cache for this run.[/dim]")
 
     dl_workers = max(1, getattr(settings, "expand_download_workers", 4))
     downloaded = failed_dl = 0
@@ -3372,6 +3404,26 @@ def download_dois(
                     failed_dl += 1
                     with no_oa_cache_file.open("a") as f:
                         f.write(doi_key + "\n")
+                    # Phase 54.6.7 — stash the row so it shows up in
+                    # the pending-downloads panel. We match the DOI
+                    # back to its full metadata from doi_list (which
+                    # the download-dois CLI / web selected-download
+                    # endpoint fills with title + year when it has them).
+                    try:
+                        from sciknow.core.pending_ops import record_failure
+                        meta = next(
+                            (it for it in doi_list
+                             if (it[0] or "").lower() == doi_key),
+                            None,
+                        )
+                        t, y = (meta[1], meta[2]) if meta else ("", None)
+                        record_failure(
+                            doi=doi_key or "", title=t or "",
+                            year=y, source_method="download-dois",
+                            reason="no_oa",
+                        )
+                    except Exception:
+                        pass
                 else:
                     failed_dl += 1
                 progress.advance(task)
@@ -3433,6 +3485,8 @@ def download_dois(
 def _expand_common_download_and_ingest(
     candidates: list[dict], *, download_dir,
     workers: int, ingest: bool, dry_run: bool,
+    source_method: str | None = None,
+    source_query: str | None = None,
 ) -> None:
     """Shared tail for expand-cites / expand-topic / expand-coauthors."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -3495,6 +3549,7 @@ def _expand_common_download_and_ingest(
         with ThreadPoolExecutor(max_workers=dl_workers) as pool:
             futures = {pool.submit(_dl, c): c for c in candidates}
             for fut in as_completed(futures):
+                cand = futures[fut]
                 try:
                     status, doi_key, title, dest, source = fut.result()
                 except Exception:
@@ -3512,6 +3567,23 @@ def _expand_common_download_and_ingest(
                     failed_dl += 1
                     with no_oa_cache_file.open("a") as f:
                         f.write(doi_key + "\n")
+                    # Phase 54.6.7 — save to pending_downloads with the
+                    # richest metadata the candidate dict carries.
+                    try:
+                        from sciknow.core.pending_ops import record_failure
+                        record_failure(
+                            doi=cand.get("doi") or doi_key or "",
+                            title=cand.get("title") or "",
+                            authors=list(cand.get("authors") or []),
+                            year=cand.get("year"),
+                            arxiv_id=cand.get("arxiv_id"),
+                            relevance_score=cand.get("relevance_score"),
+                            source_method=source_method,
+                            source_query=source_query,
+                            reason="no_oa",
+                        )
+                    except Exception:
+                        pass
                 else:
                     failed_dl += 1
                 progress.advance(task)
@@ -3605,7 +3677,8 @@ def expand_cites(
         console.print("[yellow]Nothing to download.[/yellow]")
         raise typer.Exit(0)
     _expand_common_download_and_ingest(
-        cands, download_dir=download_dir, workers=workers, ingest=ingest, dry_run=dry_run
+        cands, download_dir=download_dir, workers=workers, ingest=ingest, dry_run=dry_run,
+        source_method="expand-cites",
     )
 
 
@@ -3650,7 +3723,8 @@ def expand_topic(
         console.print("[yellow]Nothing to download.[/yellow]")
         raise typer.Exit(0)
     _expand_common_download_and_ingest(
-        cands, download_dir=download_dir, workers=workers, ingest=ingest, dry_run=dry_run
+        cands, download_dir=download_dir, workers=workers, ingest=ingest, dry_run=dry_run,
+        source_method="expand-topic", source_query=query,
     )
 
 
@@ -3697,5 +3771,213 @@ def expand_coauthors(
         console.print("[yellow]Nothing to download.[/yellow]")
         raise typer.Exit(0)
     _expand_common_download_and_ingest(
-        cands, download_dir=download_dir, workers=workers, ingest=ingest, dry_run=dry_run
+        cands, download_dir=download_dir, workers=workers, ingest=ingest, dry_run=dry_run,
+        source_method="expand-coauthors",
     )
+
+
+# ── Phase 54.6.7 — pending_downloads sub-app ──────────────────────────
+# Papers the user selected via any expand flow that couldn't be
+# auto-downloaded (no OA PDF) land in the pending_downloads table. This
+# sub-app lets the user view / retry / mark-done / abandon / export.
+
+pending_app = typer.Typer(help="Manage pending_downloads table (papers "
+                               "selected for ingest but no OA PDF was "
+                               "found — ripe for retry or manual acquisition).")
+app.add_typer(pending_app, name="pending")
+
+
+@pending_app.command(name="list")
+def pending_list(
+    status: str = typer.Option("pending", "--status", "-s",
+        help="Filter by status (pending / manual_acquired / abandoned / all). "
+             "Default: pending."),
+    source: str = typer.Option("", "--source",
+        help="Filter by source_method (expand / expand-author / expand-cites / "
+             "expand-topic / expand-coauthors / auto-expand / download-dois)."),
+    limit: int = typer.Option(50, "--limit", "-l",
+        help="Max rows to display."),
+):
+    """Show the pending-downloads table (papers waiting on a legal OA PDF)."""
+    from sciknow.cli import preflight
+    preflight()
+    from sciknow.core.pending_ops import list_pending
+    rows = list_pending(
+        status=(status or None),
+        source_method=(source.strip() or None),
+        limit=limit,
+    )
+    if not rows:
+        console.print("[green]No pending entries.[/green]")
+        return
+    table = Table(title=f"pending_downloads (status={status!r})",
+                  box=box.SIMPLE_HEAD, expand=True)
+    table.add_column("DOI", ratio=4, no_wrap=False)
+    table.add_column("Title", ratio=6, no_wrap=False)
+    table.add_column("Yr", width=4, justify="right")
+    table.add_column("Src", width=14)
+    table.add_column("Tries", width=5, justify="right")
+    table.add_column("Last reason", ratio=3)
+    for r in rows:
+        table.add_row(
+            (r["doi"] or "")[:40],
+            (r["title"] or "")[:80],
+            str(r["year"] or ""),
+            (r["source_method"] or "")[:14],
+            str(r["attempt_count"]),
+            (r["last_failure_reason"] or "")[:30],
+        )
+    console.print(table)
+    console.print(
+        f"\n[dim]{len(rows)} row(s). Retry with "
+        f"[bold]sciknow db pending retry[/bold], mark as manually acquired "
+        f"with [bold]sciknow db pending mark-done <doi>[/bold], abandon "
+        f"with [bold]sciknow db pending abandon <doi>[/bold].[/dim]"
+    )
+
+
+@pending_app.command(name="retry")
+def pending_retry(
+    limit: int = typer.Option(0, "--limit", "-l",
+        help="Max DOIs to retry in this run (0 = all pending)."),
+    download_dir: Path = typer.Option(None, "--download-dir", "-d"),
+    workers: int = typer.Option(0, "--workers", "-w"),
+    ingest: bool = typer.Option(True, "--ingest/--no-ingest"),
+):
+    """Retry every pending DOI against the 6-source OA cascade.
+
+    Passes ``--retry-failed`` to ``download-dois`` internally so the
+    .no_oa_cache is bypassed (the whole point is that one of the
+    sources might have surfaced a new PDF since the last attempt).
+    """
+    from sciknow.cli import preflight
+    preflight()
+    from sciknow.core.pending_ops import list_pending
+
+    rows = list_pending(status="pending", limit=(limit if limit > 0 else 10000))
+    if not rows:
+        console.print("[green]Nothing pending to retry.[/green]")
+        return
+    console.print(
+        f"[bold]Retrying {len(rows)} pending DOI(s)…[/bold]"
+    )
+    # Serialise the rows as the dois-file format expected by download-dois.
+    import json as _json
+    import tempfile
+    tmp_dir = Path(tempfile.gettempdir()) / "sciknow-pending-retry"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = tmp_dir / f"retry-{os.getpid()}.json"
+    tmp_path.write_text(_json.dumps([
+        {"doi": r["doi"], "title": r["title"], "year": r["year"]}
+        for r in rows
+    ]))
+    # Reuse download-dois directly — that function already records
+    # failures back into pending_downloads, bumping attempt_count.
+    try:
+        download_dois(
+            dois="", dois_file=tmp_path,
+            download_dir=download_dir, workers=workers,
+            ingest=ingest, retry_failed=True,
+        )
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+@pending_app.command(name="mark-done")
+def pending_mark_done(
+    doi: Annotated[str, typer.Argument(help="DOI to mark manual_acquired.")],
+    note: str = typer.Option("", "--note", "-n",
+        help="Optional note (how/where acquired)."),
+):
+    """Mark a DOI as manually acquired (ILL / sci-hub / author email / …)."""
+    from sciknow.cli import preflight
+    preflight()
+    from sciknow.core.pending_ops import update_status
+    if update_status(doi, status="manual_acquired", notes=(note or None)):
+        console.print(f"[green]✓[/green] {doi} → manual_acquired")
+    else:
+        console.print(f"[yellow]DOI not found in pending_downloads:[/yellow] {doi}")
+
+
+@pending_app.command(name="abandon")
+def pending_abandon(
+    doi: Annotated[str, typer.Argument(help="DOI to abandon.")],
+    note: str = typer.Option("", "--note", "-n"),
+):
+    """Mark a DOI as abandoned (decided it's not worth chasing)."""
+    from sciknow.cli import preflight
+    preflight()
+    from sciknow.core.pending_ops import update_status
+    if update_status(doi, status="abandoned", notes=(note or None)):
+        console.print(f"[green]✓[/green] {doi} → abandoned")
+    else:
+        console.print(f"[yellow]DOI not found in pending_downloads:[/yellow] {doi}")
+
+
+@pending_app.command(name="reopen")
+def pending_reopen(
+    doi: Annotated[str, typer.Argument(help="DOI to move back to 'pending'.")],
+):
+    """Move a manual_acquired / abandoned DOI back to pending."""
+    from sciknow.cli import preflight
+    preflight()
+    from sciknow.core.pending_ops import update_status
+    if update_status(doi, status="pending"):
+        console.print(f"[green]✓[/green] {doi} → pending")
+    else:
+        console.print(f"[yellow]DOI not found:[/yellow] {doi}")
+
+
+@pending_app.command(name="remove")
+def pending_remove(
+    doi: Annotated[str, typer.Argument(help="DOI to delete from the table.")],
+):
+    """Delete a pending row (use abandon unless you really want it gone)."""
+    from sciknow.cli import preflight
+    preflight()
+    from sciknow.core.pending_ops import remove as _remove
+    if _remove(doi):
+        console.print(f"[green]✓[/green] deleted {doi}")
+    else:
+        console.print(f"[yellow]DOI not found:[/yellow] {doi}")
+
+
+@pending_app.command(name="export")
+def pending_export(
+    output: Path = typer.Option(None, "--output", "-o",
+        help="Output path (default: stdout)."),
+    fmt: str = typer.Option("csv", "--format", "-f",
+        help="csv | json."),
+    status: str = typer.Option("pending", "--status", "-s"),
+):
+    """Dump the pending table to CSV or JSON for manual acquisition."""
+    from sciknow.cli import preflight
+    preflight()
+    from sciknow.core.pending_ops import list_pending
+    rows = list_pending(status=(status or None), limit=100000)
+    if fmt.lower() == "json":
+        import json as _json
+        text = _json.dumps(rows, indent=2, ensure_ascii=False)
+    else:
+        import csv as _csv
+        import io as _io
+        buf = _io.StringIO()
+        cols = ["doi", "title", "authors", "year", "source_method",
+                "source_query", "relevance_score", "attempt_count",
+                "last_attempt_at", "last_failure_reason", "status",
+                "notes", "created_at"]
+        w = _csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
+        w.writeheader()
+        for r in rows:
+            r = dict(r)
+            r["authors"] = "; ".join(r.get("authors") or [])
+            w.writerow(r)
+        text = buf.getvalue()
+    if output:
+        output.write_text(text)
+        console.print(f"[green]✓[/green] Wrote {len(rows)} row(s) → {output}")
+    else:
+        console.print(text)

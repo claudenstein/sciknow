@@ -4427,6 +4427,115 @@ async def api_corpus_expand_coauthors_preview(
     return JSONResponse(result)
 
 
+@app.get("/api/pending-downloads")
+async def api_pending_downloads_list(
+    status: str = "pending", source: str = "", limit: int = 500,
+):
+    """Phase 54.6.7 — list rows from the pending_downloads table."""
+    from sciknow.core.pending_ops import list_pending
+    rows = list_pending(
+        status=(status or None),
+        source_method=(source.strip() or None),
+        limit=int(limit),
+    )
+    return JSONResponse({"rows": rows, "count": len(rows)})
+
+
+@app.post("/api/pending-downloads/update")
+async def api_pending_downloads_update(request: Request):
+    """Update one row's status (manual_acquired / abandoned / pending).
+
+    Body: ``{"doi": "...", "status": "...", "notes": "..."}``
+    """
+    from sciknow.core.pending_ops import update_status
+    body = await request.json()
+    doi = (body.get("doi") or "").strip()
+    st = (body.get("status") or "").strip()
+    notes = body.get("notes")
+    if not doi or st not in ("pending", "manual_acquired", "abandoned"):
+        raise HTTPException(status_code=400, detail="doi + valid status required")
+    ok = update_status(doi, status=st, notes=notes)
+    return JSONResponse({"ok": ok, "updated": ok})
+
+
+@app.post("/api/pending-downloads/remove")
+async def api_pending_downloads_remove(request: Request):
+    """Delete a pending row outright. Body: ``{"doi": "..."}``."""
+    from sciknow.core.pending_ops import remove as _remove
+    body = await request.json()
+    doi = (body.get("doi") or "").strip()
+    if not doi:
+        raise HTTPException(status_code=400, detail="doi required")
+    return JSONResponse({"ok": _remove(doi)})
+
+
+@app.post("/api/pending-downloads/retry")
+async def api_pending_downloads_retry(request: Request):
+    """Retry a set of pending DOIs by spawning `db download-dois
+    --retry-failed --dois-file <tmp.json>` and streaming SSE.
+
+    Body: ``{"dois": [list], "workers": int, "ingest": bool}``. If ``dois``
+    is empty, retries ALL currently-pending rows.
+    """
+    import json as _json
+    import tempfile
+    import uuid
+    from sciknow.core.pending_ops import list_pending
+
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    requested = body.get("dois") or []
+    if not requested:
+        rows = list_pending(status="pending", limit=10000)
+        requested = [{"doi": r["doi"], "title": r["title"],
+                      "year": r["year"]} for r in rows]
+    else:
+        # Sanitize: expect list of strings OR list of {doi,title,year}.
+        clean = []
+        for item in requested:
+            if isinstance(item, str):
+                clean.append({"doi": item.strip()})
+            elif isinstance(item, dict) and (item.get("doi") or "").strip():
+                clean.append({
+                    "doi": item["doi"].strip(),
+                    "title": (item.get("title") or "")[:500],
+                    "year": item.get("year") if isinstance(item.get("year"), int) else None,
+                })
+        requested = clean
+    if not requested:
+        raise HTTPException(status_code=400, detail="no DOIs to retry")
+
+    workers = int(body.get("workers") or 0)
+    ingest = bool(body.get("ingest", True))
+
+    tmp_dir = Path(tempfile.gettempdir()) / "sciknow-pending-retry"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = tmp_dir / f"retry-{uuid.uuid4().hex[:12]}.json"
+    tmp_path.write_text(_json.dumps(requested))
+
+    job_id, _queue = _create_job("pending_retry")
+    loop = asyncio.get_event_loop()
+    argv = [
+        "db", "download-dois",
+        "--dois-file", str(tmp_path),
+        "--workers", str(workers),
+        "--retry-failed",
+    ]
+    argv.append("--ingest" if ingest else "--no-ingest")
+
+    def _cleanup_tmp():
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    _spawn_cli_streaming(job_id, argv, loop, on_finish=_cleanup_tmp)
+    return JSONResponse({"job_id": job_id, "n_retried": len(requested)})
+
+
 @app.post("/api/corpus/cleanup-downloads")
 async def api_corpus_cleanup_downloads(
     dry_run: bool = Form(False),
@@ -7982,15 +8091,20 @@ body.task-bar-open {{ padding-top: 40px; }}
           the modes below. All are long-running; the log streams at the
           bottom. Cancel with the red button.
         </p>
-        <!-- Phase 54.6.4 — cleanup utility (top-of-tab so it's always
-             one click away regardless of which subtab is active). -->
-        <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;padding:8px;background:var(--bg-alt,#f8f8f8);border-radius:6px;font-size:12px;">
+        <!-- Phase 54.6.4 + 54.6.7 — utility buttons at the top of the
+             Corpus tab: cleanup (dedup) + pending-downloads (retry /
+             manual acquisition for papers without a legal OA PDF). -->
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;padding:8px;background:var(--bg-alt,#f8f8f8);border-radius:6px;font-size:12px;flex-wrap:wrap;">
           <button class="btn-secondary" onclick="doToolCorpus('cleanup')"
                   title="Remove PDFs from downloads/ that are already ingested in this or any other project's DB. Frees disk without touching the pipeline archive.">
             &#129529; Cleanup downloads
           </button>
+          <button class="btn-secondary" onclick="openPendingDownloadsModal()"
+                  title="Papers you selected but couldn't be auto-downloaded (no legal OA PDF). Retry, mark manually acquired, or export for ILL.">
+            &#128203; Pending downloads
+          </button>
           <span style="color:var(--fg-muted);">
-            Deletes download duplicates that are already ingested (checks every project's DB).
+            Cleanup removes already-ingested dupes. Pending lists papers still waiting on an OA PDF.
           </span>
         </div>
         <div class="tabs" style="margin-bottom:10px;">
@@ -8327,6 +8441,90 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div id="eap-status" style="margin-top:8px;font-size:12px;color:var(--fg-muted);"></div>
         <pre id="eap-log" style="margin-top:6px;max-height:260px;overflow:auto;background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);border-radius:4px;padding:8px;font-size:11px;font-family:ui-monospace,monospace;white-space:pre-wrap;display:none;"></pre>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- Phase 54.6.7 — Pending downloads modal.
+     Papers the user selected via any expand flow that couldn't be
+     auto-downloaded (no OA PDF). Retry / mark-done / abandon / export. -->
+<div class="modal-overlay" id="pending-downloads-modal"
+     onclick="if(event.target===this)closeModal('pending-downloads-modal')">
+  <div class="modal wide xwide">
+    <div class="modal-header">
+      <h3>&#128203; Pending downloads</h3>
+      <button class="modal-close" onclick="closeModal('pending-downloads-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;">
+        Papers you selected that had no legal open-access PDF. Retry runs
+        the 6-source OA cascade again (sometimes Unpaywall / Semantic
+        Scholar / Europe PMC surface a link that wasn't there before).
+        Mark-done records that you got the paper manually (ILL, author
+        email, library). Export lets you hand off a CSV for manual work.
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
+        <label style="font-size:12px;">
+          Status:
+          <select id="pdl-status" onchange="refreshPendingDownloads()"
+                  style="font-size:12px;padding:2px 4px;margin-left:4px;">
+            <option value="pending" selected>pending</option>
+            <option value="manual_acquired">manual_acquired</option>
+            <option value="abandoned">abandoned</option>
+            <option value="all">all</option>
+          </select>
+        </label>
+        <label style="font-size:12px;">
+          Source:
+          <select id="pdl-source" onchange="refreshPendingDownloads()"
+                  style="font-size:12px;padding:2px 4px;margin-left:4px;">
+            <option value="">(any)</option>
+            <option value="expand">expand</option>
+            <option value="expand-author">expand-author</option>
+            <option value="expand-cites">expand-cites</option>
+            <option value="expand-topic">expand-topic</option>
+            <option value="expand-coauthors">expand-coauthors</option>
+            <option value="auto-expand">auto-expand</option>
+            <option value="download-dois">download-dois</option>
+          </select>
+        </label>
+        <button class="btn-secondary" onclick="refreshPendingDownloads()">Refresh</button>
+        <span id="pdl-count" style="font-size:11px;color:var(--fg-muted);"></span>
+        <span style="margin-left:auto;"></span>
+        <button class="btn-secondary" onclick="pendingSelectAll(true)">Select all</button>
+        <button class="btn-secondary" onclick="pendingSelectAll(false)">Select none</button>
+        <button class="btn-primary" onclick="pendingRetrySelected()"
+                title="Retry the selected DOIs against the OA cascade, bypassing .no_oa_cache.">
+          &#8635; Retry selected
+        </button>
+        <button class="btn-secondary" onclick="pendingExportCsv()"
+                title="Download a CSV of rows currently shown (status / source filtered).">
+          &#128229; Export CSV
+        </button>
+      </div>
+      <div style="max-height:60vh;overflow:auto;border:1px solid var(--border);border-radius:4px;">
+        <table id="pdl-table" style="width:100%;border-collapse:collapse;font-size:12px;">
+          <thead style="background:var(--bg-alt,#f8f8f8);position:sticky;top:0;z-index:1;">
+            <tr>
+              <th style="width:32px;padding:6px 8px;text-align:left;">
+                <input type="checkbox" id="pdl-header-cb" onchange="pendingSelectAll(this.checked)">
+              </th>
+              <th style="padding:6px 8px;text-align:left;">Title / DOI</th>
+              <th style="padding:6px 8px;text-align:left;white-space:nowrap;">Authors</th>
+              <th style="padding:6px 8px;text-align:left;white-space:nowrap;">Year</th>
+              <th style="padding:6px 8px;text-align:left;white-space:nowrap;">Source</th>
+              <th style="padding:6px 8px;text-align:left;white-space:nowrap;">Tries</th>
+              <th style="padding:6px 8px;text-align:left;white-space:nowrap;">Last reason</th>
+              <th style="padding:6px 8px;text-align:left;white-space:nowrap;">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="pdl-tbody">
+            <tr><td colspan="8" style="padding:20px;text-align:center;color:var(--fg-muted);">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div id="pdl-retry-status" style="margin-top:8px;font-size:12px;color:var(--fg-muted);"></div>
+      <pre id="pdl-retry-log" style="display:none;margin-top:6px;max-height:240px;overflow:auto;background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);border-radius:4px;padding:8px;font-size:11px;font-family:ui-monospace,monospace;white-space:pre-wrap;"></pre>
     </div>
   </div>
 </div>
@@ -14371,6 +14569,218 @@ function expandSingleGap(gapDesc) {{
       openExpandTopicPreview();
     }}, 80);
   }}, 80);
+}}
+
+// ── Phase 54.6.7 — Pending downloads modal ─────────────────────────────
+// When expand flows can't find an OA PDF for a paper the user selected,
+// the row goes into the pending_downloads table. This modal is the
+// curator UI: retry / mark-done / abandon / export for papers stuck
+// without a legal PDF.
+let _pdlRows = [];
+let _pdlSelected = new Set();
+let _pdlRetryJob = null;
+
+async function openPendingDownloadsModal() {{
+  openModal('pending-downloads-modal');
+  await refreshPendingDownloads();
+}}
+
+async function refreshPendingDownloads() {{
+  const status = document.getElementById('pdl-status').value || 'pending';
+  const source = document.getElementById('pdl-source').value || '';
+  const url = '/api/pending-downloads?status=' + encodeURIComponent(status)
+            + (source ? '&source=' + encodeURIComponent(source) : '');
+  const tbody = document.getElementById('pdl-tbody');
+  tbody.innerHTML = '<tr><td colspan="8" style="padding:20px;text-align:center;color:var(--fg-muted);">Loading…</td></tr>';
+  try {{
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    _pdlRows = data.rows || [];
+    _pdlSelected = new Set();
+    document.getElementById('pdl-count').textContent = data.count + ' row(s)';
+    _renderPendingTable();
+  }} catch (exc) {{
+    tbody.innerHTML = '<tr><td colspan="8" style="padding:16px;color:var(--danger);">Failed: '
+      + _escHtml(exc.message) + '</td></tr>';
+  }}
+}}
+
+function _renderPendingTable() {{
+  const tbody = document.getElementById('pdl-tbody');
+  if (!_pdlRows.length) {{
+    tbody.innerHTML = '<tr><td colspan="8" style="padding:20px;text-align:center;color:var(--fg-muted);">'
+      + 'No rows for the current filter.</td></tr>';
+    _pdlUpdateHeaderCb();
+    return;
+  }}
+  const rows = _pdlRows.map(r => {{
+    const checked = _pdlSelected.has(r.doi) ? 'checked' : '';
+    const authors = (r.authors || []).slice(0, 3).join(', ')
+      + ((r.authors || []).length > 3 ? ` +${{r.authors.length - 3}}` : '');
+    const doiUrl = r.doi
+      ? `<a href="https://doi.org/${{_escHtml(r.doi)}}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;font-family:ui-monospace,monospace;font-size:10px;">${{_escHtml(r.doi)}}</a>`
+      : '<span style="color:var(--fg-muted);">(no DOI)</span>';
+    const actions = `
+      <button class="btn-secondary" style="font-size:10px;padding:2px 6px;"
+              onclick="pendingRetrySingle('${{_escHtml(r.doi)}}')">&#8635;</button>
+      <button class="btn-secondary" style="font-size:10px;padding:2px 6px;"
+              onclick="pendingMarkStatus('${{_escHtml(r.doi)}}','manual_acquired')"
+              title="Mark manually acquired">&#10003;</button>
+      <button class="btn-secondary" style="font-size:10px;padding:2px 6px;"
+              onclick="pendingMarkStatus('${{_escHtml(r.doi)}}','abandoned')"
+              title="Abandon">&#215;</button>
+    `;
+    return `<tr data-doi="${{_escHtml(r.doi)}}" style="border-top:1px solid var(--border);">
+      <td style="padding:6px 8px;"><input type="checkbox" class="pdl-row-cb" data-doi="${{_escHtml(r.doi)}}" ${{checked}}></td>
+      <td style="padding:6px 8px;">
+        <div style="font-weight:500;">${{_escHtml(r.title || '(untitled)')}}</div>
+        <div style="font-size:10px;margin-top:2px;">${{doiUrl}}</div>
+      </td>
+      <td style="padding:6px 8px;color:var(--fg-muted);">${{_escHtml(authors)}}</td>
+      <td style="padding:6px 8px;color:var(--fg-muted);">${{r.year || '—'}}</td>
+      <td style="padding:6px 8px;color:var(--fg-muted);font-size:10px;">${{_escHtml(r.source_method || '')}}</td>
+      <td style="padding:6px 8px;font-family:ui-monospace,monospace;">${{r.attempt_count}}</td>
+      <td style="padding:6px 8px;color:var(--fg-muted);font-size:11px;">${{_escHtml(r.last_failure_reason || '')}}</td>
+      <td style="padding:6px 8px;white-space:nowrap;">${{actions}}</td>
+    </tr>`;
+  }}).join('');
+  tbody.innerHTML = rows;
+  tbody.querySelectorAll('.pdl-row-cb').forEach(cb => {{
+    cb.addEventListener('change', () => {{
+      const doi = cb.dataset.doi;
+      if (cb.checked) _pdlSelected.add(doi);
+      else _pdlSelected.delete(doi);
+      _pdlUpdateHeaderCb();
+    }});
+  }});
+  _pdlUpdateHeaderCb();
+}}
+
+function _pdlUpdateHeaderCb() {{
+  const hdr = document.getElementById('pdl-header-cb');
+  if (!hdr) return;
+  const sel = _pdlSelected.size;
+  const tot = _pdlRows.length;
+  hdr.checked = sel > 0 && sel === tot;
+  hdr.indeterminate = sel > 0 && sel < tot;
+}}
+
+function pendingSelectAll(on) {{
+  _pdlSelected = new Set();
+  if (on) _pdlRows.forEach(r => {{ if (r.doi) _pdlSelected.add(r.doi); }});
+  _renderPendingTable();
+}}
+
+async function pendingMarkStatus(doi, status) {{
+  if (!doi) return;
+  if (status === 'abandoned' &&
+      !confirm('Abandon "' + doi + '"? You can reopen it from the CLI later.')) return;
+  try {{
+    const res = await fetch('/api/pending-downloads/update', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{doi: doi, status: status}}),
+    }});
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    await refreshPendingDownloads();
+  }} catch (exc) {{
+    alert('Update failed: ' + exc.message);
+  }}
+}}
+
+async function pendingRetrySingle(doi) {{
+  if (!doi) return;
+  await pendingRetryDois([{{doi: doi}}]);
+}}
+
+async function pendingRetrySelected() {{
+  if (!_pdlSelected.size) {{
+    alert('Select at least one row (or use "Select all").');
+    return;
+  }}
+  const chosen = _pdlRows
+    .filter(r => r.doi && _pdlSelected.has(r.doi))
+    .map(r => ({{doi: r.doi, title: r.title || '', year: r.year || null}}));
+  await pendingRetryDois(chosen);
+}}
+
+async function pendingRetryDois(rowsOrDois) {{
+  const logEl = document.getElementById('pdl-retry-log');
+  const status = document.getElementById('pdl-retry-status');
+  logEl.style.display = 'block';
+  logEl.textContent = '';
+  status.textContent = 'Starting retry…';
+  try {{
+    const res = await fetch('/api/pending-downloads/retry', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{dois: rowsOrDois, ingest: true, workers: 0}}),
+    }});
+    if (!res.ok) {{
+      const detail = await res.text();
+      throw new Error('HTTP ' + res.status + ': ' + detail);
+    }}
+    const data = await res.json();
+    _pdlRetryJob = data.job_id;
+    status.textContent = `Retrying ${{data.n_retried}} DOI(s)… (see log)`;
+    const source = new EventSource('/api/stream/' + data.job_id);
+    source.onmessage = function(e) {{
+      let evt;
+      try {{ evt = JSON.parse(e.data); }} catch (_) {{ return; }}
+      if (evt.type === 'log') {{
+        logEl.textContent += evt.text + '\\n';
+        logEl.scrollTop = logEl.scrollHeight;
+      }} else if (evt.type === 'progress') {{
+        if (evt.detail && evt.detail.startsWith('$ ')) {{
+          logEl.textContent += evt.detail + '\\n';
+        }}
+      }} else if (evt.type === 'completed') {{
+        source.close(); _pdlRetryJob = null;
+        status.textContent = 'Retry complete. Refreshing list…';
+        setTimeout(refreshPendingDownloads, 600);
+      }} else if (evt.type === 'error') {{
+        source.close(); _pdlRetryJob = null;
+        status.textContent = 'Retry failed: ' + (evt.message || 'see log');
+      }} else if (evt.type === 'done') {{
+        source.close(); _pdlRetryJob = null;
+      }}
+    }};
+  }} catch (exc) {{
+    status.textContent = 'Retry failed: ' + exc.message;
+  }}
+}}
+
+function pendingExportCsv() {{
+  // Convert the currently-rendered _pdlRows to CSV client-side.
+  if (!_pdlRows.length) {{
+    alert('No rows to export.');
+    return;
+  }}
+  const cols = ['doi','title','authors','year','source_method','source_query',
+                'relevance_score','attempt_count','last_attempt_at',
+                'last_failure_reason','status','notes'];
+  const lines = [cols.join(',')];
+  for (const r of _pdlRows) {{
+    const row = cols.map(k => {{
+      let v = r[k];
+      if (Array.isArray(v)) v = v.join('; ');
+      if (v == null) v = '';
+      v = String(v);
+      if (/[",\\n]/.test(v)) v = '"' + v.replace(/"/g, '""') + '"';
+      return v;
+    }});
+    lines.push(row.join(','));
+  }}
+  const blob = new Blob([lines.join('\\n')], {{type: 'text/csv'}});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'pending_downloads_' + (new Date().toISOString().slice(0,10)) + '.csv';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }}
 
 function eapRender() {{

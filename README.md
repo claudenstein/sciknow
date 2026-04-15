@@ -32,6 +32,7 @@ A local-first scientific knowledge system that ingests papers, builds a compiled
   - `db expand-coauthors` — **invisible college** (papers by coauthors of your corpus authors)
   - `book auto-expand` — **gap-driven** auto-expansion: every open `book gaps` entry becomes its own topic search, candidates merged + ranked so papers that close multiple gaps rise to the top
 - **Cross-project dedup** — `db cleanup-downloads --cross-project` (default ON) checks every sciknow project's DB by SHA-256, so a PDF downloaded into project B that's already ingested in project A is recognised and cleaned
+- **Pending downloads panel** — ~50% of expand selections typically have no legal OA PDF; those rows auto-persist to `pending_downloads` with full metadata (title, authors, year, source-method) so you can retry (the 6-source cascade bypasses `.no_oa_cache`), mark manually-acquired, abandon with a note, or export to CSV for ILL. Surfaced as the "📋 Pending downloads" button in the Corpus Tools tab and `sciknow db pending list|retry|mark-done|abandon|export` from the CLI
 - **Topic clustering** — BERTopic (UMAP + HDBSCAN + c-TF-IDF) assigns papers to named thematic clusters in seconds
 
 **Search & Retrieval**
@@ -141,6 +142,8 @@ See [`docs/PROJECTS.md`](docs/PROJECTS.md) for the full design.
 | **Coauthor snowball** (same-lab researchers) | `sciknow db expand-coauthors` |
 | **Auto-insert citations** into a draft | `sciknow book insert-citations <draft-id>` |
 | **Reclaim disk** from already-ingested downloads | `sciknow db cleanup-downloads` |
+| **See papers stuck without a legal OA PDF** | `sciknow db pending list` |
+| **Retry pending downloads** (new OA links may have appeared) | `sciknow db pending retry` |
 
 ---
 

@@ -60,6 +60,27 @@ sciknow db cleanup-downloads --delete-dupes      # aggressive: deletes instead o
 sciknow db cleanup-downloads --no-cross-project  # only check the active project's DB
 ```
 
+### Pending downloads (papers without a legal OA PDF)
+
+Every expand flow records its no-OA failures in the `pending_downloads`
+table with the full metadata (title / authors / year) so you can
+retry later or acquire manually. Surfaced in the web reader as the
+"📋 Pending downloads" button at the top of the Corpus Tools tab.
+
+```bash
+sciknow db pending list                         # defaults to --status pending
+sciknow db pending list --status all            # include manual_acquired / abandoned
+sciknow db pending list --source expand-author  # filter by which flow added the row
+sciknow db pending retry                        # re-run the 6-source cascade, bypassing .no_oa_cache
+sciknow db pending retry --limit 20             # smaller batch
+sciknow db pending mark-done 10.1038/nature12345 --note "got via ILL"
+sciknow db pending abandon 10.1234/xyz --note "not worth chasing"
+sciknow db pending reopen 10.1234/xyz           # move back to pending
+sciknow db pending remove 10.1234/xyz           # delete the row outright
+sciknow db pending export --format csv -o pending.csv
+sciknow db pending export --format json --status all > pending.json
+```
+
 ---
 
 ## `sciknow ingest`

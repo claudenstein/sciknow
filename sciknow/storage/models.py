@@ -797,3 +797,77 @@ class Feedback(Base):
         Index("idx_feedback_score", "score"),
         Index("idx_feedback_created_at", "created_at"),
     )
+
+
+class PendingDownload(Base):
+    """Phase 54.6.7 — papers the user selected for ingest but no OA PDF
+    was found. The curator can:
+
+    * come back later and retry (re-running the 6-source OA cascade
+      because Unpaywall / Copernicus / Semantic Scholar sometimes
+      surface a link that wasn't available weeks ago)
+    * export to CSV and acquire manually (ILL, author email, library)
+    * abandon with a note explaining why
+
+    Upserted by DOI — a DOI already on file bumps ``attempt_count``
+    and updates ``last_attempt_at`` / ``last_failure_reason`` rather
+    than creating a duplicate row.
+
+    NOT used for ingest failures (those land in ``data/failed/`` via
+    the existing pipeline). This table is specifically for the
+    "~50% of expand selections have no legal OA PDF" failure mode.
+    """
+
+    __tablename__ = "pending_downloads"
+
+    id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    # Canonical identifier — the download pipeline keys on this.
+    # Unique so upserts are trivial.
+    doi: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    # Optional alternate identifier (arXiv preprints that lack a
+    # journal DOI can still be recovered via arxiv_id).
+    arxiv_id: Mapped[str | None] = mapped_column(Text)
+    # Bibliographic metadata captured at selection time — we store
+    # this on the row so the user can make informed decisions
+    # (manual acquisition, email the author, etc.) without having
+    # to re-fetch metadata later.
+    title: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    authors: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    year: Mapped[int | None] = mapped_column(Integer)
+    # Which expand flow surfaced this candidate — ``expand`` /
+    # ``expand-author`` / ``expand-cites`` / ``expand-topic`` /
+    # ``expand-coauthors`` / ``auto-expand`` / ``download-dois``.
+    source_method: Mapped[str | None] = mapped_column(Text)
+    # The query / seed / author name the flow was given. Useful when
+    # the same paper surfaces from multiple searches.
+    source_query: Mapped[str | None] = mapped_column(Text)
+    relevance_score: Mapped[float | None] = mapped_column(Float)
+    # Retry bookkeeping.
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    # Human-readable reason — ``no_oa`` / ``http_500`` / ``timeout`` /
+    # etc. Not an enum: the 6-source cascade adds new failure modes
+    # faster than we want to migrate a CHECK constraint.
+    last_failure_reason: Mapped[str | None] = mapped_column(Text)
+    # ``pending`` = still want it, queued for retry
+    # ``manual_acquired`` = user got it another way (ILL, sci-hub, etc.)
+    # ``abandoned`` = decided it's not worth chasing
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        server_default=func.now(), onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        Index("idx_pending_downloads_status", "status"),
+        Index("idx_pending_downloads_source_method", "source_method"),
+        Index("idx_pending_downloads_created_at", "created_at"),
+    )

@@ -1447,6 +1447,7 @@ def auto_expand(
     _expand_common_download_and_ingest(
         cands, download_dir=download_dir, workers=workers,
         ingest=ingest, dry_run=dry_run,
+        source_method="auto-expand", source_query=book_title,
     )
 
 
