@@ -4535,15 +4535,18 @@ def l1_phase35_total_compute_counter() -> None:
 def l1_phase36_tools_panel() -> None:
     """Phase 36 — Tools modal bringing CLI-only capabilities into the web UI.
 
-    Four tabs mapped to CLI commands:
+    Tools modal tabs (Phase 54.6.18 — Corpus extracted to its own modal):
       Search     → /api/search/query, /api/search/similar       (JSON)
       Synthesize → /api/ask/synthesize                          (SSE)
       Topics     → /api/catalog/topics                          (JSON)
+
+    Corpus lives in a standalone top-bar dropdown + modal:
       Corpus     → /api/corpus/enrich, /api/corpus/expand       (SSE, subprocess)
 
     Verifies handlers exist with the right shape, the Tools button is
-    wired, the modal HTML carries all four tabs, and the JS dispatches
-    to the right endpoint per tab.
+    wired, the Tools modal carries the three remaining tabs, the Corpus
+    modal + top-bar dropdown exist, and the JS dispatches to the right
+    endpoint per tab.
     """
     import inspect
 
@@ -4608,17 +4611,35 @@ def l1_phase36_tools_panel() -> None:
     # stderr merged into stdout so Rich progress bars surface in the log
     assert "STDOUT" in spawn_src
 
-    # 8) Tools button is wired to the new modal
+    # 8) Tools button is wired to the Tools modal
     assert 'onclick="openToolsModal()"' in src, (
         "Tools button not wired into the top-bar button tray"
     )
-    # 9) Modal HTML has all four tabs
-    for tab in ("tl-search", "tl-synth", "tl-topics", "tl-corpus"):
-        assert f'data-tab="{tab}"' in src, f"tab {tab} missing from modal"
+    # 9) Tools modal has the 3 remaining tabs (Corpus was extracted in 54.6.18)
+    for tab in ("tl-search", "tl-synth", "tl-topics"):
+        assert f'data-tab="{tab}"' in src, f"tab {tab} missing from Tools modal"
         assert f'id="{tab}-pane"' in src, f"pane {tab}-pane missing"
+    # 9b) Corpus lives in its own modal + top-bar dropdown
+    assert 'id="corpus-modal"' in src, (
+        "corpus-modal missing — Phase 54.6.18 extracted Corpus into its "
+        "own modal"
+    )
+    assert 'id="tl-corpus-pane"' in src, (
+        "tl-corpus-pane must still exist (moved into corpus-modal)"
+    )
+    assert 'id="corpus-dropdown"' in src, (
+        "top-bar Corpus dropdown (#corpus-dropdown) missing"
+    )
+    # Top-bar dropdown entries for the 6 expand sub-tabs + cleanup + pending
+    for subtab in ("corp-enrich", "corp-cites", "corp-author",
+                   "corp-inbound", "corp-topic", "corp-coauth"):
+        assert f"openCorpusModal('{subtab}')" in src, (
+            f"Corpus dropdown entry for {subtab} missing"
+        )
     # 10) JS dispatchers exist and hit the right endpoints
     for fn in ("openToolsModal", "switchToolsTab", "doToolSearch",
                "doToolSynthesize", "loadToolTopics", "loadToolTopicPapers",
+               "openCorpusModal", "switchCorpusTab",
                "doToolCorpus", "cancelToolCorpus"):
         assert f"function {fn}(" in src or f"async function {fn}(" in src, (
             f"Tools JS function {fn} missing"

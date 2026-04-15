@@ -7285,6 +7285,27 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button role="menuitem" onclick="openCatalogModal()">&#128194; Browse Papers</button>
     </div>
   </div>
+  <!-- Phase 54.6.18 — Corpus: every enrich / expand surface lifted
+       out of the old Tools→Corpus tab. 6 expand vectors + enrich +
+       two utilities. Each link opens the standalone Corpus modal on
+       the right sub-tab (or runs the utility directly). -->
+  <div class="nav-dropdown" id="corpus-dropdown">
+    <button class="nav-btn" onclick="toggleNavDropdown('corpus-dropdown', event)"
+            title="Grow and enrich the corpus: enrich metadata + five expand vectors + cleanup + pending">
+      &#127793; Corpus &#9662;
+    </button>
+    <div class="nav-dropdown-menu" role="menu">
+      <button role="menuitem" onclick="openCorpusModal('corp-enrich')">&#128270; Enrich metadata</button>
+      <button role="menuitem" onclick="openCorpusModal('corp-cites')">&#127760; Expand (citations)</button>
+      <button role="menuitem" onclick="openCorpusModal('corp-author')">&#128100; Expand by author</button>
+      <button role="menuitem" onclick="openCorpusModal('corp-inbound')">&#128258; Inbound cites</button>
+      <button role="menuitem" onclick="openCorpusModal('corp-topic')">&#128269; Topic search</button>
+      <button role="menuitem" onclick="openCorpusModal('corp-coauth')">&#128101; Coauthors</button>
+      <div style="height:1px;background:var(--border);margin:2px 0;"></div>
+      <button role="menuitem" onclick="openCorpusModal('corp-enrich');doToolCorpus('cleanup')">&#129529; Cleanup downloads</button>
+      <button role="menuitem" onclick="openPendingDownloadsModal()">&#128203; Pending downloads</button>
+    </div>
+  </div>
   <!-- Visualize — seven views of the corpus (KG + the six Viz tabs) -->
   <div class="nav-dropdown" id="viz-dropdown">
     <button class="nav-btn" onclick="toggleNavDropdown('viz-dropdown', event)"
@@ -8345,7 +8366,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           the detailed surface.
         </p>
         <div style="display:flex;gap:10px;">
-          <button class="btn-primary" onclick="closeModal('setup-wizard-modal');openToolsModal();switchToolsTab('tl-corpus');">
+          <button class="btn-primary" onclick="closeModal('setup-wizard-modal');openCorpusModal();">
             &#128736; Open Tools &rarr; Corpus tab
           </button>
         </div>
@@ -8462,7 +8483,6 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button class="tab active" data-tab="tl-search" onclick="switchToolsTab('tl-search')">Search</button>
       <button class="tab" data-tab="tl-synth" onclick="switchToolsTab('tl-synth')">Synthesize</button>
       <button class="tab" data-tab="tl-topics" onclick="switchToolsTab('tl-topics')">Topics</button>
-      <button class="tab" data-tab="tl-corpus" onclick="switchToolsTab('tl-corpus')">Corpus</button>
     </div>
     <div class="modal-body">
 
@@ -8557,6 +8577,24 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div id="tl-topics-papers"></div>
       </div>
 
+
+    </div>
+  </div>
+</div>
+
+<!-- Phase 54.6.18 — standalone Corpus modal. Moved out of the
+     Tools modal so the top-bar "Corpus ▾" dropdown can surface it
+     directly. The pane's internal IDs and sub-tab logic are
+     untouched — openCorpusModal() just unhides the pane + calls
+     switchCorpusTab to pick the right sub-surface. -->
+<div class="modal-overlay" id="corpus-modal"
+     onclick="if(event.target===this)closeModal('corpus-modal')">
+  <div class="modal wide xwide">
+    <div class="modal-header">
+      <h3>&#127793; Corpus &mdash; Enrich &amp; Expand</h3>
+      <button class="modal-close" onclick="closeModal('corpus-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
       <!-- Corpus tab (Phase 46.E + 54.6.4 — expand/enrich/cleanup) -->
       <div id="tl-corpus-pane" style="display:none;">
         <p style="font-size:11px;color:var(--fg-muted);margin-bottom:12px;">
@@ -8831,7 +8869,6 @@ body.task-bar-open {{ padding-top: 40px; }}
         </div>
         <pre id="tl-corpus-log" style="margin-top:8px;max-height:360px;overflow:auto;background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:11px;font-family:ui-monospace,monospace;white-space:pre-wrap;"></pre>
       </div>
-
     </div>
   </div>
 </div>
@@ -15752,19 +15789,39 @@ function openToolsModal() {{
 function switchToolsTab(name) {{
   // Only flip the TOP-level Tools tabs (not any inner Corpus-subtabs,
   // which carry data-ctab instead of data-tab so they don't collide).
+  // Phase 54.6.18 — Corpus extracted into its own modal, so tl-corpus
+  // is no longer part of the Tools tab list. Backwards-compat: if a
+  // caller passes 'tl-corpus' we redirect to openCorpusModal.
+  if (name === 'tl-corpus') {{
+    openCorpusModal();
+    return;
+  }}
   document.querySelectorAll('#tools-modal > .tabs > .tab').forEach(t => {{
     t.classList.toggle('active', t.dataset.tab === name);
   }});
-  ['tl-search', 'tl-synth', 'tl-topics', 'tl-corpus'].forEach(n => {{
+  ['tl-search', 'tl-synth', 'tl-topics'].forEach(n => {{
     const pane = document.getElementById(n + '-pane');
     if (pane) pane.style.display = (n === name) ? 'block' : 'none';
   }});
   if (name === 'tl-topics') loadToolTopics();
-  if (name === 'tl-corpus') {{
-    // Default to Enrich sub-tab on first open
-    switchCorpusTab('corp-enrich');
-    loadCorpusTopicList();
-  }}
+}}
+
+// Phase 54.6.18 — standalone Corpus modal. Opens the extracted pane
+// and optionally switches to a specific sub-tab. Called from the
+// top-bar Corpus ▾ dropdown (seven entry points) and from the
+// legacy switchToolsTab('tl-corpus') fallback.
+function openCorpusModal(subtab) {{
+  // Close any open nav dropdown so the top bar resets.
+  document.querySelectorAll('.nav-dropdown.open').forEach(d => d.classList.remove('open'));
+  openModal('corpus-modal');
+  // The pane was previously style="display:none;" to hide it inside
+  // the Tools modal's tab rotation. Inside its own modal it needs to
+  // be visible.
+  const pane = document.getElementById('tl-corpus-pane');
+  if (pane) pane.style.display = 'block';
+  // Default sub-tab on first open.
+  switchCorpusTab(subtab || 'corp-enrich');
+  loadCorpusTopicList();
 }}
 
 
@@ -16190,24 +16247,20 @@ async function openAutoExpandPreview() {{
   );
 }}
 
-// Per-gap "Expand" button handler: opens the Tools modal, selects the
+// Per-gap "Expand" button handler: opens the Corpus modal on the
 // Topic-search subtab, pre-fills the query with the gap description,
 // and kicks off the preview. Shorter path than running the Dashboard-
 // level auto-expand if the user only cares about one specific gap.
+// Phase 54.6.18 — now goes via openCorpusModal (Corpus is its own modal).
 function expandSingleGap(gapDesc) {{
   if (!gapDesc) return;
-  openToolsModal();
-  // Give the modal a tick to mount, then switch to the corpus tab +
-  // topic subtab and fire the preview.
+  openCorpusModal('corp-topic');
+  // Give the modal a tick to mount, then prefill + fire.
   setTimeout(() => {{
-    if (typeof switchToolsTab === 'function') switchToolsTab('tl-corpus');
-    setTimeout(() => {{
-      if (typeof switchCorpusTab === 'function') switchCorpusTab('corp-topic');
-      const q = document.getElementById('tl-top-q');
-      if (q) q.value = gapDesc;
-      openExpandTopicPreview();
-    }}, 80);
-  }}, 80);
+    const q = document.getElementById('tl-top-q');
+    if (q) q.value = gapDesc;
+    openExpandTopicPreview();
+  }}, 120);
 }}
 
 // ── Phase 54.6.7 — Pending downloads modal ─────────────────────────────
