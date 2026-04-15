@@ -2537,6 +2537,33 @@ async def api_gaps(model: str = Form(None)):
     return JSONResponse({"job_id": job_id})
 
 
+@app.post("/api/book/auto-expand/preview")
+async def api_book_auto_expand_preview(
+    per_gap_limit: int = Form(100),
+):
+    """Phase 54.6.5 — preview corpus-expansion candidates derived from
+    the current book's open gaps.
+
+    Composition: book_gaps (open, type in {topic, evidence}) → per-gap
+    topic search → merged + corpus-centroid-scored candidate list. Each
+    candidate carries a ``gap_ids`` list so the UI can display how many
+    open gaps the paper would close.
+    """
+    from sciknow.core.expand_ops import find_candidates_for_book_gaps
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: find_candidates_for_book_gaps(
+                _book_id, per_gap_limit=int(per_gap_limit),
+                score_relevance=True,
+            ),
+        )
+    except Exception as exc:
+        logger.exception("book/auto-expand preview failed")
+        raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}")
+    return JSONResponse(result)
+
+
 @app.post("/api/argue")
 async def api_argue(
     claim: str = Form(...),
@@ -8540,6 +8567,7 @@ const ACTIONS = {{
   'open-chapter-modal': (el) => openChapterModal(el.dataset.chapterId),
   'load-section': (el) => loadSection(el.dataset.draftId),
   'write-for-gap': (el) => writeForGap(parseInt(el.dataset.chapterNum, 10)),
+  'expand-single-gap': (el) => expandSingleGap(el.dataset.gapDesc),
 
   // Cluster 3 — sidebar + section editor. setSectionType wants the
   // clicked element as its second arg so it can toggle `.active` on
@@ -11178,16 +11206,33 @@ async function showDashboard() {{
 
   // Gaps
   if (data.gaps.length > 0) {{
-    html += '<h3 style="margin-bottom:8px;">Open Gaps</h3><div class="gap-list">';
+    // Phase 54.6.5 — Auto-expand corpus from all open topic/evidence gaps.
+    const openExpandable = data.gaps.filter(
+      g => g.type === 'topic' || g.type === 'evidence'
+    ).length;
+    const autoBtn = (openExpandable > 0)
+      ? '<button class="btn-primary" style="margin-left:auto;" '
+        + 'onclick="openAutoExpandPreview()" '
+        + 'title="Query OpenAlex once per open topic/evidence gap; merge + rank candidates so you can cherry-pick which to ingest. Mirrors `sciknow book auto-expand`.">'
+        + '&#128269; Auto-expand from these gaps</button>'
+      : '';
+    html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">'
+      + '<h3 style="margin:0;">Open Gaps</h3>'
+      + autoBtn
+      + '</div><div class="gap-list">';
     data.gaps.forEach(g => {{
       let btn = '';
       if (g.type === 'draft' && g.chapter_num) {{
         // Phase 42 — data-action dispatch; chapter_num is a numeric
         // attr, parsed back via parseInt in the handler.
         btn = '<button data-action="write-for-gap" data-chapter-num="' + g.chapter_num + '">Write</button>';
-      }} else if (g.type === 'evidence') {{
-        const cmdHint = 'Run: sciknow db expand -q ' + g.description.substring(0,30).replace(/[&<>"\\']/g, '');
-        btn = '<button data-cmd="' + cmdHint.replace(/&/g, '&amp;').replace(/"/g, '&quot;') + '" onclick="alert(this.dataset.cmd)">Expand</button>';
+      }} else if (g.type === 'topic' || g.type === 'evidence') {{
+        // Phase 54.6.5 — replace the old "Run: sciknow db expand" alert
+        // with a real one-click flow: prefill the Topic-search subtab
+        // with this gap's description and open the preview modal.
+        btn = '<button data-action="expand-single-gap" '
+          + 'data-gap-desc="' + escapeHtml(g.description) + '" '
+          + 'title="Preview candidates for this specific gap via Topic search.">Expand</button>';
       }}
       html += '<div class="gap-item">';
       html += '<span class="gap-type">' + g.type + '</span>';
@@ -14283,6 +14328,39 @@ async function openExpandCoauthPreview() {{
     'Enumerating corpus authors → fetching their works…',
     '(30s–3 min: scales with author count × per-author cap)'
   );
+}}
+
+// Phase 54.6.5 — Gap-driven auto-expand. Called from the Dashboard gaps
+// panel when the user clicks "Auto-expand from these gaps".
+async function openAutoExpandPreview() {{
+  const fd = new FormData();
+  fd.append('per_gap_limit', '80');
+  await _eapFetchPreview(
+    '/api/book/auto-expand/preview', fd,
+    '&#128269; Auto-expand &mdash; Candidates for open gaps',
+    'Running a topic search per open gap…',
+    '(1–5 min: one OpenAlex query per topic/evidence gap, then merged + relevance-scored)'
+  );
+}}
+
+// Per-gap "Expand" button handler: opens the Tools modal, selects the
+// Topic-search subtab, pre-fills the query with the gap description,
+// and kicks off the preview. Shorter path than running the Dashboard-
+// level auto-expand if the user only cares about one specific gap.
+function expandSingleGap(gapDesc) {{
+  if (!gapDesc) return;
+  openToolsModal();
+  // Give the modal a tick to mount, then switch to the corpus tab +
+  // topic subtab and fire the preview.
+  setTimeout(() => {{
+    if (typeof switchToolsTab === 'function') switchToolsTab('tl-corpus');
+    setTimeout(() => {{
+      if (typeof switchCorpusTab === 'function') switchCorpusTab('corp-topic');
+      const q = document.getElementById('tl-top-q');
+      if (q) q.value = gapDesc;
+      openExpandTopicPreview();
+    }}, 80);
+  }}, 80);
 }}
 
 function eapRender() {{

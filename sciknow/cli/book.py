@@ -1360,6 +1360,96 @@ def gaps(
     _consume_events(gen, console)
 
 
+@app.command(name="auto-expand")
+def auto_expand(
+    book_title: Annotated[str, typer.Argument(help="Book title or ID fragment.")],
+    per_gap_limit: int = typer.Option(100, "--per-gap-limit",
+        help="Max OpenAlex results per gap. Lower = faster + noisier."),
+    relevance_threshold: float = typer.Option(0.55, "--relevance-threshold",
+        help="Drop candidates below this cosine similarity to corpus centroid."),
+    download_dir: Path = typer.Option(None, "--download-dir", "-d"),
+    workers: int = typer.Option(0, "--workers", "-w"),
+    ingest: bool = typer.Option(True, "--ingest/--no-ingest"),
+    dry_run: bool = typer.Option(False, "--dry-run",
+        help="Show the ranked candidate list + exit (no download)."),
+):
+    """Phase 54.6.5 — Auto-expand from this book's open gaps.
+
+    For every open ``BookGap`` of type 'topic' or 'evidence' on the
+    book, run ``db expand-topic`` with the gap's description as the
+    query; merge across gaps (each candidate remembers which gaps it
+    addresses); score the merged list against the corpus centroid;
+    filter, download + ingest.
+
+    Composition of ``book gaps`` + ``db expand-topic`` so you don't
+    have to manually transcribe gap descriptions into search queries.
+
+    Examples:
+
+      sciknow book auto-expand "Global Cooling"
+
+      sciknow book auto-expand "Global Cooling" --relevance-threshold 0.65 --dry-run
+    """
+    from sciknow.cli import preflight
+    preflight()
+    from sciknow.core.expand_ops import find_candidates_for_book_gaps
+    from sciknow.storage.db import get_session
+
+    with get_session() as session:
+        book = _get_book(session, book_title)
+        if not book:
+            console.print(f"[red]Book not found:[/red] {book_title}")
+            raise typer.Exit(1)
+        book_id = book[0]
+
+    console.print(f"\n[bold]Auto-expand for book[/bold] {book_title!r}")
+    console.print("[dim]Querying OpenAlex for each open topic/evidence gap…[/dim]\n")
+    result = find_candidates_for_book_gaps(
+        book_id, per_gap_limit=per_gap_limit, score_relevance=True,
+    )
+    cands = result["candidates"]
+    info = result["info"]
+    console.print(
+        f"Processed {info.get('gaps_processed', 0)} of "
+        f"{info.get('gaps_total', 0)} open gap(s). "
+        f"Raw {info.get('raw', 0)} → merged {info.get('merged', 0)}, "
+        f"dedup'd {info.get('dedup_dropped', 0)}."
+    )
+    if not cands:
+        console.print("[yellow]Nothing to download.[/yellow]")
+        raise typer.Exit(0)
+
+    if relevance_threshold > 0:
+        before = len(cands)
+        cands = [c for c in cands
+                 if (c.get("relevance_score") or 0.0) >= relevance_threshold]
+        console.print(f"Relevance ≥ {relevance_threshold:.2f} kept {len(cands)} / {before}.")
+    if not cands:
+        console.print("[yellow]Nothing above the threshold.[/yellow]")
+        raise typer.Exit(0)
+
+    # Show gap-coverage preview — papers that close multiple gaps are
+    # prioritised in the helper's sort, so the top of the list should
+    # have the most-valuable items.
+    console.print("\n[bold]Top candidates by gap-coverage × relevance:[/bold]")
+    for c in cands[:10]:
+        n_gaps = len(c.get("gap_ids") or [])
+        year_str = f"({c.get('year')})" if c.get("year") else "(n.d.)"
+        score = c.get("relevance_score")
+        sc = f"  s={score:.2f}" if score is not None else ""
+        console.print(
+            f"  [cyan]{n_gaps}g[/cyan] {(c.get('doi') or '?')[:38]:<38} "
+            f"{year_str}{sc} {(c.get('title') or '')[:60]}"
+        )
+
+    # Delegate to the shared download+ingest tail (lives in db.py).
+    from sciknow.cli.db import _expand_common_download_and_ingest
+    _expand_common_download_and_ingest(
+        cands, download_dir=download_dir, workers=workers,
+        ingest=ingest, dry_run=dry_run,
+    )
+
+
 # ── serve (web reader) ─────────────────────────────────────────────────────────
 
 @app.command()

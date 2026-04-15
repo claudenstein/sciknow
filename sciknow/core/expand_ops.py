@@ -409,6 +409,102 @@ def find_topic_candidates(
     }}
 
 
+def find_candidates_for_book_gaps(
+    book_id: str, *, per_gap_limit: int = 100,
+    only_types: tuple[str, ...] = ("topic", "evidence"),
+    score_relevance: bool = True,
+) -> dict[str, Any]:
+    """Phase 54.6.5 — Auto-expand from book gaps.
+
+    For every open ``BookGap`` on the book whose ``gap_type`` is in
+    ``only_types``, use the gap's ``description`` as a topic query,
+    fetch candidates via ``find_topic_candidates``, merge across all
+    gaps (dedup by DOI while remembering which gap(s) each candidate
+    addresses), dedup against the corpus, relevance-score against the
+    corpus centroid, and return a unified candidate list.
+
+    The key UX affordance: each candidate carries a ``gap_ids`` list
+    of the gap UUIDs it was fetched for, so the UI can display
+    "addresses N of your open gaps" and the user can prioritise papers
+    that close multiple gaps at once.
+    """
+    if not book_id:
+        raise ValueError("book_id required")
+
+    with get_session() as session:
+        rows = session.execute(sql_text("""
+            SELECT id::text, gap_type, description
+            FROM book_gaps
+            WHERE book_id = :b AND status = 'open'
+              AND gap_type = ANY(:types)
+              AND description IS NOT NULL AND length(trim(description)) > 5
+            ORDER BY created_at DESC
+        """), {"b": book_id, "types": list(only_types)}).fetchall()
+
+    if not rows:
+        return {"candidates": [], "info": {
+            "gaps_total": 0, "gaps_processed": 0,
+            "message": "no open gaps of the requested type(s)",
+        }}
+
+    # Per-gap fetch. We DON'T score each sub-query against its own gap
+    # (expensive and noisy); we score the merged list once against the
+    # corpus centroid afterwards so the same threshold maps consistently
+    # across all three expand flows.
+    merged: dict[str, dict] = {}
+    per_gap_info: list[dict] = []
+    raw_total = 0
+    for gap_id, gap_type, desc in rows:
+        try:
+            sub = find_topic_candidates(
+                desc, limit=per_gap_limit,
+                relevance_query="",  # pass-through
+                score_relevance=False,  # we re-score merged set below
+            )
+        except Exception as exc:
+            logger.warning("gap topic-search failed (%s): %s", gap_id, exc)
+            continue
+        n_sub = len(sub.get("candidates") or [])
+        raw_total += n_sub
+        per_gap_info.append({
+            "gap_id": gap_id, "gap_type": gap_type,
+            "description": desc[:140], "n_raw": n_sub,
+        })
+        for c in sub.get("candidates") or []:
+            doi = c.get("doi")
+            if not doi:
+                continue
+            if doi in merged:
+                merged[doi]["gap_ids"].append(gap_id)
+            else:
+                mc = dict(c)
+                mc["gap_ids"] = [gap_id]
+                merged[doi] = mc
+
+    raw_list = list(merged.values())
+    cands, dropped, rq_used = _score_and_dedup(
+        raw_list, relevance_query="", score_relevance=score_relevance,
+    )
+    # Secondary sort: more gaps addressed = more valuable.
+    cands.sort(
+        key=lambda c: (
+            len(c.get("gap_ids") or []),
+            c.get("relevance_score") if c.get("relevance_score") is not None else -1.0,
+            c.get("year") or 0,
+        ),
+        reverse=True,
+    )
+    return {"candidates": cands, "info": {
+        "gaps_total": len(rows),
+        "gaps_processed": len(per_gap_info),
+        "per_gap": per_gap_info,
+        "raw": raw_total,
+        "merged": len(raw_list),
+        "dedup_dropped": dropped,
+        "relevance_query_used": rq_used,
+    }}
+
+
 def find_coauthor_candidates(
     *, depth: int = 1, per_author_cap: int = 10, total_limit: int = 500,
     relevance_query: str = "", score_relevance: bool = True,
