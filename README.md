@@ -53,7 +53,8 @@ A local-first scientific knowledge system that ingests papers, builds a compiled
 - **Autowrite** — autonomous convergence loop: generates, scores, verifies, revises until quality target is met
 - **TreeWriter planning** — hierarchical paragraph-level plans before drafting
 - **Web reader** — browser-based authoring with a full-width top bar for app-level navigation (Plan, Settings, Dashboard, Corkboard, History, Snapshot, Export, Ask Corpus, Wiki Query, KG, Browse Papers, Tools, Setup, Projects) separated from the per-chapter writing toolbar (Edit, Autowrite, Write, Review, Revise, Verify, Insert Citations, Scores, Argue, Gaps, Bundles, Read). Live LLM streaming, corkboard view, chapter reader, argument maps, citation popovers, snapshots, version diffs
-- **Knowledge wiki in the browser** — the Wiki modal has four tabs: Query (RAG-streamed answer over compiled pages), Browse (paginated page index with detail view, KaTeX math, backlinks, related pages, per-page inline Ask + personal "My take" notes), **Lint** (broken links, stale pages, orphaned concepts, optional LLM contradiction detection), **Consensus** (strong / moderate / weak / contested claim classification for a topic with supporting vs contradicting papers)
+- **Knowledge wiki in the browser** — the Wiki modal has four tabs: Query (RAG-streamed answer over compiled pages), Browse (paginated page index with detail view, KaTeX math, backlinks, related pages, per-page inline Ask + personal "My take" notes), **Lint** (broken links, stale pages, orphaned concepts, optional LLM contradiction detection, **Extract / Backfill KG** button for wikis compiled before the combined entity+KG extraction step), **Consensus** (strong / moderate / weak / contested claim classification for a topic with supporting vs contradicting papers)
+- **Regenerate chapter outline from the browser** — the Plans modal now has a "📖 Generate outline" button that runs `sciknow book outline` against your paper library, streams the LLM response, parses the proposed chapter list, and adds any new chapters without touching existing drafts
 - **Compute dashboard** — book-level GPU compute ledger: cumulative tokens, wall time, and per-operation breakdown (write/review/revise/argue/gaps/autowrite) across every LLM call
 - **Tools panel** — CLI-parity in the browser: hybrid corpus search, similarity search, multi-paper synthesis, topic-cluster browser, and five corpus-expansion tabs (Enrich / Expand citations / Expand by author / Inbound cites / Topic search / Coauthors) each with the preview-and-select flow. Cleanup-downloads button at the top of the Corpus tab reclaims disk from already-ingested duplicates in one click
 - **Dashboard gap integration** — the Open Gaps panel has a top-level "🔍 Auto-expand from these gaps" button (runs `book auto-expand` and opens the preview modal with all gaps merged), plus a per-gap "Expand" button that prefills the Topic-search subtab with that specific gap's description
@@ -144,6 +145,8 @@ See [`docs/PROJECTS.md`](docs/PROJECTS.md) for the full design.
 | **Reclaim disk** from already-ingested downloads | `sciknow db cleanup-downloads` |
 | **See papers stuck without a legal OA PDF** | `sciknow db pending list` |
 | **Retry pending downloads** (new OA links may have appeared) | `sciknow db pending retry` |
+| **Backfill the KG** (empty or stale `knowledge_graph`) | `sciknow wiki extract-kg` |
+| **Draft a chapter outline** from the LLM | `sciknow book outline "Title"` (also available from the Plans modal) |
 
 ---
 

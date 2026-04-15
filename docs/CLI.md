@@ -232,44 +232,35 @@ sciknow catalog raptor stats              # show node counts per RAPTOR level
 
 ## `sciknow wiki`
 
-Karpathy-style compiled knowledge wiki. Instead of RAG on raw chunks every time, the wiki pre-synthesizes papers into interconnected pages that grow incrementally.
+The wiki is the "compiled knowledge layer" — per-paper summary pages, shared
+concept pages, and synthesis pages built by LLM over the ingested corpus.
 
 ```bash
-# Build wiki (only new papers by default — safe to re-run anytime)
-# Shows live progress: bar + tok/s + ETA + running totals
-# Per paper: 1 LLM call for summary + 1 structured output call for entities+KG
-# Uses LLM_FAST_MODEL by default (wiki is exploration, not final writing)
-# Override with --model if needed. Book writing always uses the main model.
-sciknow wiki compile                    # only papers without wiki pages yet
-sciknow wiki compile --doc-id abc123    # compile one paper
-sciknow wiki compile --rebuild          # recompile everything from scratch
+sciknow wiki compile                 # build pages for every complete paper
+sciknow wiki compile --rebuild       # force re-compile (destructive)
+sciknow wiki compile --doc-id abc123 # compile one paper
 
-# Query the compiled wiki (not raw chunks)
-sciknow wiki query "what is total solar irradiance?"
-sciknow wiki query "how do cosmic rays affect cloud formation?"
+# Backfill the knowledge_graph table for papers that have a wiki page but
+# no extracted triples — typically needed only if your wiki was built on
+# a pre-Phase-54.6.8 version that didn't run the combined entity+KG step.
+# Exposed in the web reader as "Extract / Backfill KG" inside the Wiki
+# modal's Lint tab.
+sciknow wiki extract-kg              # backfill all orphan papers
+sciknow wiki extract-kg --doc-id 3f2a  # test on one paper first
+sciknow wiki extract-kg --force      # re-extract every paper (even those with triples)
 
-# Generate a synthesis overview page
-sciknow wiki synthesize "solar forcing and climate"
-
-# Browse wiki pages
-sciknow wiki list                       # all pages
-sciknow wiki list --type concept        # only concept pages
-sciknow wiki show total-solar-irradiance
-
-# Health checks
-sciknow wiki lint                       # structural: broken links, orphans, stale
-sciknow wiki lint --deep                # + LLM contradiction detection
-
-# Knowledge graph — explore entity-relationship triples
-sciknow wiki graph "solar forcing"              # direct connections
-sciknow wiki graph "total solar irradiance" --depth 2   # 2-hop traversal
-
-# Consensus mapping — agreement/disagreement across corpus
-sciknow wiki consensus "solar forcing and climate"
-sciknow wiki consensus "cosmic ray cloud nucleation"
+sciknow wiki list                    # paginated page list
+sciknow wiki show <slug>             # render one page
+sciknow wiki query "..."             # LLM RAG over the wiki
+sciknow wiki lint                    # structural health check
+sciknow wiki lint --deep             # + LLM contradiction detection
+sciknow wiki consensus "topic"       # map strong / moderate / weak / contested claims
+sciknow wiki graph <entity>          # dump KG triples for a concept
+sciknow wiki graph <entity> --depth 2   # 2-hop traversal
+sciknow wiki synthesize <slug>       # LLM re-synthesis pass for one page
 ```
 
-Wiki pages are stored as human-readable markdown in `data/wiki/` (git-friendly), indexed in PostgreSQL, and embedded in Qdrant for search. When new papers are ingested, relevant concept pages are automatically updated.
+Wiki pages are stored as human-readable markdown in `data/wiki/` (git-friendly), indexed in PostgreSQL, and embedded in Qdrant for search. When new papers are ingested, relevant concept pages are automatically updated. Per paper: 1 LLM call for the summary + 1 structured-output call for entities+KG.
 
 ---
 

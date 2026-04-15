@@ -794,6 +794,115 @@ async def api_book_plan_generate(model: str = Form(None)):
     return JSONResponse({"job_id": job_id})
 
 
+@app.post("/api/book/outline/generate")
+async def api_book_outline_generate(model: str = Form(None)):
+    """Phase 54.6.8 — generate + save chapter outline for the active book.
+
+    Mirrors ``sciknow book outline``: prompts the LLM with the book title
+    + paper corpus, parses the JSON chapters list, inserts any chapter
+    whose number isn't already in ``book_chapters``. Streams tokens so
+    the user sees progress; existing chapters are preserved (the flow
+    is additive, never destructive).
+    """
+    job_id, queue = _create_job("book_outline_generate")
+    loop = asyncio.get_event_loop()
+
+    def gen():
+        import json as _json
+        from sciknow.rag import prompts as rag_prompts
+        from sciknow.rag.llm import stream as llm_stream
+        from sciknow.core.project_type import get_project_type
+
+        with get_session() as session:
+            book = session.execute(text("""
+                SELECT id::text, title, description, project_type
+                FROM books WHERE id::text = :bid
+            """), {"bid": _book_id}).fetchone()
+            if not book:
+                yield {"type": "error", "message": "Book not found."}
+                return
+            # Flat project types have a fixed one-chapter shape. Refuse
+            # to generate an outline for them — mirrors the CLI.
+            pt = get_project_type(book[3] if len(book) > 3 else None)
+            if pt.is_flat:
+                yield {"type": "error", "message":
+                       f"Project type {pt.slug!r} is flat — no outline to generate."}
+                return
+            papers = session.execute(text("""
+                SELECT pm.title, pm.year FROM paper_metadata pm
+                JOIN documents d ON d.id = pm.document_id
+                WHERE d.ingestion_status = 'complete' AND pm.title IS NOT NULL
+                ORDER BY pm.year DESC NULLS LAST LIMIT 200
+            """)).fetchall()
+
+        paper_list = [{"title": r[0], "year": r[1]} for r in papers if r[0]]
+        yield {"type": "progress", "stage": "generating",
+               "detail": f"Drafting outline from {len(paper_list)} papers…"}
+
+        sys_p, usr_p = rag_prompts.outline(book_title=book[1], papers=paper_list)
+        tokens: list[str] = []
+        for tok in llm_stream(sys_p, usr_p, model=model or None):
+            tokens.append(tok)
+            yield {"type": "token", "text": tok}
+
+        raw = "".join(tokens).strip()
+        # Same JSON-fence strip as the CLI.
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        try:
+            data = _json.loads(raw, strict=False)
+            chapters = data.get("chapters", [])
+        except Exception as exc:
+            yield {"type": "error",
+                   "message": f"LLM returned invalid JSON: {exc}"}
+            return
+
+        if not chapters:
+            yield {"type": "error",
+                   "message": "No chapters in LLM response."}
+            return
+
+        # Additive insert — skip numbers that already exist so the
+        # user can re-run without destroying manual edits.
+        inserted = 0
+        skipped = 0
+        with get_session() as session:
+            for ch in chapters:
+                num = ch.get("number")
+                if not isinstance(num, int):
+                    continue
+                existing = session.execute(text("""
+                    SELECT id FROM book_chapters
+                    WHERE book_id::text = :bid AND number = :num
+                """), {"bid": _book_id, "num": num}).fetchone()
+                if existing:
+                    skipped += 1
+                    continue
+                sections_json = _json.dumps(ch.get("sections", []) or [])
+                session.execute(text("""
+                    INSERT INTO book_chapters
+                        (book_id, number, title, description, topic_query, sections)
+                    VALUES (CAST(:bid AS uuid), :num, :title,
+                            :desc, :tq, CAST(:secs AS jsonb))
+                """), {
+                    "bid": _book_id, "num": num,
+                    "title": ch.get("title") or f"Chapter {num}",
+                    "desc": ch.get("description"),
+                    "tq": ch.get("topic_query"),
+                    "secs": sections_json,
+                })
+                inserted += 1
+            session.commit()
+
+        yield {"type": "completed", "n_chapters": len(chapters),
+               "n_inserted": inserted, "n_skipped": skipped}
+
+    threading.Thread(
+        target=_run_generator_in_thread, args=(job_id, gen, loop), daemon=True
+    ).start()
+    return JSONResponse({"job_id": job_id})
+
+
 @app.get("/api/section/{draft_id}")
 async def api_section(draft_id: str):
     """Return section data as JSON for SPA navigation."""
@@ -3107,6 +3216,22 @@ async def api_wiki_query(question: str = Form(...), model: str = Form(None)):
     threading.Thread(
         target=_run_generator_in_thread, args=(job_id, gen, loop), daemon=True
     ).start()
+    return JSONResponse({"job_id": job_id})
+
+
+@app.post("/api/wiki/extract-kg")
+async def api_wiki_extract_kg(force: bool = Form(False)):
+    """Phase 54.6.8 — backfill knowledge_graph triples for already-
+    compiled wiki pages. Spawns ``sciknow wiki extract-kg`` as a
+    subprocess so the stdout streams as SSE. Safe to invoke from the
+    Wiki Lint tab while other jobs run.
+    """
+    job_id, _queue = _create_job("wiki_extract_kg")
+    loop = asyncio.get_event_loop()
+    argv = ["wiki", "extract-kg"]
+    if force:
+        argv.append("--force")
+    _spawn_cli_streaming(job_id, argv, loop)
     return JSONResponse({"job_id": job_id})
 
 
@@ -7213,6 +7338,29 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div id="wiki-lint-status" style="margin-top:8px;font-size:12px;color:var(--fg-muted);"></div>
         <div id="wiki-lint-summary" style="margin-top:8px;"></div>
         <div id="wiki-lint-issues" style="margin-top:10px;max-height:400px;overflow:auto;"></div>
+        <!-- Phase 54.6.8 — KG backfill utility. If the Knowledge Graph
+             modal is empty for your corpus, this is the fix: older wiki
+             compiles didn't run the combined entity+KG extraction, so
+             paper pages can exist with zero triples. This walks those
+             orphans and runs ONLY the extraction step (no re-summarize). -->
+        <div style="margin-top:20px;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-alt,#f8f8f8);">
+          <div style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;">
+            <strong>Backfill KG triples.</strong> Papers with a wiki page but no
+            <code>knowledge_graph</code> rows — usually the result of an older
+            <code>wiki compile</code> that predates the combined entity+KG
+            extraction step. Runs one LLM call per orphan paper (no
+            re-summarizing). Mirrors <code>sciknow wiki extract-kg</code>.
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+              <input type="checkbox" id="wiki-extractkg-force"> force re-extract every paper
+            </label>
+            <button class="btn-primary" id="wiki-extractkg-run"
+                    onclick="doWikiExtractKg()">Extract / Backfill KG</button>
+          </div>
+          <div id="wiki-extractkg-status" style="margin-top:8px;font-size:12px;color:var(--fg-muted);"></div>
+          <pre id="wiki-extractkg-log" style="display:none;margin-top:6px;max-height:280px;overflow:auto;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:8px;font-size:11px;font-family:ui-monospace,monospace;white-space:pre-wrap;"></pre>
+        </div>
       </div>
       <!-- Phase 54.6.2 — Consensus tab: surfaces `sciknow wiki consensus` in the GUI. -->
       <div class="tab-pane" id="wiki-consensus-pane" style="display:none;">
@@ -7474,6 +7622,10 @@ body.task-bar-open {{ padding-top: 40px; }}
     </div>
     <div class="modal-footer">
       <button class="btn-secondary" onclick="closeModal('plan-modal')">Close</button>
+      <button class="btn-secondary" onclick="regenerateOutline()" id="plan-outline-btn"
+              title="Ask the LLM to propose a full chapter structure from your paper corpus. Adds new chapters without touching existing ones. Mirrors `sciknow book outline`.">
+        &#128214; Generate outline
+      </button>
       <button class="btn-secondary" onclick="regeneratePlan()" id="plan-regen-btn">&#9889; Regenerate with LLM</button>
       <button class="btn-primary" onclick="savePlan()">Save</button>
     </div>
@@ -13074,6 +13226,58 @@ async function stopWikiLint() {{
   }}
 }}
 
+// Phase 54.6.8 — Wiki KG backfill from the Lint tab.
+async function doWikiExtractKg() {{
+  const force = document.getElementById('wiki-extractkg-force').checked;
+  const runBtn = document.getElementById('wiki-extractkg-run');
+  const status = document.getElementById('wiki-extractkg-status');
+  const logEl = document.getElementById('wiki-extractkg-log');
+  runBtn.disabled = true;
+  status.textContent = 'Starting KG extraction…';
+  logEl.style.display = 'block';
+  logEl.textContent = '';
+  const fd = new FormData();
+  fd.append('force', force);
+  let res;
+  try {{
+    res = await fetch('/api/wiki/extract-kg', {{method: 'POST', body: fd}});
+  }} catch (exc) {{
+    status.textContent = 'Request failed: ' + exc.message;
+    runBtn.disabled = false;
+    return;
+  }}
+  if (!res.ok) {{
+    status.textContent = 'Start failed: HTTP ' + res.status;
+    runBtn.disabled = false;
+    return;
+  }}
+  const data = await res.json();
+  const source = new EventSource('/api/stream/' + data.job_id);
+  source.onmessage = function(e) {{
+    let evt;
+    try {{ evt = JSON.parse(e.data); }} catch (_) {{ return; }}
+    if (evt.type === 'log') {{
+      logEl.textContent += evt.text + '\\n';
+      logEl.scrollTop = logEl.scrollHeight;
+    }} else if (evt.type === 'progress') {{
+      if (evt.detail && evt.detail.startsWith('$ ')) {{
+        logEl.textContent += evt.detail + '\\n';
+      }}
+    }} else if (evt.type === 'completed') {{
+      source.close();
+      status.innerHTML = '<span style="color:var(--success);">&#10003; Done — open the Knowledge Graph modal to browse triples.</span>';
+      runBtn.disabled = false;
+    }} else if (evt.type === 'error') {{
+      source.close();
+      status.textContent = 'Error: ' + (evt.message || 'see log');
+      runBtn.disabled = false;
+    }} else if (evt.type === 'done') {{
+      source.close();
+      runBtn.disabled = false;
+    }}
+  }};
+}}
+
 let _wikiConsensusJob = null;
 let _wikiConsensusSource = null;
 
@@ -15913,6 +16117,71 @@ async function regeneratePlan() {{
     }} else if (evt.type === 'done') {{
       stats.done('done');
       source.close(); currentEventSource = null; currentJobId = null;
+    }}
+  }};
+}}
+
+// Phase 54.6.8 — Regenerate the book's chapter outline. Streams LLM
+// tokens into a read-only buffer on the plan-status line; on completion,
+// refreshes the sidebar so any newly-inserted chapters appear without
+// a full page reload. Does NOT touch existing chapters (additive).
+async function regenerateOutline() {{
+  const status = document.getElementById('plan-status');
+  if (!confirm(
+    'Generate a chapter outline from your corpus?\\n\\n'
+    + 'The LLM reads your paper library and proposes chapter titles + '
+    + 'descriptions + section slugs. ADDS new chapters only — your '
+    + 'existing chapters and drafts are untouched. Run again to get a '
+    + 'fresh suggestion if the first pass isn\\'t great.\\n\\n'
+    + 'Mirrors `sciknow book outline`.'
+  )) return;
+  const btn = document.getElementById('plan-outline-btn');
+  btn.disabled = true;
+  status.textContent = 'Starting outline generation…';
+  const fd = new FormData();
+  let res;
+  try {{
+    res = await fetch('/api/book/outline/generate', {{method: 'POST', body: fd}});
+  }} catch (exc) {{
+    status.textContent = 'Request failed: ' + exc.message;
+    btn.disabled = false;
+    return;
+  }}
+  const data = await res.json();
+  if (currentEventSource) currentEventSource.close();
+  const source = new EventSource('/api/stream/' + data.job_id);
+  currentEventSource = source;
+  let tokBuf = '';
+  source.onmessage = async function(e) {{
+    let evt;
+    try {{ evt = JSON.parse(e.data); }} catch (_) {{ return; }}
+    if (evt.type === 'token') {{
+      tokBuf += evt.text;
+      // Show just the tail so the user knows something's happening
+      // without flooding the status line. The full JSON is parsed
+      // server-side — no need to render it in the client.
+      status.textContent = 'Drafting… ' + String(tokBuf.length) + ' chars so far';
+    }} else if (evt.type === 'progress') {{
+      status.textContent = evt.detail || evt.stage;
+    }} else if (evt.type === 'completed') {{
+      source.close(); currentEventSource = null;
+      status.innerHTML = `<span style="color:var(--success);">&#10003; Outline generated — `
+        + `<strong>${{evt.n_inserted}}</strong> new chapter(s), `
+        + `<strong>${{evt.n_skipped}}</strong> skipped (already existed).</span>`;
+      btn.disabled = false;
+      // Refresh sidebar so new chapters appear.
+      try {{
+        const sidebarRes = await fetch('/api/chapters');
+        const sd = await sidebarRes.json();
+        rebuildSidebar(sd.chapters || sd, currentDraftId);
+      }} catch (_) {{}}
+    }} else if (evt.type === 'error') {{
+      source.close(); currentEventSource = null;
+      status.textContent = 'Error: ' + evt.message;
+      btn.disabled = false;
+    }} else if (evt.type === 'done') {{
+      source.close(); currentEventSource = null;
+      btn.disabled = false;
     }}
   }};
 }}

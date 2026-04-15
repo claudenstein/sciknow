@@ -245,6 +245,154 @@ def compile(
             )
 
 
+@app.command(name="extract-kg")
+def extract_kg(
+    force: bool = typer.Option(False, "--force",
+        help="Re-extract even for papers that already have triples. "
+             "Default only backfills papers with 0 triples in knowledge_graph."),
+    doc_id: str | None = typer.Option(None, "--doc-id", "-d",
+        help="Extract for just one paper (matches on document id prefix). "
+             "Useful for smoke-testing before firing at the whole corpus."),
+    model: str | None = typer.Option(None, "--model"),
+):
+    """Backfill knowledge_graph triples for already-compiled wiki pages.
+
+    Context: prior versions of ``wiki compile`` didn't run entity + KG
+    extraction as part of the paper-summary pipeline. Users who built
+    their wiki under those earlier versions end up with paper_summary
+    pages but an empty knowledge_graph table — the KG modal shows
+    "no triples match your filter" even for basic queries. This
+    command walks papers that have a wiki page but zero triples and
+    runs the current extraction step on them, without re-doing the
+    (expensive) summary LLM call.
+
+    Typical invocation:
+
+      sciknow wiki extract-kg                      # backfill all orphans
+      sciknow wiki extract-kg --doc-id 3f2a         # test on one paper first
+      sciknow wiki extract-kg --force               # re-extract everything
+    """
+    from sciknow.cli import preflight
+    preflight()
+    _check_wiki_table()
+
+    from sqlalchemy import text as sql_text
+    from sciknow.core.wiki_ops import (
+        _extract_entities_and_kg, _load_existing_slugs, _slugify,
+    )
+    from sciknow.storage.db import get_session
+
+    with get_session() as session:
+        if doc_id:
+            rows = session.execute(sql_text("""
+                SELECT d.id::text, pm.title, pm.abstract, pm.year,
+                       pm.authors, pm.keywords, pm.domains
+                FROM documents d
+                JOIN paper_metadata pm ON pm.document_id = d.id
+                WHERE d.ingestion_status = 'complete'
+                  AND d.id::text LIKE :q
+                LIMIT 1
+            """), {"q": f"{doc_id}%"}).fetchall()
+        elif force:
+            rows = session.execute(sql_text("""
+                SELECT d.id::text, pm.title, pm.abstract, pm.year,
+                       pm.authors, pm.keywords, pm.domains
+                FROM documents d
+                JOIN paper_metadata pm ON pm.document_id = d.id
+                WHERE d.ingestion_status = 'complete' AND pm.title IS NOT NULL
+                ORDER BY pm.year DESC NULLS LAST
+            """)).fetchall()
+        else:
+            # Find papers that have a wiki page but no triples in
+            # knowledge_graph. Left-anti-join is simple + fast even
+            # at 10k+ documents.
+            rows = session.execute(sql_text("""
+                SELECT d.id::text, pm.title, pm.abstract, pm.year,
+                       pm.authors, pm.keywords, pm.domains
+                FROM documents d
+                JOIN paper_metadata pm ON pm.document_id = d.id
+                WHERE d.ingestion_status = 'complete' AND pm.title IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1 FROM wiki_pages wp
+                      WHERE wp.source_doc_ids @> jsonb_build_array(d.id::text)
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM knowledge_graph kg
+                      WHERE kg.source_doc_id = d.id
+                  )
+                ORDER BY pm.year DESC NULLS LAST
+            """)).fetchall()
+        existing_slugs = _load_existing_slugs(session)
+
+    if not rows:
+        console.print(
+            "[green]Nothing to backfill.[/green] "
+            "Every wiki paper already has KG triples (or no wiki pages exist)."
+        )
+        return
+
+    console.print(
+        f"\nExtracting KG triples for [bold]{len(rows)}[/bold] paper(s)…\n"
+    )
+    from rich.progress import (
+        Progress as _Progress, SpinnerColumn as _SpC,
+        BarColumn as _BC, MofNCompleteColumn as _MC,
+        TextColumn as _TC, TimeElapsedColumn as _TEC,
+    )
+
+    total_triples = 0
+    total_entities = 0
+    failed = 0
+    with _Progress(
+        _SpC(), _TC("[progress.description]{task.description}"),
+        _BC(), _MC(), _TEC(), console=console,
+    ) as progress:
+        task = progress.add_task("Extracting", total=len(rows))
+        for did, title, abstract, year, authors, keywords, domains in rows:
+            short_title = (title or did[:8])[:60]
+            progress.update(task, description=f"[dim]{short_title}[/dim]")
+            try:
+                # Mirror `compile_paper_summary`'s extraction-call args.
+                author_str = ", ".join(
+                    a.get("name", "") if isinstance(a, dict) else str(a)
+                    for a in (authors or [])[:5]
+                )
+                kw_str = ", ".join(keywords or [])
+                dom_str = ", ".join(domains or [])
+                # Load sections for the extraction context — these
+                # yielded better triples in the original pipeline.
+                from sciknow.storage.db import get_session as _gs
+                with _gs() as session:
+                    secs = session.execute(sql_text("""
+                        SELECT section_type, content FROM paper_sections
+                        WHERE document_id::text = :did
+                        ORDER BY section_index
+                    """), {"did": did}).fetchall()
+                section_text = "\n\n".join(
+                    f"[{s[0]}]\n{s[1][:3000]}" for s in secs
+                )[:12000]
+                slug = _slugify(f"{did[:8]}-{title or 'untitled'}")
+                entities, kg = _extract_entities_and_kg(
+                    did, slug, title, author_str, str(year or "n.d."),
+                    kw_str, dom_str, abstract or "", section_text,
+                    existing_slugs, model=model,
+                )
+                total_entities += len(entities or [])
+                total_triples += kg
+            except Exception as exc:
+                failed += 1
+                console.print(f"  [red]fail {did[:8]}:[/red] {exc}")
+            progress.advance(task)
+
+    console.print(
+        f"\n[bold]Summary:[/bold] "
+        f"[green]{total_triples} triple(s)[/green] + "
+        f"[green]{total_entities} entity mention(s)[/green] "
+        f"across {len(rows) - failed}/{len(rows)} papers."
+        + (f"  [red]{failed} failed[/red]" if failed else "")
+    )
+
+
 @app.command()
 def query(
     question: Annotated[str, typer.Argument(help="Question to answer from the wiki.")],
