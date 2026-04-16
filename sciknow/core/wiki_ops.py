@@ -1226,33 +1226,57 @@ def list_pages(*, page_type: str | None = None) -> list[dict]:
     where = "WHERE wp.page_type = :ptype" if page_type else ""
     params = {"ptype": page_type} if page_type else {}
 
+    # Phase 54.6.22 — replaced LEFT JOIN LATERAL with a single bulk
+    # SELECT into a dict, then merge in Python. The LATERAL pattern
+    # forced PostgreSQL to re-execute the paper_metadata subquery once
+    # per wiki_pages row (~961 times on a real wiki). For single-source
+    # pages we only need year + authors; the new shape does one scan of
+    # paper_metadata filtered to the source_doc_ids set we actually need.
     with get_session() as session:
         rows = session.execute(text(f"""
             SELECT wp.slug, wp.title, wp.page_type, wp.word_count,
                    array_length(wp.source_doc_ids, 1) AS n_sources,
                    wp.created_at, wp.updated_at,
-                   -- Join paper_metadata only for single-source pages
-                   -- (paper_summary). LEFT JOIN + aggregation picks the
-                   -- first (and only) linked paper when present.
-                   pm.year, pm.authors
+                   wp.source_doc_ids
             FROM wiki_pages wp
-            LEFT JOIN LATERAL (
-                SELECT year, authors FROM paper_metadata
-                WHERE array_length(wp.source_doc_ids, 1) = 1
-                  AND document_id = wp.source_doc_ids[1]
-                LIMIT 1
-            ) pm ON TRUE
             {where}
             ORDER BY wp.page_type, wp.title
         """), params).fetchall()
 
+        # Collect the single-source doc_ids that we actually need
+        # paper_metadata for (paper_summary pages typically).
+        single_source_doc_ids: set = set()
+        for r in rows:
+            src = r[7]
+            if src and len(src) == 1:
+                single_source_doc_ids.add(src[0])
+
+        meta_by_doc: dict = {}
+        if single_source_doc_ids:
+            placeholders = ", ".join(
+                f":d{i}" for i, _ in enumerate(single_source_doc_ids)
+            )
+            mparams = {
+                f"d{i}": str(d) for i, d in enumerate(single_source_doc_ids)
+            }
+            mrows = session.execute(text(f"""
+                SELECT document_id::text, year, authors
+                FROM paper_metadata
+                WHERE document_id::text IN ({placeholders})
+            """), mparams).fetchall()
+            meta_by_doc = {m[0]: (m[1], m[2]) for m in mrows}
+
     out: list[dict] = []
     for r in rows:
+        src = r[7]
+        year, raw_authors = (None, [])
+        if src and len(src) == 1:
+            year, raw_authors = meta_by_doc.get(str(src[0]), (None, []))
         # `authors` in paper_metadata is a JSONB array of dicts /
         # strings; normalize to a comma-separated display string for
         # the list view, keeping the raw list in `authors_raw` for
         # callers that want to format themselves.
-        raw_authors = r[8] or []
+        raw_authors = raw_authors or []
         names: list[str] = []
         for a in raw_authors[:6]:
             if isinstance(a, dict):
@@ -1266,7 +1290,7 @@ def list_pages(*, page_type: str | None = None) -> list[dict]:
             "word_count": r[3] or 0,
             "n_sources": r[4] or 0,
             "created_at": str(r[5]), "updated_at": str(r[6]),
-            "year": r[7],
+            "year": year,
             "authors": names,
             "authors_display": ", ".join(names)
                 + (f" +{len(raw_authors) - 6}" if len(raw_authors) > 6 else ""),

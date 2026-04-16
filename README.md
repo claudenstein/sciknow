@@ -173,6 +173,8 @@ See [`docs/PROJECTS.md`](docs/PROJECTS.md) for the full design.
 
 > **Phase 54.6.21:** the per-project `.env.overlay` file (created by `project init`, surfaced in the GUI/CLI) is now actually loaded into Settings. Pre-fix, per-project `LLM_MODEL` overrides etc. were silently no-ops. Plus a batch of audit-driven fixes: Qdrant collection-init fails fast on `EMBEDDING_DIM` mismatch instead of silently corrupting vectors; `_jobs` dict accesses in the SSE thread runners are now lock-protected; `_spawn_cli_streaming` reaps the subprocess in `finally` (no zombies on mid-stream exception); `cleanup-downloads --clean-failed` also nukes orphan paper_summary wiki pages whose source documents were just deleted; `write_active_slug` is atomic; the chunker emits a warning when it produces 0 sections (instead of silently storing a complete-but-empty doc); `consensus_map` logs KG query failures instead of swallowing them.
 
+> **Phase 54.6.22:** `sciknow wiki repair` recovers `wiki_pages` rows whose disk file is missing (common after `project init --from-existing` runs AFTER a `db reset` has wiped the legacy `data/wiki/`). Concept stubs are regenerated cheaply (no LLM); paper_summary + synthesis rows can be `--prune`'d so the next `wiki compile` recreates them from scratch. Also: hybrid-search Qdrant fetches now use a payload include-list (skip 4-5 unused fields × 50 candidates per query) and `wiki list_pages` replaced its per-row LATERAL paper_metadata join with a single bulk SELECT + dict merge.
+
 ### When to use what
 
 | I want to... | Use this |

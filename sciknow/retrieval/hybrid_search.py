@@ -292,11 +292,25 @@ def _hydrate(
     ids = [r[0] for r in ranked]
     score_map = {r[0]: r[1] for r in ranked}
 
-    # Qdrant payload for content_preview, section info
+    # Phase 54.6.22 — fetch ONLY the payload fields we actually consume
+    # in the loop below. The papers collection's payload also carries
+    # domains / authors_short / journal / year etc. that are either
+    # populated from PG via meta_rows (leaf path) or overridden by
+    # year_max/year_min (RAPTOR path), so pulling them on every search
+    # is wasted bytes and JSON parse work — typically 50-100 chunks
+    # per query, multiplied across every search. Qdrant's REST API
+    # honours the include-list and skips serialising the rest.
+    _PAYLOAD_FIELDS = [
+        "node_level", "document_id", "section_type", "section_title",
+        "content_preview",
+        # RAPTOR-only:
+        "summary_text", "n_documents", "document_ids",
+        "year_max", "year_min", "title",
+    ]
     points = client.retrieve(
         collection_name=PAPERS_COLLECTION,
         ids=ids,
-        with_payload=True,
+        with_payload=_PAYLOAD_FIELDS,
         with_vectors=False,
     )
     payload_map = {str(p.id): p.payload for p in points}
