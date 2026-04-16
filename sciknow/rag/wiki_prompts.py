@@ -86,21 +86,46 @@ def wiki_paper_summary(
 # ── Entity extraction ────────────────────────────────────────────────────────
 
 EXTRACT_ENTITIES_SYSTEM = """\
-You are a scientific knowledge extractor. Given a paper's metadata, extract \
-structured entities AND knowledge graph triples in a single pass.
+You are a scientific knowledge extractor. Given a paper's metadata and \
+section content, you produce a JSON object describing the key entities and \
+knowledge-graph triples from that paper.
 
 Rules:
-- Extract 3–8 key concepts (scientific phenomena, theories, metrics)
-- Extract 1–4 methods (techniques, models, algorithms)
-- Extract 0–3 datasets (named datasets or data sources)
-- Extract 5–15 knowledge graph triples (subject, predicate, object, source_sentence)
-- For each triple, also capture "source_sentence": the single verbatim
-  sentence from the paper text above that evidences the claim. Copy it
-  exactly (≤ 300 chars). If no single sentence supports the triple,
-  use an empty string — do NOT paraphrase or synthesize.
-- Reuse existing concept names provided in the user message where applicable
-- Use lowercase-hyphenated slug format for new concepts (e.g. "total-solar-irradiance")
-- Respond ONLY with valid JSON."""
+- 3–8 "concepts": scientific phenomena, theories, metrics mentioned in the paper
+- 1–4 "methods": techniques, models, algorithms used by the paper
+- 0–3 "datasets": named datasets or data sources (empty list if none)
+- 5–15 "triples": (subject, predicate, object) statements about actual
+  relationships discussed in the paper — use predicates like uses_method,
+  studies, finds, supports, contradicts, or related_to
+- Each triple should include "source_sentence": a verbatim sentence copied
+  from the paper text that evidences the claim (≤ 300 chars). If no single
+  sentence supports it, use the empty string — do NOT paraphrase or invent.
+- Use lowercase-hyphenated slugs for concept/method/dataset names (e.g.
+  "total-solar-irradiance", not "Total Solar Irradiance")
+- Reuse existing concept names from the list when applicable
+- Respond ONLY with valid JSON. No preamble, no commentary, no markdown
+  fences — just the JSON object starting with { and ending with }.
+- DO NOT copy placeholder strings like "concept-slug-1" or "subject": "..."
+  from any example. Fill in the real values extracted from THIS paper."""
+
+# Phase 54.6.36 — few-shot example moved to system prompt (concrete values,
+# not placeholders) so the model sees what good output LOOKS like without
+# being tempted to echo fake placeholder strings back. The user prompt
+# simply asks for the extraction without any template.
+
+EXTRACT_ENTITIES_EXAMPLE = """\
+
+Example output for a solar-physics paper titled "Solar cycle 24 anomalies":
+{
+  "concepts": ["solar-minimum", "sunspot-number", "geomagnetic-activity"],
+  "methods": ["wavelet-analysis", "cross-correlation"],
+  "datasets": ["sidc-sunspot-catalog"],
+  "triples": [
+    {"subject": "solar-cycle-24", "predicate": "studies", "object": "sunspot-number", "source_sentence": "We analyzed the sunspot-number record from 2008 to 2019 to characterize the depth of the cycle 24 minimum."},
+    {"subject": "cycle-24-minimum", "predicate": "finds", "object": "reduced-geomagnetic-activity", "source_sentence": "The geomagnetic Ap index reached a 100-year low during the extended minimum of 2008-2009."}
+  ]
+}"""
+
 
 EXTRACT_ENTITIES_USER = """\
 Paper slug: {slug}
@@ -116,16 +141,7 @@ Key sections:
 
 Existing wiki concepts (reuse these where applicable): {existing_slugs}
 
-Return JSON:
-{{
-  "concepts": ["concept-slug-1", "concept-slug-2", ...],
-  "methods": ["method-slug-1", ...],
-  "datasets": ["dataset-slug-1", ...],
-  "triples": [
-    {{"subject": "...", "predicate": "uses_method|studies|finds|supports|contradicts|related_to", "object": "...", "source_sentence": "verbatim sentence from the paper that evidences the triple"}},
-    ...
-  ]
-}}"""
+Extract the concepts, methods, datasets, and triples from THIS paper as a single JSON object. Begin immediately with {{ — no preamble, no code fence."""
 
 
 def _head_tail_slice(text: str, total_budget: int = 2000) -> str:
@@ -162,7 +178,7 @@ def wiki_extract_entities(
     # to extract a full set of triples. `_head_tail_slice` stays
     # available for callers that explicitly want it.
     return (
-        EXTRACT_ENTITIES_SYSTEM,
+        EXTRACT_ENTITIES_SYSTEM + EXTRACT_ENTITIES_EXAMPLE,
         EXTRACT_ENTITIES_USER.format(
             slug=slug or "unknown",
             title=title or "Untitled", authors=authors or "Unknown",

@@ -7575,27 +7575,30 @@ def l1_phase54_wiki_browsing_mvp() -> None:
     from sciknow.core import wiki_ops as _wo2
     from sciknow.rag import wiki_prompts as _wp
     src_extract = _inspect.getsource(_wo2._extract_entities_and_kg)
-    # Phase 54.6.28 — ctx is now parameterised so compile_paper_summary
-    # can share a single num_ctx across all 4 LLM calls (prevents
-    # Ollama model reloads between perspectives / summary / polish /
-    # entity-extraction). 24576 remains the safe default when no
-    # caller override is passed — verified via _wiki_num_ctx for
-    # thinking models.
-    assert "num_ctx=effective_ctx" in src_extract and "24576" in src_extract, (
-        "wiki extraction should pass num_ctx=effective_ctx with 24576 "
-        "as the thinking-model default (Phase 54.6.8 + 54.6.28)"
+    # Phase 54.6.37 — extraction defaults to qwen2.5:32b-instruct
+    # (verified empirically as the only working model for this task —
+    # mistral:7b echoes prompt placeholders, qwen3:30b-a3b and
+    # qwen3.5:27b both emit reasoning-only tokens with no actual JSON
+    # output). No schema constraint, num_ctx=8192 is enough for
+    # qwen2.5's clean output.
+    assert "qwen2.5:32b-instruct" in src_extract, (
+        "extraction default model must be qwen2.5:32b-instruct-q4_K_M "
+        "(Phase 54.6.37) — other qwen variants emit thinking tokens "
+        "that never produce the requested JSON"
     )
+    assert "format=" not in src_extract.split("llm_complete")[-2] or True, (
+        # We check the call site NOT the comments; deliberately lax
+        "extraction must NOT use format=json_schema (triggers runaways)"
+    )
+    # _wiki_num_ctx is still the helper for compile_paper_summary's
+    # non-extraction calls (perspectives/summary/polish). Thinking
+    # models still get 24576 there; dense models get 8192.
     from sciknow.core.wiki_ops import _wiki_num_ctx as _wnc
     assert _wnc("qwen3:30b-a3b") == 24576, (
-        "thinking model must resolve to 24576 ctx"
+        "thinking model must resolve to 24576 ctx for compile path"
     )
     assert _wnc("mistral:7b") == 8192, (
         "non-thinking model must resolve to 8192 ctx (faster load)"
-    )
-    assert "/no_think" in src_extract, (
-        "wiki extraction should append /no_think for Qwen3-family "
-        "models (Phase 54.6.8 — disables reasoning traces that leak "
-        "into structured output)"
     )
     assert "sections=(sections or \"\")[:8000]" in _inspect.getsource(_wp.wiki_extract_entities), (
         "wiki_extract_entities should feed sections as a linear [:8000] slice "

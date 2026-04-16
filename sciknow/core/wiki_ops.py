@@ -499,16 +499,90 @@ def compile_paper_summary(
            "kg_triples": kg_count, "entities": entities}
 
 
+def _find_json_block(raw: str) -> str | None:
+    """Phase 54.6.36 — robust JSON extraction from free-form LLM output.
+
+    Tries these strategies in order:
+      1. Markdown code fence: ```json ... ``` or ``` ... ```
+      2. Outermost balanced braces: from first { to its matching }
+      3. Return None if neither yields parseable JSON
+
+    Handles common LLM noise: preamble text, trailing commentary,
+    <think>...</think> blocks (stripped by caller), nested objects.
+    """
+    import re as _re
+    if not raw:
+        return None
+
+    # Try markdown code fences (greedy, prefer ```json over bare ```)
+    fence_match = _re.search(r"```(?:json)?\s*\n(.*?)\n```", raw, _re.DOTALL)
+    if fence_match:
+        candidate = fence_match.group(1).strip()
+        try:
+            json.loads(candidate, strict=False)
+            return candidate
+        except Exception:
+            pass  # fall through to brace matching
+
+    # Fall back: find first { and its matching closing }
+    start = raw.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(raw)):
+        c = raw[i]
+        if escape:
+            escape = False
+            continue
+        if c == "\\":
+            escape = True
+            continue
+        if c == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                candidate = raw[start : i + 1]
+                try:
+                    json.loads(candidate, strict=False)
+                    return candidate
+                except Exception:
+                    return None
+    return None
+
+
 def _extract_entities_and_kg(
     doc_id, slug, title, authors, year, keywords, domains,
     abstract, sections, existing_slugs, model=None,
     num_ctx: int | None = None,
 ) -> tuple[list[str], int]:
-    """Combined entity + KG triple extraction in one LLM call.
+    """Combined entity + KG triple extraction.
 
-    ``num_ctx`` (Phase 54.6.28) lets callers pin a shared context size
-    across all LLM calls in compile_paper_summary so Ollama doesn't
-    reload the model between calls. When None, uses 24576 for safety.
+    Phase 54.6.36 — reworked to NOT use ``format=json_schema`` after
+    observing 100% runaway rate across mistral:7b, qwen3.5:27b, and
+    qwen3:30b-a3b on dense scientific content. The schema constraint
+    overrides the model's natural stop-token behavior, causing the
+    model to generate thinking tokens or garbage JSON indefinitely
+    until ``num_predict`` cuts it off. By the time we cap at 2048
+    tokens, the output is usually all ``<think>`` with no JSON.
+
+    New approach:
+      * No ``format=`` parameter — model uses free-form output
+      * Prompt asks for JSON in a ```json code fence``` for parsing
+      * ``_find_json_block()`` extracts the JSON robustly, tolerating
+        preamble/trailing text and nested braces in string values
+      * Much smaller ctx (8192) and num_predict (1500) since the model
+        doesn't need headroom for schema-induced thinking loops
+
+    ``num_ctx`` (Phase 54.6.28) still accepted for backward compat,
+    but defaults to 8192 now (was 24576).
     """
     from sciknow.rag import wiki_prompts
     from sciknow.rag.llm import complete as llm_complete
@@ -522,73 +596,48 @@ def _extract_entities_and_kg(
         slug=slug, sections=sections,
     )
 
-    # Structured output schema — Ollama guarantees valid JSON matching this
-    extraction_schema = {
-        "type": "object",
-        "properties": {
-            "concepts": {"type": "array", "items": {"type": "string"}},
-            "methods": {"type": "array", "items": {"type": "string"}},
-            "datasets": {"type": "array", "items": {"type": "string"}},
-            "triples": {"type": "array", "items": {
-                "type": "object",
-                "properties": {
-                    "subject": {"type": "string"},
-                    "predicate": {"type": "string"},
-                    "object": {"type": "string"},
-                    # Phase 48d — verbatim source sentence. Not required
-                    # (the LLM may legitimately fail to pin one); empty
-                    # string is acceptable and flows through as NULL.
-                    "source_sentence": {"type": "string"},
-                },
-                "required": ["subject", "predicate", "object"],
-            }},
-        },
-        "required": ["concepts", "methods", "datasets", "triples"],
-    }
-
     try:
-        # Phase 54.6.8 — raised to 24576 + `/no_think` for reasoning
-        # models. The previous 8192 was fine for plain qwen2-class
-        # models but catastrophic for qwen3:30b-a3b and other Q3/R1
-        # thinking models: the chain-of-thought alone blows past
-        # 7-9k tokens, so with ~4k input we overflow the window
-        # and Ollama returns empty / truncated output — json.loads
-        # then fails with "Expecting value: line 1 column 1 (char
-        # 0)" and every paper's extraction silently no-ops. The log
-        # was full of them (see data/sciknow.log circa 2026-04-14).
-        # Appending `/no_think` to the user prompt is a qwen3-
-        # convention no-op flag on other models, so it's safe as a
-        # blanket fix. The 24576 ctx stays as a safety net for
-        # models that don't honor /no_think.
-        usr_e_no_think = (usr_e or "").rstrip() + "\n\n/no_think"
-        effective_ctx = num_ctx if num_ctx is not None else 24576
-        # Phase 54.6.32/33 — num_predict cap on entity extraction.
-        # Dropped from 4096 → 2048 after observing qwen3:30b-a3b
-        # runaways where the model generates 4096 tokens of <think>
-        # chain-of-thought and never emits actual JSON (/no_think is
-        # inconsistently honored). Real extractions are ~500-1500
-        # tokens; 2048 catches 99% of legitimate outputs AND halves
-        # the wall-time cost of runaways (80s → 40s for thinking
-        # models, 45s → 22s for dense models). A truncated response
-        # fails json.loads() and flows to the "return [], 0" fallback
-        # — same outcome as a real empty extraction.
-        raw = llm_complete(sys_e, usr_e_no_think, model=model,
-                           temperature=0.0, num_ctx=effective_ctx,
-                           num_predict=2048,
-                           keep_alive=-1, format=extraction_schema)
-        # Thinking models sometimes leak <think>…</think> even under
-        # structured output when /no_think isn't honored — strip them
-        # defensively before json.loads.
+        # Phase 54.6.36/37 — free-form extraction, NO schema constraint.
+        # Model choice is critical:
+        #   * mistral:7b  — too small, echoes placeholder strings from
+        #                   the prompt example instead of filling them in
+        #   * qwen3:30b-a3b — thinking MoE, generates <think> tokens that
+        #                     exhaust num_predict before emitting JSON
+        #   * qwen3.5:27b — ALSO a thinking model despite the .5 naming;
+        #                   eval_count=1500 but message.content='' (all
+        #                   tokens were internal reasoning, not output)
+        #   * qwen2.5:32b-instruct — verified working: clean JSON in
+        #                   ~180 tokens, stops naturally, instruct-tuned
+        # So we default to qwen2.5:32b-instruct-q4_K_M. Callers can
+        # still override via the ``model`` parameter.
+        extract_model = model or "qwen2.5:32b-instruct-q4_K_M"
+        effective_ctx = num_ctx if num_ctx is not None else 8192
+        raw = llm_complete(
+            sys_e, usr_e, model=extract_model,
+            temperature=0.0, num_ctx=effective_ctx,
+            num_predict=1500,
+            keep_alive=-1,
+            # Note: NO format= argument. Schema-constrained JSON
+            # mode triggered runaways on this corpus.
+        )
+        # Strip thinking, then find the JSON block.
         raw_cleaned = _strip_thinking(raw or "").strip()
         if not raw_cleaned:
             logger.warning(
                 "Entity+KG extraction returned empty output for %s "
-                "(likely context overflow — ctx=24576 wasn't enough). "
-                "Consider --model qwen3.5:27b or a non-thinking model.",
-                slug,
+                "(model generated only <think> tokens; try --model "
+                "<non-thinking>)", slug,
             )
             return [], 0
-        data = json.loads(raw_cleaned, strict=False)
+        json_text = _find_json_block(raw_cleaned)
+        if not json_text:
+            logger.warning(
+                "Entity+KG extraction for %s: no JSON block found in "
+                "model output (first 300 chars: %r)",
+                slug, raw_cleaned[:300],
+            )
+            return [], 0
+        data = json.loads(json_text, strict=False)
     except Exception as exc:
         logger.warning("Entity+KG extraction failed for %s: %s", slug, exc)
         return [], 0
