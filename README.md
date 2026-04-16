@@ -127,10 +127,15 @@ uv run sciknow catalog raptor build                # hierarchical summary tree i
 uv run sciknow db tag-multimodal                   # tag chunks with tables / equations for filtering
 
 # ═══ 4. WIKI (SLOWEST STEP — hours) ═══════════════════════════════
-uv run sciknow wiki compile                        # paper summaries + concept stubs + KG triples
-uv run sciknow wiki extract-kg                     # backfill KG for pages compiled before Phase 54.6.8
+uv run sciknow wiki compile                        # paper summaries (fast, reliable)
+uv run sciknow wiki extract-kg                     # KG triples + concept entities (separate step)
 uv run sciknow wiki lint                           # broken links, stale pages, orphaned concepts
 uv run sciknow wiki lint --deep                    # + LLM contradiction detection (~30s per concept pair)
+# Phase 54.6.35: wiki compile and wiki extract-kg are now two separate
+# jobs. Inline entity extraction during compile is opt-in via
+# `--with-entities` — off by default because `format=json_schema` on
+# dense content is unreliable enough (runaway JSON, thinking loops)
+# that we'd rather fail one job cleanly than block the whole compile.
 
 # ═══ 5. BOOK ══════════════════════════════════════════════════════
 uv run sciknow book create "My Book"
@@ -204,6 +209,8 @@ See [`docs/PROJECTS.md`](docs/PROJECTS.md) for the full design.
 > **Phase 54.6.21:** the per-project `.env.overlay` file (created by `project init`, surfaced in the GUI/CLI) is now actually loaded into Settings. Pre-fix, per-project `LLM_MODEL` overrides etc. were silently no-ops. Plus a batch of audit-driven fixes: Qdrant collection-init fails fast on `EMBEDDING_DIM` mismatch instead of silently corrupting vectors; `_jobs` dict accesses in the SSE thread runners are now lock-protected; `_spawn_cli_streaming` reaps the subprocess in `finally` (no zombies on mid-stream exception); `cleanup-downloads --clean-failed` also nukes orphan paper_summary wiki pages whose source documents were just deleted; `write_active_slug` is atomic; the chunker emits a warning when it produces 0 sections (instead of silently storing a complete-but-empty doc); `consensus_map` logs KG query failures instead of swallowing them.
 
 > **Phase 54.6.22:** `sciknow wiki repair` recovers `wiki_pages` rows whose disk file is missing (common after `project init --from-existing` runs AFTER a `db reset` has wiped the legacy `data/wiki/`). Concept stubs are regenerated cheaply (no LLM); paper_summary + synthesis rows can be `--prune`'d so the next `wiki compile` recreates them from scratch. Also: hybrid-search Qdrant fetches now use a payload include-list (skip 4-5 unused fields × 50 candidates per query) and `wiki list_pages` replaced its per-row LATERAL paper_metadata join with a single bulk SELECT + dict merge.
+
+> **Phase 54.6.35:** `wiki compile` and `wiki extract-kg` are now separate concerns. Inline entity + KG extraction during compile is opt-in via `--with-entities`; off by default because `format=json_schema` calls have model-dependent failure modes (runaway JSON, thinking-token loops) that can routinely dominate compile wall time and produce empty extractions anyway. Run `sciknow wiki extract-kg` separately to populate the knowledge graph — it can retry safely, pick its own model, and be debugged independently when extraction misbehaves. Matches the Unix principle: one command does one thing well.
 
 > **Phase 54.6.23:** five verified bugs from the second-round wiki + ingestion audit. (1) `wiki compile` now runs entity+KG extraction even on the skip path when no triples exist for a doc — pre-fix, a paper whose summary landed but whose entity pass was rolled back was permanently stuck. (2) Citation extraction during ingest now bulk-fetches the DOI→doc_id map in one query instead of one SELECT per reference (N+1 → 1). (3) Empty-sections PDFs now raise and get marked `failed` with a specific `ingestion_error` instead of silently landing as `complete` with zero chunks. (4) Metadata-extraction LLM fallback has an explicit 60s timeout (pre-fix, a hung Ollama would block ingest indefinitely). (5) Concept `source_doc_ids` array de-dupes on append so a doc that updates the same concept twice no longer accumulates duplicate UUIDs.
 

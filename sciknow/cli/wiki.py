@@ -67,13 +67,15 @@ def compile(
                                   help="Recompile ALL pages from scratch (destructive). Default: only compile new papers."),
     rewrite_stale: bool = typer.Option(False, "--rewrite-stale",
                                         help="Rewrite pages marked as stale."),
-    no_entities: bool = typer.Option(
-        False, "--no-entities",
-        help="Skip entity + knowledge-graph extraction (Phase 54.6.34). "
-             "Useful when the structured-output extraction is failing on "
-             "your corpus — you still get paper summaries written + "
-             "embedded, just no KG triples. Run `sciknow wiki extract-kg` "
-             "later to backfill entities when a working strategy is found.",
+    with_entities: bool = typer.Option(
+        False, "--with-entities",
+        help="ALSO run inline entity + KG extraction during compile "
+             "(Phase 54.6.35: opt-in). Default OFF — entity extraction "
+             "is its own step with its own failure modes (runaway JSON "
+             "generation, thinking-token loops on dense content). "
+             "Run `sciknow wiki extract-kg` separately to backfill "
+             "entities for all already-compiled papers; it can retry "
+             "safely and pick its own model/strategy.",
     ),
     model: str | None = typer.Option(None, "--model"),
 ):
@@ -83,15 +85,22 @@ def compile(
     By default, only compiles papers that don't have wiki pages yet
     (safe to re-run anytime). Use --rebuild to recompile everything.
 
+    Entity + KG extraction is NOT run inline by default. Use
+    `sciknow wiki extract-kg` after this to populate the knowledge
+    graph — it handles its own retries and can use a different model
+    if the current one has structured-output issues on your corpus.
+
     Examples:
 
-      sciknow wiki compile                    # compile only new papers (safe)
+      sciknow wiki compile                    # summaries only (fast, reliable)
 
-      sciknow wiki compile --doc-id abc123    # compile one paper
+      sciknow wiki compile --doc-id abc123    # one paper
 
-      sciknow wiki compile --rebuild          # recompile everything from scratch
+      sciknow wiki compile --rebuild          # recompile everything
 
-      sciknow wiki compile --no-entities      # summaries only, skip KG extraction
+      sciknow wiki compile --with-entities    # also run inline KG extraction
+                                              # (only if you've verified it
+                                              # works on your corpus)
     """
     import warnings
     warnings.filterwarnings("ignore", message=".*urllib3.*")
@@ -108,7 +117,7 @@ def compile(
     if doc_id:
         console.print(f"Compiling wiki page for document {doc_id[:8]}...")
         gen = wiki_ops.compile_paper_summary(
-            doc_id, model=model, force=rebuild, skip_entities=no_entities,
+            doc_id, model=model, force=rebuild, with_entities=with_entities,
         )
         result = _consume_events(gen, console)
         if result and not result.get("skipped"):
@@ -124,7 +133,7 @@ def compile(
 
         gen = wiki_ops.compile_all(model=model, force=rebuild,
                                     rewrite_stale=rewrite_stale,
-                                    skip_entities=no_entities)
+                                    with_entities=with_entities)
 
         result = None
         total = 0

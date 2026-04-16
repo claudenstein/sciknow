@@ -249,19 +249,29 @@ def compile_paper_summary(
     *,
     model: str | None = None,
     force: bool = False,
-    skip_entities: bool = False,
+    with_entities: bool = False,
     _existing_slugs_cache: list[str] | None = None,
 ) -> Iterator[Event]:
     """Generate a wiki summary page for one paper.
 
-    ``skip_entities`` (Phase 54.6.34): when True, writes the paper
-    summary + embedding but skips the ``_extract_entities_and_kg``
-    call. Useful for corpora where ``format=json_schema`` entity
-    extraction is broken (user's climate-science corpus had 100%
-    runaway rate across mistral:7b, qwen3.5:27b, qwen3:30b-a3b).
-    The per-paper wall time drops from ~50s to ~15s. Entity
-    extraction can be re-attempted later via
-    ``sciknow wiki extract-kg`` once a working strategy is found.
+    Phase 54.6.35 — entity + KG extraction is now OPT-IN via
+    ``with_entities=True`` (was default-on pre-54.6.35). Rationale:
+    the `format=json_schema` extraction path has model-dependent
+    failure modes (runaway JSON generation on dense content, thinking-
+    token loops, etc.) that routinely dominate compile wall time and
+    produce (0 triples, 0 entities) on the majority of papers. The
+    cleaner architecture is:
+
+      * ``wiki compile``      — build paper summaries only (one job)
+      * ``wiki extract-kg``   — backfill KG triples separately
+                                (retry-safe, runs on demand, can
+                                pick its own model + strategy)
+
+    This matches the separation already embodied by ``wiki extract-kg``:
+    that command exists precisely to backfill entity extraction for
+    compiled papers. Making it the canonical path (rather than also
+    running inline during compile) eliminates an entire class of
+    reliability issues from the compile critical path.
 
     ``_existing_slugs_cache`` (Phase 54.6.25): when compiling in bulk
     via ``compile_all()``, the caller loads the slug list ONCE and
@@ -311,7 +321,7 @@ def compile_paper_summary(
         # summary exists (for skip detection) but never run entity
         # extraction, so a skipped paper with summary already in place
         # is a total no-op.
-        if skip_entities:
+        if not with_entities:
             need_entities = False
         if not force:
             existing = session.execute(text(
@@ -319,7 +329,7 @@ def compile_paper_summary(
             ), {"slug": slug}).fetchone()
             if existing:
                 skip_summary = True
-                if not skip_entities:
+                if with_entities:
                     kg_count = session.execute(text(
                         "SELECT COUNT(*) FROM knowledge_graph "
                         "WHERE source_doc_id::text = :did"
@@ -377,7 +387,7 @@ def compile_paper_summary(
         # polish) fit comfortably in 8192. Using a smaller ctx here
         # shrinks KV cache ~3× which lets us run more parallel workers
         # AND reduces per-token latency.
-        shared_ctx = 8192 if skip_entities else _wiki_num_ctx(model)
+        shared_ctx = _wiki_num_ctx(model) if with_entities else 8192
 
         perspectives_text = ""
         try:
@@ -459,12 +469,13 @@ def compile_paper_summary(
     # Combined entity + KG extraction in a single LLM call (speedup: 2 calls → 1)
     # Phase 54.6.28 — pass shared_ctx so entity extraction doesn't
     # reload the model with a different num_ctx.
-    # Phase 54.6.34 — skip_entities short-circuits this when the
-    # caller knows the structured-output call is broken for the corpus.
-    if skip_entities:
+    # Phase 54.6.35 — entity extraction is opt-in. By default we don't
+    # run it here; users run `sciknow wiki extract-kg` separately when
+    # they want the KG populated.
+    if not with_entities:
         _append_log(
             f"ingest | {title} → [[{slug}]] "
-            f"(entities skipped — --no-entities)"
+            f"(summary only — run `wiki extract-kg` for entities)"
         )
         yield {"type": "completed", "slug": slug,
                "word_count": len(content.split()),
@@ -790,14 +801,13 @@ def compile_all(
     model: str | None = None,
     force: bool = False,
     rewrite_stale: bool = False,
-    skip_entities: bool = False,
+    with_entities: bool = False,
 ) -> Iterator[Event]:
     """Build the full wiki from all ingested papers.
 
-    ``skip_entities`` (Phase 54.6.34) routes through to each
-    ``compile_paper_summary`` call and short-circuits the
-    entity/KG extraction step. See that function's docstring for
-    when this is useful.
+    ``with_entities`` (Phase 54.6.35) routes through to each
+    ``compile_paper_summary`` call. Off by default — entity
+    extraction is its own step, run via ``sciknow wiki extract-kg``.
     """
     from sqlalchemy import text
     from sciknow.storage.db import get_session
@@ -806,13 +816,13 @@ def compile_all(
     # first paper doesn't pay cold-start latency (~3-10s on a 7B model).
     # Uses the same ctx + batch settings the workload will use so
     # Ollama doesn't create a second instance on the first real call.
-    # Phase 54.6.34b — when skip_entities, the actual workload uses
-    # ctx=8192 (we never make the big-ctx structured-output call); warm
-    # up at 8192 to match, otherwise warmup wastes a load on a 24576
-    # instance that immediately gets evicted for the 8192 instance.
+    # Phase 54.6.34b — when entity extraction is off, the workload
+    # uses ctx=8192; warm up at 8192 to match, otherwise warmup
+    # wastes a load on a 24576 instance that immediately gets
+    # evicted for the 8192 instance.
     from sciknow.rag.llm import warm_up as _llm_warm_up
     _resolved_model = _wiki_model(model)
-    _warmup_ctx = 8192 if skip_entities else _wiki_num_ctx(_resolved_model)
+    _warmup_ctx = _wiki_num_ctx(_resolved_model) if with_entities else 8192
     _llm_warm_up(
         model=_resolved_model,
         num_ctx=_warmup_ctx,
@@ -872,7 +882,7 @@ def compile_all(
         try:
             for event in compile_paper_summary(
                 doc_id, model=model, force=force,
-                skip_entities=skip_entities,
+                with_entities=with_entities,
                 _existing_slugs_cache=existing_slugs_cache,
             ):
                 collected.append(event)
@@ -910,7 +920,7 @@ def compile_all(
             paper_skipped = False
             for event in compile_paper_summary(
                 doc_id, model=model, force=force,
-                skip_entities=skip_entities,
+                with_entities=with_entities,
                 _existing_slugs_cache=existing_slugs_cache,
             ):
                 if event.get("type") == "token":
