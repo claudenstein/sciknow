@@ -798,7 +798,7 @@ def b_model_reranker_throughput() -> Iterable[BenchMetric]:
 
 
 def b_model_llm_fast_throughput() -> Iterable[BenchMetric]:
-    """Ollama fast-model tokens/sec (mistral-ish, for metadata extract).
+    """Ollama fast-model tokens/sec (LLM_FAST_MODEL, for metadata extract).
     A single short generation call — fast models are used inside the
     ingestion hot path so latency dominates over throughput."""
     from sciknow.config import settings

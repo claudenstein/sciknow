@@ -7899,7 +7899,7 @@ def l1_phase54_wiki_browsing_mvp() -> None:
     assert _wnc("qwen3:30b-a3b") == 24576, (
         "thinking model must resolve to 24576 ctx for compile path"
     )
-    assert _wnc("mistral:7b") == 8192, (
+    assert _wnc("qwen2.5:32b-instruct") == 8192, (
         "non-thinking model must resolve to 8192 ctx (faster load)"
     )
     assert "sections=(sections or \"\")[:8000]" in _inspect.getsource(_wp.wiki_extract_entities), (

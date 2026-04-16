@@ -16,7 +16,7 @@ bash scripts/setup.sh
 What it does:
 - Installs PostgreSQL 16 (via apt), creates `sciknow` user and database
 - Downloads Qdrant binary to `~/.local/qdrant/` and registers it as a systemd user service
-- Installs Ollama and pulls the fast metadata model (`mistral:7b-instruct-q4_K_M`)
+- Installs Ollama and pulls the fast metadata model (`qwen3:30b-a3b`)
 - Installs `uv` and runs `uv sync` to set up the Python environment
 - Installs MinerU 2.5 (`mineru[core]`) as the primary PDF backend and Marker (`marker-pdf`) as fallback; both download their models lazily on first use (MinerU → `~/.cache/modelscope`, Marker → `~/.cache/datalab`)
 - Copies `.env.example` → `.env`
@@ -82,7 +82,7 @@ tar -xzf qdrant*.tar.gz
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
 ollama pull qwen2.5:32b-instruct-q4_K_M     # main writer (LLM_MODEL default)
-ollama pull mistral:7b-instruct-q4_K_M      # fast metadata extractor (LLM_FAST_MODEL default)
+ollama pull qwen3:30b-a3b                   # fast metadata extractor + wiki compile (LLM_FAST_MODEL default)
 ```
 
 **Python environment:**
@@ -158,7 +158,7 @@ All settings are read from `.env` (or environment variables). Managed by Pydanti
 | `EMBEDDING_MODEL` | `BAAI/bge-m3` | Embedding model (HuggingFace ID) |
 | `EMBEDDING_DIM` | `1024` | Embedding vector dimension |
 | `LLM_MODEL` | `qwen2.5:32b-instruct-q4_K_M` | Main LLM (Ollama model name) |
-| `LLM_FAST_MODEL` | `mistral:7b-instruct-q4_K_M` | Fast LLM for metadata extraction, wiki compile |
+| `LLM_FAST_MODEL` | `qwen3:30b-a3b` | Fast LLM for metadata extraction, wiki compile (MoE, 3B active) |
 | `RERANKER_MODEL` | `BAAI/bge-reranker-v2-m3` | Cross-encoder reranker |
 | `CROSSREF_EMAIL` | `user@example.com` | **Set this.** Used in Crossref/OpenAlex polite pool User-Agent |
 | `PDF_CONVERTER_BACKEND` | `auto` | `auto` / `mineru` / `mineru-vlm-pro` / `marker` (Phase 21) |

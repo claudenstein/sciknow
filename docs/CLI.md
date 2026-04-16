@@ -143,7 +143,7 @@ sciknow search query "galaxy formation" --candidates 100 --top-k 15
 sciknow ask question "What are the main mechanisms of aerosol radiative forcing?"
 
 # Use a specific model (default: LLM_MODEL from .env)
-sciknow ask question "Explain stellar nucleosynthesis" --model mistral:7b-instruct-q4_K_M
+sciknow ask question "Explain stellar nucleosynthesis" --model qwen3:30b-a3b
 
 # Filter by year and section
 sciknow ask question "How is SST reconstructed from proxies?" \

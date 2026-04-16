@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     embedding_model: str = "BAAI/bge-m3"
     embedding_dim: int = 1024
     llm_model: str = "qwen2.5:32b-instruct-q4_K_M"
-    llm_fast_model: str = "mistral:7b-instruct-q4_K_M"
+    llm_fast_model: str = "qwen3:30b-a3b"
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
 
     # Crossref polite pool

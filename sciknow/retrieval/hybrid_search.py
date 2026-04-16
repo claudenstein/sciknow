@@ -569,7 +569,7 @@ def expand_query(query: str) -> str:
     improve recall for terse queries: e.g. "solar forcing" → "solar forcing
     total solar irradiance TSI sunspot cycle solar variability climate".
 
-    Uses LLM_FAST_MODEL (Mistral 7B by default) for speed (~1 s). Never blocks
+    Uses LLM_FAST_MODEL (qwen3:30b-a3b by default) for speed (~1 s). Never blocks
     the search pipeline — falls through silently on error.
     """
     try:
