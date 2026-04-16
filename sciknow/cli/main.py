@@ -8,6 +8,7 @@ import typer
 from rich.console import Console
 
 from sciknow.cli import ask as ask_module
+from sciknow.cli import backup as backup_module
 from sciknow.cli import book as book_module
 from sciknow.cli import catalog as catalog_module
 from sciknow.cli import db as db_module
@@ -65,6 +66,7 @@ def _startup(
     logger.info(f"CLI  {cmd}")
 
 
+app.add_typer(backup_module.app, name="backup")
 app.add_typer(catalog_module.app, name="catalog")
 app.add_typer(db_module.app, name="db")
 app.add_typer(ingest_module.app, name="ingest")

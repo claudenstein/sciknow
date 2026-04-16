@@ -5465,6 +5465,65 @@ async def api_projects_destroy(request: Request):
     return JSONResponse({"ok": not errors, "errors": errors, "qdrant_dropped": n_dropped})
 
 
+# ── Phase 54.6.24 — backup endpoints ───────────────────────────────────────
+
+@app.get("/api/backups")
+async def api_backups_list():
+    """Return backup history + schedule status from the JSON state file."""
+    from sciknow.cli.backup import _read_state, _backup_root
+    state = _read_state()
+    return JSONResponse({
+        "backups": state.get("backups", []),
+        "schedule": state.get("schedule"),
+        "backup_dir": str(_backup_root()),
+    })
+
+
+@app.post("/api/backups/run")
+async def api_backups_run():
+    """Trigger a full backup via _spawn_cli_streaming."""
+    job_id, _ = _create_job("backup_run")
+    loop = asyncio.get_event_loop()
+    _spawn_cli_streaming(job_id, ["backup", "run", "--all-projects"], loop)
+    return JSONResponse({"job_id": job_id})
+
+
+@app.get("/api/backups/download/{dirname}/{filename}")
+async def api_backups_download(dirname: str, filename: str):
+    """Serve a backup file. Validates the path stays within archives/backups/."""
+    from sciknow.cli.backup import _backup_root
+    from starlette.responses import FileResponse
+
+    safe_dir = dirname.replace("..", "").replace("/", "")
+    safe_file = filename.replace("..", "").replace("/", "")
+    path = _backup_root() / safe_dir / safe_file
+    if not path.exists() or not path.is_file():
+        raise HTTPException(404, "Backup file not found")
+    abs_root = _backup_root().resolve()
+    if not path.resolve().is_relative_to(abs_root):
+        raise HTTPException(403, "Path traversal rejected")
+    return FileResponse(path, filename=safe_file,
+                        media_type="application/octet-stream")
+
+
+@app.post("/api/backups/schedule")
+async def api_backups_schedule(request: Request):
+    """Install or remove the daily cron. Body: {action: "enable"|"disable", hour: 3}."""
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    action = body.get("action", "enable")
+    if action == "enable":
+        job_id, _ = _create_job("backup_schedule")
+        loop = asyncio.get_event_loop()
+        hour = int(body.get("hour", 3))
+        _spawn_cli_streaming(job_id, ["backup", "schedule", "--hour", str(hour)], loop)
+        return JSONResponse({"job_id": job_id})
+    else:
+        job_id, _ = _create_job("backup_unschedule")
+        loop = asyncio.get_event_loop()
+        _spawn_cli_streaming(job_id, ["backup", "unschedule"], loop)
+        return JSONResponse({"job_id": job_id})
+
+
 @app.post("/api/server/shutdown")
 async def api_server_shutdown(request: Request):
     """Phase 54.6.2 — cleanly stop the running ``sciknow book serve``.
@@ -7373,6 +7432,8 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button role="menuitem" onclick="openToolsModal()">&#128736; Tools &middot; CLI parity</button>
       <button role="menuitem" onclick="openSetupWizard()">&#128295; Setup Wizard</button>
       <button role="menuitem" onclick="openProjectsModal()"><span id="proj-btn-label">&#128193; Projects</span></button>
+      <div style="height:1px;background:var(--border);margin:2px 0;"></div>
+      <button role="menuitem" onclick="openBackupsModal()">&#128190; Backups <span id="backup-badge" style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-left:4px;vertical-align:middle;"></span></button>
     </div>
   </div>
 </header>
@@ -8194,6 +8255,30 @@ body.task-bar-open {{ padding-top: 40px; }}
 </div>
 
 <!-- Phase 43h — Project management modal -->
+<!-- Phase 54.6.24 — Backups modal -->
+<div class="modal-overlay" id="backups-modal" onclick="if(event.target===this)closeModal('backups-modal')">
+  <div class="modal wide">
+    <div class="modal-header">
+      <h3>&#128190; Backups</h3>
+      <button class="modal-close" onclick="closeModal('backups-modal')">&times;</button>
+    </div>
+    <div class="modal-body" style="font-size:13px;">
+      <div id="backup-status" style="margin-bottom:12px;padding:10px;background:var(--bg-alt);border-radius:6px;">
+        Loading backup status...
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
+        <button class="btn-primary" onclick="runBackupNow()">&#128190; Run Backup Now</button>
+        <button class="btn-secondary" id="backup-schedule-btn" onclick="toggleBackupSchedule()">&#128339; Enable Daily Schedule</button>
+      </div>
+      <div id="backup-log" style="display:none;max-height:120px;overflow-y:auto;font-family:var(--font-mono);font-size:11px;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:8px;margin-bottom:12px;white-space:pre-wrap;"></div>
+      <h4 style="margin:0 0 8px;">Backup History</h4>
+      <div id="backup-list" style="max-height:300px;overflow-y:auto;">
+        <em>Loading...</em>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="projects-modal" onclick="if(event.target===this)closeModal('projects-modal')">
   <div class="modal wide">
     <div class="modal-header">
@@ -19355,6 +19440,173 @@ function swAttachLogStream(jobId, logElId) {{
 // Mirrors `sciknow project` from the CLI. Switching the active project
 // only writes .active-project; the running web reader keeps serving its
 // original book until the user restarts `sciknow book serve`.
+
+// ── Phase 54.6.24 — Backups ──────────────────────────────────────────
+let _backupScheduleActive = false;
+
+function openBackupsModal() {{
+  document.querySelectorAll('.nav-dropdown.open').forEach(d => d.classList.remove('open'));
+  openModal('backups-modal');
+  refreshBackupsList();
+}}
+
+async function refreshBackupsList() {{
+  try {{
+    const res = await fetch('/api/backups');
+    const d = await res.json();
+    const status = document.getElementById('backup-status');
+    const list = document.getElementById('backup-list');
+    const schedBtn = document.getElementById('backup-schedule-btn');
+
+    // Status
+    const backups = d.backups || [];
+    const sched = d.schedule;
+    _backupScheduleActive = !!sched;
+    let statusHtml = '';
+    if (backups.length) {{
+      const last = backups[backups.length - 1];
+      const mb = (last.total_bytes || 0) / 1024 / 1024;
+      statusHtml += '<strong>Last backup:</strong> ' + last.timestamp
+        + ' (' + mb.toFixed(1) + ' MB, '
+        + (last.projects || []).join(', ') + ')';
+    }} else {{
+      statusHtml += '<span style="color:var(--warning);">No backups yet.</span>';
+    }}
+    statusHtml += '<br>';
+    if (sched) {{
+      statusHtml += '<strong>Schedule:</strong> ' + sched.cron_expression
+        + ' (since ' + (sched.installed_at || '?').substring(0, 10) + ')';
+      schedBtn.textContent = '\\u23F9 Disable Schedule';
+    }} else {{
+      statusHtml += '<span style="color:var(--fg-muted);">No schedule active.</span>';
+      schedBtn.textContent = '\\u23F0 Enable Daily Schedule';
+    }}
+    status.innerHTML = statusHtml;
+
+    // Badge on Manage button
+    const badge = document.getElementById('backup-badge');
+    if (badge) {{
+      if (!backups.length) {{
+        badge.style.background = 'var(--danger, #e74c3c)';
+      }} else {{
+        const lastTs = backups[backups.length - 1].timestamp;
+        const ageSec = (Date.now() - new Date(lastTs).getTime()) / 1000;
+        badge.style.background = ageSec < 90000 ? 'var(--success, #27ae60)'
+          : ageSec < 172800 ? 'var(--warning, #f39c12)'
+          : 'var(--danger, #e74c3c)';
+      }}
+    }}
+
+    // List
+    if (!backups.length) {{
+      list.innerHTML = '<em style="color:var(--fg-muted);">No backups. Click "Run Backup Now".</em>';
+      return;
+    }}
+    let html = '<table style="width:100%;border-collapse:collapse;font-size:12px;">';
+    html += '<tr style="border-bottom:1px solid var(--border);"><th style="text-align:left;padding:4px;">Date</th><th>Projects</th><th style="text-align:right;">Size</th><th>Sys</th><th>Files</th></tr>';
+    for (let i = backups.length - 1; i >= 0; i--) {{
+      const b = backups[i];
+      const mb = (b.total_bytes || 0) / 1024 / 1024;
+      const files = Object.keys(b.files || {{}});
+      const dlLinks = files.map(f =>
+        '<a href="/api/backups/download/' + encodeURIComponent(b.dir) + '/' + encodeURIComponent(f) + '" download style="color:var(--link);text-decoration:underline;font-size:11px;">' + f + '</a>'
+      ).join('<br>');
+      html += '<tr style="border-bottom:1px solid var(--border);">'
+        + '<td style="padding:4px;">' + b.timestamp + '</td>'
+        + '<td>' + (b.projects || []).join(', ') + '</td>'
+        + '<td style="text-align:right;">' + mb.toFixed(1) + ' MB</td>'
+        + '<td style="text-align:center;">' + (b.system_bundle ? '\\u2713' : '\\u2014') + '</td>'
+        + '<td>' + dlLinks + '</td>'
+        + '</tr>';
+    }}
+    html += '</table>';
+    list.innerHTML = html;
+  }} catch (exc) {{
+    document.getElementById('backup-list').innerHTML = '<span style="color:var(--danger);">Failed to load: ' + exc + '</span>';
+  }}
+}}
+
+async function runBackupNow() {{
+  const log = document.getElementById('backup-log');
+  log.style.display = 'block';
+  log.textContent = 'Starting backup...\\n';
+  try {{
+    const res = await fetch('/api/backups/run', {{method: 'POST'}});
+    const d = await res.json();
+    if (!res.ok) {{
+      log.textContent += 'Failed: ' + (d.detail || res.status) + '\\n';
+      return;
+    }}
+    const source = new EventSource('/api/stream/' + d.job_id);
+    source.onmessage = function(e) {{
+      const evt = JSON.parse(e.data);
+      if (evt.type === 'log') {{
+        log.textContent += evt.text + '\\n';
+        log.scrollTop = log.scrollHeight;
+      }} else if (evt.type === 'completed') {{
+        log.textContent += '\\n\\u2713 Backup complete.\\n';
+        source.close();
+        refreshBackupsList();
+      }} else if (evt.type === 'error') {{
+        log.textContent += '\\u2717 ' + (evt.message || 'error') + '\\n';
+        source.close();
+      }}
+    }};
+    source.onerror = function() {{ source.close(); }};
+  }} catch (exc) {{
+    log.textContent += 'Failed: ' + exc + '\\n';
+  }}
+}}
+
+async function toggleBackupSchedule() {{
+  const action = _backupScheduleActive ? 'disable' : 'enable';
+  try {{
+    const res = await fetch('/api/backups/schedule', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{action: action, hour: 3}}),
+    }});
+    const d = await res.json();
+    if (d.job_id) {{
+      const log = document.getElementById('backup-log');
+      log.style.display = 'block';
+      log.textContent = (action === 'enable' ? 'Installing' : 'Removing') + ' crontab entry...\\n';
+      const source = new EventSource('/api/stream/' + d.job_id);
+      source.onmessage = function(e) {{
+        const evt = JSON.parse(e.data);
+        if (evt.type === 'log') {{
+          log.textContent += evt.text + '\\n';
+        }} else if (evt.type === 'completed' || evt.type === 'error') {{
+          source.close();
+          refreshBackupsList();
+        }}
+      }};
+      source.onerror = function() {{ source.close(); }};
+    }}
+  }} catch (exc) {{
+    alert('Schedule failed: ' + exc);
+  }}
+}}
+
+// Load backup badge on page load
+setTimeout(function() {{
+  fetch('/api/backups').then(r => r.json()).then(d => {{
+    const badge = document.getElementById('backup-badge');
+    if (!badge) return;
+    const backups = d.backups || [];
+    if (!backups.length) {{
+      badge.style.background = 'var(--danger, #e74c3c)';
+    }} else {{
+      const lastTs = backups[backups.length - 1].timestamp;
+      const ageSec = (Date.now() - new Date(lastTs).getTime()) / 1000;
+      badge.style.background = ageSec < 90000 ? 'var(--success, #27ae60)'
+        : ageSec < 172800 ? 'var(--warning, #f39c12)'
+        : 'var(--danger, #e74c3c)';
+    }}
+  }}).catch(() => {{}});
+}}, 2000);
+
+// ── Projects ─────────────────────────────────────────────────────────
 
 function openProjectsModal() {{
   openModal('projects-modal');

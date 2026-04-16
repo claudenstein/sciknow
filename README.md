@@ -103,30 +103,44 @@ sciknow book autowrite "My Book" --full   # or let it write autonomously
 sciknow book export "My Book" --format latex -o manuscript.tex
 ```
 
-### See everything working end-to-end
+### Full rebuild sequence (from zero)
 
-The GUI has a lot of surfaces; here's the shortest path from a fresh install
-to every feature populated (every step is idempotent / resumable):
+Every step is idempotent / resumable. Later blocks depend on earlier ones.
 
 ```bash
-# 1. Get a corpus in
-uv run sciknow ingest directory ./papers/          # PDFs → Postgres + Qdrant (parallel OK)
+# ═══ 1. PROJECT + SCHEMA ══════════════════════════════════════════
+uv run sciknow project init my-project
+uv run sciknow project use my-project
+uv run sciknow db init                             # alembic upgrade + Qdrant collections
 
-# 2. Derive metadata + structure
-uv run sciknow db enrich                           # fill missing DOIs via Crossref / OpenAlex
+# ═══ 2. INGEST + METADATA ═════════════════════════════════════════
+uv run sciknow ingest directory ./papers/          # PDFs → Postgres + Qdrant
+uv run sciknow db enrich                           # fill missing DOIs via Crossref / OpenAlex / arXiv
+uv run sciknow db link-citations                   # cross-link cited_document_id for in-corpus papers
+uv run sciknow db stats                            # sanity-check: all papers should be 'complete'
+
+# ═══ 3. INDEXING LAYERS ════════════════════════════════════════════
 uv run sciknow catalog cluster                     # BERTopic → paper_metadata.topic_cluster
-                                                   #            (feeds the Topic map viz)
-uv run sciknow catalog raptor build                # hierarchical summary tree
-                                                   #            (feeds the RAPTOR sunburst viz)
+                                                   #   (feeds Topic map viz, search --topic filter)
+uv run sciknow catalog raptor build                # hierarchical summary tree in Qdrant
+                                                   #   (feeds RAPTOR sunburst viz, enriches retrieval)
+uv run sciknow db tag-multimodal                   # tag chunks with tables / equations for filtering
 
-# 3. Compile the wiki (paper summaries + KG extraction)
-uv run sciknow wiki compile                        # summaries + concept pages
-uv run sciknow wiki extract-kg                     # backfill knowledge_graph triples
-                                                   #            if you're upgrading a wiki
-                                                   #            built before Phase 54.6.8
+# ═══ 4. WIKI (SLOWEST STEP — hours) ═══════════════════════════════
+uv run sciknow wiki compile                        # paper summaries + concept stubs + KG triples
+uv run sciknow wiki extract-kg                     # backfill KG for pages compiled before Phase 54.6.8
+uv run sciknow wiki lint                           # broken links, stale pages, orphaned concepts
+uv run sciknow wiki lint --deep                    # + LLM contradiction detection (~30s per concept pair)
 
-# 4. Start the web reader (the browser UI uses every surface above)
-uv run sciknow book serve "My Book"                # http://localhost:8765 by default
+# ═══ 5. BOOK ══════════════════════════════════════════════════════
+uv run sciknow book create "My Book"
+uv run sciknow book outline "My Book"              # LLM proposes chapter structure
+uv run sciknow book plan "My Book"                 # thesis + scope document
+uv run sciknow book serve "My Book"                # http://localhost:8765 — all GUI surfaces populated
+
+# ═══ 6. OPTIONAL ══════════════════════════════════════════════════
+uv run sciknow watch seed                          # pre-populate upstream-repo watchlist
+uv run sciknow backup schedule                     # daily auto-backup to archives/backups/
 ```
 
 Once the web reader is up, the top bar gives you:

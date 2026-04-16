@@ -257,6 +257,10 @@ class Settings(BaseSettings):
     def wiki_dir(self) -> Path:
         return self.data_dir / "wiki"
 
+    # Phase 54.6.24 — auto-backup
+    backup_retain_count: int = 7
+    backup_include_code: bool = True
+
 
 def _apply_env_overlay() -> None:
     """Phase 54.6.21 — apply per-project ``.env.overlay`` BEFORE
