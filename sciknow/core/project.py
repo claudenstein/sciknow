@@ -182,6 +182,10 @@ class Project:
     def wiki_collection(self) -> str:
         return f"{self.qdrant_prefix}wiki"
 
+    @property
+    def visuals_collection(self) -> str:
+        return f"{self.qdrant_prefix}visuals"
+
     # ── Existence check ─────────────────────────────────────────────
 
     def exists(self) -> bool:

@@ -57,6 +57,13 @@ def wiki_collection() -> str:
     return get_active_project().wiki_collection
 
 
+def visuals_collection() -> str:
+    """Return the active project's ``visuals`` collection name (Phase 21.b)."""
+    from sciknow.core.project import get_active_project
+    p = get_active_project()
+    return f"{p.qdrant_prefix}visuals"
+
+
 # ── Legacy-constant compatibility shim (PEP 562) ───────────────────────
 #
 # Pre-Phase-43 call sites import the names ``PAPERS_COLLECTION``,
@@ -132,7 +139,7 @@ def init_collections(client: QdrantClient | None = None) -> None:
     # old one — Qdrant returns 422 buried in an upsert log line, or
     # (worse) silent corruption depending on version. Fail fast and
     # tell the user how to recover.
-    for coll in (papers_coll, abstracts_coll, wiki_coll):
+    for coll in (papers_coll, abstracts_coll, wiki_coll, visuals_collection()):
         if coll in existing:
             try:
                 info = client.get_collection(coll)
@@ -240,6 +247,28 @@ def init_collections(client: QdrantClient | None = None) -> None:
             ("slug", PayloadSchemaType.KEYWORD),
         ]:
             client.create_payload_index(wiki_coll, field, schema)
+
+    # Phase 21.b — visuals collection for caption-based retrieval
+    visuals_coll = visuals_collection()
+    if visuals_coll not in existing:
+        client.create_collection(
+            collection_name=visuals_coll,
+            vectors_config={
+                "dense": VectorParams(
+                    size=settings.embedding_dim,
+                    distance=Distance.COSINE,
+                    on_disk=False,  # in-memory — visuals are few per project
+                )
+            },
+            sparse_vectors_config={
+                "sparse": SparseVectorParams(),
+            },
+        )
+        for field, schema in [
+            ("document_id", PayloadSchemaType.KEYWORD),
+            ("kind", PayloadSchemaType.KEYWORD),
+        ]:
+            client.create_payload_index(visuals_coll, field, schema)
 
 
 def ensure_node_level_index(client: QdrantClient | None = None) -> bool:

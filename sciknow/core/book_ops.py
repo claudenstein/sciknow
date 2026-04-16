@@ -2531,12 +2531,35 @@ def write_section_stream(
     yield {"type": "progress", "stage": "writing",
            "detail": f"Drafting {section_type} for Ch.{ch_num}: {ch_title} · model: {resolved_model}"}
 
+    # Phase 21.e — query visuals for this section (same pattern as autowrite)
+    section_visuals: list[dict] = []
+    try:
+        with get_session() as session:
+            from sqlalchemy import text as _vtext
+            vis_rows = session.execute(_vtext("""
+                SELECT kind, content, caption, figure_num, surrounding_text
+                FROM visuals v
+                JOIN documents d ON v.document_id = d.id
+                WHERE d.ingestion_status = 'complete'
+                  AND (v.kind IN ('table', 'equation', 'figure'))
+                  AND (v.caption ILIKE :pat OR v.surrounding_text ILIKE :pat)
+                ORDER BY v.kind, v.created_at LIMIT 8
+            """), {"pat": f"%{(topic or '')[:50]}%"}).fetchall()
+            section_visuals = [
+                {"kind": r[0], "content": r[1], "caption": r[2],
+                 "figure_num": r[3], "surrounding_text": r[4]}
+                for r in vis_rows
+            ]
+    except Exception:
+        pass
+
     system, user = prompts.write_section_v2(
         section_type, topic, results,
         book_plan=b_plan, prior_summaries=prior_summaries,
         paragraph_plan=paragraph_plan,
         target_words=effective_target_words,
         section_plan=section_plan,
+        visuals=section_visuals,
     )
 
     yield {"type": "length_target", "target_words": effective_target_words}
@@ -3564,6 +3587,33 @@ def _autowrite_section_body(
         # the autowrite — Layer 5 is purely additive.
         logger.warning("style fingerprint load failed: %s", exc)
 
+    # Phase 21.e — query the visuals table for tables/equations/figures
+    # related to this section's topic. Inject into the writer prompt so
+    # the LLM can incorporate them inline. Best-effort: if the visuals
+    # table doesn't exist yet (fresh install without extract-visuals),
+    # pass an empty list and the writer works as before.
+    section_visuals: list[dict] = []
+    try:
+        with get_session() as session:
+            from sqlalchemy import text as _vtext
+            vis_rows = session.execute(_vtext("""
+                SELECT kind, content, caption, figure_num, surrounding_text
+                FROM visuals v
+                JOIN documents d ON v.document_id = d.id
+                WHERE d.ingestion_status = 'complete'
+                  AND (v.kind IN ('table', 'equation', 'figure'))
+                  AND (v.caption ILIKE :pat OR v.surrounding_text ILIKE :pat)
+                ORDER BY v.kind, v.created_at
+                LIMIT 8
+            """), {"pat": f"%{(topic or '')[:50]}%"}).fetchall()
+            section_visuals = [
+                {"kind": r[0], "content": r[1], "caption": r[2],
+                 "figure_num": r[3], "surrounding_text": r[4]}
+                for r in vis_rows
+            ]
+    except Exception:
+        pass  # visuals table may not exist — fail-soft
+
     if resume_content is None:
         system, user = rag_prompts.write_section_v2(
             section_type, topic, results,
@@ -3573,9 +3623,11 @@ def _autowrite_section_body(
             section_plan=section_plan,
             lessons=relevant_lessons,
             style_fingerprint_block=style_fingerprint_block,
+            visuals=section_visuals,
         )
         yield {"type": "progress", "stage": "writing",
-               "detail": f"Generating initial draft (~{effective_target_words} words)..."}
+               "detail": f"Generating initial draft (~{effective_target_words} words, "
+                         f"{len(section_visuals)} visuals)..."}
     else:
         # Resume mode — fast-path past the writing phase. The score
         # loop below will pick up `content` and run iterations on it.

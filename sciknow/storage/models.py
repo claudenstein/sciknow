@@ -478,6 +478,39 @@ class WikiPage(Base):
     )
 
 
+# ── Phase 21.a — Visuals as first-class evidence ─────────────────────────
+
+class Visual(Base):
+    """A figure, table, equation, or code block extracted from a paper.
+
+    Populated by ``sciknow db extract-visuals`` which walks each paper's
+    ``content_list.json`` (MinerU output). Later phases (21.b–21.f) build
+    retrieval, UI, and write-loop integration on top of this table.
+    """
+    __tablename__ = "visuals"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    document_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(Text, nullable=False)  # table | equation | figure | code
+    content: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    caption: Mapped[str | None] = mapped_column(Text)
+    asset_path: Mapped[str | None] = mapped_column(Text)
+    block_idx: Mapped[int | None] = mapped_column(Integer)
+    figure_num: Mapped[str | None] = mapped_column(Text)
+    surrounding_text: Mapped[str | None] = mapped_column(Text)
+    qdrant_point_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("idx_visuals_document", "document_id"),
+        Index("idx_visuals_kind", "kind"),
+    )
+
+
 # ── Phase 32.6 — Compound learning Layer 0: autowrite telemetry ─────────
 #
 # These three tables capture per-run / per-iteration / per-retrieval data

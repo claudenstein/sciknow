@@ -4087,3 +4087,184 @@ def pending_export(
         console.print(f"[green]✓[/green] Wrote {len(rows)} row(s) → {output}")
     else:
         console.print(text)
+
+
+@app.command(name="extract-visuals")
+def extract_visuals_cmd(
+    limit: int = typer.Option(0, "--limit", help="Process at most N papers (0 = all)."),
+    force: bool = typer.Option(False, "--force",
+        help="Re-extract even for papers that already have visuals rows."),
+):
+    """Phase 21.a — extract figures, tables, equations from content_list.json.
+
+    Walks each ingested paper's MinerU output and creates one ``visuals``
+    row per visual element (table, equation, figure, code block). No
+    re-ingestion needed — reads the existing content_list.json files.
+
+    Safe to re-run: skips papers that already have visuals unless --force.
+
+    Examples:
+
+      sciknow db extract-visuals                # extract for all papers
+      sciknow db extract-visuals --limit 50     # first 50 only
+      sciknow db extract-visuals --force        # re-extract everything
+    """
+    import re as _re
+
+    from sciknow.cli import preflight
+    preflight()
+
+    from sqlalchemy import text as sql_text
+    from sciknow.config import settings
+    from sciknow.storage.db import get_session
+
+    with get_session() as session:
+        rows = session.execute(sql_text("""
+            SELECT d.id::text, d.file_hash
+            FROM documents d
+            WHERE d.ingestion_status = 'complete'
+            ORDER BY d.created_at
+        """)).fetchall()
+
+    total = len(rows)
+    if limit > 0:
+        rows = rows[:limit]
+
+    console.print(f"Scanning [bold]{len(rows)}[/bold] of {total} papers for visuals…")
+
+    # Pre-fetch which docs already have visuals (skip unless --force)
+    done_doc_ids: set[str] = set()
+    if not force:
+        with get_session() as session:
+            done_rows = session.execute(sql_text(
+                "SELECT DISTINCT document_id::text FROM visuals"
+            )).fetchall()
+            done_doc_ids = {r[0] for r in done_rows}
+
+    _FIG_NUM_RE = _re.compile(
+        r'(?:Fig(?:ure)?|Table|Eq(?:uation)?)\s*\.?\s*(\d+)',
+        _re.IGNORECASE,
+    )
+
+    extracted = 0
+    skipped = 0
+    papers_done = 0
+
+    for doc_id, file_hash in rows:
+        if doc_id in done_doc_ids:
+            skipped += 1
+            continue
+
+        # Find content_list.json
+        output_dir = settings.mineru_output_dir / doc_id
+        if not output_dir.exists():
+            continue
+
+        content_list_path = None
+        for root_d, _dirs, files in os.walk(output_dir):
+            for f in files:
+                if f.endswith("_content_list.json") or f == "content_list.json":
+                    content_list_path = Path(root_d) / f
+                    break
+            if content_list_path:
+                break
+
+        if not content_list_path or not content_list_path.exists():
+            continue
+
+        try:
+            content_list = json.loads(content_list_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+        visuals_batch: list[dict] = []
+        prev_text = ""
+
+        for idx, block in enumerate(content_list):
+            btype = block.get("type", "")
+
+            if btype == "text":
+                prev_text = (block.get("text") or "")[:500]
+                continue
+
+            if btype == "table":
+                table_body = block.get("table_body") or block.get("html") or ""
+                caption = block.get("table_caption") or block.get("caption") or ""
+                fig_match = _FIG_NUM_RE.search(caption or prev_text)
+                visuals_batch.append({
+                    "document_id": doc_id, "kind": "table",
+                    "content": table_body[:10000],
+                    "caption": (caption or "")[:1000],
+                    "block_idx": idx,
+                    "figure_num": fig_match.group(0) if fig_match else None,
+                    "surrounding_text": prev_text,
+                })
+
+            elif btype == "equation":
+                latex = block.get("text") or block.get("latex") or ""
+                visuals_batch.append({
+                    "document_id": doc_id, "kind": "equation",
+                    "content": latex[:5000],
+                    "caption": None,
+                    "block_idx": idx,
+                    "figure_num": None,
+                    "surrounding_text": prev_text,
+                })
+
+            elif btype == "image":
+                img_path = block.get("img_path") or ""
+                caption = block.get("image_caption") or block.get("caption") or ""
+                fig_match = _FIG_NUM_RE.search(caption or prev_text)
+                visuals_batch.append({
+                    "document_id": doc_id, "kind": "figure",
+                    "content": caption[:2000],
+                    "caption": (caption or "")[:1000],
+                    "asset_path": img_path,
+                    "block_idx": idx,
+                    "figure_num": fig_match.group(0) if fig_match else None,
+                    "surrounding_text": prev_text,
+                })
+
+            elif btype == "code":
+                code_body = block.get("text") or block.get("code_body") or ""
+                visuals_batch.append({
+                    "document_id": doc_id, "kind": "code",
+                    "content": code_body[:10000],
+                    "caption": None,
+                    "block_idx": idx,
+                    "figure_num": None,
+                    "surrounding_text": prev_text,
+                })
+
+        if visuals_batch:
+            try:
+                with get_session() as session:
+                    if force:
+                        session.execute(sql_text(
+                            "DELETE FROM visuals WHERE document_id::text = :did"
+                        ), {"did": doc_id})
+                    for v in visuals_batch:
+                        session.execute(sql_text("""
+                            INSERT INTO visuals
+                                (document_id, kind, content, caption, asset_path,
+                                 block_idx, figure_num, surrounding_text)
+                            VALUES
+                                (CAST(:document_id AS uuid), :kind, :content,
+                                 :caption, :asset_path, :block_idx, :figure_num,
+                                 :surrounding_text)
+                        """), {
+                            "asset_path": v.get("asset_path"),
+                            **{k: v[k] for k in ("document_id", "kind", "content",
+                                                   "caption", "block_idx",
+                                                   "figure_num", "surrounding_text")},
+                        })
+                    session.commit()
+                extracted += len(visuals_batch)
+                papers_done += 1
+            except Exception as exc:
+                console.print(f"  [red]skip {doc_id[:8]}:[/red] {exc}")
+
+    console.print(
+        f"\n[green]✓ Extracted {extracted} visuals from {papers_done} papers[/green]"
+        f"  [dim]({skipped} already done, {total - len(rows)} over limit)[/dim]"
+    )

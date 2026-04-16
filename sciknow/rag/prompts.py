@@ -309,29 +309,62 @@ WRITE_SYSTEM = """\
 You are a scientific writing assistant. Draft a {section} section in academic style \
 based ONLY on the provided literature passages.
 Cite sources inline as [N]. Use precise, formal language. \
-Do not introduce claims beyond what the passages support."""
+Do not introduce claims beyond what the passages support.
+
+Phase 21.e — Visual evidence integration:
+- If any passage contains a data TABLE, incorporate it as a Markdown table \
+in the appropriate place in your draft. Reference it as "Table N" in the text.
+- If any passage contains a LaTeX EQUATION, include it as $$...$$ in the draft \
+and reference it in the text.
+- If any passage mentions a FIGURE with a caption, reference it as "[Fig. N]" \
+and describe what it shows based on the caption text.
+- Do NOT fabricate visual elements that aren't in the passages."""
 
 WRITE_USER = """\
 Literature passages:
 
 {context}
 
----
+{visuals_context}---
 
 Draft a {section} section on the following topic.
 
 Topic: {topic}"""
 
 
+def _format_visuals_context(visuals: list[dict] | None) -> str:
+    """Phase 21.e — format visual elements into a prompt block."""
+    if not visuals:
+        return ""
+    parts = ["Relevant visual elements from the source papers:\n"]
+    for i, v in enumerate(visuals[:10], 1):
+        kind = v.get("kind", "visual")
+        label = f"[{kind.title()} {i}]"
+        caption = v.get("caption") or ""
+        content = v.get("content", "")[:1000]
+        if kind == "table":
+            parts.append(f"{label} {caption}\n{content}\n")
+        elif kind == "equation":
+            parts.append(f"{label} $${content}$$\n")
+        elif kind == "figure":
+            fig_num = v.get("figure_num") or f"Fig. {i}"
+            parts.append(f"[{fig_num}] {caption}\n")
+        elif kind == "code":
+            parts.append(f"{label}\n```\n{content[:500]}\n```\n")
+    return "\n".join(parts) + "\n"
+
+
 def write_section(
     section: str,
     topic: str,
     results: list[SearchResult],
+    visuals: list[dict] | None = None,
 ) -> tuple[str, str]:
     return (
         WRITE_SYSTEM.format(section=section),
         WRITE_USER.format(
             context=format_context(results),
+            visuals_context=_format_visuals_context(visuals),
             section=section,
             topic=topic,
         ),
@@ -776,7 +809,7 @@ Literature passages:
 
 {context}
 
----
+{visuals_context}---
 
 Draft a {section} section on the following topic.
 
@@ -794,6 +827,7 @@ def write_section_v2(
     section_plan: str | None = None,
     lessons: list[str] | None = None,
     style_fingerprint_block: str | None = None,
+    visuals: list[dict] | None = None,
 ) -> tuple[str, str]:
     # Phase 32.7 — Layer 1 episodic memory. `lessons` is a list of 1-3
     # sentence concrete reflections distilled from past autowrite runs
@@ -983,6 +1017,7 @@ def write_section_v2(
         ),
         WRITE_V2_USER.format(
             context=format_context(results),
+            visuals_context=_format_visuals_context(visuals),
             section=section,
             topic=topic,
         ),
@@ -1572,6 +1607,13 @@ claims and quantitative detail from the provided passages — not to pad with fi
 If evidence is missing on a topic, include it in **missing_topics** (list of short phrases \
 that could be used as search queries to find relevant papers).
 
+Phase 21.e — Visual utilization check:
+If the source passages contain data tables, equations, or figure references, and \
+the draft does NOT incorporate them (no markdown tables, no $$...$$ equations, no \
+[Fig. N] / [Table N] references), add a **visual_note** string suggesting which \
+visuals should be incorporated and where. If the draft already uses visuals well, \
+set visual_note to null.
+
 Respond ONLY with valid JSON:
 {
   "groundedness": 0.85,
@@ -1583,7 +1625,8 @@ Respond ONLY with valid JSON:
   "overall": 0.83,
   "weakest_dimension": "hedging_fidelity",
   "revision_instruction": "Soften three overstated claims: change 'proves' to 'suggests' for [2], restore the 'in the North Atlantic' qualifier on the AMOC claim citing [4], and replace 'causes' with 'is associated with' for [7].",
-  "missing_topics": ["proxy calibration uncertainty", "tree ring standardization methods"]
+  "missing_topics": ["proxy calibration uncertainty", "tree ring standardization methods"],
+  "visual_note": "Source [3] contains a data table comparing proxy records — incorporate as a markdown table in the Methods discussion."
 }"""
 
 SCORE_USER = """\

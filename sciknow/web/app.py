@@ -3972,6 +3972,70 @@ async def api_catalog_topics(name: str = None):
 # ── Corpus actions — subprocess-backed, stream stdout as SSE ─────────────────
 
 import os  # noqa: E402 — kept local-ish with the block that uses it
+# ── Phase 21.b — Visuals API ────────────────────────────────────────────────
+
+@app.get("/api/visuals")
+async def api_visuals_list(
+    kind: str = None, doc_id: str = None,
+    query: str = None, limit: int = 50,
+):
+    """Phase 21.b — list/search visual elements (tables, equations, figures).
+
+    Filters: ?kind=table|equation|figure, ?doc_id=..., ?query=caption search.
+    Returns JSON array of visuals with content, caption, kind, figure_num.
+    """
+    from sqlalchemy import text as _vtext
+    conditions = ["1=1"]
+    params: dict = {}
+    if kind:
+        conditions.append("v.kind = :kind")
+        params["kind"] = kind
+    if doc_id:
+        conditions.append("v.document_id::text = :doc_id")
+        params["doc_id"] = doc_id
+    if query:
+        conditions.append("(v.caption ILIKE :q OR v.surrounding_text ILIKE :q)")
+        params["q"] = f"%{query[:100]}%"
+    where = " AND ".join(conditions)
+    try:
+        with get_session() as session:
+            rows = session.execute(_vtext(f"""
+                SELECT v.id::text, v.document_id::text, v.kind, v.content,
+                       v.caption, v.asset_path, v.figure_num, v.block_idx,
+                       pm.title AS paper_title, pm.year
+                FROM visuals v
+                JOIN paper_metadata pm ON pm.document_id = v.document_id
+                WHERE {where}
+                ORDER BY v.kind, v.created_at DESC
+                LIMIT :lim
+            """), {**params, "lim": limit}).fetchall()
+        return JSONResponse([
+            {"id": r[0], "document_id": r[1], "kind": r[2],
+             "content": (r[3] or "")[:2000], "caption": r[4],
+             "asset_path": r[5], "figure_num": r[6], "block_idx": r[7],
+             "paper_title": r[8], "year": r[9]}
+            for r in rows
+        ])
+    except Exception as exc:
+        return JSONResponse({"error": str(exc), "visuals": []})
+
+
+@app.get("/api/visuals/stats")
+async def api_visuals_stats():
+    """Phase 21.b — visual element counts by kind."""
+    try:
+        with get_session() as session:
+            rows = session.execute(text(
+                "SELECT kind, COUNT(*) FROM visuals GROUP BY kind ORDER BY kind"
+            )).fetchall()
+        return JSONResponse({
+            "stats": {r[0]: r[1] for r in rows},
+            "total": sum(r[1] for r in rows),
+        })
+    except Exception:
+        return JSONResponse({"stats": {}, "total": 0})
+
+
 import shlex  # noqa: E402
 import subprocess  # noqa: E402
 
@@ -7401,6 +7465,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button role="menuitem" onclick="openAskModal()">&#128270; Ask Corpus</button>
       <button role="menuitem" onclick="openWikiModal()">&#128218; Wiki Query</button>
       <button role="menuitem" onclick="openCatalogModal()">&#128194; Browse Papers</button>
+      <button role="menuitem" onclick="openVisualsModal()">&#128202; Visuals (Tables/Figs/Eqs)</button>
     </div>
   </div>
   <!-- Phase 54.6.18 — Corpus: every enrich / expand surface lifted
@@ -8271,6 +8336,33 @@ body.task-bar-open {{ padding-top: 40px; }}
 </div>
 
 <!-- Phase 43h — Project management modal -->
+<!-- Phase 21.c — Visuals browser modal -->
+<div class="modal-overlay" id="visuals-modal" onclick="if(event.target===this)closeModal('visuals-modal')">
+  <div class="modal wide" style="max-width:900px;">
+    <div class="modal-header">
+      <h3>&#128202; Visual Elements</h3>
+      <button class="modal-close" onclick="closeModal('visuals-modal')">&times;</button>
+    </div>
+    <div class="modal-body" style="font-size:13px;">
+      <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center;">
+        <select id="vis-kind-filter" onchange="loadVisuals()" style="padding:4px 8px;">
+          <option value="">All types</option>
+          <option value="table">Tables</option>
+          <option value="equation">Equations</option>
+          <option value="figure">Figures</option>
+          <option value="code">Code</option>
+        </select>
+        <input type="text" id="vis-search" placeholder="Search captions..." style="flex:1;min-width:150px;padding:4px 8px;" onkeyup="if(event.key==='Enter')loadVisuals()">
+        <button class="btn-secondary" onclick="loadVisuals()">&#128269; Search</button>
+        <span id="vis-stats" style="color:var(--fg-muted);font-size:11px;"></span>
+      </div>
+      <div id="vis-results" style="max-height:500px;overflow-y:auto;">
+        <em>Loading...</em>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Phase 54.6.24 — Backups modal -->
 <div class="modal-overlay" id="backups-modal" onclick="if(event.target===this)closeModal('backups-modal')">
   <div class="modal wide">
@@ -19457,6 +19549,96 @@ function swAttachLogStream(jobId, logElId) {{
 // Mirrors `sciknow project` from the CLI. Switching the active project
 // only writes .active-project; the running web reader keeps serving its
 // original book until the user restarts `sciknow book serve`.
+
+// ── Phase 21.c — Visuals browser ─────────────────────────────────────
+
+function openVisualsModal() {{
+  document.querySelectorAll('.nav-dropdown.open').forEach(d => d.classList.remove('open'));
+  openModal('visuals-modal');
+  loadVisuals();
+  // Load stats
+  fetch('/api/visuals/stats').then(r => r.json()).then(d => {{
+    const s = d.stats || {{}};
+    const parts = Object.entries(s).map(([k,v]) => k + ': ' + v).join(', ');
+    const el = document.getElementById('vis-stats');
+    if (el) el.textContent = parts ? ('Total: ' + d.total + ' (' + parts + ')') : 'No visuals extracted yet. Run: sciknow db extract-visuals';
+  }}).catch(() => {{}});
+}}
+
+async function loadVisuals() {{
+  const kind = document.getElementById('vis-kind-filter').value;
+  const query = document.getElementById('vis-search').value.trim();
+  const params = new URLSearchParams();
+  if (kind) params.set('kind', kind);
+  if (query) params.set('query', query);
+  params.set('limit', '50');
+  const results = document.getElementById('vis-results');
+  results.innerHTML = '<em>Loading...</em>';
+  try {{
+    const res = await fetch('/api/visuals?' + params.toString());
+    const items = await res.json();
+    if (!items.length || items.error) {{
+      results.innerHTML = '<em style="color:var(--fg-muted);">No visuals found.' + (items.error ? ' Error: ' + items.error : '') + '</em>';
+      return;
+    }}
+    let html = '';
+    for (const v of items) {{
+      const kindIcon = v.kind === 'table' ? '\\uD83D\\uDCCA' : v.kind === 'equation' ? '\\u2211' : v.kind === 'figure' ? '\\uD83D\\uDDBC' : '\\uD83D\\uDCBB';
+      const label = (v.figure_num || v.kind) + (v.caption ? ': ' + v.caption.substring(0, 80) : '');
+      const paperInfo = (v.paper_title || '').substring(0, 50) + (v.year ? ' (' + v.year + ')' : '');
+      let preview = '';
+      if (v.kind === 'table') {{
+        preview = '<div style="max-height:120px;overflow:auto;font-size:11px;border:1px solid var(--border);border-radius:4px;padding:4px;background:var(--bg);">' + (v.content || '').substring(0, 1000) + '</div>';
+      }} else if (v.kind === 'equation') {{
+        preview = '<div style="font-family:var(--font-mono);font-size:12px;padding:4px;background:var(--bg);border-radius:4px;">$$' + (v.content || '').substring(0, 300) + '$$</div>';
+      }} else if (v.kind === 'figure') {{
+        preview = '<div style="font-style:italic;font-size:11px;color:var(--fg-muted);">' + (v.content || v.caption || 'No caption') + '</div>';
+      }} else {{
+        preview = '<pre style="max-height:80px;overflow:auto;font-size:10px;padding:4px;background:var(--bg);border-radius:4px;">' + (v.content || '').substring(0, 500) + '</pre>';
+      }}
+      html += '<div style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:8px;">'
+        + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">'
+        + '<strong>' + kindIcon + ' ' + label.substring(0, 100) + '</strong>'
+        + '<button class="btn-secondary" style="font-size:11px;padding:2px 8px;" onclick="insertVisualAtCursor(' + JSON.stringify(JSON.stringify(v)) + ')">Insert</button>'
+        + '</div>'
+        + '<div style="font-size:11px;color:var(--fg-muted);margin-bottom:4px;">' + paperInfo + '</div>'
+        + preview
+        + '</div>';
+    }}
+    results.innerHTML = html;
+  }} catch (exc) {{
+    results.innerHTML = '<em style="color:var(--danger);">Failed: ' + exc + '</em>';
+  }}
+}}
+
+function insertVisualAtCursor(vJson) {{
+  const v = JSON.parse(vJson);
+  let md = '';
+  if (v.kind === 'table') {{
+    md = '\\n\\n' + (v.figure_num || 'Table') + ': ' + (v.caption || '') + '\\n\\n' + (v.content || '').substring(0, 2000) + '\\n\\n';
+  }} else if (v.kind === 'equation') {{
+    md = '\\n\\n$$' + (v.content || '') + '$$\\n\\n';
+  }} else if (v.kind === 'figure') {{
+    const fig = v.figure_num || 'Figure';
+    md = '\\n\\n[' + fig + ']: ' + (v.caption || 'No caption') + '\\n\\n';
+  }} else {{
+    md = '\\n\\n```\\n' + (v.content || '').substring(0, 1000) + '\\n```\\n\\n';
+  }}
+  // Try to insert into the active editor textarea
+  const editor = document.querySelector('.editor-area textarea, #section-editor');
+  if (editor) {{
+    const start = editor.selectionStart || editor.value.length;
+    editor.value = editor.value.slice(0, start) + md + editor.value.slice(start);
+    editor.focus();
+    closeModal('visuals-modal');
+  }} else {{
+    // Fallback: copy to clipboard
+    navigator.clipboard.writeText(md).then(() => {{
+      alert('Copied to clipboard — paste into the editor.');
+      closeModal('visuals-modal');
+    }});
+  }}
+}}
 
 // ── Phase 54.6.24 — Backups ──────────────────────────────────────────
 let _backupScheduleActive = false;
