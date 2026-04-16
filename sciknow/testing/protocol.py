@@ -8294,6 +8294,111 @@ def l1_phase54_6_40_entity_name_normalizer() -> None:
     )
 
 
+def l1_model_sweep_surface() -> None:
+    """Phase 54.6.41 — model-sweep bench harness structural test.
+
+    The sweep harness is how we decide which Ollama model wins each
+    sciknow LLM role. It needs zero LLM calls to pass this test —
+    we just verify the scaffolding is intact so a broken import or
+    missing registry entry surfaces fast, before someone kicks off
+    a 20-minute GPU burn.
+
+    Locks in:
+      A) Module imports cleanly and exposes CANDIDATE_MODELS,
+         CANDIDATE_PAPERS, BUDGETS, SWEEP_BENCHES.
+      B) All three production tasks (extract_kg, compile_summary,
+         write_section) are wired up.
+      C) The ``sweep`` layer is dispatchable via bench.run_layer
+         (resolves through _sweep_layer indirection).
+      D) The scorer helpers work on trivial inputs — a flat-list
+         of concepts scores as "flat", a dict-wrapped list as "dict"
+         (exercises the same shape classification the production
+         _entity_name fix depends on, so a regression in either
+         place is caught on the next L1 run).
+    """
+    from sciknow.testing import model_sweep as sw
+    from sciknow.testing import bench
+
+    # A) Public surface
+    assert isinstance(sw.CANDIDATE_MODELS, list) and sw.CANDIDATE_MODELS, (
+        "CANDIDATE_MODELS must be a non-empty list"
+    )
+    assert isinstance(sw.CANDIDATE_PAPERS, list) and sw.CANDIDATE_PAPERS, (
+        "CANDIDATE_PAPERS must be a non-empty list of doc_id prefixes"
+    )
+    for task in ("extract_kg", "compile_summary", "write_section"):
+        assert task in sw.BUDGETS, f"BUDGETS missing {task!r}"
+        for key in ("num_ctx", "num_predict", "temperature"):
+            assert key in sw.BUDGETS[task], f"BUDGETS[{task}] missing {key}"
+
+    # B) All three bench functions registered
+    bench_names = {fn.__name__ for _, fn in sw.SWEEP_BENCHES}
+    for expected in ("b_model_sweep_extract_kg",
+                     "b_model_sweep_compile_summary",
+                     "b_model_sweep_write_section"):
+        assert expected in bench_names, (
+            f"SWEEP_BENCHES missing {expected} — the sweep would silently "
+            f"skip that role"
+        )
+
+    # C) Dispatch indirection — "sweep" is a pseudo-layer resolved in
+    # run_layer() rather than stored in LAYERS (preserves the
+    # "every layer has ≥1 bench fn" invariant that l1_bench_harness_surface
+    # enforces). Accept it via VALID_LAYERS + _sweep_layer().
+    assert "sweep" in bench.VALID_LAYERS, (
+        "sweep missing from VALID_LAYERS — CLI layer validation will reject it"
+    )
+    assert "sweep" not in bench.LAYERS, (
+        "sweep should NOT live in LAYERS (breaks non-empty invariant); "
+        "route through _sweep_layer() instead"
+    )
+    sweep_benches = bench._sweep_layer()
+    assert len(sweep_benches) >= 3, (
+        "_sweep_layer() returned fewer than 3 bench functions"
+    )
+
+    # D) Scorer smoke — extract_kg scoring classifies shape correctly.
+    # We build synthetic LLM responses + a tiny PaperCtx so no DB or
+    # model is needed. A flat-list response must score "flat"; a
+    # dict-wrapped response must score "dict". Guards against the
+    # Phase 54.6.40 regression mode.
+    tiny_paper = sw.PaperCtx(
+        doc_id="0"*32, title="t", authors="a", year="2020",
+        keywords="", domains="", abstract="", sections_text="",
+        source_text="the continuity equation was applied to model flow.",
+    )
+    flat_resp = {
+        "content": '{"concepts": ["flow-modeling", "continuity-equation"], '
+                   '"methods": ["analytical-solution"], "datasets": [], '
+                   '"triples": [{"subject": "continuity-equation", '
+                   '"predicate": "models", "object": "flow", '
+                   '"source_sentence": "The continuity equation was applied to model flow."}]}',
+        "thinking": "",
+    }
+    dict_resp = {
+        "content": '{"concepts": [{"name": "flow-modeling", "description": "x"}],'
+                   ' "methods": [], "datasets": [], "triples": []}',
+        "thinking": "",
+    }
+    flat_score = sw._score_extract_kg(flat_resp, tiny_paper)
+    dict_score = sw._score_extract_kg(dict_resp, tiny_paper)
+    assert flat_score["shape"] == "flat", (
+        f"flat response scored as {flat_score['shape']!r} — "
+        f"shape classifier regression"
+    )
+    assert dict_score["shape"] == "dict", (
+        f"dict response scored as {dict_score['shape']!r} — "
+        f"classifier missing the Phase 54.6.40 failure shape"
+    )
+    # The flat response has a verbatim source_sentence; verbatim_pct
+    # must be 100 for it (anti-hallucination signal works).
+    assert flat_score["sent_verbatim_pct"] == 100.0, (
+        f"verbatim check should find the sentence in source_text but "
+        f"got {flat_score['sent_verbatim_pct']}% — case/whitespace "
+        f"normalization regression"
+    )
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -8486,6 +8591,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_21_audit_fixes,
     # Phase 54.6.40 — extract-kg entity-name dict normalization
     l1_phase54_6_40_entity_name_normalizer,
+    # Phase 54.6.41 — model-sweep bench harness structural test
+    l1_model_sweep_surface,
 ]
 
 L2_TESTS: list[Callable] = [

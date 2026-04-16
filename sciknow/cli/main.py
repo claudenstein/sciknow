@@ -163,7 +163,8 @@ def bench_cmd(
         "fast", "--layer", "-l",
         help="Which bench layer to run: fast (descriptive only), live "
              "(adds hybrid_search + embedder + reranker), llm (adds "
-             "Ollama throughput), or full.",
+             "Ollama throughput), sweep (per-model comparison across "
+             "extract-kg / compile / write_section), or full.",
     ),
     tag: str = typer.Option(
         "", "--tag",
@@ -186,12 +187,17 @@ def bench_cmd(
       fast   — DB + Qdrant stats, descriptive only, no model calls (~5s).
       live   — adds 1 embedder pass + hybrid_search round trip (~30s cold).
       llm    — adds Ollama fast + main model throughput (~60–180s cold).
+      sweep  — per-model comparison: runs every candidate in
+               model_sweep.CANDIDATE_MODELS against extract-kg,
+               compile-summary, and write-section on fixed paper 4092d6ad.
+               Produces apples-to-apples metrics for picking which model
+               wins each role. ~20–25 min for 6 models × 3 tasks on a 3090.
       full   — every bench. Run before a release or after infra change.
     """
     from sciknow.testing import bench as bench_mod
 
-    if layer not in bench_mod.LAYERS:
-        console.print(f"[red]Unknown layer: {layer!r}. Use {list(bench_mod.LAYERS)}[/red]")
+    if layer not in bench_mod.VALID_LAYERS:
+        console.print(f"[red]Unknown layer: {layer!r}. Use {list(bench_mod.VALID_LAYERS)}[/red]")
         raise typer.Exit(2)
 
     console.print(f"[bold]sciknow bench[/bold] · layer: [cyan]{layer}[/cyan]"

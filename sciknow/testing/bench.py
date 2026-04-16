@@ -1195,6 +1195,14 @@ _LLM: list[tuple[str, BenchFn]] = [
     ("models", b_model_llm_main_throughput),
 ]
 
+def _sweep_layer() -> list[tuple[str, BenchFn]]:
+    """Import sweep benches lazily — model_sweep imports wiki_prompts
+    which has heavier transitive deps than bench.py wants to pay for
+    every CLI invocation."""
+    from sciknow.testing import model_sweep as _sw
+    return list(_sw.SWEEP_BENCHES)
+
+
 LAYERS: dict[str, list[tuple[str, BenchFn]]] = {
     "fast":  _FAST,
     "live":  _LIVE,
@@ -1202,11 +1210,19 @@ LAYERS: dict[str, list[tuple[str, BenchFn]]] = {
     "full":  _FAST + _LIVE + _LLM,
 }
 
+# "sweep" is a pseudo-layer: not stored in LAYERS (which would break
+# the invariant that every layer has >= 1 bench fn) — resolved lazily
+# in run_layer() via _sweep_layer().
+VALID_LAYERS: tuple[str, ...] = tuple(LAYERS.keys()) + ("sweep",)
+
 
 def run_layer(layer: str) -> list[BenchResult]:
-    benches = LAYERS.get(layer)
+    if layer == "sweep":
+        benches = _sweep_layer()
+    else:
+        benches = LAYERS.get(layer)
     if benches is None:
-        raise ValueError(f"unknown bench layer {layer!r}; pick from {list(LAYERS)}")
+        raise ValueError(f"unknown bench layer {layer!r}; pick from {list(VALID_LAYERS)}")
     results: list[BenchResult] = []
     for cat, fn in benches:
         results.append(_run_bench(fn, category=cat, layer=layer))
