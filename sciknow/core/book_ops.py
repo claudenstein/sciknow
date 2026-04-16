@@ -464,7 +464,11 @@ def _auto_summarize(content: str, section_type: str, chapter_title: str, model: 
     from sciknow.rag.llm import complete
     system, user = prompts.draft_summary(section_type, chapter_title, content)
     try:
-        return complete(system, user, model=model, temperature=0.1, num_ctx=4096).strip()
+        # Phase 54.6.30 — 16384 to match the main write pass and avoid
+        # Ollama reloading the model between write and summarize
+        # (summarize runs right after a section is written in
+        # write_section_stream and autowrite, same model in scope).
+        return complete(system, user, model=model, temperature=0.1, num_ctx=16384).strip()
     except Exception as exc:
         logger.warning("Auto-summarize failed for %s/%s: %s", chapter_title, section_type, exc)
         return ""
@@ -2306,7 +2310,12 @@ def _generate_step_back_query(query: str, model: str | None = None) -> str | Non
         raw = llm_complete(
             sys_p, usr_p,
             model=model or settings.llm_model,  # main model, not fast
-            temperature=0.1, num_ctx=2048,
+            # Phase 54.6.30 — standardise on 16384 across the autowrite
+            # call chain so this utility (step-back query) doesn't
+            # trigger an Ollama model reload when the main write pass
+            # arrives expecting 16384. Extra KV cache cost is trivial
+            # compared to model weights.
+            temperature=0.1, num_ctx=16384,
         )
         # Strip thinking blocks and any leading/trailing punctuation/quotes.
         raw = re.sub(r'<think>.*?</think>\s*', '', raw, flags=re.DOTALL).strip()

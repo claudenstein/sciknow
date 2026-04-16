@@ -7821,6 +7821,43 @@ def l1_phase54_6_21_audit_fixes() -> None:
         "_layer_llm must pass an explicit timeout to ollama.Client "
         "so a slow/hung model can't block the pipeline indefinitely"
     )
+    # Phase 54.6.30 — _layer_llm now passes keep_alive=-1 to avoid
+    # model reloads across the N papers in a bulk ingest.
+    assert "keep_alive=-1" in meta_src, (
+        "_layer_llm must pass keep_alive=-1 to keep the fast model "
+        "resident across papers in a bulk ingest"
+    )
+
+    # L) Phase 54.6.30 — llm.py wrapper defaults
+    from sciknow.rag import llm as _llm
+    _stream_sig = _inspect.signature(_llm.stream)
+    _complete_sig = _inspect.signature(_llm.complete)
+    _status_sig = _inspect.signature(_llm.complete_with_status)
+    # Default num_ctx unified at 16384 so callers using the default
+    # don't trigger Ollama model reloads when mixing stream() and
+    # complete() in the same pipeline.
+    assert _stream_sig.parameters["num_ctx"].default == 16384, (
+        "stream() num_ctx default must be 16384"
+    )
+    assert _complete_sig.parameters["num_ctx"].default == 16384, (
+        "complete() num_ctx default must be 16384 (was 8192 pre-54.6.30)"
+    )
+    assert _status_sig.parameters["num_ctx"].default == 16384, (
+        "complete_with_status() num_ctx default must be 16384"
+    )
+    # Default keep_alive is sticky (-1) so models persist across
+    # pipeline phases without explicit caller intervention.
+    assert _stream_sig.parameters["keep_alive"].default == -1, (
+        "stream() keep_alive default must be -1 (sticky)"
+    )
+    assert _complete_sig.parameters["keep_alive"].default == -1, (
+        "complete() keep_alive default must be -1 (sticky)"
+    )
+    assert "keep_alive" in _status_sig.parameters, (
+        "complete_with_status() must accept keep_alive — pre-54.6.30 "
+        "it silently dropped the param, forcing reloads in any "
+        "multi-pass flow that went through this wrapper"
+    )
 
 
 # ════════════════════════════════════════════════════════════════════════════

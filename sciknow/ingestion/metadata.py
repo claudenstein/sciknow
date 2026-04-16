@@ -896,11 +896,19 @@ def _layer_llm(text: str, meta: PaperMeta) -> None:
         # takes longer than that, the paper should fail metadata to
         # "unknown" (cascade outcome below) and the ingest moves on.
         client = ollama.Client(host=settings.ollama_host, timeout=60)
+        # Phase 54.6.30 — keep_alive=-1 so the fast model stays resident
+        # across the N papers in a bulk ingest. Pre-fix, each paper in
+        # `sciknow ingest directory` hit this call with Ollama's default
+        # 5-minute TTL, which meant the model reloaded when PDF parsing
+        # of the previous paper took longer than 5 min (MinerU is slow
+        # on heavy figure-laden PDFs). With keep_alive=-1 the model
+        # stays loaded for the entire ingest run.
         response = client.chat(
             model=settings.llm_fast_model,
             messages=[{"role": "user", "content": _LLM_PROMPT.format(text=text)}],
             format="json",
             options={"temperature": 0},
+            keep_alive=-1,
         )
 
         raw = response.message.content

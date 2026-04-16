@@ -77,7 +77,7 @@ def stream(
     model: str | None = None,
     temperature: float = 0.2,
     num_ctx: int = 16384,
-    keep_alive: str | int | None = None,
+    keep_alive: str | int | None = -1,
     format: dict | str | None = None,
 ) -> Iterator[str]:
     """
@@ -85,6 +85,13 @@ def stream(
 
     keep_alive: Ollama keep_alive parameter ("-1" = infinite, "60m", etc.).
                 Prevents model unload between calls, enabling prompt caching.
+                **Phase 54.6.30: default changed from None → -1.** Pre-fix
+                the default meant Ollama's 5-minute TTL applied, which
+                evicted the model between multi-phase pipeline steps
+                (autowrite loop: write → score → verify → revise → …)
+                even though they were processing the same model. Sticky
+                by default; callers that want to unload pass
+                ``keep_alive=0`` or ``"30s"``.
     format:     JSON schema dict for structured output (Ollama v0.5+).
                 Guarantees valid JSON matching the schema.
     """
@@ -143,12 +150,23 @@ def complete(
     user: str,
     model: str | None = None,
     temperature: float = 0.1,
-    num_ctx: int = 8192,
-    keep_alive: str | int | None = None,
+    num_ctx: int = 16384,
+    keep_alive: str | int | None = -1,
     format: dict | str | None = None,
 ) -> str:
     """
     Non-streaming completion. Returns the full response string.
+
+    Phase 54.6.30:
+      - ``num_ctx`` default raised from 8192 → 16384 to match stream().
+        Pre-fix, a script calling stream() then complete() with default
+        ctx triggered an Ollama model reload because each unique
+        (model, num_ctx) is a separate Ollama instance.
+      - ``keep_alive`` default None → -1 (sticky). Pre-fix, calls without
+        an explicit keep_alive fell back to Ollama's 5-minute TTL,
+        which evicted the model between pipeline phases that take
+        longer than 5 minutes (e.g. autowrite score → verify → revise).
+        Callers that want to unload can still pass ``keep_alive=0``.
     """
     return "".join(stream(system, user, model=model, temperature=temperature,
                           num_ctx=num_ctx, keep_alive=keep_alive, format=format))
@@ -160,7 +178,8 @@ def complete_with_status(
     label: str = "Generating",
     model: str | None = None,
     temperature: float = 0.1,
-    num_ctx: int = 8192,
+    num_ctx: int = 16384,
+    keep_alive: str | int | None = -1,
 ) -> str:
     """
     Like complete(), but shows a live token counter on the console while
@@ -170,6 +189,10 @@ def complete_with_status(
     Display: `  Generating... 847 tokens (4.2 tok/s, 32s)`
 
     Returns the full response string.
+
+    Phase 54.6.30 — now accepts and forwards ``keep_alive``. Pre-fix,
+    the utility wrapper silently dropped keep_alive so multi-pass
+    workflows that went through this function lost model persistence.
     """
     from rich.console import Console
     from rich.live import Live
@@ -180,7 +203,8 @@ def complete_with_status(
     t0 = time.monotonic()
 
     with Live(console=console, refresh_per_second=2, transient=True) as live:
-        for tok in stream(system, user, model=model, temperature=temperature, num_ctx=num_ctx):
+        for tok in stream(system, user, model=model, temperature=temperature,
+                          num_ctx=num_ctx, keep_alive=keep_alive):
             tokens.append(tok)
             elapsed = time.monotonic() - t0
             tps = len(tokens) / elapsed if elapsed > 0 else 0
