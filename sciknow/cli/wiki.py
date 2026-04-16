@@ -67,6 +67,14 @@ def compile(
                                   help="Recompile ALL pages from scratch (destructive). Default: only compile new papers."),
     rewrite_stale: bool = typer.Option(False, "--rewrite-stale",
                                         help="Rewrite pages marked as stale."),
+    no_entities: bool = typer.Option(
+        False, "--no-entities",
+        help="Skip entity + knowledge-graph extraction (Phase 54.6.34). "
+             "Useful when the structured-output extraction is failing on "
+             "your corpus — you still get paper summaries written + "
+             "embedded, just no KG triples. Run `sciknow wiki extract-kg` "
+             "later to backfill entities when a working strategy is found.",
+    ),
     model: str | None = typer.Option(None, "--model"),
 ):
     """
@@ -82,6 +90,8 @@ def compile(
       sciknow wiki compile --doc-id abc123    # compile one paper
 
       sciknow wiki compile --rebuild          # recompile everything from scratch
+
+      sciknow wiki compile --no-entities      # summaries only, skip KG extraction
     """
     import warnings
     warnings.filterwarnings("ignore", message=".*urllib3.*")
@@ -97,7 +107,9 @@ def compile(
 
     if doc_id:
         console.print(f"Compiling wiki page for document {doc_id[:8]}...")
-        gen = wiki_ops.compile_paper_summary(doc_id, model=model, force=rebuild)
+        gen = wiki_ops.compile_paper_summary(
+            doc_id, model=model, force=rebuild, skip_entities=no_entities,
+        )
         result = _consume_events(gen, console)
         if result and not result.get("skipped"):
             entities = result.get("entities", [])
@@ -110,7 +122,9 @@ def compile(
         from rich.text import Text
         from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn, MofNCompleteColumn
 
-        gen = wiki_ops.compile_all(model=model, force=rebuild, rewrite_stale=rewrite_stale)
+        gen = wiki_ops.compile_all(model=model, force=rebuild,
+                                    rewrite_stale=rewrite_stale,
+                                    skip_entities=no_entities)
 
         result = None
         total = 0

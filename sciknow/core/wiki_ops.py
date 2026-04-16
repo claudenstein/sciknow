@@ -249,9 +249,19 @@ def compile_paper_summary(
     *,
     model: str | None = None,
     force: bool = False,
+    skip_entities: bool = False,
     _existing_slugs_cache: list[str] | None = None,
 ) -> Iterator[Event]:
     """Generate a wiki summary page for one paper.
+
+    ``skip_entities`` (Phase 54.6.34): when True, writes the paper
+    summary + embedding but skips the ``_extract_entities_and_kg``
+    call. Useful for corpora where ``format=json_schema`` entity
+    extraction is broken (user's climate-science corpus had 100%
+    runaway rate across mistral:7b, qwen3.5:27b, qwen3:30b-a3b).
+    The per-paper wall time drops from ~50s to ~15s. Entity
+    extraction can be re-attempted later via
+    ``sciknow wiki extract-kg`` once a working strategy is found.
 
     ``_existing_slugs_cache`` (Phase 54.6.25): when compiling in bulk
     via ``compile_all()``, the caller loads the slug list ONCE and
@@ -296,17 +306,25 @@ def compile_paper_summary(
         # expensive summary LLM call).
         skip_summary = False
         need_entities = True
+        # Phase 54.6.34 — --skip-entities short-circuits the expensive
+        # structured-output call. When True, we still check if the
+        # summary exists (for skip detection) but never run entity
+        # extraction, so a skipped paper with summary already in place
+        # is a total no-op.
+        if skip_entities:
+            need_entities = False
         if not force:
             existing = session.execute(text(
                 "SELECT id FROM wiki_pages WHERE slug = :slug"
             ), {"slug": slug}).fetchone()
             if existing:
                 skip_summary = True
-                kg_count = session.execute(text(
-                    "SELECT COUNT(*) FROM knowledge_graph "
-                    "WHERE source_doc_id::text = :did"
-                ), {"did": doc_id}).scalar() or 0
-                need_entities = (kg_count == 0)
+                if not skip_entities:
+                    kg_count = session.execute(text(
+                        "SELECT COUNT(*) FROM knowledge_graph "
+                        "WHERE source_doc_id::text = :did"
+                    ), {"did": doc_id}).scalar() or 0
+                    need_entities = (kg_count == 0)
                 if not need_entities:
                     yield {"type": "progress", "stage": "skip",
                            "detail": f"Already compiled: {slug}"}
@@ -435,6 +453,18 @@ def compile_paper_summary(
     # Combined entity + KG extraction in a single LLM call (speedup: 2 calls → 1)
     # Phase 54.6.28 — pass shared_ctx so entity extraction doesn't
     # reload the model with a different num_ctx.
+    # Phase 54.6.34 — skip_entities short-circuits this when the
+    # caller knows the structured-output call is broken for the corpus.
+    if skip_entities:
+        _append_log(
+            f"ingest | {title} → [[{slug}]] "
+            f"(entities skipped — --no-entities)"
+        )
+        yield {"type": "completed", "slug": slug,
+               "word_count": len(content.split()),
+               "kg_triples": 0, "entities": []}
+        return
+
     yield {"type": "progress", "stage": "extracting",
            "detail": "Extracting entities + knowledge graph..."}
     # shared_ctx is defined in the not-skipped branch above; in the
@@ -754,8 +784,15 @@ def compile_all(
     model: str | None = None,
     force: bool = False,
     rewrite_stale: bool = False,
+    skip_entities: bool = False,
 ) -> Iterator[Event]:
-    """Build the full wiki from all ingested papers."""
+    """Build the full wiki from all ingested papers.
+
+    ``skip_entities`` (Phase 54.6.34) routes through to each
+    ``compile_paper_summary`` call and short-circuits the
+    entity/KG extraction step. See that function's docstring for
+    when this is useful.
+    """
     from sqlalchemy import text
     from sciknow.storage.db import get_session
 
@@ -824,6 +861,7 @@ def compile_all(
         try:
             for event in compile_paper_summary(
                 doc_id, model=model, force=force,
+                skip_entities=skip_entities,
                 _existing_slugs_cache=existing_slugs_cache,
             ):
                 collected.append(event)
@@ -861,6 +899,7 @@ def compile_all(
             paper_skipped = False
             for event in compile_paper_summary(
                 doc_id, model=model, force=force,
+                skip_entities=skip_entities,
                 _existing_slugs_cache=existing_slugs_cache,
             ):
                 if event.get("type") == "token":
