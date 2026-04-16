@@ -223,8 +223,18 @@ def compile_paper_summary(
     *,
     model: str | None = None,
     force: bool = False,
+    _existing_slugs_cache: list[str] | None = None,
 ) -> Iterator[Event]:
-    """Generate a wiki summary page for one paper."""
+    """Generate a wiki summary page for one paper.
+
+    ``_existing_slugs_cache`` (Phase 54.6.25): when compiling in bulk
+    via ``compile_all()``, the caller loads the slug list ONCE and
+    passes it through. Pre-fix, every paper triggered a fresh
+    ``SELECT slug FROM wiki_pages`` — 600 identical queries on a
+    600-paper corpus.  Callers that compile a single paper (CLI
+    ``--doc-id``, web API) pass ``None`` and the per-paper lookup
+    runs as before.
+    """
     from sqlalchemy import text
     from sciknow.rag import wiki_prompts
     from sciknow.rag.llm import stream as llm_stream
@@ -286,7 +296,11 @@ def compile_paper_summary(
             f"[{s[0]}]\n{s[1][:3000]}" for s in sections
         )[:12000]
 
-        existing_slugs = _load_existing_slugs(session)
+        existing_slugs = (
+            _existing_slugs_cache
+            if _existing_slugs_cache is not None
+            else _load_existing_slugs(session)
+        )
 
     # Format metadata
     author_str = ", ".join(
@@ -662,6 +676,18 @@ def compile_all(
     workers = max(1, int(settings.wiki_compile_workers or 1))
     effective_workers = min(workers, max(1, total))
     compile_wall_t0 = time.monotonic()
+
+    # Phase 54.6.25 — load the slug list ONCE and pass through to
+    # every paper. Pre-fix, each of the 600 papers fired an
+    # identical `SELECT slug FROM wiki_pages ORDER BY slug` —
+    # ~600 wasted queries. The list is read-only during compile
+    # (new slugs added by _save_page won't be visible to the LLM
+    # prompt until the next compile run anyway; pre-fix they weren't
+    # either, since the per-paper load ran BEFORE the new page was
+    # saved). Thread-safe: only passed by reference, never mutated.
+    with get_session() as session:
+        existing_slugs_cache = _load_existing_slugs(session)
+
     yield {"type": "compile_start", "total": total,
            "workers": effective_workers}
 
@@ -683,7 +709,10 @@ def compile_all(
         status = "compiled"
         err: str | None = None
         try:
-            for event in compile_paper_summary(doc_id, model=model, force=force):
+            for event in compile_paper_summary(
+                doc_id, model=model, force=force,
+                _existing_slugs_cache=existing_slugs_cache,
+            ):
                 collected.append(event)
                 if event.get("type") == "token":
                     paper_tokens += 1
@@ -717,7 +746,10 @@ def compile_all(
                    "title": short_title, "doc_id": doc_id}
             paper_ok = False
             paper_skipped = False
-            for event in compile_paper_summary(doc_id, model=model, force=force):
+            for event in compile_paper_summary(
+                doc_id, model=model, force=force,
+                _existing_slugs_cache=existing_slugs_cache,
+            ):
                 if event.get("type") == "token":
                     paper_tokens += 1
                     total_tokens += 1
