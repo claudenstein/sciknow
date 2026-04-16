@@ -21,15 +21,30 @@ This repo prioritises correctness over coverage metrics. The failure modes worth
 
 These are all checkable with ~10 lines of straight-line Python per test. A pytest setup would add structure (fixtures, parametrisation, plugins, conftest) that doesn't help you catch any of those failures faster — and the project explicitly avoids hidden complexity. The harness is a single file (`sciknow/testing/protocol.py`) that anyone can read end-to-end.
 
-## The three layers
+## The four layers
 
 | Layer | Speed | Dependencies | What it covers | When to run |
 |---|---|---|---|---|
 | **L1 — Static** | seconds | none | imports, prompts, function signatures, CLI registration, JSON shapes, doc consistency | Every PR. Should be in your pre-push muscle memory. |
 | **L2 — Live integration** | ~10–60 s | PostgreSQL + Qdrant up | hybrid_search returns results, Qdrant collections exist, ensure_node_level_index is idempotent, db queries work | Before shipping a "Phase" feature drop, after touching `storage/`, `retrieval/`, or `ingestion/` |
-| **L3 — End-to-end** | minutes | PG + Qdrant + Ollama | Ollama answers, one tiny `complete()` call returns text, bge-m3 model loads and embeds | After touching `rag/llm.py`, `embedder.py`, `reranker.py`, or after a model swap |
+| **L3 — End-to-end** | minutes | PG + Qdrant + Ollama | Ollama answers, one tiny `complete()` call returns text, bge-m3 model loads and embeds, **plus the Phase 54.6.39 single-example pipeline smokes** | After touching `rag/llm.py`, `embedder.py`, `reranker.py`, or after a model swap |
+| **SMOKE** | ~3–5 min | PG + Qdrant + Ollama + 1 ingested paper | Phase 54.6.39: `num_predict` cap honored; extraction model produces clean JSON; `wiki compile` on 1 paper; `wiki extract-kg` on 1 paper; `autowrite` one iteration | **After ANY change to wiki / autowrite LLM pipelines** — catches prompt, model, and `num_predict` regressions that bulk runs would only reveal after 20–40 min |
 
-L2 and L3 are **skipped automatically** when their service prerequisites aren't reachable — so on a laptop without Qdrant running, `sciknow test --layer all` reports L2/L3 as `~ skipped` instead of failing hard.
+L2, L3, and SMOKE are **skipped automatically** when their service prerequisites aren't reachable — so on a laptop without Qdrant running, `sciknow test --layer all` reports them as `~ skipped` instead of failing hard. The paper-dependent SMOKE tests (`wiki_compile_single_paper`, `wiki_extract_kg_single_paper`) also skip gracefully when the active project has no ingested papers.
+
+## Why the SMOKE layer exists (Phase 54.6.39)
+
+The 2026-04-16 debug session spent 6+ hours chasing a wiki-compile regression that ran at ~1 paper/min and produced 0 KG triples per paper. Every fix cycle meant kicking off a bulk compile to "test", watching it fail for 20–40 minutes, tweaking, and retrying. Each failure would have been visible in 60 seconds if we'd run a single-paper test first.
+
+The SMOKE layer codifies that discipline. Its tests:
+
+1. **`l3_llm_num_predict_cap_honored`** — asks for a 500-word essay but caps at 20 tokens; asserts output is short. Catches: Ollama dropping `num_predict`, our wrapper not forwarding it.
+2. **`l3_extract_model_produces_clean_json`** — runs the real entity-extraction prompt against the pinned extract model (`qwen2.5:32b-instruct`); asserts JSON parses AND doesn't echo prompt placeholders. Catches: model swaps to thinking-prone variants, prompt leaks.
+3. **`l3_wiki_compile_single_paper_smoke`** — runs `compile_paper_summary` on one real ingested paper; asserts the summary has ≥100 words. Catches: thinking-runaways, prompt-template breakage.
+4. **`l3_wiki_extract_kg_single_paper_smoke`** — runs `_extract_entities_and_kg` on one paper; asserts ≥1 triple + ≥1 entity produced. Catches: structured-output regressions, JSON parser bugs, model assignment changes.
+5. **`l3_autowrite_one_iteration_smoke`** — runs the `write_section_v2` prompt once; asserts non-empty prose output. Catches: write-prompt regressions, default-model issues.
+
+Run `sciknow test --layer SMOKE` — it's the single command to run after any prompt/model/num_predict tweak, before a bulk compile or extract.
 
 ## How to run it
 

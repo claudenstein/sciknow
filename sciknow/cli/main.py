@@ -93,7 +93,7 @@ def test_cmd(
     layer: str = typer.Option(
         "L1",
         "--layer", "-l",
-        help="Which test layer to run: L1 (static), L2 (live integration), L3 (end-to-end), or all.",
+        help="Which test layer to run: L1 (static), L2 (live integration), L3 (end-to-end), SMOKE (Phase 54.6.39: single-example LLM pipeline smokes only — skip the cheap L1/L2 and the utility L3 checks), or all.",
     ),
     fail_fast: bool = typer.Option(
         False,
@@ -104,19 +104,27 @@ def test_cmd(
     """
     Run the layered testing protocol (smoke tests, not pytest).
 
-    L1 — Static     (seconds, no deps)              imports, prompts, signatures
-    L2 — Live       (tens of sec, PG + Qdrant)      hybrid_search, raptor scrolls
-    L3 — End-to-end (minutes, PG + Qdrant + Ollama) one tiny LLM call, embedder
+    L1    — Static     (seconds, no deps)              imports, prompts, signatures
+    L2    — Live       (tens of sec, PG + Qdrant)      hybrid_search, raptor scrolls
+    L3    — End-to-end (minutes, PG + Qdrant + Ollama) tiny LLM call, embedder +
+                                                        Phase 54.6.39 single-example smokes
+    SMOKE — Phase 54.6.39 single-example LLM pipeline tests ONLY (a focused
+            subset of L3). Runs: num_predict cap check, extraction-model
+            canary, wiki-compile-1-paper, extract-kg-1-paper, autowrite-1-iter.
+            Use this after any prompt/model/num_predict change — catches the
+            regressions that bulk runs would only reveal after 20-40 minutes.
 
     Run L1 on every PR. Run L2 before shipping a "Phase" feature drop or after
     infrastructure changes. Run L3 after retrieval / LLM / embedder changes.
+    Run SMOKE after ANY change in the wiki / autowrite LLM pipelines.
     See docs/TESTING.md for the full protocol and how to add new checks.
 
     Examples:
 
-      sciknow test                  # L1 only (default — fast)
-      sciknow test --layer L2       # live integration only
-      sciknow test --layer all      # everything (L1 + L2 + L3)
+      sciknow test                      # L1 only (default — fast)
+      sciknow test --layer L2           # live integration only
+      sciknow test --layer SMOKE        # single-example pipeline sanity (~5 min)
+      sciknow test --layer all          # everything (L1 + L2 + L3)
       sciknow test -l all --fail-fast
     """
     from sciknow.testing import protocol
@@ -124,10 +132,16 @@ def test_cmd(
     layer_norm = layer.upper().strip()
     if layer_norm == "ALL":
         layers = ["L1", "L2", "L3"]
+    elif layer_norm == "SMOKE":
+        # Phase 54.6.39 — single-example LLM pipeline smokes only.
+        # Skips the utility L3 checks (ollama reachable / llm smoke /
+        # embedder loads) since they're subsumed by the pipeline tests,
+        # AND skips the cheap L1/L2 checks you'd normally run first.
+        layers = ["SMOKE"]
     elif layer_norm in ("L1", "L2", "L3"):
         layers = [layer_norm]
     else:
-        console.print(f"[red]Unknown layer: {layer!r}. Use L1, L2, L3, or all.[/red]")
+        console.print(f"[red]Unknown layer: {layer!r}. Use L1, L2, L3, SMOKE, or all.[/red]")
         raise typer.Exit(2)
 
     console.print(f"[bold]sciknow test[/bold] · layers: {', '.join(layers)}")

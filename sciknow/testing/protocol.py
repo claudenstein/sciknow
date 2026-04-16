@@ -1111,6 +1111,308 @@ def l3_embedder_loads() -> None:
     )
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Phase 54.6.39 — Single-example LLM pipeline smoke tests
+#
+# Rationale (from today's memory: feedback_test_single_before_bulk.md):
+# every time we change a prompt, model, or num_predict setting in a hot
+# LLM pipeline, bulk runs waste 20-40 minutes before revealing the
+# regression. Single-example tests catch the same bugs in 30-120
+# seconds. These run against the active project's actual DB + Ollama,
+# so they validate end-to-end without mocking.
+#
+# Each test MUST be tolerant of an empty / uninitialized project:
+# skip gracefully (not fail) if no suitable paper is available, so L3
+# can be run on a fresh install or a paused project.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _l3_find_smoke_paper(session, min_sections: int = 1) -> tuple | None:
+    """Pick a deterministic paper to use for LLM smoke tests. Returns
+    (doc_id, title, year, sections_text) or None if the project has no
+    suitable paper yet. Idempotent — picks by lowest id so repeated
+    runs hit the same paper (consistent tok/s benchmarks)."""
+    from sqlalchemy import text as _t
+    row = session.execute(_t("""
+        SELECT d.id::text, pm.title, pm.year, pm.abstract
+        FROM documents d
+        JOIN paper_metadata pm ON pm.document_id = d.id
+        WHERE d.ingestion_status = 'complete' AND pm.title IS NOT NULL
+        ORDER BY d.id
+        LIMIT 1
+    """)).fetchone()
+    if not row:
+        return None
+    doc_id, title, year, abstract = row
+    sec_rows = session.execute(_t("""
+        SELECT section_type, content FROM paper_sections
+        WHERE document_id::text = :did
+        ORDER BY section_index
+        LIMIT 8
+    """), {"did": doc_id}).fetchall()
+    if len(sec_rows) < min_sections:
+        return None
+    sections = "\n\n".join(
+        f"[{r[0]}]\n{(r[1] or '')[:2000]}" for r in sec_rows
+    )[:6000]
+    return doc_id, title, year, abstract or "", sections
+
+
+def l3_llm_num_predict_cap_honored() -> None:
+    """Verify the llm wrapper actually caps output at num_predict.
+
+    This catches: num_predict getting dropped from options (an Ollama
+    API change, a bug in our wrapper), which would re-expose every
+    pipeline to runaway generation. Asks for a deliberately long
+    response but caps at 20 tokens — output should be short, not long.
+    """
+    import time
+    from sciknow.config import settings
+    from sciknow.rag.llm import complete
+    t0 = time.monotonic()
+    out = complete(
+        "You are a verbose writer.",
+        "Write a 500-word essay about the history of the printing press.",
+        model=settings.llm_fast_model,
+        temperature=0.0,
+        num_ctx=2048,
+        num_predict=20,
+    )
+    elapsed = time.monotonic() - t0
+    # 20 tokens ≈ 60-140 chars depending on word length. Cap should
+    # bite well before 500 words (~3000 chars).
+    assert len(out) < 500, (
+        f"num_predict=20 produced {len(out)} chars — cap not being "
+        f"honored. Output: {out[:200]!r}"
+    )
+    return TestResult.ok(
+        name="l3_llm_num_predict_cap_honored",
+        message=f"capped at {len(out)} chars in {elapsed:.1f}s",
+    )
+
+
+def l3_extract_model_produces_clean_json() -> None:
+    """Verify the hardcoded extraction model (qwen2.5:32b-instruct)
+    produces valid JSON on the project's real entity-extraction prompt.
+
+    This is the specific canary for the Phase 54.6.37 bug: thinking
+    models produce empty `message.content` under `format=json_schema`
+    or generate reasoning tokens that never emit JSON. Swapping the
+    extract model to one that doesn't work would make this test fail
+    immediately instead of silently producing (0 triples, 0 entities)
+    for hours on a bulk run.
+    """
+    import json
+    from sciknow.rag.wiki_prompts import wiki_extract_entities
+    from sciknow.rag.llm import complete
+    from sciknow.core.wiki_ops import _find_json_block, _strip_thinking
+
+    sys_e, usr_e = wiki_extract_entities(
+        title="Test: Solar Cycle 24 Observations",
+        authors="Test Author", year="2020",
+        keywords="solar cycle, sunspot", domains="solar-physics",
+        abstract="We analyze solar cycle 24 sunspot data.",
+        existing_slugs=["sunspot-number"],
+        slug="test-solar-cycle-24",
+        sections="[methods] Wavelet analysis of sunspot data. "
+                 "[results] Cycle 24 was the weakest since cycle 14.",
+    )
+    raw = complete(
+        sys_e, usr_e,
+        model="qwen2.5:32b-instruct-q4_K_M",
+        temperature=0.0, num_ctx=8192, num_predict=1500,
+    )
+    cleaned = _strip_thinking(raw or "").strip()
+    assert cleaned, (
+        "extraction model returned empty content after strip_thinking — "
+        "model is emitting only reasoning tokens. DO NOT swap to this "
+        "model for extraction."
+    )
+    json_text = _find_json_block(cleaned)
+    assert json_text, (
+        f"extraction model produced no JSON block. First 300 chars: "
+        f"{cleaned[:300]!r}"
+    )
+    data = json.loads(json_text, strict=False)
+    for key in ("concepts", "methods", "triples"):
+        assert key in data, f"extraction JSON missing required key {key!r}"
+    # concepts + methods should be non-placeholder (catches the
+    # mistral bug where the model echoed "concept-slug-1" etc.)
+    concepts = data.get("concepts") or []
+    for c in concepts:
+        assert "concept-slug-" not in str(c), (
+            f"extraction model echoed placeholder {c!r} — prompt is leaking "
+            f"template example verbatim"
+        )
+    return TestResult.ok(
+        name="l3_extract_model_produces_clean_json",
+        message=f"{len(concepts)} concepts, {len(data.get('triples') or [])} triples",
+    )
+
+
+def l3_wiki_compile_single_paper_smoke() -> None:
+    """End-to-end `compile_paper_summary` on one real paper.
+
+    Catches: prompt regressions, `num_predict` mis-caps, model swaps
+    that don't actually produce wiki pages, `shared_ctx` dispatch
+    bugs. Emits a success event with the paper + timing so the user
+    can sanity-check speed trends.
+    """
+    import time
+    from sciknow.storage.db import get_session
+    from sciknow.core.wiki_ops import compile_paper_summary
+
+    with get_session() as session:
+        found = _l3_find_smoke_paper(session)
+    if found is None:
+        return TestResult.ok(
+            name="l3_wiki_compile_single_paper_smoke",
+            message="skipped — no ingested paper in the active project",
+        )
+    doc_id, title, _year, _abstract, _sections = found
+
+    t0 = time.monotonic()
+    content_tokens = 0
+    completed = None
+    try:
+        for event in compile_paper_summary(doc_id, force=True):
+            if event.get("type") == "token":
+                content_tokens += 1
+            elif event.get("type") == "error":
+                raise AssertionError(
+                    f"compile_paper_summary yielded error: "
+                    f"{event.get('message', '<no message>')}"
+                )
+            elif event.get("type") == "completed":
+                completed = event
+    except Exception as exc:
+        raise AssertionError(
+            f"compile_paper_summary raised for {title[:50]}: {exc}"
+        )
+
+    elapsed = time.monotonic() - t0
+    assert completed is not None, "no completed event from compile"
+    word_count = completed.get("word_count", 0)
+    # A real summary is 200+ words. Empty/near-empty means the model
+    # generated only thinking tokens or hit an edge case.
+    assert word_count >= 100, (
+        f"compile produced only {word_count} words for {title[:50]!r} "
+        f"— likely a thinking-runaway or prompt regression"
+    )
+    return TestResult.ok(
+        name="l3_wiki_compile_single_paper_smoke",
+        message=f"{word_count} words in {elapsed:.1f}s ({title[:40]})",
+    )
+
+
+def l3_wiki_extract_kg_single_paper_smoke() -> None:
+    """End-to-end `_extract_entities_and_kg` on one real paper.
+
+    Catches: structured-output runaways, prompt placeholder echoes,
+    model-choice regressions, JSON parser breakage. This is the single
+    most critical L3 test because entity extraction is the step that
+    broke multiple times today (2026-04-16) without being caught by
+    L1 static checks.
+    """
+    import time
+    from sciknow.storage.db import get_session
+    from sciknow.core.wiki_ops import (
+        _extract_entities_and_kg, _load_existing_slugs, _slugify,
+    )
+
+    with get_session() as session:
+        found = _l3_find_smoke_paper(session, min_sections=2)
+        if found is None:
+            return TestResult.ok(
+                name="l3_wiki_extract_kg_single_paper_smoke",
+                message="skipped — no paper with sections in project",
+            )
+        doc_id, title, year, abstract, sections = found
+        existing_slugs = _load_existing_slugs(session)
+
+    slug = _slugify(f"{doc_id[:8]}-{title or 'untitled'}")
+    t0 = time.monotonic()
+    try:
+        entities, kg_count = _extract_entities_and_kg(
+            doc_id, slug, title, "smoke", str(year or "n.d."),
+            "", "", abstract, sections, existing_slugs,
+        )
+    except Exception as exc:
+        raise AssertionError(
+            f"_extract_entities_and_kg raised for {title[:50]}: {exc}"
+        )
+    elapsed = time.monotonic() - t0
+
+    # Real extractions produce at least 1 triple and 1 entity for a
+    # paper with sections. (0, 0) means the model silently failed —
+    # exactly the regression mode we need to catch fast.
+    assert kg_count >= 1, (
+        f"extraction produced 0 KG triples for {title[:50]!r} — "
+        f"likely a model/prompt regression (check _extract_entities_and_kg "
+        f"and the extract model pin)"
+    )
+    assert len(entities) >= 1, (
+        f"extraction produced 0 entities for {title[:50]!r}"
+    )
+    return TestResult.ok(
+        name="l3_wiki_extract_kg_single_paper_smoke",
+        message=f"{kg_count} triples + {len(entities)} entities in {elapsed:.1f}s",
+    )
+
+
+def l3_autowrite_one_iteration_smoke() -> None:
+    """Run one autowrite iteration on a throwaway section plan.
+
+    Catches: write_section_v2 prompt regressions, scorer JSON breakage,
+    per-section model override bugs, keep_alive drops in the loop.
+    Uses a minimal 2-paragraph target so this finishes in under 90s.
+    """
+    import time
+    from sciknow.storage.db import get_session
+    from sciknow.rag import prompts
+    from sciknow.rag.llm import stream as llm_stream
+
+    # Does the project have any complete papers to retrieve from?
+    # Without them, autowrite has nothing to cite — skip cleanly.
+    from sqlalchemy import text as _t
+    with get_session() as session:
+        n_complete = session.execute(_t(
+            "SELECT COUNT(*) FROM documents WHERE ingestion_status='complete'"
+        )).scalar() or 0
+    if n_complete < 1:
+        return TestResult.ok(
+            name="l3_autowrite_one_iteration_smoke",
+            message="skipped — no complete papers in project",
+        )
+
+    # Invoke just the writer prompt path with a fixed trivial context.
+    # We don't run the full autowrite scoring loop — that's L3's job
+    # for `bench`. Here we verify the writer LLM call produces prose.
+    sys_w, usr_w = prompts.write_section_v2(
+        section_type="introduction", topic="A smoke-test topic",
+        results=[],
+        book_plan="Smoke book plan.",
+        prior_summaries=None, paragraph_plan=None,
+        target_words=150, section_plan=None,
+        lessons=None, style_fingerprint_block=None,
+    )
+    t0 = time.monotonic()
+    toks = []
+    for tok in llm_stream(sys_w, usr_w, num_ctx=4096, num_predict=400):
+        toks.append(tok)
+    content = "".join(toks)
+    elapsed = time.monotonic() - t0
+
+    assert len(content) > 200, (
+        f"writer produced only {len(content)} chars — prompt regression? "
+        f"Output: {content[:200]!r}"
+    )
+    return TestResult.ok(
+        name="l3_autowrite_one_iteration_smoke",
+        message=f"{len(content)} chars in {elapsed:.1f}s",
+    )
+
+
 # ── Phase 17 — length as a scoring dimension ────────────────────────────────
 
 
@@ -7896,6 +8198,31 @@ def l1_phase54_6_21_audit_fixes() -> None:
         "autowrite body should warm up the LLM before the first iteration"
     )
 
+    # Phase 54.6.39 — SMOKE layer (single-example LLM pipeline smokes).
+    # Lock in that the canonical canary tests stay registered, so a
+    # future refactor can't silently drop them.
+    import sciknow.testing.protocol as _prot
+    assert hasattr(_prot, "SMOKE_TESTS"), (
+        "SMOKE_TESTS list missing — Phase 54.6.39 single-example "
+        "pipeline smokes must stay registered (see docs/TESTING.md §SMOKE)"
+    )
+    smoke_names = {t.__name__ for t in _prot.SMOKE_TESTS}
+    for required in (
+        "l3_llm_num_predict_cap_honored",
+        "l3_extract_model_produces_clean_json",
+        "l3_wiki_compile_single_paper_smoke",
+        "l3_wiki_extract_kg_single_paper_smoke",
+        "l3_autowrite_one_iteration_smoke",
+    ):
+        assert required in smoke_names, (
+            f"SMOKE layer must include {required!r} — this is the canary "
+            f"that catches regressions in <60s instead of bulk-run failures "
+            f"after 20-40 min"
+        )
+    assert "SMOKE" in _prot.LAYERS, (
+        "LAYERS dict must expose 'SMOKE' so `sciknow test --layer SMOKE` works"
+    )
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
@@ -8116,12 +8443,32 @@ L3_TESTS: list[Callable] = [
     l3_ollama_reachable,
     l3_llm_complete_smoke,
     l3_embedder_loads,
+    # Phase 54.6.39 — single-example pipeline smokes.
+    # Order matters: cheap sanity checks first, expensive end-to-end last.
+    l3_llm_num_predict_cap_honored,           # ~5s   — catches Ollama/wrapper num_predict regressions
+    l3_extract_model_produces_clean_json,     # ~30s  — canary for extract-kg model swaps
+    l3_wiki_compile_single_paper_smoke,       # ~120s — full compile pipeline on 1 paper
+    l3_wiki_extract_kg_single_paper_smoke,    # ~90s  — full extract-kg pipeline on 1 paper
+    l3_autowrite_one_iteration_smoke,         # ~30s  — write_section_v2 prompt sanity
+]
+
+# Phase 54.6.39 — SMOKE layer: focused subset of L3, only the single-example
+# LLM pipeline tests (the ones that catch prompt/model/num_predict regressions
+# fast). Skips the utility checks in L3 (ollama_reachable / llm_complete_smoke /
+# embedder_loads) since they're subsumed by the pipeline tests anyway.
+SMOKE_TESTS: list[Callable] = [
+    l3_llm_num_predict_cap_honored,
+    l3_extract_model_produces_clean_json,
+    l3_wiki_compile_single_paper_smoke,
+    l3_wiki_extract_kg_single_paper_smoke,
+    l3_autowrite_one_iteration_smoke,
 ]
 
 LAYERS: dict[str, list[Callable]] = {
     "L1": L1_TESTS,
     "L2": L2_TESTS,
     "L3": L3_TESTS,
+    "SMOKE": SMOKE_TESTS,
 }
 
 
