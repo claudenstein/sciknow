@@ -218,6 +218,32 @@ def _wiki_model(model: str | None = None) -> str:
     return settings.llm_fast_model or settings.llm_model
 
 
+def _wiki_num_ctx(model: str) -> int:
+    """Phase 54.6.28 — single shared num_ctx for every LLM call in
+    compile_paper_summary so Ollama doesn't reload the model between
+    perspectives / summary / polish / entity-extraction calls.
+
+    Ollama treats each unique (model, num_ctx) pair as a separate
+    model instance. Changing num_ctx between calls evicts and
+    reloads — wiping the benefit of keep_alive=-1. A fixed ctx for
+    the whole compile pass means ONE model load per worker.
+
+    Thinking models (qwen3:30b-a3b, deepseek-r1, o1-like) emit long
+    chain-of-thought inside the response budget, so entity extraction
+    with schema-constrained JSON needs headroom: 24576 is the safe
+    floor established in Phase 54.6.8.
+
+    Dense non-thinking models (mistral, qwen2, qwen3.5, llama3)
+    don't blow up their own output; 8192 is plenty and loads ~2-3×
+    faster than 24576.
+    """
+    m = (model or "").lower()
+    thinking_markers = ("a3b", "r1", "o1", ":think", "thinking", "qwq")
+    if any(marker in m for marker in thinking_markers):
+        return 24576
+    return 8192
+
+
 def compile_paper_summary(
     doc_id: str,
     *,
@@ -323,11 +349,12 @@ def compile_paper_summary(
         content = summary_path.read_text(encoding="utf-8") if summary_path.exists() else section_text
     else:
         # Phase 54.6.26 — multi-perspective pre-research (from STORM).
-        # Before writing the summary, generate 3 expert perspectives
-        # that probe the paper from different angles. These are injected
-        # into the summary prompt as additional context so the LLM
-        # addresses depth it would otherwise miss. Cheap: ~100 tokens
-        # output, no retrieval, same model with keep_alive=-1.
+        # Phase 54.6.28 — use ONE num_ctx across all 4 LLM calls so
+        # Ollama keeps the model resident instead of reloading between
+        # perspectives / summary / polish / entity-extraction (each
+        # unique num_ctx is a separate Ollama model instance).
+        shared_ctx = _wiki_num_ctx(model)
+
         perspectives_text = ""
         try:
             from sciknow.rag.llm import complete as llm_complete
@@ -339,7 +366,7 @@ def compile_paper_summary(
             )
             raw_perspectives = _strip_thinking(
                 llm_complete(p_sys, p_usr, model=model,
-                             temperature=0.3, num_ctx=4096,
+                             temperature=0.3, num_ctx=shared_ctx,
                              keep_alive=-1) or ""
             ).strip()
             if raw_perspectives:
@@ -365,7 +392,8 @@ def compile_paper_summary(
         )
 
         tokens: list[str] = []
-        for tok in llm_stream(system, user, model=model, keep_alive=-1):
+        for tok in llm_stream(system, user, model=model,
+                              num_ctx=shared_ctx, keep_alive=-1):
             tokens.append(tok)
             yield {"type": "token", "text": tok}
 
@@ -380,7 +408,7 @@ def compile_paper_summary(
             pol_sys, pol_usr = wiki_prompts.wiki_polish(content)
             polished = _strip_thinking(
                 llm_complete(pol_sys, pol_usr, model=model,
-                             temperature=0.1, num_ctx=8192,
+                             temperature=0.1, num_ctx=shared_ctx,
                              keep_alive=-1) or ""
             ).strip()
             if polished and len(polished) > 100:
@@ -405,12 +433,17 @@ def compile_paper_summary(
                    "detail": "Embedding skipped (GPU VRAM full)"}
 
     # Combined entity + KG extraction in a single LLM call (speedup: 2 calls → 1)
+    # Phase 54.6.28 — pass shared_ctx so entity extraction doesn't
+    # reload the model with a different num_ctx.
     yield {"type": "progress", "stage": "extracting",
            "detail": "Extracting entities + knowledge graph..."}
+    # shared_ctx is defined in the not-skipped branch above; in the
+    # skip_summary branch we still need it for entity-only backfill.
+    _ctx_for_entities = locals().get("shared_ctx") or _wiki_num_ctx(model)
     entities, kg_count = _extract_entities_and_kg(
         doc_id, slug, title, author_str, str(year or "n.d."),
         kw_str, dom_str, abstract or "", section_text,
-        existing_slugs, model=model,
+        existing_slugs, model=model, num_ctx=_ctx_for_entities,
     )
 
     _append_log(f"ingest | {title} → [[{slug}]] ({kg_count} triples, {len(entities)} entities)")
@@ -422,8 +455,14 @@ def compile_paper_summary(
 def _extract_entities_and_kg(
     doc_id, slug, title, authors, year, keywords, domains,
     abstract, sections, existing_slugs, model=None,
+    num_ctx: int | None = None,
 ) -> tuple[list[str], int]:
-    """Combined entity + KG triple extraction in one LLM call."""
+    """Combined entity + KG triple extraction in one LLM call.
+
+    ``num_ctx`` (Phase 54.6.28) lets callers pin a shared context size
+    across all LLM calls in compile_paper_summary so Ollama doesn't
+    reload the model between calls. When None, uses 24576 for safety.
+    """
     from sciknow.rag import wiki_prompts
     from sciknow.rag.llm import complete as llm_complete
     from sciknow.storage.db import get_session
@@ -475,8 +514,9 @@ def _extract_entities_and_kg(
         # blanket fix. The 24576 ctx stays as a safety net for
         # models that don't honor /no_think.
         usr_e_no_think = (usr_e or "").rstrip() + "\n\n/no_think"
+        effective_ctx = num_ctx if num_ctx is not None else 24576
         raw = llm_complete(sys_e, usr_e_no_think, model=model,
-                           temperature=0.0, num_ctx=24576,
+                           temperature=0.0, num_ctx=effective_ctx,
                            keep_alive=-1, format=extraction_schema)
         # Thinking models sometimes leak <think>…</think> even under
         # structured output when /no_think isn't honored — strip them

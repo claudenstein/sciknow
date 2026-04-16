@@ -7575,9 +7575,22 @@ def l1_phase54_wiki_browsing_mvp() -> None:
     from sciknow.core import wiki_ops as _wo2
     from sciknow.rag import wiki_prompts as _wp
     src_extract = _inspect.getsource(_wo2._extract_entities_and_kg)
-    assert "num_ctx=24576" in src_extract, (
-        "wiki extraction should be at num_ctx=24576 (Phase 54.6.8 — "
-        "thinking-model headroom after the empty-JSON regression)"
+    # Phase 54.6.28 — ctx is now parameterised so compile_paper_summary
+    # can share a single num_ctx across all 4 LLM calls (prevents
+    # Ollama model reloads between perspectives / summary / polish /
+    # entity-extraction). 24576 remains the safe default when no
+    # caller override is passed — verified via _wiki_num_ctx for
+    # thinking models.
+    assert "num_ctx=effective_ctx" in src_extract and "24576" in src_extract, (
+        "wiki extraction should pass num_ctx=effective_ctx with 24576 "
+        "as the thinking-model default (Phase 54.6.8 + 54.6.28)"
+    )
+    from sciknow.core.wiki_ops import _wiki_num_ctx as _wnc
+    assert _wnc("qwen3:30b-a3b") == 24576, (
+        "thinking model must resolve to 24576 ctx"
+    )
+    assert _wnc("mistral:7b") == 8192, (
+        "non-thinking model must resolve to 8192 ctx (faster load)"
     )
     assert "/no_think" in src_extract, (
         "wiki extraction should append /no_think for Qwen3-family "
