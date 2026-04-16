@@ -7616,9 +7616,12 @@ def l1_phase54_wiki_browsing_mvp() -> None:
         "head-of-line-blocking pairing constraint inline"
     )
     # Default opts OUT of parallelism — user must measure first.
-    from sciknow.config import settings as _settings
-    assert _settings.wiki_compile_workers == 1, (
-        "wiki_compile_workers default must stay at 1 (opt-in); the "
+    # Check the field default (not the runtime setting, which the user
+    # may have overridden via WIKI_COMPILE_WORKERS in .env).
+    from sciknow.config import Settings as _SettingsCls
+    _default_workers = _SettingsCls.model_fields["wiki_compile_workers"].default
+    assert _default_workers == 1, (
+        "wiki_compile_workers field default must stay at 1 (opt-in); the "
         "MoE + single-GPU speedup is hardware-dependent and can be "
         "negative under VRAM pressure"
     )

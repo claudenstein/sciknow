@@ -322,6 +322,36 @@ def compile_paper_summary(
         summary_path = settings.wiki_dir / "papers" / f"{slug}.md"
         content = summary_path.read_text(encoding="utf-8") if summary_path.exists() else section_text
     else:
+        # Phase 54.6.26 — multi-perspective pre-research (from STORM).
+        # Before writing the summary, generate 3 expert perspectives
+        # that probe the paper from different angles. These are injected
+        # into the summary prompt as additional context so the LLM
+        # addresses depth it would otherwise miss. Cheap: ~100 tokens
+        # output, no retrieval, same model with keep_alive=-1.
+        perspectives_text = ""
+        try:
+            from sciknow.rag.llm import complete as llm_complete
+            p_sys, p_usr = wiki_prompts.wiki_perspectives(
+                title=title, authors=author_str,
+                year=str(year or "n.d."),
+                abstract=abstract or "",
+                sections=section_text[:3000],
+            )
+            raw_perspectives = _strip_thinking(
+                llm_complete(p_sys, p_usr, model=model,
+                             temperature=0.3, num_ctx=4096,
+                             keep_alive=-1) or ""
+            ).strip()
+            if raw_perspectives:
+                perspectives_text = (
+                    "\n\nExpert perspectives to address in your summary:\n"
+                    + raw_perspectives
+                )
+                yield {"type": "progress", "stage": "perspectives",
+                       "detail": f"Generated expert perspectives"}
+        except Exception:
+            pass  # best-effort; if it fails, write without perspectives
+
         yield {"type": "progress", "stage": "writing",
                "detail": f"Compiling summary: {title or doc_id[:8]}..."}
 
@@ -329,7 +359,8 @@ def compile_paper_summary(
             title=title, authors=author_str, year=str(year or "n.d."),
             journal=journal or "", doi=doi or "",
             keywords=kw_str, domains=dom_str,
-            abstract=abstract or "", sections=section_text,
+            abstract=abstract or "",
+            sections=section_text + perspectives_text,
             existing_slugs=existing_slugs,
         )
 
@@ -339,6 +370,25 @@ def compile_paper_summary(
             yield {"type": "token", "text": tok}
 
         content = _strip_thinking("".join(tokens))
+
+        # Phase 54.6.26 — polishing pass (from STORM Article Polishing).
+        # Quick cleanup: remove duplication, smooth transitions, fix
+        # formatting. Uses the same model with keep_alive=-1 so no
+        # model-swap overhead. Best-effort — if it fails, save the
+        # unpolished version (still perfectly usable).
+        try:
+            pol_sys, pol_usr = wiki_prompts.wiki_polish(content)
+            polished = _strip_thinking(
+                llm_complete(pol_sys, pol_usr, model=model,
+                             temperature=0.1, num_ctx=8192,
+                             keep_alive=-1) or ""
+            ).strip()
+            if polished and len(polished) > 100:
+                content = polished
+                yield {"type": "progress", "stage": "polished",
+                       "detail": "Wiki page polished"}
+        except Exception:
+            pass  # save unpolished — still good
 
         # Save
         with get_session() as session:

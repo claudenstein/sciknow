@@ -4040,6 +4040,27 @@ def _autowrite_section_body(
                        "detail": f"Weak coverage: {', '.join(weak_topics)}. "
                                  f"Consider: sciknow db expand -q \"{weak_topics[0]}\""}
 
+        # Phase 54.6.26 — Adaptive revision (from WriteHERE's dynamic
+        # planning). When scoring reveals completeness gaps or
+        # missing_topics, run a TARGETED re-retrieval for the weakest
+        # area before revising. This gives the revision prompt fresh
+        # evidence it didn't have in the initial write pass. The extra
+        # results are APPENDED to the existing results, not replaced.
+        if missing and weakest in ("completeness", "length"):
+            for gap_query in missing[:2]:
+                try:
+                    with get_session() as session:
+                        extra_results, _ = _retrieve(
+                            session, qdrant, gap_query,
+                            candidate_k=10, context_k=3,
+                        )
+                        if extra_results:
+                            results = results + extra_results
+                            yield {"type": "progress", "stage": "adaptive_retrieval",
+                                   "detail": f"Found {len(extra_results)} extra passages for: {gap_query[:50]}"}
+                except Exception:
+                    pass
+
         # Revise (Fix 3: pass writer's results to revision context)
         log.stage("revising", iteration=iteration + 1)
         yield {"type": "progress", "stage": "revising",

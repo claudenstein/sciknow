@@ -1,9 +1,10 @@
 """
-4-layer metadata extraction:
-  1. PyMuPDF  — embedded PDF fields
-  2. Crossref — authoritative by DOI
-  3. arXiv    — for preprints by arXiv ID
-  4. LLM      — Ollama fallback from markdown text
+5-layer metadata extraction:
+  1. PyMuPDF           — embedded PDF fields
+  2. Crossref          — authoritative by DOI
+  3. arXiv             — for preprints by arXiv ID
+  3.5. Semantic Scholar — title search when DOI/arXiv missed (Phase 54.6.26)
+  4. LLM               — Ollama fallback from markdown text
 """
 import json
 import re
@@ -59,6 +60,15 @@ def extract(pdf_path: Path, markdown_text: str) -> PaperMeta:
     # Layer 3: arXiv
     if meta.arxiv_id and not meta.title:
         _layer_arxiv(meta)
+
+    # Layer 3.5: Semantic Scholar — title search when neither DOI
+    # nor arXiv ID yielded metadata. Phase 54.6.26 (from
+    # PaperOrchestra's citation-verification pattern). Free API,
+    # 200M+ papers, no key needed.
+    if not meta.title and not meta.doi:
+        candidate_title = _extract_title_from_markdown(markdown_text)
+        if candidate_title:
+            _layer_semantic_scholar(candidate_title, meta)
 
     # Layer 4: LLM fallback — also runs if PyMuPDF returned a garbage title
     if not meta.title or _is_garbage_title(meta.title):
@@ -804,6 +814,74 @@ Return ONLY valid JSON with these fields (use null for missing fields):
 Paper text:
 {text}
 """
+
+
+def _layer_semantic_scholar(candidate_title: str, meta: PaperMeta) -> None:
+    """Phase 54.6.26 — Semantic Scholar title search (from PaperOrchestra's
+    citation-verification pattern). Free API, 200M+ papers, no key needed.
+
+    Runs ONLY when DOI + arXiv both missed and we have a candidate title
+    from markdown heading extraction. If the top hit is a strong match
+    (>80% token overlap), populate DOI + metadata from S2.
+    """
+    import logging
+    logger = logging.getLogger("sciknow.metadata")
+    try:
+        query = candidate_title[:200].strip()
+        if len(query) < 10:
+            return
+        with httpx.Client(timeout=15) as client:
+            resp = client.get(
+                "https://api.semanticscholar.org/graph/v1/paper/search",
+                params={
+                    "query": query,
+                    "limit": 3,
+                    "fields": "title,year,authors,externalIds,journal,abstract",
+                },
+            )
+        if resp.status_code != 200:
+            return
+        data = resp.json()
+        hits = data.get("data") or []
+        if not hits:
+            return
+
+        # Pick the best title match
+        q_words = set(query.lower().split())
+        best = None
+        best_overlap = 0.0
+        for hit in hits:
+            h_title = (hit.get("title") or "").strip()
+            if not h_title:
+                continue
+            h_words = set(h_title.lower().split())
+            if not q_words or not h_words:
+                continue
+            overlap = len(q_words & h_words) / max(len(q_words), len(h_words))
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best = hit
+
+        if best is None or best_overlap < 0.6:
+            return
+
+        meta.title = best.get("title") or meta.title
+        meta.year = meta.year or best.get("year")
+        meta.abstract = meta.abstract or (best.get("abstract") or "")[:3000]
+        ext = best.get("externalIds") or {}
+        if ext.get("DOI") and not meta.doi:
+            meta.doi = normalize_doi(ext["DOI"])
+        if ext.get("ArXiv") and not meta.arxiv_id:
+            meta.arxiv_id = ext["ArXiv"]
+        authors = best.get("authors") or []
+        if authors and not meta.authors:
+            meta.authors = [{"name": a.get("name", "")} for a in authors]
+        j = best.get("journal") or {}
+        if j.get("name") and not meta.journal:
+            meta.journal = j["name"]
+        meta.source = "semantic_scholar"
+    except Exception as exc:
+        logger.debug("Semantic Scholar lookup failed: %s", exc)
 
 
 def _layer_llm(text: str, meta: PaperMeta) -> None:

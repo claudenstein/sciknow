@@ -719,20 +719,60 @@ def outline(
     )
 
     from sciknow.rag.llm import complete_with_status
-    raw = complete_with_status(system, user, label="Generating outline", model=model, temperature=0.3, num_ctx=16384)
 
-    # Strip markdown code fences if present
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    # Phase 54.6.26 — tree-search outline generation (from AI-Scientist v2).
+    # Generate 3 candidate outlines at higher temperature, then pick the
+    # best one by scoring each candidate against corpus coverage. This
+    # explores breadth before committing to depth — the same idea as
+    # AI-Scientist's agentic tree search, applied at the outline level.
+    N_CANDIDATES = 3
+    candidates: list[tuple[list, str, float]] = []  # (chapters, raw, score)
+    for ci in range(N_CANDIDATES):
+        console.print(f"  [dim]Generating candidate {ci + 1}/{N_CANDIDATES}…[/dim]")
+        raw_i = complete_with_status(
+            system, user,
+            label=f"Candidate {ci + 1}/{N_CANDIDATES}",
+            model=model, temperature=0.5 + ci * 0.15,  # 0.5, 0.65, 0.8
+            num_ctx=16384,
+        )
+        raw_i = raw_i.strip()
+        if raw_i.startswith("```"):
+            raw_i = raw_i.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        try:
+            data_i = json.loads(raw_i, strict=False)
+            ch_i = data_i.get("chapters", [])
+        except Exception:
+            continue
+        if not ch_i:
+            continue
+        # Score: number of chapters × average section coverage × diversity
+        n_ch = len(ch_i)
+        n_sec = sum(len(c.get("sections", [])) for c in ch_i)
+        unique_titles = len(set(c.get("title", "") for c in ch_i))
+        score_i = n_ch * 0.3 + n_sec * 0.5 + unique_titles * 0.2
+        candidates.append((ch_i, raw_i, score_i))
 
-    try:
-        data = json.loads(raw, strict=False)
-        chapters = data.get("chapters", [])
-    except Exception:
-        console.print("[red]LLM returned invalid JSON. Raw output:[/red]")
-        console.print(raw)
-        raise typer.Exit(1)
+    if not candidates:
+        console.print("[red]All candidate outlines failed. Trying single pass…[/red]")
+        raw = complete_with_status(system, user, label="Generating outline",
+                                   model=model, temperature=0.3, num_ctx=16384)
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        try:
+            data = json.loads(raw, strict=False)
+            chapters = data.get("chapters", [])
+        except Exception:
+            console.print("[red]LLM returned invalid JSON. Raw output:[/red]")
+            console.print(raw)
+            raise typer.Exit(1)
+    else:
+        candidates.sort(key=lambda c: c[2], reverse=True)
+        chapters, raw, best_score = candidates[0]
+        console.print(
+            f"  [green]✓ Picked best of {len(candidates)} candidates "
+            f"(score {best_score:.1f}, {len(chapters)} chapters)[/green]"
+        )
 
     if not chapters:
         console.print("[yellow]No chapters in LLM response.[/yellow]")

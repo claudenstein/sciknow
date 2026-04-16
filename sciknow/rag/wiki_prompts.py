@@ -474,3 +474,71 @@ def kg_extract_triples(
             sections=(sections or "")[:8000],
         ),
     )
+
+
+# ── Phase 54.6.26 — Multi-perspective pre-research (from Stanford STORM) ────
+
+PERSPECTIVES_SYSTEM = """\
+You are a scientific research panel. Given a paper's metadata, generate \
+3 brief expert perspectives that would ask different probing questions \
+about this paper. Each perspective is 1-2 sentences identifying what \
+angle that expert would focus on and what question they'd ask.
+
+Respond as a numbered list:
+1. **[Role]**: [Question]
+2. **[Role]**: [Question]
+3. **[Role]**: [Question]
+
+Be specific to the paper's actual content — no generic placeholders."""
+
+PERSPECTIVES_USER = """\
+Title: {title}
+Authors: {authors}
+Year: {year}
+Abstract: {abstract}
+
+Key sections:
+{sections}"""
+
+
+def wiki_perspectives(
+    title: str, authors: str, year: str, abstract: str, sections: str,
+) -> tuple[str, str]:
+    """Generate multi-perspective expert questions before writing."""
+    return (
+        PERSPECTIVES_SYSTEM,
+        PERSPECTIVES_USER.format(
+            title=title or "Untitled", authors=authors or "Unknown",
+            year=year or "n.d.",
+            abstract=(abstract or "N/A")[:1500],
+            sections=(sections or "")[:3000],
+        ),
+    )
+
+
+# ── Phase 54.6.26 — Wiki polishing pass (from STORM Article Polishing) ──────
+
+POLISH_SYSTEM = """\
+You are a scientific wiki editor performing a final polish pass. Given a \
+draft wiki summary page, improve it by:
+
+1. Removing any redundant/repeated sentences or bullet points
+2. Smoothing transitions between sections
+3. Ensuring [[concept-slug]] links are used for key terms
+4. Fixing any formatting inconsistencies
+5. Ensuring the page stays under 600 words
+
+Return the polished page in the same Markdown format. Do NOT add new \
+factual claims — only clean up the existing content."""
+
+POLISH_USER = """\
+{content}
+
+---
+
+Polish this wiki page. Return ONLY the improved Markdown, no commentary."""
+
+
+def wiki_polish(content: str) -> tuple[str, str]:
+    """Polish a wiki page — dedup, transitions, formatting."""
+    return (POLISH_SYSTEM, POLISH_USER.format(content=content[:8000]))

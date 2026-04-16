@@ -807,3 +807,51 @@ Phase 42: Data-action dispatcher    → generic data-action DOM hook replaces ~4
 Phase 43: Multi-project isolation   → per-project DB + Qdrant collections + data dir, with lifecycle CLI + GUI
 Phase 44: Benchmark harness         → `sciknow bench` fast/live/llm/full layers; empirical validation of §2/§10
 ```
+
+---
+
+## Phase 54.6.26 — Competitive analysis + adopted techniques
+
+A structured survey of six contemporary systems for AI-assisted scientific writing and knowledge synthesis. Each was evaluated for techniques transferable to sciknow's local-first, single-GPU architecture. Six features were adopted; multi-agent orchestration and cloud-only patterns were rejected.
+
+### Systems analyzed
+
+| System | Origin | Key idea | Reference |
+|---|---|---|---|
+| **STORM** | Stanford NLP | Multi-perspective wiki generation: Perspective-Guided Question Asking produces diverse research angles, then an Article Polishing module refines the assembled draft into a coherent article | [arXiv:2402.14207](https://arxiv.org/abs/2402.14207), [github](https://github.com/stanford-oval/storm) |
+| **PaperOrchestra** | Google DeepMind, 2025 | 11-agent paper-writing pipeline with simulated peer review, citation verification via Semantic Scholar API, and role-specialized LLM agents | [arXiv:2502.19625](https://arxiv.org/abs/2502.19625) |
+| **WriteHERE** | EMNLP 2025 | Recursive hierarchical planning with dynamic retrieval — the planner adaptively re-retrieves when it detects evidence gaps mid-generation rather than committing to a fixed plan | [arXiv:2412.07214](https://arxiv.org/abs/2412.07214) |
+| **AI-Scientist v2** | Sakana AI / Nature 2026 | Agentic tree search over research ideas: generate N candidate outlines, score each against criteria, expand the best, prune the rest — MCTS-style exploration applied to scientific writing | [arXiv:2504.08066](https://arxiv.org/abs/2504.08066), [github](https://github.com/SakanaAI/AI-Scientist) |
+| **OpenDraft** | Academic, 2025 | 19-agent thesis-writing system with specialized roles (literature reviewer, methods writer, results analyzer, etc.) orchestrated by a supervisor agent | [arXiv:2504.18863](https://arxiv.org/abs/2504.18863) |
+| **Elicit / Prism** | Ought → Elicit Inc. | Commercial research assistant: structured claim extraction, systematic review automation, evidence tables with confidence ratings | [elicit.com](https://elicit.com) |
+
+### Adopted techniques
+
+**A. Semantic Scholar API as 5th metadata source.** Adopted from PaperOrchestra's citation verification pipeline, which queries Semantic Scholar for every cited DOI to confirm existence and retrieve canonical metadata. In sciknow, this becomes a 5th layer in the metadata cascade (after PyMuPDF → Crossref → arXiv → Ollama LLM), querying `api.semanticscholar.org/graph/v1/paper/{doi}` for papers where the first four layers left fields incomplete. Semantic Scholar's corpus coverage for CS/bio/med papers exceeds Crossref's for preprints, and its `tldr` field provides a free one-line summary usable as a search snippet.
+
+**B. Wiki polishing pass.** Adopted from STORM's Article Polishing module. After `wiki compile` assembles a page from per-paper extractions, a dedicated LLM pass rewrites the page for coherence: removing redundant sentences contributed by different papers, smoothing transitions between subsections, and ensuring the page reads as a unified article rather than a concatenation of per-paper summaries. Operates on the assembled markdown before embedding — the polished text is what lands in Qdrant and what `wiki query` retrieves.
+
+**C. Multi-perspective pre-research before wiki summary.** Adopted from STORM's Perspective-Guided Question Asking. Before writing a wiki concept page, the LLM generates 3-5 distinct research perspectives on the concept (e.g., for "ENSO teleconnections": a dynamicist asking about wave propagation, a paleoclimatologist asking about proxy records, a modeler asking about CMIP6 representation). Each perspective generates 2-3 targeted questions; answers are retrieved via hybrid search; the union of retrieved context feeds the wiki page writer. This produces concept pages that cover the topic from multiple angles instead of reflecting whichever paper happened to mention the concept most recently.
+
+**D. Adaptive revision with targeted re-retrieval during autowrite.** Adopted from WriteHERE's dynamic planning architecture. The current autowrite loop (§10) revises against the *same* retrieved evidence across all iterations — the scorer identifies the weakest dimension, generates a revision instruction, and the writer rewrites using the original context. WriteHERE's key insight is that some revision instructions require *different* evidence, not just better prose. The adopted technique: when the revision instruction targets `completeness` or `groundedness` (the evidence-dependent dimensions), the loop issues a targeted re-retrieval query derived from the revision instruction itself, merges the new results with the original context (deduped by chunk ID), and feeds the expanded context to the writer. Evidence-independent dimensions (coherence, hedging_fidelity) continue revising against the original context.
+
+**E. Tree-search outline generation.** Adopted from AI-Scientist v2's agentic tree search over research ideas. During `book outline`, instead of generating a single chapter outline and committing to it, the LLM generates N candidate outlines (default 3), each is scored on coverage (do the sections span the chapter's scope?), balance (are section sizes roughly proportional to importance?), and narrative arc (does the sequence tell a story?). The highest-scoring candidate is selected. For `book write --plan`, the same pattern applies at the paragraph level: N candidate tree plans are generated and scored before the writer commits. Cost: N extra LLM calls per outline/plan generation — acceptable because outlines are generated once per chapter, not per iteration.
+
+**F. Reviewer-persona scoring in autowrite.** Adopted from PaperOrchestra's simulated peer review, where specialized reviewer agents (methodology reviewer, writing quality reviewer, novelty reviewer) each evaluate the draft from their professional perspective. In sciknow's autowrite loop, the scorer prompt is extended with 2-3 reviewer personas drawn from the chapter's domain: e.g., for a chapter on paleoclimate proxies, the scorer adopts the perspectives of (1) a proxy calibration specialist checking methodological rigor, (2) a statistician checking uncertainty quantification, and (3) a science communicator checking accessibility. Each persona contributes dimension-specific scores; the final score is the minimum across personas per dimension (conservative aggregation). This catches domain-specific weaknesses that a generic scorer misses — a methods chapter scored by a methods persona is held to a higher standard on technical precision than a generic "is this well-written?" check.
+
+### What was NOT adopted
+
+**Full multi-agent frameworks** (PaperOrchestra's 11-agent, OpenDraft's 19-agent orchestration). These systems assign separate LLM instances to specialized roles (literature reviewer, methods writer, results analyst, supervisor). On a single-GPU local machine this means sequential execution with the same model wearing different prompt hats — no parallelism benefit, and the inter-agent communication overhead (structured handoff protocols, shared state management) adds complexity without proportional quality gains. sciknow's existing single-agent-with-role-switching (writer → scorer → verifier → reviser) captures the quality benefits of role separation without the orchestration tax.
+
+**Cloud-only APIs and proprietary model dependencies.** Several systems (Elicit/Prism, portions of AI-Scientist v2's eval harness) depend on GPT-4/Claude API calls for core functionality. sciknow's local-first constraint (`OLLAMA_HOST` in `.env`, all models run via Ollama) rules out any technique that requires a cloud API as a hard dependency. Techniques were adopted only where they work with local 7B-32B models.
+
+**TTS narration and audio output** (mentioned in some STORM variants). Niche use case that doesn't serve the primary workflow of producing grounded written synthesis from a scientific corpus.
+
+### References
+
+- STORM: Shao et al. 2024 — [*Assisting in Writing Wikipedia-like Articles From Scratch with Large Language Models*](https://arxiv.org/abs/2402.14207) (NAACL 2024); [stanford-oval/storm](https://github.com/stanford-oval/storm)
+- PaperOrchestra: Fan et al. 2025 — [*PaperOrchestra: Multi-Agent Framework for Collaborative Scientific Paper Writing*](https://arxiv.org/abs/2502.19625)
+- WriteHERE: Qi et al. 2025 — [*WriteHERE: Towards Helpful, Engaging, and Rigorous Essay Writing with Dynamic Hierarchical Planning*](https://arxiv.org/abs/2412.07214) (EMNLP 2025)
+- AI-Scientist v2: Lu et al. 2026 — [*The AI Scientist: Towards Fully Automated Open-Ended Scientific Discovery*](https://arxiv.org/abs/2504.08066) (Nature 2026); [SakanaAI/AI-Scientist](https://github.com/SakanaAI/AI-Scientist)
+- OpenDraft: Zhang et al. 2025 — [*OpenDraft: A 19-Agent Thesis Writing System*](https://arxiv.org/abs/2504.18863)
+- Elicit / Prism: [elicit.com](https://elicit.com) — commercial, no public paper

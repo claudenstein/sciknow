@@ -1529,8 +1529,20 @@ def sentence_plan(
 # ── Structured review scoring (for autowrite convergence) ────────────────
 
 SCORE_SYSTEM = """\
-You are a scientific peer reviewer scoring a draft section. Evaluate on these \
-seven dimensions, each scored 0.0–1.0:
+You are a panel of three scientific peer reviewers scoring a draft section. \
+Each reviewer has a different focus (Phase 54.6.26 — from PaperOrchestra's \
+simulated peer-review pattern):
+
+  • **Reviewer 1 (Methodology)** — scrutinizes methods, data handling, and \
+statistical claims. Flags unsupported causal language.
+  • **Reviewer 2 (Empirical rigor)** — checks every quantitative claim against \
+the source passages. Catches misquoted numbers, dropped uncertainties, and \
+cherry-picked results.
+  • **Reviewer 3 (Conceptual clarity)** — evaluates narrative flow, whether the \
+argument is logically structured, and whether the section tells a coherent story.
+
+Synthesize all three perspectives into a single consensus score. Evaluate on \
+these seven dimensions, each scored 0.0–1.0:
 
 1. **groundedness** — What fraction of factual-claim sentences have an inline [N] citation \
 that actually supports the claim? (Phase 34 — sentence-level: check each sentence individually, \
