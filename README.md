@@ -143,6 +143,22 @@ uv run sciknow watch seed                          # pre-populate upstream-repo 
 uv run sciknow backup schedule                     # daily auto-backup to archives/backups/
 ```
 
+### Adding new papers later
+
+Drop new PDFs into `projects/<slug>/data/inbox/` and run the master refresh
+command — it re-runs every step in the right order, skipping what's already
+done:
+
+```bash
+uv run sciknow refresh                 # full pipeline (including wiki)
+uv run sciknow refresh --no-wiki       # skip the hours-long wiki compile
+uv run sciknow refresh --dry-run       # preview what would run
+```
+
+Every step is idempotent, so `refresh` is safe to run any time. Use
+`--no-<step>` to skip individual steps (`--no-ingest`, `--no-cluster`,
+`--no-raptor`, `--no-wiki`, etc.).
+
 Once the web reader is up, the top bar gives you:
 
 | Action | What to click |

@@ -16,6 +16,7 @@ from sciknow.cli import draft as draft_module
 from sciknow.cli import feedback as feedback_module
 from sciknow.cli import ingest as ingest_module
 from sciknow.cli import project as project_module
+from sciknow.cli import refresh as refresh_module
 from sciknow.cli import search as search_module
 from sciknow.cli import spans as spans_module
 from sciknow.cli import watch as watch_module
@@ -67,6 +68,8 @@ def _startup(
 
 
 app.add_typer(backup_module.app, name="backup")
+# Phase 54.6.27 — master refresh command (re-run full pipeline on new papers)
+app.command(name="refresh")(refresh_module.refresh)
 app.add_typer(catalog_module.app, name="catalog")
 app.add_typer(db_module.app, name="db")
 app.add_typer(ingest_module.app, name="ingest")
