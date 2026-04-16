@@ -5506,6 +5506,22 @@ async def api_backups_download(dirname: str, filename: str):
                         media_type="application/octet-stream")
 
 
+@app.post("/api/backups/restore")
+async def api_backups_restore(request: Request):
+    """Trigger a restore from a backup set via _spawn_cli_streaming.
+    Body: {timestamp: "latest"|"20260415T030000Z", force: true|false}."""
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    ts = body.get("timestamp", "latest")
+    force = body.get("force", False)
+    job_id, _ = _create_job("backup_restore")
+    loop = asyncio.get_event_loop()
+    argv = ["backup", "restore", ts]
+    if force:
+        argv.append("--force")
+    _spawn_cli_streaming(job_id, argv, loop)
+    return JSONResponse({"job_id": job_id})
+
+
 @app.post("/api/backups/schedule")
 async def api_backups_schedule(request: Request):
     """Install or remove the daily cron. Body: {action: "enable"|"disable", hour: 3}."""
@@ -8268,6 +8284,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       </div>
       <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
         <button class="btn-primary" onclick="runBackupNow()">&#128190; Run Backup Now</button>
+        <button class="btn-secondary" onclick="restoreBackup()">&#128260; Restore Latest</button>
         <button class="btn-secondary" id="backup-schedule-btn" onclick="toggleBackupSchedule()">&#128339; Enable Daily Schedule</button>
       </div>
       <div id="backup-log" style="display:none;max-height:120px;overflow-y:auto;font-family:var(--font-mono);font-size:11px;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:8px;margin-bottom:12px;white-space:pre-wrap;"></div>
@@ -19545,6 +19562,44 @@ async function runBackupNow() {{
         log.scrollTop = log.scrollHeight;
       }} else if (evt.type === 'completed') {{
         log.textContent += '\\n\\u2713 Backup complete.\\n';
+        source.close();
+        refreshBackupsList();
+      }} else if (evt.type === 'error') {{
+        log.textContent += '\\u2717 ' + (evt.message || 'error') + '\\n';
+        source.close();
+      }}
+    }};
+    source.onerror = function() {{ source.close(); }};
+  }} catch (exc) {{
+    log.textContent += 'Failed: ' + exc + '\\n';
+  }}
+}}
+
+async function restoreBackup(ts) {{
+  const timestamp = ts || 'latest';
+  if (!confirm('Restore from backup "' + timestamp + '"?\\n\\nThis will destroy existing projects with matching slugs and replace them with the backup version. Qdrant vectors will need rebuilding after restore.\\n\\nContinue?')) return;
+  const log = document.getElementById('backup-log');
+  log.style.display = 'block';
+  log.textContent = 'Starting restore from ' + timestamp + '...\\n';
+  try {{
+    const res = await fetch('/api/backups/restore', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{timestamp: timestamp, force: true}}),
+    }});
+    const d = await res.json();
+    if (!res.ok) {{
+      log.textContent += 'Failed: ' + (d.detail || res.status) + '\\n';
+      return;
+    }}
+    const source = new EventSource('/api/stream/' + d.job_id);
+    source.onmessage = function(e) {{
+      const evt = JSON.parse(e.data);
+      if (evt.type === 'log') {{
+        log.textContent += evt.text + '\\n';
+        log.scrollTop = log.scrollHeight;
+      }} else if (evt.type === 'completed') {{
+        log.textContent += '\\n\\u2713 Restore complete. Restart the server to pick up the restored project.\\n';
         source.close();
         refreshBackupsList();
       }} else if (evt.type === 'error') {{

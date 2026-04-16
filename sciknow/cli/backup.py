@@ -423,3 +423,203 @@ def unschedule():
     _write_state(state)
 
     console.print("[green]✓ Backup schedule removed.[/green]")
+
+
+@app.command(name="restore")
+def restore(
+    timestamp: str = typer.Argument(
+        "latest",
+        help="Backup timestamp to restore (e.g. '20260415T030000Z'). "
+             "Use 'latest' to pick the most recent backup.",
+    ),
+    force: bool = typer.Option(False, "--force", "-f",
+        help="Destroy existing projects before restoring (use with care)."),
+    no_system: bool = typer.Option(False, "--no-system",
+        help="Skip restoring the system bundle (only restore project data)."),
+    project_slug: str = typer.Option("", "--project", "-p",
+        help="Restore a single project from the backup set (default: all)."),
+):
+    """Restore projects (and optionally system config) from a backup set.
+
+    By default restores ALL projects in the backup. Use ``--project``
+    to restore just one. Refuses to overwrite existing projects unless
+    ``--force`` is passed (which destroys the existing project first).
+
+    Examples:
+
+      sciknow backup restore                    # restore latest, all projects
+      sciknow backup restore --force            # destroy + restore latest
+      sciknow backup restore 20260415T030000Z   # restore a specific backup
+      sciknow backup restore --project my-proj  # restore just one project
+    """
+    state = _read_state()
+    backups = state.get("backups", [])
+    if not backups:
+        console.print("[red]No backups available.[/red]")
+        raise typer.Exit(1)
+
+    if timestamp == "latest":
+        entry = backups[-1]
+    else:
+        entry = next((b for b in backups if b["dir"] == timestamp
+                       or b.get("timestamp") == timestamp), None)
+        if entry is None:
+            console.print(f"[red]Backup '{timestamp}' not found.[/red]")
+            console.print(f"[dim]Available: {', '.join(b['dir'] for b in backups)}[/dim]")
+            raise typer.Exit(1)
+
+    run_dir = _backup_root() / entry["dir"]
+    if not run_dir.exists():
+        console.print(f"[red]Backup directory missing: {run_dir}[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[bold]Restoring from backup:[/bold] {entry['dir']}")
+
+    # Determine which project tars to restore
+    tar_files = sorted(run_dir.glob("*.skproj.tar"))
+    if project_slug:
+        tar_files = [t for t in tar_files if t.stem == project_slug]
+        if not tar_files:
+            console.print(f"[red]No archive for project '{project_slug}' in this backup.[/red]")
+            raise typer.Exit(1)
+
+    from sciknow.cli.project import (
+        _create_pg_database, _drop_pg_database, _ensure_init_dirs,
+        _delete_qdrant_collections_for_project, _pg_database_exists,
+    )
+    from sciknow.core.project import (
+        Project, get_active_project, validate_slug, write_active_slug,
+    )
+
+    restored: list[str] = []
+    for tar_path in tar_files:
+        console.print(f"\n[bold]Restoring:[/bold] {tar_path.name}")
+
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            with tarfile.open(tar_path, "r") as tf:
+                tf.extractall(tmp, filter="data")
+            staging = tmp / "skproj"
+            if not (staging / "manifest.txt").exists():
+                console.print(f"  [red]✗ Invalid archive (no manifest)[/red]")
+                continue
+
+            manifest: dict[str, str] = {}
+            for line in (staging / "manifest.txt").read_text().splitlines():
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    manifest[k.strip()] = v.strip()
+            slug = manifest.get("slug", "")
+            try:
+                validate_slug(slug)
+            except ValueError as exc:
+                console.print(f"  [red]✗ Bad slug: {exc}[/red]")
+                continue
+
+            project = Project(slug=slug, repo_root=get_active_project().repo_root)
+
+            if project.root.exists() or _pg_database_exists(project.pg_database):
+                if not force:
+                    console.print(
+                        f"  [yellow]⚠ Project {slug} already exists. "
+                        f"Pass --force to destroy and replace.[/yellow]"
+                    )
+                    continue
+                console.print(f"  [dim]Destroying existing {slug}…[/dim]")
+                try:
+                    _drop_pg_database(project.pg_database)
+                except Exception:
+                    pass
+                try:
+                    _delete_qdrant_collections_for_project(project)
+                except Exception:
+                    pass
+                if project.root.exists():
+                    shutil.rmtree(project.root)
+
+            # PG restore
+            try:
+                _create_pg_database(project.pg_database)
+                from sciknow.config import settings
+                env = os.environ.copy()
+                env["PGPASSWORD"] = settings.pg_password
+                res = subprocess.run([
+                    "pg_restore",
+                    "-h", settings.pg_host,
+                    "-p", str(settings.pg_port),
+                    "-U", settings.pg_user,
+                    "-d", project.pg_database,
+                    str(staging / "postgres.dump"),
+                ], env=env, capture_output=True, text=True)
+                if res.returncode != 0:
+                    console.print(f"  [red]pg_restore failed:[/red] {res.stderr[:300]}")
+                    continue
+                console.print(f"  [green]✓[/green] PG restored")
+            except Exception as exc:
+                console.print(f"  [red]✗ PG restore failed: {exc}[/red]")
+                continue
+
+            # Data directory
+            _ensure_init_dirs(project)
+            data_src = staging / "data"
+            if data_src.exists():
+                for child in data_src.iterdir():
+                    dest = project.data_dir / child.name
+                    if dest.exists():
+                        shutil.rmtree(dest) if dest.is_dir() else dest.unlink()
+                    shutil.move(str(child), str(dest))
+            console.print(f"  [green]✓[/green] data dir restored")
+
+            # Env overlay
+            env_src = staging / ".env.overlay"
+            if env_src.exists():
+                shutil.copy2(env_src, project.env_overlay_path)
+
+            # Qdrant note
+            snaps_dir = staging / "qdrant_snapshots"
+            if snaps_dir.exists() and any(snaps_dir.iterdir()):
+                console.print(
+                    "  [yellow]![/yellow] Qdrant vectors need rebuilding: "
+                    "run `sciknow db init` then "
+                    "`sciknow ingest directory <data>/processed/`"
+                )
+
+            restored.append(slug)
+
+    # System bundle
+    sys_bundle = run_dir / "sciknow-system.tar.gz"
+    if sys_bundle.exists() and not no_system:
+        console.print(f"\n[bold]Restoring system bundle…[/bold]")
+        from sciknow.core.project import _repo_root
+        root = _repo_root()
+        with tempfile.TemporaryDirectory() as tmp_str:
+            with tarfile.open(sys_bundle, "r:gz") as tf:
+                tf.extractall(Path(tmp_str), filter="data")
+            sys_stage = Path(tmp_str) / "sciknow-system"
+            for name in (".env", ".env.example", "pyproject.toml", "uv.lock",
+                         "alembic.ini", ".active-project"):
+                src = sys_stage / name
+                if src.exists():
+                    shutil.copy2(src, root / name)
+            mig_src = sys_stage / "migrations"
+            if mig_src.exists():
+                mig_dst = root / "migrations"
+                if mig_dst.exists():
+                    shutil.rmtree(mig_dst)
+                shutil.copytree(mig_src, mig_dst)
+        console.print(f"  [green]✓[/green] .env, pyproject.toml, uv.lock, "
+                      f"alembic.ini, migrations/ restored")
+        console.print(f"  [dim]Run `uv sync` to reinstall deps if pyproject.toml changed.[/dim]")
+
+    if restored:
+        write_active_slug(restored[0])
+        console.print(
+            f"\n[green]✓ Restored {len(restored)} project(s): "
+            f"{', '.join(restored)}[/green]"
+        )
+        console.print(
+            f"[dim]Active project set to: {restored[0]}. "
+            f"Run `sciknow db init` to rebuild Qdrant collections.[/dim]"
+        )
+    else:
+        console.print("\n[yellow]No projects were restored.[/yellow]")
