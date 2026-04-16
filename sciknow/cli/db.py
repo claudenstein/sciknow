@@ -4146,6 +4146,14 @@ def extract_visuals_cmd(
         _re.IGNORECASE,
     )
 
+    def _join_caption(c) -> str:
+        """MinerU returns captions as lists of strings. Normalize to str."""
+        if c is None:
+            return ""
+        if isinstance(c, list):
+            return " ".join(str(x) for x in c if x).strip()
+        return str(c).strip()
+
     extracted = 0
     skipped = 0
     papers_done = 0
@@ -4188,13 +4196,16 @@ def extract_visuals_cmd(
                 continue
 
             if btype == "table":
-                table_body = block.get("table_body") or block.get("html") or ""
-                caption = block.get("table_caption") or block.get("caption") or ""
+                table_body = (block.get("table_body") or block.get("html") or "")
+                caption = _join_caption(
+                    block.get("table_caption") or block.get("caption")
+                )
                 fig_match = _FIG_NUM_RE.search(caption or prev_text)
                 visuals_batch.append({
                     "document_id": doc_id, "kind": "table",
-                    "content": table_body[:10000],
-                    "caption": (caption or "")[:1000],
+                    "content": str(table_body)[:10000],
+                    "caption": caption[:1000],
+                    "asset_path": None,
                     "block_idx": idx,
                     "figure_num": fig_match.group(0) if fig_match else None,
                     "surrounding_text": prev_text,
@@ -4204,8 +4215,9 @@ def extract_visuals_cmd(
                 latex = block.get("text") or block.get("latex") or ""
                 visuals_batch.append({
                     "document_id": doc_id, "kind": "equation",
-                    "content": latex[:5000],
+                    "content": str(latex)[:5000],
                     "caption": None,
+                    "asset_path": None,
                     "block_idx": idx,
                     "figure_num": None,
                     "surrounding_text": prev_text,
@@ -4213,13 +4225,15 @@ def extract_visuals_cmd(
 
             elif btype == "image":
                 img_path = block.get("img_path") or ""
-                caption = block.get("image_caption") or block.get("caption") or ""
+                caption = _join_caption(
+                    block.get("image_caption") or block.get("caption")
+                )
                 fig_match = _FIG_NUM_RE.search(caption or prev_text)
                 visuals_batch.append({
                     "document_id": doc_id, "kind": "figure",
                     "content": caption[:2000],
-                    "caption": (caption or "")[:1000],
-                    "asset_path": img_path,
+                    "caption": caption[:1000],
+                    "asset_path": str(img_path) if img_path else None,
                     "block_idx": idx,
                     "figure_num": fig_match.group(0) if fig_match else None,
                     "surrounding_text": prev_text,
@@ -4229,8 +4243,9 @@ def extract_visuals_cmd(
                 code_body = block.get("text") or block.get("code_body") or ""
                 visuals_batch.append({
                     "document_id": doc_id, "kind": "code",
-                    "content": code_body[:10000],
+                    "content": str(code_body)[:10000],
                     "caption": None,
+                    "asset_path": None,
                     "block_idx": idx,
                     "figure_num": None,
                     "surrounding_text": prev_text,
@@ -4252,12 +4267,7 @@ def extract_visuals_cmd(
                                 (CAST(:document_id AS uuid), :kind, :content,
                                  :caption, :asset_path, :block_idx, :figure_num,
                                  :surrounding_text)
-                        """), {
-                            "asset_path": v.get("asset_path"),
-                            **{k: v[k] for k in ("document_id", "kind", "content",
-                                                   "caption", "block_idx",
-                                                   "figure_num", "surrounding_text")},
-                        })
+                        """), v)
                     session.commit()
                 extracted += len(visuals_batch)
                 papers_done += 1
