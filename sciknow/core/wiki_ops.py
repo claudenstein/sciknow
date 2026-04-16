@@ -371,7 +371,13 @@ def compile_paper_summary(
         # Ollama keeps the model resident instead of reloading between
         # perspectives / summary / polish / entity-extraction (each
         # unique num_ctx is a separate Ollama model instance).
-        shared_ctx = _wiki_num_ctx(model)
+        # Phase 54.6.34b — with --no-entities, we NEVER make the
+        # structured-output call that needed 24576 ctx for thinking-
+        # model headroom. The remaining calls (perspectives + summary +
+        # polish) fit comfortably in 8192. Using a smaller ctx here
+        # shrinks KV cache ~3× which lets us run more parallel workers
+        # AND reduces per-token latency.
+        shared_ctx = 8192 if skip_entities else _wiki_num_ctx(model)
 
         perspectives_text = ""
         try:
@@ -800,11 +806,16 @@ def compile_all(
     # first paper doesn't pay cold-start latency (~3-10s on a 7B model).
     # Uses the same ctx + batch settings the workload will use so
     # Ollama doesn't create a second instance on the first real call.
+    # Phase 54.6.34b — when skip_entities, the actual workload uses
+    # ctx=8192 (we never make the big-ctx structured-output call); warm
+    # up at 8192 to match, otherwise warmup wastes a load on a 24576
+    # instance that immediately gets evicted for the 8192 instance.
     from sciknow.rag.llm import warm_up as _llm_warm_up
     _resolved_model = _wiki_model(model)
+    _warmup_ctx = 8192 if skip_entities else _wiki_num_ctx(_resolved_model)
     _llm_warm_up(
         model=_resolved_model,
-        num_ctx=_wiki_num_ctx(_resolved_model),
+        num_ctx=_warmup_ctx,
         num_batch=1024,
     )
 
