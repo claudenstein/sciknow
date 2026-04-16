@@ -41,6 +41,8 @@ projects/
 *.tar.gz
 *.tar.bz2
 *.zip
+*.7z
+*.rar
 # Phase 43e — `sciknow project archive` writes here.
 archives/
 *.skproj.tar

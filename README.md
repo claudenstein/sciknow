@@ -175,6 +175,8 @@ See [`docs/PROJECTS.md`](docs/PROJECTS.md) for the full design.
 
 > **Phase 54.6.22:** `sciknow wiki repair` recovers `wiki_pages` rows whose disk file is missing (common after `project init --from-existing` runs AFTER a `db reset` has wiped the legacy `data/wiki/`). Concept stubs are regenerated cheaply (no LLM); paper_summary + synthesis rows can be `--prune`'d so the next `wiki compile` recreates them from scratch. Also: hybrid-search Qdrant fetches now use a payload include-list (skip 4-5 unused fields × 50 candidates per query) and `wiki list_pages` replaced its per-row LATERAL paper_metadata join with a single bulk SELECT + dict merge.
 
+> **Phase 54.6.23:** five verified bugs from the second-round wiki + ingestion audit. (1) `wiki compile` now runs entity+KG extraction even on the skip path when no triples exist for a doc — pre-fix, a paper whose summary landed but whose entity pass was rolled back was permanently stuck. (2) Citation extraction during ingest now bulk-fetches the DOI→doc_id map in one query instead of one SELECT per reference (N+1 → 1). (3) Empty-sections PDFs now raise and get marked `failed` with a specific `ingestion_error` instead of silently landing as `complete` with zero chunks. (4) Metadata-extraction LLM fallback has an explicit 60s timeout (pre-fix, a hung Ollama would block ingest indefinitely). (5) Concept `source_doc_ids` array de-dupes on append so a doc that updates the same concept twice no longer accumulates duplicate UUIDs.
+
 ### When to use what
 
 | I want to... | Use this |

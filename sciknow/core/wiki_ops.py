@@ -248,16 +248,34 @@ def compile_paper_summary(
 
         slug = _slugify(f"{doc_id[:8]}-{title or 'untitled'}")
 
-        # Check if already compiled (skip unless force)
+        # Check if already compiled (skip unless force). Phase 54.6.23 —
+        # even when the summary exists, we still check whether entities
+        # + KG triples have been extracted for this doc. Pre-fix, a
+        # paper whose summary landed but whose entity pass never ran
+        # (or was rolled back by a DB wipe after the fact) would be
+        # permanently stuck — the skip path returned before
+        # _extract_entities_and_kg could backfill concept pages.
+        # Now: skip iff summary exists AND KG triples exist. Otherwise
+        # fall through to entity extraction (without re-doing the
+        # expensive summary LLM call).
+        skip_summary = False
+        need_entities = True
         if not force:
             existing = session.execute(text(
                 "SELECT id FROM wiki_pages WHERE slug = :slug"
             ), {"slug": slug}).fetchone()
             if existing:
-                yield {"type": "progress", "stage": "skip",
-                       "detail": f"Already compiled: {slug}"}
-                yield {"type": "completed", "slug": slug, "skipped": True}
-                return
+                skip_summary = True
+                kg_count = session.execute(text(
+                    "SELECT COUNT(*) FROM knowledge_graph "
+                    "WHERE source_doc_id::text = :did"
+                ), {"did": doc_id}).scalar() or 0
+                need_entities = (kg_count == 0)
+                if not need_entities:
+                    yield {"type": "progress", "stage": "skip",
+                           "detail": f"Already compiled: {slug}"}
+                    yield {"type": "completed", "slug": slug, "skipped": True}
+                    return
 
         # Load section contents
         sections = session.execute(text("""
@@ -278,37 +296,49 @@ def compile_paper_summary(
     kw_str = ", ".join(keywords or [])
     dom_str = ", ".join(domains or [])
 
-    yield {"type": "progress", "stage": "writing",
-           "detail": f"Compiling summary: {title or doc_id[:8]}..."}
+    # Phase 54.6.23 — only call the expensive summary LLM when the
+    # summary is actually missing. If we're here because entities are
+    # missing but the summary is present, skip straight to entity
+    # extraction with the existing on-disk content.
+    if skip_summary:
+        yield {"type": "progress", "stage": "entity_only",
+               "detail": f"Summary exists, backfilling entities: {slug}"}
+        # Read the already-saved content from disk (or fall back to
+        # section_text if the file is missing — rare, but don't crash).
+        summary_path = settings.wiki_dir / "papers" / f"{slug}.md"
+        content = summary_path.read_text(encoding="utf-8") if summary_path.exists() else section_text
+    else:
+        yield {"type": "progress", "stage": "writing",
+               "detail": f"Compiling summary: {title or doc_id[:8]}..."}
 
-    system, user = wiki_prompts.wiki_paper_summary(
-        title=title, authors=author_str, year=str(year or "n.d."),
-        journal=journal or "", doi=doi or "",
-        keywords=kw_str, domains=dom_str,
-        abstract=abstract or "", sections=section_text,
-        existing_slugs=existing_slugs,
-    )
-
-    tokens: list[str] = []
-    for tok in llm_stream(system, user, model=model, keep_alive=-1):
-        tokens.append(tok)
-        yield {"type": "token", "text": tok}
-
-    content = _strip_thinking("".join(tokens))
-
-    # Save
-    with get_session() as session:
-        _save_page(
-            session, slug=slug, title=title or "Untitled",
-            page_type="paper_summary", content=content,
-            source_doc_ids=[doc_id], subdir="papers",
+        system, user = wiki_prompts.wiki_paper_summary(
+            title=title, authors=author_str, year=str(year or "n.d."),
+            journal=journal or "", doi=doi or "",
+            keywords=kw_str, domains=dom_str,
+            abstract=abstract or "", sections=section_text,
+            existing_slugs=existing_slugs,
         )
 
-    # Embed (may fail if GPU VRAM is full — non-fatal)
-    point_id = _embed_wiki_page(slug, content, "paper_summary")
-    if not point_id:
-        yield {"type": "progress", "stage": "warning",
-               "detail": "Embedding skipped (GPU VRAM full)"}
+        tokens: list[str] = []
+        for tok in llm_stream(system, user, model=model, keep_alive=-1):
+            tokens.append(tok)
+            yield {"type": "token", "text": tok}
+
+        content = _strip_thinking("".join(tokens))
+
+        # Save
+        with get_session() as session:
+            _save_page(
+                session, slug=slug, title=title or "Untitled",
+                page_type="paper_summary", content=content,
+                source_doc_ids=[doc_id], subdir="papers",
+            )
+
+        # Embed (may fail if GPU VRAM is full — non-fatal)
+        point_id = _embed_wiki_page(slug, content, "paper_summary")
+        if not point_id:
+            yield {"type": "progress", "stage": "warning",
+                   "detail": "Embedding skipped (GPU VRAM full)"}
 
     # Combined entity + KG extraction in a single LLM call (speedup: 2 calls → 1)
     yield {"type": "progress", "stage": "extracting",
@@ -556,12 +586,22 @@ def update_concepts_for_paper(
                 updated_content = existing_content.rstrip() + "\n\n" + addition.strip() + "\n"
                 concept_path.write_text(updated_content, encoding="utf-8")
 
-                # Update DB
+                # Update DB. Phase 54.6.23 — only append the doc_id to
+                # source_doc_ids if it isn't already there. Pre-fix, a
+                # paper that updated the same concept twice (from two
+                # runs, or after a wiki_pages re-insert) would
+                # accumulate duplicate UUIDs in the array, which in
+                # turn inflated the "sources: N papers" count and
+                # broke the single-source branch of list_pages.
                 with get_session() as session:
                     session.execute(text("""
                         UPDATE wiki_pages SET
                             word_count = :wc,
-                            source_doc_ids = array_append(source_doc_ids, CAST(:did AS uuid)),
+                            source_doc_ids = CASE
+                                WHEN CAST(:did AS uuid) = ANY(source_doc_ids)
+                                THEN source_doc_ids
+                                ELSE array_append(source_doc_ids, CAST(:did AS uuid))
+                            END,
                             updated_at = now()
                         WHERE slug = :slug
                     """), {"wc": len(updated_content.split()), "did": doc_id, "slug": slug})

@@ -286,6 +286,31 @@ def ingest(
                 elif result.backend == "marker_md" and result.text:
                     raw_refs.extend(extract_references_from_markdown(result.text))
 
+                # Phase 54.6.23 — bulk-fetch DOI→doc_id map once per
+                # paper. Pre-fix, each referenced DOI triggered its
+                # own SELECT, turning a paper with 80 refs into 80
+                # round-trips to PG. On a 600-paper ingest that's
+                # ~48k extra queries for a step whose work can be
+                # done in one.
+                from sqlalchemy import text as _text
+                unique_dois = {
+                    ref.doi.lower() for ref in raw_refs
+                    if ref.doi and ref.doi.strip()
+                }
+                doi_to_doc_id: dict[str, UUID] = {}
+                if unique_dois:
+                    placeholders = ", ".join(f":d{i}" for i, _ in enumerate(unique_dois))
+                    params = {f"d{i}": d for i, d in enumerate(unique_dois)}
+                    rows = session.execute(_text(f"""
+                        SELECT LOWER(pm.doi), d.id
+                        FROM documents d
+                        JOIN paper_metadata pm ON pm.document_id = d.id
+                        WHERE LOWER(pm.doi) IN ({placeholders})
+                          AND d.ingestion_status = 'complete'
+                    """), params).fetchall()
+                    for r in rows:
+                        doi_to_doc_id[r[0]] = r[1]
+
                 seen_ref_keys: set[str] = set()
                 for ref in raw_refs:
                     key = (ref.doi or "").lower() or (ref.title or "")[:60].lower()
@@ -293,17 +318,10 @@ def ingest(
                         continue
                     seen_ref_keys.add(key)
 
-                    cited_doc_id = None
-                    if ref.doi:
-                        from sqlalchemy import text as _text
-                        row = session.execute(
-                            _text("SELECT d.id FROM documents d JOIN paper_metadata pm "
-                                  "ON pm.document_id = d.id WHERE LOWER(pm.doi) = :doi "
-                                  "AND d.ingestion_status = 'complete' LIMIT 1"),
-                            {"doi": ref.doi.lower()},
-                        ).first()
-                        if row:
-                            cited_doc_id = row[0]
+                    cited_doc_id = (
+                        doi_to_doc_id.get(ref.doi.lower())
+                        if ref.doi else None
+                    )
 
                     session.add(Citation(
                         citing_document_id=doc_id,
@@ -372,19 +390,21 @@ def ingest(
             else:
                 sections = chunker.parse_sections(result.text)
 
-            # Phase 54.6.21 — defensive log when the chunker returns 0
-            # sections. Pre-fix this silently produced a "complete" doc
-            # with no sections, no chunks, no Qdrant vectors — invisible
-            # to retrieval but indistinguishable from a real ingest in
-            # `db stats`. Now there's a breadcrumb to grep for.
+            # Phase 54.6.23 — escalated from "warn and continue" to
+            # "raise and fail". An empty-sections doc is useless for
+            # retrieval (no chunks, no vectors) and pre-fix it was
+            # marked ``complete`` anyway, so users couldn't tell real
+            # ingests apart from these ghosts in `db stats`. Raising
+            # here routes through the outer except block which marks
+            # the doc ``failed`` with a specific ingestion_error, so
+            # the user sees it surface in `db stats` and can choose
+            # to re-ingest with a different backend (e.g. mineru-
+            # vlm-pro for scanned pages).
             if not sections:
-                logger.warning(
-                    "INGEST EMPTY  %s  doc=%s  backend=%s — chunker produced "
-                    "0 sections (PDF likely empty/scanned-without-OCR or all "
-                    "blocks were skipped); will store as complete with no "
-                    "embeddings. Re-ingest with a different backend if this "
-                    "paper matters.",
-                    pdf_path.name, doc_id, result.backend,
+                raise ValueError(
+                    f"chunker produced 0 sections (backend={result.backend}) "
+                    f"— PDF is likely empty, scanned-without-OCR, or all "
+                    f"blocks were filtered. Try a different backend."
                 )
 
             db_sections: dict[int, UUID] = {}

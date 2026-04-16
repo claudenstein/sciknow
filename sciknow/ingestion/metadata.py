@@ -810,7 +810,14 @@ def _layer_llm(text: str, meta: PaperMeta) -> None:
     try:
         import ollama
 
-        client = ollama.Client(host=settings.ollama_host)
+        # Phase 54.6.23 — explicit timeout. Pre-fix, ollama.Client
+        # had no timeout, so a hung/slow Ollama (model loading, OOM,
+        # dropped socket) would block the entire ingestion pipeline
+        # indefinitely on a single paper. 60s is generous for the
+        # 7B-class fast model on this prompt; if Ollama genuinely
+        # takes longer than that, the paper should fail metadata to
+        # "unknown" (cascade outcome below) and the ingest moves on.
+        client = ollama.Client(host=settings.ollama_host, timeout=60)
         response = client.chat(
             model=settings.llm_fast_model,
             messages=[{"role": "user", "content": _LLM_PROMPT.format(text=text)}],
