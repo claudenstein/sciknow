@@ -7859,6 +7859,40 @@ def l1_phase54_6_21_audit_fixes() -> None:
         "multi-pass flow that went through this wrapper"
     )
 
+    # Phase 54.6.31 — num_batch parameter + model warm-up
+    assert "num_batch" in _stream_sig.parameters, (
+        "stream() must accept num_batch (Phase 54.6.31 — raising "
+        "from Ollama default 512 → 1024 gives ~60% prompt-eval "
+        "throughput boost on modern GPUs at <1 GB extra VRAM)"
+    )
+    assert _stream_sig.parameters["num_batch"].default == 1024, (
+        "stream() num_batch default must be 1024 (was 512 / Ollama default)"
+    )
+    assert "num_batch" in _complete_sig.parameters, (
+        "complete() must accept num_batch"
+    )
+    assert hasattr(_llm, "warm_up"), (
+        "llm.warm_up helper missing — required by wiki compile / autowrite "
+        "entry points to pre-load the model and avoid cold-start latency"
+    )
+    _warm_sig = _inspect.signature(_llm.warm_up)
+    for name in ("model", "num_ctx", "num_batch"):
+        assert name in _warm_sig.parameters, (
+            f"warm_up() must accept {name}"
+        )
+    # Wiki compile and autowrite call warm_up
+    from sciknow.core import wiki_ops as _wo_wu
+    compile_src = _inspect.getsource(_wo_wu.compile_all)
+    assert "warm_up" in compile_src or "_llm_warm_up" in compile_src, (
+        "compile_all should warm up the LLM before entering the hot "
+        "loop (Phase 54.6.31 — eliminates first-paper cold start)"
+    )
+    from sciknow.core import book_ops as _bo_wu
+    awb_src = _inspect.getsource(_bo_wu._autowrite_section_body)
+    assert "warm_up" in awb_src or "_llm_warm_up" in awb_src, (
+        "autowrite body should warm up the LLM before the first iteration"
+    )
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.

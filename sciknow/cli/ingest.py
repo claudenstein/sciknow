@@ -273,6 +273,13 @@ def directory(
     worker_note = f" ({num_workers} workers)" if num_workers > 1 else ""
     console.print(f"Found [bold]{len(pdfs)}[/bold] PDF(s) in {path}{worker_note}")
 
+    # Phase 54.6.31 — warm the fast model (used for metadata fallback)
+    # before the ingest loop so the first paper doesn't pay cold-start.
+    # Best-effort; ingest will still work if Ollama is unreachable
+    # since Layer 4 (LLM) only runs when the other 3 layers miss.
+    from sciknow.rag.llm import warm_up as _llm_warm_up
+    _llm_warm_up(model=settings.llm_fast_model, num_ctx=4096, num_batch=1024)
+
     results = {"done": 0, "skipped": 0, "failed": 0}
     failed_files: list[tuple[str, str]] = []
 

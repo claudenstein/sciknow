@@ -3333,10 +3333,19 @@ def _autowrite_section_body(
     """
     from sciknow.rag import prompts as rag_prompts
     from sciknow.rag.llm import stream as llm_stream, complete as llm_complete
+    from sciknow.rag.llm import warm_up as _llm_warm_up
     from sciknow.storage.db import get_session
     from sciknow.storage.qdrant import get_client
 
     qdrant = get_client()
+
+    # Phase 54.6.31 — warm the writer model into VRAM before the
+    # score/verify/revise loop starts so the first iteration doesn't
+    # pay cold-start latency. Best-effort; silently continues if the
+    # Ollama server is unreachable (autowrite will fail naturally on
+    # the real call with a clearer error).
+    from sciknow.config import settings as _s
+    _llm_warm_up(model=model or _s.llm_model, num_ctx=16384, num_batch=1024)
 
     log.stage("loading_book")
     # Load book/chapter data

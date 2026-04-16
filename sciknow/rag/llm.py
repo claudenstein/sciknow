@@ -71,12 +71,52 @@ def release_llm(models: list[str] | None = None) -> list[str]:
     return released
 
 
+def warm_up(
+    model: str | None = None,
+    num_ctx: int = 16384,
+    num_batch: int = 1024,
+) -> bool:
+    """Phase 54.6.31 — pre-load the model into VRAM with a zero-token
+    generate call so the first real request doesn't pay cold-start.
+
+    Ollama's recommended production pattern: trigger a model load at
+    service startup so users never wait for the ~3-10s cold load on
+    their first request. Here we use it at the top of long hot-loop
+    commands (``wiki compile``, ``book autowrite``) so the first paper
+    / section doesn't show anomalously slow timing.
+
+    Uses keep_alive=-1 so the model stays resident for the actual
+    workload. The ``num_ctx`` and ``num_batch`` values should match
+    what the workload will use — otherwise Ollama loads one instance
+    now and another on the first real call.
+
+    Returns True on success, False if the server is unreachable.
+    Never raises — this is best-effort.
+    """
+    try:
+        client = _get_client()
+        chosen = model or settings.llm_model
+        t0 = time.monotonic()
+        client.generate(
+            model=chosen, prompt="",
+            keep_alive=-1,
+            options={"num_ctx": num_ctx, "num_batch": num_batch, "num_predict": 1},
+        )
+        elapsed = time.monotonic() - t0
+        logger.info(f"LLM warmed model={chosen} ctx={num_ctx} batch={num_batch} in {elapsed:.1f}s")
+        return True
+    except Exception as exc:
+        logger.warning(f"LLM warmup failed for {model}: {exc}")
+        return False
+
+
 def stream(
     system: str,
     user: str,
     model: str | None = None,
     temperature: float = 0.2,
     num_ctx: int = 16384,
+    num_batch: int = 1024,
     keep_alive: str | int | None = -1,
     format: dict | str | None = None,
 ) -> Iterator[str]:
@@ -92,6 +132,19 @@ def stream(
                 even though they were processing the same model. Sticky
                 by default; callers that want to unload pass
                 ``keep_alive=0`` or ``"30s"``.
+
+    num_batch: Prompt-evaluation batch size. **Phase 54.6.31: default
+                raised from Ollama's native 512 → 1024** based on the
+                community benchmarks (Ollama perf docs, Medium guides):
+                1024 gives ~60% higher prompt-eval throughput than 512
+                on any modern GPU at a cost of <1 GB extra VRAM for
+                7B-class models. 2048 can give another boost but
+                occasionally OOMs on 10 GB cards, so 1024 is the safe
+                default that captures most of the win. Must be ≥32
+                (llama.cpp docs: below that the cuBLAS kernels are
+                bypassed entirely, which is much slower). Increase to
+                2048 on the 3090 / DGX if VRAM is comfortable.
+
     format:     JSON schema dict for structured output (Ollama v0.5+).
                 Guarantees valid JSON matching the schema.
     """
@@ -112,7 +165,8 @@ def stream(
                 {"role": "user",   "content": user},
             ],
             "stream": True,
-            "options": {"temperature": temperature, "num_ctx": num_ctx},
+            "options": {"temperature": temperature, "num_ctx": num_ctx,
+                        "num_batch": num_batch},
         }
         if keep_alive is not None:
             kwargs["keep_alive"] = keep_alive
@@ -151,6 +205,7 @@ def complete(
     model: str | None = None,
     temperature: float = 0.1,
     num_ctx: int = 16384,
+    num_batch: int = 1024,
     keep_alive: str | int | None = -1,
     format: dict | str | None = None,
 ) -> str:
@@ -167,9 +222,13 @@ def complete(
         which evicted the model between pipeline phases that take
         longer than 5 minutes (e.g. autowrite score → verify → revise).
         Callers that want to unload can still pass ``keep_alive=0``.
+
+    Phase 54.6.31 — ``num_batch`` default 1024 (was Ollama's native
+    512). See ``stream()`` docstring for rationale.
     """
     return "".join(stream(system, user, model=model, temperature=temperature,
-                          num_ctx=num_ctx, keep_alive=keep_alive, format=format))
+                          num_ctx=num_ctx, num_batch=num_batch,
+                          keep_alive=keep_alive, format=format))
 
 
 def complete_with_status(
@@ -179,6 +238,7 @@ def complete_with_status(
     model: str | None = None,
     temperature: float = 0.1,
     num_ctx: int = 16384,
+    num_batch: int = 1024,
     keep_alive: str | int | None = -1,
 ) -> str:
     """
@@ -204,7 +264,8 @@ def complete_with_status(
 
     with Live(console=console, refresh_per_second=2, transient=True) as live:
         for tok in stream(system, user, model=model, temperature=temperature,
-                          num_ctx=num_ctx, keep_alive=keep_alive):
+                          num_ctx=num_ctx, num_batch=num_batch,
+                          keep_alive=keep_alive):
             tokens.append(tok)
             elapsed = time.monotonic() - t0
             tps = len(tokens) / elapsed if elapsed > 0 else 0

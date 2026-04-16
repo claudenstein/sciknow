@@ -748,6 +748,18 @@ def compile_all(
     from sqlalchemy import text
     from sciknow.storage.db import get_session
 
+    # Phase 54.6.31 — warm up the LLM before entering the hot loop so the
+    # first paper doesn't pay cold-start latency (~3-10s on a 7B model).
+    # Uses the same ctx + batch settings the workload will use so
+    # Ollama doesn't create a second instance on the first real call.
+    from sciknow.rag.llm import warm_up as _llm_warm_up
+    _resolved_model = _wiki_model(model)
+    _llm_warm_up(
+        model=_resolved_model,
+        num_ctx=_wiki_num_ctx(_resolved_model),
+        num_batch=1024,
+    )
+
     with get_session() as session:
         rows = session.execute(text("""
             SELECT d.id::text, pm.title
