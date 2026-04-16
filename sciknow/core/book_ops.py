@@ -468,7 +468,7 @@ def _auto_summarize(content: str, section_type: str, chapter_title: str, model: 
         # Ollama reloading the model between write and summarize
         # (summarize runs right after a section is written in
         # write_section_stream and autowrite, same model in scope).
-        return complete(system, user, model=model, temperature=0.1, num_ctx=16384).strip()
+        return complete(system, user, model=model, temperature=0.1, num_ctx=16384, keep_alive=-1).strip()
     except Exception as exc:
         logger.warning("Auto-summarize failed for %s/%s: %s", chapter_title, section_type, exc)
         return ""
@@ -1000,7 +1000,7 @@ def _distill_lessons_from_run(run_id: str | None) -> int:
         raw = llm_complete(
             sys_p, usr_p,
             model=settings.llm_fast_model,
-            temperature=0.2, num_ctx=4096,
+            temperature=0.2, num_ctx=4096, keep_alive=-1,
         )
         # Strip thinking blocks the same way other parsers do.
         raw = re.sub(r'<think>.*?</think>\s*', '', raw, flags=re.DOTALL).strip()
@@ -1684,12 +1684,19 @@ def _stream_phase(system: str, user: str, phase: str, *, model=None,
     token); silently swallows callback errors so a busted observer
     can't kill the stream.
 
+    Phase 54.6.30 — defaults ``keep_alive=-1`` on the underlying
+    llm_stream call so every autowrite phase that routes through
+    this helper (planning, scoring, verifying, rescoring, CoVe) is
+    explicitly sticky at the call site. Callers can override by
+    passing ``keep_alive=...`` in ``**kw``.
+
     Usage in a generator (re-yields events to consumer):
         raw = yield from _stream_phase(sys, usr, "scoring",
                                        model=model, num_ctx=16384)
         scores = json.loads(_clean_json(raw))
     """
     from sciknow.rag.llm import stream as llm_stream
+    kw.setdefault("keep_alive", -1)
     tokens: list[str] = []
     for tok in llm_stream(system, user, model=model, **kw):
         tokens.append(tok)
@@ -1767,6 +1774,9 @@ def _stream_with_save(
             save_callback("".join(tokens))
         except Exception as exc:
             logger.warning("Streaming save (%s) failed: %s", phase, exc)
+
+    # Phase 54.6.30 — sticky model by default for the writing loop.
+    stream_kw.setdefault("keep_alive", -1)
 
     try:
         for tok in llm_stream(system, user, model=model, **stream_kw):
@@ -2315,7 +2325,7 @@ def _generate_step_back_query(query: str, model: str | None = None) -> str | Non
             # trigger an Ollama model reload when the main write pass
             # arrives expecting 16384. Extra KV cache cost is trivial
             # compared to model weights.
-            temperature=0.1, num_ctx=16384,
+            temperature=0.1, num_ctx=16384, keep_alive=-1,
         )
         # Strip thinking blocks and any leading/trailing punctuation/quotes.
         raw = re.sub(r'<think>.*?</think>\s*', '', raw, flags=re.DOTALL).strip()
@@ -2515,7 +2525,7 @@ def write_section_stream(
             section_plan=section_plan,
         )
         plan_raw = ""
-        for tok in llm_stream(sys_p, usr_p, model=model):
+        for tok in llm_stream(sys_p, usr_p, model=model, keep_alive=-1):
             plan_raw += tok
         # Strip thinking blocks and try to parse as JSON
         plan_clean = re.sub(r'<think>.*?</think>\s*', '', plan_raw, flags=re.DOTALL).strip()
@@ -2620,7 +2630,7 @@ def write_section_stream(
                "word_count": len(content.split())}
     else:
         content_tokens: list[str] = []
-        for tok in llm_stream(system, user, model=model):
+        for tok in llm_stream(system, user, model=model, keep_alive=-1):
             content_tokens.append(tok)
             yield {"type": "token", "text": tok}
         content = "".join(content_tokens)
@@ -2631,7 +2641,7 @@ def write_section_stream(
         yield {"type": "progress", "stage": "verifying", "detail": "Verifying claims..."}
         sys_v, usr_v = prompts.verify_claims(content, results)
         try:
-            raw = llm_complete(sys_v, usr_v, model=model, temperature=0.0, num_ctx=16384)
+            raw = llm_complete(sys_v, usr_v, model=model, temperature=0.0, num_ctx=16384, keep_alive=-1)
             vdata = json.loads(_clean_json(raw), strict=False)
             verify_feedback = raw
             yield {"type": "verification", "data": vdata}
@@ -2708,7 +2718,7 @@ def review_draft_stream(
 
     sys_r, usr_r = rag_prompts.review(d_section, d_topic or d_title, d_content, results)
     output_tokens: list[str] = []
-    for tok in llm_stream(sys_r, usr_r, model=model):
+    for tok in llm_stream(sys_r, usr_r, model=model, keep_alive=-1):
         output_tokens.append(tok)
         yield {"type": "token", "text": tok}
 
@@ -2785,7 +2795,7 @@ def revise_draft_stream(
 
     sys_r, usr_r = rag_prompts.revise(d_content, rev_instruction, results or None)
     output_tokens: list[str] = []
-    for tok in llm_stream(sys_r, usr_r, model=model):
+    for tok in llm_stream(sys_r, usr_r, model=model, keep_alive=-1):
         output_tokens.append(tok)
         yield {"type": "token", "text": tok}
 
@@ -2907,7 +2917,7 @@ def run_gaps_stream(
     )
     if method_preamble:
         user = method_preamble + user
-    for tok in llm_stream(system, user, model=model, num_ctx=16384):
+    for tok in llm_stream(system, user, model=model, num_ctx=16384, keep_alive=-1):
         yield {"type": "token", "text": tok}
 
     # Pass 2: structured JSON extraction
@@ -2918,7 +2928,7 @@ def run_gaps_stream(
             rejected_ideas=rejected_ideas or None,
         )
         try:
-            raw = llm_complete(sys_j, usr_j, model=model, temperature=0.0, num_ctx=16384)
+            raw = llm_complete(sys_j, usr_j, model=model, temperature=0.0, num_ctx=16384, keep_alive=-1)
             gap_data = json.loads(_clean_json(raw), strict=False)
             gap_list = gap_data.get("gaps", [])
         except Exception as exc:
@@ -2993,7 +3003,7 @@ def run_argue_stream(
 
     system, user = prompts.argue(claim, results)
     output_tokens: list[str] = []
-    for tok in llm_stream(system, user, model=model, num_ctx=16384):
+    for tok in llm_stream(system, user, model=model, num_ctx=16384, keep_alive=-1):
         output_tokens.append(tok)
         yield {"type": "token", "text": tok}
 
@@ -3033,7 +3043,7 @@ def _score_draft_inner(draft_content, section_type, topic, results, model=None):
     from sciknow.rag.llm import complete as llm_complete
 
     sys_s, usr_s = rag_prompts.score_draft(section_type, topic, draft_content, results)
-    raw = llm_complete(sys_s, usr_s, model=model, temperature=0.0, num_ctx=16384)
+    raw = llm_complete(sys_s, usr_s, model=model, temperature=0.0, num_ctx=16384, keep_alive=-1)
 
     return json.loads(_clean_json(raw), strict=False)
 
@@ -3048,7 +3058,7 @@ def _verify_draft_inner(draft_content, results, model=None):
     from sciknow.rag.llm import complete as llm_complete
 
     sys_v, usr_v = rag_prompts.verify_claims(draft_content, results)
-    raw = llm_complete(sys_v, usr_v, model=model, temperature=0.0, num_ctx=16384)
+    raw = llm_complete(sys_v, usr_v, model=model, temperature=0.0, num_ctx=16384, keep_alive=-1)
 
     return json.loads(_clean_json(raw), strict=False)
 
@@ -3089,7 +3099,7 @@ def _cove_verify(draft_content, results, model=None, max_questions: int = 6):
     # Step 1: Generate verification questions (sees only the draft).
     try:
         sys_q, usr_q = rag_prompts.cove_questions(draft_content)
-        raw_q = llm_complete(sys_q, usr_q, model=model, temperature=0.1, num_ctx=16384)
+        raw_q = llm_complete(sys_q, usr_q, model=model, temperature=0.1, num_ctx=16384, keep_alive=-1)
         q_clean = re.sub(r'<think>.*?</think>\s*', '', raw_q, flags=re.DOTALL).strip()
         q_data = json.loads(_clean_json(q_clean), strict=False)
         questions = (q_data.get("questions") or [])[:max_questions]
@@ -3114,6 +3124,7 @@ def _cove_verify(draft_content, results, model=None, max_questions: int = 6):
             sys_a, usr_a = rag_prompts.cove_answer(question_text, results)
             raw_a = llm_complete(
                 sys_a, usr_a, model=model, temperature=0.0, num_ctx=16384,
+                keep_alive=-1,
             )
             a_clean = re.sub(r'<think>.*?</think>\s*', '', raw_a, flags=re.DOTALL).strip()
             a_data = json.loads(_clean_json(a_clean), strict=False)
@@ -5272,7 +5283,7 @@ def adversarial_review_stream(
     )
     out: list[str] = []
     # Thinking-model headroom — same rationale as extract-kg / consensus.
-    for tok in llm_stream(sys_p, usr_p, model=model, num_ctx=24576):
+    for tok in llm_stream(sys_p, usr_p, model=model, num_ctx=24576, keep_alive=-1):
         out.append(tok)
         yield {"type": "token", "text": tok}
 
@@ -5363,7 +5374,7 @@ def edge_case_hunter_stream(
     try:
         raw = llm_complete(
             sys_p, usr_p, model=model,
-            temperature=0.0, num_ctx=24576,
+            temperature=0.0, num_ctx=24576, keep_alive=-1,
             format=schema,
         )
     except Exception as exc:

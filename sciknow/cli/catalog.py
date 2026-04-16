@@ -802,7 +802,7 @@ def cluster_llm(
                                        "start": _time.monotonic()}
         try:
             tokens: list[str] = []
-            for tok in llm_stream(system, user, model=model, num_ctx=32768):
+            for tok in llm_stream(system, user, model=model, num_ctx=32768, keep_alive=-1):
                 tokens.append(tok)
                 with _state_lock:
                     _batch_state[batch_num]["tokens"] = len(tokens)

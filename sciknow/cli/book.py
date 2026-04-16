@@ -2566,7 +2566,7 @@ def draft_compare(
                 d['content'], results,
             )
             try:
-                raw = llm_complete(sys_s, usr_s, model=model, temperature=0.0, num_ctx=16384)
+                raw = llm_complete(sys_s, usr_s, model=model, temperature=0.0, num_ctx=16384, keep_alive=-1)
                 return _json.loads(book_ops._clean_json(raw), strict=False)
             except Exception as exc:
                 console.print(f"[red]Rescoring failed: {exc}[/red]")
