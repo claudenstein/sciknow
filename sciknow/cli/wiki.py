@@ -121,6 +121,12 @@ def compile(
         last_paper_title = ""
         last_paper_elapsed = 0.0
         last_paper_tokens = 0
+        workers_count = 1  # set from compile_start; used as tok/s multiplier
+        # Phase 54.6.29 — rolling window of recently-seen paper titles
+        # so the user can see what's being worked on across parallel
+        # workers (in parallel mode, paper_start fires on replay which
+        # means titles appear as papers COMPLETE, not when they start).
+        recent_titles: list[str] = []
 
         with Progress(
             SpinnerColumn(),
@@ -140,32 +146,49 @@ def compile(
 
                 if t == "compile_start":
                     total = event["total"]
+                    workers_count = max(1, int(event.get("workers", 1)))
                     compile_t0 = _time.monotonic()
                     task_id = progress.add_task(
-                        "Compiling wiki", total=total, status="starting...")
+                        "Compiling wiki", total=total,
+                        status=f"starting ({workers_count} worker(s))...")
                     tok_task = progress.add_task(
                         "[dim]LLM", total=None, status="[dim]waiting...[/dim]")
 
                 elif t == "paper_start":
                     paper_tok_count = 0
                     paper_t0 = _time.monotonic()
-                    last_paper_title = event["title"]
+                    title_full = event["title"]
+                    last_paper_title = title_full
                     idx = event.get("index", 0)
+                    # Phase 54.6.29 — maintain rolling window of last N
+                    # papers (N = workers_count) so parallel mode shows
+                    # which papers are in-flight instead of just the
+                    # most recent one.
+                    recent_titles.append(title_full[:40])
+                    if len(recent_titles) > workers_count:
+                        recent_titles.pop(0)
+                    in_flight_str = " | ".join(recent_titles)
                     progress.update(task_id,
                         description=f"[bold]Wiki {idx}/{total}[/bold]",
-                        status=f"[dim]{event['title'][:45]}[/dim]")
+                        status=f"[dim]{in_flight_str[:120]}[/dim]")
                     progress.update(tok_task,
-                        status=f"[dim]{event['title'][:35]}...[/dim]")
+                        status=f"[dim]{title_full[:45]}...[/dim]")
 
                 elif t == "token":
                     paper_tok_count += 1
                     elapsed = _time.monotonic() - paper_t0
-                    tps = paper_tok_count / elapsed if elapsed > 0 else 0
+                    # Phase 54.6.29 — multiply by worker count in
+                    # parallel mode so the displayed rate reflects
+                    # aggregate GPU throughput, not the per-paper
+                    # wall-time rate that underreports by a factor of
+                    # ~N due to cross-worker contention.
+                    raw_tps = paper_tok_count / elapsed if elapsed > 0 else 0
+                    tps = raw_tps * workers_count
                     total_toks = event.get("total_tokens", paper_tok_count)
                     progress.update(tok_task,
                         status=(
                             f"[green]{paper_tok_count} tok[/green]  "
-                            f"[cyan]{tps:.1f} tok/s[/cyan]  "
+                            f"[cyan]~{tps:.0f} tok/s agg[/cyan]  "
                             f"[dim]{total_toks} total[/dim]"
                         ))
 
@@ -181,7 +204,13 @@ def compile(
 
                     last_paper_tokens = p_toks
                     last_paper_elapsed = p_elapsed
+                    # Per-call generation rate (not multiplied) — this
+                    # is the actual per-request speed, useful for
+                    # debugging whether the GPU is saturated.
                     last_paper_tps = p_toks / p_elapsed if p_elapsed > 0 else 0
+                    # Aggregate throughput across workers for the final
+                    # "X tok in Ys (Z t/s)" line below.
+                    last_paper_agg_tps = last_paper_tps * workers_count
 
                     # Estimate remaining time
                     done = c + s + f
@@ -205,6 +234,10 @@ def compile(
                     if f:
                         status_text += f"  [red]{f} fail[/red]"
                     status_text += eta_part
+                    # Phase 54.6.29 — tack on just-finished title so the
+                    # user sees papers streaming past in the bar.
+                    if title_short:
+                        status_text += f"  [dim]last: {title_short}[/dim]"
 
                     progress.update(task_id, status=status_text)
 
@@ -212,7 +245,8 @@ def compile(
                         progress.update(tok_task,
                             status=(
                                 f"[green]{p_toks} tok in {p_elapsed:.0f}s "
-                                f"({last_paper_tps:.1f} t/s)[/green]"
+                                f"({last_paper_tps:.1f} t/s, "
+                                f"~{last_paper_agg_tps:.0f} agg)[/green]"
                             ))
                     elif st == "skipped":
                         progress.update(tok_task,
