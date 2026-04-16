@@ -43,6 +43,28 @@ def _slugify(text: str) -> str:
     return s[:80]
 
 
+def _entity_name(item) -> str:
+    """Phase 54.6.40 — normalize an entity entry to a plain string.
+
+    qwen2.5:32b-instruct frequently returns concepts/methods/datasets
+    as ``[{"name": "...", "description": "..."}]`` objects even when
+    the prompt asks for a flat list of slug strings. Accept both
+    shapes so _slugify doesn't crash with 'dict object has no
+    attribute lower'. Also defensively normalizes triple
+    subject/predicate/object values in case a future model decides
+    to nest those too.
+    """
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        for key in ("name", "slug", "id", "value", "term"):
+            v = item.get(key)
+            if isinstance(v, str) and v.strip():
+                return v
+        return ""
+    return str(item or "")
+
+
 def _ensure_wiki_dirs():
     """Create the wiki directory structure if it doesn't exist."""
     for subdir in ["papers", "concepts", "synthesis"]:
@@ -664,12 +686,19 @@ def _extract_entities_and_kg(
         logger.warning("Entity+KG extraction failed for %s: %s", slug, exc)
         return [], 0
 
-    # Save entities (concepts list)
-    all_entities = (
-        data.get("concepts", []) +
-        data.get("methods", []) +
-        data.get("datasets", [])
-    )
+    # Save entities (concepts list). Phase 54.6.40 — normalize entries
+    # through _entity_name: qwen2.5:32b often returns {"name": ...,
+    # "description": ...} objects despite the prompt asking for flat
+    # slug strings.
+    all_entities = [
+        name for name in (
+            _entity_name(x) for x in (
+                data.get("concepts", []) +
+                data.get("methods", []) +
+                data.get("datasets", [])
+            )
+        ) if name
+    ]
 
     # Save KG triples
     triples = data.get("triples", [])
@@ -680,13 +709,16 @@ def _extract_entities_and_kg(
                 "DELETE FROM knowledge_graph WHERE source_doc_id::text = :did"
             ), {"did": doc_id})
             for t in triples:
-                subj = (t.get("subject") or "").strip().lower()[:200]
-                pred = (t.get("predicate") or "").strip().lower()[:100]
-                obj = (t.get("object") or "").strip().lower()[:200]
+                if not isinstance(t, dict):
+                    continue
+                subj = _entity_name(t.get("subject")).strip().lower()[:200]
+                pred = _entity_name(t.get("predicate")).strip().lower()[:100]
+                obj = _entity_name(t.get("object")).strip().lower()[:200]
                 # Phase 48d — empty / whitespace-only source sentence
                 # flows through as NULL so the UI can render "(no
                 # source sentence)" consistently instead of "".
-                sent_raw = (t.get("source_sentence") or "").strip()[:500]
+                sent_val = t.get("source_sentence")
+                sent_raw = (sent_val if isinstance(sent_val, str) else "").strip()[:500]
                 sent = sent_raw if sent_raw else None
                 if subj and pred and obj:
                     session.execute(text("""

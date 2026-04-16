@@ -86,43 +86,70 @@ def wiki_paper_summary(
 # ── Entity extraction ────────────────────────────────────────────────────────
 
 EXTRACT_ENTITIES_SYSTEM = """\
-You are a scientific knowledge extractor. Given a paper's metadata and \
-section content, you produce a JSON object describing the key entities and \
-knowledge-graph triples from that paper.
+You are a scientific knowledge extractor. Output VALID JSON only.
 
-Rules:
-- 3–8 "concepts": scientific phenomena, theories, metrics mentioned in the paper
-- 1–4 "methods": techniques, models, algorithms used by the paper
-- 0–3 "datasets": named datasets or data sources (empty list if none)
-- 5–15 "triples": (subject, predicate, object) statements about actual
-  relationships discussed in the paper — use predicates like uses_method,
-  studies, finds, supports, contradicts, or related_to
-- Each triple should include "source_sentence": a verbatim sentence copied
-  from the paper text that evidences the claim (≤ 300 chars). If no single
-  sentence supports it, use the empty string — do NOT paraphrase or invent.
-- Use lowercase-hyphenated slugs for concept/method/dataset names (e.g.
-  "total-solar-irradiance", not "Total Solar Irradiance")
-- Reuse existing concept names from the list when applicable
-- Respond ONLY with valid JSON. No preamble, no commentary, no markdown
-  fences — just the JSON object starting with { and ending with }.
-- DO NOT copy placeholder strings like "concept-slug-1" or "subject": "..."
-  from any example. Fill in the real values extracted from THIS paper."""
+CRITICAL TYPE CONSTRAINTS — read these twice:
+
+WRONG — do not do this:
+{"concepts": [{"name": "climate-change", "description": "..."}]}
+
+RIGHT — concepts is a flat list of slug strings:
+{"concepts": ["climate-change", "greenhouse-gas-emissions"]}
+
+Same rule for "methods" and "datasets": arrays of STRING slugs, \
+never objects with "name"/"description" keys.
+
+Required output shape (JSON):
+{
+  "concepts":  [<slug-str>, ...]   // 3-8 items, scientific phenomena / theories / metrics
+  "methods":   [<slug-str>, ...]   // 1-4 items, techniques or algorithms
+  "datasets":  [<slug-str>, ...]   // 0-3 items, named datasets
+  "triples":   [
+    {"subject": "<slug>", "predicate": "<snake_verb>", "object": "<slug>", "source_sentence": "<verbatim ≤ 300 chars>"},
+    ...   // EXACTLY 6-12 items, not fewer
+  ]
+}
+
+Slug format: lowercase-hyphenated (e.g. "atmospheric-co2-rise"), \
+never Title Case, never spaces.
+Predicates: short snake_case verbs like uses_method, studies, finds, \
+supports, contradicts, measures, causes, correlates_with, related_to.
+source_sentence: verbatim from the paper text, or "" if none. \
+NEVER paraphrase or invent a sentence.
+Reuse existing concept slugs from the provided list when they match.
+
+Respond ONLY with the JSON object — no preamble, no fences, no commentary.
+DO NOT copy placeholder strings like "concept-slug-1" from any example; \
+fill in the real values extracted from THIS paper."""
 
 # Phase 54.6.36 — few-shot example moved to system prompt (concrete values,
 # not placeholders) so the model sees what good output LOOKS like without
-# being tempted to echo fake placeholder strings back. The user prompt
-# simply asks for the extraction without any template.
+# being tempted to echo fake placeholder strings back.
+# Phase 54.6.40 — switched to explicit wrong-vs-right schema enforcement.
+# Rationale: qwen2.5:32b-instruct was returning `[{"name": ..., "description":
+# ...}]` for concepts/methods/datasets regardless of prose rules in the
+# prompt. Adding a 6-triple example did not move the needle (measured
+# live: identical output before/after). Showing a WRONG pattern next to
+# a RIGHT pattern flipped behavior: 4 concepts as flat slugs, 6 triples
+# (up from 3), and 6/6 with source_sentence (up from 0/3). The
+# "EXACTLY 6-12 items, not fewer" line is also load-bearing — the model
+# was anchoring to the example count and producing one-for-one matches
+# with whatever the example showed.
 
 EXTRACT_ENTITIES_EXAMPLE = """\
 
-Example output for a solar-physics paper titled "Solar cycle 24 anomalies":
+Example (solar-physics paper titled "Solar cycle 24 anomalies"):
 {
-  "concepts": ["solar-minimum", "sunspot-number", "geomagnetic-activity"],
-  "methods": ["wavelet-analysis", "cross-correlation"],
-  "datasets": ["sidc-sunspot-catalog"],
+  "concepts": ["solar-minimum", "sunspot-number", "geomagnetic-activity", "extended-minimum", "coronal-holes"],
+  "methods": ["wavelet-analysis", "cross-correlation", "superposed-epoch-analysis"],
+  "datasets": ["sidc-sunspot-catalog", "omni-solar-wind-database"],
   "triples": [
     {"subject": "solar-cycle-24", "predicate": "studies", "object": "sunspot-number", "source_sentence": "We analyzed the sunspot-number record from 2008 to 2019 to characterize the depth of the cycle 24 minimum."},
-    {"subject": "cycle-24-minimum", "predicate": "finds", "object": "reduced-geomagnetic-activity", "source_sentence": "The geomagnetic Ap index reached a 100-year low during the extended minimum of 2008-2009."}
+    {"subject": "cycle-24-minimum", "predicate": "finds", "object": "reduced-geomagnetic-activity", "source_sentence": "The geomagnetic Ap index reached a 100-year low during the extended minimum of 2008-2009."},
+    {"subject": "wavelet-analysis", "predicate": "measures", "object": "sunspot-number", "source_sentence": "Morlet wavelet analysis was applied to the daily sunspot-number series to isolate decadal modulations."},
+    {"subject": "extended-minimum", "predicate": "correlates_with", "object": "coronal-holes", "source_sentence": "Persistent low-latitude coronal holes accompanied the extended minimum, mediating solar-wind outflow."},
+    {"subject": "solar-cycle-24", "predicate": "contradicts", "object": "dynamo-prediction-2007", "source_sentence": "The observed polar-field strength fell well below the 2007 dynamo prediction of a strong cycle."},
+    {"subject": "superposed-epoch-analysis", "predicate": "uses_method", "object": "omni-solar-wind-database", "source_sentence": "Superposed-epoch composites were built from OMNI high-resolution solar-wind data."}
   ]
 }"""
 
@@ -177,8 +204,14 @@ def wiki_extract_entities(
     # pre-Phase-55 default of 6 KB) so the model sees enough context
     # to extract a full set of triples. `_head_tail_slice` stays
     # available for callers that explicitly want it.
+    # Phase 54.6.40 — EXAMPLE deliberately omitted. Live test showed
+    # qwen2.5:32b-instruct regresses to verbose {"name":..., "description":...}
+    # objects whenever the long few-shot example is appended, even with
+    # the wrong-vs-right schema framing in SYSTEM. Without the EXAMPLE,
+    # the same paper yields flat slug strings + 6 triples with source
+    # sentences. The inline mini-example inside SYSTEM is retained.
     return (
-        EXTRACT_ENTITIES_SYSTEM + EXTRACT_ENTITIES_EXAMPLE,
+        EXTRACT_ENTITIES_SYSTEM,
         EXTRACT_ENTITIES_USER.format(
             slug=slug or "unknown",
             title=title or "Untitled", authors=authors or "Unknown",

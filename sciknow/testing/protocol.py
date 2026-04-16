@@ -1389,7 +1389,7 @@ def l3_autowrite_one_iteration_smoke() -> None:
     # We don't run the full autowrite scoring loop — that's L3's job
     # for `bench`. Here we verify the writer LLM call produces prose.
     sys_w, usr_w = prompts.write_section_v2(
-        section_type="introduction", topic="A smoke-test topic",
+        section="introduction", topic="A smoke-test topic",
         results=[],
         book_plan="Smoke book plan.",
         prior_summaries=None, paragraph_plan=None,
@@ -1398,7 +1398,15 @@ def l3_autowrite_one_iteration_smoke() -> None:
     )
     t0 = time.monotonic()
     toks = []
-    for tok in llm_stream(sys_w, usr_w, num_ctx=4096, num_predict=400):
+    # Phase 54.6.40 — pin to qwen2.5:32b-instruct (non-thinking). The
+    # default LLM_MODEL on this project is qwen3.5:27b, which is a
+    # thinking-family model: with num_predict=400 the model burns the
+    # entire budget in <think> and content_len stays at 0. The purpose
+    # of this smoke test is to exercise the write_section_v2 prompt
+    # path, not to probe LLM_MODEL — pin to a known-good model so the
+    # test fails loudly only on prompt-shape regressions.
+    for tok in llm_stream(sys_w, usr_w, model="qwen2.5:32b-instruct-q4_K_M",
+                          num_ctx=4096, num_predict=400):
         toks.append(tok)
     content = "".join(toks)
     elapsed = time.monotonic() - t0
@@ -8224,6 +8232,68 @@ def l1_phase54_6_21_audit_fixes() -> None:
     )
 
 
+def l1_phase54_6_40_entity_name_normalizer() -> None:
+    """Phase 54.6.40 — entity-name normalization in _extract_entities_and_kg.
+
+    qwen2.5:32b-instruct returns concepts/methods/datasets as
+    ``[{"name": ..., "description": ...}]`` objects even when the
+    prompt asks for flat slug strings. Before this fix, the entity
+    loop crashed with ``'dict' object has no attribute 'lower'`` as
+    soon as _slugify was called on the dict, taking down every
+    extract-kg run after 3 triples (the triple loop happened to
+    commit first). Lock in:
+
+      A) ``_entity_name`` helper exists and accepts str | dict | None
+      B) ``_extract_entities_and_kg`` routes the concepts + methods +
+         datasets lists through ``_entity_name`` before slugifying
+      C) Triple subject/predicate/object values also go through
+         ``_entity_name`` (cheap insurance for future models that
+         decide to nest those too)
+    """
+    import inspect as _inspect
+    from sciknow.core import wiki_ops as _wo
+
+    # A) helper exists + behaves
+    assert hasattr(_wo, "_entity_name"), (
+        "_entity_name helper missing — Phase 54.6.40 regression"
+    )
+    assert _wo._entity_name("solar-cycle-24") == "solar-cycle-24"
+    assert _wo._entity_name({"name": "solar-cycle-24",
+                              "description": "x"}) == "solar-cycle-24"
+    assert _wo._entity_name({"slug": "alt-key"}) == "alt-key"
+    assert _wo._entity_name({}) == ""
+    assert _wo._entity_name(None) == ""
+    # Dict with only unknown keys falls back to empty (don't invent a name)
+    assert _wo._entity_name({"foo": "bar"}) == ""
+
+    # B) extraction function actually uses it for entity aggregation
+    ext_src = _inspect.getsource(_wo._extract_entities_and_kg)
+    assert "_entity_name" in ext_src, (
+        "_extract_entities_and_kg must route entity lists through "
+        "_entity_name or the dict-shaped LLM output crashes _slugify"
+    )
+    # The concepts/methods/datasets concatenation must pipe through it
+    assert 'data.get("concepts"' in ext_src and 'data.get("methods"' in ext_src, (
+        "entity concatenation source changed — re-verify the normalization path"
+    )
+
+    # C) triple subject/predicate/object are defensively normalized
+    assert ext_src.count('_entity_name(t.get(') >= 3, (
+        "triple subject/predicate/object must each go through "
+        "_entity_name so a future model returning nested triple "
+        "fields can't crash the whole run"
+    )
+
+    # D) CLI layer still catches + reports per-paper failures so one
+    # stubborn paper can't take down a whole backfill batch.
+    from sciknow.cli import wiki as _wiki_cli
+    cli_src = _inspect.getsource(_wiki_cli.extract_kg)
+    assert "failed += 1" in cli_src and "fail" in cli_src, (
+        "extract-kg CLI must keep the per-paper try/except so one "
+        "bad paper doesn't kill the batch"
+    )
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -8414,6 +8484,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_wiki_browsing_mvp,
     # Phase 54.6.21 — audit fixes batch
     l1_phase54_6_21_audit_fixes,
+    # Phase 54.6.40 — extract-kg entity-name dict normalization
+    l1_phase54_6_40_entity_name_normalizer,
 ]
 
 L2_TESTS: list[Callable] = [
