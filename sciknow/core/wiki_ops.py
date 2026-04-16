@@ -399,9 +399,17 @@ def compile_paper_summary(
                 sections=section_text[:3000],
             )
             raw_perspectives = _strip_thinking(
-                llm_complete(p_sys, p_usr, model=model,
-                             temperature=0.3, num_ctx=shared_ctx,
-                             keep_alive=-1) or ""
+                llm_complete(
+                    p_sys,
+                    (p_usr or "").rstrip() + "\n\n/no_think",
+                    model=model,
+                    temperature=0.3, num_ctx=shared_ctx,
+                    # Phase 54.6.38 — cap output to 400 tokens.
+                    # Perspectives are ~3 bullet points (~100 tokens
+                    # of content + thinking). Without cap, qwen3:30b-a3b
+                    # generates 1000+ tokens of reasoning per call.
+                    num_predict=400,
+                    keep_alive=-1) or ""
             ).strip()
             if raw_perspectives:
                 perspectives_text = (
@@ -426,8 +434,15 @@ def compile_paper_summary(
         )
 
         tokens: list[str] = []
-        for tok in llm_stream(system, user, model=model,
-                              num_ctx=shared_ctx, keep_alive=-1):
+        # Phase 54.6.38 — cap summary output to 1500 tokens and append
+        # /no_think. Pre-cap, qwen3:30b-a3b emitted up to 4155 tokens
+        # per summary (most of it thinking) which dragged compile to
+        # ~20 min/paper. Typical wiki summary is 300-600 words ≈
+        # 400-800 tokens; 1500 is generous for longer sections.
+        user_no_think = (user or "").rstrip() + "\n\n/no_think"
+        for tok in llm_stream(system, user_no_think, model=model,
+                              num_ctx=shared_ctx, num_predict=1500,
+                              keep_alive=-1):
             tokens.append(tok)
             yield {"type": "token", "text": tok}
 
@@ -441,9 +456,16 @@ def compile_paper_summary(
         try:
             pol_sys, pol_usr = wiki_prompts.wiki_polish(content)
             polished = _strip_thinking(
-                llm_complete(pol_sys, pol_usr, model=model,
-                             temperature=0.1, num_ctx=shared_ctx,
-                             keep_alive=-1) or ""
+                llm_complete(
+                    pol_sys,
+                    (pol_usr or "").rstrip() + "\n\n/no_think",
+                    model=model,
+                    temperature=0.1, num_ctx=shared_ctx,
+                    # Phase 54.6.38 — polish output ≤ original summary
+                    # length (~1500 tokens). Cap it to prevent qwen's
+                    # thinking-mode runaway.
+                    num_predict=1500,
+                    keep_alive=-1) or ""
             ).strip()
             if polished and len(polished) > 100:
                 content = polished
