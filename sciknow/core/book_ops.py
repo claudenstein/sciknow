@@ -5381,9 +5381,11 @@ def edge_case_hunter_stream(
         "required": ["findings"],
     }
     try:
+        # Phase 54.6.32 — num_predict=4096 cap on structured output
+        # to prevent runaway generation (see wiki_ops entity extraction).
         raw = llm_complete(
             sys_p, usr_p, model=model,
-            temperature=0.0, num_ctx=24576, keep_alive=-1,
+            temperature=0.0, num_ctx=24576, num_predict=4096, keep_alive=-1,
             format=schema,
         )
     except Exception as exc:

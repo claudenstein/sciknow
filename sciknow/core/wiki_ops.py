@@ -515,8 +515,18 @@ def _extract_entities_and_kg(
         # models that don't honor /no_think.
         usr_e_no_think = (usr_e or "").rstrip() + "\n\n/no_think"
         effective_ctx = num_ctx if num_ctx is not None else 24576
+        # Phase 54.6.32 — num_predict=4096 cap on entity extraction.
+        # Pre-fix, mistral:7b could enter an infinite-loop on
+        # structured-output (format=json_schema) calls, generating
+        # 10,000+ tokens of JSON until Ollama OOM'd. The real output
+        # is ~500-1500 tokens (concepts + triples); 4096 is a generous
+        # ceiling that catches the runaway without truncating legitimate
+        # extractions. A truncated response will fail json.loads() and
+        # fall through to the "return [], 0" fallback below, which is
+        # the same failure mode as a real empty extraction.
         raw = llm_complete(sys_e, usr_e_no_think, model=model,
                            temperature=0.0, num_ctx=effective_ctx,
+                           num_predict=4096,
                            keep_alive=-1, format=extraction_schema)
         # Thinking models sometimes leak <think>…</think> even under
         # structured output when /no_think isn't honored — strip them

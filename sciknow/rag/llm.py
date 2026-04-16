@@ -117,6 +117,7 @@ def stream(
     temperature: float = 0.2,
     num_ctx: int = 16384,
     num_batch: int = 1024,
+    num_predict: int | None = None,
     keep_alive: str | int | None = -1,
     format: dict | str | None = None,
 ) -> Iterator[str]:
@@ -166,7 +167,16 @@ def stream(
             ],
             "stream": True,
             "options": {"temperature": temperature, "num_ctx": num_ctx,
-                        "num_batch": num_batch},
+                        "num_batch": num_batch,
+                        # Phase 54.6.32 — num_predict cap (if set) prevents
+                        # runaway generation. Discovered when mistral:7b
+                        # entered an infinite-loop on a structured-output
+                        # (format=json_schema) entity-extraction call,
+                        # generating 10,919 tokens in 116.8s before Ollama
+                        # OOM'd. Critical for format=json_schema calls
+                        # where the schema has unbounded arrays.
+                        **({"num_predict": num_predict}
+                           if num_predict is not None else {})},
         }
         if keep_alive is not None:
             kwargs["keep_alive"] = keep_alive
@@ -206,6 +216,7 @@ def complete(
     temperature: float = 0.1,
     num_ctx: int = 16384,
     num_batch: int = 1024,
+    num_predict: int | None = None,
     keep_alive: str | int | None = -1,
     format: dict | str | None = None,
 ) -> str:
@@ -228,6 +239,7 @@ def complete(
     """
     return "".join(stream(system, user, model=model, temperature=temperature,
                           num_ctx=num_ctx, num_batch=num_batch,
+                          num_predict=num_predict,
                           keep_alive=keep_alive, format=format))
 
 

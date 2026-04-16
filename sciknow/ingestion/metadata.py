@@ -903,11 +903,14 @@ def _layer_llm(text: str, meta: PaperMeta) -> None:
         # of the previous paper took longer than 5 min (MinerU is slow
         # on heavy figure-laden PDFs). With keep_alive=-1 the model
         # stays loaded for the entire ingest run.
+        # Phase 54.6.32 — num_predict=1024 cap on metadata JSON output
+        # (typical response is ~200-400 tokens; 1024 is generous for
+        # papers with many authors or long abstracts).
         response = client.chat(
             model=settings.llm_fast_model,
             messages=[{"role": "user", "content": _LLM_PROMPT.format(text=text)}],
             format="json",
-            options={"temperature": 0},
+            options={"temperature": 0, "num_predict": 1024},
             keep_alive=-1,
         )
 
