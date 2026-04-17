@@ -4644,7 +4644,10 @@ async def api_corpus_expand_author_download_selected(request: Request):
     if not isinstance(raw_cands, list) or not raw_cands:
         raise HTTPException(status_code=400, detail="candidates list required")
 
-    # Sanitize to {doi, title, year}, drop entries missing DOI.
+    # Sanitize to {doi, title, year, alternate_dois, alternate_arxiv_ids},
+    # drop entries missing DOI. Phase 54.6.51 — alternates are used by
+    # the downloader as fallback sources when the primary DOI's OA
+    # discovery returns nothing (preprint-vs-journal duplicates).
     clean: list[dict] = []
     for c in raw_cands:
         if not isinstance(c, dict):
@@ -4652,10 +4655,14 @@ async def api_corpus_expand_author_download_selected(request: Request):
         doi = (c.get("doi") or "").strip()
         if not doi:
             continue
+        alt_dois = [d for d in (c.get("alternate_dois") or []) if isinstance(d, str) and d.strip()]
+        alt_arxiv = [a for a in (c.get("alternate_arxiv_ids") or []) if isinstance(a, str) and a.strip()]
         clean.append({
             "doi": doi,
             "title": (c.get("title") or "")[:500],
             "year": c.get("year") if isinstance(c.get("year"), int) else None,
+            "alternate_dois": alt_dois[:10],
+            "alternate_arxiv_ids": alt_arxiv[:10],
         })
     if not clean:
         raise HTTPException(status_code=400, detail="no valid DOIs in candidates")
@@ -17019,12 +17026,18 @@ function eapRender() {{
     const doi = c.doi
       ? `<a href="https://doi.org/${{_escHtml(c.doi)}}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;font-family:ui-monospace,monospace;font-size:10px;" onclick="event.stopPropagation();">${{_escHtml(c.doi)}}</a>`
       : '<span style="color:var(--fg-muted);">(no DOI)</span>';
+    // Phase 54.6.51 — alt-source badge: show "+N more" when the row
+    // represents a title-dedup group covering multiple DOIs / arXiv IDs.
+    const altCount = (c.alternate_dois || []).length + (c.alternate_arxiv_ids || []).length;
+    const altBadge = altCount > 0
+      ? ` <span title="Same paper also known under ${{altCount}} alternate identifier(s); will be used as download fallbacks" style="background:rgba(80,200,120,0.15);color:var(--success);padding:1px 5px;border-radius:3px;font-size:9px;margin-left:4px;">+${{altCount}} alt</span>`
+      : '';
     return `<tr style="border-top:1px solid var(--border);cursor:pointer;" data-doi="${{_escHtml(c.doi || '')}}">
       <td style="padding:6px 8px;"><input type="checkbox" class="eap-row-cb" ${{checked}}
            data-doi="${{_escHtml(c.doi || '')}}" onclick="event.stopPropagation();"></td>
       <td style="padding:6px 8px;">
         <div style="font-weight:500;">${{_escHtml(c.title || '(untitled)')}}</div>
-        <div style="font-size:10px;margin-top:2px;">${{doi}}</div>
+        <div style="font-size:10px;margin-top:2px;">${{doi}}${{altBadge}}</div>
       </td>
       <td style="padding:6px 8px;color:var(--fg-muted);">${{_escHtml(authors)}}</td>
       <td style="padding:6px 8px;color:var(--fg-muted);">${{c.year || '—'}}</td>
@@ -17095,6 +17108,11 @@ async function eapDownloadSelected() {{
   const payload = {{
     candidates: chosen.map(c => ({{
       doi: c.doi, title: c.title || '', year: c.year || null,
+      // Phase 54.6.51 — forward alternate identifiers for title-merged
+      // duplicates so the downloader can fall back (preprint → journal
+      // → HAL → Zenodo → etc.) if the primary DOI has no OA mirror.
+      alternate_dois: c.alternate_dois || [],
+      alternate_arxiv_ids: c.alternate_arxiv_ids || [],
     }})),
     workers: parseInt(document.getElementById('eap-workers').value || '0', 10),
     ingest: document.getElementById('eap-ingest').checked,

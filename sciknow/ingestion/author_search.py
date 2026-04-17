@@ -566,6 +566,63 @@ def search_author(
                 )
         by_doi = verified
 
-    merged = sorted(by_doi.values(), key=lambda r: r.year or 0, reverse=True)
+    # Phase 54.6.51 — title-normalised dedup. OpenAlex and Crossref
+    # frequently surface the SAME paper under different DOIs (preprint
+    # DOI + journal DOI, or arXiv DOI + journal DOI). The DOI-keyed
+    # dedup above catches exact-DOI dupes but lets through these
+    # identifier-variant dupes, so the UI shows the same paper twice.
+    # Group refs by normalised title + year-within-1, keep the ref
+    # with the most complete metadata as the representative, and fold
+    # the others into ``alternate_dois`` / ``alternate_arxiv_ids``
+    # so ``find_and_download`` can fall back through them when the
+    # primary source 404s.
+    from sciknow.ingestion.references import normalise_title_for_dedup
+    from collections import defaultdict
+    groups: dict[tuple[str, int | None], list[Reference]] = defaultdict(list)
+    for r in by_doi.values():
+        key = (normalise_title_for_dedup(r.title or ""), r.year)
+        groups[key].append(r)
+    # Fall-through: also merge entries with same normalised title whose
+    # years differ by ≤1 (common for preprint posted 2023 and journal
+    # publication 2024).
+    final: list[Reference] = []
+    used: set[int] = set()
+    key_list = list(groups.keys())
+    for i, (ti, yi) in enumerate(key_list):
+        if id(ti) in used:
+            continue
+        members: list[Reference] = list(groups[(ti, yi)])
+        if ti:  # non-empty title
+            for j in range(i + 1, len(key_list)):
+                tj, yj = key_list[j]
+                if tj != ti:
+                    continue
+                if yi is None or yj is None or abs((yi or 0) - (yj or 0)) <= 1:
+                    members.extend(groups[(tj, yj)])
+                    used.add(id(tj))
+            used.add(id(ti))
+        # Pick the "best" representative: prefer the one with an arxiv
+        # id (often has a richer OA path) OR the one with a longer DOI
+        # (journal DOIs are typically longer than preprint DOIs, and
+        # a journal DOI's Unpaywall hit rate is higher than a preprint's).
+        def _score(r: Reference) -> tuple:
+            return (
+                1 if r.arxiv_id else 0,
+                1 if (r.doi and not r.doi.lower().startswith("10.48550")) else 0,
+                len(r.doi or ""),
+                len(r.title or ""),
+            )
+        members.sort(key=_score, reverse=True)
+        rep = members[0]
+        alt_dois = [m.doi for m in members[1:] if m.doi and m.doi.lower() != (rep.doi or "").lower()]
+        alt_arxiv = [m.arxiv_id for m in members[1:] if m.arxiv_id and m.arxiv_id != rep.arxiv_id]
+        if alt_dois or alt_arxiv:
+            # mutate in place — Reference is a dataclass with default lists
+            rep.alternate_dois = list({*alt_dois})
+            rep.alternate_arxiv_ids = list({*alt_arxiv})
+        final.append(rep)
+
+    merged = sorted(final, key=lambda r: r.year or 0, reverse=True)
     info["merged"] = len(merged)
+    info["title_dedup_dropped"] = len(by_doi) - len(merged)
     return merged, info

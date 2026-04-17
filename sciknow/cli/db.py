@@ -33,18 +33,14 @@ _FAILED_SUBDIR = "failed_ingest"
 
 
 def _normalise_title_for_dedup(title: str) -> str:
-    """Collapse a paper title into a stable dedup key. Lowercase,
-    strip non-word chars to single spaces, clip to 140 chars.
-    Catches duplicates where two references point at the same paper
-    via different identifiers (preprint DOI vs published DOI, arXiv
-    id vs journal DOI). Very conservative — won't match near-dupes
-    with different wording; that's a job for embedding similarity
-    which the Phase-49 ranker already does downstream."""
-    import re as _re
-    s = (title or "").lower()
-    s = _re.sub(r"[^\w\s]", " ", s)
-    s = _re.sub(r"\s+", " ", s).strip()
-    return s[:140]
+    """Phase 54.6.51 — thin re-export. The actual implementation lives in
+    ``sciknow.ingestion.references`` so ingestion-layer modules can use
+    it without a circular import via this CLI module. L1
+    ``l1_phase49_1_title_dedup_plumbing`` still grips on the old
+    attribute path, hence the alias here.
+    """
+    from sciknow.ingestion.references import normalise_title_for_dedup as _impl
+    return _impl(title)
 
 
 def _move_downloaded_pdf(
@@ -3468,7 +3464,11 @@ def download_dois(
         download_dir = settings.data_dir / "downloads"
 
     # ── Parse input ──────────────────────────────────────────────────────
-    doi_list: list[tuple[str, str, int | None]] = []  # (doi, title, year)
+    # Phase 54.6.51 — each entry now carries optional alternate DOIs +
+    # arXiv IDs so the downloader can fall back to a preprint mirror
+    # when the journal DOI's OA discovery returns nothing. Tuple layout:
+    #   (doi, title, year, alternate_dois, alternate_arxiv_ids)
+    doi_list: list[tuple[str, str, int | None, list[str], list[str]]] = []
     if dois_file:
         raw = json.loads(Path(dois_file).read_text())
         if not isinstance(raw, list):
@@ -3476,12 +3476,14 @@ def download_dois(
             raise typer.Exit(2)
         for item in raw:
             if isinstance(item, str):
-                doi_list.append((item, "", None))
+                doi_list.append((item, "", None, [], []))
             elif isinstance(item, dict) and item.get("doi"):
                 doi_list.append((
                     item["doi"],
                     item.get("title", "") or "",
                     item.get("year"),
+                    list(item.get("alternate_dois") or []),
+                    list(item.get("alternate_arxiv_ids") or []),
                 ))
             else:
                 console.print(f"[yellow]Skipping malformed entry: {item!r}[/yellow]")
@@ -3489,13 +3491,13 @@ def download_dois(
         for d in dois.split(","):
             d = d.strip()
             if d:
-                doi_list.append((d, "", None))
+                doi_list.append((d, "", None, [], []))
 
     # dedup by DOI
     seen: set[str] = set()
     doi_list = [
-        (d, t, y) for (d, t, y) in doi_list
-        if (d.lower() not in seen and not seen.add(d.lower()))
+        entry for entry in doi_list
+        if (entry[0].lower() not in seen and not seen.add(entry[0].lower()))
     ]
 
     if not doi_list:
@@ -3521,7 +3523,7 @@ def download_dois(
     to_ingest: list[tuple[str, str, Path]] = []
 
     def _download_one(item):
-        doi, title, _year = item
+        doi, title, _year, alt_dois, alt_arxiv = item
         doi_key = doi.lower()
         safe_name = doi.replace("/", "_").replace(":", "_")
         dest = download_dir / f"{safe_name}.pdf"
@@ -3533,6 +3535,8 @@ def download_dois(
         ok, source = find_and_download(
             doi=doi, arxiv_id=None,
             dest_path=dest, email=settings.crossref_email,
+            alternate_dois=alt_dois,
+            alternate_arxiv_ids=alt_arxiv,
         )
         return ("downloaded" if ok else "no_oa", doi_key, label, dest, source)
 

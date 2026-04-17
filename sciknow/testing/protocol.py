@@ -8399,6 +8399,97 @@ def l1_model_sweep_surface() -> None:
     )
 
 
+def l1_phase54_6_51_downloader_parallelism_and_dedup() -> None:
+    """Phase 54.6.51 — parallel OA-source discovery + title-dedup
+    + alternate-source fallback. Pure structural (no network) —
+    exercises: (a) the new helpers exist on the right modules;
+    (b) Copernicus / arXiv fast-paths return in constant time with
+    the right source tag; (c) Reference now carries alternate_dois
+    and alternate_arxiv_ids; (d) the normalise_title_for_dedup helper
+    moved to ingestion.references and its CLI re-export still works."""
+    from sciknow.ingestion import downloader as _dl
+    from sciknow.ingestion import references as _refs
+    from sciknow.cli import db as _db
+
+    # A) Public surface additions
+    for attr in ("find_and_download", "_gather_candidate_urls",
+                 "find_hal_pdf_url", "find_zenodo_pdf_url",
+                 "find_arxiv_id_by_doi", "close_shared_client",
+                 "_get_client", "_LookupSpec"):
+        assert hasattr(_dl, attr), f"downloader missing {attr!r}"
+
+    # B) Fast-paths don't hit the network — they return in < 0.1 s and
+    # surface the right source label.
+    import time
+    t0 = time.monotonic()
+    urls = _dl._gather_candidate_urls(
+        doi="10.5194/angeo-33-457-2015", arxiv_id=None,
+        email="test@example.com",
+    )
+    dt = time.monotonic() - t0
+    assert dt < 0.5, f"Copernicus fast-path took {dt:.3f}s — should be instant"
+    assert urls and urls[0][0] == "copernicus", (
+        f"expected copernicus first, got {urls[:1]}"
+    )
+
+    t0 = time.monotonic()
+    urls = _dl._gather_candidate_urls(
+        doi=None, arxiv_id="2301.04293", email="test@example.com",
+    )
+    dt = time.monotonic() - t0
+    assert dt < 0.5, f"arXiv fast-path took {dt:.3f}s — should be instant"
+    assert urls and urls[0][0] == "arxiv", (
+        f"expected arxiv first, got {urls[:1]}"
+    )
+
+    # C) Reference carries alternate identifiers
+    r = _refs.Reference(raw_text="x", doi="10.1/a", title="X", year=2020)
+    assert hasattr(r, "alternate_dois"), "Reference missing alternate_dois"
+    assert hasattr(r, "alternate_arxiv_ids"), "Reference missing alternate_arxiv_ids"
+    assert r.alternate_dois == [] and r.alternate_arxiv_ids == []
+
+    # D) Title normaliser moved + re-export still works
+    assert hasattr(_refs, "normalise_title_for_dedup"), (
+        "normalise_title_for_dedup missing from references module"
+    )
+    assert _refs.normalise_title_for_dedup("  Foo, Bar!  ") == "foo bar"
+    # Re-export in cli.db retains the old name for existing L1 test
+    assert _db._normalise_title_for_dedup("  Foo, Bar!  ") == "foo bar"
+
+    # E) Title-dedup logic in search_author — build two Reference objects
+    # with same title + year, different DOIs, and verify dedup merges them.
+    from sciknow.ingestion import author_search as _as
+    # Monkey-patch the lower-level search calls so we don't hit the network
+    def _fake_oa(name, **kw):
+        return [
+            _refs.Reference(raw_text="a", doi="10.1/preprint", arxiv_id="2301.0001",
+                            title="Solar Activity and Earth Climate", year=2023,
+                            authors=["J. Zharkova"]),
+            _refs.Reference(raw_text="b", doi="10.1234/journal.v1.2024",
+                            title="Solar Activity and Earth Climate", year=2024,
+                            authors=["J. Zharkova"]),
+            _refs.Reference(raw_text="c", doi="10.5555/other",
+                            title="Unrelated Paper On X", year=2020,
+                            authors=["J. Zharkova"]),
+        ], []
+    orig = _as.search_openalex_by_author
+    _as.search_openalex_by_author = _fake_oa
+    try:
+        merged, info = _as.search_author(
+            "Zharkova", strict_author=True, author_ids=["A123"],
+        )
+    finally:
+        _as.search_openalex_by_author = orig
+    # Expect 2 merged rows (the two "Solar Activity" entries collapse).
+    assert len(merged) == 2, f"expected 2 merged rows, got {len(merged)}: {[r.title for r in merged]}"
+    # The representative should carry the alternate DOI + arxiv_id of the dropped dupe.
+    rep = next(r for r in merged if r.title == "Solar Activity and Earth Climate")
+    assert len(rep.alternate_dois) + len(rep.alternate_arxiv_ids) >= 1, (
+        f"dedup dropped a dupe but didn't preserve its identifier: "
+        f"rep.doi={rep.doi} alt_dois={rep.alternate_dois} alt_arxiv={rep.alternate_arxiv_ids}"
+    )
+
+
 def l1_quality_bench_surface() -> None:
     """Phase 54.6.46 — writing-quality bench harness structural test.
 
@@ -8682,6 +8773,8 @@ L1_TESTS: list[Callable] = [
     l1_model_sweep_surface,
     # Phase 54.6.46 — writing-quality bench harness structural test
     l1_quality_bench_surface,
+    # Phase 54.6.51 — parallel OA lookup + title-dedup + alternate sources
+    l1_phase54_6_51_downloader_parallelism_and_dedup,
 ]
 
 L2_TESTS: list[Callable] = [

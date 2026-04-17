@@ -33,6 +33,9 @@ def _ref_to_dict(ref, score: float | None = None) -> dict[str, Any]:
         "authors": list(ref.authors or []),
         "year": ref.year,
         "relevance_score": (None if score is None else float(score)),
+        # Phase 54.6.51 — alternate identifiers for title-merged dupes.
+        "alternate_dois": list(getattr(ref, "alternate_dois", []) or []),
+        "alternate_arxiv_ids": list(getattr(ref, "alternate_arxiv_ids", []) or []),
     }
 
 

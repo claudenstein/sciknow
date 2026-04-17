@@ -23,6 +23,22 @@ import re
 from dataclasses import dataclass, field
 
 
+def normalise_title_for_dedup(title: str) -> str:
+    """Phase 54.6.51 — moved here from cli.db so ingestion-layer helpers
+    can reuse it without creating a circular import.
+
+    Collapse a paper title into a stable dedup key. Lowercase, strip
+    non-word chars to single spaces, clip to 140 chars. Catches
+    duplicates where two references point at the same paper via
+    different identifiers (preprint DOI vs published DOI, arXiv
+    id vs journal DOI).
+    """
+    s = (title or "").lower()
+    s = re.sub(r"[^\w\s]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:140]
+
+
 @dataclass
 class Reference:
     raw_text: str                   # original text of the reference entry
@@ -31,6 +47,14 @@ class Reference:
     title: str | None = None
     year: int | None = None
     authors: list[str] = field(default_factory=list)
+    # Phase 54.6.51 — carry alternate identifiers for the same paper when
+    # title-dedup merges OpenAlex + Crossref results that share a title
+    # but expose different DOIs (typical for preprint-vs-journal pairs or
+    # arXiv-vs-DOI duplicates). find_and_download tries the primary
+    # identifier first, then falls back to each alternate for source
+    # diversity.
+    alternate_dois: list[str] = field(default_factory=list)
+    alternate_arxiv_ids: list[str] = field(default_factory=list)
 
 
 # ── MinerU content_list.json reference section detection ─────────────────────
