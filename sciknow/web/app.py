@@ -6358,16 +6358,23 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
    large content (preview tables, wiki pages, catalog browser). The
    40px overlay padding is the border-space the user asked to keep;
    modal-body scrolls internally when content overflows. */
+/* Phase 54.6.45 — modals sized to the viewport rather than fixed pixels.
+   Pre-fix, `.modal` capped at 1100px and `.modal.wide` at 1400px, which
+   on any modern display left huge empty gutters. User reported reader
+   popups felt cramped; now the default fills 94vw up to 1500px and wide
+   modals up to 1800px. max-height reduced reserved chrome from 80px
+   → 40px so the modal reaches closer to the viewport edges. */
 .modal {{ background: var(--bg-elevated); border: 1px solid var(--border);
-          border-radius: var(--r-xl); box-shadow: var(--shadow-lg); width: 94%;
-          max-width: 1100px; max-height: calc(100vh - 80px);
+          border-radius: var(--r-xl); box-shadow: var(--shadow-lg);
+          width: 94vw; max-width: 1500px;
+          max-height: calc(100vh - 40px);
           display: flex; flex-direction: column;
           overflow: hidden; animation: slideUp .18s ease; }}
-.modal.wide {{ max-width: 1400px; }}
+.modal.wide {{ width: 94vw; max-width: 1800px; }}
 /* Candidate-preview / KG / catalog modals render wide tables. Scale
    them to the viewport so the user actually gets to see full titles
    without wrap hell. */
-.modal.xwide {{ width: 94vw; max-width: 1700px; max-height: calc(100vh - 64px); }}
+.modal.xwide {{ width: 96vw; max-width: 2000px; max-height: calc(100vh - 32px); }}
 /* Phase 54.6.12 — sized container for every ECharts-backed viz tab.
    70vh works well across the six charts; each chart instance calls
    .resize() on window resize + tab-switch. */

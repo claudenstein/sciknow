@@ -1446,6 +1446,13 @@ def expand(
     #   B. MinerU content_list.json (primary for MinerU-ingested papers)
     #   C. Marker markdown bibliography section (legacy fallback)
     #   D. OpenAlex referenced_works (only when A+B+C yielded few refs)
+    # Phase 54.6.45 — announce each step so the user doesn't stare at a
+    # silent terminal for 60+ seconds during reference extraction on a
+    # large corpus.
+    console.print(
+        f"[dim]Scanning {len(papers)} papers for references "
+        f"(Crossref + MinerU + Marker)…[/dim]"
+    )
     all_refs: list = []
     source_counts = {"crossref": 0, "mineru": 0, "markdown": 0, "openalex": 0}
 
@@ -1527,6 +1534,10 @@ def expand(
     )
 
     # ── Step 3: deduplicate references against each other and the collection ─
+    # Phase 54.6.45 — progress announcement. On a corpus with 100k+ refs
+    # this pass can take ~20s, which feels frozen without signal.
+    console.print(f"[dim]Deduplicating {len(all_refs)} references "
+                  f"against existing corpus…[/dim]")
     seen: set[str] = set()
     candidates = []
     skipped_by_title = 0
@@ -1853,15 +1864,38 @@ def expand(
                 pool.submit(_download_one, *info): info for info in prepped
             }
 
+            # Phase 54.6.45 — durable per-event lines. Rich.Progress
+            # only updates the inline description to the *last-settled*
+            # future; with 6 workers in flight, long-running downloads
+            # appear to stall because no line is emitted until they
+            # complete. Emit one persistent line per event (via
+            # `progress.console.print`, which Rich correctly stacks
+            # above the live progress bar) so the terminal log reads
+            # like a change-log the user can scroll back through.
+            import time as _time
+            t_phase_start = _time.monotonic()
+            done_count = 0
+            total_dl = len(future_to_info)
+
+            def _emit(mark: str, color: str, kind: str, label_: str, note: str = "") -> None:
+                t_elapsed = _time.monotonic() - t_phase_start
+                progress.console.print(
+                    f"[dim][{done_count:>4d}/{total_dl}][/dim]  "
+                    f"[{color}]{mark} {kind:<7}[/{color}] {label_[:70]:<70}"
+                    + (f"  [dim]· {note}[/dim]" if note else "")
+                )
+
             for fut in as_completed(future_to_info):
                 ref, ref_key, dest, title = future_to_info[fut]
-                label = (ref.title or ref.doi or ref.arxiv_id or "")[:50]
-                progress.update(task, description=f"[dim]{label}[/dim]")
+                label = (ref.title or ref.doi or ref.arxiv_id or "")[:70]
+                progress.update(task, description=f"[dim]{label[:50]}[/dim]")
+                done_count += 1
 
                 try:
                     status, source = fut.result()
                 except Exception as exc:
                     failed_dl += 1
+                    _emit("✗", "red", "ERROR", label, str(exc)[:50])
                     _log(f"ERROR  {ref_key}  | {title}  | {exc}")
                     progress.advance(task)
                     continue
@@ -1875,6 +1909,7 @@ def expand(
                         if ref_key in ingest_failed
                         else "no OA PDF"
                     )
+                    _emit("⏭", "dim", "SKIP", label, f"cached: {reason}")
                     _log(f"SKIP   {ref_key}  | {title}  ({reason}, cached)")
                     progress.advance(task)
                     continue
@@ -1884,6 +1919,7 @@ def expand(
                     # .ingest_done cache or because its PDF lives in the
                     # processed/ subfolder).
                     skipped += 1
+                    _emit("⏭", "dim", "SKIP", label, "already in corpus")
                     _log(f"SKIP   {ref_key}  | {title}  (already in corpus)")
                     progress.advance(task)
                     continue
@@ -1906,6 +1942,7 @@ def expand(
                         )
                     except Exception:
                         pass
+                    _emit("✗", "yellow", "NO_OA", label, "no open-access PDF found")
                     _log(f"NO_OA  {ref_key}  | {title}")
                     progress.advance(task)
                     continue
@@ -1913,6 +1950,7 @@ def expand(
                 if status == "downloaded":
                     downloaded += 1
                     progress.update(task, description=f"[green]↓ {source}[/green] {label[:40]}")
+                    _emit("✓", "green", "DL", label, f"source={source}")
                     _log(f"DL     {ref_key}  | {title}  | source={source}")
                     if ingest:
                         to_ingest.append((ref_key, title, dest))
@@ -1922,9 +1960,11 @@ def expand(
                     # Queue for ingestion anyway — pipeline.ingest() will
                     # hash-dedupe against the DB.
                     if ingest:
+                        _emit("↺", "cyan", "EXISTS", label, "pdf on disk, queued for ingest")
                         to_ingest.append((ref_key, title, dest))
                     else:
                         skipped += 1
+                        _emit("⏭", "dim", "SKIP", label, "pdf on disk, --no-ingest")
                         _log(f"SKIP   {ref_key}  | {title}  (pdf on disk, --no-ingest)")
 
                 progress.advance(task)
@@ -1952,20 +1992,36 @@ def expand(
             dest.resolve(): (ref_key, title) for ref_key, title, dest in to_ingest
         }
 
+        # Phase 54.6.45 — progress.console.print captured below by the
+        # closure so ingestion callbacks can emit durable lines too.
+        _ingest_progress_ref: list = [None]  # set just before Progress ctx
+
         def _on_file_done(path, status, error):
             # Counters and log lines mutate nonlocal state; rich.Progress
             # handles its own threading so no extra lock is needed here.
             nonlocal ingested, failed_ingest
             ref_key, title = path_to_meta.get(path.resolve(), ("?", path.name))
+            label = (title or path.name)[:70]
+            prog = _ingest_progress_ref[0]
+            def _say(mark, color, kind, note=""):
+                if prog is None:
+                    return
+                prog.console.print(
+                    f"  [{color}]{mark} {kind:<11}[/{color}] {label[:70]:<70}"
+                    + (f"  [dim]· {note}[/dim]" if note else "")
+                )
             if status == "done":
                 ingested += 1
+                _say("✓", "green", "INGEST")
                 _log(f"INGEST {ref_key}  | {title}")
             elif status == "skipped":
                 # Already in DB via SHA-256 match — count as success for UX.
                 ingested += 1
+                _say("⏭", "dim", "INGEST-SKIP", "already in DB")
                 _log(f"INGEST {ref_key}  | {title}  (already in DB)")
             elif status == "failed":
                 failed_ingest += 1
+                _say("✗", "red", "INGEST-FAIL", (error or "")[:50])
                 _log(f"INGEST_FAIL {ref_key}  | {title}  | {error or ''}")
                 # Phase 49.1 — persist the failure so the next run
                 # skips this ref by default. User can force a retry
@@ -2002,6 +2058,7 @@ def expand(
             console=console,
             transient=False,
         ) as progress:
+            _ingest_progress_ref[0] = progress
             itask = progress.add_task("Ingesting", total=len(to_ingest))
             _run_parallel_workers(
                 [dest for _, _, dest in to_ingest],
