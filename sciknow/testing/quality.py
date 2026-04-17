@@ -96,20 +96,37 @@ logger = logging.getLogger("sciknow.testing.quality")
 # production picks + an alternative per role so we can detect drift
 # when a prompt or model swap changes quality.
 CANDIDATE_MODELS: list[str] = [
-    # Current winners (baselines)
-    "qwen3:30b-a3b-instruct-2507-q4_K_M",   # wiki compile + extract-kg
-    "gemma3:27b-it-qat",                     # book writing
-    # Historical / alternative
-    "qwen2.5:32b-instruct-q4_K_M",           # former extract-kg default
+    # Phase 54.6.53 — full sweep across every locally-installed model
+    # for the 2026-04-17 bench. Not-installed candidates are skipped
+    # gracefully. Order is stable for diff-ability across runs.
+    "gemma3:27b-it-qat",                      # current book-writing baseline
+    "gemma4:26b-a4b-it-q4_K_M",
+    "gemma4:31b",                             # may fail load on Ollama < 0.20.0
+    "gemopus4:26b-a4b-q4_K_M",
+    "mn-darkest-universe:29b-q4_K_M",
+    "nemotron-cascade-2:30b",
+    "ornstein3.6:35b-a3b-q4_K_S",
+    "qwen2.5:32b-instruct-q4_K_M",
+    "qwen3:30b-a3b-instruct-2507-q4_K_M",     # current compile + extract-kg
+    "qwen3.5:27b",
+    "qwen3.6:35b-a3b-q4_K_M",
+    "qwen3.6:35b-a3b-ud-q4_K_S",
+    "supergemma4:26b-uncensored-q4_K_M",
+    "supergemma4:31b-abliterated-q4_K_M",     # broken output — keeps for ref
 ]
 
-# Judge-model roster. Used by _pick_judge to select a model from a
-# different family than the candidate being tested. Ordered by
-# preference; the first non-conflict is chosen.
+# Judge-model roster. Used by _pick_judge to pick a model from a
+# different family than the candidate pair being compared. Ordered
+# by preference; the first non-conflict is chosen. With 14 candidates
+# spanning qwen/gemma/mistral-nemo/nvidia-nemotron families, most pairs
+# have a non-conflict judge available; the remaining pairs fall through
+# to self-judge with a logged warning.
 JUDGE_MODEL_ROSTER: list[str] = [
-    "gemma3:27b-it-qat",
-    "qwen3:30b-a3b-instruct-2507-q4_K_M",
-    "qwen2.5:32b-instruct-q4_K_M",
+    "qwen3:30b-a3b-instruct-2507-q4_K_M",     # fast non-thinking qwen
+    "gemma3:27b-it-qat",                      # non-thinking gemma
+    "qwen2.5:32b-instruct-q4_K_M",            # reliable non-thinking fallback
+    "mn-darkest-universe:29b-q4_K_M",         # mistral-nemo, different family
+    "nemotron-cascade-2:30b",                 # nvidia, different family
 ]
 
 # Test papers (pinned by 8-char document_id prefix). One math-heavy

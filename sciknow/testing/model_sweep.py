@@ -65,15 +65,24 @@ from sciknow.testing.bench import BenchMetric, skip
 # as you pull/drop models; a model that isn't installed yields a
 # skip metric rather than failing the whole sweep.
 CANDIDATE_MODELS: list[str] = [
-    # Current production picks (baselines to beat)
-    "qwen2.5:32b-instruct-q4_K_M",       # extract-kg baseline
-    "qwen3:30b-a3b",                     # compile baseline (thinking)
-    "qwen3.5:27b",                       # autowrite baseline (thinking)
-
-    # New candidates the user is pulling 2026-04-16
-    "qwen3:30b-a3b-instruct-2507-q4_K_M",  # official non-thinking 30B-A3B
-    "gemma3:27b-it-qat",                    # Google non-thinking, QAT
-    "command-r:35b",                        # Cohere RAG specialist
+    # Phase 54.6.53 — full local-install sweep for the 2026-04-17 bench.
+    # Listed in name-sort order; not priority. Any model not in
+    # ``ollama list`` is gracefully skipped with a "not-installed"
+    # status metric rather than failing the whole sweep.
+    "gemma3:27b-it-qat",                      # current book-writing baseline
+    "gemma4:26b-a4b-it-q4_K_M",
+    "gemma4:31b",                             # may fail load on Ollama < 0.20.0
+    "gemopus4:26b-a4b-q4_K_M",                # gemma4 MoE community tune
+    "mn-darkest-universe:29b-q4_K_M",         # mistral-nemo variant
+    "nemotron-cascade-2:30b",                 # NVIDIA
+    "ornstein3.6:35b-a3b-q4_K_S",             # qwen35moe community tune
+    "qwen2.5:32b-instruct-q4_K_M",            # former extract-kg baseline
+    "qwen3:30b-a3b-instruct-2507-q4_K_M",     # current compile + extract-kg
+    "qwen3.5:27b",                            # former book baseline (thinking)
+    "qwen3.6:35b-a3b-q4_K_M",                 # thinking variant
+    "qwen3.6:35b-a3b-ud-q4_K_S",              # unsloth UD quant (thinking)
+    "supergemma4:26b-uncensored-q4_K_M",      # gemma4 dense community tune
+    "supergemma4:31b-abliterated-q4_K_M",     # broken output (for reference)
 ]
 
 # Fixed test paper prefixes (8-char document_id prefix). The first is
