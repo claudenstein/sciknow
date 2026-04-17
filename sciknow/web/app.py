@@ -4669,6 +4669,11 @@ async def api_corpus_expand_author_download_selected(request: Request):
 
     workers = int(body.get("workers") or 0)
     ingest = bool(body.get("ingest", True))
+    # Phase 54.6.52 — retry_failed bypasses .no_oa_cache + .ingest_failed
+    # for the current batch. Used by the GUI's "Retry previously-failed"
+    # checkbox when the user wants to re-probe cached DOIs (e.g. after
+    # new OA sources like HAL/Zenodo land in Phase 54.6.51).
+    retry_failed = bool(body.get("retry_failed", False))
 
     # Persist the DOI list to a tempfile the CLI will read. Use the
     # project's data dir so it's namespaced per-project and survives
@@ -4688,6 +4693,8 @@ async def api_corpus_expand_author_download_selected(request: Request):
         "--workers", str(workers),
     ]
     argv.append("--ingest" if ingest else "--no-ingest")
+    if retry_failed:
+        argv.append("--retry-failed")
 
     def _cleanup_tmp():
         try:
@@ -9192,6 +9199,14 @@ body.task-bar-open {{ padding-top: 40px; }}
               <option value="title">by title (A-Z)</option>
             </select>
           </label>
+          <!-- Phase 54.6.52 — hide previously-cached failures so the
+               user doesn't waste selections on DOIs the pipeline will
+               silently skip. Count filled in by eapRender. -->
+          <label style="font-size:12px;display:flex;align-items:center;gap:4px;"
+                 title="Rows previously marked as no-OA or ingest-failed are hidden by default. Uncheck to see them.">
+            <input type="checkbox" id="eap-hide-cached" checked onchange="eapRender()">
+            Hide cached <span id="eap-cached-count" style="color:var(--fg-muted);"></span>
+          </label>
           <span id="eap-selected-count" style="margin-left:auto;font-size:12px;color:var(--fg-muted);"></span>
         </div>
         <div id="eap-table-wrap"
@@ -9221,6 +9236,15 @@ body.task-bar-open {{ padding-top: 40px; }}
           </label>
           <label style="font-size:12px;display:flex;align-items:center;gap:4px;">
             <input type="checkbox" id="eap-ingest" checked> ingest after download
+          </label>
+          <!-- Phase 54.6.52 — retry bypasses .no_oa_cache + .ingest_failed
+               for this batch. Off by default (honor the cache) so the
+               normal path doesn't re-probe dead-ends, but one-click
+               recovery after a new source lands or the user cleans up
+               a broken PDF. -->
+          <label style="font-size:12px;display:flex;align-items:center;gap:4px;"
+                 title="Ignore the .no_oa_cache + .ingest_failed sidecar files for this batch. Use after adding a new OA source (HAL/Zenodo in 54.6.51) or fixing a broken PDF converter.">
+            <input type="checkbox" id="eap-retry-failed"> retry previously-failed
           </label>
           <button class="btn-primary" id="eap-download-btn"
                   onclick="eapDownloadSelected()" style="margin-left:auto;">
@@ -16321,7 +16345,9 @@ async function openExpandAuthorPreview() {{
     const threshold = info.relevance_threshold || 0.0;
     document.getElementById('eap-threshold').value = threshold.toFixed(2);
     _eapCandidates.forEach(c => {{
-      if (c.doi && (c.relevance_score == null || c.relevance_score >= threshold)) {{
+      // Phase 54.6.52 — don't auto-select cached rows; pipeline would skip them.
+      if (c.doi && !c.cached_status
+          && (c.relevance_score == null || c.relevance_score >= threshold)) {{
         _eapSelected.add(c.doi);
       }}
     }});
@@ -16485,7 +16511,9 @@ async function eapRequeryWithSelected() {{
     const threshold = info.relevance_threshold || 0.0;
     document.getElementById('eap-threshold').value = threshold.toFixed(2);
     _eapCandidates.forEach(c => {{
-      if (c.doi && (c.relevance_score == null || c.relevance_score >= threshold)) {{
+      // Phase 54.6.52 — don't auto-select cached rows; pipeline would skip them.
+      if (c.doi && !c.cached_status
+          && (c.relevance_score == null || c.relevance_score >= threshold)) {{
         _eapSelected.add(c.doi);
       }}
     }});
@@ -16683,7 +16711,8 @@ async function _eapFetchPreview(url, fd, titleHtml, loadingMsg, loadingSub) {{
     document.getElementById('eap-threshold').value = thr.toFixed(2);
     _eapSelected = new Set();
     _eapCandidates.forEach(c => {{
-      if (c.doi && (c.relevance_score == null || c.relevance_score >= thr)) {{
+      if (c.doi && !c.cached_status
+          && (c.relevance_score == null || c.relevance_score >= thr)) {{
         _eapSelected.add(c.doi);
       }}
     }});
@@ -17008,7 +17037,17 @@ function pendingExportCsv() {{
 function eapRender() {{
   const tbody = document.getElementById('eap-tbody');
   const sort = document.getElementById('eap-sort').value;
-  const sorted = _eapCandidates.slice();
+  // Phase 54.6.52 — cached-row filter. Count + filter before sort so
+  // the "Hide cached (N)" label stays accurate.
+  const hideCachedEl = document.getElementById('eap-hide-cached');
+  const hideCached = hideCachedEl ? hideCachedEl.checked : true;
+  const totalCached = _eapCandidates.filter(c => c.cached_status).length;
+  const cntEl = document.getElementById('eap-cached-count');
+  if (cntEl) cntEl.textContent = totalCached > 0 ? `(${{totalCached}})` : '';
+  const pool = hideCached
+    ? _eapCandidates.filter(c => !c.cached_status)
+    : _eapCandidates.slice();
+  const sorted = pool.slice();
   if (sort === 'year') {{
     sorted.sort((a, b) => (b.year || 0) - (a.year || 0));
   }} else if (sort === 'title') {{
@@ -17016,6 +17055,10 @@ function eapRender() {{
   }} else {{
     sorted.sort((a, b) => (b.relevance_score || -1) - (a.relevance_score || -1));
   }}
+  // Push cached rows to the bottom within each sort (user can still
+  // see them when "Hide cached" is unchecked, but they don't clutter
+  // the top of the relevance-ranked list).
+  sorted.sort((a, b) => (a.cached_status ? 1 : 0) - (b.cached_status ? 1 : 0));
   const rows = sorted.map(c => {{
     const checked = _eapSelected.has(c.doi) ? 'checked' : '';
     const scoreText = (c.relevance_score == null)
@@ -17032,12 +17075,22 @@ function eapRender() {{
     const altBadge = altCount > 0
       ? ` <span title="Same paper also known under ${{altCount}} alternate identifier(s); will be used as download fallbacks" style="background:rgba(80,200,120,0.15);color:var(--success);padding:1px 5px;border-radius:3px;font-size:9px;margin-left:4px;">+${{altCount}} alt</span>`
       : '';
-    return `<tr style="border-top:1px solid var(--border);cursor:pointer;" data-doi="${{_escHtml(c.doi || '')}}">
+    // Phase 54.6.52 — cached-status badge + dimmed row.
+    let cachedBadge = '';
+    let rowStyle = 'border-top:1px solid var(--border);cursor:pointer;';
+    if (c.cached_status === 'no_oa') {{
+      cachedBadge = ` <span title="Prior run confirmed no open-access PDF via all tried sources. Re-tick 'retry previously-failed' to re-probe." style="background:rgba(180,180,180,0.2);color:var(--fg-muted);padding:1px 5px;border-radius:3px;font-size:9px;margin-left:4px;">&#128164; cached: no OA</span>`;
+      rowStyle += 'opacity:0.55;';
+    }} else if (c.cached_status === 'ingest_failed') {{
+      cachedBadge = ` <span title="Prior run downloaded the PDF but the converter (MinerU/Marker) couldn't parse it. Re-tick 'retry previously-failed' to re-try." style="background:rgba(220,160,80,0.18);color:var(--warning);padding:1px 5px;border-radius:3px;font-size:9px;margin-left:4px;">&#9888; cached: ingest fail</span>`;
+      rowStyle += 'opacity:0.55;';
+    }}
+    return `<tr style="${{rowStyle}}" data-doi="${{_escHtml(c.doi || '')}}">
       <td style="padding:6px 8px;"><input type="checkbox" class="eap-row-cb" ${{checked}}
            data-doi="${{_escHtml(c.doi || '')}}" onclick="event.stopPropagation();"></td>
       <td style="padding:6px 8px;">
         <div style="font-weight:500;">${{_escHtml(c.title || '(untitled)')}}</div>
-        <div style="font-size:10px;margin-top:2px;">${{doi}}${{altBadge}}</div>
+        <div style="font-size:10px;margin-top:2px;">${{doi}}${{altBadge}}${{cachedBadge}}</div>
       </td>
       <td style="padding:6px 8px;color:var(--fg-muted);">${{_escHtml(authors)}}</td>
       <td style="padding:6px 8px;color:var(--fg-muted);">${{c.year || '—'}}</td>
@@ -17116,6 +17169,8 @@ async function eapDownloadSelected() {{
     }})),
     workers: parseInt(document.getElementById('eap-workers').value || '0', 10),
     ingest: document.getElementById('eap-ingest').checked,
+    // Phase 54.6.52 — retry cached failures if the checkbox is ticked.
+    retry_failed: (document.getElementById('eap-retry-failed') || {{}}).checked || false,
   }};
   const btn = document.getElementById('eap-download-btn');
   btn.disabled = true;

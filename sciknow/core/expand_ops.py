@@ -25,7 +25,11 @@ from sciknow.storage.db import get_session
 logger = logging.getLogger(__name__)
 
 
-def _ref_to_dict(ref, score: float | None = None) -> dict[str, Any]:
+def _ref_to_dict(
+    ref,
+    score: float | None = None,
+    cached_status: str | None = None,
+) -> dict[str, Any]:
     return {
         "doi": ref.doi,
         "arxiv_id": ref.arxiv_id,
@@ -36,7 +40,32 @@ def _ref_to_dict(ref, score: float | None = None) -> dict[str, Any]:
         # Phase 54.6.51 — alternate identifiers for title-merged dupes.
         "alternate_dois": list(getattr(ref, "alternate_dois", []) or []),
         "alternate_arxiv_ids": list(getattr(ref, "alternate_arxiv_ids", []) or []),
+        # Phase 54.6.52 — cache annotation. "no_oa" = prior run confirmed
+        # no OA copy exists; "ingest_failed" = PDF downloaded fine but
+        # the converter (MinerU/Marker) couldn't parse it; None = fresh.
+        # The UI uses this to filter/highlight so the user doesn't
+        # cherry-pick papers the pipeline will silently skip.
+        "cached_status": cached_status,
     }
+
+
+def _load_download_caches() -> tuple[set[str], set[str]]:
+    """Load the active project's download-side caches. Returns
+    ``(no_oa_cache, ingest_failed)`` as lowercased sets of DOI/arxiv-id
+    keys. Handles missing files — fresh projects have neither file and
+    the returned sets are empty.
+    """
+    from sciknow.config import settings as _settings
+    dl_dir = _settings.data_dir / "downloads"
+    no_oa: set[str] = set()
+    fail: set[str] = set()
+    f_noaa = dl_dir / ".no_oa_cache"
+    f_fail = dl_dir / ".ingest_failed"
+    if f_noaa.exists():
+        no_oa = {l.strip().lower() for l in f_noaa.read_text().splitlines() if l.strip()}
+    if f_fail.exists():
+        fail = {l.strip().lower() for l in f_fail.read_text().splitlines() if l.strip()}
+    return no_oa, fail
 
 
 def find_author_candidates(
@@ -122,6 +151,24 @@ def find_author_candidates(
         except Exception as exc:
             logger.warning("Relevance scoring failed in preview: %s", exc)
 
+    # Phase 54.6.52 — annotate with download-cache status so the UI
+    # can distinguish fresh candidates from ones that already hit the
+    # pipeline's dead-ends in prior runs.
+    no_oa_keys, fail_keys = _load_download_caches()
+
+    def _cache_status_for(ref) -> str | None:
+        doi_k = (ref.doi or "").lower()
+        arx_k = (ref.arxiv_id or "").lower()
+        if doi_k and doi_k in no_oa_keys:
+            return "no_oa"
+        if arx_k and arx_k in no_oa_keys:
+            return "no_oa"
+        if doi_k and doi_k in fail_keys:
+            return "ingest_failed"
+        if arx_k and arx_k in fail_keys:
+            return "ingest_failed"
+        return None
+
     # sort by score desc where available, else by year desc
     paired = list(zip(refs, scores))
     paired.sort(
@@ -132,7 +179,16 @@ def find_author_candidates(
         reverse=True,
     )
 
-    candidates = [_ref_to_dict(r, s) for r, s in paired]
+    candidates = [
+        _ref_to_dict(r, s, _cache_status_for(r)) for r, s in paired
+    ]
+
+    # Counts for the UI's "Hide cached (N)" filter
+    cache_counts = {
+        "no_oa":           sum(1 for c in candidates if c["cached_status"] == "no_oa"),
+        "ingest_failed":   sum(1 for c in candidates if c["cached_status"] == "ingest_failed"),
+        "fresh":           sum(1 for c in candidates if c["cached_status"] is None),
+    }
 
     out_info: dict[str, Any] = {
         "openalex": info["openalex"],
@@ -146,6 +202,7 @@ def find_author_candidates(
         "relevance_query_used": relevance_query_used,
         "picked_authors": info.get("picked", []),
         "candidate_authors": info.get("candidates", []),
+        "cache_counts": cache_counts,
     }
     return {"candidates": candidates, "info": out_info}
 
