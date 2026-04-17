@@ -1203,6 +1203,14 @@ def _sweep_layer() -> list[tuple[str, BenchFn]]:
     return list(_sw.SWEEP_BENCHES)
 
 
+def _quality_layer() -> list[tuple[str, BenchFn]]:
+    """Same lazy-import pattern as _sweep_layer — quality.py pulls in
+    sentence-transformers + NLI model on first call which we don't
+    want for every bench invocation."""
+    from sciknow.testing import quality as _q
+    return list(_q.QUALITY_BENCHES)
+
+
 LAYERS: dict[str, list[tuple[str, BenchFn]]] = {
     "fast":  _FAST,
     "live":  _LIVE,
@@ -1210,15 +1218,17 @@ LAYERS: dict[str, list[tuple[str, BenchFn]]] = {
     "full":  _FAST + _LIVE + _LLM,
 }
 
-# "sweep" is a pseudo-layer: not stored in LAYERS (which would break
-# the invariant that every layer has >= 1 bench fn) — resolved lazily
-# in run_layer() via _sweep_layer().
-VALID_LAYERS: tuple[str, ...] = tuple(LAYERS.keys()) + ("sweep",)
+# "sweep" and "quality" are pseudo-layers: not stored in LAYERS (which
+# would break the invariant that every layer has >= 1 bench fn) —
+# resolved lazily in run_layer() via _sweep_layer() / _quality_layer().
+VALID_LAYERS: tuple[str, ...] = tuple(LAYERS.keys()) + ("sweep", "quality")
 
 
 def run_layer(layer: str) -> list[BenchResult]:
     if layer == "sweep":
         benches = _sweep_layer()
+    elif layer == "quality":
+        benches = _quality_layer()
     else:
         benches = LAYERS.get(layer)
     if benches is None:

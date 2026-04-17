@@ -163,8 +163,10 @@ def bench_cmd(
         "fast", "--layer", "-l",
         help="Which bench layer to run: fast (descriptive only), live "
              "(adds hybrid_search + embedder + reranker), llm (adds "
-             "Ollama throughput), sweep (per-model comparison across "
-             "extract-kg / compile / write_section), or full.",
+             "Ollama throughput), sweep (per-model speed comparison on "
+             "extract-kg / compile / write_section), quality (deep "
+             "writing-quality benchmarks with NLI faithfulness + ALCE "
+             "citation quality + LLM-judge pairwise), or full.",
     ),
     tag: str = typer.Option(
         "", "--tag",
@@ -192,6 +194,14 @@ def bench_cmd(
                compile-summary, and write-section on fixed paper 4092d6ad.
                Produces apples-to-apples metrics for picking which model
                wins each role. ~20–25 min for 6 models × 3 tasks on a 3090.
+      quality — deep writing-quality benchmarks: per-model NLI-based
+               faithfulness scoring, ALCE-adapted citation precision/recall,
+               length + thinking-leak checks, and pairwise LLM-judge
+               win-rates across 7 tasks (wiki summary, wiki polish,
+               autowrite writer, book review, ask synthesize, autowrite
+               scorer, wiki consensus). Uses a ~440 MB NLI cross-encoder
+               (cross-encoder/nli-deberta-v3-base) for entailment,
+               downloaded on first run. ~30-60 min for 3 models × 7 tasks.
       full   — every bench. Run before a release or after infra change.
     """
     from sciknow.testing import bench as bench_mod

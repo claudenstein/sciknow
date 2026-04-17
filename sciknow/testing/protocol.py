@@ -8399,6 +8399,93 @@ def l1_model_sweep_surface() -> None:
     )
 
 
+def l1_quality_bench_surface() -> None:
+    """Phase 54.6.46 — writing-quality bench harness structural test.
+
+    Zero LLM calls. Verifies the quality.py module loads cleanly,
+    registers the expected 7 benches, exposes CANDIDATE_MODELS /
+    CANDIDATE_PAPERS / CANDIDATE_TOPICS / BUDGETS / JUDGE_MODEL_ROSTER,
+    and that the ``quality`` pseudo-layer dispatches via
+    bench._quality_layer(). Also exercises the pure-Python helpers
+    (sentence split, citation extract, marker→chunk mapping) on
+    synthetic inputs so prompt-format regressions surface fast.
+
+    Does NOT load the NLI model (that's ~440 MB); that's the first
+    thing `sciknow bench --layer quality` will do at runtime.
+    """
+    from sciknow.testing import quality as q
+    from sciknow.testing import bench
+
+    # A) Public surface
+    assert isinstance(q.CANDIDATE_MODELS, list) and q.CANDIDATE_MODELS, (
+        "CANDIDATE_MODELS must be a non-empty list"
+    )
+    assert isinstance(q.CANDIDATE_PAPERS, list) and q.CANDIDATE_PAPERS, (
+        "CANDIDATE_PAPERS must be a non-empty list of doc_id prefixes"
+    )
+    assert isinstance(q.CANDIDATE_TOPICS, list) and q.CANDIDATE_TOPICS, (
+        "CANDIDATE_TOPICS must be a non-empty list"
+    )
+    assert isinstance(q.JUDGE_MODEL_ROSTER, list) and len(q.JUDGE_MODEL_ROSTER) >= 2, (
+        "JUDGE_MODEL_ROSTER must have ≥ 2 entries so _pick_judge can "
+        "always find a different-family judge than any candidate"
+    )
+    for task in ("wiki_summary", "wiki_polish", "autowrite_writer",
+                 "book_review", "ask_synthesize", "autowrite_scorer",
+                 "judge"):
+        assert task in q.BUDGETS, f"BUDGETS missing {task!r}"
+
+    # B) All 7 bench functions registered
+    bench_names = {fn.__name__ for _, fn in q.QUALITY_BENCHES}
+    for expected in (
+        "b_quality_wiki_summary", "b_quality_wiki_polish",
+        "b_quality_autowrite_writer", "b_quality_book_review",
+        "b_quality_ask_synthesize", "b_quality_autowrite_scorer",
+        "b_quality_wiki_consensus",
+    ):
+        assert expected in bench_names, (
+            f"QUALITY_BENCHES missing {expected} — that task would "
+            f"silently never run"
+        )
+
+    # C) Pseudo-layer dispatch
+    assert "quality" in bench.VALID_LAYERS, (
+        "quality missing from VALID_LAYERS — CLI would reject it"
+    )
+    assert "quality" not in bench.LAYERS, (
+        "quality should NOT live in LAYERS (breaks non-empty invariant); "
+        "route through _quality_layer() instead"
+    )
+    resolved = bench._quality_layer()
+    assert len(resolved) == 7, f"_quality_layer() returned {len(resolved)}, expected 7"
+
+    # D) Pure-Python helpers work on tiny inputs — regression guard for
+    # prompt-template / citation-marker drift.
+    sents = q._split_sentences(
+        "# Heading\nFirst sentence. Second sentence! Third? Short.\n\nNew para here."
+    )
+    assert len(sents) >= 3, f"sentence split broke: {sents}"
+
+    cites = q._extract_citations(
+        "Climate sensitivity is ~3°C [1]. Observational estimates tend lower [2]."
+        " But see (Bony et al. 2015) for cloud feedbacks."
+    )
+    assert len(cites) == 3, f"citation extractor broke: {cites}"
+
+    # E) Judge-picker excludes the models under test
+    picked = q._pick_judge(*q.JUDGE_MODEL_ROSTER[:1])
+    assert picked not in q.JUDGE_MODEL_ROSTER[:1], (
+        "_pick_judge returned a model that was supposed to be excluded"
+    )
+
+    # F) citation_quality_alce handles empty source chunks without
+    # crashing — a common edge case when retrieval returns nothing.
+    empty = q.citation_quality_alce("Some text without citations.", [])
+    assert empty.get("citation_recall") is None, (
+        "empty source chunks must return None recall, not crash"
+    )
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -8593,6 +8680,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_40_entity_name_normalizer,
     # Phase 54.6.41 — model-sweep bench harness structural test
     l1_model_sweep_surface,
+    # Phase 54.6.46 — writing-quality bench harness structural test
+    l1_quality_bench_surface,
 ]
 
 L2_TESTS: list[Callable] = [
