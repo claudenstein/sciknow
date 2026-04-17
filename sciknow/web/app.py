@@ -16293,6 +16293,45 @@ async function openExpandAuthorPreview() {{
           ? ` · relevance anchor: <code>${{_escHtml(info.relevance_query_used)}}</code>`
           : ` · no relevance scoring`)
       + pickedSuffix + '.';
+
+    // Phase 54.6.47 — ambiguity-disambiguation banner. OpenAlex surfaces
+    // multiple canonical authors for common surnames (e.g. "zharkova"
+    // → A. Zharkova the materials scientist, V. V. Zharkova the solar
+    // physicist, G. I. Zharkova the chemist, etc.). Pre-fix the UI
+    // silently picked the most-prolific one, so searching "zharkova"
+    // for a user who meant Valentina Zharkova returned off-topic
+    // radiotherapy papers with no explanation of why. Now: if more
+    // than one candidate author was surfaced, show them all with
+    // works counts + ORCIDs so the user can re-run with --orcid to
+    // target a specific person.
+    const candAuthors = (info.candidate_authors || []).slice(0, 10);
+    const pickedIds = new Set((info.picked_authors || []).map(a => a.short_id || a.id));
+    if (candAuthors.length > 1) {{
+      let rows = '';
+      for (const a of candAuthors) {{
+        const isPicked = pickedIds.has(a.short_id) || pickedIds.has(a.id);
+        const affil = (a.affiliations || []).slice(0, 2).join(', ');
+        const orcid = a.orcid ? `<a href="${{_escHtml(a.orcid)}}" target="_blank">ORCID</a>` : '<span style="color:var(--fg-muted);">no ORCID</span>';
+        rows += `<tr style="${{isPicked ? 'background:rgba(80,200,120,0.12);' : ''}}">`
+          + `<td style="padding:2px 8px;">${{isPicked ? '✓ picked' : ''}}</td>`
+          + `<td style="padding:2px 8px;"><strong>${{_escHtml(a.display_name || '')}}</strong></td>`
+          + `<td style="padding:2px 8px;text-align:right;">${{a.works_count || 0}}w</td>`
+          + `<td style="padding:2px 8px;font-size:10px;color:var(--fg-muted);">${{_escHtml(affil)}}</td>`
+          + `<td style="padding:2px 8px;">${{orcid}}</td></tr>`;
+      }}
+      const banner = `<div style="margin-top:8px;padding:10px;background:rgba(255,200,80,0.12);border-left:3px solid var(--warning);border-radius:4px;font-size:12px;">`
+        + `<strong>&#9888; ${{candAuthors.length}} canonical authors match this surname</strong>. `
+        + `Picked the most-prolific one (highlighted below). If that's not the person you meant, `
+        + `copy the ORCID into the ORCID field and re-run Preview for an exact match.`
+        + `<table style="margin-top:6px;border-collapse:collapse;font-size:11px;width:100%;">`
+        + `<thead><tr style="border-bottom:1px solid var(--border);text-align:left;">`
+        + `<th style="padding:2px 8px;"></th><th style="padding:2px 8px;">Name</th>`
+        + `<th style="padding:2px 8px;text-align:right;">Works</th>`
+        + `<th style="padding:2px 8px;">Affiliation</th>`
+        + `<th style="padding:2px 8px;">ID</th></tr></thead>`
+        + `<tbody>${{rows}}</tbody></table></div>`;
+      document.getElementById('eap-info').innerHTML += banner;
+    }}
     document.getElementById('eap-loading').style.display = 'none';
     if (!_eapCandidates.length) {{
       document.getElementById('eap-error').style.display = 'block';

@@ -3543,28 +3543,52 @@ def download_dois(
         MofNCompleteColumn(),
         TimeElapsedColumn(),
         console=console,
+        transient=False,
     ) as progress:
         task = progress.add_task(
             f"Downloading ({dl_workers} workers)", total=len(doi_list)
         )
+        # Phase 54.6.47 — same durable-per-event pattern as db expand
+        # (54.6.45). Rich's Progress bar uses \r to update in-place; when
+        # download-dois is spawned by the web UI via subprocess pipe,
+        # those \r updates don't produce newline-terminated log events
+        # so the GUI log pane shows only the startup header and looks
+        # frozen for the full duration of the download batch. Emit
+        # durable per-DOI lines via progress.console.print so the web
+        # SSE stream sees real events.
+        done_count = 0
+        total_ct = len(doi_list)
+
+        def _emit(mark: str, color: str, kind: str, label_: str, note: str = "") -> None:
+            progress.console.print(
+                f"[dim][{done_count:>4d}/{total_ct}][/dim]  "
+                f"[{color}]{mark} {kind:<8}[/{color}] {label_[:70]:<70}"
+                + (f"  [dim]· {note}[/dim]" if note else "")
+            )
+
         with ThreadPoolExecutor(max_workers=dl_workers) as pool:
             futures = {pool.submit(_download_one, it): it for it in doi_list}
             for fut in as_completed(futures):
+                done_count += 1
                 try:
                     status, doi_key, label, dest, source = fut.result()
-                except Exception:
+                except Exception as exc:
                     failed_dl += 1
+                    _emit("✗", "red", "ERROR", (str(exc) or "")[:70], "")
                     progress.advance(task)
                     continue
                 short = label[:50]
                 if status == "downloaded":
                     downloaded += 1
                     progress.update(task, description=f"[green]↓ {source}[/green] {short}")
+                    _emit("✓", "green", "DL", label, f"source={source}")
                     to_ingest.append((doi_key, label, dest))
                 elif status == "exists":
+                    _emit("↺", "cyan", "EXISTS", label, "pdf on disk; queued for ingest")
                     to_ingest.append((doi_key, label, dest))
                 elif status == "no_oa":
                     failed_dl += 1
+                    _emit("✗", "yellow", "NO_OA", label, "no open-access PDF found")
                     with no_oa_cache_file.open("a") as f:
                         f.write(doi_key + "\n")
                     # Phase 54.6.7 — stash the row so it shows up in
@@ -3587,8 +3611,11 @@ def download_dois(
                         )
                     except Exception:
                         pass
+                elif status == "cached":
+                    _emit("⏭", "dim", "CACHED", label, "no_oa cached from prior run")
                 else:
                     failed_dl += 1
+                    _emit("✗", "red", "FAIL", label, f"unknown status={status}")
                 progress.advance(task)
 
     # ── Ingest phase ─────────────────────────────────────────────────────
@@ -3601,12 +3628,34 @@ def download_dois(
         ingest_workers = min(ingest_workers, len(to_ingest))
         _release_embedder()
 
+        # Phase 54.6.47 — durable per-file ingest lines (same rationale as
+        # the download phase above: \r-updated Rich progress bars get lost
+        # in the web SSE stream).
+        _ing_progress_ref: list = [None]
+        path_to_title: dict = {dest.resolve(): label for _, label, dest in to_ingest}
+
         def _on_file_done(path, status, error):
             nonlocal ingested, failed_ingest
-            if status in ("done", "skipped"):
+            label = (path_to_title.get(path.resolve(), path.name))[:70]
+            prog = _ing_progress_ref[0]
+
+            def _say(mark, color, kind, note=""):
+                if prog is None:
+                    return
+                prog.console.print(
+                    f"  [{color}]{mark} {kind:<11}[/{color}] {label[:70]:<70}"
+                    + (f"  [dim]· {note}[/dim]" if note else "")
+                )
+
+            if status == "done":
                 ingested += 1
+                _say("✓", "green", "INGEST")
+            elif status == "skipped":
+                ingested += 1
+                _say("⏭", "dim", "INGEST-SKIP", "already in DB (hash match)")
             elif status == "failed":
                 failed_ingest += 1
+                _say("✗", "red", "INGEST-FAIL", (error or "")[:50])
 
         ingest_results = {"done": 0, "skipped": 0, "failed": 0}
         ingest_failed_files: list[tuple[str, str]] = []
@@ -3620,7 +3669,9 @@ def download_dois(
             MofNCompleteColumn(),
             TimeElapsedColumn(),
             console=console,
+            transient=False,
         ) as progress:
+            _ing_progress_ref[0] = progress
             itask = progress.add_task("Ingesting", total=len(to_ingest))
             _run_parallel_workers(
                 [dest for _, _, dest in to_ingest],
