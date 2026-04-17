@@ -203,6 +203,25 @@ def ingest(
             _set_status(session, doc, "converting")
             t0 = time.monotonic()
 
+            # Phase 54.6.48 — release any Ollama LLMs from VRAM BEFORE the
+            # PDF-convert stage. Pre-fix, release_llm() only ran right
+            # before embedding (stage 4); MinerU's layout/formula models
+            # need ~1-4 GB of VRAM, and if a 22 GB Ollama LLM is resident
+            # (common: user was just using the wiki modal with
+            # keep_alive=-1), MinerU OOMs in stage 1 and every PDF fails
+            # with "CUDA out of memory. Tried to allocate 20.00 MiB" —
+            # exactly the failure pattern the web "download-selected"
+            # button surfaced on 37 Zharkova DOIs. Moving the release
+            # earlier makes ingest robust regardless of whether Ollama
+            # happens to be busy.
+            try:
+                from sciknow.rag.llm import release_llm
+                released = release_llm()
+                if released:
+                    logger.info("freed VRAM before PDF convert: %s", released)
+            except Exception as exc:
+                logger.debug("release_llm pre-convert failed: %s", exc)
+
             output_dir = settings.mineru_output_dir / str(doc_id)
             result = pdf_converter.convert(pdf_path, output_dir)
             doc.mineru_output_path = str(output_dir)

@@ -3623,6 +3623,24 @@ def download_dois(
     if ingest and to_ingest:
         from sciknow.cli.ingest import _run_parallel_workers
         from sciknow.ingestion.embedder import release_model as _release_embedder
+        # Phase 54.6.48 — also release any Ollama LLM from VRAM. Pre-fix,
+        # the web "Download selected" flow triggered from the wiki modal
+        # would leave qwen3:30b-a3b-instruct-2507 resident (keep_alive=-1)
+        # and MinerU would OOM on every PDF in the ingest phase. See
+        # pipeline.py for the belt-and-braces inside the pipeline itself.
+        from sciknow.rag.llm import release_llm as _release_llm
+        try:
+            released = _release_llm()
+            if released:
+                console.print(
+                    f"[dim]Freed VRAM before ingest: unloaded "
+                    f"{', '.join(released)}[/dim]"
+                )
+        except Exception as exc:
+            console.print(
+                f"[yellow]Warning: could not unload LLM(s) before ingest: {exc}. "
+                f"MinerU may OOM on large PDFs.[/yellow]"
+            )
 
         ingest_workers = workers if workers > 0 else max(1, settings.ingest_workers)
         ingest_workers = min(ingest_workers, len(to_ingest))

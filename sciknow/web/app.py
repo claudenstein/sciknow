@@ -35,6 +35,19 @@ logger = logging.getLogger("sciknow.web")
 
 app = FastAPI(title="SciKnow Book Reader")
 
+# Phase 54.6.48 — serve vendored frontend libraries (KaTeX + ECharts)
+# from `/static/` instead of the public jsdelivr CDN. Eliminates the
+# external network dependency (equations / charts work offline), removes
+# the third-party IP/User-Agent ping on every page load, and lets us
+# enforce Subresource-Integrity-equivalent trust by committing the bytes.
+# Files live under sciknow/web/static/vendor/ (see vendor/README for
+# origin + versions).
+from fastapi.staticfiles import StaticFiles as _StaticFiles
+from pathlib import Path as _Path
+_STATIC_DIR = _Path(__file__).parent / "static"
+if _STATIC_DIR.exists():
+    app.mount("/static", _StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
 # Phase 33 — build tag: a short version string visible in the browser
 # tab title and in the DevTools console so the user can instantly tell
 # whether their browser has stale JS (the "hard-refresh to see the new
@@ -7908,26 +7921,19 @@ body.task-bar-open {{ padding-top: 40px; }}
   </div>
 </div>
 
-<!-- Phase 54.1 — KaTeX math rendering (loaded from the jsDelivr CDN
-     with Subresource Integrity so first load is verified; falls
-     back silently if the network is offline — math just renders as
-     its raw `$...$` source). ~90KB JS + ~60KB CSS gzipped. -->
-<link rel="stylesheet"
-      href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css"
-      integrity="sha384-nB0miv6/jRmo5UMMR1wu3Gz6NLsoTkbqJghGIsx//Rlm+ZU03BU6SQNC66uf4l5+"
-      crossorigin="anonymous"/>
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"
-        integrity="sha384-7zkQWkzuo3B5mTepMUcHkMB5jZaolc2xDwL6VFqjFALcbeS9Ggm/Yr2r3Dy4lfFB"
-        crossorigin="anonymous"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
-        integrity="sha384-43gviWU0YVjaDtb/GhzOouOXtZMP/7XUzwPTstBeZFe/+rCMvRwr4yROQP43s0Xk"
-        crossorigin="anonymous"></script>
-<!-- Phase 54.6.12 — ECharts 5 for the Visualize modal. One library
-     covers all six tabs (scatter, sunburst, stacked area, radar,
-     polar) with proper pan / zoom / tooltips built in. ~1 MB from
-     CDN but cached hard. -->
-<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"
-        crossorigin="anonymous"></script>
+<!-- Phase 54.1 + 54.6.48 — KaTeX math rendering. Vendored locally
+     under sciknow/web/static/vendor/katex/ (see vendor/README.md for
+     origin + versions). Loading from /static/ instead of jsDelivr
+     eliminates the third-party CDN ping + makes equations work
+     offline. ~90KB JS + ~60KB CSS gzipped + ~800KB of woff2 fonts. -->
+<link rel="stylesheet" href="/static/vendor/katex/katex.min.css"/>
+<script defer src="/static/vendor/katex/katex.min.js"></script>
+<script defer src="/static/vendor/katex/contrib/auto-render.min.js"></script>
+<!-- Phase 54.6.12 + 54.6.48 — ECharts 5 for the Visualize modal.
+     Vendored locally. One library covers all six tabs (scatter,
+     sunburst, stacked area, radar,
+     polar) with proper pan / zoom / tooltips built in. ~1 MB. -->
+<script src="/static/vendor/echarts/echarts.min.js"></script>
 
 <!-- Phase 54.1 — keyboard shortcuts cheatsheet (? to toggle) -->
 <div id="kb-help" class="kb-help" onclick="if(event.target===this)closeKbHelp()">
