@@ -1557,9 +1557,33 @@ def lint_wiki(
                     issues.append({"type": "orphaned", "severity": "low",
                                    "detail": f"Orphaned concept: [[{f.stem}]]"})
 
-    # Yield issues
+    # Yield issues. Phase 54.6.43 — emit ``type_`` for the inner
+    # issue kind so the outer event key ``type`` stays as "lint_issue".
+    # Pre-fix, ``{"type": "lint_issue", **issue}`` collided with
+    # ``issue["type"] = "orphaned"`` (later wins in dict spread), so
+    # every yielded event looked like ``type="orphaned"`` and the
+    # CLI's ``if t == "lint_issue"`` branch never fired — user saw
+    # only the trailing count, never the individual issues.
     for issue in issues:
-        yield {"type": "lint_issue", **issue}
+        yield {
+            "type": "lint_issue",
+            "type_":    issue.get("type", "unknown"),
+            "severity": issue.get("severity", "low"),
+            "detail":   issue.get("detail", ""),
+        }
+
+    # Summary breakdown by (severity, kind). 3666 "issues" with no
+    # decomposition is useless; showing "2500 orphaned / 1000 broken_link
+    # / 50 stale" lets the user triage.
+    from collections import Counter
+    by_kind = Counter(i.get("type", "unknown") for i in issues)
+    by_sev  = Counter(i.get("severity", "low") for i in issues)
+    yield {
+        "type":          "lint_summary",
+        "total":         len(issues),
+        "by_kind":       dict(by_kind),
+        "by_severity":   dict(by_sev),
+    }
 
     yield {"type": "progress", "stage": "lint",
            "detail": f"Found {len(issues)} issues"}

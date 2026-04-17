@@ -42,6 +42,12 @@ def _check_wiki_table():
 def _consume_events(gen, console):
     """Consume events from a wiki_ops generator, printing to Rich console."""
     completed = None
+    # Phase 54.6.43 — lint emits one event per issue; on a real corpus
+    # that can easily be thousands. Cap per-severity printing so the
+    # terminal stays usable, and show the full breakdown via the
+    # lint_summary event after.
+    lint_printed = {"high": 0, "medium": 0, "low": 0}
+    LINT_PER_SEV_CAP = 20
     for event in gen:
         t = event.get("type")
         if t == "token":
@@ -51,7 +57,40 @@ def _consume_events(gen, console):
         elif t == "lint_issue":
             sev = event.get("severity", "low")
             color = "red" if sev == "high" else "yellow" if sev == "medium" else "dim"
-            console.print(f"  [{color}]{event.get('type_', event.get('type', ''))}[/{color}]: {event.get('detail', '')}")
+            n = lint_printed.get(sev, 0)
+            if n < LINT_PER_SEV_CAP:
+                # Phase 54.6.43 — escape the detail so `[[slug-name]]`
+                # wiki-link markers don't get eaten by Rich's markup
+                # parser (which treats `[...]` as a style tag and
+                # silently drops unknown ones like `[total-solar-irradiance]`).
+                from rich.markup import escape as _esc
+                kind = event.get('type_', event.get('type', ''))
+                detail = _esc(event.get('detail', ''))
+                console.print(f"  [{color}]{kind}[/{color}]: {detail}")
+            elif n == LINT_PER_SEV_CAP:
+                console.print(f"  [{color}](… capped at {LINT_PER_SEV_CAP} {sev}-severity issues; see lint_summary for totals)[/{color}]")
+            lint_printed[sev] = n + 1
+        elif t == "lint_summary":
+            from rich.table import Table
+            from rich import box
+            total = event.get("total", 0)
+            console.print()
+            tab = Table(title=f"Lint summary — {total} issues",
+                        box=box.SIMPLE_HEAD, expand=False)
+            tab.add_column("Kind", style="bold")
+            tab.add_column("Count", justify="right")
+            for kind, n in sorted(event.get("by_kind", {}).items(),
+                                  key=lambda kv: -kv[1]):
+                tab.add_row(kind, str(n))
+            console.print(tab)
+            sev_parts = []
+            for sev_name in ("high", "medium", "low"):
+                n = event.get("by_severity", {}).get(sev_name, 0)
+                if n:
+                    color = "red" if sev_name == "high" else "yellow" if sev_name == "medium" else "dim"
+                    sev_parts.append(f"[{color}]{n} {sev_name}[/{color}]")
+            if sev_parts:
+                console.print(f"  by severity: {' · '.join(sev_parts)}")
         elif t == "completed":
             completed = event
         elif t == "error":
