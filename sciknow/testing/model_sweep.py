@@ -485,14 +485,34 @@ def b_model_sweep_write_section() -> Iterable[BenchMetric]:
     purpose — keeps runtime down and focuses the metric on prompt
     compliance rather than long-form fatigue."""
     from sciknow.rag import prompts
+    from sciknow.retrieval.context_builder import SearchResult
 
+    # Build two real ``SearchResult`` objects — write_section_v2 walks
+    # ``r.title`` / ``r.year`` / ``r.content`` / ``r.authors`` etc.,
+    # so dict literals crash in _norm_title and the context formatter.
+    # Production feeds this prompt with SearchResult instances
+    # (hydrated from SearchCandidate + full chunk content from PG),
+    # so the sweep does the same to stay faithful.
+    results = [
+        SearchResult(
+            rank=1, score=0.1, chunk_id="sweep-a", document_id="sweep-doc-a",
+            section_type="results", section_title="Findings",
+            content="Climate sensitivity remains debated. The IPCC reports a likely range of 2.5-4°C per doubling of CO2. Recent observational studies suggest the distribution may be skewed, with a long tail toward higher sensitivities.",
+            title="Sample source A", year=2022,
+            authors=[{"name": "A. Researcher"}], journal="Journal of Climate", doi=None,
+        ),
+        SearchResult(
+            rank=2, score=0.09, chunk_id="sweep-b", document_id="sweep-doc-b",
+            section_type="discussion", section_title="Discussion",
+            content="Observational estimates of climate sensitivity tend toward the lower end of the likely range, though paleoclimate constraints push back against the lowest values.",
+            title="Sample source B", year=2020,
+            authors=[{"name": "B. Scientist"}], journal="Nature Climate", doi=None,
+        ),
+    ]
     sys_p, usr_p = prompts.write_section_v2(
         section="introduction",
         topic="Scientific uncertainty in climate sensitivity estimates",
-        results=[
-            {"title": "Sample source A", "year": 2022, "chunk_text": "Climate sensitivity remains debated. The IPCC reports a likely range of 2.5-4°C per doubling of CO2."},
-            {"title": "Sample source B", "year": 2020, "chunk_text": "Observational estimates of climate sensitivity tend toward the lower end of the likely range."},
-        ],
+        results=results,
         book_plan="A book on climate sensitivity uncertainty.",
         prior_summaries=None, paragraph_plan=None,
         target_words=150, section_plan=None,
