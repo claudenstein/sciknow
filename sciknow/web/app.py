@@ -4513,6 +4513,7 @@ async def api_corpus_expand_author_preview(
     strict_author: bool = Form(True),
     all_matches: bool = Form(False),
     relevance_query: str = Form(""),
+    author_ids: str = Form(""),
 ):
     """Phase 54.6.1 — preview candidates without downloading.
 
@@ -4522,12 +4523,22 @@ async def api_corpus_expand_author_preview(
     existing ``POST /api/corpus/expand-author`` still exists for the
     "auto-download by relevance threshold" override path.
 
+    Phase 54.6.49 — ``author_ids`` (comma-separated OpenAlex short
+    IDs like "A5079882695,A5033301096") bypasses name resolution and
+    targets exactly those canonical authors. Used by the multi-select
+    disambiguation banner: when OpenAlex returns the same person under
+    multiple name variants, the user ticks the ones that are actually
+    them and re-queries with all of them merged.
+
     May take 10-30s due to external API calls. Blocking — not SSE.
     """
-    if not name.strip() and not orcid.strip():
+    # Parse author_ids — accept comma/pipe/space separated
+    id_list = [x.strip() for x in re.split(r"[,|\s]+", author_ids) if x.strip()] if author_ids else None
+
+    if not name.strip() and not orcid.strip() and not id_list:
         raise HTTPException(
             status_code=400,
-            detail="provide either author name or ORCID",
+            detail="provide either author name, ORCID, or selected author IDs",
         )
     from sciknow.core.expand_ops import find_author_candidates
     try:
@@ -4543,6 +4554,7 @@ async def api_corpus_expand_author_preview(
                 strict_author=strict_author,
                 relevance_query=relevance_query,
                 score_relevance=True,
+                author_ids=id_list,
             ),
         )
     except ValueError as exc:
@@ -9725,6 +9737,9 @@ const ACTIONS = {{
   'load-wiki-pages': (el) => loadWikiPages(parseInt(el.dataset.page, 10)),
   'ask-about-paper': (el) => askAboutPaper(el.dataset.paperTitle),
   'load-catalog': (el) => loadCatalog(parseInt(el.dataset.page, 10)),
+
+  // Phase 54.6.49 — expand-by-author disambiguation row toggle.
+  'eap-toggle-author': (el) => eapToggleAuthor(el.dataset.sid),
 
   // Cluster 5 — version history + snapshot bundle/draft restore.
   'select-version': (el) => selectVersion(el.dataset.versionId),
@@ -16219,10 +16234,18 @@ function selectExpandAuthor(author) {{
 // to /api/corpus/expand-author/download-selected (SSE-streamed CLI).
 let _eapCandidates = [];   // all candidates from the last preview
 let _eapSelected = new Set(); // doi set — source of truth for selection
+// Phase 54.6.49 — disambiguation banner state. Persisted across
+// re-queries so the banner remains visible when the user re-runs
+// with author_ids (the server returns an empty candidate_authors
+// list in that mode since no name-resolution happened).
+let _eapCandAuthors = [];   // OpenAlex canonical authors matching the surname
+let _eapAuthorSelection = new Set();  // short_ids of ticked rows
 
 function _eapResetModal(title, loadingMsg, loadingSub) {{
   _eapCandidates = [];
   _eapSelected = new Set();
+  _eapCandAuthors = [];
+  _eapAuthorSelection = new Set();
   document.getElementById('eap-title').innerHTML = title;
   document.getElementById('eap-loading-msg').textContent = loadingMsg || 'Loading…';
   document.getElementById('eap-loading-sub').textContent = loadingSub || '';
@@ -16300,42 +16323,67 @@ async function openExpandAuthorPreview() {{
           : ` · no relevance scoring`)
       + pickedSuffix + '.';
 
-    // Phase 54.6.47 — ambiguity-disambiguation banner. OpenAlex surfaces
-    // multiple canonical authors for common surnames (e.g. "zharkova"
-    // → A. Zharkova the materials scientist, V. V. Zharkova the solar
-    // physicist, G. I. Zharkova the chemist, etc.). Pre-fix the UI
-    // silently picked the most-prolific one, so searching "zharkova"
-    // for a user who meant Valentina Zharkova returned off-topic
-    // radiotherapy papers with no explanation of why. Now: if more
-    // than one candidate author was surfaced, show them all with
-    // works counts + ORCIDs so the user can re-run with --orcid to
-    // target a specific person.
-    const candAuthors = (info.candidate_authors || []).slice(0, 10);
-    const pickedIds = new Set((info.picked_authors || []).map(a => a.short_id || a.id));
-    if (candAuthors.length > 1) {{
+    // Phase 54.6.47 + 54.6.49 — ambiguity-disambiguation banner with
+    // multi-select. OpenAlex surfaces multiple canonical authors for
+    // common surnames (e.g. "zharkova" → A. Zharkova the materials
+    // scientist, V. V. Zharkova the solar physicist, G. I. Zharkova
+    // the chemist, etc.) AND frequently lists the SAME person under
+    // slightly different name variants ("V. V. Zharkova" +
+    // "Valentina V. Zharkova" + "V.V. Zharkova"). Render the banner
+    // with checkboxes so the user can tick every row that's actually
+    // their target, then click Re-query to merge works across all of
+    // them. Auto-picked row is pre-checked.
+    //
+    // _eapCandAuthors persists across re-queries so the banner can
+    // re-render after an explicit-ids query (which returns an empty
+    // candidate_authors list).
+    const newCandAuthors = (info.candidate_authors || []);
+    if (newCandAuthors.length) {{
+      _eapCandAuthors = newCandAuthors.slice(0, 15);
+      const newPickedIds = new Set((info.picked_authors || []).map(a => a.short_id || a.id));
+      _eapAuthorSelection = new Set();
+      for (const a of _eapCandAuthors) {{
+        const sid = a.short_id || a.id;
+        if (newPickedIds.has(sid)) _eapAuthorSelection.add(sid);
+      }}
+    }}
+    if (_eapCandAuthors && _eapCandAuthors.length > 1) {{
       let rows = '';
-      for (const a of candAuthors) {{
-        const isPicked = pickedIds.has(a.short_id) || pickedIds.has(a.id);
+      for (const a of _eapCandAuthors) {{
+        const sid = a.short_id || a.id || '';
+        const isChecked = _eapAuthorSelection.has(sid);
         const affil = (a.affiliations || []).slice(0, 2).join(', ');
-        const orcid = a.orcid ? `<a href="${{_escHtml(a.orcid)}}" target="_blank">ORCID</a>` : '<span style="color:var(--fg-muted);">no ORCID</span>';
-        rows += `<tr style="${{isPicked ? 'background:rgba(80,200,120,0.12);' : ''}}">`
-          + `<td style="padding:2px 8px;">${{isPicked ? '✓ picked' : ''}}</td>`
+        const orcid = a.orcid
+          ? `<a href="${{_escHtml(a.orcid)}}" target="_blank" onclick="event.stopPropagation();">ORCID</a>`
+          : '<span style="color:var(--fg-muted);">no ORCID</span>';
+        rows += `<tr data-action="eap-toggle-author" data-sid="${{_escHtml(sid)}}" `
+          + `style="cursor:pointer;${{isChecked ? 'background:rgba(80,200,120,0.12);' : ''}}">`
+          + `<td style="padding:4px 8px;">`
+          + `<input type="checkbox" class="eap-author-cb" data-sid="${{_escHtml(sid)}}" ${{isChecked ? 'checked' : ''}}></td>`
           + `<td style="padding:2px 8px;"><strong>${{_escHtml(a.display_name || '')}}</strong></td>`
           + `<td style="padding:2px 8px;text-align:right;">${{a.works_count || 0}}w</td>`
           + `<td style="padding:2px 8px;font-size:10px;color:var(--fg-muted);">${{_escHtml(affil)}}</td>`
           + `<td style="padding:2px 8px;">${{orcid}}</td></tr>`;
       }}
+      const numSelected = _eapAuthorSelection.size;
       const banner = `<div style="margin-top:8px;padding:10px;background:rgba(255,200,80,0.12);border-left:3px solid var(--warning);border-radius:4px;font-size:12px;">`
-        + `<strong>&#9888; ${{candAuthors.length}} canonical authors match this surname</strong>. `
-        + `Picked the most-prolific one (highlighted below). If that's not the person you meant, `
-        + `copy the ORCID into the ORCID field and re-run Preview for an exact match.`
+        + `<strong>&#9888; ${{_eapCandAuthors.length}} canonical authors match this surname</strong>. `
+        + `Tick the rows that are actually the person you want (OpenAlex often lists the same person under multiple name variants). `
+        + `All ticked rows will be merged on re-query.`
         + `<table style="margin-top:6px;border-collapse:collapse;font-size:11px;width:100%;">`
         + `<thead><tr style="border-bottom:1px solid var(--border);text-align:left;">`
-        + `<th style="padding:2px 8px;"></th><th style="padding:2px 8px;">Name</th>`
+        + `<th style="padding:2px 8px;width:24px;"></th>`
+        + `<th style="padding:2px 8px;">Name</th>`
         + `<th style="padding:2px 8px;text-align:right;">Works</th>`
         + `<th style="padding:2px 8px;">Affiliation</th>`
         + `<th style="padding:2px 8px;">ID</th></tr></thead>`
-        + `<tbody>${{rows}}</tbody></table></div>`;
+        + `<tbody>${{rows}}</tbody></table>`
+        + `<div style="margin-top:8px;display:flex;gap:8px;align-items:center;">`
+        + `<button class="btn-primary" onclick="eapRequeryWithSelected()" style="font-size:11px;padding:4px 10px;">`
+        + `&#128269; Re-query with <span id="eap-sel-count">${{numSelected}}</span> selected</button>`
+        + `<span style="font-size:10px;color:var(--fg-muted);">`
+        + `Click rows to toggle. Re-query runs preview scoped to the ticked author IDs only.`
+        + `</span></div></div>`;
       document.getElementById('eap-info').innerHTML += banner;
     }}
     document.getElementById('eap-loading').style.display = 'none';
@@ -16351,6 +16399,144 @@ async function openExpandAuthorPreview() {{
     document.getElementById('eap-loading').style.display = 'none';
     document.getElementById('eap-error').style.display = 'block';
     document.getElementById('eap-error').textContent = 'Preview failed: ' + exc.message;
+  }}
+}}
+
+// Phase 54.6.49 — multi-select disambiguation helpers.
+function eapToggleAuthor(shortId) {{
+  if (!shortId) return;
+  if (_eapAuthorSelection.has(shortId)) {{
+    _eapAuthorSelection.delete(shortId);
+  }} else {{
+    _eapAuthorSelection.add(shortId);
+  }}
+  // Reflect in the DOM: row highlight + checkbox state + counter
+  const row = document.querySelector(`tr[data-action="eap-toggle-author"][data-sid="${{shortId}}"]`);
+  if (row) {{
+    const checked = _eapAuthorSelection.has(shortId);
+    const cb = row.querySelector('input.eap-author-cb');
+    if (cb) cb.checked = checked;
+    row.style.background = checked ? 'rgba(80,200,120,0.12)' : '';
+  }}
+  const cntEl = document.getElementById('eap-sel-count');
+  if (cntEl) cntEl.textContent = String(_eapAuthorSelection.size);
+}}
+
+async function eapRequeryWithSelected() {{
+  if (!_eapAuthorSelection.size) {{
+    alert('Tick at least one author row first.');
+    return;
+  }}
+  const ids = Array.from(_eapAuthorSelection).join(',');
+  // Re-open the loading state, keep the modal open, hit the preview
+  // endpoint with explicit author_ids (skips name resolution).
+  document.getElementById('eap-content').style.display = 'none';
+  document.getElementById('eap-error').style.display = 'none';
+  document.getElementById('eap-loading').style.display = 'block';
+  document.getElementById('eap-loading-msg').textContent =
+    `Re-querying with ${{_eapAuthorSelection.size}} selected author(s)…`;
+  document.getElementById('eap-loading-sub').textContent =
+    '(merging works from the ticked canonical authors)';
+
+  const fd = new FormData();
+  // Pass name too — it's still used for the Crossref surname post-filter
+  // if not in strict mode, but author_ids alone is enough for OpenAlex.
+  const name = document.getElementById('tl-eauth-q').value.trim();
+  if (name) fd.append('name', name);
+  fd.append('author_ids', ids);
+  const yFrom = parseInt(document.getElementById('tl-eauth-yfrom').value || '0', 10);
+  const yTo = parseInt(document.getElementById('tl-eauth-yto').value || '0', 10);
+  if (yFrom) fd.append('year_from', yFrom);
+  if (yTo) fd.append('year_to', yTo);
+  const limit = parseInt(document.getElementById('tl-eauth-limit').value || '0', 10);
+  if (limit > 0) fd.append('limit', limit);
+  const relq = document.getElementById('tl-eauth-relq').value.trim();
+  if (relq) fd.append('relevance_query', relq);
+
+  try {{
+    const res = await fetch('/api/corpus/expand-author/preview', {{
+      method: 'POST', body: fd,
+    }});
+    if (!res.ok) {{
+      const detail = await res.text();
+      throw new Error('HTTP ' + res.status + ': ' + detail);
+    }}
+    const data = await res.json();
+    _eapCandidates = data.candidates || [];
+    _eapSelected = new Set();
+    const info = data.info || {{}};
+    const threshold = info.relevance_threshold || 0.0;
+    document.getElementById('eap-threshold').value = threshold.toFixed(2);
+    _eapCandidates.forEach(c => {{
+      if (c.doi && (c.relevance_score == null || c.relevance_score >= threshold)) {{
+        _eapSelected.add(c.doi);
+      }}
+    }});
+    // Render a compact info line for the explicit-ids case. Reuse the
+    // stored _eapCandAuthors so the banner + table still render.
+    const chosenNames = _eapCandAuthors
+      .filter(a => _eapAuthorSelection.has(a.short_id || a.id))
+      .map(a => a.display_name || '').filter(Boolean).slice(0, 5).join(', ');
+    document.getElementById('eap-info').innerHTML =
+      `Re-queried with <strong>${{_eapAuthorSelection.size}}</strong> `
+      + `selected author(s): ${{_escHtml(chosenNames)}}. `
+      + `Found <strong>${{info.merged || 0}}</strong> paper(s), `
+      + `dropped <strong>${{info.dedup_dropped || 0}}</strong> already in corpus`
+      + (info.relevance_query_used
+          ? ` · relevance anchor: <code>${{_escHtml(info.relevance_query_used)}}</code>`
+          : ` · no relevance scoring`) + '.';
+
+    // Re-render the banner so the user can adjust the selection again.
+    if (_eapCandAuthors && _eapCandAuthors.length > 1) {{
+      let rows = '';
+      for (const a of _eapCandAuthors) {{
+        const sid = a.short_id || a.id || '';
+        const isChecked = _eapAuthorSelection.has(sid);
+        const affil = (a.affiliations || []).slice(0, 2).join(', ');
+        const orcid = a.orcid
+          ? `<a href="${{_escHtml(a.orcid)}}" target="_blank" onclick="event.stopPropagation();">ORCID</a>`
+          : '<span style="color:var(--fg-muted);">no ORCID</span>';
+        rows += `<tr data-action="eap-toggle-author" data-sid="${{_escHtml(sid)}}" `
+          + `style="cursor:pointer;${{isChecked ? 'background:rgba(80,200,120,0.12);' : ''}}">`
+          + `<td style="padding:4px 8px;">`
+          + `<input type="checkbox" class="eap-author-cb" data-sid="${{_escHtml(sid)}}" ${{isChecked ? 'checked' : ''}}></td>`
+          + `<td style="padding:2px 8px;"><strong>${{_escHtml(a.display_name || '')}}</strong></td>`
+          + `<td style="padding:2px 8px;text-align:right;">${{a.works_count || 0}}w</td>`
+          + `<td style="padding:2px 8px;font-size:10px;color:var(--fg-muted);">${{_escHtml(affil)}}</td>`
+          + `<td style="padding:2px 8px;">${{orcid}}</td></tr>`;
+      }}
+      const numSelected = _eapAuthorSelection.size;
+      const banner = `<div style="margin-top:8px;padding:10px;background:rgba(255,200,80,0.12);border-left:3px solid var(--warning);border-radius:4px;font-size:12px;">`
+        + `<strong>${{_eapCandAuthors.length}} canonical authors</strong>. `
+        + `Adjust selection and re-query if needed.`
+        + `<table style="margin-top:6px;border-collapse:collapse;font-size:11px;width:100%;">`
+        + `<thead><tr style="border-bottom:1px solid var(--border);text-align:left;">`
+        + `<th style="padding:2px 8px;width:24px;"></th>`
+        + `<th style="padding:2px 8px;">Name</th>`
+        + `<th style="padding:2px 8px;text-align:right;">Works</th>`
+        + `<th style="padding:2px 8px;">Affiliation</th>`
+        + `<th style="padding:2px 8px;">ID</th></tr></thead>`
+        + `<tbody>${{rows}}</tbody></table>`
+        + `<div style="margin-top:8px;display:flex;gap:8px;align-items:center;">`
+        + `<button class="btn-primary" onclick="eapRequeryWithSelected()" style="font-size:11px;padding:4px 10px;">`
+        + `&#128269; Re-query with <span id="eap-sel-count">${{numSelected}}</span> selected</button>`
+        + `</div></div>`;
+      document.getElementById('eap-info').innerHTML += banner;
+    }}
+
+    document.getElementById('eap-loading').style.display = 'none';
+    if (!_eapCandidates.length) {{
+      document.getElementById('eap-error').style.display = 'block';
+      document.getElementById('eap-error').textContent =
+        'No candidates returned for this selection. These author(s) may have no DOI-bearing works not already in the corpus.';
+      return;
+    }}
+    document.getElementById('eap-content').style.display = 'block';
+    eapRender();
+  }} catch (exc) {{
+    document.getElementById('eap-loading').style.display = 'none';
+    document.getElementById('eap-error').style.display = 'block';
+    document.getElementById('eap-error').textContent = 'Re-query failed: ' + exc.message;
   }}
 }}
 

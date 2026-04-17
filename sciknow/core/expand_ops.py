@@ -47,6 +47,7 @@ def find_author_candidates(
     strict_author: bool = True,
     relevance_query: str = "",
     score_relevance: bool = True,
+    author_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run search + corpus-dedup + (optional) relevance scoring.
 
@@ -72,8 +73,8 @@ def find_author_candidates(
     (auto)" path still uses the CLI's hard filter; this preview path shows
     everything and lets the user choose.
     """
-    if not name.strip() and not orcid:
-        raise ValueError("must provide either name or orcid")
+    if not name.strip() and not orcid and not author_ids:
+        raise ValueError("must provide either name, orcid, or author_ids")
 
     refs, info = search_author(
         name.strip(),
@@ -83,6 +84,7 @@ def find_author_candidates(
         limit=(limit if limit > 0 else None),
         all_matches=all_matches,
         strict_author=strict_author,
+        author_ids=author_ids,
     )
 
     # ── dedup against existing corpus by DOI ────────────────────────────

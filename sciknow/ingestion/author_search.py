@@ -132,33 +132,53 @@ def search_openalex_by_author(
     limit: int | None = None,
     require_doi: bool = True,
     all_matches: bool = False,
+    author_ids: list[str] | None = None,
 ) -> tuple[list[Reference], list[dict]]:
     """Query OpenAlex /works for papers by an author.
 
     Strategy:
-      1. If `orcid` is given → direct filter by author.orcid (exact match,
-         no ambiguity).
-      2. Otherwise → /authors?search={name} to resolve canonical authors,
-         then by default pick the SINGLE top author by works_count and
-         query /works?filter=author.id:{that_one}. This is what the user
-         almost always wants: the most prominent person with that name,
-         not a fuzzy union of everyone whose surname matches.
-      3. With `all_matches=True`, pool all authors with that surname.
+      1. If `author_ids` is given → query /works for exactly those
+         OpenAlex canonical author IDs, skipping name resolution.
+         Used by the web UI's multi-select disambiguation banner,
+         which shows the user all canonical authors matching a
+         surname and lets them tick two or more that are actually
+         the same person under slightly different name variants
+         ("V. V. Zharkova" + "Valentina V. Zharkova" + "V.V. Zharkova").
+      2. Else if `orcid` is given → direct filter by author.orcid
+         (exact match, no ambiguity).
+      3. Otherwise → /authors?search={name} to resolve canonical
+         authors, then by default pick the SINGLE top author by
+         works_count and query /works?filter=author.id:{that_one}.
+         This is what the user almost always wants: the most prominent
+         person with that name, not a fuzzy union of everyone whose
+         surname matches.
+      4. With `all_matches=True`, pool all authors with that surname.
 
     Returns:
         (refs, candidate_authors)
           refs: list[Reference] from the works query, sorted by year DESC.
           candidate_authors: the author records found by /authors?search,
             so the caller can show "picked X but also found Y, Z" hints.
+            Empty list when `author_ids` is supplied (no name search
+            was run).
     """
-    if not name and not orcid:
+    if not name and not orcid and not author_ids:
         return [], []
 
     base_filter_parts: list[str] = []
     candidates: list[dict] = []
     picked: list[dict] = []
 
-    if orcid:
+    if author_ids:
+        # Phase 54.6.49 — explicit-ids mode. Caller has already picked
+        # which canonical authors they want merged, e.g. via the web
+        # UI's multi-select banner. Skip name resolution entirely.
+        clean_ids = [i.strip() for i in author_ids if i and i.strip()]
+        if not clean_ids:
+            return [], []
+        ids = "|".join(clean_ids)
+        base_filter_parts.append(f"author.id:{ids}")
+    elif orcid:
         clean = orcid.strip().replace("https://orcid.org/", "")
         base_filter_parts.append(f"author.orcid:https://orcid.org/{clean}")
     else:
@@ -455,6 +475,7 @@ def search_author(
     require_doi: bool = True,
     all_matches: bool = False,
     strict_author: bool = False,
+    author_ids: list[str] | None = None,
 ) -> tuple[list[Reference], dict]:
     """Search both OpenAlex and Crossref, dedup by DOI, return merged list.
 
@@ -487,11 +508,24 @@ def search_author(
         year_from=year_from, year_to=year_to,
         limit=limit, require_doi=require_doi,
         all_matches=all_matches,
+        author_ids=author_ids,
     )
     info["openalex"] = len(oa_refs)
     info["candidates"] = oa_candidates
-    if oa_candidates:
+    if author_ids:
+        # Explicit-ids mode — caller already chose. No name resolution
+        # happened so oa_candidates is empty. Leave ``picked`` empty too;
+        # the client knows which IDs it selected and can render them.
+        info["picked"] = []
+    elif oa_candidates:
         info["picked"] = oa_candidates if all_matches else oa_candidates[:1]
+
+    # Phase 54.6.49 — explicit author-id mode implies the user already
+    # resolved the ambiguity themselves, so silently force strict
+    # (skip Crossref's looser surname search to keep false positives
+    # out of the merged list).
+    if author_ids:
+        strict_author = True
     by_doi: dict[str, Reference] = {r.doi: r for r in oa_refs if r.doi}
 
     # Only call Crossref if (a) we haven't already hit the limit, and
