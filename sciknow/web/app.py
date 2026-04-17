@@ -583,7 +583,17 @@ async def index(request: Request):
     book, chapters, drafts, gaps, comments = _get_book_data()
     if not book:
         return HTMLResponse("<h1>Book not found</h1>", status_code=404)
-    return HTMLResponse(_render_book(book, chapters, drafts, gaps, comments))
+    # Phase 54.6.50 — disable browser caching of the reader page. The
+    # HTML is ~680 KB and embeds all JS inline; when the backend restarts
+    # with a new commit, browsers that cached the previous response keep
+    # serving the old JS and the user sees stale behaviour (e.g. the
+    # multi-select disambiguation banner from Phase 54.6.49 silently
+    # missing because the browser has the pre-49 script cached). This
+    # header trades a re-fetch of ~680 KB on every navigation for
+    # always-fresh code, which is worth it for a local-only dev tool.
+    resp = HTMLResponse(_render_book(book, chapters, drafts, gaps, comments))
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    return resp
 
 
 @app.get("/section/{draft_id}", response_class=HTMLResponse)
