@@ -15019,13 +15019,33 @@ async function doWikiConsensus() {{
       source.close(); _wikiConsensusSource = null; _wikiConsensusJob = null;
       runBtn.disabled = false; stopBtn.style.display = 'none';
     }} else if (evt.type === 'error') {{
-      status.textContent = 'Error: ' + evt.message;
+      // Phase 54.6.44 — surface the error inline so the user sees why
+      // the output panels stayed empty. Pre-fix, a "no data for topic"
+      // or JSON-parse failure only updated the tiny status textContent;
+      // users reported this as "consensus shows nothing".
+      status.textContent = 'Error: ' + (evt.message || 'unknown');
+      summaryEl.innerHTML =
+        '<div style="padding:12px;background:rgba(220,50,50,0.08);border-left:3px solid var(--danger);border-radius:4px;">'
+        + '<strong style="color:var(--danger);">Consensus failed.</strong><br>'
+        + '<span style="font-size:12px;">' + _escHtml(evt.message || '(no details)') + '</span><br>'
+        + '<span style="font-size:11px;color:var(--fg-muted);margin-top:6px;display:block;">'
+        + 'Common causes: (1) the topic has no wiki pages yet — try `uv run sciknow wiki compile` or a broader topic; '
+        + '(2) the LLM returned un-parseable JSON — check the server log for a <code>consensus_map</code> warning.'
+        + '</span></div>';
       source.close(); _wikiConsensusSource = null; _wikiConsensusJob = null;
       runBtn.disabled = false; stopBtn.style.display = 'none';
     }} else if (evt.type === 'done') {{
       source.close(); _wikiConsensusSource = null; _wikiConsensusJob = null;
       runBtn.disabled = false; stopBtn.style.display = 'none';
     }}
+  }};
+  source.onerror = function() {{
+    // Phase 54.6.44 — surface EventSource transport failures (server
+    // died, network blip). The default behavior is silent retry which
+    // looks to the user like "nothing happened".
+    status.textContent = 'Lost connection to server. Reload and try again.';
+    source.close(); _wikiConsensusSource = null; _wikiConsensusJob = null;
+    runBtn.disabled = false; stopBtn.style.display = 'none';
   }};
 }}
 
@@ -15089,12 +15109,25 @@ async function loadWikiPages(page) {{
   if (filter && filter.value) params.set('page_type', filter.value);
   const list = document.getElementById('wiki-browse-list');
   const detail = document.getElementById('wiki-page-detail');
-  detail.style.display = 'none';
+  // Phase 54.6.44 — defensive null checks. If the DOM skeleton is
+  // missing (e.g. someone refactored the modal and forgot to update
+  // the IDs), fail loudly to the console and a visible banner
+  // instead of crashing silently in the original `.style` deref.
+  if (!list) {{
+    console.error('loadWikiPages: #wiki-browse-list not found in DOM');
+    return;
+  }}
+  if (detail) detail.style.display = 'none';
   list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--fg-muted);">Loading...</div>';
 
   try {{
     const res = await fetch('/api/wiki/pages?' + params.toString());
+    if (!res.ok) {{
+      throw new Error('HTTP ' + res.status + ' ' + res.statusText);
+    }}
     const data = await res.json();
+    console.log('[loadWikiPages] total=' + (data.total || 0) +
+                ' available_types=' + JSON.stringify(data.available_types || []));
 
     // Populate the type filter dropdown if it's still empty
     if (filter && filter.options.length <= 1 && data.available_types) {{
@@ -15107,8 +15140,13 @@ async function loadWikiPages(page) {{
     }}
 
     if (!data.pages || data.pages.length === 0) {{
-      list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--fg-muted);">' +
-        'No wiki pages found.<br><span style="font-size:11px;">Run <code>uv run sciknow wiki compile</code> to build wiki pages from your corpus.</span></div>';
+      const msg = data.error
+        ? 'API returned an error: <code>' + _escHtml(data.error) + '</code><br>'
+          + '<span style="font-size:11px;">Check the server log.</span>'
+        : 'No wiki pages found.<br>'
+          + '<span style="font-size:11px;">Run <code>uv run sciknow wiki compile</code> to build wiki pages from your corpus.</span>';
+      list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--fg-muted);">'
+        + msg + '</div>';
       return;
     }}
 
