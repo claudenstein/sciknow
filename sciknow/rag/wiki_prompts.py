@@ -196,7 +196,13 @@ def wiki_extract_entities(
     abstract: str, existing_slugs: list[str],
     slug: str = "", sections: str = "",
 ) -> tuple[str, str]:
-    slug_str = ", ".join(existing_slugs[:300]) if existing_slugs else "(none yet)"
+    # Phase 54.6.42 — existing_slugs cap 300 → 100. With 300 slugs
+    # the user prompt balloons to ~27 KB and qwen3:30b-a3b-instruct-2507
+    # emits 3000+ tokens of verbose output (40+ concepts, long source
+    # sentences) that blow past any num_predict cap mid-JSON. 100
+    # slugs is enough for the "reuse where applicable" hint without
+    # encouraging the model to match every one.
+    slug_str = ", ".join(existing_slugs[:100]) if existing_slugs else "(none yet)"
     # Phase 55.2 — rollback. The Phase 55 head+tail cut to 2 KB was
     # too aggressive — for multi-section papers it shaved the middle
     # methodology/results paragraphs that *do* carry triple-extraction

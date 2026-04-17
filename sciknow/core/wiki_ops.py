@@ -422,14 +422,14 @@ def compile_paper_summary(
             )
             raw_perspectives = _strip_thinking(
                 llm_complete(
-                    p_sys,
-                    (p_usr or "").rstrip() + "\n\n/no_think",
-                    model=model,
+                    p_sys, p_usr, model=model,
                     temperature=0.3, num_ctx=shared_ctx,
-                    # Phase 54.6.38 — cap output to 400 tokens.
-                    # Perspectives are ~3 bullet points (~100 tokens
-                    # of content + thinking). Without cap, qwen3:30b-a3b
-                    # generates 1000+ tokens of reasoning per call.
+                    # Phase 54.6.42 — 400-tok cap retained as hygiene.
+                    # `/no_think` removed: the new LLM_FAST_MODEL
+                    # (qwen3:30b-a3b-instruct-2507) is non-thinking so
+                    # the tag is a no-op. _strip_thinking() also kept
+                    # as belt-and-braces in case the model is swapped
+                    # back to a thinking variant by .env override.
                     num_predict=400,
                     keep_alive=-1) or ""
             ).strip()
@@ -456,13 +456,10 @@ def compile_paper_summary(
         )
 
         tokens: list[str] = []
-        # Phase 54.6.38 — cap summary output to 1500 tokens and append
-        # /no_think. Pre-cap, qwen3:30b-a3b emitted up to 4155 tokens
-        # per summary (most of it thinking) which dragged compile to
-        # ~20 min/paper. Typical wiki summary is 300-600 words ≈
-        # 400-800 tokens; 1500 is generous for longer sections.
-        user_no_think = (user or "").rstrip() + "\n\n/no_think"
-        for tok in llm_stream(system, user_no_think, model=model,
+        # Phase 54.6.42 — 1500-tok cap retained as hygiene (typical wiki
+        # summary is 300-600 words ≈ 400-800 tokens; 1500 is generous).
+        # `/no_think` removed: new LLM_FAST_MODEL is non-thinking.
+        for tok in llm_stream(system, user, model=model,
                               num_ctx=shared_ctx, num_predict=1500,
                               keep_alive=-1):
             tokens.append(tok)
@@ -479,13 +476,12 @@ def compile_paper_summary(
             pol_sys, pol_usr = wiki_prompts.wiki_polish(content)
             polished = _strip_thinking(
                 llm_complete(
-                    pol_sys,
-                    (pol_usr or "").rstrip() + "\n\n/no_think",
-                    model=model,
+                    pol_sys, pol_usr, model=model,
                     temperature=0.1, num_ctx=shared_ctx,
-                    # Phase 54.6.38 — polish output ≤ original summary
-                    # length (~1500 tokens). Cap it to prevent qwen's
-                    # thinking-mode runaway.
+                    # Phase 54.6.42 — /no_think removed (new fast model
+                    # is non-thinking). 1500-tok cap retained as hygiene;
+                    # polished output shouldn't exceed the original
+                    # summary length.
                     num_predict=1500,
                     keep_alive=-1) or ""
             ).strip()
@@ -599,7 +595,53 @@ def _find_json_block(raw: str) -> str | None:
                     return candidate
                 except Exception:
                     return None
-    return None
+
+    # Phase 54.6.42 — salvage for truncated JSON (num_predict cutoff).
+    # Scenario: model emits valid JSON but was cut mid-array before
+    # the closing brace. Walk back from the end of the raw string,
+    # drop any partial trailing element, close open arrays and the
+    # outer object. Returns something `json.loads` can parse so the
+    # caller keeps 80% of the payload instead of 0%.
+    tail = raw[start:]
+    # Trim trailing incomplete string literal, if any: find the last
+    # unescaped unmatched quote and cut everything after it.
+    if in_string:
+        # Inside an unterminated string — cut back to last newline or
+        # last comma outside the string context we can safely close.
+        last_safe = max(tail.rfind(',\n'), tail.rfind('\n'))
+        if last_safe > 0:
+            tail = tail[:last_safe]
+    # Trim trailing comma if present
+    tail = tail.rstrip().rstrip(",")
+    # Close any open brackets (array depth + object depth).
+    # Count in a fresh pass: we want a minimal closing sequence.
+    open_sq = 0
+    open_cu = 0
+    in_s = False
+    esc = False
+    for c in tail:
+        if esc:
+            esc = False; continue
+        if c == "\\":
+            esc = True; continue
+        if c == '"':
+            in_s = not in_s; continue
+        if in_s:
+            continue
+        if c == "[":
+            open_sq += 1
+        elif c == "]":
+            open_sq -= 1
+        elif c == "{":
+            open_cu += 1
+        elif c == "}":
+            open_cu -= 1
+    repaired = tail + ("]" * max(open_sq, 0)) + ("}" * max(open_cu, 0))
+    try:
+        json.loads(repaired, strict=False)
+        return repaired
+    except Exception:
+        return None
 
 
 def _extract_entities_and_kg(
@@ -641,25 +683,34 @@ def _extract_entities_and_kg(
     )
 
     try:
-        # Phase 54.6.36/37 — free-form extraction, NO schema constraint.
-        # Model choice is critical:
-        #   * mistral:7b  — too small, echoes placeholder strings from
-        #                   the prompt example instead of filling them in
-        #   * qwen3:30b-a3b — thinking MoE, generates <think> tokens that
-        #                     exhaust num_predict before emitting JSON
-        #   * qwen3.5:27b — ALSO a thinking model despite the .5 naming;
-        #                   eval_count=1500 but message.content='' (all
-        #                   tokens were internal reasoning, not output)
-        #   * qwen2.5:32b-instruct — verified working: clean JSON in
-        #                   ~180 tokens, stops naturally, instruct-tuned
-        # So we default to qwen2.5:32b-instruct-q4_K_M. Callers can
-        # still override via the ``model`` parameter.
-        extract_model = model or "qwen2.5:32b-instruct-q4_K_M"
+        # Phase 54.6.42 — default upgraded to qwen3:30b-a3b-instruct-2507
+        # after the 2026-04-17 sweep. This is the official non-thinking
+        # variant of qwen3:30b-a3b — same MoE architecture, same VRAM,
+        # but no thinking mode.
+        #
+        # Empirical results on paper 4092d6ad (math-heavy Nature-CO2):
+        #   qwen3:30b-a3b-instruct-2507  →  13s, 12 triples, 50% verbatim  ✓
+        #   qwen2.5:32b-instruct         →  108s, 10 triples, 40% verbatim (old default)
+        #   gemma3:27b-it-qat            →   38s, 12 triples, 33% verbatim  (#2)
+        #   qwen3:30b-a3b (thinking)     →   runaway: 0 content, 2048 tok spent thinking
+        #   qwen3.5:27b  (thinking)      →   runaway (same failure mode)
+        #   command-r:35b                →   356s, ran past 2048 num_predict mid-JSON
+        # Callers can still override via the ``model`` parameter.
+        extract_model = model or "qwen3:30b-a3b-instruct-2507-q4_K_M"
         effective_ctx = num_ctx if num_ctx is not None else 8192
         raw = llm_complete(
             sys_e, usr_e, model=extract_model,
             temperature=0.0, num_ctx=effective_ctx,
-            num_predict=1500,
+            # Phase 54.6.42 — raised 1500 → 3000 after observing
+            # qwen3:30b-a3b-instruct-2507 overshoot 2048 (tokens=2049,
+            # done_reason=length) on the 4092d6ad retry: the model
+            # emitted 12+ concepts and was still going when the cap
+            # bit. Content quality is excellent (real CO2/solar
+            # concepts, no "electron beam" hallucinations like qwen2.5
+            # produced) so the right move is to give it headroom, not
+            # fight the verbosity. 3000 tokens ≈ 11 KB of JSON — still
+            # cheap at 14s elapsed.
+            num_predict=3000,
             keep_alive=-1,
             # Note: NO format= argument. Schema-constrained JSON
             # mode triggered runaways on this corpus.
@@ -1383,21 +1434,19 @@ def consensus_map(
     sys_c, usr_c = wiki_prompts.wiki_consensus(topic, triples_text, summaries_text)
 
     try:
-        # Phase 54.6.13 — same thinking-model headroom fix as the
-        # extract-kg regression (see feedback_thinking_models_json.md):
-        # qwen3:30b-a3b emits 7-9k thinking tokens that blow past a
-        # 16384 ctx on top of ~12k of evidence text. Append /no_think
-        # to the user prompt (skip reasoning on Qwen3) and raise the
-        # ceiling. Empty raw == context overflow — report specifically.
-        usr_c_nt = (usr_c or "").rstrip() + "\n\n/no_think"
-        raw = llm_complete(sys_c, usr_c_nt, model=model,
+        # Phase 54.6.42 — /no_think removed; the new LLM_FAST_MODEL
+        # (qwen3:30b-a3b-instruct-2507) is non-thinking, and the 24576
+        # ctx headroom now just serves the ~12k evidence-text volume.
+        # _strip_thinking() retained in case someone overrides --model
+        # back to a thinking variant.
+        raw = llm_complete(sys_c, usr_c, model=model,
                            temperature=0.0, num_ctx=24576)
         cleaned = _strip_thinking(raw or "").strip()
         if not cleaned:
             yield {"type": "error",
                    "message": "LLM returned empty output (likely context "
                               "overflow even at ctx=24576). Try a smaller "
-                              "topic or --model qwen3.5:27b."}
+                              "topic or --model gemma3:27b-it-qat."}
             return
         data = json.loads(_clean_json(cleaned), strict=False)
         yield {"type": "consensus", "data": data}
