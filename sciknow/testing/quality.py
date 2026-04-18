@@ -150,14 +150,47 @@ CANDIDATE_TOPICS: list[str] = [
 # model that exhausts these in ``<think>`` alone is a legitimate
 # quality failure for the sweep.
 BUDGETS = {
-    "wiki_summary":     {"num_ctx": 8192,  "num_predict": 1500, "temperature": 0.3},
-    "wiki_polish":      {"num_ctx": 8192,  "num_predict": 1500, "temperature": 0.1},
-    "autowrite_writer": {"num_ctx": 4096,  "num_predict": 1500, "temperature": 0.4},
-    "book_review":      {"num_ctx": 8192,  "num_predict": 1500, "temperature": 0.2},
-    "ask_synthesize":   {"num_ctx": 16384, "num_predict": 2000, "temperature": 0.2},
-    "autowrite_scorer": {"num_ctx": 8192,  "num_predict": 1000, "temperature": 0.0},
-    "judge":            {"num_ctx": 8192,  "num_predict": 400,  "temperature": 0.0},
+    # Phase 54.6.91 — budgets raised AND made model-aware via
+    # effective_budget() below. Pre-54.6.91, every model got the same
+    # 1000-2000 num_predict / temp 0-0.4, which (per 54.6.85 and
+    # BENCH_METHODOLOGY R2) is architecturally unfair to thinking
+    # models that need 16k+ budget. The quality bench was fixed in a
+    # separate commit from the sweep — don't let this drift again.
+    "wiki_summary":     {"num_ctx": 8192,  "num_predict": 2000, "temperature": 0.3},
+    "wiki_polish":      {"num_ctx": 8192,  "num_predict": 2000, "temperature": 0.2},
+    "autowrite_writer": {"num_ctx": 4096,  "num_predict": 2000, "temperature": 0.4},
+    "book_review":      {"num_ctx": 8192,  "num_predict": 2000, "temperature": 0.3},
+    "ask_synthesize":   {"num_ctx": 16384, "num_predict": 2500, "temperature": 0.3},
+    "autowrite_scorer": {"num_ctx": 8192,  "num_predict": 1500, "temperature": 0.2},
+    "judge":            {"num_ctx": 8192,  "num_predict": 400,  "temperature": 0.1},
 }
+
+
+def effective_budget(task: str, model: str) -> dict:
+    """Phase 54.6.91 — quality-bench analog of model_sweep.effective_budget.
+
+    Scales `num_predict` by 8× for thinking models (min 12k floor) so
+    they have room for CoT + answer. Overrides sampling with Qwen-
+    recommended per-family parameters instead of the one-size-fits-all
+    budget default. Mirrors sweep exactly so both benches apply the
+    same methodology to the same candidates.
+    """
+    from sciknow.testing.model_sweep import (
+        profile_for, THINKING_PREDICT_MULT, THINKING_MIN_PREDICT,
+    )
+    base = BUDGETS[task]
+    p = profile_for(model)
+    predict = base["num_predict"]
+    if p.thinks_by_default:
+        predict = max(THINKING_MIN_PREDICT, predict * THINKING_PREDICT_MULT)
+    return {
+        "num_ctx":     base["num_ctx"],
+        "num_predict": predict,
+        "temperature": p.temperature,
+        "top_p":       p.top_p,
+        "top_k":       p.top_k,
+        "thinks_by_default": p.thinks_by_default,
+    }
 
 # NLI model used for faithfulness + citation quality. This is the
 # standard cross-encoder NLI model from sentence-transformers — trained
@@ -627,6 +660,10 @@ def _call_model_raw(system: str, user: str, model: str, budget: dict) -> dict:
                 "num_ctx":     budget["num_ctx"],
                 "num_predict": budget["num_predict"],
                 "num_batch":   1024,
+                **({"top_p": budget["top_p"]}
+                   if budget.get("top_p") is not None else {}),
+                **({"top_k": budget["top_k"]}
+                   if budget.get("top_k") is not None else {}),
             },
             keep_alive=0,
         )
@@ -706,7 +743,7 @@ def b_quality_wiki_summary() -> Iterable[BenchMetric]:
         if _skip_if_model_missing(model, installed):
             yield BenchMetric(f"{model}::status", "not-installed", "")
             continue
-        resp = _call_model_raw(sys_p, usr_p, model, BUDGETS["wiki_summary"])
+        resp = _call_model_raw(sys_p, usr_p, model, effective_budget("wiki_summary", model))
         if resp.get("error"):
             yield BenchMetric(f"{model}::status", "error", "",
                               note=resp["error"][:80])
@@ -792,7 +829,7 @@ def b_quality_wiki_polish() -> Iterable[BenchMetric]:
         if _skip_if_model_missing(model, installed):
             yield BenchMetric(f"{model}::status", "not-installed", "")
             continue
-        resp = _call_model_raw(sys_p, usr_p, model, BUDGETS["wiki_polish"])
+        resp = _call_model_raw(sys_p, usr_p, model, effective_budget("wiki_polish", model))
         if resp.get("error"):
             yield BenchMetric(f"{model}::status", "error", "",
                               note=resp["error"][:80])
@@ -900,7 +937,7 @@ def b_quality_autowrite_writer() -> Iterable[BenchMetric]:
         if _skip_if_model_missing(model, installed):
             yield BenchMetric(f"{model}::status", "not-installed", "")
             continue
-        resp = _call_model_raw(sys_p, usr_p, model, BUDGETS["autowrite_writer"])
+        resp = _call_model_raw(sys_p, usr_p, model, effective_budget("autowrite_writer", model))
         if resp.get("error"):
             yield BenchMetric(f"{model}::status", "error", "",
                               note=resp["error"][:80])
@@ -989,7 +1026,7 @@ def b_quality_book_review() -> Iterable[BenchMetric]:
         if _skip_if_model_missing(model, installed):
             yield BenchMetric(f"{model}::status", "not-installed", "")
             continue
-        resp = _call_model_raw(sys_p, usr_p, model, BUDGETS["book_review"])
+        resp = _call_model_raw(sys_p, usr_p, model, effective_budget("book_review", model))
         if resp.get("error"):
             yield BenchMetric(f"{model}::status", "error", "",
                               note=resp["error"][:80])
@@ -1078,8 +1115,8 @@ def b_quality_autowrite_scorer() -> Iterable[BenchMetric]:
             draft_content=_BAD_DRAFT, results=results,
         )
 
-        good = _call_model_raw(sys_p_good, usr_p_good, model, BUDGETS["autowrite_scorer"])
-        bad  = _call_model_raw(sys_p_bad,  usr_p_bad,  model, BUDGETS["autowrite_scorer"])
+        good = _call_model_raw(sys_p_good, usr_p_good, model, effective_budget("autowrite_scorer", model))
+        bad  = _call_model_raw(sys_p_bad,  usr_p_bad,  model, effective_budget("autowrite_scorer", model))
         if good.get("error") or bad.get("error"):
             yield BenchMetric(f"{model}::status", "error", "",
                               note=(good.get("error") or bad.get("error") or "")[:80])
@@ -1168,7 +1205,7 @@ def b_quality_ask_synthesize() -> Iterable[BenchMetric]:
         if _skip_if_model_missing(model, installed):
             yield BenchMetric(f"{model}::status", "not-installed", "")
             continue
-        resp = _call_model_raw(sys_p, usr_p, model, BUDGETS["ask_synthesize"])
+        resp = _call_model_raw(sys_p, usr_p, model, effective_budget("ask_synthesize", model))
         if resp.get("error"):
             yield BenchMetric(f"{model}::status", "error", "",
                               note=resp["error"][:80])
