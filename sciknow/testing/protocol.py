@@ -8657,6 +8657,58 @@ def l1_phase54_6_61_wiki_summaries_and_visuals_surface() -> None:
     )
 
 
+def l1_phase54_6_75_book_snapshot_cli_surface() -> None:
+    """Phase 54.6.75 (#13) — CLI commands for chapter/book snapshots."""
+    from sciknow.cli import book as _b
+    for name in ("snapshot", "snapshots", "snapshot_restore"):
+        assert hasattr(_b, name), f"book CLI missing {name}"
+
+
+def l1_phase54_6_76_gpu_ledger_surface() -> None:
+    """Phase 54.6.76 (#15) — GPU-time ledger module + CLI + web API.
+
+    Verifies the display helper (format_wall) handles expected ranges
+    and that the three rollup functions + three API endpoints all
+    exist — without hitting the DB.
+    """
+    from sciknow.core import gpu_ledger
+    from sciknow.testing.helpers import all_app_routes
+    from sciknow.cli import book as _b
+
+    # Rollup functions
+    for name in ("ledger_for_draft", "ledger_for_chapter", "ledger_for_book",
+                 "ledger_per_chapter", "ledger_per_section",
+                 "ledger_as_dict", "format_wall", "LedgerRow"):
+        assert hasattr(gpu_ledger, name), f"gpu_ledger missing {name}"
+
+    # format_wall handles the three ranges cleanly
+    assert gpu_ledger.format_wall(42) == "42s"
+    assert gpu_ledger.format_wall(90) == "1m 30s"
+    assert gpu_ledger.format_wall(3661) == "1h 1m"
+
+    # LedgerRow.tokens_per_second guards zero
+    row = gpu_ledger.LedgerRow(scope="draft", label="x", n_runs=0,
+                                wall_seconds=0.0, tokens=0,
+                                started_first="", finished_last="")
+    assert row.tokens_per_second == 0.0
+
+    # ledger_as_dict produces JSON-safe shape
+    d = gpu_ledger.ledger_as_dict(row)
+    for k in ("scope", "label", "n_runs", "wall_seconds", "wall_human",
+              "tokens", "tokens_per_second"):
+        assert k in d, f"ledger_as_dict missing key {k}"
+
+    # CLI command
+    assert hasattr(_b, "ledger"), "book CLI must expose `sciknow book ledger`"
+
+    # Web endpoints
+    routes = {p for p, _m in all_app_routes()}
+    for path in ("/api/ledger/book/{book_id}",
+                 "/api/ledger/chapter/{chapter_id}",
+                 "/api/ledger/draft/{draft_id}"):
+        assert path in routes, f"ledger endpoint missing: {path}"
+
+
 def l1_phase54_6_74_vlm_sweep_surface() -> None:
     """Phase 54.6.74 (#1b) — VLM sweep harness.
 
@@ -9190,6 +9242,10 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_72_visuals_caption_surface,
     # Phase 54.6.74 — VLM sweep harness (#1b)
     l1_phase54_6_74_vlm_sweep_surface,
+    # Phase 54.6.75 — chapter/book snapshot CLI (#13)
+    l1_phase54_6_75_book_snapshot_cli_surface,
+    # Phase 54.6.76 — GPU-time ledger (#15)
+    l1_phase54_6_76_gpu_ledger_surface,
 ]
 
 L2_TESTS: list[Callable] = [

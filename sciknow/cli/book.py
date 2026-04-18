@@ -1289,6 +1289,100 @@ def ensemble_review(
     _consume_events(gen, console)
 
 
+# ── ledger (Phase 54.6.76 — #15) ───────────────────────────────────────────
+
+@app.command()
+def ledger(
+    book_title: Annotated[str, typer.Argument(help="Book title or id-prefix.")],
+    chapter: int = typer.Option(
+        0, "--chapter", "-c",
+        help="Chapter number. Default 0 = book-level + per-chapter breakdown. "
+             "Positive N = one chapter's section-level breakdown.",
+    ),
+    draft_id: str = typer.Option(
+        "", "--draft", "-d",
+        help="Draft id-prefix. Overrides --chapter; shows one draft's "
+             "autowrite wall-time + tokens.",
+    ),
+):
+    """Phase 54.6.76 (#15) — GPU-time + token ledger per draft, chapter,
+    or book, sourced from the autowrite_runs telemetry table.
+
+    Shows total wall-seconds (retrieval + scoring + verification + CoVe +
+    idle) and total tokens. Helps spot a runaway CoVe loop or a
+    chapter that's disproportionately expensive.
+
+    Examples:
+
+      sciknow book ledger "Global Cooling"                 # book + per-chapter
+      sciknow book ledger "Global Cooling" --chapter 3     # sections in ch.3
+      sciknow book ledger "Global Cooling" --draft 3f2a1b  # one draft
+    """
+    from sciknow.core import gpu_ledger
+    from sciknow.storage.db import get_session
+
+    with get_session() as session:
+        book = _get_book(session, book_title)
+        if not book:
+            console.print(f"[red]Book not found:[/red] {book_title}")
+            raise typer.Exit(1)
+        book_id = book[0]
+
+        if draft_id:
+            row = gpu_ledger.ledger_for_draft(session, draft_id)
+            if not row or row.n_runs == 0:
+                console.print(
+                    f"[yellow]No autowrite runs found for draft "
+                    f"{draft_id!r}.[/yellow]"
+                )
+                raise typer.Exit(0)
+            _print_ledger_row(row)
+            return
+
+        if chapter > 0:
+            from sqlalchemy import text as _t
+            ch = session.execute(_t(
+                "SELECT id::text FROM book_chapters "
+                "WHERE book_id::text = :bid AND number = :n LIMIT 1"
+            ), {"bid": book_id, "n": chapter}).fetchone()
+            if not ch:
+                console.print(f"[red]Chapter {chapter} not found in {book[1]!r}.[/red]")
+                raise typer.Exit(1)
+            header = gpu_ledger.ledger_for_chapter(session, ch[0])
+            sections = gpu_ledger.ledger_per_section(session, ch[0])
+            if header:
+                _print_ledger_row(header, prefix="[bold]")
+            if sections:
+                console.print("  [dim]sections:[/dim]")
+                for s in sections:
+                    _print_ledger_row(s, indent="    ")
+            return
+
+        header = gpu_ledger.ledger_for_book(session, book_id)
+        per_ch = gpu_ledger.ledger_per_chapter(session, book_id)
+        if header:
+            _print_ledger_row(header, prefix="[bold]")
+        if per_ch:
+            console.print("  [dim]chapters:[/dim]")
+            for c in per_ch:
+                _print_ledger_row(c, indent="    ")
+
+
+def _print_ledger_row(row, indent: str = "", prefix: str = "") -> None:
+    from sciknow.core.gpu_ledger import format_wall
+    label = f"{prefix}{row.label}[/bold]" if prefix else row.label
+    if row.n_runs == 0:
+        console.print(f"{indent}{label}  [dim]— no autowrite runs yet —[/dim]")
+        return
+    tps = f"{row.tokens_per_second:.1f} tok/s" if row.wall_seconds > 0 else "—"
+    console.print(
+        f"{indent}{label}  "
+        f"[cyan]{format_wall(row.wall_seconds)}[/cyan]  "
+        f"[dim]{row.tokens:,} tok · {tps} · "
+        f"{row.n_runs} run{'s' if row.n_runs != 1 else ''}[/dim]"
+    )
+
+
 # ── snapshot / snapshots / snapshot-restore (Phase 54.6.75 — #13) ──────────
 
 @app.command()
