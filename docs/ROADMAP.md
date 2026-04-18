@@ -225,22 +225,27 @@ per hour of effort.
   row. **Effort:** ~20 min LLM time for the backfill, 2h implementation.
 - [ ] **#12 — Compound learning Layer 3** (already in §4b, still pending,
   blocked on ≥50 autowrite runs).
-- [ ] **#13 — Chapter / book snapshot + restore.** Wrap existing
-  `draft_snapshots` with a "snapshot all drafts in this chapter/book"
-  batch operation. Safety net for autowrite-all runs. **Effort:** 2h.
+- [x] **~~#13 — Chapter / book snapshot + restore.~~** Shipped in
+  Phase 54.6.75. Three new CLI commands (`sciknow book snapshot` /
+  `snapshots` / `snapshot-restore`) wrapping the existing Phase-38
+  web endpoints. Dry-run supported on restore. Non-destructive —
+  inserts new draft versions, never overwrites.
 
 ### 6d. Tier 4 — UX / observability
 
 - [ ] **#14 — Consolidated Book settings modal** (already in §5, half-day).
-- [ ] **#15 — GPU-time ledger per draft / chapter / book.** Persist
-  LLM-call wall-time from existing autowrite telemetry; expose as a
-  sidebar column + export in the book summary. Helps spot runaway CoVe
-  or rescoring loops. **Effort:** 2h.
-- [ ] **#16 — MCP server interface for the corpus.** Expose
-  `/api/ask`, `/api/search`, `/api/chapters` as an MCP server so
-  external agents can query the corpus. ~100 lines given FastAPI.
-  Opens multi-agent workflows without duplicating the ingestion stack.
-  **Effort:** 3h.
+- [x] **~~#15 — GPU-time ledger per draft / chapter / book.~~** Shipped
+  in Phase 54.6.76. New module `sciknow/core/gpu_ledger.py` rolls up
+  `autowrite_runs.started_at / finished_at / tokens_used` at every
+  scope. CLI `sciknow book ledger <book> [-c N | -d ID]` +
+  `/api/ledger/{book,chapter,draft}/{id}` endpoints. Read-only; no
+  new tables.
+- [x] **~~#16 — MCP server interface for the corpus.~~** Shipped in
+  Phase 54.6.77. `sciknow mcp-serve` speaks Model Context Protocol
+  over stdio. Four tools exposed: `search_corpus`, `ask_corpus`,
+  `list_chapters`, `get_paper_summary`. Configure agent with
+  `{"command": "uv", "args": ["run", "sciknow", "mcp-serve"]}`.
+  Added `mcp` dep.
 
 ### Rejected-adjacent items (from the 2026-04-18 audit)
 
