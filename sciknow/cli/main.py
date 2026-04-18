@@ -228,6 +228,40 @@ def bench_cmd(
     raise typer.Exit(0 if n_err == 0 else 1)
 
 
+@app.command(name="mcp-serve")
+def mcp_serve_cmd():
+    """Phase 54.6.77 (#16) — run sciknow as an MCP (Model Context Protocol)
+    server over stdio.
+
+    Exposes four tools to any MCP-speaking agent (Claude Desktop,
+    Claude Code, goose, etc.):
+      - search_corpus       hybrid retrieval, top-k chunks
+      - ask_corpus          full RAG with citations
+      - list_chapters       book outline
+      - get_paper_summary   compiled wiki page by slug
+
+    No arguments — the transport is stdin/stdout. Configure Claude
+    Desktop / an agent harness with:
+
+        {
+          "mcpServers": {
+            "sciknow": {
+              "command": "uv",
+              "args": ["run", "sciknow", "mcp-serve"],
+              "cwd": "/path/to/sciknow/repo"
+            }
+          }
+        }
+
+    The active sciknow project is whichever `.active-project` points
+    at when this process starts. Restart the MCP client to pick up a
+    project switch.
+    """
+    import asyncio
+    from sciknow.mcp_server import serve_stdio
+    asyncio.run(serve_stdio())
+
+
 @app.command(name="bench-vlm-gen")
 def bench_vlm_gen_cmd(
     n: int = typer.Option(

@@ -8657,6 +8657,56 @@ def l1_phase54_6_61_wiki_summaries_and_visuals_surface() -> None:
     )
 
 
+def l1_phase54_6_77_mcp_server_surface() -> None:
+    """Phase 54.6.77 (#16) — MCP server module + CLI + tool registry.
+
+    Structural only (no agent connects, no LLM calls):
+      A) sciknow/mcp_server.py exports _TOOLS, _build_mcp_server,
+         serve_stdio.
+      B) The four canonical tools are registered and each has a
+         JSONSchema inputSchema with required params declared.
+      C) CLI exposes `sciknow mcp-serve` for agent integration.
+      D) _build_mcp_server() actually instantiates without raising —
+         verifies the MCP SDK's decorator surface still matches.
+    """
+    from sciknow import mcp_server
+    from sciknow.cli import main as _cli_main
+
+    # A) module exports
+    for name in ("_TOOLS", "_build_mcp_server", "serve_stdio",
+                 "_search_corpus", "_ask_corpus", "_list_chapters",
+                 "_get_paper_summary"):
+        assert hasattr(mcp_server, name), f"mcp_server missing {name}"
+
+    # B) tool registry — four canonical tools with JSONSchema
+    expected = {"search_corpus", "ask_corpus", "list_chapters",
+                "get_paper_summary"}
+    present = {t["name"] for t in mcp_server._TOOLS}
+    assert expected == present, (
+        f"MCP tool registry mismatch — expected {expected}, got {present}"
+    )
+    for t in mcp_server._TOOLS:
+        assert "inputSchema" in t, f"tool {t['name']} missing inputSchema"
+        assert t["inputSchema"].get("type") == "object", (
+            f"tool {t['name']}: inputSchema.type must be 'object'"
+        )
+        assert "description" in t and len(t["description"]) >= 40, (
+            f"tool {t['name']}: description too short (helps agents pick)"
+        )
+        assert callable(t.get("handler")), (
+            f"tool {t['name']}: handler must be callable"
+        )
+
+    # C) CLI command registered
+    assert hasattr(_cli_main, "mcp_serve_cmd"), (
+        "CLI must expose `sciknow mcp-serve` for agent integration"
+    )
+
+    # D) server builds cleanly (doesn't start, just constructs)
+    srv = mcp_server._build_mcp_server()
+    assert srv is not None
+
+
 def l1_phase54_6_75_book_snapshot_cli_surface() -> None:
     """Phase 54.6.75 (#13) — CLI commands for chapter/book snapshots."""
     from sciknow.cli import book as _b
@@ -9246,6 +9296,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_75_book_snapshot_cli_surface,
     # Phase 54.6.76 — GPU-time ledger (#15)
     l1_phase54_6_76_gpu_ledger_surface,
+    # Phase 54.6.77 — MCP server (#16)
+    l1_phase54_6_77_mcp_server_surface,
 ]
 
 L2_TESTS: list[Callable] = [
