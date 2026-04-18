@@ -4452,6 +4452,29 @@ def extract_visuals_cmd(
                     "surrounding_text": prev_text,
                 })
 
+            elif btype == "chart":
+                # Phase 54.6.62 — MinerU 2.5 emits a distinct `chart`
+                # block type for plot-like images (bar charts, line plots,
+                # scatter, etc.), separate from generic `image`. Pre-fix,
+                # this dispatch ignored `chart` entirely, which silently
+                # dropped ~65% of visual elements on corpora dominated
+                # by quantitative papers. See the 2026-04-18 audit in
+                # Phase 54.6.62 writeup.
+                img_path = block.get("img_path") or ""
+                caption = _join_caption(
+                    block.get("chart_caption") or block.get("caption")
+                )
+                fig_match = _FIG_NUM_RE.search(caption or prev_text)
+                visuals_batch.append({
+                    "document_id": doc_id, "kind": "chart",
+                    "content": caption[:2000],
+                    "caption": caption[:1000],
+                    "asset_path": str(img_path) if img_path else None,
+                    "block_idx": idx,
+                    "figure_num": fig_match.group(0) if fig_match else None,
+                    "surrounding_text": prev_text,
+                })
+
             elif btype == "code":
                 code_body = block.get("text") or block.get("code_body") or ""
                 visuals_batch.append({

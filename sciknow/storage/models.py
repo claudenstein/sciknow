@@ -493,7 +493,7 @@ class Visual(Base):
     document_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
     )
-    kind: Mapped[str] = mapped_column(Text, nullable=False)  # table | equation | figure | code
+    kind: Mapped[str] = mapped_column(Text, nullable=False)  # table | equation | figure | chart | code
     content: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
     caption: Mapped[str | None] = mapped_column(Text)
     asset_path: Mapped[str | None] = mapped_column(Text)

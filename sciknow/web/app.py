@@ -4094,9 +4094,11 @@ async def api_visuals_image(visual_id: str):
     doc_id, asset_path, kind = row
     if not asset_path:
         raise HTTPException(status_code=404, detail="visual has no asset_path")
-    if kind != "figure":
-        # Equations/tables/code are text content, not JPGs — reject early
-        # so a confused caller gets a clear error.
+    if kind not in ("figure", "chart"):
+        # Phase 54.6.62 — `chart` also ships as a JPG (MinerU classifies
+        # plots/bar charts/etc. as chart blocks, same img_path shape as
+        # image blocks). Equations/tables/code stay text-only — reject
+        # early so a confused caller gets a clear error.
         raise HTTPException(status_code=400,
                             detail=f"visual kind={kind!r} has no image asset")
 
@@ -7918,6 +7920,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
           <select id="wiki-vis-kind" onchange="loadWikiVisuals()" style="padding:4px 8px;">
             <option value="figure">Figures (thumbnails)</option>
+            <option value="chart">Charts (thumbnails)</option>
             <option value="table">Tables</option>
             <option value="equation">Equations</option>
             <option value="code">Code</option>
@@ -15543,7 +15546,8 @@ async function loadWikiVisuals() {{
 }}
 
 function renderWikiVisuals(items, kind) {{
-  if (kind === 'figure') {{
+  // Phase 54.6.62 — chart renders the same as figure (same image endpoint).
+  if (kind === 'figure' || kind === 'chart') {{
     // Thumbnail grid. Native lazy-loading on <img> keeps the initial
     // render cheap even at limit=500.
     let html = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;">';

@@ -8630,8 +8630,10 @@ def l1_phase54_6_61_wiki_summaries_and_visuals_surface() -> None:
         "image endpoint must constrain resolved path under the doc's "
         "mineru_output subtree (path-traversal guard)"
     )
-    assert 'kind != "figure"' in handler_src, (
-        "image endpoint must reject non-figure kinds (no JPG asset)"
+    # Phase 54.6.62 — chart joined figure as an image-bearing kind.
+    assert 'kind not in ("figure", "chart")' in handler_src, (
+        "image endpoint must reject non-image-bearing kinds "
+        "(equation/table/code have no JPG asset)"
     )
 
 
