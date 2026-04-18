@@ -4729,3 +4729,125 @@ def caption_visuals_cmd(
         f"[yellow]skipped {skipped}[/yellow] · "
         f"[dim]{time.monotonic() - t0:.1f}s wall[/dim]"
     )
+
+
+# ── paraphrase-equations (Phase 54.6.78 — #11) ───────────────────────────
+
+@app.command(name="paraphrase-equations")
+def paraphrase_equations_cmd(
+    model: str = typer.Option(
+        None, "--model",
+        help="Text LLM for paraphrasing. Default: settings.llm_fast_model "
+             "(qwen3:30b-a3b-instruct-2507-q4_K_M by default).",
+    ),
+    limit: int = typer.Option(
+        0, "--limit", "-n",
+        help="Max equations to paraphrase this run (0 = all pending).",
+    ),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Re-paraphrase rows that already have ai_caption set.",
+    ),
+):
+    """Phase 54.6.78 (#11) — paraphrase MinerU-extracted equations into
+    one-sentence natural-language descriptions for retrieval indexing.
+
+    bge-m3 embeds raw LaTeX poorly because the tokenizer fragments
+    commands like ``\\frac`` into characters — the resulting embedding
+    drifts from the equation's meaning. A one-sentence paraphrase
+    ("The slope of outgoing longwave radiation with respect to global
+    surface temperature, 2.93 ± 0.3 W/m²·K") embeds far better.
+
+    Uses LLM_FAST_MODEL (qwen3:30b-a3b-instruct-2507 by default),
+    ~1-2s per equation. For 4,687 equations: ~2-3 hours on a 3090.
+    Interruptible — re-run continues where you left off because the
+    row's ai_caption gets populated on write. Trivial equations
+    (length < 3 characters after cleanup, e.g. `a=b`) are skipped.
+
+    Stored in the existing ai_caption column (54.6.72 migration); the
+    text-LLM-vs-VLM distinction is made by `kind`: equation kind with
+    ai_caption set means "paraphrased here", figure/chart means
+    "image-captioned in caption-visuals".
+
+    Examples:
+
+      sciknow db paraphrase-equations                    # all pending
+      sciknow db paraphrase-equations -n 50              # first 50
+      sciknow db paraphrase-equations --force            # re-do all
+      sciknow db paraphrase-equations --model gemma3:27b-it-qat
+    """
+    from sciknow.cli import preflight
+    preflight(qdrant=False)
+
+    from sciknow.config import settings
+    from sciknow.core.equation_paraphrase import paraphrase_equation
+    from sciknow.storage.db import get_session
+    from sqlalchemy import text as sql_text
+
+    if model is None:
+        model = settings.llm_fast_model
+
+    where = ["v.kind = 'equation'", "v.content IS NOT NULL",
+             "length(v.content) >= 5"]
+    if not force:
+        where.append("v.ai_caption IS NULL")
+
+    with get_session() as session:
+        rows = session.execute(sql_text(f"""
+            SELECT v.id::text, v.content, COALESCE(v.surrounding_text, '')
+            FROM visuals v
+            WHERE {' AND '.join(where)}
+            ORDER BY v.created_at
+            {('LIMIT :lim' if limit else '')}
+        """), ({"lim": limit} if limit else {})).fetchall()
+
+    total = len(rows)
+    if total == 0:
+        console.print("[green]Nothing to paraphrase — every equation "
+                      "already has ai_caption (or pass --force).[/green]")
+        return
+
+    console.print(
+        f"Paraphrasing [bold]{total}[/bold] equation(s) with "
+        f"[cyan]{model}[/cyan]…"
+    )
+
+    done = 0
+    skipped = 0
+    t0 = time.monotonic()
+    for idx, (vid, latex, ctx) in enumerate(rows, 1):
+        para = paraphrase_equation(latex, ctx, model=model)
+        if para is None:
+            skipped += 1
+            console.print(
+                f"  [dim][{idx}/{total}][/dim] [yellow]⊘ SKIP[/yellow]  "
+                f"trivial or empty output"
+            )
+            continue
+        with get_session() as session:
+            session.execute(sql_text("""
+                UPDATE visuals SET
+                  ai_caption = :cap,
+                  ai_caption_model = :mdl,
+                  ai_captioned_at = now()
+                WHERE id::text = :vid
+            """), {"cap": para.replace("\x00", ""),
+                   "mdl": model, "vid": vid})
+            session.commit()
+        done += 1
+        preview = para[:80]
+        console.print(
+            f"  [dim][{idx}/{total}][/dim] [green]✓ PARA[/green]  {preview}"
+        )
+        if idx % 50 == 0:
+            rate = idx / max(0.01, time.monotonic() - t0)
+            eta = (total - idx) / max(0.01, rate)
+            console.print(
+                f"  [dim]… {rate:.2f}/s, eta {int(eta/60)}m {int(eta%60)}s[/dim]"
+            )
+
+    console.print(
+        f"\n[green]✓ Paraphrased {done}[/green] · "
+        f"[yellow]skipped {skipped}[/yellow] · "
+        f"[dim]{time.monotonic() - t0:.1f}s wall[/dim]"
+    )

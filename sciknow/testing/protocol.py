@@ -8657,6 +8657,43 @@ def l1_phase54_6_61_wiki_summaries_and_visuals_surface() -> None:
     )
 
 
+def l1_phase54_6_78_equation_paraphrase_surface() -> None:
+    """Phase 54.6.78 (#11) — equation paraphrase helpers.
+
+    No LLM calls — exercises the pre-processing logic (LaTeX cleanup,
+    trivial-equation detection) and confirms the CLI entry point +
+    module exports exist.
+    """
+    from sciknow.core import equation_paraphrase as eq
+    from sciknow.cli import db as _db_cli
+
+    # A) module exports
+    for name in ("paraphrase_equation", "_clean_latex",
+                 "_is_trivial_equation", "PARAPHRASE_SYSTEM", "PARAPHRASE_USER"):
+        assert hasattr(eq, name), f"equation_paraphrase missing {name}"
+
+    # B) _clean_latex strips $$ and \tag{}
+    assert eq._clean_latex("$$ r^2 = r_0^2 + a^2 \\tag{13} $$") == "r^2 = r_0^2 + a^2"
+    assert eq._clean_latex("  $x + y$  ") == "x + y"
+
+    # C) _is_trivial_equation skips scalar identities, keeps real ones
+    assert eq._is_trivial_equation("$$ a = b $$"), (
+        "2-variable scalar identity 'a=b' should be trivial"
+    )
+    assert eq._is_trivial_equation(""), "empty string must be trivial"
+    assert not eq._is_trivial_equation(
+        "$$ r^2 = r_0^2 + a^2 $$"
+    ), "r²=r₀²+a² is NOT trivial — three distinct symbols"
+    assert not eq._is_trivial_equation(
+        "$$ d O L T / d T = 2.93 W/m^2 K $$"
+    ), "dOLT/dT equation has enough structure to paraphrase"
+
+    # D) CLI command registered
+    assert hasattr(_db_cli, "paraphrase_equations_cmd"), (
+        "CLI must expose `sciknow db paraphrase-equations`"
+    )
+
+
 def l1_phase54_6_77_mcp_server_surface() -> None:
     """Phase 54.6.77 (#16) — MCP server module + CLI + tool registry.
 
@@ -9298,6 +9335,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_76_gpu_ledger_surface,
     # Phase 54.6.77 — MCP server (#16)
     l1_phase54_6_77_mcp_server_surface,
+    # Phase 54.6.78 — equation paraphrase module (#11)
+    l1_phase54_6_78_equation_paraphrase_surface,
 ]
 
 L2_TESTS: list[Callable] = [
