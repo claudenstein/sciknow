@@ -372,7 +372,7 @@ def write(
                 INSERT INTO drafts (id, title, book_id, chapter_id, section_type, topic,
                                     content, word_count, sources, model_used)
                 VALUES (:id, :title, :book_id, :chapter_id, :section_type, :topic,
-                        :content, :word_count, :sources::jsonb, :model_used)
+                        :content, :word_count, CAST(:sources AS jsonb), :model_used)
             """), {
                 "id": str(uuid.uuid4()),
                 "title": draft_title,

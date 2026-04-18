@@ -612,7 +612,7 @@ async def add_comment(
     with get_session() as session:
         session.execute(text("""
             INSERT INTO draft_comments (draft_id, paragraph_index, selected_text, comment)
-            VALUES (:did::uuid, :para, :sel, :comment)
+            VALUES (CAST(:did AS uuid), :para, :sel, :comment)
         """), {"did": draft_id, "para": paragraph_index, "sel": selected_text, "comment": comment})
         session.commit()
     return RedirectResponse(f"/section/{draft_id}", status_code=303)
@@ -1925,7 +1925,7 @@ async def create_snapshot(draft_id: str, name: str = Form("")):
         snap_name = name or f"Snapshot {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')}"
         session.execute(text("""
             INSERT INTO draft_snapshots (draft_id, name, content, word_count)
-            VALUES (:did::uuid, :name, :content, :wc)
+            VALUES (CAST(:did AS uuid), :name, :content, :wc)
         """), {"did": draft_id, "name": snap_name,
                "content": draft[0], "wc": draft[1]})
         session.commit()

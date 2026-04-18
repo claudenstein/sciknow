@@ -324,7 +324,7 @@ def _save_draft(session, *, title, book_id, chapter_id, section_type, topic,
                             word_count, sources, model_used, version, summary,
                             parent_draft_id, review_feedback)
         VALUES (:title, :book_id, :chapter_id, :section, :topic, :content,
-                :wc, :sources::jsonb, :model, :version, :summary,
+                :wc, CAST(:sources AS jsonb), :model, :version, :summary,
                 :parent_id, :review_feedback)
         RETURNING id::text
     """), {
@@ -803,7 +803,7 @@ def outline(
                 sections_json = _json.dumps(ch.get("sections", []))
                 session.execute(text("""
                     INSERT INTO book_chapters (book_id, number, title, description, topic_query, sections)
-                    VALUES (:bid, :num, :title, :desc, :tq, :secs::jsonb)
+                    VALUES (:bid, :num, :title, :desc, :tq, CAST(:secs AS jsonb))
                 """), {
                     "bid": book[0],
                     "num": ch["number"],
