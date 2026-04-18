@@ -43,6 +43,10 @@ class SearchCandidate:
     # cited in a FINISHED autowrite draft (was_cited=true in
     # autowrite_retrievals). Populated by _apply_useful_boost.
     useful_count: int = 0
+    # Phase 54.6.70 (#9) — co-citation count: how many edges in the
+    # citation graph connect this candidate's document to the retrieval's
+    # anchor set (top-N candidates). Populated by _apply_cocite_boost.
+    cocite_count: int = 0
 
 
 # ── RRF ───────────────────────────────────────────────────────────────────────
@@ -471,6 +475,117 @@ def _apply_citation_boost(
     return candidates
 
 
+# ── Co-citation / bib-coupling boost (Phase 54.6.70 — #9) ────────────────────
+
+def _apply_cocite_boost(
+    candidates: list[SearchCandidate],
+    session: Session,
+    boost_factor: float = 0.0,
+    anchor_size: int = 20,
+) -> list[SearchCandidate]:
+    """Co-citation / bibliographic-coupling boost WITHIN the retrieved set.
+
+    Distinct from ``_apply_citation_boost`` (which is *global* popularity:
+    how many papers anywhere in the corpus cite this one). This boost is
+    *topic-local*: for each candidate, count citation edges to the TOP-K
+    anchor set from the same query's retrieval. A candidate that cites
+    or is cited by several other top hits is in the citation neighborhood
+    of this query — topical relevance signal independent of text
+    embedding similarity.
+
+    References: Kessler 1963 (bibliographic coupling), Small 1973
+    (co-citation). Both classical IR techniques; not GraphRAG-global,
+    which was rejected in RESEARCH.md §526 — that was entity-graph
+    community summaries, a different axis.
+
+    Formula:
+      boosted_score = rrf_score × (1 + boost_factor × log2(1 + n_edges))
+
+    where n_edges counts edges in EITHER direction between the
+    candidate's document_id and the top-``anchor_size`` candidates'
+    document_ids (excluding self). When the corpus citation graph is
+    sparse (sciknow currently has ~4.5% in-corpus resolution per
+    RESEARCH.md), most candidates get 0 edges and the boost is a no-op.
+
+    ``boost_factor=0.0`` is a clean no-op (doesn't even run the SQL).
+    """
+    if boost_factor <= 0 or not candidates:
+        return candidates
+
+    # Anchor set: the top-N candidates by current score.
+    anchors = [c for c in candidates[:anchor_size] if c.document_id]
+    if len(anchors) < 2:
+        # Need at least 2 anchors for edges to mean anything.
+        return candidates
+    anchor_ids = {a.document_id for a in anchors}
+
+    # Collect every candidate doc (anchors + tail) — we want edges for
+    # the tail too, so a tail candidate that cites two anchors can still
+    # get boosted and float up.
+    all_doc_ids = {c.document_id for c in candidates if c.document_id}
+    if not all_doc_ids:
+        return candidates
+
+    from sqlalchemy import text
+
+    # One SQL query: fetch every citation edge where EITHER end is an
+    # anchor AND the other end is any candidate (anchors or tail). We
+    # index-filter on cited_document_id IS NOT NULL because unresolved
+    # cites (external papers) have no signal here.
+    anchor_ph = ", ".join(f":a{i}" for i, _ in enumerate(anchor_ids))
+    all_ph = ", ".join(f":c{i}" for i, _ in enumerate(all_doc_ids))
+    params: dict = {}
+    for i, d in enumerate(anchor_ids):
+        params[f"a{i}"] = d
+    for i, d in enumerate(all_doc_ids):
+        params[f"c{i}"] = d
+    rows = session.execute(
+        text(f"""
+            SELECT citing_document_id::text, cited_document_id::text
+            FROM citations
+            WHERE cited_document_id IS NOT NULL
+              AND (
+                (citing_document_id::text IN ({anchor_ph})
+                 AND cited_document_id::text IN ({all_ph}))
+                OR
+                (cited_document_id::text IN ({anchor_ph})
+                 AND citing_document_id::text IN ({all_ph}))
+              )
+        """),
+        params,
+    ).fetchall()
+
+    # Tally edges per candidate (exclude self-loops).
+    edge_counts: dict[str, int] = {}
+    for citing, cited in rows:
+        if citing == cited:
+            continue
+        # Which direction connects a candidate to an anchor?
+        if citing in anchor_ids and cited in all_doc_ids and cited != citing:
+            edge_counts[cited] = edge_counts.get(cited, 0) + 1
+        if cited in anchor_ids and citing in all_doc_ids and citing != cited:
+            edge_counts[citing] = edge_counts.get(citing, 0) + 1
+
+    if not edge_counts:
+        # Sparse corpus → nothing to boost; skip the sort.
+        return candidates
+
+    import math
+
+    for c in candidates:
+        n = edge_counts.get(c.document_id, 0)
+        # Exclude self-citations by NOT boosting anchors for edges TO
+        # themselves — already handled above (citing == cited skipped).
+        if n > 0:
+            c.rrf_score *= 1.0 + boost_factor * math.log2(1 + n)
+            # Stash the count on the candidate so downstream consumers
+            # (GUI, bench diag) can surface it.
+            c.cocite_count = n
+
+    candidates.sort(key=lambda c: c.rrf_score, reverse=True)
+    return candidates
+
+
 # ── Useful-count boost (Phase 32.8 — Compound learning Layer 2) ────────────────
 
 def _apply_useful_boost(
@@ -666,4 +781,12 @@ def search(
     # ranking of chunks that are both well-cited in the literature
     # AND have proven useful in past autowrite drafts.
     useful_boost = getattr(settings, "useful_count_boost_factor", 0.15)
-    return _apply_useful_boost(candidates, session, boost_factor=useful_boost)
+    candidates = _apply_useful_boost(candidates, session, boost_factor=useful_boost)
+
+    # Phase 54.6.70 (#9) — co-citation / bib-coupling boost inside the
+    # retrieved set. Topic-local citation-graph signal. Default off
+    # (boost_factor=0.1 is gentle but still noticeable); set
+    # COCITE_BOOST_FACTOR=0.0 in .env to disable if it regresses MRR
+    # on a corpus with dense in-corpus citations.
+    cocite_boost = getattr(settings, "cocite_boost_factor", 0.1)
+    return _apply_cocite_boost(candidates, session, boost_factor=cocite_boost)

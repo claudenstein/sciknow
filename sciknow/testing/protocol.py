@@ -8657,6 +8657,54 @@ def l1_phase54_6_61_wiki_summaries_and_visuals_surface() -> None:
     )
 
 
+def l1_phase54_6_70_cocite_boost_surface() -> None:
+    """Phase 54.6.70 — co-citation / bib-coupling retrieval boost (#9).
+
+    Structural surface only (no live Qdrant / PG hits):
+      A) _apply_cocite_boost exists in hybrid_search and is wired AFTER
+         _apply_useful_boost in the main search pipeline.
+      B) SearchCandidate carries a cocite_count field for diagnostics.
+      C) Settings has cocite_boost_factor, defaulted to 0.0 (data-driven
+         decision from the 54.6.70 A/B — 4.5% in-corpus resolution made
+         the signal regress MRR; kept for opt-in).
+      D) boost_factor=0.0 is a cheap no-op (early-return, no SQL).
+    """
+    from sciknow.retrieval import hybrid_search as hs
+    from sciknow.config import settings
+    import inspect
+
+    assert hasattr(hs, "_apply_cocite_boost"), (
+        "hybrid_search must expose _apply_cocite_boost (#9)"
+    )
+    assert "cocite_count" in {f.name for f in hs.SearchCandidate.__dataclass_fields__.values()}, (
+        "SearchCandidate needs a cocite_count field for diagnostics"
+    )
+    assert hasattr(settings, "cocite_boost_factor"), (
+        "Settings must expose cocite_boost_factor"
+    )
+    assert settings.cocite_boost_factor == 0.0, (
+        "Default cocite_boost_factor must be 0.0 (54.6.70 A/B regression); "
+        "flip to 0.1 in .env per-project to opt in"
+    )
+    src = inspect.getsource(hs)
+    assert "_apply_cocite_boost" in src and "_apply_useful_boost" in src, (
+        "cocite + useful boosts must both be wired into the search pipeline"
+    )
+    # Cocite must be applied AFTER the useful boost so multiplicative
+    # composition stays ordered (scoring → citation → useful → cocite).
+    useful_pos = src.rfind("_apply_useful_boost")
+    cocite_pos = src.rfind("_apply_cocite_boost")
+    assert useful_pos > 0 and cocite_pos > useful_pos, (
+        "_apply_cocite_boost must be called AFTER _apply_useful_boost in the pipeline"
+    )
+    # E) No-op path: boost_factor=0 must early-return without hitting SQL.
+    cocite_src = inspect.getsource(hs._apply_cocite_boost)
+    assert "boost_factor <= 0" in cocite_src or "boost_factor == 0" in cocite_src, (
+        "_apply_cocite_boost must early-return when boost_factor is 0 "
+        "so disabling it is free"
+    )
+
+
 def l1_phase54_6_69_retrieval_eval_surface() -> None:
     """Phase 54.6.69 — retrieval_eval module exposes the probe-set
     generator, loader, NDCG helper, and the bench function; bench.py
@@ -8941,6 +8989,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness
     l1_phase54_6_69_retrieval_eval_surface,
+    # Phase 54.6.70 — co-citation/bib-coupling boost (default off)
+    l1_phase54_6_70_cocite_boost_surface,
 ]
 
 L2_TESTS: list[Callable] = [

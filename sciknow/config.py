@@ -84,6 +84,16 @@ class Settings(BaseSettings):
     autowrite_scorer_model: str | None = None
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
 
+    # Phase 54.6.70 (#9) — co-citation / bib-coupling retrieval boost.
+    # Gentle log-dampened multiplier applied to candidates whose document
+    # has citation-graph edges to the top-N anchor set from the same
+    # query's retrieval. Default 0.0 (OFF) because the 54.6.70 A/B on the
+    # 30-query retrieval bench regressed MRR 0.514→0.496: with the current
+    # ~4.5% in-corpus citation resolution the signal is sparse and biased
+    # toward popular papers rather than true-topic neighbors. Set to 0.1
+    # in .env to A/B again once the corpus has denser in-corpus citations.
+    cocite_boost_factor: float = 0.0
+
     # Crossref polite pool
     crossref_email: str = "user@example.com"
 
