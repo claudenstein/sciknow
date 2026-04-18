@@ -203,11 +203,17 @@ per hour of effort.
   weakest-dimension logic picks up the gap; when coverage is lowest,
   the revision instruction is overridden to name missed bullets
   explicitly. Fails silently on empty plans / unavailable NLI.
-- [ ] **#8 — Claim-atomization for offline verify.** Split each draft
-  sentence into ≤3 sub-claims, verify each with the NLI scorer,
-  aggregate. Catches mixed-truth sentences. Note: RESEARCH.md §526
-  rejects FActScore as *online* method; this is the offline-evaluator
-  slice, explicitly kept open. **Effort:** 1 day.
+- [x] **~~#8 — Claim-atomization for offline verify.~~** Shipped in
+  Phase 54.6.83 as a standalone `sciknow book verify-draft` CLI, NOT
+  wired into the quality bench (doing so would multiply NLI cost 2-3×
+  for marginal signal). `sciknow/core/claim_atomize.py`: heuristic-
+  first atomizer (regex splits on `;`, em-dashes, clear `, and` clause
+  boundaries), LLM fallback for long multi-conjunction sentences
+  (>30 words with ≥2 conjunctions the heuristic missed). `verify_draft`
+  batch-scores each sub-claim's max-over-sources NLI entailment, flags
+  per-sentence mixed_truth (≥1 supported AND ≥1 unsupported sub-claim —
+  the failure mode single-sentence NLI averages away). Reads from
+  `drafts.sources`; read-only.
 - [ ] **#4 — bge-m3 LoRA fine-tune on synthetic question-chunk pairs.**
   Uses #3's synthetic queries as contrastive-loss training data.
   Distinct from ROADMAP §3 Phase E (which is the *reranker*). Keep the
