@@ -1356,6 +1356,102 @@ def edge_cases_cmd(
     _consume_events(gen, console)
 
 
+# ── align-citations (Phase 54.6.71) ────────────────────────────────────
+
+@app.command(name="align-citations")
+def align_citations_cmd(
+    draft_id: Annotated[str, typer.Argument(help="Draft ID (first 8+ chars).")],
+    save: bool = typer.Option(True, "--save/--no-save",
+        help="Write the remapped content back to the draft row."),
+    low_threshold: float = typer.Option(0.5, "--low-threshold",
+        help="Only remap when claimed chunk's entailment is below this."),
+    win_margin: float = typer.Option(0.15, "--win-margin",
+        help="Top chunk must beat claimed chunk's entailment by this much."),
+):
+    """Phase 54.6.71 — align citation markers with the chunks that best
+    entail each sentence.
+
+    For every [N] marker in the draft, score the sentence's entailment
+    against every retrieval source chunk and (conservatively) remap N
+    when the claimed source is wrong. Reuses the NLI cross-encoder that
+    the quality bench already loads for faithfulness scoring.
+
+    Requires the draft to have a non-empty ``sources`` field (populated
+    automatically by `book write` / `book autowrite`). Drafts without
+    stored sources error out — this post-pass has nothing to align against.
+
+    Examples:
+
+      sciknow book align-citations 3f2a1b4c
+
+      sciknow book align-citations 3f2a1b4c --no-save   # dry-run
+
+      sciknow book align-citations 3f2a1b4c --low-threshold 0.4 --win-margin 0.2
+    """
+    import json as _json
+    from sqlalchemy import text
+    from sciknow.core.citation_align import align_citations
+    from sciknow.storage.db import get_session
+
+    with get_session() as session:
+        row = session.execute(text("""
+            SELECT id::text, title, content, sources
+            FROM drafts WHERE id::text LIKE :q LIMIT 1
+        """), {"q": f"{draft_id}%"}).fetchone()
+    if not row:
+        console.print(f"[red]Draft not found:[/red] {draft_id}")
+        raise typer.Exit(1)
+    d_id, d_title, d_content, d_sources = row
+    sources = (_json.loads(d_sources) if isinstance(d_sources, str)
+               else (d_sources or []))
+    if not sources:
+        console.print(
+            f"[red]Draft {d_id[:8]} has no stored sources.[/red] "
+            f"This alignment pass needs the retrieval context the writer "
+            f"used. Re-generate the draft via `book write` / `autowrite` "
+            f"so sources get persisted, then retry."
+        )
+        raise typer.Exit(2)
+    if not d_content:
+        console.print(f"[red]Draft {d_id[:8]} has empty content.[/red]")
+        raise typer.Exit(2)
+
+    console.print(
+        f"Aligning citations for [bold]{d_title}[/bold] "
+        f"([dim]{d_id[:8]}[/dim], {len(sources)} sources)…"
+    )
+    result = align_citations(d_content, sources,
+                             low_threshold=low_threshold,
+                             win_margin=win_margin)
+    console.print(f"  {result.summary()}")
+    if result.n_remapped == 0:
+        console.print("[green]No remaps needed — citations align with sources.[/green]")
+        raise typer.Exit(0)
+
+    # Show each remap for review
+    for ev in result.remaps:
+        console.print(
+            f"  [yellow]·[/yellow] [dim]{ev.sentence_preview}[/dim]"
+        )
+        console.print(
+            f"    [{ev.claimed_n}] ({ev.claimed_score:.3f})  →  "
+            f"[{ev.new_n}] ({ev.new_score:.3f})"
+        )
+
+    if save:
+        with get_session() as session:
+            session.execute(text(
+                "UPDATE drafts SET content = :c, "
+                "word_count = :wc, updated_at = now() WHERE id::text = :did"
+            ), {"c": result.new_text,
+                "wc": len(result.new_text.split()),
+                "did": d_id})
+            session.commit()
+        console.print(f"\n[green]✓ Saved {result.n_remapped} remaps to the draft.[/green]")
+    else:
+        console.print(f"\n[dim]--no-save: draft not modified.[/dim]")
+
+
 # ── revise ─────────────────────────────────────────────────────────────────────
 
 @app.command()

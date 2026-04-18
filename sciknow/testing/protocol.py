@@ -8657,6 +8657,71 @@ def l1_phase54_6_61_wiki_summaries_and_visuals_surface() -> None:
     )
 
 
+def l1_phase54_6_71_citation_align_behavior() -> None:
+    """Phase 54.6.71 — citation marker → chunk alignment post-pass (#7).
+
+    Uses a mocked NLI scorer so we can exercise the real remap logic
+    without loading the 440MB cross-encoder. Verifies:
+      A) A correct-citation sentence passes through unchanged.
+      B) A wrong-citation sentence (claimed chunk scores very low,
+         another chunk scores very high) gets remapped.
+      C) A multi-citation sentence only remaps the wrong number.
+      D) Remap gate respects the win_margin (close scores → no remap).
+      E) The CLI command `sciknow book align-citations` is registered.
+    """
+    from unittest.mock import patch
+    from sciknow.core import citation_align
+
+    sources = [
+        {"content": "Alpha is the primary cause of outgoing longwave change."},
+        {"content": "Unrelated oceanography content about ENSO variability."},
+        {"content": "Beta is the correct driver of the other claim here."},
+    ]
+    draft = (
+        "Alpha is the primary cause of outgoing longwave change [1]. "
+        "Beta is the correct driver of the other claim here [2]. "
+        "Both Alpha and Beta play roles [1, 2]."
+    )
+
+    # Flat probs in (sentence × source) order: 3 × 3 = 9 pairs
+    probs = [
+        0.92, 0.05, 0.03,   # sent1: src 1 wins
+        0.10, 0.08, 0.88,   # sent2: src 3 wins, claimed src 2 is 0.08
+        0.70, 0.10, 0.65,   # sent3: src 1 wins, src 2 claimed=0.10 → remap
+    ]
+    with patch.object(citation_align, "_nli_score_pairs", return_value=probs):
+        r = citation_align.align_citations(draft, sources)
+    assert r.n_sentences_scanned == 3
+    assert r.n_citations_checked == 4  # [1] + [2] + [1,2]
+    assert r.n_remapped == 2, f"expected 2 remaps, got {r.n_remapped}: {r.new_text}"
+    # B: sentence 2's [2] becomes [3]
+    assert "Beta is the correct driver of the other claim here [3]." in r.new_text
+    # A: sentence 1's [1] is unchanged
+    assert "outgoing longwave change [1]." in r.new_text
+    # C: sentence 3's [1, 2] becomes [1] (dedup after 2→1 remap)
+    assert "Both Alpha and Beta play roles [1]." in r.new_text
+
+    # D: if nothing scores above low_threshold, no remap.
+    flat_probs = [0.4, 0.3, 0.35] * 3
+    with patch.object(citation_align, "_nli_score_pairs", return_value=flat_probs):
+        r2 = citation_align.align_citations(draft, sources,
+                                            low_threshold=0.5,
+                                            win_margin=0.15)
+    # Top score (0.4) - claimed (0.3 or 0.4) < 0.15, so should mostly NOT remap.
+    # Here sent1's claimed [1]=0.4 vs top 0.4 — tie, no remap.
+    # Sent2's claimed [2]=0.3 vs top 0.4 — delta 0.1 < 0.15, no remap.
+    # Sent3 similarly. Expect 0 remaps.
+    assert r2.n_remapped == 0, (
+        f"flat-score pairs must not remap (win_margin gate); got {r2.n_remapped}"
+    )
+
+    # E: CLI command registered
+    from sciknow.cli import book as _book_cli
+    assert hasattr(_book_cli, "align_citations_cmd"), (
+        "CLI must expose `sciknow book align-citations`"
+    )
+
+
 def l1_phase54_6_70_cocite_boost_surface() -> None:
     """Phase 54.6.70 — co-citation / bib-coupling retrieval boost (#9).
 
@@ -8991,6 +9056,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_69_retrieval_eval_surface,
     # Phase 54.6.70 — co-citation/bib-coupling boost (default off)
     l1_phase54_6_70_cocite_boost_surface,
+    # Phase 54.6.71 — citation marker → chunk alignment post-pass (#7)
+    l1_phase54_6_71_citation_align_behavior,
 ]
 
 L2_TESTS: list[Callable] = [

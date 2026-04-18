@@ -3991,6 +3991,32 @@ def _autowrite_section_body(
             detail=reason_str[:300],
         )
 
+    # Phase 54.6.71 (#7) — citation marker → chunk alignment. Runs once
+    # on the writer's output before entering the iteration loop so the
+    # scorer grades the corrected text, not the raw writer output. NLI
+    # model is lazy-loaded (~440 MB one-time); remap gate is conservative
+    # (claimed chunk entailment < 0.5 AND top chunk beats by ≥0.15) so
+    # we never thrash on plausible citations. When align_citations can't
+    # load the NLI model it degrades gracefully — content passes through.
+    if results and content:
+        try:
+            from sciknow.core.citation_align import align_citations as _align
+            _aln = _align(content, results)
+            if _aln.n_remapped > 0:
+                content = _aln.new_text
+                log.event(
+                    "citation_align",
+                    sentences_scanned=_aln.n_sentences_scanned,
+                    citations_checked=_aln.n_citations_checked,
+                    remapped=_aln.n_remapped,
+                    summary=_aln.summary(),
+                )
+                yield {"type": "citation_align",
+                       "n_remapped": _aln.n_remapped,
+                       "summary": _aln.summary()}
+        except Exception as exc:
+            logger.warning("citation_align skipped: %s", exc)
+
     for iteration in range(max_iter):
         yield {"type": "iteration_start", "iteration": iteration + 1, "max": max_iter}
         log.event("iteration_start", iteration=iteration + 1, max=max_iter)
