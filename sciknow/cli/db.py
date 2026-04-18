@@ -4537,10 +4537,14 @@ def extract_visuals_cmd(
 @app.command(name="caption-visuals")
 def caption_visuals_cmd(
     model: str = typer.Option(
-        "qwen2.5vl:7b", "--model",
-        help="Vision-LLM tag to use via Ollama. "
-             "Recommended: qwen2.5vl:7b (~6GB), llama3.2-vision:11b, "
-             "or minicpm-v:8b. Run `ollama pull <model>` first.",
+        "qwen2.5vl:32b", "--model",
+        help="Vision-LLM tag to use via Ollama. Default qwen2.5vl:32b "
+             "(~19 GB Q4, fits a 3090 with the main LLM unloaded — "
+             "strongest open VLM that fits for document+chart quality). "
+             "For faster / lower-VRAM: qwen2.5vl:7b (~6 GB, co-resident "
+             "with an LLM). Other options: internvl3:14b, llama3.2-vision:11b, "
+             "minicpm-v:8b. `ollama ps` to unload other models; "
+             "`ollama pull <model>` to fetch.",
     ),
     kind: str = typer.Option(
         "figure,chart", "--kind",
@@ -4572,12 +4576,24 @@ def caption_visuals_cmd(
     to already be pulled — this command does NOT auto-pull (the pull
     is a ~6-20 GB download and we want it explicit).
 
+    Quality note: default flipped from qwen2.5vl:7b → qwen2.5vl:32b in
+    Phase 54.6.73 after the user directive "always optimize for best
+    quality". On the 3090 the 32B variant (Q4 quant, ~19 GB VRAM) fits
+    only when other models are unloaded (``ollama stop <current>``); it
+    runs ~3-4× slower than 7B but produces materially better captions
+    for scientific plots and tables (MinerU's own PDF parser is
+    Qwen2-VL-derived, so Qwen2.5-VL inherits the document lineage).
+    Pass ``--model qwen2.5vl:7b`` to trade quality for speed /
+    co-residence with the LLM.
+
     Examples:
 
-      ollama pull qwen2.5vl:7b
+      ollama pull qwen2.5vl:32b                       # recommended
+      ollama stop qwen3:30b-a3b-instruct-2507-q4_K_M  # free VRAM
       sciknow db caption-visuals                       # caption all pending
       sciknow db caption-visuals -n 20 --force         # re-caption first 20
       sciknow db caption-visuals --kind figure         # figures only
+      sciknow db caption-visuals --model qwen2.5vl:7b  # faster, lower quality
     """
     from sciknow.cli import preflight
     preflight(qdrant=False)

@@ -178,6 +178,18 @@ per hour of effort.
   `visuals.description_embedding` column for retrieval parity with
   text chunks. GUI Visuals tab auto-populates with real captions.
   **Preconditions:** `ollama pull qwen2.5vl:7b` (~6 GB). **Effort:** 4–6h.
+- [ ] **#1b — VLM sweep harness (mirror of the text-LLM sweep).** Per the
+  54.6.73 directive "always optimize for best quality", add a
+  `sciknow bench vlm-sweep` that picks ~15 figures from the corpus
+  and captions each with every locally-installed VLM candidate
+  (qwen2.5vl:7b, qwen2.5vl:32b, internvl3:14b, llama3.2-vision:11b,
+  minicpm-v:8b, …), then uses a judge model (ideally Claude or GPT-4o
+  in one-shot API calls, else the local fast-LLM on caption pairs) to
+  rank. Analogous to `sciknow bench --layer sweep` for text LLMs.
+  **Effort:** ~1 day once a VLM is pulled. Currently the default is
+  qwen2.5vl:32b on engineering judgment; this sweep turns that into
+  corpus-grounded evidence.
+
 - [ ] **#2 — Structured table parsing.** 1,406 tables live as MinerU
   HTML in `visuals.content`. Parse into `{headers, rows, units}` +
   semantic summary via fast-LLM; store in new `table_rows` table joined

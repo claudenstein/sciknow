@@ -8688,9 +8688,20 @@ def l1_phase54_6_72_visuals_caption_surface() -> None:
     for col in ("ai_caption", "ai_caption_model", "ai_captioned_at"):
         assert hasattr(Visual, col), f"Visual model missing {col!r}"
 
-    # C) CLI command registered
+    # C) CLI command registered AND the default model is the quality-first
+    # pick (Phase 54.6.73 directive — "always optimize for best quality").
+    # Flipping the default back to a 7B variant without documenting why
+    # should trip this test.
     assert hasattr(_db_cli, "caption_visuals_cmd"), (
         "CLI must expose `sciknow db caption-visuals`"
+    )
+    # Extract the default model from the Typer option's default value.
+    import inspect as _inspect
+    cmd_src = _inspect.getsource(_db_cli.caption_visuals_cmd)
+    assert '"qwen2.5vl:32b"' in cmd_src, (
+        "caption-visuals default model must be the quality pick "
+        "(qwen2.5vl:32b) per the 54.6.73 directive; "
+        "to lower the default, document the reason in the CLI docstring"
     )
 
     # D) /api/visuals hydrates ai_caption
