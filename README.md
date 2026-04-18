@@ -311,6 +311,7 @@ Core guides — how to use sciknow, how it works, how to extend it:
 | **[Operations](docs/OPERATIONS.md)** | Backup/restore, expand, enrich, citations, dev notes |
 | **[Testing Protocol](docs/TESTING.md)** | 3-layer smoke harness (`sciknow test`); how to add checks |
 | **[Benchmarks](docs/BENCHMARKS.md)** | `sciknow bench` — performance + quality measurement; baseline findings |
+| **[Bench methodology](docs/BENCH_METHODOLOGY.md)** | Hard-won rules for fair LLM/VLM benchmarking; the 2026-04-17 failure that motivated them |
 
 Project planning and release history:
 

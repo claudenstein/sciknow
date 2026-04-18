@@ -9,13 +9,21 @@ Pipeline order (matches docs/README "Full rebuild sequence"):
   1a. ingest inbox/          — add new PDFs (your staging area)
   1b. ingest downloads/      — expand-discovered PDFs not yet processed
   1c. ingest failed/         — retry previously-failed PDFs (resume, no force)
-  2. db enrich               — DOI backfill via Crossref / OpenAlex / arXiv / Semantic Scholar
+  2. db enrich               — DOI backfill via Crossref / OpenAlex / arXiv / S2
   3. db link-citations       — cross-link cited_document_id for in-corpus papers
-  4. catalog cluster         — BERTopic re-cluster (includes new papers)
-  5. catalog raptor build    — hierarchical summary tree rebuild
-  6. db tag-multimodal       — tag chunks containing tables / equations
-  7. db extract-visuals      — extract visual elements into visuals table
-  8. wiki compile            — paper summaries + concept stubs + KG triples
+  4. db classify-papers      — paper_type tag per paper (peer_reviewed /
+                               preprint / opinion / …) — 54.6.80
+  5. catalog cluster         — BERTopic re-cluster (includes new papers)
+  6. catalog raptor build    — hierarchical summary tree rebuild
+  7. db tag-multimodal       — tag chunks containing tables / equations
+  8. db extract-visuals      — extract visual elements into visuals table
+  9. db caption-visuals      — VLM captions for figures + charts — 54.6.72
+                               (needs a VLM pulled; skipped cleanly if not)
+  10. db paraphrase-equations — natural-language paraphrases for retrieval
+                                of LaTeX equations — 54.6.78
+  11. db embed-visuals       — embed captions + paraphrases into the
+                               visuals Qdrant collection — 54.6.82
+  12. wiki compile           — paper summaries + concept stubs + KG triples
 
 Every step is idempotent and **does not force rebuilds** — each one
 skips rows that are already done. Pass ``--rebuild`` directly to the
@@ -24,6 +32,12 @@ compile --rebuild`` — refresh will never add that flag for you).
 
 Use ``--no-<step>`` flags to skip expensive steps you don't need this
 round (e.g. ``--no-wiki`` skips the hours-long LLM compile).
+
+Phase 54.6.86 — added the post-ingest enrichment steps (classify,
+caption, paraphrase, embed-visuals) so one `refresh` run produces a
+corpus ready for retrieval + all the new 54.6.78-82 features. Prior
+to this, each of those commands had to be remembered and run
+separately.
 """
 from __future__ import annotations
 
@@ -89,12 +103,22 @@ def refresh(
         help="Skip the ingest step (use when no new PDFs, just reindex)."),
     no_enrich: bool = typer.Option(False, "--no-enrich"),
     no_citations: bool = typer.Option(False, "--no-citations"),
+    no_classify: bool = typer.Option(False, "--no-classify",
+        help="Skip paper-type classification (54.6.80)."),
     no_cluster: bool = typer.Option(False, "--no-cluster",
         help="Skip BERTopic re-cluster (keeps existing topic assignments)."),
     no_raptor: bool = typer.Option(False, "--no-raptor",
         help="Skip RAPTOR tree rebuild (expensive on large corpora)."),
     no_multimodal: bool = typer.Option(False, "--no-multimodal"),
     no_visuals: bool = typer.Option(False, "--no-visuals"),
+    no_caption: bool = typer.Option(False, "--no-caption",
+        help="Skip VLM caption-visuals (54.6.72) — skipped anyway if "
+             "no vision LLM is pulled."),
+    no_paraphrase: bool = typer.Option(False, "--no-paraphrase",
+        help="Skip equation paraphrase backfill (54.6.78)."),
+    no_embed_visuals: bool = typer.Option(False, "--no-embed-visuals",
+        help="Skip visuals Qdrant embedding (54.6.82). Only useful if "
+             "caption + paraphrase populated ai_caption already."),
     no_wiki: bool = typer.Option(False, "--no-wiki",
         help="Skip wiki compile (the hours-long LLM step)."),
     dry_run: bool = typer.Option(False, "--dry-run",
@@ -189,20 +213,45 @@ def refresh(
     if not no_citations:
         steps.append(("3. Link citations",
                       ["db", "link-citations"], True))
+    if not no_classify:
+        # Phase 54.6.80 — skips rows that already have paper_type set,
+        # so re-runs are cheap (only new/unclassified papers).
+        steps.append(("4. Classify paper types (peer_reviewed / "
+                      "preprint / opinion / …)",
+                      ["db", "classify-papers"], True))
     if not no_cluster:
-        steps.append(("4. BERTopic clustering",
+        steps.append(("5. BERTopic clustering",
                       ["catalog", "cluster"], True))
     if not no_raptor:
-        steps.append(("5. RAPTOR tree build",
+        steps.append(("6. RAPTOR tree build",
                       ["catalog", "raptor", "build"], True))
     if not no_multimodal:
-        steps.append(("6. Tag multimodal chunks",
+        steps.append(("7. Tag multimodal chunks",
                       ["db", "tag-multimodal"], True))
     if not no_visuals:
-        steps.append(("7. Extract visuals",
+        steps.append(("8. Extract visuals",
                       ["db", "extract-visuals"], True))
+    if not no_caption:
+        # Phase 54.6.72 — VLM captions for figures + charts. Fails
+        # fast + cleanly when no VLM is pulled; optional step so
+        # that's not a refresh blocker.
+        steps.append(("9. Caption figures + charts (VLM — skipped "
+                      "if no vision LLM is pulled)",
+                      ["db", "caption-visuals"], True))
+    if not no_paraphrase:
+        # Phase 54.6.78 — one-sentence prose paraphrase per equation
+        # for retrieval. Skips rows that already have ai_caption set.
+        steps.append(("10. Paraphrase equations (LaTeX → prose)",
+                      ["db", "paraphrase-equations"], True))
+    if not no_embed_visuals:
+        # Phase 54.6.82 — embeds ai_caption into the visuals Qdrant
+        # collection. Depends on caption-visuals + paraphrase-equations
+        # having populated ai_caption first (same refresh pass does
+        # both steps earlier).
+        steps.append(("11. Embed visuals into Qdrant",
+                      ["db", "embed-visuals"], True))
     if not no_wiki:
-        steps.append(("8. Wiki compile (slowest)",
+        steps.append(("12. Wiki compile (slowest)",
                       ["wiki", "compile"], True))
 
     if not steps:

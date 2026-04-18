@@ -512,6 +512,26 @@ def _md_to_html(text_content: str) -> str:
     # Bold and italic
     html = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", html)
     html = re.sub(r"\*(.+?)\*", r"<em>\1</em>", html)
+    # Phase 54.6.87 — markdown images ![alt](url). Constrained to our
+    # own /api/visuals/image/ paths OR absolute http(s) URLs so a user
+    # can't smuggle ``javascript:`` or ``data:`` URIs through the
+    # renderer. alt text is escaped via the existing citation path.
+    def _img_sub(m: "re.Match") -> str:
+        alt = (m.group(1) or "").replace('"', "&quot;").replace("<", "&lt;")
+        src = (m.group(2) or "").strip()
+        if not (src.startswith("/api/visuals/image/")
+                or src.startswith("http://")
+                or src.startswith("https://")
+                or src.startswith("/static/")):
+            # Unknown scheme → drop the image; leave the alt as plain text.
+            return alt
+        return (
+            f'<img class="inline-figure" src="{src}" alt="{alt}" '
+            f'loading="lazy" style="max-width:100%;height:auto;'
+            f'border:1px solid var(--border,#ddd);border-radius:6px;'
+            f'margin:10px 0;" title="{alt}">'
+        )
+    html = re.sub(r"!\[([^\]]*)\]\(([^)\s]+)\)", _img_sub, html)
     # Citation references [N] -> styled spans
     html = re.sub(r"\[(\d+)\]", r'<span class="citation" data-ref="\1">[\1]</span>', html)
     # Paragraphs
@@ -10192,6 +10212,9 @@ async function loadSection(draftId) {{
     document.getElementById('draft-version').textContent = data.version;
     document.getElementById('draft-words').textContent = data.word_count;
     document.getElementById('read-view').innerHTML = data.content_html;
+    // Phase 54.6.87 — render math in the loaded draft content so $...$
+    // doesn't show up as literal dollar signs.
+    _renderMathInEl(document.getElementById('read-view'));
     document.getElementById('edit-view').style.display = 'none';
 
     // Phase 22 — word target progress bar in the subtitle. Hidden when
@@ -13798,20 +13821,53 @@ function edPreview() {{
   // amber dot the moment they type, not after the next 5s autosave tick.
   if (ta.value !== _currentRaw) setAutosaveState('unsaved', 'Unsaved changes');
   let md = ta.value;
-  // Simple markdown → HTML for preview
+  // Simple markdown → HTML for preview.
   md = md.replace(/^### (.+)$/gm, '<h4>$1</h4>');
   md = md.replace(/^## (.+)$/gm, '<h3>$1</h3>');
   md = md.replace(/^# (.+)$/gm, '<h2>$1</h2>');
   md = md.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   md = md.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  // Phase 54.6.87 — ![alt](url) → <img> (constrained to our own
+  // /api/visuals/image/ paths + whitelisted schemes). Matches the
+  // server-side _md_to_html rule so the preview shows the same thumbnails
+  // the read-view will.
+  md = md.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, function(_m, alt, src) {{
+    alt = (alt || '').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+    const ok = /^(?:\/api\/visuals\/image\/|\/static\/|https?:\/\/)/.test(src);
+    if (!ok) return alt;
+    return '<img class="inline-figure" src="' + src + '" alt="' + alt + '" '
+      + 'loading="lazy" style="max-width:100%;height:auto;border:1px solid '
+      + 'var(--border,#ddd);border-radius:6px;margin:10px 0;" title="' + alt + '">';
+  }});
   md = md.replace(/\[(\d+)\]/g, '<span class="citation">[$1]</span>');
   const paras = md.split('\\n\\n');
   preview.innerHTML = paras.map(p => {{
     p = p.trim();
     if (!p) return '';
-    if (p.startsWith('<h')) return p;
+    if (p.startsWith('<h') || p.startsWith('<img')) return p;
     return '<p>' + p + '</p>';
   }}).join('');
+  // Phase 54.6.87 — render math via KaTeX auto-render. Pre-fix the
+  // editor preview showed raw `$...$` / `$$...$$` source, same as the
+  // main read-view did until this phase. Silent if KaTeX isn't loaded.
+  _renderMathInEl(preview);
+}}
+
+function _renderMathInEl(el) {{
+  /* Shared helper — auto-render KaTeX inside any content-bearing
+   * element. Used by edPreview + read-view assignments below. */
+  if (!el || typeof window.renderMathInElement !== 'function') return;
+  try {{
+    window.renderMathInElement(el, {{
+      delimiters: [
+        {{ left: '$$', right: '$$', display: true }},
+        {{ left: '$',  right: '$',  display: false }},
+        {{ left: '\\\\(', right: '\\\\)', display: false }},
+        {{ left: '\\\\[', right: '\\\\]', display: true }},
+      ],
+      throwOnError: false,
+    }});
+  }} catch (e) {{ /* non-fatal */ }}
 }}
 
 function edInsert(before, after) {{
@@ -20868,25 +20924,39 @@ async function loadVisuals() {{
 function insertVisualAtCursor(vJson) {{
   const v = JSON.parse(vJson);
   let md = '';
-  if (v.kind === 'table') {{
-    md = '\\n\\n' + (v.figure_num || 'Table') + ': ' + (v.caption || '') + '\\n\\n' + (v.content || '').substring(0, 2000) + '\\n\\n';
+  // Phase 54.6.87 — figure + chart inserts now emit markdown image
+  // syntax referencing the server's /api/visuals/image/<id> endpoint
+  // so the editor preview + the saved draft both render a real
+  // thumbnail. Equations keep $$...$$ which KaTeX auto-render picks up.
+  if (v.kind === 'figure' || v.kind === 'chart') {{
+    const fig = v.figure_num || (v.kind === 'chart' ? 'Chart' : 'Figure');
+    const cap = (v.ai_caption || v.caption || 'No caption').replace(/[\\[\\]()]/g, '');
+    md = '\\n\\n![' + fig + ': ' + cap.substring(0, 180) + '](/api/visuals/image/'
+         + encodeURIComponent(v.id) + ')\\n\\n';
   }} else if (v.kind === 'equation') {{
     md = '\\n\\n$$' + (v.content || '') + '$$\\n\\n';
-  }} else if (v.kind === 'figure') {{
-    const fig = v.figure_num || 'Figure';
-    md = '\\n\\n[' + fig + ']: ' + (v.caption || 'No caption') + '\\n\\n';
+  }} else if (v.kind === 'table') {{
+    // Tables stay inline; MinerU HTML renders in the read-view via
+    // innerHTML (the content is sanitized on the server).
+    md = '\\n\\n' + (v.figure_num || 'Table') + ': '
+         + (v.caption || '') + '\\n\\n'
+         + (v.content || '').substring(0, 2000) + '\\n\\n';
   }} else {{
     md = '\\n\\n```\\n' + (v.content || '').substring(0, 1000) + '\\n```\\n\\n';
   }}
-  // Try to insert into the active editor textarea
-  const editor = document.querySelector('.editor-area textarea, #section-editor');
+  // Target our real editor (#edit-area). Fall back to the old
+  // selectors for unknown hosts; then clipboard.
+  const editor = document.getElementById('edit-area')
+              || document.querySelector('.editor-area textarea, #section-editor');
   if (editor) {{
     const start = editor.selectionStart || editor.value.length;
     editor.value = editor.value.slice(0, start) + md + editor.value.slice(start);
     editor.focus();
+    // Re-render the live preview so the just-inserted thumbnail /
+    // equation shows immediately instead of needing a keystroke first.
+    if (typeof edPreview === 'function') edPreview();
     closeModal('visuals-modal');
   }} else {{
-    // Fallback: copy to clipboard
     navigator.clipboard.writeText(md).then(() => {{
       alert('Copied to clipboard — paste into the editor.');
       closeModal('visuals-modal');
