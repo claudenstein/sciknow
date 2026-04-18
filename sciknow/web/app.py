@@ -899,6 +899,17 @@ async def api_book_outline_generate(
                    "message": "No chapters in LLM response."}
             return
 
+        # Phase 54.6.65 — per-chapter density-based section trim. One
+        # hybrid retrieval per chapter on topic_query → count distinct
+        # papers → bucket to a target section count → trim if over.
+        try:
+            from sciknow.core.book_ops import resize_sections_by_density as _resize
+            yield {"type": "progress", "stage": "resizing",
+                   "detail": "Resizing sections by corpus evidence density…"}
+            chapters = _resize(chapters)
+        except Exception as exc:
+            logger.warning("density resize failed: %s", exc)
+
         # Additive insert — skip numbers that already exist so the
         # user can re-run without destroying manual edits.
         inserted = 0

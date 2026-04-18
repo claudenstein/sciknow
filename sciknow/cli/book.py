@@ -745,11 +745,28 @@ def outline(
             continue
         if not ch_i:
             continue
-        # Score: number of chapters × average section coverage × diversity
+        # Score: reward breadth (chapter count + unique titles + total
+        # sections) but also reward VARIANCE in per-chapter section
+        # counts (Phase 54.6.65). Pre-fix the scorer was monotonic in
+        # total-section-count, which biased the tournament toward
+        # candidates that gave every chapter the max section count —
+        # producing uniform outlines where 8 chapters × 5 sections = 40
+        # always beat 8 chapters × (3..7 varied) = 38.
         n_ch = len(ch_i)
-        n_sec = sum(len(c.get("sections", [])) for c in ch_i)
+        sec_counts = [len(c.get("sections", [])) for c in ch_i]
+        n_sec = sum(sec_counts)
         unique_titles = len(set(c.get("title", "") for c in ch_i))
-        score_i = n_ch * 0.3 + n_sec * 0.5 + unique_titles * 0.2
+        # Stddev of section counts, 0 when all equal. Scale up so a
+        # varied candidate (stddev ≈ 1.5) adds ≈3 to the score —
+        # enough to outrank a flat-max candidate with 2 extra sections.
+        if len(sec_counts) > 1:
+            _m = sum(sec_counts) / len(sec_counts)
+            _var = sum((s - _m) ** 2 for s in sec_counts) / len(sec_counts)
+            section_variance = _var ** 0.5
+        else:
+            section_variance = 0.0
+        score_i = (n_ch * 0.3 + n_sec * 0.3 + unique_titles * 0.2
+                   + section_variance * 2.0)
         candidates.append((ch_i, raw_i, score_i))
 
     if not candidates:
@@ -778,6 +795,15 @@ def outline(
         console.print("[yellow]No chapters in LLM response.[/yellow]")
         raise typer.Exit(1)
 
+    # Phase 54.6.65 — resize sections to match corpus evidence density.
+    # One hybrid-retrieval per chapter on the chapter's topic_query;
+    # section lists get trimmed to a bucket derived from the number of
+    # distinct papers retrieved. Runs only when the retrieval stack is
+    # reachable; offline invocations fall through silently.
+    from sciknow.core.book_ops import resize_sections_by_density as _resize
+    console.print("  [dim]Resizing sections by corpus evidence density…[/dim]")
+    chapters = _resize(chapters)
+
     # Display
     console.print()
     console.print(Rule(f"[bold]Proposed outline: {book[1]}[/bold]"))
@@ -790,6 +816,14 @@ def outline(
             console.print(f"         [dim]Query: {ch['topic_query']}[/dim]")
         if ch.get("sections"):
             console.print(f"         Sections: {' → '.join(ch['sections'])}")
+        di = ch.get("_density_info")
+        if di:
+            note = f"{di['n_papers']} papers → target {di['target']}"
+            action = di.get("action", "")
+            if action and action != "kept":
+                note += (f" ({action}"
+                         f" from {di['original_count']} → {di['final_count']})")
+            console.print(f"         [dim]Density: {note}[/dim]")
         console.print()
 
     if save:

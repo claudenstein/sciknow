@@ -382,7 +382,11 @@ Rules:
 - Propose 6–12 chapters that logically build the book's narrative
 - Each chapter should have a clear title and a 1–2 sentence description
 - Order chapters so the argument flows from foundational concepts to conclusions
-- For EACH chapter, propose 3–6 sections appropriate to that chapter's content. \
+- For EACH chapter, propose BETWEEN 3 AND 8 sections, choosing a count that \
+  matches the chapter's scope and the likely depth of evidence. Do NOT give every \
+  chapter the same number of sections — a short framing chapter might only need \
+  3 sections, a mechanism-heavy or evidence-rich chapter might warrant 6–8. \
+  Vary deliberately; uniform section counts are a sign of lazy outlining. \
   Use section names that fit a book (NOT paper-style like "methods" or "results"). \
   Good section names: "Historical Context", "Key Evidence", "The Debate", \
   "Mechanisms", "Observations", "Implications", "Current Understanding", \
@@ -411,9 +415,10 @@ Propose a chapter structure for this book. Return JSON:
 
 The "topic_query" should be a short search phrase (3–6 words) that retrieves the most \
 relevant papers from the collection for that chapter.
-The "sections" should be 3–6 section names appropriate for a scientific book chapter \
-(NOT paper-style — no "methods", "results", "discussion"). Think of how a popular \
-science book structures its chapters."""
+The "sections" should be 3–8 section names appropriate for a scientific book chapter \
+(NOT paper-style — no "methods", "results", "discussion"). Vary the number across \
+chapters based on scope and evidence depth — do not pick the same count for every \
+chapter. Think of how a popular science book structures its chapters."""
 
 
 def outline(book_title: str, papers: list[dict]) -> tuple[str, str]:

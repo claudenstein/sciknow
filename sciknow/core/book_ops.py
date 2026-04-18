@@ -422,6 +422,150 @@ def adopt_orphan_section(
     }
 
 
+# ── Phase 54.6.65 — data-weighted section-count resizing ─────────────────────
+#
+# The outline LLM can pick any section count it likes within the prompt's
+# 3–8 range, but (a) LLMs tend to converge on a single "safe" count across
+# all chapters and (b) a fixed count doesn't reflect how much evidence is
+# actually in the corpus for a given chapter topic. After the outline is
+# generated, run one hybrid retrieval per chapter on the chapter's
+# topic_query, count distinct papers in the top-100, and trim the chapter's
+# section list to a target count derived from that density. We ONLY trim
+# (never grow) because adding coherent section names would require another
+# LLM pass and the grow-up case is rare — the prompt already asks for 3–8,
+# and a chapter where the LLM picked 3 when evidence supports 6 is usually
+# fine as-is (the writer can still find enough material per section).
+
+_DENSITY_SECTION_TARGETS: list[tuple[int, int]] = [
+    # (max distinct papers for this bucket, target section count)
+    (3,  2),
+    (8,  3),
+    (20, 4),
+    (40, 5),
+    (70, 6),
+    (10**9, 7),
+]
+
+
+def _target_sections_for_density(n_papers: int) -> int:
+    for cap, target in _DENSITY_SECTION_TARGETS:
+        if n_papers <= cap:
+            return target
+    return 7  # safety
+
+
+def _grow_sections_llm(chapter: dict, n_add: int, model: str | None = None) -> list[str]:
+    """Ask the fast LLM for `n_add` additional section names that
+    complement the chapter's existing sections.
+
+    Returns a list of new section name strings. Empty list on any
+    failure (safe — caller just keeps the original list).
+    """
+    from sciknow.rag.llm import complete as _complete
+    import json as _json
+    import re as _re
+
+    existing = chapter.get("sections") or []
+    system = (
+        "You are a scientific book editor extending a chapter outline. "
+        "The existing sections are given; propose ADDITIONAL section names "
+        "that fit the chapter's scope without overlapping the existing ones. "
+        "Respond ONLY with a JSON array of strings."
+    )
+    user = (
+        f"Chapter title: {chapter.get('title','')}\n"
+        f"Chapter description: {chapter.get('description','')}\n"
+        f"Topic query: {chapter.get('topic_query','')}\n"
+        f"Existing sections: {_json.dumps(existing)}\n\n"
+        f"Propose {n_add} ADDITIONAL section names that complement the "
+        f"existing ones (no overlap, no duplication). Return a JSON array "
+        f'of strings, e.g. ["New Section 1", "New Section 2"].'
+    )
+    try:
+        raw = _complete(system, user, model=model, temperature=0.4,
+                        num_ctx=8192, keep_alive=-1)
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        # Be lenient: the LLM might wrap in {"sections": [...]}.
+        parsed = _json.loads(raw, strict=False)
+        if isinstance(parsed, dict):
+            for key in ("sections", "additional_sections", "new_sections"):
+                if isinstance(parsed.get(key), list):
+                    parsed = parsed[key]
+                    break
+        if not isinstance(parsed, list):
+            return []
+        out: list[str] = []
+        existing_lower = {str(s).strip().lower() for s in existing}
+        for item in parsed[:n_add]:
+            name = str(item).strip() if item is not None else ""
+            if name and name.lower() not in existing_lower:
+                out.append(name)
+        return out
+    except Exception:
+        return []
+
+
+def resize_sections_by_density(chapters: list[dict], *,
+                                grow: bool = True,
+                                model: str | None = None) -> list[dict]:
+    """Align each chapter's `sections` count to the evidence density
+    in the corpus for that chapter's topic_query.
+
+    - Over-specified chapters (len(sections) > target) are trimmed.
+    - Under-specified chapters (len(sections) < target, ≥2 short) grow
+      via a fast-LLM call that proposes complementary section names.
+    - Chapters already at target are left alone.
+
+    Mutates the chapter dicts in place and returns them. Safe to call
+    with retrieval/LLM offline — any failure for a given chapter
+    leaves that chapter's section list untouched.
+    """
+    from sciknow.retrieval import hybrid_search as _hs
+    from sciknow.storage.db import get_session
+    from sciknow.storage.qdrant import get_client
+
+    try:
+        qdrant = get_client()
+    except Exception:
+        return chapters  # retrieval stack not available — leave as-is
+
+    with get_session() as session:
+        for ch in chapters:
+            topic = (ch.get("topic_query") or ch.get("title") or "").strip()
+            secs = list(ch.get("sections") or [])
+            if not topic or not secs:
+                continue
+            try:
+                candidates = _hs.search(topic, qdrant, session, candidate_k=100)
+            except Exception:
+                continue
+            n_papers = len({c.document_id for c in candidates})
+            target = _target_sections_for_density(n_papers)
+            original = len(secs)
+            action = "kept"
+            if original > target:
+                ch["sections"] = secs[:target]
+                action = "trimmed"
+            elif grow and original < target - 1:
+                # Grow only when ≥2 short; a single section gap isn't
+                # worth an LLM call and is well within LLM noise.
+                n_add = target - original
+                extra = _grow_sections_llm(ch, n_add, model=model)
+                if extra:
+                    ch["sections"] = secs + extra
+                    action = f"grown (+{len(extra)})"
+            ch["_density_info"] = {
+                "n_papers": n_papers,
+                "target": target,
+                "original_count": original,
+                "final_count": len(ch.get("sections") or []),
+                "action": action,
+            }
+    return chapters
+
+
 def _get_book(session, title_or_id: str):
     from sqlalchemy import text
     return session.execute(text("""
