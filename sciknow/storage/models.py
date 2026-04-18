@@ -501,6 +501,14 @@ class Visual(Base):
     figure_num: Mapped[str | None] = mapped_column(Text)
     surrounding_text: Mapped[str | None] = mapped_column(Text)
     qdrant_point_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+    # Phase 54.6.72 — vision-LLM caption for figures/charts (NULL for
+    # text-only kinds like equation/table/code). Filled by
+    # `sciknow db caption-visuals`. ai_caption_model records which
+    # VLM produced it so re-runs with a better model can target the
+    # stale rows.
+    ai_caption: Mapped[str | None] = mapped_column(Text)
+    ai_caption_model: Mapped[str | None] = mapped_column(Text)
+    ai_captioned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

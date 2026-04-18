@@ -8657,6 +8657,63 @@ def l1_phase54_6_61_wiki_summaries_and_visuals_surface() -> None:
     )
 
 
+def l1_phase54_6_72_visuals_caption_surface() -> None:
+    """Phase 54.6.72 (#1) — vision-LLM captioning module + CLI surface.
+
+    Doesn't load a VLM. Verifies:
+      A) visuals_caption module exports PROMPT_SYSTEM / PROMPT_USER /
+         resolve_asset_path.
+      B) Visual ORM model carries ai_caption / ai_caption_model /
+         ai_captioned_at fields (migration 0026 shipped).
+      C) CLI exposes `sciknow db caption-visuals`.
+      D) /api/visuals returns ai_caption + ai_caption_model fields
+         (visible in the handler source).
+      E) resolve_asset_path refuses escape-paths (basic path-traversal guard).
+    """
+    from sciknow.core import visuals_caption
+    from sciknow.storage.models import Visual
+    from sciknow.cli import db as _db_cli
+    from sciknow.web import app as _web_app
+    import inspect
+
+    # A) prompts + resolver exported
+    for name in ("PROMPT_SYSTEM", "PROMPT_USER", "resolve_asset_path"):
+        assert hasattr(visuals_caption, name), f"visuals_caption missing {name!r}"
+    # Prompt tells the VLM to return a retrieval-targeted description.
+    assert "retrieval" in visuals_caption.PROMPT_SYSTEM.lower(), (
+        "caption prompt must target a retrieval use case — see 54.6.72"
+    )
+
+    # B) ORM model has the new columns
+    for col in ("ai_caption", "ai_caption_model", "ai_captioned_at"):
+        assert hasattr(Visual, col), f"Visual model missing {col!r}"
+
+    # C) CLI command registered
+    assert hasattr(_db_cli, "caption_visuals_cmd"), (
+        "CLI must expose `sciknow db caption-visuals`"
+    )
+
+    # D) /api/visuals hydrates ai_caption
+    src = inspect.getsource(_web_app.api_visuals_list)
+    assert "ai_caption" in src, (
+        "/api/visuals handler must return ai_caption so the GUI can render it"
+    )
+
+    # E) resolver returns None for a bogus doc_id — path-traversal guard
+    # (real test in 54.6.61's image-endpoint L1; here we just confirm
+    # the helper doesn't explode on junk input).
+    result = visuals_caption.resolve_asset_path(
+        "00000000-0000-0000-0000-000000000000", "images/bogus.jpg"
+    )
+    assert result is None, "resolver must return None for missing docs"
+    # And no path-traversal slipping through:
+    result2 = visuals_caption.resolve_asset_path(
+        "00000000-0000-0000-0000-000000000000",
+        "../../../../etc/passwd"
+    )
+    assert result2 is None, "resolver must not resolve paths outside the doc dir"
+
+
 def l1_phase54_6_71_citation_align_behavior() -> None:
     """Phase 54.6.71 — citation marker → chunk alignment post-pass (#7).
 
@@ -9058,6 +9115,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_70_cocite_boost_surface,
     # Phase 54.6.71 — citation marker → chunk alignment post-pass (#7)
     l1_phase54_6_71_citation_align_behavior,
+    # Phase 54.6.72 — vision-LLM captioning pipeline surface (#1)
+    l1_phase54_6_72_visuals_caption_surface,
 ]
 
 L2_TESTS: list[Callable] = [

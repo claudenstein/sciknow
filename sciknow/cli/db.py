@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import time
 from pathlib import Path
 from typing import Annotated
 
@@ -4528,4 +4529,179 @@ def extract_visuals_cmd(
     console.print(
         f"\n[green]✓ Extracted {extracted} visuals from {papers_done} papers[/green]"
         f"  [dim]({skipped} already done, {total - len(rows)} over limit)[/dim]"
+    )
+
+
+# ── caption-visuals (Phase 54.6.72 — #1) ──────────────────────────────────────
+
+@app.command(name="caption-visuals")
+def caption_visuals_cmd(
+    model: str = typer.Option(
+        "qwen2.5vl:7b", "--model",
+        help="Vision-LLM tag to use via Ollama. "
+             "Recommended: qwen2.5vl:7b (~6GB), llama3.2-vision:11b, "
+             "or minicpm-v:8b. Run `ollama pull <model>` first.",
+    ),
+    kind: str = typer.Option(
+        "figure,chart", "--kind",
+        help="Comma-separated kinds to caption. Only image-bearing kinds "
+             "(figure, chart) produce useful captions; everything else is "
+             "skipped even if listed.",
+    ),
+    limit: int = typer.Option(
+        0, "--limit", "-n",
+        help="Max visuals to caption this run (0 = all pending).",
+    ),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Recaption even rows that already have ai_caption set.",
+    ),
+    min_prob: float = typer.Option(
+        0.0, "--min-prob",
+        help="If set, skip rows whose existing caption is short — forces "
+             "re-caption of thin placeholders without re-doing good ones.",
+    ),
+):
+    """Phase 54.6.72 (#1) — run a vision LLM over every image visual and
+    store a one-paragraph caption in the `ai_caption` column.
+
+    Hydrates the 9,988 silent MinerU-extracted figures + charts for
+    semantic retrieval and for real previews in the wiki Visuals tab.
+
+    Model is invoked via Ollama's image endpoint. Requires the model
+    to already be pulled — this command does NOT auto-pull (the pull
+    is a ~6-20 GB download and we want it explicit).
+
+    Examples:
+
+      ollama pull qwen2.5vl:7b
+      sciknow db caption-visuals                       # caption all pending
+      sciknow db caption-visuals -n 20 --force         # re-caption first 20
+      sciknow db caption-visuals --kind figure         # figures only
+    """
+    from sciknow.cli import preflight
+    preflight(qdrant=False)
+
+    import ollama
+    from sciknow.config import settings
+    from sciknow.core.visuals_caption import (
+        PROMPT_SYSTEM, PROMPT_USER, resolve_asset_path,
+    )
+    from sciknow.storage.db import get_session
+    from sqlalchemy import text as sql_text
+
+    kinds = [k.strip() for k in kind.split(",") if k.strip()]
+    if not kinds:
+        console.print("[red]--kind must be a non-empty comma-separated list[/red]")
+        raise typer.Exit(2)
+
+    # Sanity-check model availability up front so we fail fast.
+    client = ollama.Client(host=settings.ollama_host)
+    try:
+        installed = {m.model for m in client.list().models}
+    except Exception as exc:
+        console.print(f"[red]Ollama unreachable:[/red] {exc}")
+        raise typer.Exit(1)
+    if model not in installed:
+        console.print(
+            f"[red]Model {model!r} not installed.[/red] Run:\n"
+            f"  [bold]ollama pull {model}[/bold]\n"
+            f"and retry."
+        )
+        raise typer.Exit(1)
+
+    # Fetch pending rows.
+    kind_ph = ", ".join(f":k{i}" for i, _ in enumerate(kinds))
+    kind_params = {f"k{i}": k for i, k in enumerate(kinds)}
+    where = [f"v.kind IN ({kind_ph})", "v.asset_path IS NOT NULL"]
+    if not force:
+        where.append("v.ai_caption IS NULL")
+    with get_session() as session:
+        rows = session.execute(sql_text(f"""
+            SELECT v.id::text, v.document_id::text, v.kind,
+                   v.asset_path, v.caption, v.figure_num
+            FROM visuals v
+            WHERE {' AND '.join(where)}
+            ORDER BY v.created_at
+            {('LIMIT :lim' if limit else '')}
+        """), {**kind_params, **({"lim": limit} if limit else {})}).fetchall()
+
+    total = len(rows)
+    if total == 0:
+        console.print("[green]Nothing to caption — all matching visuals already have ai_caption.[/green]")
+        return
+
+    console.print(
+        f"Captioning [bold]{total}[/bold] visual(s) with [cyan]{model}[/cyan]…"
+    )
+
+    captioned = 0
+    skipped = 0
+    t0 = time.monotonic()
+    for idx, (vid, doc_id, vkind, asset_path, existing_caption, fig_num) in enumerate(rows, 1):
+        img_path = resolve_asset_path(doc_id, asset_path)
+        if img_path is None:
+            skipped += 1
+            console.print(f"  [dim][{idx}/{total}][/dim] "
+                          f"[yellow]⊘ SKIP[/yellow]  "
+                          f"{fig_num or vkind} · image file missing on disk")
+            continue
+
+        # Compose a short, targeted prompt. Existing MinerU caption is
+        # usually empty or the raw "Figure 1" line — we pass it as
+        # context anyway so the VLM can refine rather than ignore it.
+        user_prompt = PROMPT_USER.format(
+            kind=vkind,
+            existing_caption=(existing_caption or "").strip() or "(none)",
+        )
+        try:
+            resp = client.chat(
+                model=model,
+                messages=[
+                    {"role": "system", "content": PROMPT_SYSTEM},
+                    {"role": "user", "content": user_prompt,
+                     "images": [str(img_path)]},
+                ],
+                options={"temperature": 0.2, "num_predict": 300},
+                keep_alive=-1,
+            )
+            ai_caption = (resp.get("message") or {}).get("content", "").strip()
+        except Exception as exc:
+            skipped += 1
+            console.print(f"  [dim][{idx}/{total}][/dim] "
+                          f"[red]⚠ FAIL[/red]  {fig_num or vkind}  · {exc}")
+            continue
+
+        if not ai_caption or len(ai_caption) < 20:
+            skipped += 1
+            console.print(f"  [dim][{idx}/{total}][/dim] "
+                          f"[yellow]⊘ SKIP[/yellow]  {fig_num or vkind}  · "
+                          f"caption too short")
+            continue
+
+        with get_session() as session:
+            session.execute(sql_text("""
+                UPDATE visuals SET
+                  ai_caption = :cap,
+                  ai_caption_model = :mdl,
+                  ai_captioned_at = now()
+                WHERE id::text = :vid
+            """), {"cap": ai_caption.replace("\x00", ""),
+                   "mdl": model, "vid": vid})
+            session.commit()
+        captioned += 1
+        preview = ai_caption[:70].replace("\n", " ")
+        console.print(
+            f"  [dim][{idx}/{total}][/dim] "
+            f"[green]✓ CAP[/green]  {fig_num or vkind}  · {preview}"
+        )
+        if idx % 50 == 0:
+            rate = idx / max(0.01, time.monotonic() - t0)
+            eta = (total - idx) / max(0.01, rate)
+            console.print(f"  [dim]… {rate:.2f}/s, eta {eta:.0f}s[/dim]")
+
+    console.print(
+        f"\n[green]✓ Captioned {captioned}[/green] · "
+        f"[yellow]skipped {skipped}[/yellow] · "
+        f"[dim]{time.monotonic() - t0:.1f}s wall[/dim]"
     )

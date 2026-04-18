@@ -4036,7 +4036,8 @@ async def api_visuals_list(
             rows = session.execute(_vtext(f"""
                 SELECT v.id::text, v.document_id::text, v.kind, v.content,
                        v.caption, v.asset_path, v.figure_num, v.block_idx,
-                       pm.title AS paper_title, pm.year
+                       pm.title AS paper_title, pm.year,
+                       v.ai_caption, v.ai_caption_model
                 FROM visuals v
                 JOIN paper_metadata pm ON pm.document_id = v.document_id
                 WHERE {where}
@@ -4047,7 +4048,8 @@ async def api_visuals_list(
             {"id": r[0], "document_id": r[1], "kind": r[2],
              "content": (r[3] or "")[:2000], "caption": r[4],
              "asset_path": r[5], "figure_num": r[6], "block_idx": r[7],
-             "paper_title": r[8], "year": r[9]}
+             "paper_title": r[8], "year": r[9],
+             "ai_caption": r[10], "ai_caption_model": r[11]}
             for r in rows
         ])
     except Exception as exc:
@@ -15553,6 +15555,8 @@ function renderWikiVisuals(items, kind) {{
       const paper = _escHtml((v.paper_title || '').substring(0, 60));
       const year = v.year ? ' (' + v.year + ')' : '';
       const fn = _escHtml(v.figure_num || 'Figure');
+      // Phase 54.6.72 (#1) — ai_caption (vision-LLM generated) if present
+      const ai = v.ai_caption ? _escHtml(v.ai_caption.substring(0, 260)) : '';
       html += '<div style="border:1px solid var(--border);border-radius:6px;overflow:hidden;background:var(--bg);">'
            +  '<a href="/api/visuals/image/' + encodeURIComponent(v.id) + '" target="_blank" '
            +  'style="display:block;background:#000;">'
@@ -15562,7 +15566,8 @@ function renderWikiVisuals(items, kind) {{
            +  '</a>'
            +  '<div style="padding:6px 8px;font-size:11px;">'
            +  '<div style="font-weight:600;margin-bottom:2px;">' + fn + '</div>'
-           +  '<div style="color:var(--fg-muted);line-height:1.35;max-height:3.6em;overflow:hidden;">' + caption + '</div>'
+           +  (caption ? '<div style="color:var(--fg-muted);line-height:1.35;max-height:3.6em;overflow:hidden;">' + caption + '</div>' : '')
+           +  (ai ? '<div style="color:var(--fg);line-height:1.4;margin-top:4px;padding:4px 6px;background:var(--bg-alt,#f5f5f5);border-radius:4px;font-size:10.5px;max-height:7em;overflow:hidden;" title="' + _escHtml(v.ai_caption || '') + '"><strong style="color:var(--accent,dodgerblue);">AI:</strong> ' + ai + '</div>' : '')
            +  '<div style="color:var(--fg-muted);margin-top:4px;font-style:italic;">' + paper + year + '</div>'
            +  '</div>'
            +  '</div>';
