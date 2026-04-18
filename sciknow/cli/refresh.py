@@ -114,6 +114,16 @@ def refresh(
     no_caption: bool = typer.Option(False, "--no-caption",
         help="Skip VLM caption-visuals (54.6.72) — skipped anyway if "
              "no vision LLM is pulled."),
+    caption_model: str = typer.Option(
+        "qwen2.5vl:7b", "--caption-model",
+        help="Vision-LLM for the bulk caption pass. Default qwen2.5vl:7b — "
+             "54.6.89 VLM sweep showed it's ~60% of the 32b judge-win "
+             "quality but ~35× faster (1.85s vs 65s per caption), which "
+             "matters at 9,000+ image scale (5h vs 7 days on a 3090). "
+             "Passthrough to `db caption-visuals --model` — set to "
+             "`qwen2.5vl:32b` for premium quality if you can afford the "
+             "wall time, or to an empty string to use that CLI's default "
+             "(currently qwen2.5vl:32b)."),
     no_paraphrase: bool = typer.Option(False, "--no-paraphrase",
         help="Skip equation paraphrase backfill (54.6.78)."),
     no_embed_visuals: bool = typer.Option(False, "--no-embed-visuals",
@@ -235,9 +245,16 @@ def refresh(
         # Phase 54.6.72 — VLM captions for figures + charts. Fails
         # fast + cleanly when no VLM is pulled; optional step so
         # that's not a refresh blocker.
-        steps.append(("9. Caption figures + charts (VLM — skipped "
-                      "if no vision LLM is pulled)",
-                      ["db", "caption-visuals"], True))
+        # 54.6.89 — default to qwen2.5vl:7b for bulk (60% judge-win
+        # quality at 35× the speed; co-resident with LLM_MODEL, no
+        # model swap). Pass --caption-model "" to use the
+        # caption-visuals default (qwen2.5vl:32b).
+        caption_argv = ["db", "caption-visuals"]
+        if caption_model and caption_model.strip():
+            caption_argv += ["--model", caption_model.strip()]
+        steps.append((f"9. Caption figures + charts (VLM — skipped "
+                      f"if '{caption_model or 'default'}' isn't pulled)",
+                      caption_argv, True))
     if not no_paraphrase:
         # Phase 54.6.78 — one-sentence prose paraphrase per equation
         # for retrieval. Skips rows that already have ai_caption set.
