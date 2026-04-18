@@ -144,10 +144,13 @@ per hour of effort.
   `bench --layer sweep` run measure MRR@10 / NDCG@10 / Recall@K. New bench
   function in `sciknow/testing/bench.py`. **Unblocks:** #4 (bge-m3 LoRA
   needs this as its eval signal). **Effort:** half-day.
-- [ ] **#5 — Tokenizer-aware chunk budgets.** `_PARAMS` in `sciknow/ingestion/chunker.py`
-  uses character counts; bge-m3's real limit is 8K tokens. Long LaTeX-heavy
-  chunks silently overflow and lose their tail. Switch to bge-m3's own
-  tokenizer for the cap. Prevents invisible retrieval recall loss. **Effort:** 1h.
+- [x] **~~#5 — Tokenizer-aware chunk budgets.~~** **False alarm from the audit.**
+  The chunker is already tokenizer-aware (uses `tiktoken.cl100k_base` at
+  `sciknow/ingestion/chunker.py:22-24`). cl100k_base ≈ XLM-R within ~30%,
+  and with target=512 / cap=8192 there's ~16× headroom — no real-world
+  overflow possible even on LaTeX-dense sections. Swapping to bge-m3's
+  exact XLM-R tokenizer would be mechanically correct but gains nothing
+  measurable; pay no diff on this one.
 - [ ] **#7 — Citation marker → chunk alignment post-pass.** After a
   draft is written, for each sentence containing `[N]` citations, score
   the retrieval-context chunks against the sentence with the already-loaded

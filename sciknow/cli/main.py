@@ -226,5 +226,49 @@ def bench_cmd(
     raise typer.Exit(0 if n_err == 0 else 1)
 
 
+@app.command(name="bench-retrieval-gen")
+def bench_retrieval_gen_cmd(
+    n: int = typer.Option(
+        200, "-n", "--n-queries",
+        help="Number of synthetic (question, source_chunk) pairs to generate.",
+    ),
+    model: str = typer.Option(
+        None, "--model",
+        help="LLM for question generation. Defaults to settings.llm_fast_model.",
+    ),
+    seed: int = typer.Option(
+        42, "--seed",
+        help="Random seed for chunk sampling (deterministic probe set).",
+    ),
+):
+    """Phase 54.6.69 — generate the retrieval-quality probe set.
+
+    Samples N random chunks from the corpus (length ≥ 400 chars), asks
+    the fast LLM to write one specific question per chunk (answerable
+    only from that passage), and persists the (question, source_chunk)
+    pairs to ``<project>/data/bench/retrieval_queries.jsonl``.
+
+    The ``b_retrieval_recall`` bench function reads this file and
+    measures MRR@10 / Recall@10 / NDCG@10. Regenerate when the corpus
+    changes materially (new papers, chunker version bumps). Generation
+    is deterministic for a fixed ``--seed``.
+
+    Runtime: ~2-5 min on LLM_FAST_MODEL for n=200.
+    """
+    from sciknow.testing import retrieval_eval
+    console.print(f"[bold]Generating {n} retrieval benchmark queries…[/bold]")
+    console.print(
+        "[dim]This is a one-time LLM cost; the probe set is persisted "
+        "and reused on every `bench --layer live` or `--layer full` "
+        "run until you regenerate.[/dim]\n"
+    )
+    path = retrieval_eval.generate_probe_set(n=n, model=model, seed=seed)
+    console.print(f"\n[green]✓ Probe set written to[/green] {path}")
+    console.print(
+        "[dim]Next: run `sciknow bench --layer live` to get MRR / "
+        "Recall / NDCG against this probe set.[/dim]"
+    )
+
+
 if __name__ == "__main__":
     app()

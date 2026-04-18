@@ -8657,6 +8657,45 @@ def l1_phase54_6_61_wiki_summaries_and_visuals_surface() -> None:
     )
 
 
+def l1_phase54_6_69_retrieval_eval_surface() -> None:
+    """Phase 54.6.69 — retrieval_eval module exposes the probe-set
+    generator, loader, NDCG helper, and the bench function; bench.py
+    registers b_retrieval_recall into the _LIVE layer via a lazy
+    wrapper so an unneeded import doesn't cost anything on `fast` runs.
+    """
+    from sciknow.testing import retrieval_eval, bench
+    # A) module surface
+    for name in ("generate_probe_set", "load_probe_set",
+                 "b_retrieval_recall", "_ndcg_at_k", "_find_source_rank",
+                 "DEFAULT_N_QUERIES", "TOP_K"):
+        assert hasattr(retrieval_eval, name), (
+            f"retrieval_eval missing {name!r}"
+        )
+    # B) NDCG sanity: rank-1 is perfect, rank-0 is zero, monotone decrease.
+    assert retrieval_eval._ndcg_at_k(1, 10) == 1.0
+    assert retrieval_eval._ndcg_at_k(0, 10) == 0.0
+    assert retrieval_eval._ndcg_at_k(11, 10) == 0.0
+    assert (retrieval_eval._ndcg_at_k(2, 10)
+            > retrieval_eval._ndcg_at_k(3, 10)), (
+        "NDCG@10 must decrease monotonically with rank"
+    )
+    # C) bench.py registers the lazy wrapper into _LIVE
+    import inspect
+    src = inspect.getsource(bench)
+    assert "_retrieval_recall_lazy" in src, (
+        "bench.py must register b_retrieval_recall via a lazy wrapper in _LIVE"
+    )
+    live_fns = {fn.__name__ for _, fn in bench._LIVE}
+    assert "_retrieval_recall_lazy" in live_fns, (
+        "_retrieval_recall_lazy not in the _LIVE layer list"
+    )
+    # D) the CLI entry point (bench-retrieval-gen) exists
+    from sciknow.cli import main as _cli_main
+    assert hasattr(_cli_main, "bench_retrieval_gen_cmd"), (
+        "CLI must expose `sciknow bench-retrieval-gen` for probe-set generation"
+    )
+
+
 def l1_phase54_6_56_refresh_ingests_downloads_and_failed() -> None:
     """Phase 54.6.56 — `refresh` sweeps inbox + downloads + failed folders.
 
@@ -8900,6 +8939,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_56_refresh_ingests_downloads_and_failed,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
+    # Phase 54.6.69 — retrieval-quality benchmark harness
+    l1_phase54_6_69_retrieval_eval_surface,
 ]
 
 L2_TESTS: list[Callable] = [

@@ -1182,10 +1182,18 @@ _FAST: list[tuple[str, BenchFn]] = [
     ("books",  b_autowrite_log_convergence),
 ]
 
+def _retrieval_recall_lazy() -> Iterable[BenchMetric]:
+    """Phase 54.6.69 — lazy-import wrapper for retrieval_eval.b_retrieval_recall
+    so the bench module doesn't pay the import cost when no probe set exists."""
+    from sciknow.testing.retrieval_eval import b_retrieval_recall as _fn
+    yield from _fn()
+
+
 _LIVE: list[tuple[str, BenchFn]] = [
     ("retrieval", b_retrieval_hybrid_latency),
     ("retrieval", b_retrieval_rerank_mrr_shift),
     ("retrieval", b_retrieval_signal_overlap),
+    ("retrieval", _retrieval_recall_lazy),      # Phase 54.6.69
     ("models",    b_model_embedder_throughput),
     ("models",    b_model_reranker_throughput),
 ]
