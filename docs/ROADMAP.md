@@ -196,11 +196,13 @@ per hour of effort.
   by visual_id. Unlocks queries like *"every paper reporting ECS"*. A
   climate-specific parser template would work even better than general
   parsing. **Effort:** 1 day.
-- [ ] **#6 — Coverage-based autowrite termination.** Semantic-entailment
-  check of each section-plan bullet against the draft; if plan-coverage
-  drops below 85%, trigger a targeted revision iteration. Reference:
-  CovScore (Zhang 2024). **Effort:** half-day once the plan-bullet
-  schema is defined.
+- [x] **~~#6 — Coverage-based autowrite termination.~~** Shipped in Phase
+  54.6.79. `sciknow/core/plan_coverage.py` computes NLI coverage of
+  atomic plan bullets against the draft; folded into the autowrite
+  scores dict as a new `plan_coverage` dimension. The existing
+  weakest-dimension logic picks up the gap; when coverage is lowest,
+  the revision instruction is overridden to name missed bullets
+  explicitly. Fails silently on empty plans / unavailable NLI.
 - [ ] **#8 — Claim-atomization for offline verify.** Split each draft
   sentence into ≤3 sub-claims, verify each with the NLI scorer,
   aggregate. Catches mixed-truth sentences. Note: RESEARCH.md §526
@@ -213,16 +215,24 @@ per hour of effort.
 
 ### 6c. Tier 3 — architecturally useful
 
-- [ ] **#10 — Paper-type classification + retrieval weighting.** Corpus
-  has peer-reviewed, preprints, theses, opinion pieces, policy briefs
-  with no distinction. Add a `paper_type` column via LLM classification
-  on abstract + first page. Expose as retrieval filter + default
-  downweight for non-peer-reviewed on factual `ask` queries. **Effort:** 1 day.
-- [ ] **#11 — Equation natural-language paraphrase embedding.** 4,687
-  equations embed poorly as raw LaTeX with bge-m3. LLM-paraphrase each
-  into prose (*"This equation expresses total outgoing longwave radiation
-  as…"*), embed the paraphrase, store in a new column on the `visuals`
-  row. **Effort:** ~20 min LLM time for the backfill, 2h implementation.
+- [x] **~~#10 — Paper-type classification + retrieval weighting.~~**
+  Shipped in two parts. Part 1 (Phase 54.6.80): migration 0027 adds
+  `paper_type` / `paper_type_confidence` / `paper_type_model` to
+  `paper_metadata`. New `sciknow/core/paper_type.py` classifier (LLM
+  one-pass on abstract + first 2000 chars + bibliographic metadata)
+  covers 8 categories. CLI `sciknow db classify-papers`. Part 2
+  (Phase 54.6.81): `_apply_paper_type_weight` in hybrid_search
+  multiplies rrf_score by a per-type weight (opinion=0.4 →
+  peer_reviewed=1.0); defaults OFF behind `PAPER_TYPE_WEIGHTING=true`
+  until the backfill completes on a meaningful corpus fraction.
+- [x] **~~#11 — Equation natural-language paraphrase embedding.~~**
+  Shipped in Phase 54.6.78. `sciknow/core/equation_paraphrase.py` +
+  `sciknow db paraphrase-equations` CLI. Uses LLM_FAST_MODEL at ~2s/eq
+  (~2.2h for 4,687 equations). Persists into the existing
+  `visuals.ai_caption` column; the text-LLM-vs-VLM distinction is
+  made by `kind`. **Still open:** re-embedding the paraphrases into
+  Qdrant so retrieval actually surfaces them (for now they're only
+  searchable via Postgres FTS on the visuals table).
 - [ ] **#12 — Compound learning Layer 3** (already in §4b, still pending,
   blocked on ≥50 autowrite runs).
 - [x] **~~#13 — Chapter / book snapshot + restore.~~** Shipped in
