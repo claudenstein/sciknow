@@ -4095,6 +4095,13 @@ def _spawn_cli_streaming(job_id: str, argv: list[str], loop, on_finish=None):
         env = os.environ.copy()
         env.setdefault("NO_COLOR", "1")
         env.setdefault("TERM", "dumb")
+        # Phase 54.6.57 — force unbuffered stdout. Python block-buffers
+        # when stdout is a pipe (our case), which can hold back 4–8 KB
+        # of log lines before a visible flush — makes the web log pane
+        # look frozen during multi-second sub-steps of enrich / expand
+        # / cleanup. `PYTHONUNBUFFERED=1` makes stdout line-flushed so
+        # each `console.print` arrives as an SSE event immediately.
+        env.setdefault("PYTHONUNBUFFERED", "1")
         yield {"type": "progress", "stage": "starting",
                "detail": "$ " + " ".join(shlex.quote(c) for c in cmd)}
         try:

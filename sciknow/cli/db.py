@@ -1198,11 +1198,30 @@ def enrich(
             # Phase 51 — shortlist rows (optional HITL review output)
             shortlist_rows: list[dict] = []
 
+            # Phase 54.6.57 — durable per-item log lines. Mirrors the
+            # expand 54.6.45 pattern so the web UI log pane shows one
+            # scrollable event per paper (MATCH / ARXIV / NO_MATCH /
+            # SKIP / FAIL) instead of just a silent progress bar. The
+            # in-place description update is kept for terminal users;
+            # `progress.console.print` stacks durable lines above it.
+            total_rows = len(rows)
+            done_count = 0
+
+            def _emit(mark: str, color: str, kind: str, label_: str, note: str = "") -> None:
+                """Print one durable line above the live progress bar."""
+                progress.console.print(
+                    f"[dim][{done_count:>4d}/{total_rows}][/dim]  "
+                    f"[{color}]{mark} {kind:<8}[/{color}] {label_[:70]:<70}"
+                    + (f"  [dim]· {note}[/dim]" if note else "")
+                )
+
             for fut in as_completed(futures):
                 try:
                     pm_id, title, meta, status, pm_year = fut.result()
-                except Exception:
+                except Exception as exc:
                     failed += 1
+                    done_count += 1
+                    _emit("⚠", "red", "FAIL", "(lookup exception)", str(exc)[:80])
                     progress.advance(task)
                     continue
                 if shortlist_tsv:
@@ -1218,18 +1237,27 @@ def enrich(
                     })
 
                 progress.update(task, description=f"[dim]{title[:55]}[/dim]")
+                done_count += 1
 
-                if status == "skip" or meta is None:
+                if status == "skip":
                     skipped += 1
+                    _emit("⊘", "yellow", "SKIP", title or "(no title)",
+                          "garbage/short title")
+                    progress.advance(task)
+                    continue
+                if meta is None:
+                    skipped += 1
+                    _emit("✗", "yellow", "NO_MATCH", title or "(no title)",
+                          f"below threshold={threshold}")
                     progress.advance(task)
                     continue
 
                 if dry_run:
-                    doi_str = f"doi:{meta.doi}" if meta.doi else f"arXiv:{meta.arxiv_id}"
-                    console.print(
-                        f"  [green]✓[/green] {title[:60]}  →  {doi_str}"
-                        f"  [dim](score≥{threshold})[/dim]"
-                    )
+                    doi_str = (f"doi:{meta.doi}" if meta.doi
+                               else f"arXiv:{meta.arxiv_id}")
+                    kind = "DRY_ARXIV" if meta.arxiv_id and not meta.doi else "DRY_OK"
+                    _emit("✓", "green", kind, title or "(no title)",
+                          f"{doi_str} via {meta.source or '?'}")
                     matched += 1
                     progress.advance(task)
                     continue
@@ -1239,6 +1267,8 @@ def enrich(
                         pm = session.query(PaperMetadata).filter_by(id=pm_id).first()
                         if pm is None:
                             skipped += 1
+                            _emit("⊘", "yellow", "SKIP", title or "(no title)",
+                                  "row disappeared during lookup")
                             progress.advance(task)
                             continue
 
@@ -1261,8 +1291,15 @@ def enrich(
                         session.commit()
 
                     matched += 1
-                except Exception:
+                    doi_str = (f"doi:{meta.doi}" if meta.doi
+                               else f"arXiv:{meta.arxiv_id}")
+                    kind = "ARXIV" if meta.arxiv_id and not meta.doi else "MATCH"
+                    _emit("✓", "green", kind, title or "(no title)",
+                          f"{doi_str} via {meta.source or '?'}")
+                except Exception as exc:
                     failed += 1
+                    _emit("⚠", "red", "FAIL", title or "(no title)",
+                          f"DB write: {str(exc)[:80]}")
 
                 progress.advance(task)
 
