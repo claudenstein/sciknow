@@ -226,15 +226,50 @@ def _hedging_per_100w(text: str) -> float:
 # ════════════════════════════════════════════════════════════════════════
 
 
+def _vlm_sampling_for(model: str) -> dict:
+    """Phase 54.6.85 — per-VLM sampling + num_predict recommended by
+    the model's own HF card. VLMs don't emit CoT, so there's no
+    thinking-budget issue here — but temperature / top_p / top_k
+    still matter for description quality.
+
+    Sources (match the 54.6.85 text-LLM research methodology):
+      - Qwen2.5-VL HF card: temp 0.2-0.3 for description, top_p 0.9.
+      - InternVL3 paper + model card: temp 0.3, top_p 0.9, top_k 50.
+      - Llama-3.2-Vision HF card: temp 0.6, top_p 0.9.
+      - MiniCPM-V card: temp 0.7, top_p 0.8.
+
+    All VLMs get num_predict=500 — a paragraph-length caption
+    (120-200 words) plus headroom. Pre-54.6.85 was 300 which
+    occasionally truncated mid-sentence.
+    """
+    m = (model or "").lower()
+    if "qwen2.5vl" in m or "qwen2.5-vl" in m or "qwen2vl" in m:
+        return {"temperature": 0.2, "top_p": 0.9, "top_k": 40, "num_predict": 500}
+    if "internvl" in m:
+        return {"temperature": 0.3, "top_p": 0.9, "top_k": 50, "num_predict": 500}
+    if "llama3.2-vision" in m or "llama-3.2-vision" in m:
+        return {"temperature": 0.6, "top_p": 0.9, "top_k": 50, "num_predict": 500}
+    if "minicpm-v" in m or "minicpm" in m:
+        return {"temperature": 0.7, "top_p": 0.8, "top_k": 40, "num_predict": 500}
+    # Default
+    return {"temperature": 0.3, "top_p": 0.9, "top_k": 40, "num_predict": 500}
+
+
 def _caption_one(
     client, model: str, image_path: str, kind: str, existing_caption: str
 ) -> tuple[str | None, float]:
-    """Return (caption_or_None, elapsed_s). None on any error."""
+    """Return (caption_or_None, elapsed_s). None on any error.
+
+    Phase 54.6.85 — sampling now per-model via ``_vlm_sampling_for``
+    instead of a hardcoded temp=0.2/num_predict=300. The latter
+    truncated Qwen2.5-VL-32B's detailed captions mid-sentence.
+    """
     from sciknow.core.visuals_caption import PROMPT_SYSTEM, PROMPT_USER
     user_prompt = PROMPT_USER.format(
         kind=kind,
         existing_caption=(existing_caption or "").strip() or "(none)",
     )
+    sampling = _vlm_sampling_for(model)
     t0 = time.monotonic()
     try:
         resp = client.chat(
@@ -244,7 +279,12 @@ def _caption_one(
                 {"role": "user", "content": user_prompt,
                  "images": [image_path]},
             ],
-            options={"temperature": 0.2, "num_predict": 300},
+            options={
+                "temperature": sampling["temperature"],
+                "top_p":       sampling["top_p"],
+                "top_k":       sampling["top_k"],
+                "num_predict": sampling["num_predict"],
+            },
             keep_alive=-1,
         )
         cap = (resp.get("message") or {}).get("content", "").strip()

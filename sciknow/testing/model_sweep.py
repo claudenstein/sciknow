@@ -90,18 +90,140 @@ CANDIDATE_MODELS: list[str] = [
 # the second is descriptive prose. Sweep runs against the FIRST one
 # only to keep runtime sane — add more via --paper if you want.
 CANDIDATE_PAPERS: list[str] = [
-    "4092d6ad",  # Nature Controls the CO2 Increase II — math-heavy
-    # "631fd2ea",  # Sun Reversed Decades-long Weakening Trend — descriptive
+    # Phase 54.6.85 — three-paper panel, one per content archetype.
+    # Variance between papers is the biggest noise source in per-model
+    # metrics; averaging three papers shrinks CI bounds by ~√3.
+    "4092d6ad",  # Nature Controls the CO2 Increase II — math-heavy, LaTeX-dense
+    "631fd2ea",  # Sun Reversed Decades-long Weakening Trend — descriptive prose
+    "858170b4",  # Decadal Changes of Earth's OLR — chart-heavy quantitative
 ]
 
-# Per-task generation budgets. Match production defaults so results
-# reflect real-world use. If a thinking model burns all of these in
-# <think>, that's a legitimate failure signal for the sweep.
+# ════════════════════════════════════════════════════════════════════════
+# Per-task budgets — Phase 54.6.85 methodology overhaul
+# ════════════════════════════════════════════════════════════════════════
+#
+# Pre-54.6.85, every model ran at ``temperature=0`` and ``num_predict``
+# between 600 and 2048. This was methodologically unfair to Qwen's
+# thinking variants:
+#
+#   - Qwen's own docs recommend ``num_predict`` **16k–32k** for
+#     thinking mode; CoT commonly spans 4-16k tokens before a single
+#     answer token emerges. At 2048 the CoT is truncated mid-thought,
+#     producing 0-word outputs that misleadingly marked the model as
+#     "broken".
+#   - Qwen explicitly discourages ``temperature=0`` — causes repetition
+#     loops, especially with thinking on. Recommended: 0.7 non-thinking,
+#     1.0 thinking.
+#   - Ollama has a native ``think`` boolean that can force-disable
+#     thinking on hybrid (3.5 / 3.6) models. Pre-54.6.85 the bench
+#     never used it.
+#
+# Fix: budgets are now a BASE that gets scaled by the model's profile.
+# Thinking models get 8× the predict budget and Qwen-recommended
+# sampling; non-thinking stay near the previous numbers. Each model
+# also gets its sampling params (temp, top_p, top_k) from
+# ``profile_for()`` below.
+#
+# Sources for the fix (see docs/PHASE_LOG.md 54.6.85 entry):
+#   - Qwen3-30B-A3B-Instruct-2507 HF card: temp 0.7, top_p 0.8, top_k 20
+#   - Qwen3.5 / 3.6 model cards: temp 1.0 thinking / 0.6 coding,
+#     top_p 0.95, top_k 20
+#   - Ollama thinking docs: native ``think`` boolean flag
+#   - Qwen3 blog: CoT budget recommendations
 BUDGETS = {
-    "extract_kg":      {"num_ctx": 8192,  "num_predict": 2048, "temperature": 0.0},
-    "compile_summary": {"num_ctx": 8192,  "num_predict": 1500, "temperature": 0.3},
-    "write_section":   {"num_ctx": 4096,  "num_predict": 600,  "temperature": 0.4},
+    "extract_kg":      {"num_ctx": 8192,  "num_predict": 2048, "temperature": 0.2},
+    "compile_summary": {"num_ctx": 8192,  "num_predict": 1500, "temperature": 0.5},
+    "write_section":   {"num_ctx": 4096,  "num_predict": 800,  "temperature": 0.6},
 }
+
+
+# Thinking-mode multiplier for ``num_predict``. 8× covers Qwen's
+# recommended 16k floor when the base budget is 2048.
+THINKING_PREDICT_MULT = 8
+# Minimum budget floor for thinking models — regardless of base.
+# 12k covers typical CoT (4-10k) + an answer of a few hundred words.
+THINKING_MIN_PREDICT = 12288
+
+
+@dataclass
+class ModelProfile:
+    """How to invoke a given model fairly.
+
+    ``thinks_by_default`` — True for hybrid Qwen3.5/3.6 that emit
+    ``<think>…</think>`` unless told otherwise; drives the budget
+    multiplier and sampling recommendations.
+    ``can_disable_thinking`` — True when the Ollama ``think`` flag
+    works (3.5+ support it, thinking-only 2507 variants don't).
+    ``temperature`` / ``top_p`` / ``top_k`` — Qwen-recommended
+    sampling per model-family doc; overrides the per-task default.
+    """
+    thinks_by_default: bool
+    can_disable_thinking: bool
+    temperature: float
+    top_p: float
+    top_k: int
+
+
+def profile_for(model: str) -> ModelProfile:
+    """Heuristically infer a model's profile from its tag. Hybrid
+    Qwen 3.5/3.6 get thinking treatment; everything else stays at
+    non-thinking defaults.
+
+    See docs/PHASE_LOG.md 54.6.85 for the source-of-truth per family.
+    Add new entries here when new candidates join ``CANDIDATE_MODELS``.
+    """
+    m = (model or "").lower()
+    # Qwen 3.5 / 3.6 — hybrid thinking, soft-switchable
+    if "qwen3.5" in m or "qwen3.6" in m or "ornstein3.6" in m:
+        return ModelProfile(
+            thinks_by_default=True, can_disable_thinking=True,
+            temperature=1.0, top_p=0.95, top_k=20,
+        )
+    # Qwen 3 Thinking-2507 — thinking-only, no soft-switch
+    if ("qwen3-thinking" in m or "qwen3:thinking" in m
+            or "qwen3-30b-a3b-thinking" in m):
+        return ModelProfile(
+            thinks_by_default=True, can_disable_thinking=False,
+            temperature=1.0, top_p=0.95, top_k=20,
+        )
+    # Qwen 3 Instruct-2507 — strictly non-thinking
+    if "instruct-2507" in m or "qwen3:30b-a3b-instruct" in m:
+        return ModelProfile(
+            thinks_by_default=False, can_disable_thinking=False,
+            temperature=0.7, top_p=0.8, top_k=20,
+        )
+    # Qwen 2.5 instruct — non-thinking, classic sampling
+    if "qwen2.5" in m and "instruct" in m:
+        return ModelProfile(
+            thinks_by_default=False, can_disable_thinking=False,
+            temperature=0.7, top_p=0.8, top_k=20,
+        )
+    # Default: assume non-thinking; use the task temperature as-is.
+    return ModelProfile(
+        thinks_by_default=False, can_disable_thinking=False,
+        temperature=0.7, top_p=0.9, top_k=40,
+    )
+
+
+def effective_budget(task: str, model: str) -> dict:
+    """Return a budget dict scaled for the model's profile.
+
+    Thinking models get a 8× num_predict multiplier with a 12k floor.
+    Sampling params come from the profile, not the task default.
+    """
+    base = BUDGETS[task]
+    p = profile_for(model)
+    predict = base["num_predict"]
+    if p.thinks_by_default:
+        predict = max(THINKING_MIN_PREDICT, predict * THINKING_PREDICT_MULT)
+    return {
+        "num_ctx":     base["num_ctx"],
+        "num_predict": predict,
+        "temperature": p.temperature,
+        "top_p":       p.top_p,
+        "top_k":       p.top_k,
+        "thinks_by_default": p.thinks_by_default,
+    }
 
 # Slug format used in the extract-kg prompt — lowercase, hyphenated,
 # no spaces or title-case. Used for predicate/subject-shape scoring.
@@ -188,13 +310,29 @@ def _installed_models() -> set[str]:
 
 def _call_model_raw(system: str, user: str, model: str, budget: dict) -> dict:
     """One chat call. Returns {content, thinking, elapsed_s, eval_count,
-    done_reason, error}. We go through the raw ollama client instead of
-    sciknow.rag.llm.complete so we can capture ``thinking`` separately
-    — without that, a thinking-runaway is indistinguishable from a hang.
+    done_reason, error, budget_predict, temp}. We go through the raw
+    ollama client so we can capture ``thinking`` separately — without
+    that, a thinking-runaway is indistinguishable from a hang.
+
+    Phase 54.6.85 — budget now includes Qwen-recommended sampling
+    (top_p, top_k) and ``thinks_by_default`` signal. On hybrid models
+    we leave Ollama to decide whether to thinking (no explicit
+    ``think`` flag) so the comparison is "what the model does when
+    nobody overrides it" — that's the real production path.
     """
     import ollama
     client = ollama.Client()
     t0 = time.monotonic()
+    options = {
+        "temperature": budget["temperature"],
+        "num_ctx":     budget["num_ctx"],
+        "num_predict": budget["num_predict"],
+        "num_batch":   1024,
+    }
+    if budget.get("top_p") is not None:
+        options["top_p"] = budget["top_p"]
+    if budget.get("top_k") is not None:
+        options["top_k"] = budget["top_k"]
     try:
         resp = client.chat(
             model=model,
@@ -202,18 +340,16 @@ def _call_model_raw(system: str, user: str, model: str, budget: dict) -> dict:
                 {"role": "system", "content": system},
                 {"role": "user",   "content": user},
             ],
-            options={
-                "temperature": budget["temperature"],
-                "num_ctx":     budget["num_ctx"],
-                "num_predict": budget["num_predict"],
-                "num_batch":   1024,
-            },
+            options=options,
             keep_alive=0,   # unload after so the next candidate gets fresh VRAM
         )
     except Exception as exc:
         return {"error": str(exc), "elapsed_s": time.monotonic() - t0,
                 "content": "", "thinking": "", "eval_count": 0,
-                "done_reason": "exception"}
+                "done_reason": "exception",
+                "budget_predict": budget.get("num_predict", 0),
+                "temp": budget.get("temperature", 0),
+                "thinks_by_default": budget.get("thinks_by_default", False)}
     msg = resp.get("message") or {}
     return {
         "error": None,
@@ -222,6 +358,9 @@ def _call_model_raw(system: str, user: str, model: str, budget: dict) -> dict:
         "thinking":  msg.get("thinking", "") or "",
         "eval_count":  resp.get("eval_count", 0) or 0,
         "done_reason": resp.get("done_reason", ""),
+        "budget_predict": budget.get("num_predict", 0),
+        "temp":        budget.get("temperature", 0),
+        "thinks_by_default": budget.get("thinks_by_default", False),
     }
 
 
@@ -356,7 +495,7 @@ def b_model_sweep_extract_kg() -> Iterable[BenchMetric]:
             yield BenchMetric(f"{model}::status", "not-installed", "",
                               note="pull with `ollama pull " + model + "`")
             continue
-        resp = _call_model_raw(sys_p, usr_p, model, BUDGETS["extract_kg"])
+        resp = _call_model_raw(sys_p, usr_p, model, effective_budget("extract_kg", model))
         if resp.get("error"):
             yield BenchMetric(f"{model}::status", "error", "",
                               note=resp["error"][:80])
@@ -438,7 +577,7 @@ def b_model_sweep_compile_summary() -> Iterable[BenchMetric]:
         if installed and model not in installed:
             yield BenchMetric(f"{model}::status", "not-installed", "")
             continue
-        resp = _call_model_raw(sys_p, usr_p, model, BUDGETS["compile_summary"])
+        resp = _call_model_raw(sys_p, usr_p, model, effective_budget("compile_summary", model))
         if resp.get("error"):
             yield BenchMetric(f"{model}::status", "error", "",
                               note=resp["error"][:80])
@@ -533,7 +672,7 @@ def b_model_sweep_write_section() -> Iterable[BenchMetric]:
         if installed and model not in installed:
             yield BenchMetric(f"{model}::status", "not-installed", "")
             continue
-        resp = _call_model_raw(sys_p, usr_p, model, BUDGETS["write_section"])
+        resp = _call_model_raw(sys_p, usr_p, model, effective_budget("write_section", model))
         if resp.get("error"):
             yield BenchMetric(f"{model}::status", "error", "",
                               note=resp["error"][:80])

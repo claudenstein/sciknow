@@ -8657,6 +8657,90 @@ def l1_phase54_6_61_wiki_summaries_and_visuals_surface() -> None:
     )
 
 
+def l1_phase54_6_85_bench_profile_for_model() -> None:
+    """Phase 54.6.85 — model-sweep bench methodology overhaul.
+
+    Root cause of the 2026-04-17 bench's "qwen3.5/3.6 → 0 words on
+    every prose task" result was NOT that the models are broken; it
+    was that (a) ``num_predict=2048`` truncated the CoT before any
+    answer tokens, and (b) ``temperature=0`` caused Qwen's own
+    documented loop-mode. This phase fixes both via a ``ModelProfile``
+    heuristic + ``effective_budget()`` wrapper.
+
+    This test locks in the fix:
+      A) profile_for(qwen3.6 or qwen3.5) → thinking, soft-switchable,
+         Qwen-recommended sampling (temp 1.0, top_p 0.95, top_k 20).
+      B) profile_for(qwen3:...instruct-2507) → non-thinking, temp 0.7,
+         top_p 0.8.
+      C) effective_budget scales num_predict by ≥8× for thinking
+         models and clamps to a 12k floor.
+      D) Default temperature is NEVER 0 anywhere in the budget table
+         (Qwen explicitly discourages it).
+      E) rag/llm.stream + complete accept the new ``think`` / ``top_p``
+         / ``top_k`` kwargs so callers can forward Qwen-recommended
+         sampling without monkey-patching.
+    """
+    from sciknow.testing import model_sweep as sw
+    from sciknow.rag import llm as _llm
+    import inspect
+
+    # A) thinking models
+    for tag in ("qwen3.5:27b", "qwen3.6:35b-a3b-q4_K_M",
+                "qwen3.6:35b-a3b-ud-q4_K_S", "ornstein3.6:35b-a3b-q4_K_S"):
+        p = sw.profile_for(tag)
+        assert p.thinks_by_default, (
+            f"{tag} must be detected as thinking by default"
+        )
+        assert p.can_disable_thinking, (
+            f"{tag} should be soft-switchable (Qwen 3.5/3.6 family)"
+        )
+        assert p.temperature == 1.0 and p.top_p == 0.95 and p.top_k == 20, (
+            f"{tag}: sampling must match Qwen thinking-mode recommendation "
+            f"(1.0/0.95/20); got {p.temperature}/{p.top_p}/{p.top_k}"
+        )
+
+    # B) non-thinking Qwen3 instruct
+    pi = sw.profile_for("qwen3:30b-a3b-instruct-2507-q4_K_M")
+    assert not pi.thinks_by_default
+    assert pi.temperature == 0.7 and pi.top_p == 0.8 and pi.top_k == 20, (
+        f"instruct-2507: sampling must match Qwen non-thinking "
+        f"recommendation (0.7/0.8/20); got {pi.temperature}/{pi.top_p}/{pi.top_k}"
+    )
+
+    # C) budget scaling
+    base = sw.BUDGETS["extract_kg"]
+    nb_thinking = sw.effective_budget("extract_kg", "qwen3.6:35b-a3b-q4_K_M")
+    nb_nonthink = sw.effective_budget("extract_kg", "qwen3:30b-a3b-instruct-2507-q4_K_M")
+    assert nb_thinking["num_predict"] >= max(
+        sw.THINKING_MIN_PREDICT, base["num_predict"] * sw.THINKING_PREDICT_MULT
+    ), (
+        "thinking-model budget must be scaled by THINKING_PREDICT_MULT "
+        "AND floored to THINKING_MIN_PREDICT"
+    )
+    assert nb_nonthink["num_predict"] == base["num_predict"], (
+        "non-thinking budget must not be multiplied"
+    )
+
+    # D) no temperature=0 anywhere in the base table
+    for task, b in sw.BUDGETS.items():
+        assert b["temperature"] > 0.0, (
+            f"BUDGETS[{task!r}] temperature must be > 0 — Qwen's docs "
+            f"explicitly discourage 0 (repetition loops)"
+        )
+
+    # E) rag/llm forwards the new kwargs
+    stream_src = inspect.getsource(_llm.stream)
+    for kw in ("think", "top_p", "top_k"):
+        assert kw in stream_src, (
+            f"rag/llm.stream must accept {kw!r} kwarg (54.6.85)"
+        )
+    complete_src = inspect.getsource(_llm.complete)
+    for kw in ("think", "top_p", "top_k"):
+        assert kw in complete_src, (
+            f"rag/llm.complete must forward {kw!r} kwarg (54.6.85)"
+        )
+
+
 def l1_phase54_6_83_claim_atomize_behavior() -> None:
     """Phase 54.6.83 (#8) — claim atomization + NLI verification.
 
@@ -9601,6 +9685,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_82_visuals_search_surface,
     # Phase 54.6.83 — claim-atomization offline verifier (#8)
     l1_phase54_6_83_claim_atomize_behavior,
+    # Phase 54.6.85 — bench methodology overhaul (thinking-aware budgets)
+    l1_phase54_6_85_bench_profile_for_model,
 ]
 
 L2_TESTS: list[Callable] = [

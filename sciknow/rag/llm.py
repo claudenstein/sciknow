@@ -120,6 +120,9 @@ def stream(
     num_predict: int | None = None,
     keep_alive: str | int | None = -1,
     format: dict | str | None = None,
+    think: bool | None = None,
+    top_p: float | None = None,
+    top_k: int | None = None,
 ) -> Iterator[str]:
     """
     Stream LLM response tokens. Yields string fragments as they arrive.
@@ -159,6 +162,20 @@ def stream(
     )
     token_count = 0
     try:
+        options = {"temperature": temperature, "num_ctx": num_ctx,
+                   "num_batch": num_batch}
+        # Phase 54.6.32 — num_predict cap (if set) prevents runaway
+        # generation. Critical for format=json_schema calls where the
+        # schema has unbounded arrays.
+        if num_predict is not None:
+            options["num_predict"] = num_predict
+        # Phase 54.6.85 — Qwen recommends top_p 0.8 non-thinking /
+        # 0.95 thinking and top_k 20 for their entire 3.x family.
+        # Passing them as kwargs lets callers opt in per model.
+        if top_p is not None:
+            options["top_p"] = top_p
+        if top_k is not None:
+            options["top_k"] = top_k
         kwargs: dict = {
             "model": chosen_model,
             "messages": [
@@ -166,22 +183,19 @@ def stream(
                 {"role": "user",   "content": user},
             ],
             "stream": True,
-            "options": {"temperature": temperature, "num_ctx": num_ctx,
-                        "num_batch": num_batch,
-                        # Phase 54.6.32 — num_predict cap (if set) prevents
-                        # runaway generation. Discovered when mistral:7b
-                        # entered an infinite-loop on a structured-output
-                        # (format=json_schema) entity-extraction call,
-                        # generating 10,919 tokens in 116.8s before Ollama
-                        # OOM'd. Critical for format=json_schema calls
-                        # where the schema has unbounded arrays.
-                        **({"num_predict": num_predict}
-                           if num_predict is not None else {})},
+            "options": options,
         }
         if keep_alive is not None:
             kwargs["keep_alive"] = keep_alive
         if format is not None:
             kwargs["format"] = format
+        # Phase 54.6.85 — Ollama native think flag for hybrid Qwen3.5/3.6
+        # models. ``think=False`` injects /no_think so the model skips
+        # CoT; ``think=True`` enables it on models that support soft-
+        # switching. None leaves Ollama's default behavior (thinks-if-
+        # the-model-thinks).
+        if think is not None:
+            kwargs["think"] = think
         response = client.chat(**kwargs)
         for chunk in response:
             token_count += 1
@@ -219,6 +233,9 @@ def complete(
     num_predict: int | None = None,
     keep_alive: str | int | None = -1,
     format: dict | str | None = None,
+    think: bool | None = None,
+    top_p: float | None = None,
+    top_k: int | None = None,
 ) -> str:
     """
     Non-streaming completion. Returns the full response string.
@@ -240,7 +257,8 @@ def complete(
     return "".join(stream(system, user, model=model, temperature=temperature,
                           num_ctx=num_ctx, num_batch=num_batch,
                           num_predict=num_predict,
-                          keep_alive=keep_alive, format=format))
+                          keep_alive=keep_alive, format=format,
+                          think=think, top_p=top_p, top_k=top_k))
 
 
 def complete_with_status(
