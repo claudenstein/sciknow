@@ -89,6 +89,12 @@ class PaperMetadata(Base):
 
     # Source tracking
     metadata_source: Mapped[str] = mapped_column(Text, nullable=False, default="unknown")
+    # Phase 54.6.80 (#10) — paper_type classification for retrieval filtering.
+    # One of: peer_reviewed | preprint | thesis | editorial | opinion |
+    # policy | book_chapter | unknown. NULL means not yet classified.
+    paper_type: Mapped[str | None] = mapped_column(Text)
+    paper_type_confidence: Mapped[float | None] = mapped_column(Float)
+    paper_type_model: Mapped[str | None] = mapped_column(Text)
 
     # Raw API responses
     crossref_raw: Mapped[dict | None] = mapped_column(JSONB)

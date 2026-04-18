@@ -8657,6 +8657,68 @@ def l1_phase54_6_61_wiki_summaries_and_visuals_surface() -> None:
     )
 
 
+def l1_phase54_6_80_paper_type_surface() -> None:
+    """Phase 54.6.80 (#10) — paper-type classifier + schema + CLI.
+
+    No LLM calls — validates the module surface, the VALID_TYPES set,
+    the alias-map handling in classify_paper (by monkey-patching the
+    LLM call), and that PaperMetadata carries the three new columns.
+    """
+    from unittest.mock import patch
+    from sciknow.core import paper_type
+    from sciknow.storage.models import PaperMetadata
+    from sciknow.cli import db as _db_cli
+
+    # A) VALID_TYPES covers the 8 expected categories
+    expected = {"peer_reviewed", "preprint", "thesis", "editorial",
+                "opinion", "policy", "book_chapter", "unknown"}
+    assert set(paper_type.VALID_TYPES) == expected, (
+        f"VALID_TYPES mismatch: {set(paper_type.VALID_TYPES) ^ expected}"
+    )
+
+    # B) ORM model has the three new columns (migration 0027)
+    for col in ("paper_type", "paper_type_confidence", "paper_type_model"):
+        assert hasattr(PaperMetadata, col), f"PaperMetadata missing {col}"
+
+    # C) classify_paper handles the alias map + bad JSON gracefully.
+    # Mock _complete to return a valid classification.
+    def _fake_complete(sys, user, **kw):
+        return '{"type": "peer_reviewed", "confidence": 0.92, "evidence": "Journal article with methods + results."}'
+    with patch("sciknow.rag.llm.complete", _fake_complete):
+        r = paper_type.classify_paper(
+            title="Solar irradiance reconstruction",
+            journal="Nature", abstract="We reconstruct...",
+            content="1. Introduction..."
+        )
+    assert r is not None and r.paper_type == "peer_reviewed"
+    assert r.confidence == 0.92
+
+    # Alias path: LLM returns "peer-reviewed" (hyphen) — must map to
+    # "peer_reviewed" before hitting VALID_TYPES.
+    def _fake_hyphen(sys, user, **kw):
+        return '{"type": "peer-reviewed", "confidence": 0.8, "evidence": "x"}'
+    with patch("sciknow.rag.llm.complete", _fake_hyphen):
+        r2 = paper_type.classify_paper(title="x")
+    assert r2.paper_type == "peer_reviewed", (
+        f"alias map failed: 'peer-reviewed' → {r2.paper_type!r}, "
+        f"expected 'peer_reviewed'"
+    )
+
+    # Garbage output → None or 'unknown', never a crash.
+    def _fake_garbage(sys, user, **kw):
+        return "I cannot classify this document."
+    with patch("sciknow.rag.llm.complete", _fake_garbage):
+        r3 = paper_type.classify_paper(title="x")
+    assert r3 is None or r3.paper_type == "unknown", (
+        f"bad JSON must return None or unknown; got {r3}"
+    )
+
+    # D) CLI command registered
+    assert hasattr(_db_cli, "classify_papers_cmd"), (
+        "CLI must expose `sciknow db classify-papers`"
+    )
+
+
 def l1_phase54_6_79_plan_coverage_behavior() -> None:
     """Phase 54.6.79 (#6) — plan coverage dimension for autowrite.
 
@@ -9408,6 +9470,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_78_equation_paraphrase_surface,
     # Phase 54.6.79 — plan coverage dimension (#6)
     l1_phase54_6_79_plan_coverage_behavior,
+    # Phase 54.6.80 — paper-type classifier surface (#10)
+    l1_phase54_6_80_paper_type_surface,
 ]
 
 L2_TESTS: list[Callable] = [

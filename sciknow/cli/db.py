@@ -4731,6 +4731,151 @@ def caption_visuals_cmd(
     )
 
 
+# ── classify-papers (Phase 54.6.80 — #10) ────────────────────────────────
+
+@app.command(name="classify-papers")
+def classify_papers_cmd(
+    model: str = typer.Option(
+        None, "--model",
+        help="LLM for classification. Default: settings.llm_fast_model.",
+    ),
+    limit: int = typer.Option(
+        0, "--limit", "-n",
+        help="Max papers to classify this run (0 = all pending).",
+    ),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Re-classify rows that already have paper_type set.",
+    ),
+):
+    """Phase 54.6.80 (#10) — classify each paper into one of:
+    peer_reviewed / preprint / thesis / editorial / opinion / policy /
+    book_chapter / unknown.
+
+    Populates `paper_metadata.paper_type` + `.paper_type_confidence` +
+    `.paper_type_model`. Enables retrieval filtering (only peer-reviewed
+    for factual queries) and default downweighting for opinion / policy
+    on `ask` queries.
+
+    Uses the abstract + first 2000 chars of content + bibliographic
+    metadata (journal, publisher, DOI) as classifier input. ~2-3s per
+    paper on LLM_FAST_MODEL; ~30-40 min for 676 papers on a 3090.
+    Interruptible — re-run picks up where you left off (skips rows
+    with paper_type set unless --force).
+
+    Examples:
+
+      sciknow db classify-papers            # all pending
+      sciknow db classify-papers -n 20      # first 20
+      sciknow db classify-papers --force    # re-classify all
+    """
+    from sciknow.cli import preflight
+    preflight(qdrant=False)
+
+    from sciknow.config import settings
+    from sciknow.core.paper_type import classify_paper
+    from sciknow.storage.db import get_session
+    from sqlalchemy import text as sql_text
+
+    if model is None:
+        model = settings.llm_fast_model
+
+    where = ["pm.title IS NOT NULL"]
+    if not force:
+        where.append("pm.paper_type IS NULL")
+
+    with get_session() as session:
+        rows = session.execute(sql_text(f"""
+            SELECT pm.id::text, pm.title, pm.journal, pm.publisher,
+                   pm.year, pm.doi, pm.abstract,
+                   COALESCE(
+                     (SELECT ps.content FROM paper_sections ps
+                        WHERE ps.document_id = pm.document_id
+                        ORDER BY ps.section_index LIMIT 1),
+                     ''
+                   ) AS first_section
+            FROM paper_metadata pm
+            WHERE {' AND '.join(where)}
+            ORDER BY pm.year DESC NULLS LAST
+            {('LIMIT :lim' if limit else '')}
+        """), ({"lim": limit} if limit else {})).fetchall()
+
+    total = len(rows)
+    if total == 0:
+        console.print(
+            "[green]Nothing to classify — every paper already has "
+            "paper_type (or pass --force).[/green]"
+        )
+        return
+
+    console.print(
+        f"Classifying [bold]{total}[/bold] paper(s) with [cyan]{model}[/cyan]…"
+    )
+
+    done = 0
+    failed = 0
+    by_type: dict[str, int] = {}
+    t0 = time.monotonic()
+    for idx, (pid, title, journal, publisher, year, doi, abstract, content) in enumerate(rows, 1):
+        result = classify_paper(
+            title=title or "",
+            journal=journal or "",
+            publisher=publisher or "",
+            year=year,
+            doi=doi or "",
+            abstract=abstract or "",
+            content=content or "",
+            model=model,
+        )
+        if result is None:
+            failed += 1
+            console.print(
+                f"  [dim][{idx}/{total}][/dim] [red]⚠ FAIL[/red]  "
+                f"{(title or '(no title)')[:70]}"
+            )
+            continue
+        with get_session() as session:
+            session.execute(sql_text("""
+                UPDATE paper_metadata SET
+                  paper_type = :t,
+                  paper_type_confidence = :c,
+                  paper_type_model = :m
+                WHERE id::text = :pid
+            """), {"t": result.paper_type, "c": result.confidence,
+                   "m": model, "pid": pid})
+            session.commit()
+        done += 1
+        by_type[result.paper_type] = by_type.get(result.paper_type, 0) + 1
+        tag_color = {
+            "peer_reviewed": "green", "preprint": "cyan", "thesis": "cyan",
+            "editorial": "yellow", "opinion": "yellow",
+            "policy": "magenta", "book_chapter": "blue", "unknown": "dim",
+        }.get(result.paper_type, "white")
+        console.print(
+            f"  [dim][{idx}/{total}][/dim] [{tag_color}]{result.paper_type:<14}[/{tag_color}] "
+            f"({result.confidence:.2f})  {(title or '')[:65]}"
+        )
+        if idx % 50 == 0:
+            rate = idx / max(0.01, time.monotonic() - t0)
+            eta = (total - idx) / max(0.01, rate)
+            console.print(
+                f"  [dim]… {rate:.2f}/s, eta {int(eta/60)}m {int(eta%60)}s[/dim]"
+            )
+
+    console.print(
+        f"\n[green]✓ Classified {done}[/green] · "
+        f"[red]failed {failed}[/red] · "
+        f"[dim]{time.monotonic() - t0:.1f}s wall[/dim]"
+    )
+    if by_type:
+        console.print("\n[bold]By type:[/bold]")
+        for t in ("peer_reviewed", "preprint", "thesis", "book_chapter",
+                  "editorial", "opinion", "policy", "unknown"):
+            n = by_type.get(t, 0)
+            if n:
+                console.print(f"  {t:<15} {n}")
+
+
 # ── paraphrase-equations (Phase 54.6.78 — #11) ───────────────────────────
 
 @app.command(name="paraphrase-equations")
