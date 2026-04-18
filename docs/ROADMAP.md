@@ -127,6 +127,123 @@ asked for. Listed in rough priority order.
 
 ---
 
+## 6. 2026-04-18 improvement sweep (Phase 54.6.68+)
+
+Second-generation improvements sourced from a fresh audit after Phases
+54.6.40–54.6.67 shipped (wiki UX, plan-modal rework, section density,
+chart extraction). Items here are **not in RESEARCH.md's rejected list**
+and don't duplicate already-shipped phases. Ordered by expected impact
+per hour of effort.
+
+### 6a. Tier 1 — ship next, foundational
+
+- [ ] **#3 — Retrieval-quality bench (`b_retrieval_recall`).** Generate
+  ~200 synthetic *(question, source_chunk)* pairs via `LLM_FAST_MODEL`
+  over random chunks (question must be answerable from exactly that
+  chunk), persist to `data/bench/retrieval_queries.jsonl`, then in every
+  `bench --layer sweep` run measure MRR@10 / NDCG@10 / Recall@K. New bench
+  function in `sciknow/testing/bench.py`. **Unblocks:** #4 (bge-m3 LoRA
+  needs this as its eval signal). **Effort:** half-day.
+- [ ] **#5 — Tokenizer-aware chunk budgets.** `_PARAMS` in `sciknow/ingestion/chunker.py`
+  uses character counts; bge-m3's real limit is 8K tokens. Long LaTeX-heavy
+  chunks silently overflow and lose their tail. Switch to bge-m3's own
+  tokenizer for the cap. Prevents invisible retrieval recall loss. **Effort:** 1h.
+- [ ] **#7 — Citation marker → chunk alignment post-pass.** After a
+  draft is written, for each sentence containing `[N]` citations, score
+  the retrieval-context chunks against the sentence with the already-loaded
+  `cross-encoder/nli-deberta-v3-base`. If the `[N]`-referenced chunk
+  isn't the top entailer by ≥0.15, remap `[N]` to the actual top chunk.
+  Direct lift on the autowrite_writer citation_precision metric
+  (gemma3 was 11%, qwen 60% — this should push both up). Reference:
+  LongCite (Zhang 2024). **Effort:** 3–4h.
+- [ ] **#9 — Citation-graph retrieval boost.** 4.5% of citation edges
+  resolve in-corpus (per RESEARCH.md expand investigation). After RRF
+  fusion, apply a small multiplicative boost (`×1 + α·log(1+n_refs)`)
+  to chunks whose `document_id` is cited-by or co-cited-with a top-K
+  hit. One PostgreSQL window query over the existing `citations` table.
+  Not in rejected list (bib-coupling / co-citation are classical IR,
+  not GraphRAG-global). **Effort:** half-day.
+
+### 6b. Tier 2 — meaningful research upgrade
+
+- [ ] **#1 — Vision-LLM auto-captioning for figures + charts.** 9,988
+  figure/chart JPGs are semantically silent. Pull
+  `qwen2.5vl:7b` (or `llama3.2-vision:11b`), add
+  `sciknow db caption-visuals` CLI that iterates `visuals` rows where
+  `asset_path IS NOT NULL AND caption = ''` and generates captions via
+  the VL model. Embed with bge-m3 and store in a new
+  `visuals.description_embedding` column for retrieval parity with
+  text chunks. GUI Visuals tab auto-populates with real captions.
+  **Preconditions:** `ollama pull qwen2.5vl:7b` (~6 GB). **Effort:** 4–6h.
+- [ ] **#2 — Structured table parsing.** 1,406 tables live as MinerU
+  HTML in `visuals.content`. Parse into `{headers, rows, units}` +
+  semantic summary via fast-LLM; store in new `table_rows` table joined
+  by visual_id. Unlocks queries like *"every paper reporting ECS"*. A
+  climate-specific parser template would work even better than general
+  parsing. **Effort:** 1 day.
+- [ ] **#6 — Coverage-based autowrite termination.** Semantic-entailment
+  check of each section-plan bullet against the draft; if plan-coverage
+  drops below 85%, trigger a targeted revision iteration. Reference:
+  CovScore (Zhang 2024). **Effort:** half-day once the plan-bullet
+  schema is defined.
+- [ ] **#8 — Claim-atomization for offline verify.** Split each draft
+  sentence into ≤3 sub-claims, verify each with the NLI scorer,
+  aggregate. Catches mixed-truth sentences. Note: RESEARCH.md §526
+  rejects FActScore as *online* method; this is the offline-evaluator
+  slice, explicitly kept open. **Effort:** 1 day.
+- [ ] **#4 — bge-m3 LoRA fine-tune on synthetic question-chunk pairs.**
+  Uses #3's synthetic queries as contrastive-loss training data.
+  Distinct from ROADMAP §3 Phase E (which is the *reranker*). Keep the
+  base checkpoint as fallback. **Preconditions:** #3 shipped. **Effort:** 1–2 days.
+
+### 6c. Tier 3 — architecturally useful
+
+- [ ] **#10 — Paper-type classification + retrieval weighting.** Corpus
+  has peer-reviewed, preprints, theses, opinion pieces, policy briefs
+  with no distinction. Add a `paper_type` column via LLM classification
+  on abstract + first page. Expose as retrieval filter + default
+  downweight for non-peer-reviewed on factual `ask` queries. **Effort:** 1 day.
+- [ ] **#11 — Equation natural-language paraphrase embedding.** 4,687
+  equations embed poorly as raw LaTeX with bge-m3. LLM-paraphrase each
+  into prose (*"This equation expresses total outgoing longwave radiation
+  as…"*), embed the paraphrase, store in a new column on the `visuals`
+  row. **Effort:** ~20 min LLM time for the backfill, 2h implementation.
+- [ ] **#12 — Compound learning Layer 3** (already in §4b, still pending,
+  blocked on ≥50 autowrite runs).
+- [ ] **#13 — Chapter / book snapshot + restore.** Wrap existing
+  `draft_snapshots` with a "snapshot all drafts in this chapter/book"
+  batch operation. Safety net for autowrite-all runs. **Effort:** 2h.
+
+### 6d. Tier 4 — UX / observability
+
+- [ ] **#14 — Consolidated Book settings modal** (already in §5, half-day).
+- [ ] **#15 — GPU-time ledger per draft / chapter / book.** Persist
+  LLM-call wall-time from existing autowrite telemetry; expose as a
+  sidebar column + export in the book summary. Helps spot runaway CoVe
+  or rescoring loops. **Effort:** 2h.
+- [ ] **#16 — MCP server interface for the corpus.** Expose
+  `/api/ask`, `/api/search`, `/api/chapters` as an MCP server so
+  external agents can query the corpus. ~100 lines given FastAPI.
+  Opens multi-agent workflows without duplicating the ingestion stack.
+  **Effort:** 3h.
+
+### Rejected-adjacent items (from the 2026-04-18 audit)
+
+These look similar to Tier 1/2 items but were already addressed or
+explicitly rejected; **do NOT relitigate**:
+
+- HyDE (RESEARCH.md §526: step-back prompting dominates it on our stack).
+- Self-RAG / CRAG as runtime with fine-tuned reflection tokens
+  (RESEARCH.md §526: prompt-only emulations lose the gains).
+- GraphRAG global community summaries (RESEARCH.md §526: RAPTOR gets
+  80% of the benefit at 20% of the cost on our chunk index; bib-coupling
+  in #9 is *not* GraphRAG global — different axis).
+- FActScore as online method (RESEARCH.md §526: the proposal in #8 is
+  specifically the offline evaluator slice, which the same doc keeps open).
+- Dense X / Propositional Retrieval, Late Chunking — all in §526.
+
+---
+
 ## How to use this doc
 
 When picking the next phase:
