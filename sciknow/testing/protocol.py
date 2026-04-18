@@ -8577,6 +8577,47 @@ def l1_quality_bench_surface() -> None:
     )
 
 
+def l1_phase54_6_56_refresh_ingests_downloads_and_failed() -> None:
+    """Phase 54.6.56 — `refresh` sweeps inbox + downloads + failed folders.
+
+    Pre-54.6.56 the refresh command only ingested from inbox/. That left
+    expand-discovered PDFs sitting in downloads/ (and previously-failed
+    ones in failed/) out of the pipeline. Fix was to add two optional
+    ingest passes after the inbox pass. This test verifies the source
+    still references all three folders — if someone drops the downloads/
+    or failed/ steps in a future refactor, this test catches it.
+
+    Also re-asserts the "no force rebuilds" invariant by checking the
+    refresh source never invokes ``--rebuild`` or ``--force`` on the
+    downstream subcommands (users opt in manually on the individual
+    subcommand if they want to rebuild).
+    """
+    import inspect as _inspect
+    from sciknow.cli import refresh as refresh_mod
+    src = _inspect.getsource(refresh_mod.refresh)
+
+    # A) All three source folders mentioned
+    for folder_token in ('"inbox"', '"downloads"', '"failed"'):
+        assert folder_token in src, (
+            f"refresh source must reference {folder_token} so the ingest "
+            f"sweep covers that folder — see Phase 54.6.56"
+        )
+
+    # B) Each ingest step is an `ingest directory` subcommand
+    assert src.count('["ingest", "directory"') >= 3, (
+        "refresh must build three `ingest directory` steps "
+        "(inbox, downloads, failed) — see Phase 54.6.56"
+    )
+
+    # C) No force/rebuild flags leaked into refresh's argv lists
+    # (users must opt in explicitly on the subcommand itself)
+    for forbidden in ('"--force"', '"--rebuild"'):
+        assert forbidden not in src, (
+            f"refresh must never pass {forbidden} to subcommands — "
+            f"idempotent resume is the documented contract"
+        )
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -8775,6 +8816,8 @@ L1_TESTS: list[Callable] = [
     l1_quality_bench_surface,
     # Phase 54.6.51 — parallel OA lookup + title-dedup + alternate sources
     l1_phase54_6_51_downloader_parallelism_and_dedup,
+    # Phase 54.6.56 — refresh sweeps inbox + downloads + failed
+    l1_phase54_6_56_refresh_ingests_downloads_and_failed,
 ]
 
 L2_TESTS: list[Callable] = [

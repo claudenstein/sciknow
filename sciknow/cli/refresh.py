@@ -6,7 +6,9 @@ re-run this any time; steps that have no new work to do skip quickly.
 
 Pipeline order (matches docs/README "Full rebuild sequence"):
 
-  1. ingest directory        — add new PDFs to Postgres + Qdrant
+  1a. ingest inbox/          — add new PDFs (your staging area)
+  1b. ingest downloads/      — expand-discovered PDFs not yet processed
+  1c. ingest failed/         — retry previously-failed PDFs (resume, no force)
   2. db enrich               — DOI backfill via Crossref / OpenAlex / arXiv / Semantic Scholar
   3. db link-citations       — cross-link cited_document_id for in-corpus papers
   4. catalog cluster         — BERTopic re-cluster (includes new papers)
@@ -14,6 +16,11 @@ Pipeline order (matches docs/README "Full rebuild sequence"):
   6. db tag-multimodal       — tag chunks containing tables / equations
   7. db extract-visuals      — extract visual elements into visuals table
   8. wiki compile            — paper summaries + concept stubs + KG triples
+
+Every step is idempotent and **does not force rebuilds** — each one
+skips rows that are already done. Pass ``--rebuild`` directly to the
+underlying command if you want a force rebuild (e.g. ``sciknow wiki
+compile --rebuild`` — refresh will never add that flag for you).
 
 Use ``--no-<step>`` flags to skip expensive steps you don't need this
 round (e.g. ``--no-wiki`` skips the hours-long LLM compile).
@@ -124,19 +131,57 @@ def refresh(
     steps: list[tuple[str, list[str], bool]] = []  # (label, argv, optional)
 
     if not no_ingest:
-        if papers_dir.exists():
-            n_pdfs = len(list(papers_dir.glob("**/*.pdf")))
-            if n_pdfs:
-                steps.append((
-                    f"1. Ingest {n_pdfs} PDF(s) from {papers_dir}",
-                    ["ingest", "directory", str(papers_dir)],
-                    False,
-                ))
-            else:
-                console.print(f"[dim]Inbox has no PDFs — skipping ingest[/dim]\n")
+        # Phase 54.6.56 — also sweep downloads/ (expand-created PDFs that
+        # never got moved to processed/ or failed/, usually because the
+        # expand run crashed between download and ingest) and failed/
+        # (previous ingestion errors — re-ingesting resumes them from
+        # whatever stage they failed at, it does NOT force a re-do of
+        # completed papers thanks to the SHA-256 skip in pipeline.ingest).
+        def _count_pdfs(p: Path) -> int:
+            if not p.exists():
+                return 0
+            return len(list(p.glob("**/*.pdf")))
+
+        n_inbox = _count_pdfs(papers_dir)
+        downloads_dir = active.data_dir / "downloads"
+        failed_dir = active.data_dir / "failed"
+        n_downloads = _count_pdfs(downloads_dir)
+        n_failed = _count_pdfs(failed_dir)
+
+        if n_inbox:
+            steps.append((
+                f"1a. Ingest {n_inbox} PDF(s) from inbox ({papers_dir})",
+                ["ingest", "directory", str(papers_dir)],
+                False,
+            ))
+        elif papers_dir.exists():
+            console.print(f"[dim]Inbox has no PDFs — skipping inbox ingest[/dim]")
         else:
-            console.print(f"[dim]Inbox missing — skipping ingest. "
-                          f"Create {papers_dir} and drop PDFs there.[/dim]\n")
+            console.print(f"[dim]Inbox missing — skipping inbox ingest. "
+                          f"Create {papers_dir} and drop PDFs there.[/dim]")
+
+        if n_downloads:
+            steps.append((
+                f"1b. Ingest {n_downloads} PDF(s) from downloads "
+                f"(expand-discovered, not yet moved to processed/)",
+                ["ingest", "directory", str(downloads_dir)],
+                True,  # optional — downloads/ is auxiliary
+            ))
+        elif downloads_dir.exists():
+            console.print(f"[dim]downloads/ has no PDFs — nothing to ingest[/dim]")
+
+        if n_failed:
+            steps.append((
+                f"1c. Retry {n_failed} previously-failed PDF(s) from failed/ "
+                f"(resume from last stage, no force)",
+                ["ingest", "directory", str(failed_dir)],
+                True,  # optional — retrying failures shouldn't block the rest
+            ))
+        elif failed_dir.exists():
+            console.print(f"[dim]failed/ has no PDFs — nothing to retry[/dim]")
+
+        if any([n_inbox, n_downloads, n_failed]):
+            console.print()
 
     if not no_enrich:
         steps.append(("2. DOI enrichment (Crossref/OpenAlex/arXiv/S2)",
