@@ -8748,13 +8748,20 @@ def l1_phase54_6_72_visuals_caption_surface() -> None:
     assert hasattr(_db_cli, "caption_visuals_cmd"), (
         "CLI must expose `sciknow db caption-visuals`"
     )
-    # Extract the default model from the Typer option's default value.
+    # Resolution chain: --model > settings.visuals_caption_model >
+    # qwen2.5vl:32b (per the 54.6.73 quality-first directive). Check
+    # the body contains both the settings lookup and the qwen2.5vl:32b
+    # fallback — flipping the fallback silently should trip this test.
     import inspect as _inspect
     cmd_src = _inspect.getsource(_db_cli.caption_visuals_cmd)
+    assert 'settings.visuals_caption_model' in cmd_src, (
+        "caption-visuals must honor settings.visuals_caption_model "
+        "(54.6.74 — lets the VLM sweep winner persist via .env)"
+    )
     assert '"qwen2.5vl:32b"' in cmd_src, (
-        "caption-visuals default model must be the quality pick "
+        "caption-visuals fallback must remain the quality pick "
         "(qwen2.5vl:32b) per the 54.6.73 directive; "
-        "to lower the default, document the reason in the CLI docstring"
+        "to lower the fallback, document the reason in the CLI docstring"
     )
 
     # D) /api/visuals hydrates ai_caption

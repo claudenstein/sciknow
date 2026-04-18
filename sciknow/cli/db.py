@@ -4537,8 +4537,10 @@ def extract_visuals_cmd(
 @app.command(name="caption-visuals")
 def caption_visuals_cmd(
     model: str = typer.Option(
-        "qwen2.5vl:32b", "--model",
-        help="Vision-LLM tag to use via Ollama. Default qwen2.5vl:32b "
+        None, "--model",
+        help="Vision-LLM tag to use via Ollama. Default: "
+             "settings.visuals_caption_model if set (let the 54.6.74 "
+             "VLM sweep winner persist via .env) else qwen2.5vl:32b. "
              "(~19 GB Q4, fits a 3090 with the main LLM unloaded — "
              "strongest open VLM that fits for document+chart quality). "
              "For faster / lower-VRAM: qwen2.5vl:7b (~6 GB, co-resident "
@@ -4610,6 +4612,12 @@ def caption_visuals_cmd(
     if not kinds:
         console.print("[red]--kind must be a non-empty comma-separated list[/red]")
         raise typer.Exit(2)
+
+    # Phase 54.6.74 — resolve the effective model: explicit --model
+    # wins, else settings.visuals_caption_model (set by .env after
+    # the VLM sweep picks a winner), else the CLI default.
+    if model is None:
+        model = settings.visuals_caption_model or "qwen2.5vl:32b"
 
     # Sanity-check model availability up front so we fail fast.
     client = ollama.Client(host=settings.ollama_host)

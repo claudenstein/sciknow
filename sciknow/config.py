@@ -84,6 +84,13 @@ class Settings(BaseSettings):
     autowrite_scorer_model: str | None = None
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
 
+    # Phase 54.6.74 (#1b) — vision-LLM default for `db caption-visuals`.
+    # Overrides the CLI default when set. Lets the 54.6.74 VLM sweep
+    # result (whichever model wins the judge pairwise on the user's
+    # own corpus) persist without editing the CLI source. Unset →
+    # CLI default (qwen2.5vl:32b) wins.
+    visuals_caption_model: str | None = None
+
     # Phase 54.6.70 (#9) — co-citation / bib-coupling retrieval boost.
     # Gentle log-dampened multiplier applied to candidates whose document
     # has citation-graph edges to the top-N anchor set from the same
