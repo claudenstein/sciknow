@@ -8226,8 +8226,8 @@ body.task-bar-open {{ padding-top: 40px; }}
     </div>
     <div class="tabs">
       <button class="tab active" data-tab="plan-book" onclick="switchPlanTab('plan-book')">Book</button>
-      <button class="tab" data-tab="plan-chapter" onclick="switchPlanTab('plan-chapter')" id="plan-tab-chapter">Chapter sections</button>
-      <button class="tab" data-tab="plan-section" onclick="switchPlanTab('plan-section')" id="plan-tab-section">Section</button>
+      <button class="tab" data-tab="plan-chapters" onclick="switchPlanTab('plan-chapters')" id="plan-tab-chapters">Chapters</button>
+      <button class="tab" data-tab="plan-chapter" onclick="switchPlanTab('plan-chapter')" id="plan-tab-chapter">Sections</button>
     </div>
     <div class="modal-body">
       <!-- Book tab — the leitmotiv (existing) -->
@@ -8271,58 +8271,44 @@ body.task-bar-open {{ padding-top: 40px; }}
           </p>
         </div>
       </div>
-      <!-- Chapter tab — Phase 21: shows the active chapter's title +
-           description + the full ordered list of section plans
-           (read+edit). Save updates each section's plan via PUT
-           /api/chapters/{{id}}/sections. -->
+      <!-- Phase 54.6.66 — Chapters tab (book-wide chapter manager):
+           list all chapters with editable title / description /
+           topic_query, ↑/↓ reorder, delete, and an Add-chapter row.
+           Uses existing /api/chapters, /api/chapters/{{id}},
+           /api/chapters/reorder, DELETE /api/chapters/{{id}}. -->
+      <div class="tab-pane" id="plan-chapters-pane" style="display:none;">
+        <p style="font-size:12px;color:var(--fg-muted);margin-bottom:12px;">
+          Book-wide chapter plan: every chapter&rsquo;s title, description, and
+          retrieval query. Reorder with &uarr; / &darr;. Delete unlinks the
+          chapter&rsquo;s drafts but does not delete them. Section-level editing
+          moves to the <strong>Sections</strong> tab.
+        </p>
+        <div id="plan-chapters-list" style="display:flex;flex-direction:column;gap:10px;"></div>
+        <div style="margin-top:12px;">
+          <button class="btn-secondary" onclick="addPlanChapter()">+ Add chapter</button>
+        </div>
+      </div>
+      <!-- Sections tab (was "Chapter sections"). Now includes a
+           chapter picker at the top so the user can switch between
+           chapters without closing the modal. Each section row stays
+           inline-editable (plan + target_words). -->
       <div class="tab-pane" id="plan-chapter-pane" style="display:none;">
         <p style="font-size:12px;color:var(--fg-muted);margin-bottom:12px;">
-          The chapter view shows the book leitmotiv at the top (read-only summary)
-          plus the full plan for every section in the chapter, in order. Edit any
-          section&rsquo;s plan inline and click Save to persist.
+          Per-chapter section plans: pick a chapter, then edit each
+          section&rsquo;s plan and target word count. To rename / reorder /
+          add / delete sections themselves, use the chapter modal&rsquo;s
+          Sections tab.
         </p>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">
+          <label style="font-size:12px;color:var(--fg-muted);">Chapter:</label>
+          <select id="plan-sections-chapter-picker"
+                  onchange="onPlanSectionsChapterChange(this.value)"
+                  style="flex:1;min-width:200px;padding:4px 8px;">
+            <option value="">(choose a chapter…)</option>
+          </select>
+        </div>
         <div id="plan-chapter-header" style="margin-bottom:14px;font-size:13px;color:var(--fg-muted);"></div>
         <div id="plan-chapter-sections"></div>
-      </div>
-      <!-- Section tab — Phase 21: focused single-section plan editor.
-           Opens here when the user clicks Plan from a section view. -->
-      <div class="tab-pane" id="plan-section-pane" style="display:none;">
-        <p style="font-size:12px;color:var(--fg-muted);margin-bottom:12px;">
-          The section plan tells the writer what THIS specific section must cover,
-          narrower than the chapter description. Injected into the writer prompt as
-          a &ldquo;Section plan&rdquo; block above the book plan and prior chapter
-          summaries.
-        </p>
-        <div id="plan-section-context" style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;"></div>
-        <div class="field">
-          <label>Section title</label>
-          <input type="text" id="plan-section-title">
-        </div>
-        <div class="field">
-          <label>Section plan (a few sentences)</label>
-          <textarea id="plan-section-text" style="min-height:200px;"></textarea>
-        </div>
-        <!-- Phase 32.2 — per-section length dropdown. Mirrors the
-             chapter modal Sections tab so the user can pick a
-             length while editing the focused section plan. -->
-        <div class="field">
-          <label>Target length for this section</label>
-          <div class="sec-size-row" style="padding-top:4px;">
-            <select id="plan-section-target-select" onchange="updatePlanSectionTargetWords(this.value)">
-              <option value="">Auto (chapter target / num sections)</option>
-              <option value="400">Very short (~400w)</option>
-              <option value="800">Short (~800w)</option>
-              <option value="1500">Medium (~1500w)</option>
-              <option value="3000">Long (~3000w)</option>
-              <option value="6000">Extra long (~6000w)</option>
-              <option value="custom">Custom&hellip;</option>
-            </select>
-            <input type="number" id="plan-section-target-custom" class="sec-size-custom" placeholder="words"
-                   min="100" step="100" style="display:none;"
-                   oninput="updatePlanSectionTargetWordsCustom(this.value)">
-            <span id="plan-section-target-badge" class="sec-target-badge"></span>
-          </div>
-        </div>
       </div>
       <div id="plan-status" style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;"></div>
       <div id="plan-stream-stats" class="stream-stats"></div>
@@ -18015,19 +18001,25 @@ function askAboutPaper(title) {{
 //   - chapter selected → Chapter tab showing the chapter's section plans
 //   - nothing selected → Book tab (the leitmotiv)
 //
-// All three tabs are always present in the DOM; openPlanModal hides
-// the chapter/section tabs when there's no relevant context, and
-// switchPlanTab is the manual override.
+// Phase 54.6.66 — three tabs, always visible:
+//   Book      — the leitmotiv (always loaded)
+//   Chapters  — book-wide chapter manager (title / description / order)
+//   Sections  — per-chapter section plan editor, with a chapter picker
+// The legacy "Section" (single-section focused editor) tab is gone;
+// section-level editing happens inside the Sections tab, filtered to
+// the picked chapter.
 
 let _planContext = {{ mode: 'book', chapterId: null, sectionSlug: null }};
 
 async function openPlanModal(context) {{
   // Default context: derive from current selection state.
   if (!context) {{
-    if (currentChapterId && currentSectionType) {{
-      context = {{ mode: 'section', chapterId: currentChapterId, sectionSlug: currentSectionType }};
-    }} else if (currentChapterId) {{
-      context = {{ mode: 'chapter', chapterId: currentChapterId, sectionSlug: null }};
+    if (currentChapterId) {{
+      // Section context still useful: auto-scroll to the section in
+      // the Sections tab so the user lands on the relevant row.
+      context = {{ mode: currentSectionType ? 'section' : 'chapter',
+                   chapterId: currentChapterId,
+                   sectionSlug: currentSectionType || null }};
     }} else {{
       context = {{ mode: 'book', chapterId: null, sectionSlug: null }};
     }}
@@ -18048,11 +18040,7 @@ async function openPlanModal(context) {{
   openModal('plan-modal');
   document.getElementById('plan-status').textContent = 'Loading...';
 
-  // Show/hide context-specific tabs based on what's selected
-  const chapterTab = document.getElementById('plan-tab-chapter');
-  const sectionTab = document.getElementById('plan-tab-section');
-  if (chapterTab) chapterTab.style.display = context.chapterId ? '' : 'none';
-  if (sectionTab) sectionTab.style.display = (context.chapterId && context.sectionSlug) ? '' : 'none';
+  // All three tabs always visible post-54.6.66; no contextual hiding.
 
   // Always populate the Book tab fields (cheap fetch + the user might
   // switch tabs back to it).
@@ -18084,20 +18072,36 @@ async function openPlanModal(context) {{
     document.getElementById('plan-status').textContent = 'Error loading book: ' + e.message;
   }}
 
-  // Populate the Chapter / Section tabs from the in-memory chaptersData
-  // (no extra fetch needed). Falls back to refetching /api/chapters
-  // if the local cache is missing the active chapter.
+  // Populate the Chapters tab always (book-wide view). Populate the
+  // Sections tab's chapter picker from the same in-memory chaptersData
+  // cache and, if the user arrived with a chapter context, preselect
+  // it so the section list is ready when they switch to that tab.
+  populatePlanChaptersTab();
+  populatePlanSectionsPicker(context.chapterId);
   if (context.chapterId) {{
     const ch = chaptersData.find(c => c.id === context.chapterId);
     if (ch) populatePlanChapterTab(ch);
   }}
 
-  // Open the right tab based on context
-  if (context.mode === 'section') {{
-    switchPlanTab('plan-section');
-    populatePlanSectionTab(context.chapterId, context.sectionSlug);
-  }} else if (context.mode === 'chapter') {{
+  // Landing tab: Sections if the user came from a chapter/section
+  // view, Book otherwise.
+  if (context.mode === 'section' || context.mode === 'chapter') {{
     switchPlanTab('plan-chapter');
+    // Auto-scroll to the specific section on next tick so the DOM
+    // from populatePlanChapterTab has settled.
+    if (context.sectionSlug) {{
+      setTimeout(function() {{
+        const row = document.querySelector(
+          '#plan-chapter-sections .sec-row[data-slug="' +
+          (context.sectionSlug || '').replace(/"/g, '\\\\"') + '"]'
+        );
+        if (row && row.scrollIntoView) {{
+          row.scrollIntoView({{block: 'center', behavior: 'smooth'}});
+          row.style.outline = '2px solid var(--accent, dodgerblue)';
+          setTimeout(function() {{ row.style.outline = ''; }}, 1200);
+        }}
+      }}, 100);
+    }}
   }} else {{
     switchPlanTab('plan-book');
   }}
@@ -18107,12 +18111,234 @@ function switchPlanTab(name) {{
   document.querySelectorAll('#plan-modal .tab').forEach(t => {{
     t.classList.toggle('active', t.dataset.tab === name);
   }});
-  document.getElementById('plan-book-pane').style.display = (name === 'plan-book') ? 'block' : 'none';
-  document.getElementById('plan-chapter-pane').style.display = (name === 'plan-chapter') ? 'block' : 'none';
-  document.getElementById('plan-section-pane').style.display = (name === 'plan-section') ? 'block' : 'none';
+  const show = {{
+    'plan-book':     'plan-book-pane',
+    'plan-chapters': 'plan-chapters-pane',
+    'plan-chapter':  'plan-chapter-pane',   // ← "Sections" tab keeps old id
+  }};
+  ['plan-book-pane', 'plan-chapters-pane', 'plan-chapter-pane'].forEach(function(id) {{
+    const el = document.getElementById(id);
+    if (el) el.style.display = (show[name] === id) ? 'block' : 'none';
+  }});
   // The Regenerate button only makes sense for the book leitmotiv.
   const regenBtn = document.getElementById('plan-regen-btn');
   if (regenBtn) regenBtn.style.display = (name === 'plan-book') ? '' : 'none';
+  // "Generate outline" button is relevant on Book and Chapters tabs
+  // (it populates both). Irrelevant inside the per-chapter Sections view.
+  const outlineBtn = document.getElementById('plan-outline-btn');
+  if (outlineBtn) {{
+    outlineBtn.style.display = (name === 'plan-chapter') ? 'none' : '';
+  }}
+}}
+
+// ── Phase 54.6.66 — Chapters tab: book-wide chapter manager ────────────
+
+function populatePlanChaptersTab() {{
+  const list = document.getElementById('plan-chapters-list');
+  if (!list) return;
+  const chapters = (chaptersData || []).slice().sort(
+    function(a, b) {{ return (a.num || 0) - (b.num || 0); }}
+  );
+  if (chapters.length === 0) {{
+    list.innerHTML =
+      '<div style="padding:16px;text-align:center;color:var(--fg-muted);'
+      + 'border:1px dashed var(--border);border-radius:6px;">'
+      + 'No chapters yet. Click <strong>Generate outline</strong> below '
+      + 'to draft chapters from your corpus, or + Add chapter to create '
+      + 'one manually.'
+      + '</div>';
+    return;
+  }}
+  let html = '';
+  chapters.forEach(function(ch, i) {{
+    const cid = ch.id;
+    const isFirst = (i === 0);
+    const isLast = (i === chapters.length - 1);
+    html += '<div class="plan-ch-row" data-cid="' + cid + '" '
+         +  'style="border:1px solid var(--border);border-radius:6px;padding:10px;">'
+         +  '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">'
+         +  '<span style="font-weight:700;font-size:12px;color:var(--fg-muted);'
+         +  'min-width:45px;">Ch.' + (ch.num || '?') + '</span>'
+         +  '<input type="text" class="plan-ch-title" value="' + escapeHtml(ch.title || '')
+         +  '" placeholder="Chapter title" '
+         +  'style="flex:1;padding:4px 8px;font-weight:600;">'
+         +  '<button class="btn-secondary" title="Move up" '
+         +  'onclick="movePlanChapter(\\'' + cid + '\\', -1)" '
+         +  (isFirst ? 'disabled' : '') + ' style="padding:2px 8px;">&uarr;</button>'
+         +  '<button class="btn-secondary" title="Move down" '
+         +  'onclick="movePlanChapter(\\'' + cid + '\\', 1)" '
+         +  (isLast ? 'disabled' : '') + ' style="padding:2px 8px;">&darr;</button>'
+         +  '<button class="btn-secondary" title="Save row" '
+         +  'onclick="savePlanChapterRow(\\'' + cid + '\\')" '
+         +  'style="padding:2px 10px;">Save</button>'
+         +  '<button class="btn-secondary" title="Delete chapter" '
+         +  'onclick="deletePlanChapter(\\'' + cid + '\\')" '
+         +  'style="padding:2px 8px;color:var(--danger,#c00);">&times;</button>'
+         +  '</div>'
+         +  '<textarea class="plan-ch-desc" rows="2" '
+         +  'placeholder="Short description (1-2 sentences)" '
+         +  'style="width:100%;padding:4px 8px;margin-bottom:6px;font-size:12px;">'
+         +  escapeHtml(ch.description || '') + '</textarea>'
+         +  '<div style="display:flex;gap:6px;align-items:center;">'
+         +  '<label style="font-size:11px;color:var(--fg-muted);min-width:80px;">Topic query:</label>'
+         +  '<input type="text" class="plan-ch-tq" value="' + escapeHtml(ch.topic_query || '')
+         +  '" placeholder="3-6 word retrieval phrase" '
+         +  'style="flex:1;padding:3px 8px;font-size:12px;">'
+         +  '</div>'
+         +  '</div>';
+  }});
+  list.innerHTML = html;
+}}
+
+async function savePlanChapterRow(cid) {{
+  const row = document.querySelector('.plan-ch-row[data-cid="' + cid + '"]');
+  if (!row) return;
+  const title = row.querySelector('.plan-ch-title').value.trim();
+  const desc = row.querySelector('.plan-ch-desc').value.trim();
+  const tq = row.querySelector('.plan-ch-tq').value.trim();
+  const fd = new FormData();
+  fd.append('title', title);
+  fd.append('description', desc);
+  fd.append('topic_query', tq);
+  const status = document.getElementById('plan-status');
+  status.textContent = 'Saving chapter…';
+  try {{
+    const res = await fetch('/api/chapters/' + cid, {{method: 'PUT', body: fd}});
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    status.textContent = '✓ Saved';
+    // Update the in-memory cache so the Sections picker + landing
+    // pages reflect the rename immediately.
+    const ch = (chaptersData || []).find(function(c) {{ return c.id === cid; }});
+    if (ch) {{
+      ch.title = title;
+      ch.description = desc;
+      ch.topic_query = tq;
+    }}
+    populatePlanSectionsPicker(
+      document.getElementById('plan-sections-chapter-picker').value || null
+    );
+  }} catch (e) {{
+    status.textContent = 'Save failed: ' + e.message;
+  }}
+}}
+
+async function movePlanChapter(cid, delta) {{
+  const chapters = (chaptersData || []).slice().sort(
+    function(a, b) {{ return (a.num || 0) - (b.num || 0); }}
+  );
+  const idx = chapters.findIndex(function(c) {{ return c.id === cid; }});
+  const target = idx + delta;
+  if (idx < 0 || target < 0 || target >= chapters.length) return;
+  // Swap in-array, then POST the new order to the server.
+  const tmp = chapters[idx];
+  chapters[idx] = chapters[target];
+  chapters[target] = tmp;
+  const order = chapters.map(function(c) {{ return c.id; }});
+  const status = document.getElementById('plan-status');
+  status.textContent = 'Reordering…';
+  try {{
+    const res = await fetch('/api/chapters/reorder', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{chapter_ids: order}}),
+    }});
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    // Reflect new numbers client-side without a full refetch.
+    chapters.forEach(function(c, i) {{ c.num = i + 1; }});
+    window.chaptersData = chapters;
+    populatePlanChaptersTab();
+    populatePlanSectionsPicker(
+      document.getElementById('plan-sections-chapter-picker').value || null
+    );
+    status.textContent = '✓ Reordered';
+  }} catch (e) {{
+    status.textContent = 'Reorder failed: ' + e.message;
+  }}
+}}
+
+async function deletePlanChapter(cid) {{
+  const ch = (chaptersData || []).find(function(c) {{ return c.id === cid; }});
+  const label = ch ? ('Ch.' + ch.num + ' "' + (ch.title || '') + '"') : 'this chapter';
+  if (!confirm('Delete ' + label + '? Drafts will be unlinked but not deleted.')) return;
+  const status = document.getElementById('plan-status');
+  status.textContent = 'Deleting…';
+  try {{
+    const res = await fetch('/api/chapters/' + cid, {{method: 'DELETE'}});
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    // Refresh local chaptersData cache
+    const res2 = await fetch('/api/chapters');
+    const data = await res2.json();
+    window.chaptersData = data.chapters || [];
+    populatePlanChaptersTab();
+    populatePlanSectionsPicker(null);
+    status.textContent = '✓ Deleted';
+  }} catch (e) {{
+    status.textContent = 'Delete failed: ' + e.message;
+  }}
+}}
+
+async function addPlanChapter() {{
+  const title = prompt('Chapter title:');
+  if (!title || !title.trim()) return;
+  const fd = new FormData();
+  fd.append('title', title.trim());
+  const status = document.getElementById('plan-status');
+  status.textContent = 'Adding chapter…';
+  try {{
+    const res = await fetch('/api/chapters', {{method: 'POST', body: fd}});
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const res2 = await fetch('/api/chapters');
+    const data = await res2.json();
+    window.chaptersData = data.chapters || [];
+    populatePlanChaptersTab();
+    populatePlanSectionsPicker(null);
+    status.textContent = '✓ Added';
+  }} catch (e) {{
+    status.textContent = 'Add failed: ' + e.message;
+  }}
+}}
+
+// ── Sections tab — chapter picker wiring (Phase 54.6.66) ──────────────
+
+function populatePlanSectionsPicker(preselectId) {{
+  const picker = document.getElementById('plan-sections-chapter-picker');
+  if (!picker) return;
+  const chapters = (chaptersData || []).slice().sort(
+    function(a, b) {{ return (a.num || 0) - (b.num || 0); }}
+  );
+  const current = preselectId || picker.value || (chapters[0] && chapters[0].id) || '';
+  let html = '<option value="">(choose a chapter…)</option>';
+  chapters.forEach(function(c) {{
+    const sel = (c.id === current) ? ' selected' : '';
+    html += '<option value="' + c.id + '"' + sel + '>'
+         +  'Ch.' + (c.num || '?') + ' — ' + escapeHtml(c.title || '')
+         +  '</option>';
+  }});
+  picker.innerHTML = html;
+  if (current) {{
+    const ch = chapters.find(function(c) {{ return c.id === current; }});
+    if (ch) populatePlanChapterTab(ch);
+  }}
+}}
+
+function onPlanSectionsChapterChange(cid) {{
+  if (!cid) {{
+    document.getElementById('plan-chapter-header').innerHTML = '';
+    document.getElementById('plan-chapter-sections').innerHTML = '';
+    return;
+  }}
+  const ch = (chaptersData || []).find(function(c) {{ return c.id === cid; }});
+  if (ch) {{
+    // Per-chapter editing state is per-slug; reset so we don't leak
+    // overrides from one chapter into another's dropdown defaults.
+    _editingChapterPlans = {{}};
+    _editingChapterTargetWords = {{}};
+    _editingChapterCustomMode = {{}};
+    populatePlanChapterTab(ch);
+    _planContext = {{
+      mode: 'chapter', chapterId: cid, sectionSlug: null,
+    }};
+  }}
 }}
 
 // Phase 21 — render the chapter sections view inside the Plan modal.
@@ -18353,18 +18579,34 @@ function setLengthPreset(words) {{
 }}
 
 async function savePlan() {{
-  // Phase 21 — savePlan dispatches based on which tab is active so a
-  // single Save button works for all three contexts. Each branch saves
-  // the relevant subset and refreshes the in-memory chaptersData cache.
+  // Phase 21 / 54.6.66 — savePlan dispatches on the active tab.
+  // plan-book    → leitmotiv + target_chapter_words (book-wide record)
+  // plan-chapters→ no bulk save; each chapter row has its own Save
+  //                button (see savePlanChapterRow). We still respond
+  //                with a status line so the global Save button feels
+  //                responsive.
+  // plan-chapter → per-chapter section plans (existing flow).
   const activeTabBtn = document.querySelector('#plan-modal .tab.active');
   const tab = activeTabBtn ? activeTabBtn.dataset.tab : 'plan-book';
 
   if (tab === 'plan-book') {{
     return savePlanBook();
+  }} else if (tab === 'plan-chapters') {{
+    // Save every dirty row. Simple approach: PUT all rows (the PUT
+    // is idempotent and cheap — text-only metadata update).
+    const rows = document.querySelectorAll('#plan-chapters-list .plan-ch-row');
+    if (!rows.length) return;
+    document.getElementById('plan-status').textContent =
+      'Saving ' + rows.length + ' chapter(s)…';
+    for (const row of rows) {{
+      const cid = row.dataset.cid;
+      if (cid) {{ await savePlanChapterRow(cid); }}
+    }}
+    document.getElementById('plan-status').innerHTML =
+      '<span style="color:var(--success);">Saved all chapters.</span>';
+    return;
   }} else if (tab === 'plan-chapter') {{
     return savePlanChapterSections();
-  }} else if (tab === 'plan-section') {{
-    return savePlanSection();
   }}
 }}
 

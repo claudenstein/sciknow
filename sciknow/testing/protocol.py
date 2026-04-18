@@ -2338,28 +2338,48 @@ def l1_phase21_section_editor_live_slug_and_budget() -> None:
 
 
 def l1_phase21_plan_modal_context_aware() -> None:
-    """Phase 21 — Plan modal has Book / Chapter / Section tabs and
-    openPlanModal() accepts a context arg that auto-routes based on
-    the current selection.
+    """Phase 21 / 54.6.66 — Plan modal has three tabs — Book, Chapters
+    (book-wide chapter manager), and Sections (per-chapter section plan
+    editor with a chapter picker). openPlanModal() still accepts an
+    optional context and auto-routes based on the current selection;
+    the legacy single-section "Section" tab was removed in 54.6.66 —
+    section-level plan editing happens inline in the Sections tab.
     """
     import inspect
     from sciknow.web import app as web_app
 
     src = inspect.getsource(web_app)
 
-    # Tabs in the HTML
-    assert "plan-tab-chapter" in src, "Plan modal missing Chapter tab"
-    assert "plan-tab-section" in src, "Plan modal missing Section tab"
-    assert "plan-chapter-pane" in src, "Plan modal missing chapter pane"
-    assert "plan-section-pane" in src, "Plan modal missing section pane"
+    # Three tabs present in the HTML (54.6.66 shape)
+    assert "plan-tab-chapters" in src, (
+        "Plan modal missing Chapters tab (54.6.66 book-wide chapter manager)"
+    )
+    assert "plan-tab-chapter" in src, "Plan modal missing Sections tab"
+    assert "plan-chapters-pane" in src, "Plan modal missing chapters pane"
+    assert "plan-chapter-pane" in src, "Plan modal missing sections pane"
+
+    # Sections tab has the chapter picker (lets the user switch chapters
+    # without leaving the Plan modal)
+    assert "plan-sections-chapter-picker" in src, (
+        "Sections tab missing chapter picker — 54.6.66 requires it"
+    )
 
     # JS dispatch helpers
     assert "switchPlanTab" in src, "switchPlanTab JS helper missing"
+    assert "populatePlanChaptersTab" in src, (
+        "populatePlanChaptersTab missing (book-wide chapter manager renderer)"
+    )
     assert "populatePlanChapterTab" in src, "populatePlanChapterTab missing"
-    assert "populatePlanSectionTab" in src, "populatePlanSectionTab missing"
     assert "savePlanBook" in src, "savePlanBook missing"
     assert "savePlanChapterSections" in src, "savePlanChapterSections missing"
-    assert "savePlanSection" in src, "savePlanSection missing"
+    assert "savePlanChapterRow" in src, (
+        "savePlanChapterRow missing — per-row save on Chapters tab"
+    )
+    assert "movePlanChapter" in src, (
+        "movePlanChapter missing — ↑/↓ reorder on Chapters tab"
+    )
+    assert "deletePlanChapter" in src, "deletePlanChapter missing"
+    assert "addPlanChapter" in src, "addPlanChapter missing"
 
     # Context-aware open: detects section/chapter/book mode
     assert "_planContext" in src, "openPlanModal doesn't track context state"
