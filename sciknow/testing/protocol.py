@@ -8657,6 +8657,75 @@ def l1_phase54_6_61_wiki_summaries_and_visuals_surface() -> None:
     )
 
 
+def l1_phase54_6_79_plan_coverage_behavior() -> None:
+    """Phase 54.6.79 (#6) — plan coverage dimension for autowrite.
+
+    NLI scorer is mocked so we exercise the real pipeline without
+    loading the 440MB cross-encoder. Verifies:
+      A) atomize_plan splits sentences and list separators.
+      B) compute_coverage: when NLI says 'all covered', fraction=1.0;
+         when NLI says 'half covered', fraction≈0.5 and missed_bullets
+         list is populated.
+      C) revision_hint_for_misses returns empty for no-misses and
+         non-empty with bullet text for misses.
+      D) book_ops._autowrite_section_body imports plan_coverage.
+    """
+    from unittest.mock import patch
+    from sciknow.core import plan_coverage as pc
+
+    # A) atomize_plan
+    bullets = pc.atomize_plan(
+        "Covers the historical context. Then the key evidence. "
+        "Finally the remaining debates."
+    )
+    assert len(bullets) == 3, (
+        f"sentence split should give 3 bullets; got {len(bullets)}: {bullets}"
+    )
+    # Single-sentence plans fall back to one bullet.
+    single = pc.atomize_plan("This section introduces the CO2 question.")
+    assert len(single) == 1
+    # Semicolon-separated list:
+    list_form = pc.atomize_plan(
+        "Covers: historical data; CO2 measurements; temperature trends"
+    )
+    assert len(list_form) >= 2
+
+    # B) compute_coverage — mocked NLI
+    plan = "First point about A. Second point about B. Third point about C."
+    draft = "some draft prose"
+    with patch.object(pc, "_nli_entail_probs", return_value=[0.9, 0.9, 0.9]):
+        r = pc.compute_coverage(draft, plan)
+        assert r.n_bullets == 3
+        assert r.coverage == 1.0
+        assert r.missed_bullets == []
+    with patch.object(pc, "_nli_entail_probs", return_value=[0.9, 0.2, 0.8]):
+        r = pc.compute_coverage(draft, plan)
+        assert r.n_bullets == 3
+        assert r.coverage == 2 / 3, f"expected 2/3, got {r.coverage}"
+        assert len(r.missed_bullets) == 1
+        assert "Second" in r.missed_bullets[0]
+
+    # C) revision hint
+    assert pc.revision_hint_for_misses([]) == ""
+    hint = pc.revision_hint_for_misses(
+        ["First point about A.", "Second point about B."]
+    )
+    assert "First point about A." in hint
+    assert "Second point about B." in hint
+
+    # D) book_ops integration
+    import inspect
+    from sciknow.core import book_ops
+    body_src = inspect.getsource(book_ops._autowrite_section_body)
+    assert "plan_coverage" in body_src, (
+        "_autowrite_section_body must compute plan_coverage as a "
+        "scoring dimension (54.6.79)"
+    )
+    assert "compute_coverage" in body_src, (
+        "autowrite body must import compute_coverage"
+    )
+
+
 def l1_phase54_6_78_equation_paraphrase_surface() -> None:
     """Phase 54.6.78 (#11) — equation paraphrase helpers.
 
@@ -9337,6 +9406,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_77_mcp_server_surface,
     # Phase 54.6.78 — equation paraphrase module (#11)
     l1_phase54_6_78_equation_paraphrase_surface,
+    # Phase 54.6.79 — plan coverage dimension (#6)
+    l1_phase54_6_79_plan_coverage_behavior,
 ]
 
 L2_TESTS: list[Callable] = [

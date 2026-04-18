@@ -4042,6 +4042,47 @@ def _autowrite_section_body(
             scores = {"overall": 0.5, "weakest_dimension": "unknown",
                       "revision_instruction": "Improve overall quality."}
 
+        # Phase 54.6.79 (#6) — plan coverage as a dimension. Computes
+        # NLI entailment of each atomic plan bullet against the draft;
+        # if the scorer's "overall" stayed high but coverage fell, the
+        # weakest-dimension logic below now picks "plan_coverage" and
+        # the revision targets the missed bullets specifically. Fails
+        # silently when NLI is unavailable or the plan text is empty.
+        if section_plan and section_plan.strip():
+            try:
+                from sciknow.core.plan_coverage import (
+                    compute_coverage, revision_hint_for_misses,
+                )
+                _cov = compute_coverage(content, section_plan)
+                if _cov.n_bullets > 0:
+                    scores["plan_coverage"] = _cov.coverage
+                    log.event(
+                        "plan_coverage",
+                        coverage=round(_cov.coverage, 3),
+                        n_bullets=_cov.n_bullets,
+                        n_covered=_cov.n_covered,
+                    )
+                    yield {"type": "plan_coverage", "data": _cov.as_dict()}
+                    # If plan_coverage is the weakest dimension AND it's
+                    # below target, override the scorer's weakest + the
+                    # revision instruction to name the missed bullets.
+                    _dim_values = {
+                        k: v for k, v in scores.items()
+                        if isinstance(v, (int, float)) and k != "overall"
+                    }
+                    if _dim_values:
+                        _weakest_dim = min(_dim_values, key=_dim_values.get)
+                        if (_weakest_dim == "plan_coverage"
+                                and _cov.coverage < target_score):
+                            scores["weakest_dimension"] = "plan_coverage"
+                            hint = revision_hint_for_misses(
+                                _cov.missed_bullets
+                            )
+                            if hint:
+                                scores["revision_instruction"] = hint
+            except Exception as exc:
+                logger.warning("plan_coverage skipped: %s", exc)
+
         # Fix 1: Run claim verification as part of scoring
         log.stage("verifying", iteration=iteration + 1)
         yield {"type": "progress", "stage": "verifying",
