@@ -187,6 +187,27 @@ _CITE_MARK = re.compile(
 _THINK_TAG = re.compile(r"<think>|</think>", re.IGNORECASE)
 
 
+def _clean_and_count(raw: str) -> tuple[str, bool, int]:
+    """Phase 54.6.90 — centralize the "did thinking leak → strip it →
+    count words on the stripped output" accounting so every quality
+    task reads the SAME metric family.
+
+    Returns (cleaned_text, thinking_leaked_bool, words_in_cleaned).
+
+    Pre-54.6.90 every task counted words in the raw text, which
+    included any <think>…</think> blocks Ollama's native splitter
+    failed to hoist out. That inflated "words", broke on_target, and
+    diluted citations_per_100w — exactly the bug we caught on
+    qwen3.6-ud in the sweep re-run.
+    """
+    from sciknow.core.wiki_ops import _strip_thinking
+    leaked = bool(_THINK_TAG.search(raw or ""))
+    cleaned = _strip_thinking(raw or "")
+    body = re.sub(r"^#+\s.*$", "", cleaned, flags=re.MULTILINE)
+    words = len(body.split())
+    return cleaned, leaked, words
+
+
 # ════════════════════════════════════════════════════════════════════════
 # Lazy-loaded NLI model (shared across benches)
 # ════════════════════════════════════════════════════════════════════════
@@ -691,12 +712,12 @@ def b_quality_wiki_summary() -> Iterable[BenchMetric]:
                               note=resp["error"][:80])
             continue
 
-        content = resp["content"]
+        content_raw = resp["content"]
+        # Phase 54.6.90 — strip any leaked <think>…</think> before scoring
+        # so qwen3.6-ud-style format bugs don't pollute the word / hedge /
+        # faithfulness metrics. Feed the CLEANED text to faithfulness too.
+        content, thinking, words = _clean_and_count(content_raw)
         outputs[model] = content
-
-        # Surface metrics
-        words = len(re.sub(r"^#+\s.*$", "", content, flags=re.MULTILINE).split())
-        thinking = bool(_THINK_TAG.search(content))
         hedge_n = len(_HEDGE_WORDS.findall(content))
 
         yield BenchMetric(f"{model}::elapsed_s",
@@ -777,10 +798,10 @@ def b_quality_wiki_polish() -> Iterable[BenchMetric]:
                               note=resp["error"][:80])
             continue
 
-        content = resp["content"]
+        content_raw = resp["content"]
+        # Phase 54.6.90 — strip leaked <think>…</think> before scoring.
+        content, leaked_polish, out_words = _clean_and_count(content_raw)
         outputs[model] = content
-
-        out_words = len(content.split())
         out_cites = len(_extract_citations(content))
         # Did it remove the duplicated sentence? Look for "exhibited unusual characteristics" count
         dup_count_before = _POLISH_SEED.count("exhibited unusual characteristics")
@@ -802,7 +823,7 @@ def b_quality_wiki_polish() -> Iterable[BenchMetric]:
                           1 if dedup_ok else 0, "bool",
                           note="the deliberately-duplicated phrases were fixed")
         yield BenchMetric(f"{model}::thinking_leaked",
-                          1 if _THINK_TAG.search(content) else 0, "bool")
+                          1 if leaked_polish else 0, "bool")
 
     if len([o for o in outputs.values() if o]) >= 2:
         judgments = _pairwise_win_rates(
@@ -885,10 +906,11 @@ def b_quality_autowrite_writer() -> Iterable[BenchMetric]:
                               note=resp["error"][:80])
             continue
 
-        content = resp["content"]
+        content_raw = resp["content"]
+        # Phase 54.6.90 — strip leaked <think> before scoring.
+        content, leaked_aw, words = _clean_and_count(content_raw)
         outputs[model] = content
 
-        words = len(content.split())
         yield BenchMetric(f"{model}::elapsed_s",
                           round(resp["elapsed_s"], 1), "s")
         yield BenchMetric(f"{model}::words", words, "words")
@@ -896,7 +918,7 @@ def b_quality_autowrite_writer() -> Iterable[BenchMetric]:
                           1 if 80 <= words <= 300 else 0, "bool",
                           note="target=150, ok if in [80, 300]")
         yield BenchMetric(f"{model}::thinking_leaked",
-                          1 if _THINK_TAG.search(content) else 0, "bool")
+                          1 if leaked_aw else 0, "bool")
 
         # Faithfulness — grounded in the 3 source chunks
         faith = faithfulness_score(content, "\n".join(source_chunks))
@@ -973,10 +995,10 @@ def b_quality_book_review() -> Iterable[BenchMetric]:
                               note=resp["error"][:80])
             continue
 
-        content = resp["content"]
+        content_raw = resp["content"]
+        # Phase 54.6.90 — strip leaked <think> before scoring.
+        content, leaked_br, words = _clean_and_count(content_raw)
         outputs[model] = content
-
-        words = len(content.split())
         # Does the review mention "big problem" weakness (the
         # deliberately vague sentence in the draft)? This is a planted
         # signal — a good reviewer notices vague language.
@@ -994,7 +1016,7 @@ def b_quality_book_review() -> Iterable[BenchMetric]:
                           round(resp["elapsed_s"], 1), "s")
         yield BenchMetric(f"{model}::words", words, "words")
         yield BenchMetric(f"{model}::thinking_leaked",
-                          1 if _THINK_TAG.search(content) else 0, "bool")
+                          1 if leaked_br else 0, "bool")
         yield BenchMetric(f"{model}::catches_vague_sentence",
                           1 if catches_vague else 0, "bool",
                           note="noticed the planted 'big problem' weakness")
@@ -1152,15 +1174,18 @@ def b_quality_ask_synthesize() -> Iterable[BenchMetric]:
                               note=resp["error"][:80])
             continue
 
-        content = resp["content"]
+        content_raw = resp["content"]
+        # Phase 54.6.90 — strip leaked <think> before scoring; cascade
+        # the cleaned text into faithfulness + ALCE citation quality
+        # below so the metrics reflect the actual answer.
+        content, leaked_as, words = _clean_and_count(content_raw)
         outputs[model] = content
 
-        words = len(content.split())
         yield BenchMetric(f"{model}::elapsed_s",
                           round(resp["elapsed_s"], 1), "s")
         yield BenchMetric(f"{model}::words", words, "words")
         yield BenchMetric(f"{model}::thinking_leaked",
-                          1 if _THINK_TAG.search(content) else 0, "bool")
+                          1 if leaked_as else 0, "bool")
 
         faith = faithfulness_score(content, source_text)
         yield BenchMetric(f"{model}::faithfulness_mean",

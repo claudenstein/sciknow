@@ -540,14 +540,24 @@ def b_model_sweep_extract_kg() -> Iterable[BenchMetric]:
 
 
 def _score_compile(text: str, paper: PaperCtx) -> dict:
-    # Word count: split on whitespace after stripping markdown headers
-    body = re.sub(r"^#+ .*$", "", text, flags=re.MULTILINE)
+    # Phase 54.6.90 — strip leaked <think>…</think> blocks BEFORE the
+    # word count so the on-target verdict measures the actual answer,
+    # not answer+thinking. Pre-54.6.90 qwen3.6-ud was marked over-target
+    # (1527 words) even though its real answer was ~300-500; the rest
+    # was raw <think> content that Ollama's native tag-splitter failed
+    # to hoist out. thinking_leaked stays as a diagnostic flag —
+    # computed on the RAW text so we still surface the format bug.
+    from sciknow.core.wiki_ops import _strip_thinking
+    leaked = bool(_THINK_TAG.search(text))
+    cleaned = _strip_thinking(text)
+    body = re.sub(r"^#+ .*$", "", cleaned, flags=re.MULTILINE)
     words = len(body.split())
     out = {
-        "words":          words,
-        "on_target":      1 if 200 <= words <= 800 else 0,
-        "thinking_leaked": 1 if _THINK_TAG.search(text) else 0,
-        "title_in_output": 1 if paper.title[:30].lower() in text.lower() else 0,
+        "words":            words,
+        "words_raw":        len(text.split()),   # answer + leaked thinking
+        "on_target":        1 if 200 <= words <= 800 else 0,
+        "thinking_leaked":  1 if leaked else 0,
+        "title_in_output":  1 if paper.title[:30].lower() in cleaned.lower() else 0,
     }
     return out
 
@@ -612,13 +622,22 @@ _CITE_MARK = re.compile(r"\[\d+\]|\[@[\w-]+\]|\((?:[A-Z][a-z]+ (?:et al\.,? )?\d
 
 
 def _score_write_section(text: str) -> dict:
-    body = re.sub(r"^#+ .*$", "", text, flags=re.MULTILINE)
+    # Phase 54.6.90 — same fix as _score_compile: strip leaked
+    # <think>…</think> before counting so on_target measures the
+    # answer, not answer+thinking. Citation counts also use the
+    # stripped text — a [N] inside a <think> block isn't a real
+    # citation in the final output.
+    from sciknow.core.wiki_ops import _strip_thinking
+    leaked = bool(_THINK_TAG.search(text))
+    cleaned = _strip_thinking(text)
+    body = re.sub(r"^#+ .*$", "", cleaned, flags=re.MULTILINE)
     words = len(body.split())
-    cite_count = len(_CITE_MARK.findall(text))
+    cite_count = len(_CITE_MARK.findall(cleaned))
     return {
         "words":           words,
+        "words_raw":       len(text.split()),
         "on_target":       1 if 80 <= words <= 300 else 0,  # target was 150
-        "thinking_leaked": 1 if _THINK_TAG.search(text) else 0,
+        "thinking_leaked": 1 if leaked else 0,
         "cite_marks":      cite_count,
         "cites_per_100w":  round(100.0 * cite_count / max(words, 1), 2),
     }
