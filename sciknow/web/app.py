@@ -18036,6 +18036,7 @@ async function openPlanModal(context) {{
   _editingChapterPlans = {{}};
   _editingChapterTargetWords = {{}};
   _editingChapterCustomMode = {{}};
+  _editingChapterTitles = {{}};
 
   openModal('plan-modal');
   document.getElementById('plan-status').textContent = 'Loading...';
@@ -18411,10 +18412,37 @@ function populatePlanChapterTab(ch) {{
       ? '<span class="badge-tag">override</span>'
       : '<span class="badge-tag muted">auto</span>';
 
+    // Phase 54.6.67 — per-row toolbar (↑ ↓ Save ×) plus editable title.
+    // Title edits feed _editingChapterTitles; slug stays stable so
+    // drafts.section_type doesn't orphan on rename.
+    const isFirst = (i === 0);
+    const isLast = (i === meta.length - 1);
+    const liveTitle = (s.slug in _editingChapterTitles)
+      ? _editingChapterTitles[s.slug]
+      : (s.title || _titleifyClient(s.slug));
     html += '<div class="sec-row" data-slug="' + s.slug + '">';
     html += '  <div class="sec-fields">';
-    html += '    <div style="font-weight:600;font-size:13px;color:var(--fg);margin-bottom:4px;">' +
-            (i + 1) + '. ' + escapeHtml(s.title || s.slug) + '</div>';
+    html += '    <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">';
+    html += '      <span style="font-weight:700;font-size:12px;color:var(--fg-muted);min-width:24px;">' +
+            (i + 1) + '.</span>';
+    html += '      <input type="text" class="plan-sec-title" ' +
+            'data-title-slug="' + s.slug + '" ' +
+            'value="' + escapeHtml(liveTitle) + '" placeholder="Section title" ' +
+            'oninput="updatePlanChapterTitle(\\'' + s.slug + '\\', this.value)" ' +
+            'style="flex:1;padding:4px 8px;font-weight:600;font-size:13px;">';
+    html += '      <button class="btn-secondary" title="Move up" ' +
+            'onclick="movePlanSection(\\'' + s.slug + '\\', -1)" ' +
+            (isFirst ? 'disabled' : '') + ' style="padding:2px 8px;">&uarr;</button>';
+    html += '      <button class="btn-secondary" title="Move down" ' +
+            'onclick="movePlanSection(\\'' + s.slug + '\\', 1)" ' +
+            (isLast ? 'disabled' : '') + ' style="padding:2px 8px;">&darr;</button>';
+    html += '      <button class="btn-secondary" title="Save this row" ' +
+            'onclick="savePlanSectionRow(\\'' + s.slug + '\\')" ' +
+            'style="padding:2px 10px;">Save</button>';
+    html += '      <button class="btn-secondary" title="Delete section" ' +
+            'onclick="deletePlanSection(\\'' + s.slug + '\\')" ' +
+            'style="padding:2px 8px;color:var(--danger,#c00);">&times;</button>';
+    html += '    </div>';
     html += '    <textarea data-plan-slug="' + s.slug + '" placeholder="Section plan — what THIS section must cover" ' +
             'oninput="updatePlanChapterSection(\\'' + s.slug + '\\', this.value)">' +
             escapeHtml(s.plan || '') + '</textarea>';
@@ -18430,6 +18458,10 @@ function populatePlanChapterTab(ch) {{
     html += '  </div>';
     html += '</div>';
   }});
+  // Phase 54.6.67 — + Add section button below the list.
+  html += '<div style="margin-top:12px;">'
+       +  '<button class="btn-secondary" onclick="addPlanSection()">+ Add section</button>'
+       +  '</div>';
   list.innerHTML = html;
 }}
 
@@ -18440,8 +18472,24 @@ let _editingChapterPlans = {{}};
 // Reset whenever a different chapter is loaded into the tab.
 let _editingChapterTargetWords = {{}};
 let _editingChapterCustomMode = {{}};
+// Phase 54.6.67 — title edits tracked separately so re-renders don't
+// drop in-flight changes. Keyed by slug (slug is stable across rename).
+let _editingChapterTitles = {{}};
+
+function _titleifyClient(slug) {{
+  // Mirror of core.book_ops._titleify_slug for the display-only
+  // default when a section has no title set.
+  return (slug || '').replace(/_/g, ' ').trim()
+    .split(' ')
+    .map(function(w) {{ return w ? (w[0].toUpperCase() + w.slice(1)) : ''; }})
+    .join(' ');
+}}
+
 function updatePlanChapterSection(slug, value) {{
   _editingChapterPlans[slug] = value;
+}}
+function updatePlanChapterTitle(slug, value) {{
+  _editingChapterTitles[slug] = value;
 }}
 function updatePlanChapterTargetWords(slug, value) {{
   if (value === "" || value === "auto") {{
@@ -18464,6 +18512,143 @@ function updatePlanChapterTargetWordsCustom(slug, value) {{
   _editingChapterTargetWords[slug] = (isNaN(n) || n <= 0) ? null : n;
   _editingChapterCustomMode[slug] = true;
   // Don't re-render — the user is actively typing in the custom input.
+}}
+
+// ── Phase 54.6.67 — per-row section handlers (move/save/delete/add) ───
+// All four go through PUT /api/chapters/{{id}}/sections, which is a
+// full-replace endpoint. Each handler materializes the chapter's
+// current sections (with pending edits folded in), applies the
+// mutation, and re-submits the full list.
+
+function _materializePlanSections(ch) {{
+  // Merge in-memory meta with the user's pending edits (title / plan
+  // / target_words) so reorder/delete don't lose unsaved work.
+  const meta = Array.isArray(ch.sections_meta) ? ch.sections_meta : [];
+  return meta.map(function(s) {{
+    const tw = (s.slug in _editingChapterTargetWords)
+      ? _editingChapterTargetWords[s.slug]
+      : (s.target_words || null);
+    return {{
+      slug: s.slug,
+      title: (s.slug in _editingChapterTitles)
+        ? _editingChapterTitles[s.slug]
+        : (s.title || _titleifyClient(s.slug)),
+      plan: (s.slug in _editingChapterPlans)
+        ? _editingChapterPlans[s.slug]
+        : (s.plan || ''),
+      target_words: (tw && tw > 0) ? tw : null,
+    }};
+  }});
+}}
+
+async function _putPlanSections(cid, sections, statusMsg) {{
+  const status = document.getElementById('plan-status');
+  if (status) status.textContent = statusMsg || 'Saving sections…';
+  const res = await fetch('/api/chapters/' + cid + '/sections', {{
+    method: 'PUT',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{sections: sections}}),
+  }});
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const data = await res.json();
+  // Update the in-memory cache + re-render.
+  const ch = chaptersData.find(function(c) {{ return c.id === cid; }});
+  if (ch && Array.isArray(data.sections)) {{
+    ch.sections_meta = data.sections;
+    ch.sections_template = data.sections.map(function(s) {{ return s.slug; }});
+  }}
+  _editingChapterPlans = {{}};
+  _editingChapterTargetWords = {{}};
+  _editingChapterCustomMode = {{}};
+  _editingChapterTitles = {{}};
+  if (ch) populatePlanChapterTab(ch);
+  // Also refresh the sidebar so renames / additions propagate.
+  try {{
+    const sb = await fetch('/api/chapters');
+    const sd = await sb.json();
+    rebuildSidebar(sd.chapters || sd, currentDraftId);
+  }} catch (e) {{ /* non-fatal */ }}
+  if (status) status.innerHTML = '<span style="color:var(--success);">✓ Saved</span>';
+}}
+
+async function savePlanSectionRow(slug) {{
+  const cid = _planContext.chapterId
+    || document.getElementById('plan-sections-chapter-picker').value;
+  if (!cid) return;
+  const ch = chaptersData.find(function(c) {{ return c.id === cid; }});
+  if (!ch) return;
+  try {{
+    await _putPlanSections(cid, _materializePlanSections(ch),
+                           'Saving section…');
+  }} catch (e) {{
+    document.getElementById('plan-status').textContent =
+      'Save failed: ' + e.message;
+  }}
+}}
+
+async function movePlanSection(slug, delta) {{
+  const cid = _planContext.chapterId
+    || document.getElementById('plan-sections-chapter-picker').value;
+  if (!cid) return;
+  const ch = chaptersData.find(function(c) {{ return c.id === cid; }});
+  if (!ch) return;
+  const secs = _materializePlanSections(ch);
+  const idx = secs.findIndex(function(s) {{ return s.slug === slug; }});
+  const target = idx + delta;
+  if (idx < 0 || target < 0 || target >= secs.length) return;
+  const tmp = secs[idx]; secs[idx] = secs[target]; secs[target] = tmp;
+  try {{
+    await _putPlanSections(cid, secs, 'Reordering…');
+  }} catch (e) {{
+    document.getElementById('plan-status').textContent =
+      'Reorder failed: ' + e.message;
+  }}
+}}
+
+async function deletePlanSection(slug) {{
+  const cid = _planContext.chapterId
+    || document.getElementById('plan-sections-chapter-picker').value;
+  if (!cid) return;
+  const ch = chaptersData.find(function(c) {{ return c.id === cid; }});
+  if (!ch) return;
+  const sec = (ch.sections_meta || []).find(function(s) {{ return s.slug === slug; }});
+  const title = sec ? (sec.title || sec.slug) : slug;
+  // The backend preserves drafts even when their section_type disappears
+  // (they become orphans), so this is not destructive — but say so.
+  if (!confirm('Delete section "' + title + '"? Any existing drafts in '
+               + 'this section will become orphans (visible only via raw '
+               + 'SQL) but are not deleted.')) return;
+  const secs = _materializePlanSections(ch).filter(
+    function(s) {{ return s.slug !== slug; }}
+  );
+  try {{
+    await _putPlanSections(cid, secs, 'Deleting section…');
+  }} catch (e) {{
+    document.getElementById('plan-status').textContent =
+      'Delete failed: ' + e.message;
+  }}
+}}
+
+async function addPlanSection() {{
+  const cid = _planContext.chapterId
+    || document.getElementById('plan-sections-chapter-picker').value;
+  if (!cid) {{
+    alert('Pick a chapter first.');
+    return;
+  }}
+  const ch = chaptersData.find(function(c) {{ return c.id === cid; }});
+  if (!ch) return;
+  const title = prompt('Section title:');
+  if (!title || !title.trim()) return;
+  const secs = _materializePlanSections(ch);
+  // Slug auto-derives server-side; we can send just {{title, plan}}.
+  secs.push({{title: title.trim(), plan: '', target_words: null}});
+  try {{
+    await _putPlanSections(cid, secs, 'Adding section…');
+  }} catch (e) {{
+    document.getElementById('plan-status').textContent =
+      'Add failed: ' + e.message;
+  }}
 }}
 
 // Phase 21 — populate the single-section editor for the Section tab.
@@ -18656,17 +18841,20 @@ async function savePlanChapterSections() {{
   if (!ch) return;
   const meta = Array.isArray(ch.sections_meta) ? ch.sections_meta : [];
 
-  // Apply pending plan + target_words edits.
+  // Apply pending plan + target_words + title edits.
   // Phase 32.2 — target_words: prefer the editing-state map (set by
-  // the dropdown), fall back to whatever was on the section meta
-  // when the tab was opened. null/0 means "use the chapter auto".
+  // the dropdown), fall back to whatever was on the section meta.
+  // Phase 54.6.67 — title also editable; pending title edits live in
+  // _editingChapterTitles and get folded in here too.
   const updated = meta.map(s => {{
     const tw = (s.slug in _editingChapterTargetWords)
       ? _editingChapterTargetWords[s.slug]
       : (s.target_words || null);
     return {{
       slug: s.slug,
-      title: s.title || s.slug,
+      title: (s.slug in _editingChapterTitles)
+        ? _editingChapterTitles[s.slug]
+        : (s.title || s.slug),
       plan: (s.slug in _editingChapterPlans) ? _editingChapterPlans[s.slug] : (s.plan || ''),
       target_words: (tw && tw > 0) ? tw : null,
     }};
