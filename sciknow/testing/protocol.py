@@ -8657,6 +8657,59 @@ def l1_phase54_6_61_wiki_summaries_and_visuals_surface() -> None:
     )
 
 
+def l1_phase54_6_74_vlm_sweep_surface() -> None:
+    """Phase 54.6.74 (#1b) — VLM sweep harness.
+
+    No actual VLM calls — verifies:
+      A) vlm_sweep module exports CANDIDATE_VLMS, the bench function,
+         figure-set generator, and persisted-paths helpers.
+      B) Shortlist is realistic — must include qwen2.5vl:32b (quality
+         default from 54.6.73) AND at least one faster option.
+      C) Specificity regexes catch known climate-corpus-relevant terms
+         (unit tokens like W/m² and ppm, plot types like "bar chart",
+         "scatter plot", "line graph", axis language).
+      D) bench.py registers the pseudo-layer "vlm-sweep".
+      E) CLI exposes `sciknow bench-vlm-gen` for figure-set pinning.
+    """
+    from sciknow.testing import vlm_sweep, bench
+    from sciknow.cli import main as _cli_main
+
+    # A
+    for name in ("CANDIDATE_VLMS", "b_vlm_sweep", "generate_figure_set",
+                 "load_figure_set", "SWEEP_BENCHES"):
+        assert hasattr(vlm_sweep, name), f"vlm_sweep missing {name!r}"
+    # B
+    assert "qwen2.5vl:32b" in vlm_sweep.CANDIDATE_VLMS, (
+        "54.6.73 quality-first default must be in the sweep shortlist"
+    )
+    faster_options = {"qwen2.5vl:7b", "minicpm-v:8b"}
+    assert any(m in vlm_sweep.CANDIDATE_VLMS for m in faster_options), (
+        "sweep must include at least one fast / co-resident baseline "
+        "so the quality/speed tradeoff is measurable"
+    )
+    # C — regex sanity
+    u, p, a, tot = vlm_sweep._specificity_score(
+        "Line plot of outgoing longwave radiation (W/m²) against year "
+        "on the horizontal axis, showing a scatter plot overlay."
+    )
+    assert u >= 1 and p >= 1 and a >= 1, (
+        f"specificity regexes must catch 'W/m²' + 'line plot' / 'scatter "
+        f"plot' + 'horizontal axis' — got u={u} p={p} a={a}"
+    )
+    empty = vlm_sweep._specificity_score("This image is interesting.")
+    assert empty == (0, 0, 0, 0), (
+        "a generic caption must score 0 on every specificity axis"
+    )
+    # D — bench layer registration
+    assert "vlm-sweep" in bench.VALID_LAYERS, (
+        "bench.VALID_LAYERS must include 'vlm-sweep' so it shows up in --layer"
+    )
+    # E — CLI command registered
+    assert hasattr(_cli_main, "bench_vlm_gen_cmd"), (
+        "CLI must expose `sciknow bench-vlm-gen`"
+    )
+
+
 def l1_phase54_6_72_visuals_caption_surface() -> None:
     """Phase 54.6.72 (#1) — vision-LLM captioning module + CLI surface.
 
@@ -9128,6 +9181,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_71_citation_align_behavior,
     # Phase 54.6.72 — vision-LLM captioning pipeline surface (#1)
     l1_phase54_6_72_visuals_caption_surface,
+    # Phase 54.6.74 — VLM sweep harness (#1b)
+    l1_phase54_6_74_vlm_sweep_surface,
 ]
 
 L2_TESTS: list[Callable] = [

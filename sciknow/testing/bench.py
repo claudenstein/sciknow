@@ -1219,6 +1219,13 @@ def _quality_layer() -> list[tuple[str, BenchFn]]:
     return list(_q.QUALITY_BENCHES)
 
 
+def _vlm_sweep_layer() -> list[tuple[str, BenchFn]]:
+    """Phase 54.6.74 (#1b) — lazy import for VLM sweep. Imports
+    ollama + PIL indirectly; keep out of hot path for non-sweep runs."""
+    from sciknow.testing import vlm_sweep as _v
+    return list(_v.SWEEP_BENCHES)
+
+
 LAYERS: dict[str, list[tuple[str, BenchFn]]] = {
     "fast":  _FAST,
     "live":  _LIVE,
@@ -1226,10 +1233,12 @@ LAYERS: dict[str, list[tuple[str, BenchFn]]] = {
     "full":  _FAST + _LIVE + _LLM,
 }
 
-# "sweep" and "quality" are pseudo-layers: not stored in LAYERS (which
-# would break the invariant that every layer has >= 1 bench fn) —
-# resolved lazily in run_layer() via _sweep_layer() / _quality_layer().
-VALID_LAYERS: tuple[str, ...] = tuple(LAYERS.keys()) + ("sweep", "quality")
+# "sweep", "quality", "vlm-sweep" are pseudo-layers: not stored in
+# LAYERS (which would break the invariant that every layer has >= 1
+# bench fn) — resolved lazily in run_layer().
+VALID_LAYERS: tuple[str, ...] = tuple(LAYERS.keys()) + (
+    "sweep", "quality", "vlm-sweep",
+)
 
 
 def run_layer(layer: str) -> list[BenchResult]:
@@ -1237,6 +1246,8 @@ def run_layer(layer: str) -> list[BenchResult]:
         benches = _sweep_layer()
     elif layer == "quality":
         benches = _quality_layer()
+    elif layer == "vlm-sweep":
+        benches = _vlm_sweep_layer()
     else:
         benches = LAYERS.get(layer)
     if benches is None:

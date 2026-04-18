@@ -166,7 +166,9 @@ def bench_cmd(
              "Ollama throughput), sweep (per-model speed comparison on "
              "extract-kg / compile / write_section), quality (deep "
              "writing-quality benchmarks with NLI faithfulness + ALCE "
-             "citation quality + LLM-judge pairwise), or full.",
+             "citation quality + LLM-judge pairwise), vlm-sweep "
+             "(54.6.74 — VLM captioning sweep with pairwise judge), "
+             "or full.",
     ),
     tag: str = typer.Option(
         "", "--tag",
@@ -224,6 +226,40 @@ def bench_cmd(
     if n_err:
         console.print(f"[yellow]{n_err} bench function(s) errored — check the JSONL for details.[/yellow]")
     raise typer.Exit(0 if n_err == 0 else 1)
+
+
+@app.command(name="bench-vlm-gen")
+def bench_vlm_gen_cmd(
+    n: int = typer.Option(
+        15, "-n", "--n-figures",
+        help="How many figures to pin for the VLM sweep (default 15).",
+    ),
+    seed: int = typer.Option(
+        42, "--seed",
+        help="Random seed for sampling — reproducible across runs.",
+    ),
+):
+    """Phase 54.6.74 (#1b) — pin the figure set for the VLM sweep.
+
+    Samples N figures from the corpus (figure + chart kinds with
+    on-disk assets, diversified across documents), persists to
+    ``<project>/data/bench/vlm_sweep_figures.json``. The
+    ``bench --layer vlm-sweep`` reads this file and captions each
+    figure with every installed candidate VLM.
+
+    Deterministic for a fixed ``--seed``. Regenerate when the corpus
+    changes enough that the pinned figures no longer represent it
+    (e.g. after a big ingest batch).
+    """
+    from sciknow.testing import vlm_sweep
+    console.print(f"[bold]Pinning {n} figures for VLM sweep…[/bold]")
+    path = vlm_sweep.generate_figure_set(n=n, seed=seed)
+    console.print(f"\n[green]✓ Figure set written to[/green] {path}")
+    console.print(
+        "[dim]Next: `ollama pull` any VLMs you want to bench, then "
+        "`sciknow bench --layer vlm-sweep --tag <tag>` to caption + "
+        "judge-rank them.[/dim]"
+    )
 
 
 @app.command(name="bench-retrieval-gen")
