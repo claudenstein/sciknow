@@ -3049,9 +3049,18 @@ def _score_draft_inner(draft_content, section_type, topic, results, model=None):
 
     Fix 3: the caller passes the writer's own results so the scorer
     evaluates against the same evidence the writer used.
+
+    Phase 54.6.59 — apply the AUTOWRITE_SCORER_MODEL fallback here too
+    so ad-hoc callers (length-controlled eval, refinement_gate tests)
+    get the same scorer routing as the live autowrite loop when model
+    is not explicitly passed.
     """
     from sciknow.rag import prompts as rag_prompts
     from sciknow.rag.llm import complete as llm_complete
+    from sciknow.config import settings as _s
+
+    if model is None and _s.autowrite_scorer_model:
+        model = _s.autowrite_scorer_model
 
     sys_s, usr_s = rag_prompts.score_draft(section_type, topic, draft_content, results)
     raw = llm_complete(sys_s, usr_s, model=model, temperature=0.0, num_ctx=16384, keep_alive=-1)
@@ -3357,6 +3366,21 @@ def _autowrite_section_body(
     # the real call with a clearer error).
     from sciknow.config import settings as _s
     _llm_warm_up(model=model or _s.llm_model, num_ctx=16384, num_batch=1024)
+
+    # Phase 54.6.59 — scorer-role resolution. Explicit `--model` beats
+    # everything (the user asked for one model end-to-end). Otherwise,
+    # route scoring + rescoring through AUTOWRITE_SCORER_MODEL if set,
+    # else fall through to the writer's llm_model (scorer_model=None
+    # → llm.stream/complete default). NOTE: verify + CoVe stay on the
+    # writer model — the gemopus4 scorer win is specific to the score
+    # task; we did not bench it for verify/CoVe and other scorer tasks
+    # on gemopus4 hang or produce 0 words.
+    if model is not None:
+        scorer_model = model
+    elif _s.autowrite_scorer_model:
+        scorer_model = _s.autowrite_scorer_model
+    else:
+        scorer_model = None
 
     log.stage("loading_book")
     # Load book/chapter data
@@ -3838,7 +3862,7 @@ def _autowrite_section_body(
             sys_s, usr_s = rag_prompts.score_draft(section_type, topic, content, results)
             score_raw = yield from _stream_phase(
                 sys_s, usr_s, "scoring",
-                model=model, temperature=0.0, num_ctx=16384,
+                model=scorer_model, temperature=0.0, num_ctx=16384,
                 token_observer=log.token,
             )
             scores = json.loads(_clean_json(score_raw), strict=False)
@@ -4200,7 +4224,7 @@ def _autowrite_section_body(
             sys_rs, usr_rs = rag_prompts.score_draft(section_type, topic, revised, results)
             rescore_raw = yield from _stream_phase(
                 sys_rs, usr_rs, "rescoring",
-                model=model, temperature=0.0, num_ctx=16384,
+                model=scorer_model, temperature=0.0, num_ctx=16384,
                 token_observer=log.token,
             )
             new_scores = json.loads(_clean_json(rescore_raw), strict=False)

@@ -73,6 +73,15 @@ class Settings(BaseSettings):
     # gemma3:27b-it-qat wins book_review judge 100% / dims 5/5 vs
     # the unified qwen default's 71.4% / 3/5).
     book_review_model: str | None = None
+    # Phase 54.6.59 — optional per-role override for the autowrite
+    # score + rescore steps (NOT verify/CoVe, which stay on the writer
+    # model). Falls back to llm_model when unset. The 2026-04-17-full
+    # bench showed gemopus4:26b-a4b-q4_K_M gives the biggest good/bad
+    # ranking gap (0.60 vs qwen's 0.27) while ranking correctly and
+    # running at 6-7s per scoring call — same speed as qwen, better
+    # discrimination. All other tasks on gemopus4 are broken, so wire
+    # it here only — never as the global LLM_MODEL.
+    autowrite_scorer_model: str | None = None
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
 
     # Crossref polite pool
