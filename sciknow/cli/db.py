@@ -4488,6 +4488,21 @@ def extract_visuals_cmd(
                 })
 
         if visuals_batch:
+            # Phase 54.6.63 — strip NUL (0x00) bytes from all text fields
+            # before insert. MinerU occasionally emits \x00 inside decoded
+            # LaTeX for unusual character encodings (e.g. equation content
+            # that went through a corrupted font map). PostgreSQL text
+            # columns cannot store \x00 (it's the C-string terminator),
+            # so the whole row insert fails with "A string literal cannot
+            # contain NUL (0x00) characters", which pre-54.6.63 caused
+            # the entire paper's batch to be skipped — that's what the
+            # 2026-04-18 audit saw on 3 papers during the chart backfill.
+            for v in visuals_batch:
+                for k in ("content", "caption", "asset_path",
+                          "figure_num", "surrounding_text"):
+                    val = v.get(k)
+                    if isinstance(val, str) and "\x00" in val:
+                        v[k] = val.replace("\x00", "")
             try:
                 with get_session() as session:
                     if force:
