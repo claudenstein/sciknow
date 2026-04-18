@@ -1710,6 +1710,109 @@ def edge_cases_cmd(
     _consume_events(gen, console)
 
 
+# ── verify-draft (Phase 54.6.83 — #8) ──────────────────────────────────
+
+@app.command(name="verify-draft")
+def verify_draft_cmd(
+    draft_id: Annotated[str, typer.Argument(help="Draft ID (first 8+ chars).")],
+    allow_llm: bool = typer.Option(
+        True, "--llm-atomize/--no-llm-atomize",
+        help="Use LLM to atomize complex sentences the regex heuristic "
+             "missed. Disable for purely-mechanical splits (faster, "
+             "may miss mixed-truth sentences with subtle compound clauses).",
+    ),
+    model: str = typer.Option(
+        None, "--model",
+        help="LLM for atomization fallback. Default: LLM_FAST_MODEL.",
+    ),
+    limit: int = typer.Option(
+        0, "--limit", "-n",
+        help="Show at most N mixed-truth sentences in detail (0 = all).",
+    ),
+):
+    """Phase 54.6.83 (#8) — offline claim-atomization + NLI verification.
+
+    Splits each sentence in the draft into atomic sub-claims
+    (heuristic first, LLM fallback for complex compound sentences),
+    scores each sub-claim's NLI entailment against the draft's source
+    chunks, and reports sentences where sub-claims split between
+    supported and unsupported — the mixed-truth failure mode that the
+    existing sentence-level verifier misses.
+
+    Reads from the draft's persisted ``sources`` field (populated by
+    `book write` / `autowrite`). Read-only — no database writes.
+
+    Examples:
+
+      sciknow book verify-draft 3f2a1b4c
+      sciknow book verify-draft 3f2a1b4c --no-llm-atomize
+      sciknow book verify-draft 3f2a1b4c -n 5
+    """
+    import json as _json
+    from sqlalchemy import text
+    from sciknow.core.claim_atomize import verify_draft
+    from sciknow.storage.db import get_session
+
+    with get_session() as session:
+        row = session.execute(text("""
+            SELECT id::text, title, content, sources
+            FROM drafts WHERE id::text LIKE :q LIMIT 1
+        """), {"q": f"{draft_id}%"}).fetchone()
+    if not row:
+        console.print(f"[red]Draft not found:[/red] {draft_id}")
+        raise typer.Exit(1)
+    d_id, d_title, d_content, d_sources = row
+    sources = (_json.loads(d_sources) if isinstance(d_sources, str)
+               else (d_sources or []))
+    if not sources:
+        console.print(
+            f"[red]Draft {d_id[:8]} has no stored sources.[/red] "
+            f"verify-draft needs the retrieval context. Re-generate "
+            f"the draft via `book write` / `autowrite` so sources "
+            f"get persisted."
+        )
+        raise typer.Exit(2)
+    if not d_content:
+        console.print(f"[red]Draft {d_id[:8]} has empty content.[/red]")
+        raise typer.Exit(2)
+
+    console.print(
+        f"Verifying [bold]{d_title}[/bold] "
+        f"([dim]{d_id[:8]}[/dim], {len(sources)} sources)…"
+    )
+    result = verify_draft(
+        d_content, sources,
+        model=model, allow_llm_atomize=allow_llm,
+    )
+    console.print(f"  {result.summary()}")
+
+    if result.mixed_truth_count == 0:
+        console.print(
+            "\n[green]No mixed-truth sentences — every atomized "
+            "sub-claim is consistent with the sources.[/green]"
+        )
+        return
+
+    console.print(f"\n[bold yellow]{result.mixed_truth_count} mixed-truth "
+                  f"sentence(s) — single-NLI would have averaged these away:"
+                  f"[/bold yellow]\n")
+    shown = 0
+    for sv in result.sentences:
+        if not sv.mixed_truth:
+            continue
+        if limit > 0 and shown >= limit:
+            break
+        shown += 1
+        console.print(f"[dim]Sentence:[/dim] {sv.sentence}")
+        for sc in sv.sub_claims:
+            color = "green" if sc.supported else "red"
+            flag = "✓" if sc.supported else "✗"
+            console.print(
+                f"  [{color}]{flag} {sc.entailment:.3f}[/{color}]  {sc.text}"
+            )
+        console.print()
+
+
 # ── align-citations (Phase 54.6.71) ────────────────────────────────────
 
 @app.command(name="align-citations")

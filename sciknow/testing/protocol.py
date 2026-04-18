@@ -8657,6 +8657,74 @@ def l1_phase54_6_61_wiki_summaries_and_visuals_surface() -> None:
     )
 
 
+def l1_phase54_6_83_claim_atomize_behavior() -> None:
+    """Phase 54.6.83 (#8) — claim atomization + NLI verification.
+
+    Exercises the heuristic atomizer (no LLM), the complex-sentence
+    detector, the verify_draft orchestration with mocked NLI, and
+    confirms the `sciknow book verify-draft` CLI is registered.
+    """
+    from unittest.mock import patch
+    from sciknow.core import claim_atomize as ca
+    from sciknow.cli import book as _b
+
+    # A) Heuristic splits semicolons cleanly
+    parts = ca.atomize_heuristic(
+        "X increases solar forcing; Y decreases cloud albedo."
+    )
+    assert len(parts) == 2, f"semicolon split failed: {parts}"
+
+    # B) Simple single-clause stays atomic
+    parts = ca.atomize_heuristic(
+        "Solar irradiance varies on the 11-year cycle."
+    )
+    assert len(parts) == 1
+
+    # C) Complex-sentence detector catches long multi-conjunction sentences.
+    # Must be >30 words AND have ≥2 conjunctions that the heuristic missed.
+    complex_s = (
+        "Although global surface temperature rose gradually over the twentieth "
+        "century while ocean heat content increased substantially because of "
+        "thermal inertia and reduced deep-water mixing, the radiative forcing "
+        "response observed at the tropopause stayed damped by persistent cloud "
+        "feedback effects during the same period."
+    )
+    assert ca.needs_llm_atomizer(complex_s), (
+        f"complex multi-conjunction sentence (wc="
+        f"{len(complex_s.split())}) should trigger LLM atomizer"
+    )
+    assert not ca.needs_llm_atomizer(
+        "CO2 rose 2 ppm/year from 2000 to 2020."
+    )
+
+    # D) verify_draft with mocked NLI — one mixed-truth sentence
+    sources = [
+        {"content": "Evidence A is supported by observations 1950-2020."},
+        {"content": "Greenland site data covers 2010-2020 only."},
+    ]
+    draft = (
+        "Evidence A is clear from the data. "
+        "Measurements from Mars rovers confirm the same pattern."
+    )
+    # Sentence 1: single-claim supported (0.9). Sentence 2: single-claim
+    # unsupported (0.1). Across 2 sentences × 2 sources = 4 NLI pairs.
+    with patch("sciknow.testing.quality._nli_entail_probs",
+                return_value=[0.9, 0.2, 0.1, 0.15]):
+        r = ca.verify_draft(draft, sources, allow_llm_atomize=False)
+    assert r.n_sentences == 2
+    assert r.n_sub_claims >= 2
+    # Sentence 1 supported, sentence 2 unsupported — so at the draft
+    # level we expect some supported + some unsupported, but since
+    # each sentence is single-sub-claim here, mixed_truth (per-sentence)
+    # should be 0. The aggregate still reports the split.
+    assert r.n_supported >= 1
+
+    # E) CLI registered
+    assert hasattr(_b, "verify_draft_cmd"), (
+        "book CLI must expose `sciknow book verify-draft`"
+    )
+
+
 def l1_phase54_6_82_visuals_search_surface() -> None:
     """Phase 54.6.82 (#11 follow-up) — visuals Qdrant index + search.
 
@@ -9531,6 +9599,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_80_paper_type_surface,
     # Phase 54.6.82 — visuals Qdrant index + semantic search (#11 follow-up)
     l1_phase54_6_82_visuals_search_surface,
+    # Phase 54.6.83 — claim-atomization offline verifier (#8)
+    l1_phase54_6_83_claim_atomize_behavior,
 ]
 
 L2_TESTS: list[Callable] = [
