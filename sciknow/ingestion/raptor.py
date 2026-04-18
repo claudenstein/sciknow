@@ -163,6 +163,38 @@ def _delete_existing_summary_levels(qdrant: QdrantClient) -> int:
     return len(leftover)  # informational only
 
 
+def _count_summary_nodes_per_level(qdrant: QdrantClient) -> dict[int, int]:
+    """Scroll every summary point (node_level >= 1) and count per level.
+
+    Phase 54.6.60 — powers the "already built" skip's informative log.
+    Cheap in practice because summary nodes are O(100–1000) even on
+    large corpora (level-1 is the widest, bounded by the number of
+    leaf clusters).
+    """
+    from collections import Counter
+    counts: Counter = Counter()
+    offset = None
+    while True:
+        result, next_offset = qdrant.scroll(
+            collection_name=PAPERS_COLLECTION,
+            scroll_filter=Filter(must=[
+                FieldCondition(key="node_level", range=Range(gte=1))
+            ]),
+            limit=500,
+            offset=offset,
+            with_vectors=False,
+            with_payload=True,
+        )
+        for pt in result:
+            lvl = (pt.payload or {}).get("node_level")
+            if isinstance(lvl, int) and lvl >= 1:
+                counts[lvl] += 1
+        if next_offset is None:
+            break
+        offset = next_offset
+    return dict(sorted(counts.items()))
+
+
 def _has_existing_summary_nodes(qdrant: QdrantClient) -> bool:
     """Cheap check: are there any points with node_level >= 1?"""
     result, _ = qdrant.scroll(
@@ -598,10 +630,16 @@ def build_raptor_tree(
                    "detail": "Deleting existing RAPTOR summary nodes..."}
             _delete_existing_summary_levels(qdrant)
     elif not rebuild and _has_existing_summary_nodes(qdrant) and not dry_run:
-        yield {"type": "error",
-               "message": "RAPTOR summary nodes already exist. "
-                          "Pass --rebuild to wipe and rebuild, or pass "
-                          "--dry-run to inspect without changes."}
+        # Phase 54.6.60 — "already built" is a valid terminal state for
+        # a one-time-batch build (see module-level docstring). Return
+        # it as a benign skip event instead of a hard error so the
+        # idempotent-resume contract holds — `sciknow refresh` can be
+        # re-run safely and the RAPTOR step reports "nothing to do"
+        # rather than exit 1. Users who want to absorb newly ingested
+        # papers into the tree must opt in with --rebuild (documented
+        # in the CLI help).
+        yield {"type": "already_built",
+               "per_level_counts": _count_summary_nodes_per_level(qdrant)}
         return
 
     # Step 2: backfill node_level=0 on leaves.

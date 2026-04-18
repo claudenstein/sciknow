@@ -1034,6 +1034,7 @@ def raptor_build(
     total_summaries = 0
     levels_built = 0
     last_error = None
+    already_built = False  # Phase 54.6.60 — suppresses the success trailer
 
     with Progress(
         SpinnerColumn(),
@@ -1127,6 +1128,27 @@ def raptor_build(
                 elif t == "cluster_skipped":
                     pass  # too noisy to print every cluster skip
 
+                elif t == "already_built":
+                    # Phase 54.6.60 — benign skip. Refresh re-runs land
+                    # here; print an informative summary and exit 0.
+                    already_built = True
+                    per_lvl = ev.get("per_level_counts", {})
+                    total = sum(per_lvl.values()) if per_lvl else 0
+                    pretty = ", ".join(
+                        f"L{lvl}={n}" for lvl, n in sorted(per_lvl.items())
+                    ) or "unknown"
+                    console.print(
+                        f"[cyan]↷ RAPTOR tree already built[/cyan] "
+                        f"({total} summary nodes: {pretty})."
+                    )
+                    console.print(
+                        "[dim]Newly ingested papers are still retrievable "
+                        "as leaves, but won't be reflected in summaries "
+                        "until you run `catalog raptor build --rebuild`. "
+                        "RAPTOR is a one-time-batch build by design — "
+                        "cluster boundaries are global UMAP+GMM fits.[/dim]"
+                    )
+
                 elif t == "error":
                     last_error = ev.get("message", "unknown error")
                     console.print(f"[red]Error:[/red] {last_error}")
@@ -1141,6 +1163,11 @@ def raptor_build(
 
     if dry_run:
         console.print("\n[yellow]Dry run complete — no Qdrant writes were made.[/yellow]")
+    elif already_built:
+        # Phase 54.6.60 — the already_built branch already printed its
+        # own summary; skip the "build complete" trailer so we don't
+        # claim "0 summary nodes added" on what was a benign no-op.
+        pass
     else:
         console.print(
             f"\n[green]✓ RAPTOR build complete:[/green] "
