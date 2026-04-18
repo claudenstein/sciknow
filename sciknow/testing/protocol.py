@@ -8577,6 +8577,64 @@ def l1_quality_bench_surface() -> None:
     )
 
 
+def l1_phase54_6_61_wiki_summaries_and_visuals_surface() -> None:
+    """Phase 54.6.61 — Compiled Knowledge Wiki has Summaries + Visuals tabs
+    and a figure-image endpoint that streams JPGs with proper constraints.
+
+    Structural checks only (no DB hits):
+      A) Tab buttons for wiki-summaries and wiki-visuals exist in the HTML.
+      B) Panes (#wiki-summaries-pane, #wiki-visuals-pane) exist.
+      C) switchWikiTab registry includes both new tabs.
+      D) loadWikiSummaries / renderWikiSummaries / openWikiSummary and
+         loadWikiVisuals / renderWikiVisuals are defined in the template.
+      E) /api/visuals/image/{visual_id} endpoint is registered on the
+         FastAPI app and its handler resolves asset_path against the
+         per-doc mineru_output subtree (path-traversal guard).
+    """
+    from sciknow.testing.helpers import web_app_full_source, all_app_routes
+
+    src = web_app_full_source()
+
+    # A) Tab buttons
+    for token in ('data-tab="wiki-summaries"', 'data-tab="wiki-visuals"'):
+        assert token in src, f"missing tab button: {token}"
+
+    # B) Panes
+    for pid in ('id="wiki-summaries-pane"', 'id="wiki-visuals-pane"'):
+        assert pid in src, f"missing pane: {pid}"
+
+    # C) Registry includes both
+    assert "'wiki-summaries'" in src and "'wiki-visuals'" in src, (
+        "switchWikiTab registry must include both new tab names"
+    )
+
+    # D) JS functions defined
+    for fn in ("async function loadWikiSummaries",
+               "function renderWikiSummaries",
+               "function openWikiSummary",
+               "async function loadWikiVisuals",
+               "function renderWikiVisuals"):
+        assert fn in src, f"missing JS function: {fn}"
+
+    # E) Image endpoint registered + constraints present
+    routes = {path for path, _methods in all_app_routes()}
+    assert "/api/visuals/image/{visual_id}" in routes, (
+        "figure image endpoint not registered"
+    )
+    # Grep the handler source for the path-traversal guard (parent chain)
+    # so a future refactor that drops it fails here instead of in prod.
+    import inspect
+    from sciknow.web import app as web_app
+    handler_src = inspect.getsource(web_app.api_visuals_image)
+    assert "doc_dir.resolve() in" in handler_src, (
+        "image endpoint must constrain resolved path under the doc's "
+        "mineru_output subtree (path-traversal guard)"
+    )
+    assert 'kind != "figure"' in handler_src, (
+        "image endpoint must reject non-figure kinds (no JPG asset)"
+    )
+
+
 def l1_phase54_6_56_refresh_ingests_downloads_and_failed() -> None:
     """Phase 54.6.56 — `refresh` sweeps inbox + downloads + failed folders.
 
@@ -8818,6 +8876,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_51_downloader_parallelism_and_dedup,
     # Phase 54.6.56 — refresh sweeps inbox + downloads + failed
     l1_phase54_6_56_refresh_ingests_downloads_and_failed,
+    # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
+    l1_phase54_6_61_wiki_summaries_and_visuals_surface,
 ]
 
 L2_TESTS: list[Callable] = [

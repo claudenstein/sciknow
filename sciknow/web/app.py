@@ -4059,6 +4059,86 @@ async def api_visuals_stats():
         return JSONResponse({"stats": {}, "total": 0})
 
 
+@app.get("/api/visuals/image/{visual_id}")
+async def api_visuals_image(visual_id: str):
+    """Phase 54.6.61 — stream a figure's JPG back to the browser.
+
+    MinerU writes figure images to a per-doc subtree under
+    ``data/mineru_output/<doc_id>/<doc_slug>/auto/images/<sha>.jpg``,
+    with `asset_path` in the DB being the path relative to the inner
+    `auto/` dir (e.g. ``images/<sha>.jpg``). We resolve against the
+    active project's data_dir rather than mounting the directory as
+    static, so:
+
+      * multi-project setups route correctly (the mount would pin
+        whichever project.data_dir was resolved at import time)
+      * there's no path-traversal surface: the client passes a UUID,
+        never a path. We look up the row, then constrain the filesystem
+        read to the known mineru_output subtree.
+    """
+    from pathlib import Path as _P
+    from starlette.responses import FileResponse as _FileResponse
+    from sqlalchemy import text as _vtext
+    from sciknow.config import settings as _settings
+
+    try:
+        with get_session() as session:
+            row = session.execute(_vtext(
+                "SELECT document_id::text, asset_path, kind "
+                "FROM visuals WHERE id::text = :vid LIMIT 1"
+            ), {"vid": visual_id}).fetchone()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"DB lookup failed: {exc}")
+    if not row:
+        raise HTTPException(status_code=404, detail="visual not found")
+    doc_id, asset_path, kind = row
+    if not asset_path:
+        raise HTTPException(status_code=404, detail="visual has no asset_path")
+    if kind != "figure":
+        # Equations/tables/code are text content, not JPGs — reject early
+        # so a confused caller gets a clear error.
+        raise HTTPException(status_code=400,
+                            detail=f"visual kind={kind!r} has no image asset")
+
+    doc_dir = _P(_settings.data_dir) / "mineru_output" / str(doc_id)
+    if not doc_dir.is_dir():
+        raise HTTPException(status_code=404,
+                            detail=f"mineru_output dir missing for {doc_id}")
+    # The per-doc subfolder is the doc's MinerU slug (arbitrary title string).
+    # Usually exactly one; we iterate in case a re-ingest left more than one.
+    candidates = []
+    for sub in doc_dir.iterdir():
+        if not sub.is_dir():
+            continue
+        # Primary layout: <doc_slug>/auto/<asset_path>
+        primary = (sub / "auto" / asset_path).resolve()
+        if primary.is_file() and doc_dir.resolve() in primary.parents:
+            candidates.append(primary)
+            break
+        # Fallback: no auto/ (older MinerU outputs)
+        fallback = (sub / asset_path).resolve()
+        if fallback.is_file() and doc_dir.resolve() in fallback.parents:
+            candidates.append(fallback)
+            break
+    if not candidates:
+        raise HTTPException(status_code=404,
+                            detail=f"image file missing: {asset_path}")
+
+    # Pick by extension; MinerU writes .jpg but be permissive.
+    target = candidates[0]
+    ext = target.suffix.lower()
+    media_type = {
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp",
+    }.get(ext, "application/octet-stream")
+    return _FileResponse(
+        str(target), media_type=media_type,
+        # Browser can cache — the asset SHA is immutable for a given
+        # extracted figure, so a week of cache is safe.
+        headers={"Cache-Control": "public, max-age=604800, immutable"},
+    )
+
+
 import shlex  # noqa: E402
 import subprocess  # noqa: E402
 
@@ -7792,6 +7872,8 @@ body.task-bar-open {{ padding-top: 40px; }}
     </div>
     <div class="tabs">
       <button class="tab active" data-tab="wiki-query" onclick="switchWikiTab('wiki-query')">&#128270; Query</button>
+      <button class="tab" data-tab="wiki-summaries" onclick="switchWikiTab('wiki-summaries')">&#128196; Summaries</button>
+      <button class="tab" data-tab="wiki-visuals" onclick="switchWikiTab('wiki-visuals')">&#128444;&#65039; Visuals</button>
       <button class="tab" data-tab="wiki-browse" onclick="switchWikiTab('wiki-browse')">&#128194; Browse pages</button>
       <button class="tab" data-tab="wiki-lint" onclick="switchWikiTab('wiki-lint')">&#9888;&#65039; Lint</button>
       <button class="tab" data-tab="wiki-consensus" onclick="switchWikiTab('wiki-consensus')">&#9878;&#65039; Consensus</button>
@@ -7811,6 +7893,44 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div class="modal-stream" id="wiki-stream"></div>
         <div id="wiki-stream-stats" class="stream-stats"></div>
         <div class="modal-sources" id="wiki-sources" style="display:none;"></div>
+      </div>
+      <!-- Phase 54.6.61 — Summaries tab: dedicated paper-summary browser. -->
+      <div class="tab-pane" id="wiki-summaries-pane" style="display:none;">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
+          <input type="text" id="wiki-sum-search" placeholder="Filter by title or author…"
+                 style="flex:1;min-width:200px;padding:6px 10px;"
+                 oninput="renderWikiSummaries()">
+          <label style="font-size:12px;color:var(--fg-muted);">Sort:</label>
+          <select id="wiki-sum-sort" onchange="renderWikiSummaries()" style="padding:4px 8px;">
+            <option value="year_desc">Year (newest first)</option>
+            <option value="year_asc">Year (oldest first)</option>
+            <option value="updated_desc">Recently compiled</option>
+            <option value="title_asc">Title A-Z</option>
+            <option value="words_desc">Word count</option>
+          </select>
+          <span id="wiki-sum-count" style="font-size:11px;color:var(--fg-muted);"></span>
+        </div>
+        <div id="wiki-summaries-list" style="max-height:560px;overflow-y:auto;"></div>
+      </div>
+      <!-- Phase 54.6.61 — Visuals tab: figures / equations / tables / code,
+           with actual image rendering for figures via /api/visuals/image. -->
+      <div class="tab-pane" id="wiki-visuals-pane" style="display:none;">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
+          <select id="wiki-vis-kind" onchange="loadWikiVisuals()" style="padding:4px 8px;">
+            <option value="figure">Figures (thumbnails)</option>
+            <option value="table">Tables</option>
+            <option value="equation">Equations</option>
+            <option value="code">Code</option>
+          </select>
+          <input type="text" id="wiki-vis-search" placeholder="Search captions…"
+                 style="flex:1;min-width:160px;padding:4px 8px;"
+                 onkeydown="if(event.key==='Enter')loadWikiVisuals()">
+          <input type="number" id="wiki-vis-limit" value="60" min="10" max="500" step="10"
+                 title="Results per load" style="width:70px;padding:4px 6px;">
+          <button class="btn-secondary" onclick="loadWikiVisuals()">&#128269; Load</button>
+          <span id="wiki-vis-stats" style="font-size:11px;color:var(--fg-muted);"></span>
+        </div>
+        <div id="wiki-visuals-list" style="max-height:560px;overflow-y:auto;"></div>
       </div>
       <!-- Browse tab -->
       <div class="tab-pane" id="wiki-browse-pane" style="display:none;">
@@ -14901,11 +15021,15 @@ function switchWikiTab(name) {{
   document.querySelectorAll('#wiki-modal .tab').forEach(t => {{
     t.classList.toggle('active', t.dataset.tab === name);
   }});
-  ['wiki-query', 'wiki-browse', 'wiki-lint', 'wiki-consensus'].forEach(tab => {{
+  // Phase 54.6.61 — wiki-summaries + wiki-visuals added to the registry.
+  ['wiki-query', 'wiki-summaries', 'wiki-visuals',
+   'wiki-browse', 'wiki-lint', 'wiki-consensus'].forEach(tab => {{
     const pane = document.getElementById(tab + '-pane');
     if (pane) pane.style.display = (name === tab) ? 'block' : 'none';
   }});
   if (name === 'wiki-browse') loadWikiPages(1);
+  if (name === 'wiki-summaries') loadWikiSummaries();
+  if (name === 'wiki-visuals') loadWikiVisuals();
 }}
 
 // ── Phase 54.6.2 — Wiki Lint + Consensus (surface CLI in GUI) ───────────
@@ -15258,6 +15382,221 @@ async function loadWikiPages(page) {{
   }} catch (e) {{
     list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--danger);">Error: ' + e.message + '</div>';
   }}
+}}
+
+// ── Phase 54.6.61 — Summaries tab ───────────────────────────────────────
+// We fetch once (all 500-1000 paper summaries fit in a single request)
+// and filter/sort client-side. Each card opens the full summary via
+// openWikiPage(), which reuses the existing detail pane under the
+// Browse tab — so "Back to list" lands on Browse. That's acceptable;
+// the state is visible and the user can use the Summaries tab button
+// to get back.
+
+let _wikiSummariesCache = null;  // array from /api/wiki/pages
+
+async function loadWikiSummaries() {{
+  const list = document.getElementById('wiki-summaries-list');
+  if (!list) return;
+  if (_wikiSummariesCache) {{ renderWikiSummaries(); return; }}
+  list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--fg-muted);">Loading summaries…</div>';
+  try {{
+    // per_page=2000 — we have ~630 summaries today; a single page keeps
+    // the client-side sort/filter trivial and avoids paginator wiring.
+    const res = await fetch('/api/wiki/pages?page_type=paper_summary&per_page=2000&page=1');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    _wikiSummariesCache = (data.pages || []).filter(p => p.page_type === 'paper_summary');
+    renderWikiSummaries();
+  }} catch (e) {{
+    list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--danger);">Error: ' + e.message + '</div>';
+  }}
+}}
+
+function renderWikiSummaries() {{
+  const list = document.getElementById('wiki-summaries-list');
+  const countEl = document.getElementById('wiki-sum-count');
+  const searchEl = document.getElementById('wiki-sum-search');
+  const sortEl = document.getElementById('wiki-sum-sort');
+  if (!list || !_wikiSummariesCache) return;
+
+  const q = ((searchEl && searchEl.value) || '').toLowerCase().trim();
+  const sort = (sortEl && sortEl.value) || 'year_desc';
+
+  let items = _wikiSummariesCache.slice();
+  if (q) {{
+    items = items.filter(p => {{
+      const hay = ((p.title || '') + ' ' + (p.authors_display || '')
+                   + ' ' + (p.slug || '')).toLowerCase();
+      return hay.indexOf(q) !== -1;
+    }});
+  }}
+
+  const cmp = {{
+    year_desc: (a, b) => (b.year || 0) - (a.year || 0)
+                     || (a.title || '').localeCompare(b.title || ''),
+    year_asc: (a, b) => (a.year || 9999) - (b.year || 9999)
+                    || (a.title || '').localeCompare(b.title || ''),
+    updated_desc: (a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''),
+    title_asc: (a, b) => (a.title || '').localeCompare(b.title || ''),
+    words_desc: (a, b) => (b.word_count || 0) - (a.word_count || 0),
+  }}[sort] || ((a, b) => 0);
+  items.sort(cmp);
+
+  if (countEl) {{
+    countEl.textContent = items.length + ' of ' + _wikiSummariesCache.length
+                        + ' summaries';
+  }}
+
+  if (items.length === 0) {{
+    list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--fg-muted);">No summaries match.</div>';
+    return;
+  }}
+
+  let html = '';
+  for (const p of items) {{
+    const title = _escHtml(p.title || p.slug || '');
+    const authors = _escHtml(p.authors_display || '');
+    const year = p.year != null ? p.year : '—';
+    const words = (p.word_count || 0).toLocaleString();
+    const slug = _escHtml(p.slug || '');
+    html += '<div class="wiki-summary-card" onclick="openWikiSummary(\\'' + slug + '\\')" '
+         +  'style="border:1px solid var(--border);border-radius:8px;padding:10px 14px;'
+         +  'margin-bottom:8px;cursor:pointer;transition:background 0.1s;" '
+         +  'onmouseover="this.style.background=\\'var(--bg-alt)\\'" '
+         +  'onmouseout="this.style.background=\\'transparent\\'">'
+         +  '<div style="font-weight:600;margin-bottom:3px;">' + title + '</div>'
+         +  '<div style="font-size:12px;color:var(--fg-muted);">'
+         +  (authors || '<em>unknown authors</em>') + '  ·  '
+         +  year + '  ·  ' + words + ' words'
+         +  '</div>'
+         +  '</div>';
+  }}
+  list.innerHTML = html;
+}}
+
+function openWikiSummary(slug) {{
+  // Switch to the Browse tab (which owns the detail pane) then open.
+  // The detail pane is shared between Browse and Summaries — simplest
+  // wiring. A dedicated detail pane inside Summaries would duplicate
+  // 150 lines of TOC / backlinks / annotations code.
+  switchWikiTab('wiki-browse');
+  openWikiPage(slug);
+}}
+
+// ── Phase 54.6.61 — Visuals tab ─────────────────────────────────────────
+// Grid for figures (actual thumbnails via /api/visuals/image/<id>),
+// list layout for equations/tables/code. Reuses /api/visuals (kind,
+// query, limit filters). Equations render via KaTeX which is already
+// loaded by the page header; tables render the raw MinerU HTML.
+
+async function loadWikiVisuals() {{
+  const kindEl = document.getElementById('wiki-vis-kind');
+  const searchEl = document.getElementById('wiki-vis-search');
+  const limitEl = document.getElementById('wiki-vis-limit');
+  const list = document.getElementById('wiki-visuals-list');
+  const statsEl = document.getElementById('wiki-vis-stats');
+  if (!list) return;
+
+  const kind = (kindEl && kindEl.value) || 'figure';
+  const query = ((searchEl && searchEl.value) || '').trim();
+  const limit = (limitEl && +limitEl.value) || 60;
+
+  // Stats line (cached — change only when extract-visuals re-runs)
+  try {{
+    const sres = await fetch('/api/visuals/stats');
+    const sdata = await sres.json();
+    if (statsEl && sdata.stats) {{
+      const parts = Object.entries(sdata.stats).map(
+        function(kv) {{ return kv[0] + ': ' + kv[1]; }}
+      ).join(', ');
+      statsEl.textContent = 'Corpus: ' + parts;
+    }}
+  }} catch (e) {{ /* non-fatal */ }}
+
+  list.innerHTML = '<div style="padding:16px;color:var(--fg-muted);">Loading ' + kind + 's…</div>';
+
+  const params = new URLSearchParams({{kind: kind, limit: String(limit)}});
+  if (query) params.set('query', query);
+  try {{
+    const res = await fetch('/api/visuals?' + params.toString());
+    const items = await res.json();
+    if (!Array.isArray(items) || items.length === 0) {{
+      list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--fg-muted);">'
+        + 'No ' + kind + 's found' + (query ? ' for “' + _escHtml(query) + '”' : '') + '.'
+        + '</div>';
+      return;
+    }}
+    list.innerHTML = renderWikiVisuals(items, kind);
+    // KaTeX render pass for any equation blocks we just injected.
+    if (kind === 'equation' && typeof renderMathInElement === 'function') {{
+      try {{ renderMathInElement(list, {{
+        delimiters: [
+          {{left: '$$', right: '$$', display: true}},
+          {{left: '$', right: '$', display: false}},
+        ],
+        throwOnError: false,
+      }}); }} catch (e) {{ /* non-fatal */ }}
+    }}
+  }} catch (e) {{
+    list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--danger);">Error: ' + e.message + '</div>';
+  }}
+}}
+
+function renderWikiVisuals(items, kind) {{
+  if (kind === 'figure') {{
+    // Thumbnail grid. Native lazy-loading on <img> keeps the initial
+    // render cheap even at limit=500.
+    let html = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;">';
+    for (const v of items) {{
+      const caption = _escHtml((v.caption || v.content || '').substring(0, 140));
+      const paper = _escHtml((v.paper_title || '').substring(0, 60));
+      const year = v.year ? ' (' + v.year + ')' : '';
+      const fn = _escHtml(v.figure_num || 'Figure');
+      html += '<div style="border:1px solid var(--border);border-radius:6px;overflow:hidden;background:var(--bg);">'
+           +  '<a href="/api/visuals/image/' + encodeURIComponent(v.id) + '" target="_blank" '
+           +  'style="display:block;background:#000;">'
+           +  '<img src="/api/visuals/image/' + encodeURIComponent(v.id) + '" loading="lazy" '
+           +  'style="width:100%;height:160px;object-fit:contain;display:block;" '
+           +  'onerror="this.style.display=\\'none\\';this.parentElement.innerHTML=\\'<div style=padding:40px;color:#888;text-align:center;font-size:11px;>image missing</div>\\';">'
+           +  '</a>'
+           +  '<div style="padding:6px 8px;font-size:11px;">'
+           +  '<div style="font-weight:600;margin-bottom:2px;">' + fn + '</div>'
+           +  '<div style="color:var(--fg-muted);line-height:1.35;max-height:3.6em;overflow:hidden;">' + caption + '</div>'
+           +  '<div style="color:var(--fg-muted);margin-top:4px;font-style:italic;">' + paper + year + '</div>'
+           +  '</div>'
+           +  '</div>';
+    }}
+    html += '</div>';
+    return html;
+  }}
+
+  // Non-figure kinds: list/row layout
+  let html = '';
+  for (const v of items) {{
+    const paper = _escHtml((v.paper_title || '').substring(0, 80)) + (v.year ? ' (' + v.year + ')' : '');
+    const caption = _escHtml(v.caption || '');
+    let body = '';
+    if (kind === 'equation') {{
+      body = '<div style="padding:8px;background:var(--bg);border-radius:4px;overflow-x:auto;">$$'
+           + (v.content || '') + '$$</div>';
+    }} else if (kind === 'table') {{
+      // MinerU stores table_body as HTML — inject directly but clamp overflow.
+      body = '<div style="max-height:320px;overflow:auto;border:1px solid var(--border);'
+           + 'border-radius:4px;padding:6px;font-size:11px;">'
+           + (v.content || '') + '</div>';
+    }} else {{  // code
+      body = '<pre style="max-height:240px;overflow:auto;background:var(--bg);'
+           + 'border-radius:4px;padding:8px;font-size:11px;">'
+           + _escHtml(v.content || '') + '</pre>';
+    }}
+    html += '<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:10px;">'
+         +  '<div style="font-size:11px;color:var(--fg-muted);margin-bottom:4px;font-style:italic;">'
+         +  paper + '</div>'
+         +  (caption ? '<div style="font-size:12px;margin-bottom:6px;">' + caption + '</div>' : '')
+         +  body
+         +  '</div>';
+  }}
+  return html;
 }}
 
 // Phase 54 — track the currently-viewed wiki slug so the TOC + Copy
