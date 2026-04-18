@@ -1289,6 +1289,266 @@ def ensemble_review(
     _consume_events(gen, console)
 
 
+# ── snapshot / snapshots / snapshot-restore (Phase 54.6.75 — #13) ──────────
+
+@app.command()
+def snapshot(
+    book_title: Annotated[str, typer.Argument(
+        help="Book title (or book-id prefix) to snapshot.")],
+    chapter: int = typer.Option(
+        0, "--chapter", "-c",
+        help="Chapter number to snapshot (default 0 = whole book).",
+    ),
+    name: str = typer.Option("", "--name", help="Optional snapshot label."),
+):
+    """Phase 54.6.75 (#13) — snapshot every draft in a book or a chapter
+    so autowrite-all can be rolled back with one command.
+
+    Mirrors the web reader's snapshot buttons (`POST /api/snapshot/book/{id}`,
+    `POST /api/snapshot/chapter/{id}`). Captures the latest draft per
+    (chapter, section_type) into one `draft_snapshots` row with
+    scope='chapter' or 'book'. Non-destructive — nothing is overwritten.
+
+    Examples:
+
+      sciknow book snapshot "Global Cooling"                  # whole book
+      sciknow book snapshot "Global Cooling" --chapter 3      # one chapter
+      sciknow book snapshot "Global Cooling" --name "pre-rewrite"
+    """
+    import datetime as _dt
+    from sqlalchemy import text as _text
+    from sciknow.storage.db import get_session
+    from sciknow.web.app import (
+        _snapshot_chapter_drafts,
+    )
+
+    with get_session() as session:
+        book = _get_book(session, book_title)
+        if not book:
+            console.print(f"[red]Book not found:[/red] {book_title}")
+            raise typer.Exit(1)
+        book_id = book[0]
+
+        if chapter > 0:
+            ch = session.execute(_text("""
+                SELECT id::text, title FROM book_chapters
+                WHERE book_id::text = :bid AND number = :n LIMIT 1
+            """), {"bid": book_id, "n": chapter}).fetchone()
+            if not ch:
+                console.print(f"[red]Chapter {chapter} not found in {book[1]!r}.[/red]")
+                raise typer.Exit(1)
+            bundle = _snapshot_chapter_drafts(session, ch[0])
+            if not bundle["drafts"]:
+                console.print(f"[yellow]Chapter has no drafts to snapshot.[/yellow]")
+                raise typer.Exit(0)
+            snap_name = name.strip() or (
+                f"{book[1]} · Ch.{chapter} — "
+                f"{_dt.datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            )
+            total_words = sum(d.get("word_count") or 0 for d in bundle["drafts"])
+            session.execute(_text("""
+                INSERT INTO draft_snapshots
+                    (chapter_id, scope, name, content, word_count)
+                VALUES
+                    (CAST(:cid AS uuid), 'chapter', :name, :content, :wc)
+            """), {"cid": ch[0], "name": snap_name,
+                   "content": _json.dumps(bundle), "wc": total_words})
+            session.commit()
+            console.print(
+                f"[green]✓ Snapshot saved:[/green] {snap_name}\n"
+                f"  scope=chapter  drafts={len(bundle['drafts'])}  "
+                f"words={total_words:,}"
+            )
+            return
+
+        # Whole-book path
+        chapters = session.execute(_text(
+            "SELECT id::text, number, title FROM book_chapters "
+            "WHERE book_id::text = :bid ORDER BY number"
+        ), {"bid": book_id}).fetchall()
+        chapter_bundles: list[dict] = []
+        grand = 0
+        for ch in chapters:
+            b = _snapshot_chapter_drafts(session, ch[0])
+            if not b["drafts"]:
+                continue
+            b["chapter_number"] = ch[1]
+            b["chapter_title"] = ch[2] or ""
+            chapter_bundles.append(b)
+            grand += sum(d.get("word_count") or 0 for d in b["drafts"])
+        if not chapter_bundles:
+            console.print(f"[yellow]Book has no drafts to snapshot.[/yellow]")
+            raise typer.Exit(0)
+        snap_name = name.strip() or (
+            f"{book[1]} — {_dt.datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        )
+        payload = _json.dumps({"book_id": book_id, "chapters": chapter_bundles})
+        session.execute(_text("""
+            INSERT INTO draft_snapshots
+                (book_id, scope, name, content, word_count)
+            VALUES
+                (CAST(:bid AS uuid), 'book', :name, :content, :wc)
+        """), {"bid": book_id, "name": snap_name,
+               "content": payload, "wc": grand})
+        session.commit()
+    console.print(
+        f"[green]✓ Snapshot saved:[/green] {snap_name}\n"
+        f"  scope=book  chapters={len(chapter_bundles)}  words={grand:,}"
+    )
+
+
+@app.command()
+def snapshots(
+    book_title: Annotated[str, typer.Argument(help="Book title.")],
+    chapter: int = typer.Option(
+        0, "--chapter", "-c",
+        help="Chapter number to list (default 0 = list book + every "
+             "chapter's snapshots).",
+    ),
+):
+    """Phase 54.6.75 (#13) — list saved snapshots for a book / chapter.
+
+    Useful for finding a snapshot ID to pass to `snapshot-restore`.
+
+    Examples:
+
+      sciknow book snapshots "Global Cooling"                 # book + all chapters
+      sciknow book snapshots "Global Cooling" --chapter 3     # one chapter
+    """
+    from sqlalchemy import text as _text
+    from sciknow.storage.db import get_session
+
+    with get_session() as session:
+        book = _get_book(session, book_title)
+        if not book:
+            console.print(f"[red]Book not found:[/red] {book_title}")
+            raise typer.Exit(1)
+        book_id = book[0]
+        if chapter > 0:
+            ch = session.execute(_text("""
+                SELECT id::text, title FROM book_chapters
+                WHERE book_id::text = :bid AND number = :n LIMIT 1
+            """), {"bid": book_id, "n": chapter}).fetchone()
+            if not ch:
+                console.print(f"[red]Chapter {chapter} not found.[/red]")
+                raise typer.Exit(1)
+            rows = session.execute(_text("""
+                SELECT id::text, name, word_count, created_at, scope
+                FROM draft_snapshots
+                WHERE chapter_id::text = :cid AND scope = 'chapter'
+                ORDER BY created_at DESC
+            """), {"cid": ch[0]}).fetchall()
+        else:
+            rows = session.execute(_text("""
+                SELECT s.id::text, s.name, s.word_count, s.created_at, s.scope,
+                       bc.number
+                FROM draft_snapshots s
+                LEFT JOIN book_chapters bc ON bc.id = s.chapter_id
+                WHERE s.book_id::text = :bid
+                   OR s.chapter_id IN (
+                       SELECT id FROM book_chapters WHERE book_id::text = :bid
+                   )
+                ORDER BY s.created_at DESC
+            """), {"bid": book_id}).fetchall()
+    if not rows:
+        console.print("[dim]No snapshots yet.[/dim]")
+        return
+    console.print()
+    for r in rows:
+        sid, nm, wc, ts, scope = r[0], r[1], r[2] or 0, str(r[3] or ""), r[4]
+        ch_num = r[5] if len(r) > 5 and r[5] is not None else "—"
+        scope_tag = (f"[dim]scope=book[/dim]" if scope == "book"
+                     else f"[dim]scope=chapter Ch.{ch_num}[/dim]")
+        console.print(f"  [cyan]{sid[:8]}[/cyan]  {ts[:19]}  "
+                      f"{scope_tag}  words={wc:,}  {nm}")
+
+
+@app.command(name="snapshot-restore")
+def snapshot_restore(
+    snapshot_id: Annotated[str, typer.Argument(
+        help="Snapshot ID (first 8+ chars from `sciknow book snapshots`).")],
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Report what would be restored; do NOT insert new drafts.",
+    ),
+):
+    """Phase 54.6.75 (#13) — restore a snapshot by inserting NEW draft
+    versions (non-destructive; existing drafts are kept).
+
+    Each section in the snapshot gets a new `drafts` row at
+    `version = max(current_version) + 1`, so the restored text
+    becomes the new "latest" while the pre-restore drafts remain in
+    version history. Undo = snapshot → restore an earlier snapshot.
+
+    Only bundle-scope snapshots (chapter, book) are accepted here.
+    Per-draft restore still runs through the web reader today.
+
+    Examples:
+
+      sciknow book snapshot-restore 3a9e1b2c
+      sciknow book snapshot-restore 3a9e1b2c --dry-run
+    """
+    from sqlalchemy import text as _text
+    from sciknow.storage.db import get_session
+    from sciknow.web.app import _restore_chapter_bundle
+
+    with get_session() as session:
+        row = session.execute(_text(
+            "SELECT id::text, scope, content, name FROM draft_snapshots "
+            "WHERE id::text LIKE :q LIMIT 1"
+        ), {"q": f"{snapshot_id}%"}).fetchone()
+        if not row:
+            console.print(f"[red]Snapshot not found:[/red] {snapshot_id}")
+            raise typer.Exit(1)
+        sid, scope, content, nm = row
+        if scope not in ("chapter", "book"):
+            console.print(
+                f"[red]Snapshot scope is {scope!r}.[/red] Only chapter + "
+                f"book bundles can be restored via this command."
+            )
+            raise typer.Exit(1)
+        try:
+            payload = _json.loads(content)
+        except Exception as exc:
+            console.print(f"[red]Malformed snapshot bundle:[/red] {exc}")
+            raise typer.Exit(1)
+
+        if dry_run:
+            if scope == "chapter":
+                n = len(payload.get("drafts") or [])
+                console.print(
+                    f"[dim][dry-run] would insert {n} new draft version(s) "
+                    f"from '{nm}'.[/dim]"
+                )
+            else:
+                n_ch = len(payload.get("chapters") or [])
+                n_d = sum(len(c.get("drafts") or []) for c in
+                          payload.get("chapters") or [])
+                console.print(
+                    f"[dim][dry-run] would restore {n_ch} chapter(s) / "
+                    f"{n_d} draft(s) from '{nm}'.[/dim]"
+                )
+            raise typer.Exit(0)
+
+        total = 0
+        chapters_touched = 0
+        if scope == "chapter":
+            total = _restore_chapter_bundle(session, payload)
+            chapters_touched = 1
+        else:
+            for ch_bundle in payload.get("chapters") or []:
+                total += _restore_chapter_bundle(session, ch_bundle)
+                chapters_touched += 1
+        session.commit()
+
+    console.print(
+        f"[green]✓ Restored {total} draft(s) across "
+        f"{chapters_touched} chapter(s) from snapshot '{nm}'.[/green]\n"
+        f"  [dim]Existing drafts are preserved as prior versions — "
+        f"use `book snapshots` to snapshot before trying another restore.[/dim]"
+    )
+
+
 # ── review ─────────────────────────────────────────────────────────────────────
 
 @app.command()
