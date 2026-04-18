@@ -8718,6 +8718,31 @@ def l1_phase54_6_80_paper_type_surface() -> None:
         "CLI must expose `sciknow db classify-papers`"
     )
 
+    # E) Retrieval-side integration (#10 part 2): hybrid_search exposes
+    # _apply_paper_type_weight + SearchCandidate has paper_type field,
+    # defaults gate the feature off until the backfill is done.
+    from sciknow.retrieval import hybrid_search as hs
+    from sciknow.config import settings
+    assert hasattr(hs, "_apply_paper_type_weight"), (
+        "hybrid_search must expose _apply_paper_type_weight"
+    )
+    assert "paper_type" in {
+        f.name for f in hs.SearchCandidate.__dataclass_fields__.values()
+    }, "SearchCandidate must carry a paper_type field for retrieval filtering"
+    assert hasattr(settings, "paper_type_weighting"), (
+        "Settings must expose paper_type_weighting toggle"
+    )
+    assert settings.paper_type_weighting is False, (
+        "paper_type_weighting must default to False until the classifier "
+        "backfill completes"
+    )
+    # Default weight table: opinion gets the deepest downweight
+    assert (hs._DEFAULT_PAPER_TYPE_WEIGHTS["opinion"]
+            < hs._DEFAULT_PAPER_TYPE_WEIGHTS["editorial"]
+            < hs._DEFAULT_PAPER_TYPE_WEIGHTS["peer_reviewed"]), (
+        "weight ordering must be opinion < editorial < peer_reviewed"
+    )
+
 
 def l1_phase54_6_79_plan_coverage_behavior() -> None:
     """Phase 54.6.79 (#6) — plan coverage dimension for autowrite.

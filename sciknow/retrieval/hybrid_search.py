@@ -47,6 +47,10 @@ class SearchCandidate:
     # citation graph connect this candidate's document to the retrieval's
     # anchor set (top-N candidates). Populated by _apply_cocite_boost.
     cocite_count: int = 0
+    # Phase 54.6.81 (#10 part 2) — paper_type classification tag for
+    # retrieval weighting + GUI filtering. Defaults to empty string;
+    # populated by _apply_paper_type_weight when enabled.
+    paper_type: str = ""
 
 
 # ── RRF ───────────────────────────────────────────────────────────────────────
@@ -586,6 +590,76 @@ def _apply_cocite_boost(
     return candidates
 
 
+# ── Paper-type weighting (Phase 54.6.81 — #10 part 2) ────────────────────────
+
+# Default per-type multiplicative weights. Tuned for factual corpus-
+# retrieval use: peer-reviewed / preprint / thesis / book_chapter
+# count as "legit research" (1.0); editorial + policy + unknown are
+# neutral-ish (0.7 / 0.7 / 0.8); opinion is down-weighted hardest
+# (0.4) because on factual queries an opinion piece is mostly a
+# liability even when it mentions the right terms.
+_DEFAULT_PAPER_TYPE_WEIGHTS: dict[str, float] = {
+    "peer_reviewed": 1.0,
+    "preprint":      1.0,
+    "thesis":        1.0,
+    "book_chapter":  1.0,
+    "editorial":     0.7,
+    "policy":        0.7,
+    "unknown":       0.8,
+    "opinion":       0.4,
+}
+
+
+def _apply_paper_type_weight(
+    candidates: list[SearchCandidate],
+    session: Session,
+    enabled: bool = False,
+) -> list[SearchCandidate]:
+    """Multiply each candidate's rrf_score by a paper-type-specific
+    weight. When ``enabled=False`` this is a pure no-op (doesn't even
+    run the SQL), so the classifier backfill from Phase 54.6.80 can
+    complete before any ranking effect kicks in.
+
+    Rows whose document has NULL ``paper_type`` (never classified)
+    fall back to the 'unknown' weight (0.8).
+    """
+    if not enabled or not candidates:
+        return candidates
+
+    # Allow .env override: PAPER_TYPE_WEIGHTS='{"opinion": 0.2, ...}'
+    from sciknow.config import settings
+    override = getattr(settings, "paper_type_weights", None)
+    weights = dict(_DEFAULT_PAPER_TYPE_WEIGHTS)
+    if isinstance(override, dict) and override:
+        weights.update({k: float(v) for k, v in override.items()})
+
+    doc_ids = {c.document_id for c in candidates if c.document_id}
+    if not doc_ids:
+        return candidates
+
+    from sqlalchemy import text
+    placeholders = ", ".join(f":d{i}" for i, _ in enumerate(doc_ids))
+    params = {f"d{i}": d for i, d in enumerate(doc_ids)}
+    rows = session.execute(text(f"""
+        SELECT pm.document_id::text, COALESCE(pm.paper_type, 'unknown')
+        FROM paper_metadata pm
+        WHERE pm.document_id::text IN ({placeholders})
+    """), params).fetchall()
+    type_by_doc = {r[0]: r[1] for r in rows}
+
+    changed = False
+    for c in candidates:
+        t = type_by_doc.get(c.document_id, "unknown")
+        w = weights.get(t, 0.8)
+        c.paper_type = t
+        if w != 1.0:
+            c.rrf_score *= w
+            changed = True
+    if changed:
+        candidates.sort(key=lambda c: c.rrf_score, reverse=True)
+    return candidates
+
+
 # ── Useful-count boost (Phase 32.8 — Compound learning Layer 2) ────────────────
 
 def _apply_useful_boost(
@@ -782,6 +856,16 @@ def search(
     # AND have proven useful in past autowrite drafts.
     useful_boost = getattr(settings, "useful_count_boost_factor", 0.15)
     candidates = _apply_useful_boost(candidates, session, boost_factor=useful_boost)
+
+    # Phase 54.6.81 (#10 part 2) — paper-type weighting. Multiplies
+    # rrf_score by the per-type weight (default 1.0 for research kinds,
+    # 0.7 for editorial/policy, 0.4 for opinion, 0.8 for unknown). Off
+    # by default (enable_weight=False) because it requires the
+    # classifier backfill from #10 part 1 to have populated paper_type.
+    candidates = _apply_paper_type_weight(
+        candidates, session,
+        enabled=bool(getattr(settings, "paper_type_weighting", False)),
+    )
 
     # Phase 54.6.70 (#9) — co-citation / bib-coupling boost inside the
     # retrieved set. Topic-local citation-graph signal. Default off

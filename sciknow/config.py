@@ -91,6 +91,19 @@ class Settings(BaseSettings):
     # CLI default (qwen2.5vl:32b) wins.
     visuals_caption_model: str | None = None
 
+    # Phase 54.6.81 (#10 part 2) — per-paper-type retrieval weighting.
+    # When True, hybrid_search multiplies each candidate's rrf_score by
+    # a type-specific weight: peer_reviewed/preprint/thesis/book_chapter
+    # stay at 1.0; editorial/policy drop to 0.7; unknown 0.8;
+    # opinion 0.4 (hardest hit). Off by default — enable only after
+    # `sciknow db classify-papers` has populated paper_type on a
+    # meaningful fraction of the corpus, otherwise everything uses the
+    # 'unknown' fallback.
+    paper_type_weighting: bool = False
+    # Optional override for the default weights — pass a JSON dict like
+    # {"opinion": 0.2, "editorial": 0.5}; merged over the defaults.
+    paper_type_weights: dict | None = None
+
     # Phase 54.6.70 (#9) — co-citation / bib-coupling retrieval boost.
     # Gentle log-dampened multiplier applied to candidates whose document
     # has citation-graph edges to the top-N anchor set from the same
