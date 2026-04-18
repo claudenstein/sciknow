@@ -4118,6 +4118,59 @@ async def api_visuals_stats():
         return JSONResponse({"stats": {}, "total": 0})
 
 
+@app.get("/api/visuals/search")
+async def api_visuals_search(q: str, kind: str = "", k: int = 10):
+    """Phase 54.6.82 (#11 follow-up) — semantic search over embedded
+    AI captions + equation paraphrases via the visuals Qdrant collection.
+
+    Results come back ranked by RRF-fused dense + sparse scores on
+    the caption text, then joined to the full ``visuals`` row so the
+    caller gets paper_title, asset_path, etc. for display. Empty
+    result list when the visuals collection hasn't been populated
+    yet (`sciknow db embed-visuals`).
+    """
+    from sciknow.retrieval.visuals_search import search_visuals
+    from sciknow.storage.qdrant import get_client as _get_qdrant
+    from sqlalchemy import text as _vtext
+
+    qdrant = _get_qdrant()
+    hits = search_visuals(
+        q, qdrant, candidate_k=max(5, min(k, 50)),
+        kind=kind.strip() or None,
+    )
+    if not hits:
+        return JSONResponse({"hits": [], "total": 0})
+
+    vids = [h.visual_id for h in hits if h.visual_id]
+    if not vids:
+        return JSONResponse({"hits": [], "total": 0})
+    with get_session() as session:
+        placeholders = ", ".join(f":v{i}" for i, _ in enumerate(vids))
+        params = {f"v{i}": v for i, v in enumerate(vids)}
+        rows = session.execute(_vtext(f"""
+            SELECT v.id::text, v.kind, v.asset_path, v.figure_num,
+                   v.caption, v.ai_caption, v.content,
+                   pm.title AS paper_title, pm.year
+            FROM visuals v
+            JOIN paper_metadata pm ON pm.document_id = v.document_id
+            WHERE v.id::text IN ({placeholders})
+        """), params).fetchall()
+    by_id = {r[0]: r for r in rows}
+    out = []
+    for h in hits:
+        r = by_id.get(h.visual_id)
+        if not r:
+            continue
+        out.append({
+            "id": r[0], "kind": r[1], "asset_path": r[2],
+            "figure_num": r[3], "caption": r[4] or "",
+            "ai_caption": r[5] or "", "content": (r[6] or "")[:1500],
+            "paper_title": r[7] or "", "year": r[8],
+            "rrf_score": round(h.rrf_score, 4),
+        })
+    return JSONResponse({"hits": out, "total": len(out)})
+
+
 @app.get("/api/visuals/image/{visual_id}")
 async def api_visuals_image(visual_id: str):
     """Phase 54.6.61 — stream a figure's JPG back to the browser.

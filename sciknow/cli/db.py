@@ -4731,6 +4731,134 @@ def caption_visuals_cmd(
     )
 
 
+# ── embed-visuals (Phase 54.6.82 — #11 follow-up) ────────────────────────
+
+@app.command(name="embed-visuals")
+def embed_visuals_cmd(
+    kind: str = typer.Option(
+        "equation,figure,chart", "--kind",
+        help="Comma-separated visual kinds to embed. Default covers "
+             "equation paraphrases (54.6.78) + figure/chart AI captions "
+             "(54.6.72).",
+    ),
+    limit: int = typer.Option(
+        0, "--limit", "-n",
+        help="Max visuals to embed this run (0 = all pending).",
+    ),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Re-embed even rows that already have qdrant_point_id set.",
+    ),
+):
+    """Phase 54.6.82 — embed visuals' ai_caption text into the project's
+    visuals Qdrant collection so paraphrases + captions become
+    retrievable.
+
+    Closes the loop on #11 (equation paraphrase) and #1 (figure captions):
+    both land prose in ``visuals.ai_caption``, but nothing was indexing
+    that prose for similarity search. This command embeds the caption
+    with bge-m3 (dense + sparse) and upserts into the project's
+    visuals Qdrant collection (created by `db init`), storing the
+    resulting point ID back on the row so the API can cross-reference.
+
+    Uses the existing bge-m3 embedder (shares the model already in
+    VRAM if you've done any retrieval today). ~300-500 ms per visual
+    cold, ~5-10 ms warm.
+
+    Examples:
+
+      sciknow db embed-visuals                        # all with ai_caption
+      sciknow db embed-visuals --kind equation -n 50  # test subset
+      sciknow db embed-visuals --force                # re-embed all
+    """
+    from sciknow.cli import preflight
+    preflight()
+
+    from sciknow.ingestion.embedder import embed_to_visuals_collection
+    from sciknow.storage.db import get_session
+    from sciknow.storage.qdrant import get_client as _get_qdrant
+    from sqlalchemy import text as sql_text
+
+    kinds = [k.strip() for k in kind.split(",") if k.strip()]
+    if not kinds:
+        console.print("[red]--kind must be a non-empty comma-separated list[/red]")
+        raise typer.Exit(2)
+    kind_ph = ", ".join(f":k{i}" for i, _ in enumerate(kinds))
+    kind_params = {f"k{i}": k for i, k in enumerate(kinds)}
+
+    where = [f"v.kind IN ({kind_ph})", "v.ai_caption IS NOT NULL",
+             "length(v.ai_caption) >= 20"]
+    if not force:
+        where.append("v.qdrant_point_id IS NULL")
+
+    with get_session() as session:
+        rows = session.execute(sql_text(f"""
+            SELECT v.id::text, v.document_id::text, v.kind, v.ai_caption,
+                   v.figure_num, v.caption
+            FROM visuals v
+            WHERE {' AND '.join(where)}
+            ORDER BY v.created_at
+            {('LIMIT :lim' if limit else '')}
+        """), {**kind_params, **({"lim": limit} if limit else {})}).fetchall()
+
+    total = len(rows)
+    if total == 0:
+        console.print(
+            "[green]Nothing to embed — every matching visual either has "
+            "no ai_caption or is already in Qdrant.[/green]"
+        )
+        return
+
+    console.print(f"Embedding [bold]{total}[/bold] visual(s) into the "
+                  f"visuals Qdrant collection…")
+
+    qdrant = _get_qdrant()
+    done = 0
+    skipped = 0
+    t0 = time.monotonic()
+    for idx, (vid, doc_id, vkind, ai_cap, fig_num, orig_cap) in enumerate(rows, 1):
+        try:
+            point_id = embed_to_visuals_collection(
+                ai_cap,
+                payload={
+                    "visual_id": vid,
+                    "document_id": doc_id,
+                    "kind": vkind,
+                    "figure_num": fig_num or "",
+                    "original_caption": (orig_cap or "")[:500],
+                    "ai_caption": ai_cap[:1000],
+                },
+                qdrant_client=qdrant,
+            )
+        except Exception as exc:
+            skipped += 1
+            console.print(f"  [dim][{idx}/{total}][/dim] [red]⚠ FAIL[/red]  {vkind}  · {exc}")
+            continue
+        if point_id is None:
+            skipped += 1
+            continue
+        with get_session() as session:
+            session.execute(sql_text("""
+                UPDATE visuals SET qdrant_point_id = CAST(:pid AS uuid)
+                WHERE id::text = :vid
+            """), {"pid": str(point_id), "vid": vid})
+            session.commit()
+        done += 1
+        if idx % 50 == 0:
+            rate = idx / max(0.01, time.monotonic() - t0)
+            eta = (total - idx) / max(0.01, rate)
+            console.print(
+                f"  [dim][{idx}/{total}] … {rate:.1f}/s, "
+                f"eta {int(eta/60)}m {int(eta%60)}s[/dim]"
+            )
+
+    console.print(
+        f"\n[green]✓ Embedded {done}[/green] · "
+        f"[yellow]skipped {skipped}[/yellow] · "
+        f"[dim]{time.monotonic() - t0:.1f}s wall[/dim]"
+    )
+
+
 # ── classify-papers (Phase 54.6.80 — #10) ────────────────────────────────
 
 @app.command(name="classify-papers")

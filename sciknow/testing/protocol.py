@@ -8657,6 +8657,38 @@ def l1_phase54_6_61_wiki_summaries_and_visuals_surface() -> None:
     )
 
 
+def l1_phase54_6_82_visuals_search_surface() -> None:
+    """Phase 54.6.82 (#11 follow-up) — visuals Qdrant index + search.
+
+    Structural only. Verifies:
+      A) embedder exports embed_to_visuals_collection
+      B) retrieval.visuals_search exports search_visuals + VisualHit
+      C) CLI exposes `sciknow db embed-visuals`
+      D) web exposes GET /api/visuals/search
+    """
+    from sciknow.ingestion import embedder
+    from sciknow.retrieval import visuals_search
+    from sciknow.cli import db as _db_cli
+    from sciknow.testing.helpers import all_app_routes
+
+    assert hasattr(embedder, "embed_to_visuals_collection"), (
+        "embedder must expose embed_to_visuals_collection"
+    )
+    assert hasattr(visuals_search, "search_visuals"), (
+        "visuals_search must expose search_visuals"
+    )
+    assert hasattr(visuals_search, "VisualHit"), (
+        "visuals_search must expose the VisualHit dataclass"
+    )
+    assert hasattr(_db_cli, "embed_visuals_cmd"), (
+        "CLI must expose `sciknow db embed-visuals`"
+    )
+    routes = {p for p, _m in all_app_routes()}
+    assert "/api/visuals/search" in routes, (
+        "web must expose GET /api/visuals/search"
+    )
+
+
 def l1_phase54_6_80_paper_type_surface() -> None:
     """Phase 54.6.80 (#10) — paper-type classifier + schema + CLI.
 
@@ -9497,6 +9529,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_79_plan_coverage_behavior,
     # Phase 54.6.80 — paper-type classifier surface (#10)
     l1_phase54_6_80_paper_type_surface,
+    # Phase 54.6.82 — visuals Qdrant index + semantic search (#11 follow-up)
+    l1_phase54_6_82_visuals_search_surface,
 ]
 
 L2_TESTS: list[Callable] = [

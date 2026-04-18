@@ -178,6 +178,55 @@ def embed_summary_text(
     return point_id
 
 
+def embed_to_visuals_collection(
+    text_to_embed: str,
+    payload: dict,
+    qdrant_client: QdrantClient,
+) -> UUID | None:
+    """Phase 54.6.82 (#11 follow-up) — embed arbitrary text into the
+    active project's *visuals* Qdrant collection.
+
+    Used to index equation paraphrases (Phase 54.6.78) and figure/chart
+    AI captions (Phase 54.6.72) for retrieval. The caller is expected
+    to set ``kind``, ``document_id``, ``visual_id`` etc. in ``payload``.
+
+    Returns the new Qdrant point UUID, or None for empty input.
+    """
+    if not text_to_embed or not text_to_embed.strip():
+        return None
+
+    from sciknow.storage.qdrant import visuals_collection
+    model = _get_model()
+    output = model.encode(
+        [text_to_embed],
+        batch_size=1,
+        max_length=8192,
+        return_dense=True,
+        return_sparse=True,
+        return_colbert_vecs=False,
+    )
+    point_id = uuid4()
+    full_payload = {
+        **payload,
+        "visual_point_id": str(point_id),
+        "embedding_model": settings.embedding_model,
+    }
+    qdrant_client.upsert(
+        collection_name=visuals_collection(),
+        points=[
+            PointStruct(
+                id=str(point_id),
+                vector={
+                    "dense": output["dense_vecs"][0].tolist(),
+                    "sparse": _to_sparse(output["lexical_weights"][0]),
+                },
+                payload=full_payload,
+            )
+        ],
+    )
+    return point_id
+
+
 def embed_abstract(
     abstract_text: str,
     document_id: UUID,
