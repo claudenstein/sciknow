@@ -66,6 +66,13 @@ class Settings(BaseSettings):
     embedding_dim: int = 1024
     llm_model: str = "qwen2.5:32b-instruct-q4_K_M"
     llm_fast_model: str = "qwen3:30b-a3b"
+    # Phase 54.6.55 — optional per-role override for `book review`.
+    # Falls back to llm_model when unset. Set when the global
+    # LLM_MODEL is fast-but-shallow and you want a deeper critic
+    # for the review pass specifically (see 2026-04-17-full bench:
+    # gemma3:27b-it-qat wins book_review judge 100% / dims 5/5 vs
+    # the unified qwen default's 71.4% / 3/5).
+    book_review_model: str | None = None
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
 
     # Crossref polite pool

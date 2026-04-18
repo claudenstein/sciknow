@@ -2705,6 +2705,17 @@ def review_draft_stream(
         if section_model_override:
             model = section_model_override
 
+    # Phase 54.6.55 — global review-role override (BOOK_REVIEW_MODEL env),
+    # applied only if no per-call and no per-section override was set.
+    # The 2026-04-17-full bench showed gemma3:27b-it-qat beats the
+    # unified qwen LLM_MODEL on book_review (judge 100% vs 71.4%,
+    # dimensions 5/5 vs 3/5), but losing everywhere else — so we keep
+    # qwen as the global default and let this setting re-route reviews.
+    if model is None:
+        from sciknow.config import settings as _settings
+        if _settings.book_review_model:
+            model = _settings.book_review_model
+
     yield {"type": "progress", "stage": "retrieval",
            "detail": f"Retrieving context for review of '{d_title}'..."}
 
