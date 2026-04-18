@@ -2337,15 +2337,40 @@ def cleanup_downloads(
                 f"{', '.join(p.slug for p in other_projects)}[/dim]"
             )
 
+    # Phase 54.6.58 — unified per-item log format, mirroring the
+    # expand 54.6.45 / enrich 54.6.57 [N/M] KIND title · note pattern.
+    # Gives the GUI log pane a scrollable event log per dupe action +
+    # per failed-nuke file instead of free-form console.print spam.
+    def _emit(done: int, total: int, mark: str, color: str,
+              kind: str, label_: str, note: str = "") -> None:
+        console.print(
+            f"[dim][{done:>4d}/{total}][/dim]  "
+            f"[{color}]{mark} {kind:<9}[/{color}] {label_[:70]:<70}"
+            + (f"  [dim]· {note}[/dim]" if note else "")
+        )
+
     # Hash every file. Group by SHA.
     by_sha: dict[str, list[tuple[str, Path]]] = defaultdict(list)
+    hash_failures: list[tuple[Path, str]] = []
     for label, pdf in found:
         try:
             h = hashlib.sha256(pdf.read_bytes()).hexdigest()
         except Exception as exc:
-            console.print(f"  [red]skip[/red] {pdf}: {exc}")
+            hash_failures.append((pdf, str(exc)[:80]))
             continue
         by_sha[h].append((label, pdf))
+
+    # Announce hash failures as durable lines if any (rare, but worth
+    # flagging — the file stays on disk and gets skipped by dedup).
+    for i, (pdf, err) in enumerate(hash_failures, 1):
+        _emit(i, len(hash_failures), "⚠", "red", "HASH_FAIL",
+              pdf.name, err)
+
+    # Pre-compute the total number of dedup events we'll emit (one per
+    # duplicate file, canonical files don't emit). Drives the [N/M]
+    # counter so the GUI progress feel matches enrich + expand.
+    total_dupes = sum(max(0, len(l) - 1) for l in by_sha.values())
+    done_dupes = 0
 
     moved = deleted = kept = 0
     archived_orphans = 0
@@ -2411,13 +2436,16 @@ def cleanup_downloads(
             archived_orphans += 1
 
         for lbl, dupe_path in dupes:
+            done_dupes += 1
+            canon_name = (canonical_path.name if canonical_path is not None
+                          else canonical_label)
+            dup_note = f"dup of {canonical_label}/{canon_name}"
+            if cross_hit:
+                dup_note += f"  [cross-project: {sha_project.get(sha, '?')}]"
+
             if dry_run:
-                canon_name = (canonical_path.name if canonical_path is not None
-                              else canonical_label)
-                console.print(
-                    f"  [dim]would remove[/dim] {lbl}/{dupe_path.name} "
-                    f"(dup of {canonical_label}/{canon_name})"
-                )
+                _emit(done_dupes, total_dupes, "⊘", "cyan", "DRY_REM",
+                      f"{lbl}/{dupe_path.name}", dup_note)
                 moved += 1
                 continue
             try:
@@ -2429,6 +2457,8 @@ def cleanup_downloads(
                     # will never ingest the file is meaningless.
                     dupe_path.unlink()
                     deleted += 1
+                    _emit(done_dupes, total_dupes, "✗", "red", "DELETED",
+                          f"{lbl}/{dupe_path.name}", dup_note)
                 else:
                     # Park in downloads/processed as the "safe keep"
                     # location. Preserves content; avoids cluttering
@@ -2441,10 +2471,17 @@ def cleanup_downloads(
                     if parked is None and dupe_path.exists():
                         dupe_path.unlink()
                         deleted += 1
+                        _emit(done_dupes, total_dupes, "✗", "red", "DELETED",
+                              f"{lbl}/{dupe_path.name}",
+                              f"{dup_note}  · clobber avoided")
                     else:
                         moved += 1
+                        _emit(done_dupes, total_dupes, "↷", "yellow", "MOVED",
+                              f"{lbl}/{dupe_path.name}",
+                              f"{dup_note}  → downloads/processed/")
             except Exception as exc:
-                console.print(f"  [red]skip[/red] {dupe_path}: {exc}")
+                _emit(done_dupes, total_dupes, "⚠", "red", "SKIP",
+                      f"{lbl}/{dupe_path.name}", str(exc)[:80])
 
     verb = "Would remove" if dry_run else ("Deleted" if delete_dupes else "Moved to processed/")
     console.print(
@@ -2464,23 +2501,32 @@ def cleanup_downloads(
             ("data/failed",             data_dir / "failed"),
             ("downloads/failed_ingest", download_dir / _FAILED_SUBDIR),
         ]
-        nuked_files = 0
+        # Pre-count so [N/M] is accurate across both failed dirs.
+        all_failed: list[tuple[str, Path]] = []
         for label, d in failed_dirs:
             if not d.exists():
                 continue
             for pdf in sorted(d.iterdir()):
-                if not (pdf.is_file() and not pdf.is_symlink()
+                if (pdf.is_file() and not pdf.is_symlink()
                         and pdf.suffix.lower() == ".pdf"):
-                    continue
-                if dry_run:
-                    console.print(f"  [dim]would nuke[/dim] {label}/{pdf.name}")
-                    nuked_files += 1
-                    continue
-                try:
-                    pdf.unlink()
-                    nuked_files += 1
-                except Exception as exc:
-                    console.print(f"  [red]skip[/red] {pdf}: {exc}")
+                    all_failed.append((label, pdf))
+
+        total_failed = len(all_failed)
+        nuked_files = 0
+        for idx, (label, pdf) in enumerate(all_failed, 1):
+            if dry_run:
+                _emit(idx, total_failed, "⊘", "cyan", "DRY_NUKE",
+                      f"{label}/{pdf.name}", "would remove")
+                nuked_files += 1
+                continue
+            try:
+                pdf.unlink()
+                nuked_files += 1
+                _emit(idx, total_failed, "✗", "red", "NUKED",
+                      f"{label}/{pdf.name}", "pipeline gave up")
+            except Exception as exc:
+                _emit(idx, total_failed, "⚠", "red", "SKIP",
+                      f"{label}/{pdf.name}", str(exc)[:80])
 
         nuked_rows = 0
         orphan_wiki = 0
