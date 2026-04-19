@@ -4077,12 +4077,14 @@ import os  # noqa: E402 — kept local-ish with the block that uses it
 @app.get("/api/visuals")
 async def api_visuals_list(
     kind: str = None, doc_id: str = None,
-    query: str = None, limit: int = 50,
+    query: str = None, limit: int = 50, offset: int = 0,
 ):
     """Phase 21.b — list/search visual elements (tables, equations, figures).
 
-    Filters: ?kind=table|equation|figure, ?doc_id=..., ?query=caption search.
+    Filters: ?kind=table|equation|figure|chart|code, ?doc_id=..., ?query=caption search.
+    Pagination: ``limit`` (default 50, capped at 500) and ``offset`` (54.6.100).
     Returns JSON array of visuals with content, caption, kind, figure_num.
+    Response shape unchanged for back-compat — total count lives at /api/visuals/stats.
     """
     from sqlalchemy import text as _vtext
     conditions = ["1=1"]
@@ -4097,6 +4099,10 @@ async def api_visuals_list(
         conditions.append("(v.caption ILIKE :q OR v.surrounding_text ILIKE :q)")
         params["q"] = f"%{query[:100]}%"
     where = " AND ".join(conditions)
+    # Cap limit to guard against "?limit=1000000" accidentally pulling a
+    # multi-MB payload through the JSON serializer.
+    safe_limit = max(1, min(int(limit or 50), 500))
+    safe_offset = max(0, int(offset or 0))
     try:
         with get_session() as session:
             rows = session.execute(_vtext(f"""
@@ -4108,8 +4114,8 @@ async def api_visuals_list(
                 JOIN paper_metadata pm ON pm.document_id = v.document_id
                 WHERE {where}
                 ORDER BY v.kind, v.created_at DESC
-                LIMIT :lim
-            """), {**params, "lim": limit}).fetchall()
+                LIMIT :lim OFFSET :off
+            """), {**params, "lim": safe_limit, "off": safe_offset}).fetchall()
         return JSONResponse([
             {"id": r[0], "document_id": r[1], "kind": r[2],
              "content": (r[3] or "")[:2000], "caption": r[4],
@@ -21391,13 +21397,18 @@ function swAttachLogStream(jobId, logElId) {{
 function openVisualsModal() {{
   document.querySelectorAll('.nav-dropdown.open').forEach(d => d.classList.remove('open'));
   openModal('visuals-modal');
+  // 54.6.100 — invalidate the stats cache on open so a reopened modal
+  // reflects any newly-ingested papers.
+  _visStatsCache = null;
   loadVisuals();
-  // Load stats
+  // Load stats into the footer-level summary (separate from the per-
+  // query counter that loadVisuals writes into #vis-stats).
   fetch('/api/visuals/stats').then(r => r.json()).then(d => {{
+    _visStatsCache = d;
     const s = d.stats || {{}};
     const parts = Object.entries(s).map(([k,v]) => k + ': ' + v).join(', ');
     const el = document.getElementById('vis-stats');
-    if (el) el.textContent = parts ? ('Total: ' + d.total + ' (' + parts + ')') : 'No visuals extracted yet. Run: sciknow db extract-visuals';
+    if (el && !el.textContent) el.textContent = parts ? ('Total: ' + d.total + ' (' + parts + ')') : 'No visuals extracted yet. Run: sciknow db extract-visuals';
   }}).catch(() => {{}});
 }}
 
@@ -21408,14 +21419,63 @@ function openVisualsModal() {{
 //                thumbnails instead of italic placeholder text
 // Both modes render tables as HTML (MinerU emits HTML table_body),
 // equations via KaTeX ($$…$$), code in <pre>.
-async function loadVisuals() {{
+//
+// Phase 54.6.100 — pagination so users can see all N visuals not just
+// the first 40. We track totals from /api/visuals/stats, page size
+// 60, and a "Load more" button at the bottom appends the next page
+// without redrawing. Fresh searches / mode toggles reset pagination.
+let _visPage = {{items: [], offset: 0, pageSize: 60, totals: null, exhausted: false}};
+let _visStatsCache = null;
+
+async function _visFetchPage(kinds, query, limit, offset) {{
+  // Interleave figures + charts by offsetting each proportionally to
+  // their totals so we don't return 40 figures first then 40 charts.
+  const totals = _visStatsCache && _visStatsCache.stats ? _visStatsCache.stats : {{}};
+  const sumTotal = kinds.reduce((s, k) => s + (totals[k] || 0), 0) || 1;
+  const perKind = kinds.map(k => ({{
+    kind: k,
+    n: Math.max(1, Math.round(limit * ((totals[k] || 0) / sumTotal))),
+    off: Math.round(offset * ((totals[k] || 0) / sumTotal)),
+  }}));
+  const fetches = perKind.map(({{kind, n, off}}) => {{
+    const p = new URLSearchParams();
+    p.set('kind', kind);
+    if (query) p.set('query', query);
+    p.set('limit', String(n));
+    p.set('offset', String(off));
+    return fetch('/api/visuals?' + p.toString()).then(r => r.json())
+      .then(arr => Array.isArray(arr) ? arr : []);
+  }});
+  const arrays = await Promise.all(fetches);
+  // Round-robin merge so the final order is kind-interleaved.
+  const merged = [];
+  const maxLen = Math.max.apply(null, arrays.map(a => a.length).concat([0]));
+  for (let i = 0; i < maxLen; i++) {{
+    for (const arr of arrays) {{ if (i < arr.length) merged.push(arr[i]); }}
+  }}
+  return merged;
+}}
+
+async function loadVisuals(append) {{
   const mode = document.getElementById('vis-mode').value || 'gallery';
   const kindSel = document.getElementById('vis-kind-filter');
   let kind = kindSel.value;
   const query = document.getElementById('vis-search').value.trim();
   const results = document.getElementById('vis-results');
   const statsEl = document.getElementById('vis-stats');
-  results.innerHTML = '<em>Loading...</em>';
+
+  // Make sure we know corpus totals before building pagination state.
+  if (!_visStatsCache) {{
+    try {{
+      _visStatsCache = await fetch('/api/visuals/stats').then(r => r.json());
+    }} catch (_) {{ _visStatsCache = {{stats: {{}}, total: 0}}; }}
+  }}
+
+  // Reset pagination state on a fresh load; keep it on append.
+  if (!append) {{
+    _visPage = {{items: [], offset: 0, pageSize: 60, totals: null, exhausted: false}};
+    results.innerHTML = '<em>Loading...</em>';
+  }}
 
   // In gallery mode, we force kind to image types only. If the user
   // picked a non-image kind in the dropdown while in gallery mode,
@@ -21423,48 +21483,57 @@ async function loadVisuals() {{
   // result. If they pick a specific image kind (figure or chart) the
   // filter still honours it.
   const imageKinds = ['figure', 'chart'];
-  let galleryKinds = null;
+  let activeKinds;
   if (mode === 'gallery') {{
-    if (!kind || !imageKinds.includes(kind)) {{
-      galleryKinds = imageKinds;
-    }} else {{
-      galleryKinds = [kind];
-    }}
+    activeKinds = (!kind || !imageKinds.includes(kind)) ? imageKinds : [kind];
+  }} else {{
+    activeKinds = kind ? [kind] : ['figure', 'chart', 'table', 'equation', 'code'];
   }}
 
+  // Compute the universe total for the active filter so the stats
+  // line can say "shown N of M".
+  const allStats = (_visStatsCache && _visStatsCache.stats) || {{}};
+  const universe = activeKinds.reduce((s, k) => s + (allStats[k] || 0), 0);
+  _visPage.totals = universe;
+
   try {{
-    // Gallery mode fetches figures + charts separately and merges them;
-    // /api/visuals only accepts one `kind` at a time.
-    let items = [];
+    let newItems = [];
     if (mode === 'gallery') {{
-      const fetches = galleryKinds.map(k => {{
-        const p = new URLSearchParams();
-        p.set('kind', k);
-        if (query) p.set('query', query);
-        p.set('limit', '40');
-        return fetch('/api/visuals?' + p.toString()).then(r => r.json());
-      }});
-      const all = await Promise.all(fetches);
-      for (const arr of all) if (Array.isArray(arr)) items = items.concat(arr);
-      // Interleave roughly 1:2 (figures are ~2x rarer than charts) so
-      // the user sees variety rather than 40 figures then 40 charts.
-      items.sort((a, b) => String(a.paper_title || '').localeCompare(String(b.paper_title || '')));
+      // Merge proportional-offset pages across all active image kinds.
+      newItems = await _visFetchPage(activeKinds, query, _visPage.pageSize, _visPage.offset);
     }} else {{
-      const p = new URLSearchParams();
-      if (kind) p.set('kind', kind);
-      if (query) p.set('query', query);
-      p.set('limit', '50');
-      const res = await fetch('/api/visuals?' + p.toString());
-      items = await res.json();
+      // List mode: either one kind (use offset directly) or all kinds
+      // (proportional like gallery).
+      if (kind) {{
+        const p = new URLSearchParams();
+        p.set('kind', kind);
+        if (query) p.set('query', query);
+        p.set('limit', String(_visPage.pageSize));
+        p.set('offset', String(_visPage.offset));
+        const res = await fetch('/api/visuals?' + p.toString());
+        const arr = await res.json();
+        newItems = Array.isArray(arr) ? arr : [];
+      }} else {{
+        newItems = await _visFetchPage(activeKinds, query, _visPage.pageSize, _visPage.offset);
+      }}
     }}
 
-    if (!items || !items.length || items.error) {{
-      results.innerHTML = '<em style="color:var(--fg-muted);">No visuals found.'
-        + (items && items.error ? ' Error: ' + items.error : '') + '</em>';
-      if (statsEl) statsEl.textContent = '';
+    _visPage.offset += _visPage.pageSize;
+    if (!newItems.length || newItems.length < _visPage.pageSize) {{
+      _visPage.exhausted = true;
+    }}
+    _visPage.items = _visPage.items.concat(newItems);
+    const items = _visPage.items;
+
+    if (!items.length) {{
+      results.innerHTML = '<em style="color:var(--fg-muted);">No visuals found.</em>';
+      if (statsEl) statsEl.textContent = universe ? '0 of ' + universe : '';
       return;
     }}
-    if (statsEl) statsEl.textContent = items.length + ' shown';
+    if (statsEl) {{
+      const parts = activeKinds.map(k => (allStats[k] || 0) + ' ' + k).join(' + ');
+      statsEl.textContent = items.length + ' of ' + universe + ' (' + parts + ')';
+    }}
 
     // Renderer shared by both modes for one visual, returns HTML.
     const renderPreview = (v) => {{
@@ -21536,12 +21605,22 @@ async function loadVisuals() {{
           + '</div>';
       }}
     }}
-    results.innerHTML = html;
+    // Append "Load more" footer when there might be more pages AND the
+    // UI already shows at least one item. Fresh loads get a full
+    // replacement; append calls splice into the existing grid/list.
+    const hasMore = !_visPage.exhausted && items.length < universe;
+    const loadMoreHtml =
+      '<div id="vis-loadmore-wrap" style="display:flex;justify-content:center;padding:10px 0;">'
+      + (hasMore
+          ? '<button class="btn-secondary" onclick="loadVisuals(true)" style="font-size:12px;">Load more (' + items.length + ' / ' + universe + ')</button>'
+          : '<span style="font-size:11px;color:var(--fg-muted);">End of list (' + items.length + ' / ' + universe + ')</span>')
+      + '</div>';
+
+    results.innerHTML = html + loadMoreHtml;
 
     // Render KaTeX on any equations we just injected. _renderMathInEl
     // is defined elsewhere in the template and no-ops if KaTeX isn't
-    // loaded yet. Gallery mode only has equations if the user
-    // explicitly filtered to kind=equation inside gallery (harmless).
+    // loaded yet.
     if (typeof _renderMathInEl === 'function') {{
       _renderMathInEl(results);
     }}
