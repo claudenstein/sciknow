@@ -5858,20 +5858,69 @@ async def api_backups_restore(request: Request):
 
 @app.post("/api/backups/schedule")
 async def api_backups_schedule(request: Request):
-    """Install or remove the daily cron. Body: {action: "enable"|"disable", hour: 3}."""
+    """Install or remove the cron. 54.6.94 adds frequency + minute + weekday.
+
+    Body on enable: {action:"enable", frequency:"hourly"|"daily"|"weekly",
+                     hour:0-23, minute:0-59, weekday:0-6}
+    Body on disable: {action:"disable"}.
+    """
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
     action = body.get("action", "enable")
     if action == "enable":
         job_id, _ = _create_job("backup_schedule")
         loop = asyncio.get_event_loop()
+        argv = ["backup", "schedule"]
+        freq = (body.get("frequency") or "daily").strip().lower()
+        argv += ["--frequency", freq]
         hour = int(body.get("hour", 3))
-        _spawn_cli_streaming(job_id, ["backup", "schedule", "--hour", str(hour)], loop)
+        minute = int(body.get("minute", 0))
+        weekday = int(body.get("weekday", 0))
+        argv += ["--hour", str(max(0, min(23, hour)))]
+        argv += ["--minute", str(max(0, min(59, minute)))]
+        argv += ["--weekday", str(max(0, min(6, weekday)))]
+        _spawn_cli_streaming(job_id, argv, loop)
         return JSONResponse({"job_id": job_id})
     else:
         job_id, _ = _create_job("backup_unschedule")
         loop = asyncio.get_event_loop()
         _spawn_cli_streaming(job_id, ["backup", "unschedule"], loop)
         return JSONResponse({"job_id": job_id})
+
+
+@app.post("/api/backups/delete")
+async def api_backups_delete(request: Request):
+    """54.6.94 — delete one backup set. Body: {timestamp: "<ts>"|"latest"}."""
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    ts = (body.get("timestamp") or "").strip()
+    if not ts:
+        raise HTTPException(400, "timestamp required")
+    job_id, _ = _create_job("backup_delete")
+    loop = asyncio.get_event_loop()
+    _spawn_cli_streaming(job_id, ["backup", "delete", ts, "--yes"], loop)
+    return JSONResponse({"job_id": job_id})
+
+
+@app.post("/api/backups/purge")
+async def api_backups_purge(request: Request):
+    """54.6.94 — bulk delete. Body: {all:true} OR {older_than_days:N}."""
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    argv = ["backup", "purge", "--yes"]
+    if body.get("all"):
+        argv.append("--all")
+    elif body.get("older_than_days"):
+        try:
+            n = int(body["older_than_days"])
+        except (TypeError, ValueError):
+            raise HTTPException(400, "older_than_days must be an integer")
+        if n <= 0:
+            raise HTTPException(400, "older_than_days must be positive")
+        argv += ["--older-than-days", str(n)]
+    else:
+        raise HTTPException(400, "pass either {all:true} or {older_than_days:N}")
+    job_id, _ = _create_job("backup_purge")
+    loop = asyncio.get_event_loop()
+    _spawn_cli_streaming(job_id, argv, loop)
+    return JSONResponse({"job_id": job_id})
 
 
 @app.post("/api/server/shutdown")
@@ -8671,10 +8720,57 @@ body.task-bar-open {{ padding-top: 40px; }}
       <div id="backup-status" style="margin-bottom:12px;padding:10px;background:var(--bg-alt);border-radius:6px;">
         Loading backup status...
       </div>
+      <div id="backup-location" style="margin-bottom:10px;font-size:11px;color:var(--fg-muted);word-break:break-all;"></div>
+
+      <details style="margin-bottom:12px;border:1px solid var(--border);border-radius:6px;padding:8px 10px;">
+        <summary style="cursor:pointer;font-weight:600;">&#128339; Schedule auto-backup</summary>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px;">
+          <label>Frequency:
+            <select id="backup-sched-freq" style="padding:4px;">
+              <option value="hourly">Hourly</option>
+              <option value="daily" selected>Daily</option>
+              <option value="weekly">Weekly</option>
+            </select>
+          </label>
+          <label id="backup-sched-weekday-label" style="display:none;">Day:
+            <select id="backup-sched-weekday" style="padding:4px;">
+              <option value="0">Sun</option><option value="1">Mon</option>
+              <option value="2">Tue</option><option value="3">Wed</option>
+              <option value="4">Thu</option><option value="5">Fri</option>
+              <option value="6">Sat</option>
+            </select>
+          </label>
+          <label id="backup-sched-hour-label">Hour:
+            <input type="number" id="backup-sched-hour" min="0" max="23" value="3" style="width:60px;padding:4px;">
+          </label>
+          <label>Minute:
+            <input type="number" id="backup-sched-minute" min="0" max="59" value="0" style="width:60px;padding:4px;">
+          </label>
+          <button class="btn-primary" onclick="enableBackupSchedule()">Save schedule</button>
+          <button class="btn-secondary" id="backup-unschedule-btn" onclick="disableBackupSchedule()" style="display:none;">Disable</button>
+        </div>
+      </details>
+
+      <details style="margin-bottom:12px;border:1px solid var(--border);border-radius:6px;padding:8px 10px;">
+        <summary style="cursor:pointer;font-weight:600;">&#128465; Autodelete old backups</summary>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px;">
+          <label><input type="checkbox" id="backup-purge-all-check"> Delete ALL backups</label>
+          <span style="color:var(--fg-muted);">— or —</span>
+          <label>Older than
+            <input type="number" id="backup-purge-days" min="1" value="30" style="width:70px;padding:4px;">
+            days
+          </label>
+          <button class="btn-secondary" onclick="purgeBackups()" style="color:var(--danger);border-color:var(--danger);">Purge now</button>
+        </div>
+        <p style="font-size:11px;color:var(--fg-muted);margin:8px 0 0;">
+          Auto-age retention on every run is controlled by <code>BACKUP_RETAIN_DAYS</code> in <code>.env</code>
+          (0 = disabled). Count-based retention is <code>BACKUP_RETAIN_COUNT</code> (default 7).
+        </p>
+      </details>
+
       <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
         <button class="btn-primary" onclick="runBackupNow()">&#128190; Run Backup Now</button>
         <button class="btn-secondary" onclick="restoreBackup()">&#128260; Restore Latest</button>
-        <button class="btn-secondary" id="backup-schedule-btn" onclick="toggleBackupSchedule()">&#128339; Enable Daily Schedule</button>
       </div>
       <div id="backup-log" style="display:none;max-height:120px;overflow-y:auto;font-family:var(--font-mono);font-size:11px;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:8px;margin-bottom:12px;white-space:pre-wrap;"></div>
       <h4 style="margin:0 0 8px;">Backup History</h4>
@@ -20978,8 +21074,9 @@ async function refreshBackupsList() {{
     const res = await fetch('/api/backups');
     const d = await res.json();
     const status = document.getElementById('backup-status');
+    const location = document.getElementById('backup-location');
     const list = document.getElementById('backup-list');
-    const schedBtn = document.getElementById('backup-schedule-btn');
+    const unschedBtn = document.getElementById('backup-unschedule-btn');
 
     // Status
     const backups = d.backups || [];
@@ -20997,14 +21094,34 @@ async function refreshBackupsList() {{
     }}
     statusHtml += '<br>';
     if (sched) {{
-      statusHtml += '<strong>Schedule:</strong> ' + sched.cron_expression
-        + ' (since ' + (sched.installed_at || '?').substring(0, 10) + ')';
-      schedBtn.textContent = '\\u23F9 Disable Schedule';
+      const human = sched.human || sched.cron_expression || '?';
+      statusHtml += '<strong>Schedule:</strong> ' + human
+        + ' <span style="color:var(--fg-muted);font-size:11px;">(cron: ' + sched.cron_expression + ')</span>';
+      if (unschedBtn) unschedBtn.style.display = '';
+      // Populate the schedule form with current values
+      const freq = sched.frequency || 'daily';
+      const freqEl = document.getElementById('backup-sched-freq');
+      if (freqEl) freqEl.value = freq;
+      const parts = (sched.cron_expression || '0 3 * * *').split(' ');
+      if (parts.length >= 5) {{
+        const minEl = document.getElementById('backup-sched-minute');
+        if (minEl && /^\\d+$/.test(parts[0])) minEl.value = parts[0];
+        const hourEl = document.getElementById('backup-sched-hour');
+        if (hourEl && /^\\d+$/.test(parts[1])) hourEl.value = parts[1];
+        const wdEl = document.getElementById('backup-sched-weekday');
+        if (wdEl && /^\\d+$/.test(parts[4])) wdEl.value = parts[4];
+      }}
+      _updateScheduleFormVisibility();
     }} else {{
       statusHtml += '<span style="color:var(--fg-muted);">No schedule active.</span>';
-      schedBtn.textContent = '\\u23F0 Enable Daily Schedule';
+      if (unschedBtn) unschedBtn.style.display = 'none';
     }}
     status.innerHTML = statusHtml;
+
+    // Location
+    if (location) {{
+      location.innerHTML = '<strong>Location:</strong> ' + (d.backup_dir || '?');
+    }}
 
     // Badge on Manage button
     const badge = document.getElementById('backup-badge');
@@ -21020,13 +21137,13 @@ async function refreshBackupsList() {{
       }}
     }}
 
-    // List
+    // List with delete + restore per row
     if (!backups.length) {{
       list.innerHTML = '<em style="color:var(--fg-muted);">No backups. Click "Run Backup Now".</em>';
       return;
     }}
     let html = '<table style="width:100%;border-collapse:collapse;font-size:12px;">';
-    html += '<tr style="border-bottom:1px solid var(--border);"><th style="text-align:left;padding:4px;">Date</th><th>Projects</th><th style="text-align:right;">Size</th><th>Sys</th><th>Files</th></tr>';
+    html += '<tr style="border-bottom:1px solid var(--border);"><th style="text-align:left;padding:4px;">Date</th><th>Projects</th><th style="text-align:right;">Size</th><th>Sys</th><th>Files</th><th>Actions</th></tr>';
     for (let i = backups.length - 1; i >= 0; i--) {{
       const b = backups[i];
       const mb = (b.total_bytes || 0) / 1024 / 1024;
@@ -21034,20 +21151,42 @@ async function refreshBackupsList() {{
       const dlLinks = files.map(f =>
         '<a href="/api/backups/download/' + encodeURIComponent(b.dir) + '/' + encodeURIComponent(f) + '" download style="color:var(--link);text-decoration:underline;font-size:11px;">' + f + '</a>'
       ).join('<br>');
+      const safeTs = b.dir.replace(/"/g, '');
+      const actions =
+        '<button class="btn-secondary" style="font-size:11px;padding:2px 6px;" onclick="restoreBackup(\\''
+          + safeTs + '\\')" title="Restore this backup">\\u21BB</button> '
+        + '<button class="btn-secondary" style="font-size:11px;padding:2px 6px;color:var(--danger);border-color:var(--danger);" '
+          + 'onclick="deleteBackup(\\'' + safeTs + '\\')" title="Delete this backup">\\u2715</button>';
       html += '<tr style="border-bottom:1px solid var(--border);">'
         + '<td style="padding:4px;">' + b.timestamp + '</td>'
         + '<td>' + (b.projects || []).join(', ') + '</td>'
         + '<td style="text-align:right;">' + mb.toFixed(1) + ' MB</td>'
         + '<td style="text-align:center;">' + (b.system_bundle ? '\\u2713' : '\\u2014') + '</td>'
         + '<td>' + dlLinks + '</td>'
+        + '<td>' + actions + '</td>'
         + '</tr>';
     }}
     html += '</table>';
+    const totalMb = backups.reduce((s, b) => s + (b.total_bytes || 0), 0) / 1024 / 1024;
+    html += '<div style="font-size:11px;color:var(--fg-muted);margin-top:6px;">'
+      + backups.length + ' backup(s), ' + totalMb.toFixed(1) + ' MB total.</div>';
     list.innerHTML = html;
   }} catch (exc) {{
     document.getElementById('backup-list').innerHTML = '<span style="color:var(--danger);">Failed to load: ' + exc + '</span>';
   }}
 }}
+
+function _updateScheduleFormVisibility() {{
+  const freq = (document.getElementById('backup-sched-freq') || {{}}).value || 'daily';
+  const wdLabel = document.getElementById('backup-sched-weekday-label');
+  const hourLabel = document.getElementById('backup-sched-hour-label');
+  if (wdLabel) wdLabel.style.display = (freq === 'weekly') ? '' : 'none';
+  if (hourLabel) hourLabel.style.display = (freq === 'hourly') ? 'none' : '';
+}}
+document.addEventListener('DOMContentLoaded', function() {{
+  const sel = document.getElementById('backup-sched-freq');
+  if (sel) sel.addEventListener('change', _updateScheduleFormVisibility);
+}});
 
 async function runBackupNow() {{
   const log = document.getElementById('backup-log');
@@ -21119,34 +21258,93 @@ async function restoreBackup(ts) {{
   }}
 }}
 
-async function toggleBackupSchedule() {{
-  const action = _backupScheduleActive ? 'disable' : 'enable';
+function _streamJobToBackupLog(jobId, startMsg) {{
+  const log = document.getElementById('backup-log');
+  log.style.display = 'block';
+  log.textContent = startMsg + '\\n';
+  const source = new EventSource('/api/stream/' + jobId);
+  source.onmessage = function(e) {{
+    const evt = JSON.parse(e.data);
+    if (evt.type === 'log') {{
+      log.textContent += evt.text + '\\n';
+      log.scrollTop = log.scrollHeight;
+    }} else if (evt.type === 'completed' || evt.type === 'error') {{
+      source.close();
+      refreshBackupsList();
+    }}
+  }};
+  source.onerror = function() {{ source.close(); }};
+}}
+
+async function enableBackupSchedule() {{
+  const freq = (document.getElementById('backup-sched-freq').value || 'daily').trim();
+  const hour = parseInt(document.getElementById('backup-sched-hour').value || '3', 10);
+  const minute = parseInt(document.getElementById('backup-sched-minute').value || '0', 10);
+  const weekday = parseInt(document.getElementById('backup-sched-weekday').value || '0', 10);
   try {{
     const res = await fetch('/api/backups/schedule', {{
       method: 'POST',
       headers: {{'Content-Type': 'application/json'}},
-      body: JSON.stringify({{action: action, hour: 3}}),
+      body: JSON.stringify({{
+        action: 'enable',
+        frequency: freq, hour: hour, minute: minute, weekday: weekday,
+      }}),
     }});
     const d = await res.json();
-    if (d.job_id) {{
-      const log = document.getElementById('backup-log');
-      log.style.display = 'block';
-      log.textContent = (action === 'enable' ? 'Installing' : 'Removing') + ' crontab entry...\\n';
-      const source = new EventSource('/api/stream/' + d.job_id);
-      source.onmessage = function(e) {{
-        const evt = JSON.parse(e.data);
-        if (evt.type === 'log') {{
-          log.textContent += evt.text + '\\n';
-        }} else if (evt.type === 'completed' || evt.type === 'error') {{
-          source.close();
-          refreshBackupsList();
-        }}
-      }};
-      source.onerror = function() {{ source.close(); }};
-    }}
-  }} catch (exc) {{
-    alert('Schedule failed: ' + exc);
+    if (d.job_id) _streamJobToBackupLog(d.job_id, 'Installing ' + freq + ' schedule...');
+  }} catch (exc) {{ alert('Schedule failed: ' + exc); }}
+}}
+
+async function disableBackupSchedule() {{
+  if (!confirm('Remove auto-backup schedule?')) return;
+  try {{
+    const res = await fetch('/api/backups/schedule', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{action: 'disable'}}),
+    }});
+    const d = await res.json();
+    if (d.job_id) _streamJobToBackupLog(d.job_id, 'Removing crontab entry...');
+  }} catch (exc) {{ alert('Disable failed: ' + exc); }}
+}}
+
+async function deleteBackup(ts) {{
+  if (!confirm('Delete backup "' + ts + '"?\\n\\nThis removes the backup files on disk and cannot be undone.')) return;
+  try {{
+    const res = await fetch('/api/backups/delete', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{timestamp: ts}}),
+    }});
+    const d = await res.json();
+    if (d.job_id) _streamJobToBackupLog(d.job_id, 'Deleting ' + ts + '...');
+  }} catch (exc) {{ alert('Delete failed: ' + exc); }}
+}}
+
+async function purgeBackups() {{
+  const all = document.getElementById('backup-purge-all-check').checked;
+  const days = parseInt(document.getElementById('backup-purge-days').value || '0', 10);
+  let body, confirmMsg;
+  if (all) {{
+    body = {{all: true}};
+    confirmMsg = 'Delete ALL backups?\\n\\nThis wipes every backup in archives/backups/ and cannot be undone.';
+  }} else if (days > 0) {{
+    body = {{older_than_days: days}};
+    confirmMsg = 'Delete backups older than ' + days + ' days?\\n\\nCannot be undone.';
+  }} else {{
+    alert('Check "Delete ALL backups" or enter a positive number of days.');
+    return;
   }}
+  if (!confirm(confirmMsg)) return;
+  try {{
+    const res = await fetch('/api/backups/purge', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify(body),
+    }});
+    const d = await res.json();
+    if (d.job_id) _streamJobToBackupLog(d.job_id, 'Purging...');
+  }} catch (exc) {{ alert('Purge failed: ' + exc); }}
 }}
 
 // Load backup badge on page load
