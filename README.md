@@ -313,6 +313,7 @@ Core guides — how to use sciknow, how it works, how to extend it:
 | **[Testing Protocol](docs/TESTING.md)** | 3-layer smoke harness (`sciknow test`); how to add checks |
 | **[Benchmarks](docs/BENCHMARKS.md)** | `sciknow bench` — performance + quality measurement; baseline findings |
 | **[Bench methodology](docs/BENCH_METHODOLOGY.md)** | Hard-won rules for fair LLM/VLM benchmarking; the 2026-04-17 failure that motivated them |
+| **[Expand + enrich research (2026-04)](docs/EXPAND_ENRICH_RESEARCH_2.md)** | Gaps audit + 2024-2026 literature sweep; follow-on to `EXPAND_RESEARCH.md` for what's next in corpus growth |
 
 Project planning and release history:
 
