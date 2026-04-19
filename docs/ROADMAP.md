@@ -155,12 +155,16 @@ per hour of effort.
 - [x] **~~#1 — Vision-LLM auto-captioning for figures + charts.~~** Shipped in Phase 54.6.72 as `sciknow/core/visuals_caption.py` + CLI `db caption-visuals`. Bulk captioning (54.6.89) wired into `sciknow refresh` step 9 with `qwen2.5vl:7b` as the default bulk VLM (60% of 32b's quality, ~35× faster — 9,831 figures captioned in ~5h). Migration 0026 added `ai_caption` / `ai_caption_model` / `ai_captioned_at` columns.
 - [x] **~~#1b — VLM sweep harness.~~** Shipped in Phase 54.6.74 as `sciknow/testing/vlm_sweep.py` + `sciknow bench --layer vlm-sweep`. Fair-fight sampling per model (54.6.85 methodology). Judge win-rate verdict: qwen2.5vl:32b 93.3%, qwen2.5vl:7b 60%, minicpm-v:8b 35.6%, llama3.2-vision:11b 8.9%.
 
-- [ ] **#2 — Structured table parsing.** 1,406 tables live as MinerU
-  HTML in `visuals.content`. Parse into `{headers, rows, units}` +
-  semantic summary via fast-LLM; store in new `table_rows` table joined
-  by visual_id. Unlocks queries like *"every paper reporting ECS"*. A
-  climate-specific parser template would work even better than general
-  parsing. **Effort:** 1 day.
+- [x] **~~#2 — Structured table parsing.~~** Shipped in Phase 54.6.106.
+  Migration 0028 adds `table_title / table_headers / table_summary /
+  table_n_rows / table_n_cols / table_parsed_at` to `visuals`. CLI
+  `sciknow db parse-tables` runs the fast LLM on MinerU's HTML and
+  stores the structured output; Visuals modal table cards render the
+  parsed block (title + summary + column list + shape) above the raw
+  HTML when available. Wired into `refresh` as step 11. Re-embedding
+  the summaries into the visuals Qdrant collection for cross-table
+  semantic queries ("every paper reporting ECS") stays open — one
+  small follow-up on `db embed-visuals` to also read `table_summary`.
 - [x] **~~#6 — Coverage-based autowrite termination.~~** Shipped in Phase
   54.6.79. `sciknow/core/plan_coverage.py` computes NLI coverage of
   atomic plan bullets against the draft; folded into the autowrite

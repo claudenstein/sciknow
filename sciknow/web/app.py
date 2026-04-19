@@ -4156,7 +4156,9 @@ async def api_visuals_list(
                 SELECT v.id::text, v.document_id::text, v.kind, v.content,
                        v.caption, v.asset_path, v.figure_num, v.block_idx,
                        pm.title AS paper_title, pm.year,
-                       v.ai_caption, v.ai_caption_model
+                       v.ai_caption, v.ai_caption_model,
+                       v.table_title, v.table_headers, v.table_summary,
+                       v.table_n_rows, v.table_n_cols
                 FROM visuals v
                 JOIN paper_metadata pm ON pm.document_id = v.document_id
                 WHERE {where}
@@ -4168,7 +4170,10 @@ async def api_visuals_list(
              "content": (r[3] or "")[:2000], "caption": r[4],
              "asset_path": r[5], "figure_num": r[6], "block_idx": r[7],
              "paper_title": r[8], "year": r[9],
-             "ai_caption": r[10], "ai_caption_model": r[11]}
+             "ai_caption": r[10], "ai_caption_model": r[11],
+             "table_title": r[12], "table_headers": r[13],
+             "table_summary": r[14],
+             "table_n_rows": r[15], "table_n_cols": r[16]}
             for r in rows
         ])
     except Exception as exc:
@@ -5448,6 +5453,24 @@ async def api_viz_gap_radar():
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
     return JSONResponse(result)
+
+
+@app.get("/api/settings/models")
+async def api_settings_models():
+    """54.6.106 — effective model assignments, surfaced in the Book
+    Settings → Models tab. Read-only snapshot of the Settings object.
+    """
+    from sciknow.config import settings as _s
+    return JSONResponse({
+        "llm_model": _s.llm_model,
+        "llm_fast_model": _s.llm_fast_model,
+        "book_review_model": _s.book_review_model,
+        "autowrite_scorer_model": _s.autowrite_scorer_model,
+        "visuals_caption_model": _s.visuals_caption_model,
+        "mineru_vlm_model": getattr(_s, "mineru_vlm_model", None),
+        "embedding_model": _s.embedding_model,
+        "reranker_model": _s.reranker_model,
+    })
 
 
 @app.get("/api/stats")
@@ -8745,6 +8768,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button class="tab active" data-tab="bs-basics" onclick="switchBookSettingsTab('bs-basics')">Basics</button>
       <button class="tab" data-tab="bs-leitmotiv" onclick="switchBookSettingsTab('bs-leitmotiv')">Leitmotiv</button>
       <button class="tab" data-tab="bs-style" onclick="switchBookSettingsTab('bs-style')">Style</button>
+      <button class="tab" data-tab="bs-models" onclick="switchBookSettingsTab('bs-models')">Models</button>
     </div>
     <div class="modal-body">
 
@@ -8797,6 +8821,36 @@ body.task-bar-open {{ padding-top: 40px; }}
           <button class="btn-primary" onclick="saveBookSettings('leitmotiv')">Save Plan</button>
           <span id="bs-leitmotiv-status" style="font-size:12px;color:var(--fg-muted);"></span>
         </div>
+      </div>
+
+      <!-- 54.6.106 — Models tab: read-only overview of the effective
+           model assignments for this project. Pulls from /api/settings/models
+           so the user sees which LLM is being used for what, and where it's
+           configured (.env, config default, or per-role override). -->
+      <div id="bs-models-pane" style="display:none;">
+        <p style="font-size:11px;color:var(--fg-muted);margin-bottom:12px;">
+          Current model assignments. Edit these in the project's <code>.env</code> file
+          (see <a href="https://github.com/claudenstein/sciknow/blob/main/docs/BOOK_ACTIONS.md" target="_blank">BOOK_ACTIONS.md</a>
+          for per-role guidance) and restart <code>sciknow book serve</code> to apply.
+          Per-section model overrides are also available (Chapter modal → Sections tab, per row).
+        </p>
+        <table style="width:100%;border-collapse:collapse;font-size:12px;">
+          <thead>
+            <tr style="border-bottom:1px solid var(--border);">
+              <th style="text-align:left;padding:6px 8px;">Role</th>
+              <th style="text-align:left;padding:6px 8px;">Model</th>
+              <th style="text-align:left;padding:6px 8px;">Used by</th>
+            </tr>
+          </thead>
+          <tbody id="bs-models-table">
+            <tr><td colspan="3" style="padding:8px;color:var(--fg-muted);">Loading…</td></tr>
+          </tbody>
+        </table>
+        <p style="font-size:11px;color:var(--fg-muted);margin-top:12px;">
+          Picks validated by the quality bench (<code>sciknow bench --layer quality</code>). See
+          <a href="https://github.com/claudenstein/sciknow/blob/main/docs/PHASE_LOG.md" target="_blank">PHASE_LOG 54.6.92</a>
+          for the v3 verdict that nailed down the current defaults.
+        </p>
       </div>
 
       <!-- Style tab -->
@@ -20915,10 +20969,41 @@ function switchBookSettingsTab(name) {{
   document.querySelectorAll('#book-settings-modal .tab').forEach(t => {{
     t.classList.toggle('active', t.dataset.tab === name);
   }});
-  ['bs-basics', 'bs-leitmotiv', 'bs-style'].forEach(n => {{
+  ['bs-basics', 'bs-leitmotiv', 'bs-style', 'bs-models'].forEach(n => {{
     const pane = document.getElementById(n + '-pane');
     if (pane) pane.style.display = (n === name) ? 'block' : 'none';
   }});
+  if (name === 'bs-models') loadBookSettingsModels();
+}}
+
+async function loadBookSettingsModels() {{
+  const tbody = document.getElementById('bs-models-table');
+  if (!tbody || tbody.dataset.loaded === '1') return;
+  try {{
+    const r = await fetch('/api/settings/models');
+    const data = await r.json();
+    const rows = [
+      ['LLM_MODEL',              data.llm_model,              'book write · autowrite writer · ask · wiki compile · extract-kg'],
+      ['LLM_FAST_MODEL',         data.llm_fast_model,         'book outline · classify-papers · paraphrase-equations · RAPTOR · metadata fallback'],
+      ['BOOK_REVIEW_MODEL',      data.book_review_model,      'book review (5-dim critic)'],
+      ['AUTOWRITE_SCORER_MODEL', data.autowrite_scorer_model, 'autowrite score + rescore (not verify/cove)'],
+      ['VISUALS_CAPTION_MODEL',  data.visuals_caption_model,  'db caption-visuals (figures + charts)'],
+      ['MINERU_VLM_MODEL',       data.mineru_vlm_model,       'PDF parse only when PDF_CONVERTER_BACKEND=mineru-vlm-pro'],
+      ['EMBEDDING_MODEL',        data.embedding_model,        'chunk embedding (dense + sparse)'],
+      ['RERANKER_MODEL',         data.reranker_model,         'hybrid search rerank step'],
+    ];
+    tbody.innerHTML = rows.map(r => {{
+      const val = r[1] || '<em style="color:var(--fg-muted);">(unset — falls back to LLM_MODEL)</em>';
+      return '<tr style="border-bottom:1px solid var(--border);">'
+        + '<td style="padding:6px 8px;font-family:var(--font-mono);font-size:11px;">' + _escHtml(r[0]) + '</td>'
+        + '<td style="padding:6px 8px;font-family:var(--font-mono);font-size:11px;">' + (r[1] ? _escHtml(r[1]) : val) + '</td>'
+        + '<td style="padding:6px 8px;color:var(--fg-muted);font-size:11px;">' + _escHtml(r[2]) + '</td>'
+        + '</tr>';
+    }}).join('');
+    tbody.dataset.loaded = '1';
+  }} catch (e) {{
+    tbody.innerHTML = '<tr><td colspan="3" style="padding:8px;color:var(--danger);">Failed: ' + e.message + '</td></tr>';
+  }}
 }}
 
 async function loadBookSettings() {{
@@ -21712,11 +21797,27 @@ async function loadVisuals(append) {{
           + '</div>';
       }}
       if (v.kind === 'table') {{
-        // 54.6.102 — MinerU emits an HTML <table> with no CSS. Wrap in
-        // a .vis-table-wrap container so scoped styles (defined below)
-        // give it grid lines, zebra rows, compact padding, and sane
-        // font sizes without leaking to other tables on the page.
-        return '<div class="vis-table-wrap" style="max-height:260px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:8px;background:#fff;color:#111;">'
+        // 54.6.106 — if the structured-parse pass ran (db parse-tables),
+        // surface the title + summary + column headers above the raw
+        // HTML. Otherwise fall back to just the styled HTML table.
+        let parsed = '';
+        if (v.table_title || v.table_summary || (v.table_headers && v.table_headers.length)) {{
+          const title = v.table_title ? '<div style="font-weight:600;font-size:13px;color:#111;margin-bottom:4px;">' + _escHtml(v.table_title) + '</div>' : '';
+          const shape = (v.table_n_rows || v.table_n_cols)
+            ? '<span style="color:var(--fg-muted);font-size:10px;">[' + (v.table_n_rows || '?') + ' rows × ' + (v.table_n_cols || '?') + ' cols]</span> '
+            : '';
+          const summary = v.table_summary
+            ? '<div style="font-size:11px;color:#333;line-height:1.45;margin-bottom:6px;">' + shape + _escHtml(v.table_summary) + '</div>'
+            : '';
+          const hdrs = Array.isArray(v.table_headers) && v.table_headers.length
+            ? '<div style="font-size:10px;color:var(--fg-muted);margin-bottom:6px;"><strong>Columns:</strong> '
+                + v.table_headers.map(h => _escHtml(String(h))).join(' · ') + '</div>'
+            : '';
+          parsed = '<div style="padding:8px;background:#fafafa;border-radius:4px;border:1px solid #eee;margin-bottom:8px;">'
+            + title + summary + hdrs + '</div>';
+        }}
+        return parsed
+          + '<div class="vis-table-wrap" style="max-height:260px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:8px;background:#fff;color:#111;">'
           + (v.content || '<em>empty table</em>') + '</div>';
       }}
       if (v.kind === 'code') {{

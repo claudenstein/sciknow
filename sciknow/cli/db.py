@@ -5124,3 +5124,78 @@ def paraphrase_equations_cmd(
         f"[yellow]skipped {skipped}[/yellow] · "
         f"[dim]{time.monotonic() - t0:.1f}s wall[/dim]"
     )
+
+
+# ── parse-tables (Phase 54.6.106 — #2) ─────────────────────────────────────
+
+@app.command(name="parse-tables")
+def parse_tables_cmd(
+    model: str = typer.Option(
+        None, "--model",
+        help="Text LLM for table parsing. Default: settings.llm_fast_model.",
+    ),
+    limit: int = typer.Option(
+        0, "--limit", "-n",
+        help="Max tables to parse this run (0 = all pending).",
+    ),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Re-parse rows that already have table_parsed_at set.",
+    ),
+):
+    """Phase 54.6.106 (#2) — parse MinerU HTML tables into a semantic
+    summary + column headers + shape.
+
+    1,501 tables live as raw HTML in ``visuals.content`` and currently
+    only match substring queries. This CLI asks the fast LLM to emit:
+
+      - ``table_title``   — one-line inferred title
+      - ``table_headers`` — JSONB array of column headers
+      - ``table_summary`` — 1-3 sentence semantic summary
+      - ``table_n_rows`` / ``table_n_cols`` — shape from the raw HTML
+
+    Output powers: the Visuals modal's table cards (subtitle shows
+    summary instead of raw HTML preview), future table-specific
+    retrieval, and optional embedding of ``table_summary`` via
+    ``db embed-visuals`` for semantic search.
+
+    Examples:
+
+      sciknow db parse-tables                  # all pending
+      sciknow db parse-tables -n 20            # first 20
+      sciknow db parse-tables --force          # re-parse everything
+      sciknow db parse-tables --model qwen3:30b-a3b-instruct-2507-q4_K_M
+    """
+    from sciknow.cli import preflight
+    preflight(qdrant=False)
+
+    from sciknow.core.table_parse import parse_pending_tables
+
+    t0 = time.monotonic()
+
+    def _progress(i: int, total: int, vid: str, outcome: str) -> None:
+        short = vid[:8]
+        mark = ("[green]✓[/green]" if outcome == "parsed"
+                else "[yellow]⊘[/yellow]" if outcome == "empty"
+                else "[red]✗[/red]")
+        console.print(
+            f"  [dim][{i}/{total}][/dim] {mark}  {short}  {outcome[:120]}"
+        )
+        if i % 25 == 0 and total > 0:
+            rate = i / max(0.01, time.monotonic() - t0)
+            eta = (total - i) / max(0.01, rate)
+            console.print(
+                f"  [dim]… {rate:.2f}/s, eta {int(eta/60)}m {int(eta%60)}s[/dim]"
+            )
+
+    stats = parse_pending_tables(
+        model=model, limit=(limit or None), force=force,
+        progress_callback=_progress,
+    )
+
+    console.print(
+        f"\n[green]✓ Parsed {stats['parsed']}[/green] · "
+        f"[red]errors {stats['errors']}[/red] · "
+        f"model [cyan]{stats['model']}[/cyan] · "
+        f"[dim]{time.monotonic() - t0:.1f}s wall[/dim]"
+    )

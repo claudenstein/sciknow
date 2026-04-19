@@ -126,6 +126,8 @@ def refresh(
              "(currently qwen2.5vl:32b)."),
     no_paraphrase: bool = typer.Option(False, "--no-paraphrase",
         help="Skip equation paraphrase backfill (54.6.78)."),
+    no_parse_tables: bool = typer.Option(False, "--no-parse-tables",
+        help="Skip structured table parsing (54.6.106). ~2 min for 1.5k tables."),
     no_embed_visuals: bool = typer.Option(False, "--no-embed-visuals",
         help="Skip visuals Qdrant embedding (54.6.82). Only useful if "
              "caption + paraphrase populated ai_caption already."),
@@ -260,15 +262,21 @@ def refresh(
         # for retrieval. Skips rows that already have ai_caption set.
         steps.append(("10. Paraphrase equations (LaTeX → prose)",
                       ["db", "paraphrase-equations"], True))
+    if not no_parse_tables:
+        # Phase 54.6.106 — structured parse of MinerU HTML tables into
+        # {title, headers, summary, n_rows, n_cols}. Powers the Visuals
+        # modal table cards + downstream table retrieval.
+        steps.append(("11. Parse tables (HTML → summary + headers)",
+                      ["db", "parse-tables"], True))
     if not no_embed_visuals:
         # Phase 54.6.82 — embeds ai_caption into the visuals Qdrant
         # collection. Depends on caption-visuals + paraphrase-equations
         # having populated ai_caption first (same refresh pass does
         # both steps earlier).
-        steps.append(("11. Embed visuals into Qdrant",
+        steps.append(("12. Embed visuals into Qdrant",
                       ["db", "embed-visuals"], True))
     if not no_wiki:
-        steps.append(("12. Wiki compile (slowest)",
+        steps.append(("13. Wiki compile (slowest)",
                       ["wiki", "compile"], True))
 
     if not steps:
