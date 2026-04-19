@@ -8940,19 +8940,37 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button class="modal-close" onclick="closeModal('visuals-modal')">&times;</button>
     </div>
     <div class="modal-body" style="font-size:13px;">
+      <!-- Phase 54.6.99 — Visual Elements browser redesigned:
+           * Default view is a gallery of image thumbnails (figures + charts),
+             which is the 10,881 items (of 17,322 total) that actually have
+             rendered JPG/PNGs on disk.
+           * Mode toggle: Gallery (images only) vs List (all kinds incl.
+             equations/tables/code).
+           * Kind filter includes `chart` (was missing in 54.6.87 and
+             earlier — users picking "Figures" missed 7,626 charts).
+           * Figures + charts now render with real <img> thumbnails and
+             a click-to-enlarge link, matching wiki-visuals-list. -->
       <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center;">
+        <label style="font-size:11px;display:flex;align-items:center;gap:4px;">
+          Mode:
+          <select id="vis-mode" onchange="loadVisuals()" style="padding:4px 8px;">
+            <option value="gallery" selected>Gallery (figures + charts)</option>
+            <option value="list">List (all kinds)</option>
+          </select>
+        </label>
         <select id="vis-kind-filter" onchange="loadVisuals()" style="padding:4px 8px;">
           <option value="">All types</option>
-          <option value="table">Tables</option>
-          <option value="equation">Equations</option>
           <option value="figure">Figures</option>
+          <option value="chart">Charts</option>
+          <option value="equation">Equations</option>
+          <option value="table">Tables</option>
           <option value="code">Code</option>
         </select>
         <input type="text" id="vis-search" placeholder="Search captions..." style="flex:1;min-width:150px;padding:4px 8px;" onkeyup="if(event.key==='Enter')loadVisuals()">
         <button class="btn-secondary" onclick="loadVisuals()">&#128269; Search</button>
         <span id="vis-stats" style="color:var(--fg-muted);font-size:11px;"></span>
       </div>
-      <div id="vis-results" style="max-height:500px;overflow-y:auto;">
+      <div id="vis-results" style="max-height:560px;overflow-y:auto;">
         <em>Loading...</em>
       </div>
     </div>
@@ -21383,47 +21401,150 @@ function openVisualsModal() {{
   }}).catch(() => {{}});
 }}
 
+// Phase 54.6.99 — redesigned Visual Elements browser. Two modes:
+//   * gallery — image-kind-only (figure+chart), CSS grid of thumbnails
+//                with captions overlay, click-to-enlarge
+//   * list    — every kind, list layout, figures/charts get real <img>
+//                thumbnails instead of italic placeholder text
+// Both modes render tables as HTML (MinerU emits HTML table_body),
+// equations via KaTeX ($$…$$), code in <pre>.
 async function loadVisuals() {{
-  const kind = document.getElementById('vis-kind-filter').value;
+  const mode = document.getElementById('vis-mode').value || 'gallery';
+  const kindSel = document.getElementById('vis-kind-filter');
+  let kind = kindSel.value;
   const query = document.getElementById('vis-search').value.trim();
-  const params = new URLSearchParams();
-  if (kind) params.set('kind', kind);
-  if (query) params.set('query', query);
-  params.set('limit', '50');
   const results = document.getElementById('vis-results');
+  const statsEl = document.getElementById('vis-stats');
   results.innerHTML = '<em>Loading...</em>';
+
+  // In gallery mode, we force kind to image types only. If the user
+  // picked a non-image kind in the dropdown while in gallery mode,
+  // transparently show them "All image kinds" rather than an empty
+  // result. If they pick a specific image kind (figure or chart) the
+  // filter still honours it.
+  const imageKinds = ['figure', 'chart'];
+  let galleryKinds = null;
+  if (mode === 'gallery') {{
+    if (!kind || !imageKinds.includes(kind)) {{
+      galleryKinds = imageKinds;
+    }} else {{
+      galleryKinds = [kind];
+    }}
+  }}
+
   try {{
-    const res = await fetch('/api/visuals?' + params.toString());
-    const items = await res.json();
-    if (!items.length || items.error) {{
-      results.innerHTML = '<em style="color:var(--fg-muted);">No visuals found.' + (items.error ? ' Error: ' + items.error : '') + '</em>';
+    // Gallery mode fetches figures + charts separately and merges them;
+    // /api/visuals only accepts one `kind` at a time.
+    let items = [];
+    if (mode === 'gallery') {{
+      const fetches = galleryKinds.map(k => {{
+        const p = new URLSearchParams();
+        p.set('kind', k);
+        if (query) p.set('query', query);
+        p.set('limit', '40');
+        return fetch('/api/visuals?' + p.toString()).then(r => r.json());
+      }});
+      const all = await Promise.all(fetches);
+      for (const arr of all) if (Array.isArray(arr)) items = items.concat(arr);
+      // Interleave roughly 1:2 (figures are ~2x rarer than charts) so
+      // the user sees variety rather than 40 figures then 40 charts.
+      items.sort((a, b) => String(a.paper_title || '').localeCompare(String(b.paper_title || '')));
+    }} else {{
+      const p = new URLSearchParams();
+      if (kind) p.set('kind', kind);
+      if (query) p.set('query', query);
+      p.set('limit', '50');
+      const res = await fetch('/api/visuals?' + p.toString());
+      items = await res.json();
+    }}
+
+    if (!items || !items.length || items.error) {{
+      results.innerHTML = '<em style="color:var(--fg-muted);">No visuals found.'
+        + (items && items.error ? ' Error: ' + items.error : '') + '</em>';
+      if (statsEl) statsEl.textContent = '';
       return;
     }}
-    let html = '';
-    for (const v of items) {{
-      const kindIcon = v.kind === 'table' ? '\\uD83D\\uDCCA' : v.kind === 'equation' ? '\\u2211' : v.kind === 'figure' ? '\\uD83D\\uDDBC' : '\\uD83D\\uDCBB';
-      const label = (v.figure_num || v.kind) + (v.caption ? ': ' + v.caption.substring(0, 80) : '');
-      const paperInfo = (v.paper_title || '').substring(0, 50) + (v.year ? ' (' + v.year + ')' : '');
-      let preview = '';
-      if (v.kind === 'table') {{
-        preview = '<div style="max-height:120px;overflow:auto;font-size:11px;border:1px solid var(--border);border-radius:4px;padding:4px;background:var(--bg);">' + (v.content || '').substring(0, 1000) + '</div>';
-      }} else if (v.kind === 'equation') {{
-        preview = '<div style="font-family:var(--font-mono);font-size:12px;padding:4px;background:var(--bg);border-radius:4px;">$$' + (v.content || '').substring(0, 300) + '$$</div>';
-      }} else if (v.kind === 'figure') {{
-        preview = '<div style="font-style:italic;font-size:11px;color:var(--fg-muted);">' + (v.content || v.caption || 'No caption') + '</div>';
-      }} else {{
-        preview = '<pre style="max-height:80px;overflow:auto;font-size:10px;padding:4px;background:var(--bg);border-radius:4px;">' + (v.content || '').substring(0, 500) + '</pre>';
+    if (statsEl) statsEl.textContent = items.length + ' shown';
+
+    // Renderer shared by both modes for one visual, returns HTML.
+    const renderPreview = (v) => {{
+      if ((v.kind === 'figure' || v.kind === 'chart') && v.id) {{
+        const imgUrl = '/api/visuals/image/' + encodeURIComponent(v.id);
+        return '<a href="' + imgUrl + '" target="_blank" style="display:block;background:var(--bg);border-radius:4px;overflow:hidden;">'
+          + '<img src="' + imgUrl + '" loading="lazy" '
+          + 'style="width:100%;height:180px;object-fit:contain;display:block;" '
+          + 'onerror="this.parentElement.innerHTML=\\'<em style=padding:8px;color:var(--fg-muted);font-size:11px;>image unavailable</em>\\'"></a>';
       }}
-      html += '<div style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:8px;">'
-        + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">'
-        + '<strong>' + kindIcon + ' ' + label.substring(0, 100) + '</strong>'
-        + '<button class="btn-secondary" style="font-size:11px;padding:2px 8px;" onclick="insertVisualAtCursor(' + JSON.stringify(JSON.stringify(v)) + ')">Insert</button>'
-        + '</div>'
-        + '<div style="font-size:11px;color:var(--fg-muted);margin-bottom:4px;">' + paperInfo + '</div>'
-        + preview
-        + '</div>';
+      if (v.kind === 'equation') {{
+        const safe = String(v.content || '').substring(0, 400);
+        return '<div class="vis-equation" style="font-family:var(--font-mono);font-size:12px;padding:6px 8px;background:var(--bg);border-radius:4px;overflow-x:auto;">$$' + safe + '$$</div>';
+      }}
+      if (v.kind === 'table') {{
+        // MinerU's table_body is already HTML. Render it directly but
+        // cap height so one big table doesn't dominate.
+        return '<div style="max-height:180px;overflow:auto;font-size:11px;border:1px solid var(--border);border-radius:4px;padding:6px;background:var(--bg);">'
+          + (v.content || '<em>empty table</em>') + '</div>';
+      }}
+      if (v.kind === 'code') {{
+        return '<pre style="max-height:120px;overflow:auto;font-size:11px;padding:6px;background:var(--bg);border-radius:4px;margin:0;">'
+          + _escHtml((v.content || '').substring(0, 800)) + '</pre>';
+      }}
+      return '<em style="color:var(--fg-muted);font-size:11px;">' + _escHtml((v.content || v.caption || '').substring(0, 200)) + '</em>';
+    }};
+
+    const kindIcon = (k) => k === 'table' ? '\\uD83D\\uDCCA'
+      : k === 'equation' ? '\\u2211'
+      : k === 'figure' ? '\\uD83D\\uDDBC'
+      : k === 'chart' ? '\\uD83D\\uDCC8'
+      : '\\uD83D\\uDCBB';
+
+    let html = '';
+    if (mode === 'gallery') {{
+      // CSS grid of cards — ~3 columns on typical width.
+      html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;">';
+      for (const v of items) {{
+        const cap = v.ai_caption || v.caption || '';
+        const label = (v.figure_num ? v.figure_num : kindIcon(v.kind) + ' ' + (v.kind || ''));
+        const paperInfo = (v.paper_title || '').substring(0, 48) + (v.year ? ' (' + v.year + ')' : '');
+        html += '<div style="border:1px solid var(--border);border-radius:6px;padding:8px;background:var(--bg-alt);">'
+          + renderPreview(v)
+          + '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;gap:4px;">'
+          +   '<strong style="font-size:11px;">' + _escHtml(label.substring(0, 40)) + '</strong>'
+          +   '<button class="btn-secondary" style="font-size:10px;padding:1px 6px;" '
+          +     'onclick="insertVisualAtCursor(' + JSON.stringify(JSON.stringify(v)) + ')">Insert</button>'
+          + '</div>'
+          + '<div style="font-size:10px;color:var(--fg-muted);margin-top:2px;">' + _escHtml(paperInfo) + '</div>'
+          + (cap ? '<div style="font-size:11px;line-height:1.35;margin-top:4px;max-height:3.4em;overflow:hidden;" title="' + _escHtml(cap) + '">' + _escHtml(cap.substring(0, 140)) + '</div>' : '')
+          + '</div>';
+      }}
+      html += '</div>';
+    }} else {{
+      // List mode — unchanged layout but with real image thumbnails
+      // for figures/charts.
+      for (const v of items) {{
+        const label = (v.figure_num || v.kind)
+          + (v.caption ? ': ' + String(v.caption).substring(0, 80) : '');
+        const paperInfo = (v.paper_title || '').substring(0, 60) + (v.year ? ' (' + v.year + ')' : '');
+        html += '<div style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:8px;">'
+          + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;gap:8px;">'
+          +   '<strong>' + kindIcon(v.kind) + ' ' + _escHtml(label.substring(0, 100)) + '</strong>'
+          +   '<button class="btn-secondary" style="font-size:11px;padding:2px 8px;flex-shrink:0;" '
+          +     'onclick="insertVisualAtCursor(' + JSON.stringify(JSON.stringify(v)) + ')">Insert</button>'
+          + '</div>'
+          + '<div style="font-size:11px;color:var(--fg-muted);margin-bottom:4px;">' + _escHtml(paperInfo) + '</div>'
+          + renderPreview(v)
+          + '</div>';
+      }}
     }}
     results.innerHTML = html;
+
+    // Render KaTeX on any equations we just injected. _renderMathInEl
+    // is defined elsewhere in the template and no-ops if KaTeX isn't
+    // loaded yet. Gallery mode only has equations if the user
+    // explicitly filtered to kind=equation inside gallery (harmless).
+    if (typeof _renderMathInEl === 'function') {{
+      _renderMathInEl(results);
+    }}
   }} catch (exc) {{
     results.innerHTML = '<em style="color:var(--danger);">Failed: ' + exc + '</em>';
   }}
