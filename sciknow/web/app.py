@@ -21898,7 +21898,16 @@ async function loadVisuals(append) {{
         body = body.replace(/^\\s*\\\\\\[\\s*/, '').replace(/\\s*\\\\\\]\\s*$/, '');
         body = body.replace(/^\\s*\\\\\\(\\s*/, '').replace(/\\s*\\\\\\)\\s*$/, '');
         body = body.trim();
-        const truncated = body.length > 600 ? body.substring(0, 600) + '…' : body;
+        // 54.6.108 — THE BUG. The 600-char truncation introduced in
+        // 54.6.101 broke every equation longer than 600 chars by
+        // cutting mid-command (\begin + array blocks, multi-line
+        // sums etc.). Server already caps content at 2000 chars in
+        // the API. Render the full body — KaTeX display mode with
+        // overflow-x:auto handles wide formulas via horizontal
+        // scroll in the card. On this corpus: ~25% of equations on
+        // the first page are >600 chars (arrays + systems); the
+        // user's "half don't render" lines up with this range.
+        const truncated = body;
         // Escape attribute value: &, <, >, ", ' so `data-latex="..."` is well-formed.
         const attrSafe = _escHtml(truncated);
         return '<div class="vis-eq" style="padding:14px 16px;background:#fff;color:#111;border-radius:6px;border:1px solid var(--border);margin:2px 0;">'
