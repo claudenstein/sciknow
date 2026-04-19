@@ -4078,12 +4078,23 @@ import os  # noqa: E402 — kept local-ish with the block that uses it
 async def api_visuals_list(
     kind: str = None, doc_id: str = None,
     query: str = None, limit: int = 50, offset: int = 0,
+    order_by: str = "default",
 ):
     """Phase 21.b — list/search visual elements (tables, equations, figures).
 
     Filters: ?kind=table|equation|figure|chart|code, ?doc_id=..., ?query=caption search.
     Pagination: ``limit`` (default 50, capped at 500) and ``offset`` (54.6.100).
-    Returns JSON array of visuals with content, caption, kind, figure_num.
+    Ordering (54.6.101) via ``order_by``:
+
+      - ``default`` / ``recent`` — newest paper first (year DESC, created_at DESC)
+      - ``importance`` — composite score: year + caption length + has-figure-num
+          + paper_type weight (peer_reviewed > preprint > … > unknown). Good
+          default for "show me the high-signal visuals first".
+      - ``paper`` — group by paper title, figures ordered within
+      - ``figure_num`` — natural figure numbering ascending (1, 2, 3…)
+      - ``caption_richness`` — longer AI caption = better-documented = first
+      - ``random`` — random sample (uses postgres random(), non-stable)
+
     Response shape unchanged for back-compat — total count lives at /api/visuals/stats.
     """
     from sqlalchemy import text as _vtext
@@ -4099,10 +4110,46 @@ async def api_visuals_list(
         conditions.append("(v.caption ILIKE :q OR v.surrounding_text ILIKE :q)")
         params["q"] = f"%{query[:100]}%"
     where = " AND ".join(conditions)
-    # Cap limit to guard against "?limit=1000000" accidentally pulling a
-    # multi-MB payload through the JSON serializer.
     safe_limit = max(1, min(int(limit or 50), 500))
     safe_offset = max(0, int(offset or 0))
+
+    # 54.6.101 — ordering heuristics. Each maps to a SQL ORDER BY.
+    # ``importance`` is a deterministic composite so two calls with the
+    # same params return the same rows in the same order; ``random``
+    # is intentionally non-stable.
+    _order_clauses = {
+        "default": "pm.year DESC NULLS LAST, v.created_at DESC",
+        "recent": "pm.year DESC NULLS LAST, v.created_at DESC",
+        "paper": "pm.title ASC NULLS LAST, v.figure_num ASC NULLS LAST, v.block_idx ASC",
+        "figure_num": "v.figure_num ASC NULLS LAST, pm.title ASC NULLS LAST",
+        "caption_richness": "LENGTH(COALESCE(v.ai_caption, v.caption, '')) DESC",
+        "random": "random()",
+        "importance": (
+            # Composite score in [0, ~1.5]:
+            #   0.30 * year_bonus     — newer = higher (2026 → 1.0, 2000 → 0)
+            #   0.25 * caption_rich   — log-ish saturation at ~400 chars
+            #   0.20 * has_fig_num    — 1 if figure_num is set
+            #   0.15 * paper_type_w   — peer_reviewed 1.0 … opinion 0.4
+            #   0.10 * has_ai_caption — 1 if the VLM captioner has run
+            "("
+            " 0.30 * GREATEST(0, LEAST(1, (COALESCE(pm.year, 2000) - 2000) / 26.0))"
+            " + 0.25 * LEAST(1, LENGTH(COALESCE(v.ai_caption, v.caption, ''))::float / 400.0)"
+            " + 0.20 * (CASE WHEN v.figure_num IS NOT NULL AND v.figure_num <> '' THEN 1 ELSE 0 END)"
+            " + 0.15 * (CASE COALESCE(pm.paper_type, 'unknown')"
+            "              WHEN 'peer_reviewed' THEN 1.0"
+            "              WHEN 'preprint'      THEN 0.9"
+            "              WHEN 'thesis'        THEN 0.85"
+            "              WHEN 'book_chapter'  THEN 0.85"
+            "              WHEN 'editorial'     THEN 0.7"
+            "              WHEN 'policy'        THEN 0.7"
+            "              WHEN 'opinion'       THEN 0.4"
+            "              ELSE 0.6 END)"
+            " + 0.10 * (CASE WHEN v.ai_caption IS NOT NULL AND v.ai_caption <> '' THEN 1 ELSE 0 END)"
+            ") DESC, pm.title ASC NULLS LAST"
+        ),
+    }
+    order_sql = _order_clauses.get((order_by or "default").lower(), _order_clauses["default"])
+
     try:
         with get_session() as session:
             rows = session.execute(_vtext(f"""
@@ -4113,7 +4160,7 @@ async def api_visuals_list(
                 FROM visuals v
                 JOIN paper_metadata pm ON pm.document_id = v.document_id
                 WHERE {where}
-                ORDER BY v.kind, v.created_at DESC
+                ORDER BY {order_sql}
                 LIMIT :lim OFFSET :off
             """), {**params, "lim": safe_limit, "off": safe_offset}).fetchall()
         return JSONResponse([
@@ -8753,7 +8800,7 @@ body.task-bar-open {{ padding-top: 40px; }}
      LLM button in the draft toolbar, with what it does, when to use it,
      what it requires, what it produces, and the CLI equivalent. -->
 <div class="modal-overlay" id="ai-help-modal" onclick="if(event.target===this)closeModal('ai-help-modal')">
-  <div class="modal wide" style="max-width:900px;">
+  <div class="modal wide">
     <div class="modal-header">
       <h3>&#128161; AI Actions &mdash; what each button does</h3>
       <button class="modal-close" onclick="closeModal('ai-help-modal')">&times;</button>
@@ -8940,7 +8987,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 <!-- Phase 43h — Project management modal -->
 <!-- Phase 21.c — Visuals browser modal -->
 <div class="modal-overlay" id="visuals-modal" onclick="if(event.target===this)closeModal('visuals-modal')">
-  <div class="modal wide" style="max-width:900px;">
+  <div class="modal wide">
     <div class="modal-header">
       <h3>&#128202; Visual Elements</h3>
       <button class="modal-close" onclick="closeModal('visuals-modal')">&times;</button>
@@ -8972,11 +9019,22 @@ body.task-bar-open {{ padding-top: 40px; }}
           <option value="table">Tables</option>
           <option value="code">Code</option>
         </select>
+        <label style="font-size:11px;display:flex;align-items:center;gap:4px;" title="How to order the visuals">
+          Order:
+          <select id="vis-order" onchange="loadVisuals()" style="padding:4px 6px;">
+            <option value="importance" selected>Importance (ranked)</option>
+            <option value="recent">Recent papers first</option>
+            <option value="paper">By paper (title)</option>
+            <option value="figure_num">Figure number</option>
+            <option value="caption_richness">Richest captions</option>
+            <option value="random">Random</option>
+          </select>
+        </label>
         <input type="text" id="vis-search" placeholder="Search captions..." style="flex:1;min-width:150px;padding:4px 8px;" onkeyup="if(event.key==='Enter')loadVisuals()">
         <button class="btn-secondary" onclick="loadVisuals()">&#128269; Search</button>
         <span id="vis-stats" style="color:var(--fg-muted);font-size:11px;"></span>
       </div>
-      <div id="vis-results" style="max-height:560px;overflow-y:auto;">
+      <div id="vis-results" style="max-height:calc(85vh - 220px);overflow-y:auto;">
         <em>Loading...</em>
       </div>
     </div>
@@ -21427,7 +21485,7 @@ function openVisualsModal() {{
 let _visPage = {{items: [], offset: 0, pageSize: 60, totals: null, exhausted: false}};
 let _visStatsCache = null;
 
-async function _visFetchPage(kinds, query, limit, offset) {{
+async function _visFetchPage(kinds, query, limit, offset, orderBy) {{
   // Interleave figures + charts by offsetting each proportionally to
   // their totals so we don't return 40 figures first then 40 charts.
   const totals = _visStatsCache && _visStatsCache.stats ? _visStatsCache.stats : {{}};
@@ -21443,6 +21501,7 @@ async function _visFetchPage(kinds, query, limit, offset) {{
     if (query) p.set('query', query);
     p.set('limit', String(n));
     p.set('offset', String(off));
+    if (orderBy) p.set('order_by', orderBy);
     return fetch('/api/visuals?' + p.toString()).then(r => r.json())
       .then(arr => Array.isArray(arr) ? arr : []);
   }});
@@ -21460,6 +21519,7 @@ async function loadVisuals(append) {{
   const mode = document.getElementById('vis-mode').value || 'gallery';
   const kindSel = document.getElementById('vis-kind-filter');
   let kind = kindSel.value;
+  const orderBy = (document.getElementById('vis-order') || {{value: 'importance'}}).value || 'importance';
   const query = document.getElementById('vis-search').value.trim();
   const results = document.getElementById('vis-results');
   const statsEl = document.getElementById('vis-stats');
@@ -21500,7 +21560,7 @@ async function loadVisuals(append) {{
     let newItems = [];
     if (mode === 'gallery') {{
       // Merge proportional-offset pages across all active image kinds.
-      newItems = await _visFetchPage(activeKinds, query, _visPage.pageSize, _visPage.offset);
+      newItems = await _visFetchPage(activeKinds, query, _visPage.pageSize, _visPage.offset, orderBy);
     }} else {{
       // List mode: either one kind (use offset directly) or all kinds
       // (proportional like gallery).
@@ -21510,11 +21570,12 @@ async function loadVisuals(append) {{
         if (query) p.set('query', query);
         p.set('limit', String(_visPage.pageSize));
         p.set('offset', String(_visPage.offset));
+        if (orderBy) p.set('order_by', orderBy);
         const res = await fetch('/api/visuals?' + p.toString());
         const arr = await res.json();
         newItems = Array.isArray(arr) ? arr : [];
       }} else {{
-        newItems = await _visFetchPage(activeKinds, query, _visPage.pageSize, _visPage.offset);
+        newItems = await _visFetchPage(activeKinds, query, _visPage.pageSize, _visPage.offset, orderBy);
       }}
     }}
 
@@ -21545,8 +21606,26 @@ async function loadVisuals(append) {{
           + 'onerror="this.parentElement.innerHTML=\\'<em style=padding:8px;color:var(--fg-muted);font-size:11px;>image unavailable</em>\\'"></a>';
       }}
       if (v.kind === 'equation') {{
-        const safe = String(v.content || '').substring(0, 400);
-        return '<div class="vis-equation" style="font-family:var(--font-mono);font-size:12px;padding:6px 8px;background:var(--bg);border-radius:4px;overflow-x:auto;">$$' + safe + '$$</div>';
+        // 54.6.101 — equation cards now have a KaTeX display-mode render
+        // with generous padding + white math background for contrast,
+        // and a collapsible "LaTeX source" pane so the underlying code
+        // is still inspectable. Content is LaTeX; KaTeX renders it on
+        // load via _renderMathInEl after innerHTML is set. Escape HTML
+        // in the source pane so markdown/brackets render literally.
+        const raw = String(v.content || '').trim();
+        const truncated = raw.length > 600 ? raw.substring(0, 600) + '…' : raw;
+        const eqId = 'eq-src-' + Math.random().toString(36).slice(2, 10);
+        return '<div class="vis-eq" style="padding:14px 16px;background:#fff;color:#111;border-radius:6px;border:1px solid var(--border);margin:2px 0;">'
+          + '<div style="font-size:17px;line-height:1.55;text-align:center;overflow-x:auto;min-height:30px;">'
+          +   '$$' + truncated + '$$'
+          + '</div>'
+          + '<details style="margin-top:8px;">'
+          +   '<summary style="font-size:10px;color:var(--fg-muted);cursor:pointer;user-select:none;">LaTeX source</summary>'
+          +   '<pre id="' + eqId + '" style="font-family:var(--font-mono);font-size:11px;margin:6px 0 0;padding:6px 8px;background:var(--bg);border-radius:4px;white-space:pre-wrap;word-break:break-word;">'
+          +   _escHtml(raw)
+          +   '</pre>'
+          + '</details>'
+          + '</div>';
       }}
       if (v.kind === 'table') {{
         // MinerU's table_body is already HTML. Render it directly but
@@ -21569,8 +21648,13 @@ async function loadVisuals(append) {{
 
     let html = '';
     if (mode === 'gallery') {{
-      // CSS grid of cards — ~3 columns on typical width.
-      html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;">';
+      // CSS grid of cards. Image-kind cards stay narrow (~220px) so
+      // more thumbnails fit per row; equation/table/code cards need
+      // more width to be legible, so bump the minmax when the active
+      // filter isn't image-kind.
+      const onlyImages = activeKinds.every(k => imageKinds.includes(k));
+      const minCol = onlyImages ? '220px' : '340px';
+      html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(' + minCol + ',1fr));gap:12px;">';
       for (const v of items) {{
         const cap = v.ai_caption || v.caption || '';
         const label = (v.figure_num ? v.figure_num : kindIcon(v.kind) + ' ' + (v.kind || ''));
