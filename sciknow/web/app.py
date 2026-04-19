@@ -16296,13 +16296,21 @@ function renderWikiVisuals(items, kind) {{
     const caption = _escHtml(v.caption || '');
     let body = '';
     if (kind === 'equation') {{
-      body = '<div style="padding:8px;background:var(--bg);border-radius:4px;overflow-x:auto;">$$'
-           + (v.content || '') + '$$</div>';
+      // 54.6.103 — strip pre-existing $$ from MinerU content + HTML-
+      // escape so embedded '<' doesn't break KaTeX auto-render. Same
+      // fix as the Explore > Visuals modal.
+      let eqBody = String(v.content || '').trim();
+      eqBody = eqBody.replace(/^\\s*\\$\\$\\s*/, '').replace(/\\s*\\$\\$\\s*$/, '');
+      eqBody = eqBody.replace(/^\\s*\\$\\s*/, '').replace(/\\s*\\$\\s*$/, '').trim();
+      body = '<div class="vis-eq" style="padding:14px 16px;background:#fff;color:#111;border-radius:6px;border:1px solid var(--border);">'
+           + '<div style="font-size:17px;line-height:1.55;text-align:center;overflow-x:auto;">$$'
+           + _escHtml(eqBody) + '$$</div></div>';
     }} else if (kind === 'table') {{
-      // MinerU stores table_body as HTML — inject directly but clamp overflow.
-      body = '<div style="max-height:320px;overflow:auto;border:1px solid var(--border);'
-           + 'border-radius:4px;padding:6px;font-size:11px;">'
-           + (v.content || '') + '</div>';
+      // MinerU stores table_body as HTML — inject directly (scoped
+      // .vis-table-wrap styles give it borders + zebra rows).
+      body = '<div class="vis-table-wrap" style="max-height:320px;overflow:auto;border:1px solid var(--border);'
+           + 'border-radius:6px;padding:8px;background:#fff;color:#111;">'
+           + (v.content || '<em>empty table</em>') + '</div>';
     }} else {{  // code
       body = '<pre style="max-height:240px;overflow:auto;background:var(--bg);'
            + 'border-radius:4px;padding:8px;font-size:11px;">'
@@ -21642,9 +21650,19 @@ async function loadVisuals(append) {{
         body = body.trim();
         const truncated = body.length > 600 ? body.substring(0, 600) + '…' : body;
         const eqId = 'eq-src-' + Math.random().toString(36).slice(2, 10);
+        // 54.6.103 — HTML-escape the LaTeX body before injecting.
+        // LaTeX syntax frequently contains '<' and '>' (e.g.
+        // "- \infty < x < \infty" or "z_i < \zeta_1") and when those
+        // chars land inside an innerHTML assignment, the browser's
+        // HTML parser treats '<x' as the start of an unknown-tag and
+        // mangles everything around it — KaTeX never sees the $$
+        // delimiters and the equation renders as broken raw text.
+        // Escaping turns '<' into '&lt;' in the HTML source; the
+        // browser decodes it back to a literal '<' in the text node,
+        // which is exactly what KaTeX needs.
         return '<div class="vis-eq" style="padding:14px 16px;background:#fff;color:#111;border-radius:6px;border:1px solid var(--border);margin:2px 0;">'
           + '<div class="eq-display" style="font-size:17px;line-height:1.55;text-align:center;overflow-x:auto;min-height:30px;">'
-          +   '$$' + truncated + '$$'
+          +   '$$' + _escHtml(truncated) + '$$'
           + '</div>'
           + '<details style="margin-top:8px;">'
           +   '<summary style="font-size:10px;color:var(--fg-muted);cursor:pointer;user-select:none;">LaTeX source</summary>'
