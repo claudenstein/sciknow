@@ -6779,6 +6779,25 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .viz-chart {{ width: 100%; height: 70vh; min-height: 420px;
               background: var(--bg-alt, #f8f8f8);
               border: 1px solid var(--border); border-radius: 4px; }}
+
+/* 54.6.102 — scoped styling for MinerU's raw HTML tables shown in the
+   Visuals modal (#vis-results) and the wiki Visuals tab. MinerU emits
+   <table><tr><td>...</td></tr></table> with no CSS; without rules
+   the output is borderless tiny text. Scope to .vis-table-wrap so
+   the styling doesn't leak to other tables (notably the heatmap). */
+.vis-table-wrap table {{ border-collapse: collapse; width: 100%;
+                         font-size: 12px; line-height: 1.4; color: #111; }}
+.vis-table-wrap th, .vis-table-wrap td {{
+  border: 1px solid #d7d7d7; padding: 5px 8px; vertical-align: top;
+  text-align: left; }}
+.vis-table-wrap th {{ background: #f4f4f4; font-weight: 600; }}
+.vis-table-wrap tr:nth-child(even) td {{ background: #fafafa; }}
+.vis-table-wrap caption {{ caption-side: top; font-weight: 600;
+                           padding: 4px 0 6px; font-size: 12px;
+                           text-align: left; }}
+.vis-eq {{ box-shadow: 0 1px 2px rgba(0,0,0,0.04); }}
+.vis-eq .katex-display {{ margin: 0.1em 0; }}
+.vis-eq .katex {{ font-size: 1.1em; }}
 /* Phase 54.6.15 — shared theming / font / fullscreen / download bar. */
 .viz-controls {{ display: flex; align-items: center; gap: 4px;
                  padding: 6px 12px; border-bottom: 1px solid var(--border);
@@ -21606,17 +21625,25 @@ async function loadVisuals(append) {{
           + 'onerror="this.parentElement.innerHTML=\\'<em style=padding:8px;color:var(--fg-muted);font-size:11px;>image unavailable</em>\\'"></a>';
       }}
       if (v.kind === 'equation') {{
-        // 54.6.101 — equation cards now have a KaTeX display-mode render
-        // with generous padding + white math background for contrast,
-        // and a collapsible "LaTeX source" pane so the underlying code
-        // is still inspectable. Content is LaTeX; KaTeX renders it on
-        // load via _renderMathInEl after innerHTML is set. Escape HTML
-        // in the source pane so markdown/brackets render literally.
+        // 54.6.101 — KaTeX display-mode rendering.
+        // 54.6.102 — MinerU already stores equation content wrapped in
+        // $$...$$ (confirmed: DB rows start and end with $$), so my
+        // earlier re-wrap produced $$$$latex$$$$ which KaTeX refused.
+        // Strip any existing LaTeX delimiters before rewrapping so the
+        // final output is exactly one $$…$$ pair around the formula.
         const raw = String(v.content || '').trim();
-        const truncated = raw.length > 600 ? raw.substring(0, 600) + '…' : raw;
+        let body = raw;
+        // Strip leading/trailing $$ (possibly on their own lines) + $
+        // + \\[ \\] + \\( \\) — normalize to bare LaTeX body.
+        body = body.replace(/^\\s*\\$\\$\\s*/, '').replace(/\\s*\\$\\$\\s*$/, '');
+        body = body.replace(/^\\s*\\$\\s*/, '').replace(/\\s*\\$\\s*$/, '');
+        body = body.replace(/^\\s*\\\\\\[\\s*/, '').replace(/\\s*\\\\\\]\\s*$/, '');
+        body = body.replace(/^\\s*\\\\\\(\\s*/, '').replace(/\\s*\\\\\\)\\s*$/, '');
+        body = body.trim();
+        const truncated = body.length > 600 ? body.substring(0, 600) + '…' : body;
         const eqId = 'eq-src-' + Math.random().toString(36).slice(2, 10);
         return '<div class="vis-eq" style="padding:14px 16px;background:#fff;color:#111;border-radius:6px;border:1px solid var(--border);margin:2px 0;">'
-          + '<div style="font-size:17px;line-height:1.55;text-align:center;overflow-x:auto;min-height:30px;">'
+          + '<div class="eq-display" style="font-size:17px;line-height:1.55;text-align:center;overflow-x:auto;min-height:30px;">'
           +   '$$' + truncated + '$$'
           + '</div>'
           + '<details style="margin-top:8px;">'
@@ -21628,9 +21655,11 @@ async function loadVisuals(append) {{
           + '</div>';
       }}
       if (v.kind === 'table') {{
-        // MinerU's table_body is already HTML. Render it directly but
-        // cap height so one big table doesn't dominate.
-        return '<div style="max-height:180px;overflow:auto;font-size:11px;border:1px solid var(--border);border-radius:4px;padding:6px;background:var(--bg);">'
+        // 54.6.102 — MinerU emits an HTML <table> with no CSS. Wrap in
+        // a .vis-table-wrap container so scoped styles (defined below)
+        // give it grid lines, zebra rows, compact padding, and sane
+        // font sizes without leaking to other tables on the page.
+        return '<div class="vis-table-wrap" style="max-height:260px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:8px;background:#fff;color:#111;">'
           + (v.content || '<em>empty table</em>') + '</div>';
       }}
       if (v.kind === 'code') {{
@@ -21703,11 +21732,18 @@ async function loadVisuals(append) {{
     results.innerHTML = html + loadMoreHtml;
 
     // Render KaTeX on any equations we just injected. _renderMathInEl
-    // is defined elsewhere in the template and no-ops if KaTeX isn't
-    // loaded yet.
-    if (typeof _renderMathInEl === 'function') {{
-      _renderMathInEl(results);
-    }}
+    // is defined elsewhere in the template. 54.6.102 — add a short
+    // retry because the KaTeX auto-render script is loaded with
+    // `defer`, so if the user opens the Visuals modal very quickly
+    // on a fresh page load it can still be pending. One retry at
+    // 250ms + a final check at 800ms catches that race without
+    // a hard dependency.
+    const doRender = () => {{
+      if (typeof _renderMathInEl === 'function') _renderMathInEl(results);
+    }};
+    doRender();
+    setTimeout(doRender, 250);
+    setTimeout(doRender, 800);
   }} catch (exc) {{
     results.innerHTML = '<em style="color:var(--danger);">Failed: ' + exc + '</em>';
   }}
