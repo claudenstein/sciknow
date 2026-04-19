@@ -162,20 +162,46 @@ def _build_system_bundle(output_path: Path) -> None:
             tf.add(stage, arcname="sciknow-system")
 
 
-def _prune_old_backups(state: dict, retain: int) -> list[str]:
-    """Remove the oldest backup sets beyond the retention count.
-    Returns list of removed dir names."""
+def _parse_ts(ts: str) -> datetime | None:
+    """Parse a backup-dir timestamp like ``20260415T030000Z``."""
+    try:
+        return datetime.strptime(ts, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def _prune_old_backups(state: dict, retain: int, retain_days: int = 0) -> list[str]:
+    """Remove backup sets beyond retention. Returns list of removed dir names.
+
+    Count-based pruning drops the oldest entries until at most ``retain``
+    remain. If ``retain_days > 0``, any set older than that many days is
+    ALSO removed (whichever deletes more wins — the unions combine).
+    """
     backups = state.get("backups", [])
-    if len(backups) <= retain:
-        return []
-    to_remove = backups[:-retain]
+    to_remove_entries: list[dict] = []
+
+    # Count-based
+    if retain > 0 and len(backups) > retain:
+        to_remove_entries.extend(backups[:-retain])
+
+    # Age-based
+    if retain_days > 0:
+        cutoff = datetime.now(timezone.utc).timestamp() - retain_days * 86400
+        for entry in backups:
+            ts = _parse_ts(entry.get("timestamp", ""))
+            if ts is not None and ts.timestamp() < cutoff:
+                if entry not in to_remove_entries:
+                    to_remove_entries.append(entry)
+
     removed: list[str] = []
-    for entry in to_remove:
+    for entry in to_remove_entries:
         d = _backup_root() / entry["dir"]
         if d.exists():
             shutil.rmtree(d, ignore_errors=True)
         removed.append(entry["dir"])
-    state["backups"] = backups[-retain:]
+
+    if removed:
+        state["backups"] = [b for b in backups if b["dir"] not in set(removed)]
     return removed
 
 
@@ -286,7 +312,11 @@ def run_backup(
             "duration_seconds": round(elapsed, 1),
         })
 
-        pruned = _prune_old_backups(state, settings.backup_retain_count)
+        pruned = _prune_old_backups(
+            state,
+            settings.backup_retain_count,
+            retain_days=settings.backup_retain_days,
+        )
         _write_state(state)
 
         console.print(
@@ -306,6 +336,8 @@ def list_backups():
     """Show backup history."""
     state = _read_state()
     backups = state.get("backups", [])
+    root = _backup_root()
+    console.print(f"[bold]Location:[/bold] {root}")
     if not backups:
         console.print("[dim]No backups yet. Run `sciknow backup run`.[/dim]")
         return
@@ -327,6 +359,8 @@ def list_backups():
             f"{b.get('duration_seconds', 0):.0f}s",
         )
     console.print(table)
+    total_mb = sum(b.get("total_bytes", 0) for b in backups) / 1024 / 1024
+    console.print(f"[dim]{len(backups)} backup(s), {total_mb:.1f} MB total.[/dim]")
 
 
 @app.command(name="status")
@@ -345,22 +379,44 @@ def status():
         console.print("[yellow]No backups yet.[/yellow]")
 
     if sched:
-        console.print(f"[bold]Schedule:[/bold] {sched.get('cron_expression', '?')}  "
-                      f"(installed {sched.get('installed_at', '?')})")
+        human = sched.get("human") or sched.get("cron_expression", "?")
+        console.print(f"[bold]Schedule:[/bold] {human}  "
+                      f"[dim](cron: {sched.get('cron_expression', '?')}, "
+                      f"installed {sched.get('installed_at', '?')})[/dim]")
     else:
         console.print("[dim]No schedule. Run `sciknow backup schedule`.[/dim]")
 
     from sciknow.config import settings
-    console.print(f"[dim]Retention: {settings.backup_retain_count} backups  "
-                  f"Dir: {_backup_root()}[/dim]")
+    ret_days = settings.backup_retain_days
+    days_part = f" + older-than-{ret_days}d" if ret_days > 0 else ""
+    console.print(
+        f"[bold]Retention:[/bold] keep last {settings.backup_retain_count}{days_part}"
+    )
+    console.print(f"[bold]Location:[/bold] {_backup_root()}")
 
 
 @app.command(name="schedule")
 def schedule(
+    frequency: str = typer.Option("daily", "--frequency", "-f",
+        help="How often to run: hourly, daily, weekly, or a raw cron "
+             "expression (5 fields, e.g. '*/30 * * * *'). Default: daily."),
     hour: int = typer.Option(3, "--hour",
-        help="Hour of day (0-23) for the daily backup. Default: 03:00."),
+        help="Hour of day (0-23). Used for daily + weekly. Default: 03."),
+    minute: int = typer.Option(0, "--minute",
+        help="Minute of hour (0-59). Default: 00."),
+    weekday: int = typer.Option(0, "--weekday",
+        help="Day of week for weekly (0=Sun…6=Sat). Default: 0 (Sunday)."),
 ):
-    """Install a daily crontab entry for auto-backup."""
+    """Install a crontab entry for auto-backup.
+
+    Examples:
+
+      sciknow backup schedule                            # daily at 03:00
+      sciknow backup schedule --hour 2 --minute 30       # daily at 02:30
+      sciknow backup schedule --frequency hourly         # every hour at :00
+      sciknow backup schedule --frequency weekly --weekday 0 --hour 4
+      sciknow backup schedule --frequency "*/30 * * * *" # raw cron expr
+    """
     from sciknow.core.project import _repo_root
     root = _repo_root()
     venv_bin = root / ".venv" / "bin" / "sciknow"
@@ -368,9 +424,36 @@ def schedule(
         console.print(f"[red]sciknow binary not found at {venv_bin}[/red]")
         raise typer.Exit(1)
 
+    freq = (frequency or "").strip().lower()
+    if not (0 <= hour <= 23):
+        console.print("[red]--hour must be 0-23[/red]"); raise typer.Exit(1)
+    if not (0 <= minute <= 59):
+        console.print("[red]--minute must be 0-59[/red]"); raise typer.Exit(1)
+    if not (0 <= weekday <= 6):
+        console.print("[red]--weekday must be 0-6[/red]"); raise typer.Exit(1)
+
+    if freq == "hourly":
+        cron_expr = f"{minute} * * * *"
+        human = f"every hour at :{minute:02d}"
+    elif freq == "daily":
+        cron_expr = f"{minute} {hour} * * *"
+        human = f"daily at {hour:02d}:{minute:02d}"
+    elif freq == "weekly":
+        cron_expr = f"{minute} {hour} * * {weekday}"
+        names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        human = f"weekly on {names[weekday]} at {hour:02d}:{minute:02d}"
+    elif freq and len(freq.split()) == 5:
+        cron_expr = freq
+        human = f"cron '{cron_expr}'"
+    else:
+        console.print(
+            f"[red]Unknown frequency '{frequency}'.[/red] "
+            "Use hourly, daily, weekly, or a 5-field cron expression."
+        )
+        raise typer.Exit(1)
+
     cron_line = (
-        f"{0} {hour} * * * "
-        f"cd {root} && {venv_bin} backup run --all-projects "
+        f"{cron_expr} cd {root} && {venv_bin} backup run --all-projects "
         f">> {_backup_root()}/cron.log 2>&1 {_CRON_MARKER}"
     )
 
@@ -391,13 +474,132 @@ def schedule(
 
     state = _read_state()
     state["schedule"] = {
-        "cron_expression": f"0 {hour} * * *",
+        "cron_expression": cron_expr,
+        "frequency": freq,
+        "human": human,
         "installed_at": datetime.now(timezone.utc).isoformat(),
     }
     _write_state(state)
 
-    console.print(f"[green]✓ Daily backup scheduled at {hour:02d}:00 local time.[/green]")
+    console.print(f"[green]✓ Backup scheduled {human} (local time).[/green]")
     console.print(f"[dim]Cron line: {cron_line}[/dim]")
+
+
+@app.command(name="delete")
+def delete_backup(
+    timestamp: str = typer.Argument(
+        ...,
+        help="Backup timestamp/dir to delete (e.g. '20260415T030000Z'). "
+             "Use 'latest' for the most recent.",
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y",
+        help="Skip confirmation prompt."),
+):
+    """Delete a single backup set (both the files on disk and the state entry)."""
+    state = _read_state()
+    backups = state.get("backups", [])
+    if not backups:
+        console.print("[yellow]No backups to delete.[/yellow]")
+        raise typer.Exit(0)
+
+    if timestamp == "latest":
+        entry = backups[-1]
+    else:
+        entry = next(
+            (b for b in backups
+             if b.get("dir") == timestamp or b.get("timestamp") == timestamp),
+            None,
+        )
+    if entry is None:
+        console.print(f"[red]Backup '{timestamp}' not found.[/red]")
+        console.print(f"[dim]Available: {', '.join(b['dir'] for b in backups)}[/dim]")
+        raise typer.Exit(1)
+
+    mb = entry.get("total_bytes", 0) / 1024 / 1024
+    projs = ", ".join(entry.get("projects", [])) or "—"
+    path = _backup_root() / entry["dir"]
+    console.print(f"[bold]About to delete:[/bold] {entry['dir']}  "
+                  f"({mb:.1f} MB, projects: {projs})")
+    console.print(f"[dim]Path: {path}[/dim]")
+
+    if not yes:
+        if not typer.confirm("Delete this backup?", default=False):
+            console.print("[dim]Cancelled.[/dim]")
+            raise typer.Exit(0)
+
+    if path.exists():
+        shutil.rmtree(path, ignore_errors=True)
+    state["backups"] = [b for b in backups if b.get("dir") != entry["dir"]]
+    _write_state(state)
+    console.print(f"[green]✓ Deleted {entry['dir']}[/green]")
+
+
+@app.command(name="purge")
+def purge_backups(
+    all_flag: bool = typer.Option(False, "--all",
+        help="Delete ALL backup sets (the 'autodelete everything' action)."),
+    older_than_days: int = typer.Option(0, "--older-than-days",
+        help="Delete backup sets older than this many days."),
+    yes: bool = typer.Option(False, "--yes", "-y",
+        help="Skip confirmation prompt."),
+):
+    """Bulk-delete backups by age — or with ``--all`` wipe them all.
+
+    Examples:
+
+      sciknow backup purge --older-than-days 30   # drop backups older than 30d
+      sciknow backup purge --all -y               # nuke everything without prompt
+    """
+    if not all_flag and older_than_days <= 0:
+        console.print(
+            "[red]Pass --all or --older-than-days N to select what to purge.[/red]"
+        )
+        raise typer.Exit(1)
+
+    state = _read_state()
+    backups = state.get("backups", [])
+    if not backups:
+        console.print("[yellow]No backups to purge.[/yellow]")
+        raise typer.Exit(0)
+
+    if all_flag:
+        victims = list(backups)
+        reason = "ALL backups"
+    else:
+        cutoff = datetime.now(timezone.utc).timestamp() - older_than_days * 86400
+        victims = []
+        for entry in backups:
+            ts = _parse_ts(entry.get("timestamp", ""))
+            if ts is not None and ts.timestamp() < cutoff:
+                victims.append(entry)
+        reason = f"backups older than {older_than_days}d"
+
+    if not victims:
+        console.print(f"[dim]Nothing matches ({reason}).[/dim]")
+        raise typer.Exit(0)
+
+    total_mb = sum(v.get("total_bytes", 0) for v in victims) / 1024 / 1024
+    console.print(
+        f"[bold]About to delete {len(victims)} backup(s) ({reason}) "
+        f"— {total_mb:.1f} MB total.[/bold]"
+    )
+    for v in victims:
+        console.print(f"  [dim]- {v['dir']}  ({v.get('total_bytes', 0)/1024/1024:.1f} MB)[/dim]")
+
+    if not yes:
+        if not typer.confirm("Proceed?", default=False):
+            console.print("[dim]Cancelled.[/dim]")
+            raise typer.Exit(0)
+
+    vset = {v["dir"] for v in victims}
+    for entry in victims:
+        p = _backup_root() / entry["dir"]
+        if p.exists():
+            shutil.rmtree(p, ignore_errors=True)
+
+    state["backups"] = [b for b in backups if b["dir"] not in vset]
+    _write_state(state)
+    console.print(f"[green]✓ Purged {len(victims)} backup(s).[/green]")
 
 
 @app.command(name="unschedule")

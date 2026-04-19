@@ -306,6 +306,11 @@ class Settings(BaseSettings):
     # Phase 54.6.24 — auto-backup
     backup_retain_count: int = 7
     backup_include_code: bool = True
+    # Phase 54.6.94 — age-based retention. When > 0, every `backup run`
+    # also prunes any backup set older than this many days. Runs in
+    # addition to `backup_retain_count` (whichever deletes more wins).
+    # Set to 0 to disable age-based pruning (count-only retention).
+    backup_retain_days: int = 0
 
 
 def _apply_env_overlay() -> None:
