@@ -161,10 +161,11 @@ per hour of effort.
   `sciknow db parse-tables` runs the fast LLM on MinerU's HTML and
   stores the structured output; Visuals modal table cards render the
   parsed block (title + summary + column list + shape) above the raw
-  HTML when available. Wired into `refresh` as step 11. Re-embedding
-  the summaries into the visuals Qdrant collection for cross-table
-  semantic queries ("every paper reporting ECS") stays open — one
-  small follow-up on `db embed-visuals` to also read `table_summary`.
+  HTML when available. Wired into `refresh` as step 11. **Follow-up
+  completed** in 54.6.109: `sciknow db embed-visuals` now picks the
+  best embedding text per kind (tables use `table_summary`, figures/
+  charts use `ai_caption`, equations use the natural-language
+  paraphrase) — every visual kind is now semantically searchable.
 - [x] **~~#6 — Coverage-based autowrite termination.~~** Shipped in Phase
   54.6.79. `sciknow/core/plan_coverage.py` computes NLI coverage of
   atomic plan bullets against the draft; folded into the autowrite

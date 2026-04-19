@@ -4787,13 +4787,23 @@ def embed_visuals_cmd(
     kind_params = {f"k{i}": k for i, k in enumerate(kinds)}
 
     where = [f"v.kind IN ({kind_ph})", "v.ai_caption IS NOT NULL",
-             "length(v.ai_caption) >= 20"]
+             "(length(COALESCE(v.ai_caption, '')) >= 20 OR "
+             " length(COALESCE(v.table_summary, '')) >= 20)"]
     if not force:
         where.append("v.qdrant_point_id IS NULL")
 
     with get_session() as session:
         rows = session.execute(sql_text(f"""
-            SELECT v.id::text, v.document_id::text, v.kind, v.ai_caption,
+            SELECT v.id::text, v.document_id::text, v.kind,
+                   -- 54.6.109: for tables, prefer the parsed
+                   -- table_summary over ai_caption (which tables
+                   -- don't have); equation/figure/chart keep using
+                   -- ai_caption from 54.6.72 / 54.6.78.
+                   CASE WHEN v.kind = 'table'
+                          AND COALESCE(v.table_summary, '') <> ''
+                        THEN v.table_summary
+                        ELSE v.ai_caption
+                   END AS embed_text,
                    v.figure_num, v.caption
             FROM visuals v
             WHERE {' AND '.join(where)}

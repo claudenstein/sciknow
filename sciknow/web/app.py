@@ -16448,8 +16448,16 @@ async function loadWikiVisuals() {{
         targets.forEach(el => {{
           if (el.dataset.rendered === '1') return;
           try {{
-            window.katex.render(el.dataset.latex || '', el,
-              {{displayMode: true, throwOnError: false, output: 'html'}});
+            window.katex.render(el.dataset.latex || '', el, {{
+              displayMode: true, throwOnError: false, output: 'html',
+              strict: 'ignore',
+              macros: {{
+                '\\\\displaylimits': '', '\\\\mit': '', '\\\\sc': '',
+                '\\\\mathbfcal': '\\\\mathcal',
+                '\\\\textless': '<', '\\\\textgreater': '>',
+                '\\\\hdots': '\\\\ldots',
+              }},
+            }});
             el.dataset.rendered = '1';
           }} catch (_) {{ el.textContent = el.dataset.latex || ''; }}
         }});
@@ -22016,6 +22024,22 @@ async function loadVisuals(append) {{
 
     results.innerHTML = html + loadMoreHtml;
 
+    // 54.6.109 — macros map for commands KaTeX doesn't natively ship
+    // but that appear legitimately in our corpus. All either pure
+    // display hints (safe to strip) or old LaTeX 2.09 aliases
+    // (mapped to KaTeX equivalents). Recovers ~20 of the ~50 failing
+    // equations in the 4,925-row corpus; remainder are MinerU
+    // extraction errors (malformed \\end, double-subscript, etc.)
+    // that need a re-ingest, not a render fix.
+    const _KATEX_MACROS = {{
+      '\\\\displaylimits': '',     // 14× — display-mode already stacks limits
+      '\\\\mit':           '',     // 2×  — LaTeX 2.09 italic, drop
+      '\\\\sc':            '',     // 1×  — small-caps, drop
+      '\\\\mathbfcal':     '\\\\mathcal',      // 1×  — bold cal → cal
+      '\\\\textless':      '<',    // 1×
+      '\\\\textgreater':   '>',    // 0×  — pre-emptive
+      '\\\\hdots':         '\\\\ldots',        // 1×
+    }};
     // 54.6.105/107 — drive KaTeX programmatically on every .eq-target
     // we just inserted. 54.6.107 adds diagnostics: count ok/failed,
     // mark failures with a red border + post-it note so the user can
@@ -22042,6 +22066,7 @@ async function loadVisuals(append) {{
             throwOnError: true,
             output: 'html',
             strict: false,   // tolerate LaTeX-incompatible constructs
+            macros: _KATEX_MACROS,
           }});
           el.dataset.rendered = '1';
           ok++;
@@ -22053,7 +22078,7 @@ async function loadVisuals(append) {{
           try {{
             window.katex.render(tex, el, {{
               displayMode: true, throwOnError: false, output: 'html',
-              strict: 'ignore',
+              strict: 'ignore', macros: _KATEX_MACROS,
             }});
           }} catch (_) {{
             el.textContent = tex;
