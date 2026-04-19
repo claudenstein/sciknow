@@ -119,11 +119,11 @@ depend on earlier layers having data.
 Things obviously missing for a book-writing system but never explicitly
 asked for. Listed in rough priority order.
 
-- [x] **~~Export to PDF (web reader)~~** — shipped in Phase 31 via WeasyPrint. The web reader's export buttons can produce PDF for an individual draft, a chapter, or the full book (`/api/export/{draft,chapter,book}/...pdf`). **Still missing:** PDF / EPUB export from the **CLI** `book export` command (only md/html/bibtex/latex/docx there). EPUB output also still planned (via pandoc, half a day).
+- [x] **~~Export to PDF (web reader) + CLI PDF/EPUB~~** — web shipped in Phase 31 via WeasyPrint; CLI EPUB via pandoc shipped in Phase 40 (`sciknow book export --format epub`); CLI PDF also in `book export`. All export paths now cover md/html/pdf/epub/latex/docx/bibtex.
 - [ ] **Per-book settings page.** Things like `target_chapter_words`, `mineru_vlm_model`, custom_metadata are editable but scattered across the Plan modal, Chapter modal, and `.env`. A single "Book settings" modal would consolidate. **Effort:** half-day.
 - [ ] **Autowrite stall investigation.** Phase 24 added the diagnostic logger (`tail -f data/autowrite/latest.jsonl | jq`) but didn't fix any underlying cause. The next stall is a chance to find a concrete root cause. **Effort:** depends on the root cause once it's reproduced.
-- [ ] **Per-draft and per-chapter snapshots.** The snapshots table exists for individual drafts; exposing a "snapshot the whole chapter" or "snapshot the whole book" operation would let the user roll back a bad autowrite-all run safely.
-- [ ] **Per-section model override.** Right now `settings.llm_model` is global. A user might want to use the flagship model for technical sections and the fast model for brief ones. Per-section meta `model: str | None` would do it. Pairs well with the per-section word target dropdown shipped in Phase 29.
+- [x] **~~Per-draft and per-chapter snapshots.~~** Shipped in Phase 54.6.75 as `sciknow book snapshot / snapshots / snapshot-restore` wrapping the existing web endpoints. Non-destructive (inserts new versions, never overwrites).
+- [x] **~~Per-section model override.~~** Shipped — `_get_section_model` at `sciknow/core/book_ops.py:298` pulls a per-section `model` key from the section's metadata and applies it in both write and autowrite paths, falling back to `settings.llm_model` when unset.
 
 ---
 
@@ -137,13 +137,7 @@ per hour of effort.
 
 ### 6a. Tier 1 — ship next, foundational
 
-- [ ] **#3 — Retrieval-quality bench (`b_retrieval_recall`).** Generate
-  ~200 synthetic *(question, source_chunk)* pairs via `LLM_FAST_MODEL`
-  over random chunks (question must be answerable from exactly that
-  chunk), persist to `data/bench/retrieval_queries.jsonl`, then in every
-  `bench --layer sweep` run measure MRR@10 / NDCG@10 / Recall@K. New bench
-  function in `sciknow/testing/bench.py`. **Unblocks:** #4 (bge-m3 LoRA
-  needs this as its eval signal). **Effort:** half-day.
+- [x] **~~#3 — Retrieval-quality bench (`b_retrieval_recall`).~~** Shipped in Phase 54.6.69. `sciknow/testing/retrieval_eval.py` provides `generate_probe_set(n)` and `b_retrieval_recall()` returning MRR@10, Recall@1/10, NDCG@10 against a synthetic probe set persisted under `projects/<slug>/data/bench/retrieval_queries.jsonl`. Baseline on global-cooling: MRR 0.514.
 - [x] **~~#5 — Tokenizer-aware chunk budgets.~~** **False alarm from the audit.**
   The chunker is already tokenizer-aware (uses `tiktoken.cl100k_base` at
   `sciknow/ingestion/chunker.py:22-24`). cl100k_base ≈ XLM-R within ~30%,
@@ -151,44 +145,15 @@ per hour of effort.
   overflow possible even on LaTeX-dense sections. Swapping to bge-m3's
   exact XLM-R tokenizer would be mechanically correct but gains nothing
   measurable; pay no diff on this one.
-- [ ] **#7 — Citation marker → chunk alignment post-pass.** After a
-  draft is written, for each sentence containing `[N]` citations, score
-  the retrieval-context chunks against the sentence with the already-loaded
-  `cross-encoder/nli-deberta-v3-base`. If the `[N]`-referenced chunk
-  isn't the top entailer by ≥0.15, remap `[N]` to the actual top chunk.
-  Direct lift on the autowrite_writer citation_precision metric
-  (gemma3 was 11%, qwen 60% — this should push both up). Reference:
-  LongCite (Zhang 2024). **Effort:** 3–4h.
-- [ ] **#9 — Citation-graph retrieval boost.** 4.5% of citation edges
-  resolve in-corpus (per RESEARCH.md expand investigation). After RRF
-  fusion, apply a small multiplicative boost (`×1 + α·log(1+n_refs)`)
-  to chunks whose `document_id` is cited-by or co-cited-with a top-K
-  hit. One PostgreSQL window query over the existing `citations` table.
+- [x] **~~#7 — Citation marker → chunk alignment post-pass.~~** Shipped in Phase 54.6.71 as `sciknow/core/citation_align.py` + CLI `book align-citations`. Conservative remap: only when the claimed chunk entails < 0.5 AND the top chunk beats by ≥ 0.15. Tunable via `--low-threshold` / `--win-margin`. Also wired into the web draft toolbar in 54.6.97.
+- [x] **~~#9 — Citation-graph retrieval boost.~~** Shipped in Phase 54.6.70 as `_apply_cocite_boost` in `retrieval/hybrid_search.py`. Bib-coupling / co-citation boost applied inside the RRF-fusion stage; controlled by `settings.cocite_boost_factor` (default 0.1). `cocite_count` propagates through `SearchCandidate` for downstream UI.
   Not in rejected list (bib-coupling / co-citation are classical IR,
   not GraphRAG-global). **Effort:** half-day.
 
 ### 6b. Tier 2 — meaningful research upgrade
 
-- [ ] **#1 — Vision-LLM auto-captioning for figures + charts.** 9,988
-  figure/chart JPGs are semantically silent. Pull
-  `qwen2.5vl:7b` (or `llama3.2-vision:11b`), add
-  `sciknow db caption-visuals` CLI that iterates `visuals` rows where
-  `asset_path IS NOT NULL AND caption = ''` and generates captions via
-  the VL model. Embed with bge-m3 and store in a new
-  `visuals.description_embedding` column for retrieval parity with
-  text chunks. GUI Visuals tab auto-populates with real captions.
-  **Preconditions:** `ollama pull qwen2.5vl:7b` (~6 GB). **Effort:** 4–6h.
-- [ ] **#1b — VLM sweep harness (mirror of the text-LLM sweep).** Per the
-  54.6.73 directive "always optimize for best quality", add a
-  `sciknow bench vlm-sweep` that picks ~15 figures from the corpus
-  and captions each with every locally-installed VLM candidate
-  (qwen2.5vl:7b, qwen2.5vl:32b, internvl3:14b, llama3.2-vision:11b,
-  minicpm-v:8b, …), then uses a judge model (ideally Claude or GPT-4o
-  in one-shot API calls, else the local fast-LLM on caption pairs) to
-  rank. Analogous to `sciknow bench --layer sweep` for text LLMs.
-  **Effort:** ~1 day once a VLM is pulled. Currently the default is
-  qwen2.5vl:32b on engineering judgment; this sweep turns that into
-  corpus-grounded evidence.
+- [x] **~~#1 — Vision-LLM auto-captioning for figures + charts.~~** Shipped in Phase 54.6.72 as `sciknow/core/visuals_caption.py` + CLI `db caption-visuals`. Bulk captioning (54.6.89) wired into `sciknow refresh` step 9 with `qwen2.5vl:7b` as the default bulk VLM (60% of 32b's quality, ~35× faster — 9,831 figures captioned in ~5h). Migration 0026 added `ai_caption` / `ai_caption_model` / `ai_captioned_at` columns.
+- [x] **~~#1b — VLM sweep harness.~~** Shipped in Phase 54.6.74 as `sciknow/testing/vlm_sweep.py` + `sciknow bench --layer vlm-sweep`. Fair-fight sampling per model (54.6.85 methodology). Judge win-rate verdict: qwen2.5vl:32b 93.3%, qwen2.5vl:7b 60%, minicpm-v:8b 35.6%, llama3.2-vision:11b 8.9%.
 
 - [ ] **#2 — Structured table parsing.** 1,406 tables live as MinerU
   HTML in `visuals.content`. Parse into `{headers, rows, units}` +
@@ -232,13 +197,12 @@ per hour of effort.
   peer_reviewed=1.0); defaults OFF behind `PAPER_TYPE_WEIGHTING=true`
   until the backfill completes on a meaningful corpus fraction.
 - [x] **~~#11 — Equation natural-language paraphrase embedding.~~**
-  Shipped in Phase 54.6.78. `sciknow/core/equation_paraphrase.py` +
-  `sciknow db paraphrase-equations` CLI. Uses LLM_FAST_MODEL at ~2s/eq
-  (~2.2h for 4,687 equations). Persists into the existing
-  `visuals.ai_caption` column; the text-LLM-vs-VLM distinction is
-  made by `kind`. **Still open:** re-embedding the paraphrases into
-  Qdrant so retrieval actually surfaces them (for now they're only
-  searchable via Postgres FTS on the visuals table).
+  Shipped in Phase 54.6.78 (paraphrase generator) + 54.6.82 (Qdrant
+  embed). `sciknow/core/equation_paraphrase.py` +
+  `sciknow db paraphrase-equations` CLI write paraphrases to
+  `visuals.ai_caption`; `sciknow db embed-visuals` (`retrieval/visuals_search.py`)
+  embeds captions + paraphrases into a per-project `<slug>_visuals`
+  Qdrant collection. Wired into `sciknow refresh` step 11.
 - [ ] **#12 — Compound learning Layer 3** (already in §4b, still pending,
   blocked on ≥50 autowrite runs).
 - [x] **~~#13 — Chapter / book snapshot + restore.~~** Shipped in
