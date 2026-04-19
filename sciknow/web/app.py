@@ -13656,6 +13656,20 @@ async function showDashboard() {{
   let html = '<div class="dashboard">';
   html += '<h2>Book Dashboard</h2>';
 
+  // Phase 54.6.98 — dashboard hint: make clear where the per-draft AI
+  // actions live. The toolbar (Edit/Autowrite/Write/Review/Revise +
+  // Verify/Critique/Extras dropdowns) is hidden on the Dashboard, so
+  // first-time users looking for "AI Review" see only Outline (Plan
+  // modal) and wonder where Review went.
+  html += '<div style="margin:4px 0 18px;padding:10px 14px;background:var(--bg-alt);border-left:3px solid var(--link);border-radius:4px;font-size:12px;line-height:1.5;">'
+    + '<strong>AI actions &mdash; where to find them:</strong><br>'
+    + '&bull; <strong>Outline</strong> &amp; <strong>Book plan</strong> live in the <em>Plan</em> modal (top nav).<br>'
+    + '&bull; <strong>AI Write / Autowrite / Review / Revise / Verify / Align / Argue / Gaps / &hellip;</strong> appear in the '
+    + '<em>draft toolbar</em> &mdash; click any section in the sidebar to open its draft and the toolbar shows up. '
+    + 'Click the <strong>?</strong> button at the end of the toolbar for a full reference, or read '
+    + '<a href="https://github.com/claudenstein/sciknow/blob/main/docs/BOOK_ACTIONS.md" target="_blank" style="color:var(--link);">docs/BOOK_ACTIONS.md</a>.'
+    + '</div>';
+
   // Book stats — modernized stat-tile cards
   html += '<div class="stat-grid">';
   html += '<div class="stat-tile"><div class="num">' + s.total_words.toLocaleString() + '</div><div class="lbl">Words</div></div>';

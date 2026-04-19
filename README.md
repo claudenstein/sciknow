@@ -307,6 +307,7 @@ Core guides — how to use sciknow, how it works, how to extend it:
 | **[Ingestion Pipeline](docs/INGESTION.md)** | PDF conversion (MinerU/Marker), metadata, chunking, embedding |
 | **[Retrieval & RAG](docs/RETRIEVAL.md)** | Hybrid search, RRF fusion, reranking, corrective RAG |
 | **[Book Writing System](docs/BOOK.md)** | Book workflow, autowrite convergence, web reader, export |
+| **[Book Actions Reference](docs/BOOK_ACTIONS.md)** | Every AI button (outline/review/autowrite/verify/align/…) + the 24 elicitation + 24 brainstorming methods |
 | **[Multi-Project](docs/PROJECTS.md)** | Per-project isolation (DB + Qdrant + `data/`), lifecycle CLI |
 | **[Operations](docs/OPERATIONS.md)** | Backup/restore, expand, enrich, citations, dev notes |
 | **[Testing Protocol](docs/TESTING.md)** | 3-layer smoke harness (`sciknow test`); how to add checks |
