@@ -6758,21 +6758,25 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
    modal-body scrolls internally when content overflows. */
 /* Phase 54.6.45 — modals sized to the viewport rather than fixed pixels.
    Pre-fix, `.modal` capped at 1100px and `.modal.wide` at 1400px, which
-   on any modern display left huge empty gutters. User reported reader
-   popups felt cramped; now the default fills 94vw up to 1500px and wide
-   modals up to 1800px. max-height reduced reserved chrome from 80px
-   → 40px so the modal reaches closer to the viewport edges. */
+   on any modern display left huge empty gutters.
+   Phase 54.6.104 — max-width caps removed. Even after 54.6.101 raised
+   the cap, wide monitors (e.g. 2560px) still showed substantial gutters
+   because `.modal.wide` hit max-width:1800px. Now all three tiers use
+   pure viewport widths; the user keeps a small uniform border around
+   every modal (2vw on base / wide, 1.5vw on xwide) without any hard
+   px cap. max-height likewise sized purely against the viewport. */
 .modal {{ background: var(--bg-elevated); border: 1px solid var(--border);
           border-radius: var(--r-xl); box-shadow: var(--shadow-lg);
-          width: 94vw; max-width: 1500px;
-          max-height: calc(100vh - 40px);
+          width: 96vw; max-width: none;
+          max-height: calc(100vh - 24px);
           display: flex; flex-direction: column;
           overflow: hidden; animation: slideUp .18s ease; }}
-.modal.wide {{ width: 94vw; max-width: 1800px; }}
+.modal.wide {{ width: 96vw; max-width: none; }}
 /* Candidate-preview / KG / catalog modals render wide tables. Scale
    them to the viewport so the user actually gets to see full titles
    without wrap hell. */
-.modal.xwide {{ width: 96vw; max-width: 2000px; max-height: calc(100vh - 32px); }}
+.modal.xwide {{ width: 97vw; max-width: none;
+                max-height: calc(100vh - 20px); }}
 /* Phase 54.6.12 — sized container for every ECharts-backed viz tab.
    70vh works well across the six charts; each chart instance calls
    .resize() on window resize + tab-switch. */
@@ -8196,7 +8200,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           </select>
           <span id="wiki-sum-count" style="font-size:11px;color:var(--fg-muted);"></span>
         </div>
-        <div id="wiki-summaries-list" style="max-height:560px;overflow-y:auto;"></div>
+        <div id="wiki-summaries-list" style="max-height:calc(85vh - 220px);overflow-y:auto;"></div>
       </div>
       <!-- Phase 54.6.61 — Visuals tab: figures / equations / tables / code,
            with actual image rendering for figures via /api/visuals/image. -->
@@ -8217,7 +8221,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           <button class="btn-secondary" onclick="loadWikiVisuals()">&#128269; Load</button>
           <span id="wiki-vis-stats" style="font-size:11px;color:var(--fg-muted);"></span>
         </div>
-        <div id="wiki-visuals-list" style="max-height:560px;overflow-y:auto;"></div>
+        <div id="wiki-visuals-list" style="max-height:calc(85vh - 220px);overflow-y:auto;"></div>
       </div>
       <!-- Browse tab -->
       <div class="tab-pane" id="wiki-browse-pane" style="display:none;">
@@ -8318,7 +8322,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         </div>
         <div id="wiki-lint-status" style="margin-top:8px;font-size:12px;color:var(--fg-muted);"></div>
         <div id="wiki-lint-summary" style="margin-top:8px;"></div>
-        <div id="wiki-lint-issues" style="margin-top:10px;max-height:400px;overflow:auto;"></div>
+        <div id="wiki-lint-issues" style="margin-top:10px;max-height:calc(70vh - 160px);overflow:auto;"></div>
         <!-- Phase 54.6.8 — KG backfill utility. If the Knowledge Graph
              modal is empty for your corpus, this is the fix: older wiki
              compiles didn't run the combined entity+KG extraction, so
@@ -8364,7 +8368,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         </div>
         <div id="wiki-consensus-status" style="margin-top:8px;font-size:12px;color:var(--fg-muted);"></div>
         <div id="wiki-consensus-summary" style="margin-top:8px;font-size:13px;"></div>
-        <div id="wiki-consensus-claims" style="margin-top:10px;max-height:400px;overflow:auto;"></div>
+        <div id="wiki-consensus-claims" style="margin-top:10px;max-height:calc(70vh - 180px);overflow:auto;"></div>
         <div id="wiki-consensus-debated" style="margin-top:10px;"></div>
       </div>
     </div>
@@ -9125,7 +9129,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       </div>
       <div id="backup-log" style="display:none;max-height:120px;overflow-y:auto;font-family:var(--font-mono);font-size:11px;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:8px;margin-bottom:12px;white-space:pre-wrap;"></div>
       <h4 style="margin:0 0 8px;">Backup History</h4>
-      <div id="backup-list" style="max-height:300px;overflow-y:auto;">
+      <div id="backup-list" style="max-height:calc(80vh - 380px);min-height:220px;overflow-y:auto;">
         <em>Loading...</em>
       </div>
     </div>
