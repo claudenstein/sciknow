@@ -115,6 +115,23 @@ CANDIDATE_MODELS: list[str] = [
     "supergemma4:31b-abliterated-q4_K_M",     # broken output — keeps for ref
 ]
 
+
+def _resolve_candidates() -> list[str]:
+    """Honour ``SCIKNOW_BENCH_MODELS`` env var for targeted re-runs.
+
+    54.6.93 — comma-separated model tags in that env var replace
+    ``CANDIDATE_MODELS`` for this process only. Lets us re-bench a
+    single newly-pulled model without editing source. Empty/unset →
+    fall back to the full list.
+    """
+    import os
+    raw = os.environ.get("SCIKNOW_BENCH_MODELS", "").strip()
+    if not raw:
+        return CANDIDATE_MODELS
+    picks = [t.strip() for t in raw.split(",") if t.strip()]
+    return picks or CANDIDATE_MODELS
+
+
 # Judge-model roster. Used by _pick_judge to pick a model from a
 # different family than the candidate pair being compared. Ordered
 # by preference; the first non-conflict is chosen. With 14 candidates
@@ -739,7 +756,7 @@ def b_quality_wiki_summary() -> Iterable[BenchMetric]:
     installed = _installed_models()
     outputs: dict[str, str] = {}
 
-    for model in CANDIDATE_MODELS:
+    for model in _resolve_candidates():
         if _skip_if_model_missing(model, installed):
             yield BenchMetric(f"{model}::status", "not-installed", "")
             continue
@@ -825,7 +842,7 @@ def b_quality_wiki_polish() -> Iterable[BenchMetric]:
     seed_words = len(_POLISH_SEED.split())
     seed_cites = len(_extract_citations(_POLISH_SEED))
 
-    for model in CANDIDATE_MODELS:
+    for model in _resolve_candidates():
         if _skip_if_model_missing(model, installed):
             yield BenchMetric(f"{model}::status", "not-installed", "")
             continue
@@ -933,7 +950,7 @@ def b_quality_autowrite_writer() -> Iterable[BenchMetric]:
     source_chunks = [r.content for r in results]
     source_preview = "\n---\n".join(source_chunks)
 
-    for model in CANDIDATE_MODELS:
+    for model in _resolve_candidates():
         if _skip_if_model_missing(model, installed):
             yield BenchMetric(f"{model}::status", "not-installed", "")
             continue
@@ -1022,7 +1039,7 @@ def b_quality_book_review() -> Iterable[BenchMetric]:
     installed = _installed_models()
     outputs: dict[str, str] = {}
 
-    for model in CANDIDATE_MODELS:
+    for model in _resolve_candidates():
         if _skip_if_model_missing(model, installed):
             yield BenchMetric(f"{model}::status", "not-installed", "")
             continue
@@ -1099,7 +1116,7 @@ def b_quality_autowrite_scorer() -> Iterable[BenchMetric]:
     results = _build_fake_results()
     installed = _installed_models()
 
-    for model in CANDIDATE_MODELS:
+    for model in _resolve_candidates():
         if _skip_if_model_missing(model, installed):
             yield BenchMetric(f"{model}::status", "not-installed", "")
             continue
@@ -1201,7 +1218,7 @@ def b_quality_ask_synthesize() -> Iterable[BenchMetric]:
     outputs: dict[str, str] = {}
     source_text = "\n".join(r.content for r in results)
 
-    for model in CANDIDATE_MODELS:
+    for model in _resolve_candidates():
         if _skip_if_model_missing(model, installed):
             yield BenchMetric(f"{model}::status", "not-installed", "")
             continue
@@ -1264,7 +1281,7 @@ def b_quality_wiki_consensus() -> Iterable[BenchMetric]:
     topic = CANDIDATE_TOPICS[0]
     installed = _installed_models()
 
-    for model in CANDIDATE_MODELS:
+    for model in _resolve_candidates():
         if _skip_if_model_missing(model, installed):
             yield BenchMetric(f"{model}::status", "not-installed", "")
             continue
