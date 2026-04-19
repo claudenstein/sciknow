@@ -5887,6 +5887,32 @@ async def api_backups_schedule(request: Request):
         return JSONResponse({"job_id": job_id})
 
 
+@app.post("/api/cli-stream")
+async def api_cli_stream(request: Request):
+    """Phase 54.6.97 — generic CLI dispatcher for draft-level actions.
+
+    Body: ``{argv: ["book", "verify-draft", "<id>"]}``. Only commands on
+    the allowlist below are accepted — keeps this from becoming a
+    remote-shell. Streams stdout as SSE log events via
+    ``_spawn_cli_streaming`` just like the backup endpoints.
+    """
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    argv = body.get("argv") or []
+    if not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv):
+        raise HTTPException(400, "argv must be a non-empty list of strings")
+    ALLOWED: set[tuple[str, str]] = {
+        ("book", "verify-draft"),
+        ("book", "align-citations"),
+        ("book", "ensemble-review"),
+    }
+    if len(argv) < 2 or (argv[0], argv[1]) not in ALLOWED:
+        raise HTTPException(403, f"command not on allowlist: {argv[:2]}")
+    job_id, _ = _create_job("cli_stream_" + argv[1].replace("-", "_"))
+    loop = asyncio.get_event_loop()
+    _spawn_cli_streaming(job_id, argv, loop)
+    return JSONResponse({"job_id": job_id})
+
+
 @app.post("/api/backups/delete")
 async def api_backups_delete(request: Request):
     """54.6.94 — delete one backup set. Body: {timestamp: "<ts>"|"latest"}."""
@@ -7934,6 +7960,8 @@ body.task-bar-open {{ padding-top: 40px; }}
       </button>
       <div class="nav-dropdown-menu" role="menu">
         <button role="menuitem" onclick="doVerify()" title="Verify citations against sources (Phases 7+11)">&#10003; Verify</button>
+        <button role="menuitem" onclick="doVerifyDraft()" title="Atomize each sentence and NLI-check every sub-claim for mixed-truth failures (54.6.83)">&#129516; Verify Draft (claim-atomization)</button>
+        <button role="menuitem" onclick="doAlignCitations()" title="Remap [N] markers to the chunk that actually entails each sentence (54.6.71, conservative)">&#128279; Align Citations</button>
         <button role="menuitem" onclick="doInsertCitations()" title="Two-pass LLM inserts [N] citation markers where needed; mirrors `sciknow book insert-citations`. Saves a new version.">&#128209; Insert Citations</button>
         <button role="menuitem" onclick="showScoresPanel()" title="Phase 13 — convergence trajectory for autowrite drafts">&#9783; Scores</button>
       </div>
@@ -7948,6 +7976,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         <button role="menuitem" onclick="doGaps()" title="Analyse gaps in the book">&#128269; Gaps</button>
         <button role="menuitem" onclick="doAdversarialReview()" title="Cynical critic pass — finds ≥10 concrete issues, never graded. BMAD-inspired. Doesn't overwrite review_feedback.">&#128126; Adversarial review</button>
         <button role="menuitem" onclick="doEdgeCases()" title="Exhaustive edge-case hunter — walks every scope boundary, counter-case, causal alternative, and quantitative limit. Structured findings.">&#129327; Edge cases</button>
+        <button role="menuitem" onclick="doEnsembleReview()" title="N independent NeurIPS-rubric reviewers (default 3, T=0.75, rotating stance) + meta-fusion. Higher variance reduction but N× cost.">&#128218; Ensemble Review</button>
       </div>
     </div>
     <div class="nav-dropdown nav-dropdown-left tb-dropdown" id="extras-tb-dropdown">
@@ -7960,6 +7989,8 @@ body.task-bar-open {{ padding-top: 40px; }}
         <button role="menuitem" onclick="showChapterReader()" title="Read entire chapter as continuous scroll">&#128214; Chapter reader</button>
       </div>
     </div>
+    <div class="sep"></div>
+    <button onclick="openAIActionsHelp()" title="What does each AI action do? Quick reference." style="font-weight:600;">?</button>
   </div>
 
   <!-- Phase 13 — Score history panel (collapsible, lazy-loaded) -->
@@ -8708,6 +8739,194 @@ body.task-bar-open {{ padding-top: 40px; }}
         </div>
       </div>
 
+    </div>
+  </div>
+</div>
+
+<!-- Phase 54.6.97 — AI Actions Help modal. Central reference for every
+     LLM button in the draft toolbar, with what it does, when to use it,
+     what it requires, what it produces, and the CLI equivalent. -->
+<div class="modal-overlay" id="ai-help-modal" onclick="if(event.target===this)closeModal('ai-help-modal')">
+  <div class="modal wide" style="max-width:900px;">
+    <div class="modal-header">
+      <h3>&#128161; AI Actions &mdash; what each button does</h3>
+      <button class="modal-close" onclick="closeModal('ai-help-modal')">&times;</button>
+    </div>
+    <div class="modal-body" style="font-size:13px;line-height:1.55;">
+      <p style="color:var(--fg-muted);">
+        sciknow&rsquo;s book workflow is a pipeline: <strong>plan</strong> the shape of the book,
+        then <strong>write</strong> drafts, then <strong>critique</strong> + <strong>fix</strong>.
+        Each button below belongs to one of those stages. Every action maps 1:1 to a
+        <code>sciknow book ...</code> CLI command, so what you see in the GUI is exactly what
+        the terminal does.
+      </p>
+
+      <h4 style="margin:18px 0 8px;">&#128221; Planning &mdash; shape the book before writing</h4>
+      <table style="width:100%;border-collapse:collapse;">
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>Outline</strong><br><em style="color:var(--fg-muted);font-size:11px;">Plan modal &rarr; Outline tab</em></td>
+          <td style="padding:8px;vertical-align:top;">
+            Proposes a chapter structure from your paper corpus. Generates 3 candidate outlines
+            at rising temperatures, scores each for breadth + section-count variance, picks the
+            winner, then density-resizes each chapter&rsquo;s section list by counting corpus
+            evidence. <strong>Additive</strong>: never touches existing chapters or drafts.
+            <em>Use when:</em> bootstrapping a new book or expanding the plan.
+            <em>Produces:</em> new <code>book_chapters</code> rows. <em>CLI:</em> <code>book outline</code>.
+          </td></tr>
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;vertical-align:top;"><strong>Leitmotiv (Book plan)</strong><br><em style="color:var(--fg-muted);font-size:11px;">Plan modal &rarr; Book tab</em></td>
+          <td style="padding:8px;vertical-align:top;">
+            The 200&ndash;500 word thesis document that gets injected into every <code>write</code> /
+            <code>autowrite</code> call so all chapters stay aligned. Edit it by hand, or click
+            <em>Regenerate with LLM</em>.
+            <em>Use when:</em> the book&rsquo;s central argument drifts or needs sharpening.
+            <em>CLI:</em> <code>book plan</code>.
+          </td></tr>
+      </table>
+
+      <h4 style="margin:18px 0 8px;">&#9998; Writing &mdash; produce draft prose</h4>
+      <table style="width:100%;border-collapse:collapse;">
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>AI Write</strong></td>
+          <td style="padding:8px;vertical-align:top;">
+            Single-pass draft of the current section. Retrieves sources, writes the prose, stops.
+            Fast, but doesn&rsquo;t self-improve. <em>Use when:</em> you want a fresh baseline you&rsquo;ll
+            hand-edit. <em>CLI:</em> <code>book write</code>.
+          </td></tr>
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;vertical-align:top;"><strong>AI Autowrite</strong></td>
+          <td style="padding:8px;vertical-align:top;">
+            Full convergence loop: <em>write &rarr; score &rarr; verify claims &rarr; revise &rarr; rescore</em>
+            for up to 3 iterations or until overall score hits 0.85. Uses the writer model for
+            prose and <code>AUTOWRITE_SCORER_MODEL</code> (gemopus4) for discrimination.
+            <em>Use when:</em> you want a polished draft, not a starter.
+            <em>CLI:</em> <code>book autowrite</code>.
+          </td></tr>
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;vertical-align:top;"><strong>Edit</strong></td>
+          <td style="padding:8px;vertical-align:top;">
+            Manual in-browser markdown editor with autosave, KaTeX math, and inline figure
+            thumbnails. <em>Use when:</em> humans need to be humans.
+          </td></tr>
+      </table>
+
+      <h4 style="margin:18px 0 8px;">&#128269; Critique &mdash; find what&rsquo;s wrong with a draft</h4>
+      <table style="width:100%;border-collapse:collapse;">
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>AI Review</strong></td>
+          <td style="padding:8px;vertical-align:top;">
+            Single-pass critic across 5 dimensions (groundedness, completeness, accuracy,
+            coherence, redundancy). Produces structured feedback with quotes + actionable
+            suggestions. Writes to <code>drafts.review_feedback</code>.
+            <em>Use when:</em> you have a draft and want to know where to fix it.
+            <em>Different from Outline:</em> Outline builds structure; Review critiques prose.
+            Uses <code>BOOK_REVIEW_MODEL</code> (gemma3:27b). <em>CLI:</em> <code>book review</code>.
+          </td></tr>
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;vertical-align:top;"><strong>Adversarial review</strong></td>
+          <td style="padding:8px;vertical-align:top;">
+            Harsher critic &mdash; forces <strong>&ge; 10</strong> concrete issues, never graded.
+            Doesn&rsquo;t overwrite the normal <code>review_feedback</code>.
+            <em>Use when:</em> the standard review feels too gentle.
+            <em>CLI:</em> <code>book adversarial-review</code>.
+          </td></tr>
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;vertical-align:top;"><strong>Edge cases</strong></td>
+          <td style="padding:8px;vertical-align:top;">
+            Exhaustive boundary-condition hunter: walks every scope boundary, counter-case,
+            causal alternative, and quantitative limit. Structured JSON output.
+            <em>Use when:</em> you need the draft to survive hostile readers.
+            <em>CLI:</em> <code>book edge-cases</code>.
+          </td></tr>
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;vertical-align:top;"><strong>Ensemble Review</strong></td>
+          <td style="padding:8px;vertical-align:top;">
+            N independent NeurIPS-rubric reviewers (default 3, T=0.75, rotating neutral/pessimistic/
+            optimistic stance) + a meta-reviewer that medians scores and unions findings.
+            Costs ~N&times; the single-review. <em>Use when:</em> a single reviewer felt flaky.
+            <em>CLI:</em> <code>book ensemble-review</code>.
+          </td></tr>
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;vertical-align:top;"><strong>Argue (map claim)</strong></td>
+          <td style="padding:8px;vertical-align:top;">
+            For any claim you type, builds a SUPPORTS / CONTRADICTS / NEUTRAL evidence map
+            from your corpus. <em>Use when:</em> you want to see how solid a single
+            assertion is. <em>CLI:</em> <code>book argue</code>.
+          </td></tr>
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;vertical-align:top;"><strong>Gaps</strong></td>
+          <td style="padding:8px;vertical-align:top;">
+            Identifies topics the book&rsquo;s plan names but the drafts don&rsquo;t cover yet.
+            <em>Use when:</em> a chapter feels thin and you&rsquo;re not sure why.
+            <em>CLI:</em> <code>book gaps</code>.
+          </td></tr>
+      </table>
+
+      <h4 style="margin:18px 0 8px;">&#10003; Verification &mdash; check citations actually support claims</h4>
+      <table style="width:100%;border-collapse:collapse;">
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>Verify</strong></td>
+          <td style="padding:8px;vertical-align:top;">
+            Sentence-level LLM verifier: classifies each <code>[N]</code> claim as SUPPORTED /
+            EXTRAPOLATED / MISREPRESENTED / OVERSTATED and returns a groundedness + hedging
+            fidelity score. <em>CLI:</em> <code>book verify-citations</code>.
+          </td></tr>
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;vertical-align:top;"><strong>Verify Draft</strong><br><em style="color:var(--fg-muted);font-size:11px;">claim-atomization</em></td>
+          <td style="padding:8px;vertical-align:top;">
+            Splits each sentence into atomic sub-claims (regex first, LLM fallback for compound
+            sentences), NLI-scores each sub-claim against source chunks, and surfaces
+            <strong>mixed-truth</strong> sentences &mdash; where part of the sentence is supported
+            and part isn&rsquo;t. Catches what the sentence-level verifier misses.
+            Read-only. <em>CLI:</em> <code>book verify-draft</code>.
+          </td></tr>
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;vertical-align:top;"><strong>Align Citations</strong></td>
+          <td style="padding:8px;vertical-align:top;">
+            Post-pass that (conservatively) remaps <code>[N]</code> markers to the chunk that
+            actually entails the sentence, when the currently-cited chunk has
+            entailment &lt; 0.5 AND the top chunk beats it by &ge; 0.15.
+            <em>Use when:</em> verify reports mismatched citations.
+            <em>CLI:</em> <code>book align-citations</code>.
+          </td></tr>
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;vertical-align:top;"><strong>Insert Citations</strong></td>
+          <td style="padding:8px;vertical-align:top;">
+            Two-pass LLM adds <code>[N]</code> markers where the prose asserts something
+            source-worthy but has no citation. Saves a new draft version.
+            <em>Use when:</em> hand-written prose is missing its citation layer.
+            <em>CLI:</em> <code>book insert-citations</code>.
+          </td></tr>
+      </table>
+
+      <h4 style="margin:18px 0 8px;">&#9888;&#65039; Fixing &mdash; apply feedback to the draft</h4>
+      <table style="width:100%;border-collapse:collapse;">
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>AI Revise</strong></td>
+          <td style="padding:8px;vertical-align:top;">
+            Reads the latest <code>review_feedback</code> saved on the draft and rewrites the
+            prose to address it. <em>Requires:</em> a Review (or Autowrite, which reviews
+            internally) has been run first. <em>Use when:</em> you&rsquo;re happy with the
+            critique and want the draft to act on it. <em>CLI:</em> <code>book revise</code>.
+          </td></tr>
+      </table>
+
+      <h4 style="margin:18px 0 8px;">&#128202; Diagnostics &mdash; inspect the autowrite trajectory</h4>
+      <table style="width:100%;border-collapse:collapse;">
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>Scores</strong></td>
+          <td style="padding:8px;vertical-align:top;">
+            Shows the 5-dimension score trajectory across autowrite iterations &mdash; which
+            scores rose, which plateaued, which triggered revisions. Read-only.
+          </td></tr>
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;vertical-align:top;"><strong>Bundles</strong></td>
+          <td style="padding:8px;vertical-align:top;">
+            Chapter- or book-wide snapshots. Safety net for <em>autowrite-all-sections</em>
+            runs &mdash; snapshot before, restore if you hate the result.
+            <em>CLI:</em> <code>book snapshot</code> / <code>snapshot-restore</code>.
+          </td></tr>
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;vertical-align:top;"><strong>Chapter reader</strong></td>
+          <td style="padding:8px;vertical-align:top;">
+            Read-only continuous-scroll view of the whole chapter so you can feel the flow
+            without the editor chrome.
+          </td></tr>
+      </table>
+
+      <h4 style="margin:18px 0 8px;">&#128737;&#65039; Typical workflow</h4>
+      <ol style="margin:0 0 8px 20px;">
+        <li><strong>Outline</strong> (Plan modal) &rarr; book has chapters</li>
+        <li><strong>AI Autowrite</strong> per section &rarr; first drafts exist, already reviewed + revised once</li>
+        <li><strong>Verify Draft</strong> + <strong>Align Citations</strong> &rarr; confirm citations hold up</li>
+        <li><strong>AI Review</strong> (or Adversarial / Ensemble) &rarr; structured critique</li>
+        <li><strong>AI Revise</strong> &rarr; apply feedback</li>
+        <li>Repeat 4&ndash;5 until happy, then <strong>Bundle</strong> snapshot the chapter</li>
+      </ol>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-primary" onclick="closeModal('ai-help-modal')">Got it</button>
     </div>
   </div>
 </div>
@@ -14342,6 +14561,103 @@ async function doEdgeCases() {{
       source.close(); currentEventSource = null; currentJobId = null;
     }}
   }};
+}}
+
+// Phase 54.6.97 — three new draft-level actions that just shell to
+// the CLI via /api/cli-stream. All three write their output as plain
+// log text into the existing stream panel so there's no new UI to
+// maintain for each action.
+function _runCliActionForDraft(argv, title, startMsg) {{
+  if (!currentDraftId) {{ showEmptyHint('No draft selected.'); return; }}
+  showStreamPanel(startMsg);
+  const body = document.getElementById('stream-body');
+  body.innerHTML = '<h3 style="margin-bottom:10px;">' + title + '</h3>'
+    + '<pre id="cli-action-out" style="white-space:pre-wrap;font-family:var(--font-mono);font-size:12px;line-height:1.45;"></pre>';
+  const out = document.getElementById('cli-action-out');
+  const status = document.getElementById('stream-status');
+  fetch('/api/cli-stream', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{argv: argv}}),
+  }}).then(r => r.json()).then(data => {{
+    currentJobId = data.job_id;
+    if (currentEventSource) currentEventSource.close();
+    const source = new EventSource('/api/stream/' + data.job_id);
+    currentEventSource = source;
+    source.onmessage = function(e) {{
+      const evt = JSON.parse(e.data);
+      if (evt.type === 'log') {{
+        out.textContent += evt.text + '\\n';
+        out.scrollTop = out.scrollHeight;
+      }} else if (evt.type === 'completed') {{
+        status.innerHTML = '<span style="color:var(--success);">\\u2713 Done.</span>';
+        source.close(); currentEventSource = null; currentJobId = null;
+      }} else if (evt.type === 'error') {{
+        status.innerHTML = '<span style="color:var(--danger);">\\u2717 ' + (evt.message || 'error') + '</span>';
+        source.close(); currentEventSource = null; currentJobId = null;
+      }} else if (evt.type === 'done') {{
+        source.close(); currentEventSource = null; currentJobId = null;
+      }}
+    }};
+  }}).catch(exc => {{
+    status.textContent = 'Request failed: ' + exc;
+  }});
+}}
+
+async function doVerifyDraft() {{
+  if (!confirm(
+    'Run Verify Draft (claim atomization)?\\n\\n'
+    + 'Splits each sentence into atomic sub-claims, NLI-scores each one against\\n'
+    + 'source chunks, and surfaces MIXED-TRUTH sentences (part supported, part\\n'
+    + 'not) that the sentence-level verifier misses. Read-only — does not\\n'
+    + 'modify the draft.\\n\\nTakes 30s-90s depending on draft length.'
+  )) return;
+  _runCliActionForDraft(
+    ['book', 'verify-draft', currentDraftId],
+    '&#129516; Verify Draft (claim atomization)',
+    'Atomizing claims…'
+  );
+}}
+
+async function doAlignCitations() {{
+  if (!confirm(
+    'Run Align Citations?\\n\\n'
+    + 'Post-pass that (conservatively) remaps [N] markers to the chunk that\\n'
+    + 'actually entails each sentence. Only remaps when the claimed chunk has\\n'
+    + 'entailment < 0.5 AND the top chunk beats it by >= 0.15. Saves the\\n'
+    + 'remapped draft back to the database.\\n\\nTakes 20s-60s.'
+  )) return;
+  _runCliActionForDraft(
+    ['book', 'align-citations', currentDraftId],
+    '&#128279; Align Citations',
+    'Re-scoring entailment for every [N]…'
+  );
+}}
+
+async function doEnsembleReview() {{
+  const nStr = prompt('Number of independent reviewers? (1-9, default 3)', '3');
+  if (nStr === null) return;
+  const n = Math.max(1, Math.min(9, parseInt(nStr, 10) || 3));
+  if (!confirm(
+    'Run Ensemble Review with ' + n + ' reviewer(s)?\\n\\n'
+    + 'Each reviewer uses NeurIPS rubric (soundness/presentation/contribution\\n'
+    + '1-4, overall 1-10, confidence 1-5, decision strong_reject..strong_accept)\\n'
+    + 'with temperature 0.75 and rotating neutral/pessimistic/optimistic stance.\\n'
+    + 'A meta-reviewer medians the scores and unions the findings.\\n\\n'
+    + 'Cost scales with N — ' + n + 'x a single review (~' + (n * 60) + 's).'
+  )) return;
+  _runCliActionForDraft(
+    ['book', 'ensemble-review', currentDraftId, '-n', String(n)],
+    '&#128218; Ensemble Review',
+    'Running ' + n + ' independent reviewers…'
+  );
+}}
+
+function openAIActionsHelp() {{
+  // Close any open nav dropdowns before pulling up the modal so the
+  // overlay doesn't stack weirdly.
+  document.querySelectorAll('.nav-dropdown.open').forEach(d => d.classList.remove('open'));
+  openModal('ai-help-modal');
 }}
 
 // Tiny markdown renderer — paragraphs, numbered lists, bullets, code.
