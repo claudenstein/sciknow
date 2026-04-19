@@ -4249,6 +4249,124 @@ async def api_visuals_search(q: str, kind: str = "", k: int = 10):
     return JSONResponse({"hits": out, "total": len(out)})
 
 
+@app.get("/debug/equations")
+async def debug_equations(limit: int = 60):
+    """Phase 54.6.107 — self-contained equation-render diagnostic.
+
+    Loads N random equations from the corpus and renders each with
+    KaTeX directly in the browser. Emits a summary counter (rendered
+    ok / KaTeX-error / empty) so we can diagnose why the user sees
+    half the equations failing without needing headless automation.
+    """
+    from sqlalchemy import text as _dt
+    from starlette.responses import HTMLResponse
+    try:
+        with get_session() as session:
+            rows = session.execute(_dt("""
+                SELECT id::text, content
+                FROM visuals
+                WHERE kind='equation' AND content IS NOT NULL AND content <> ''
+                ORDER BY random()
+                LIMIT :lim
+            """), {"lim": max(1, min(limit, 300))}).fetchall()
+    except Exception as exc:
+        return HTMLResponse(f"<pre>DB error: {exc}</pre>", status_code=500)
+
+    import json as _j
+    eqs = [{"id": r[0], "content": r[1]} for r in rows]
+    body = f"""<!doctype html>
+<html><head><title>sciknow equation diagnostic</title>
+<link rel="stylesheet" href="/static/vendor/katex/katex.min.css"/>
+<script defer src="/static/vendor/katex/katex.min.js"></script>
+<style>
+body {{ font-family: system-ui, sans-serif; margin: 20px; background: #f8f8f8; }}
+h1 {{ font-size: 18px; margin-bottom: 8px; }}
+#stats {{ position: sticky; top: 0; background: #fff; padding: 10px 14px;
+         border: 1px solid #ccc; border-radius: 6px; margin-bottom: 14px;
+         font-size: 13px; z-index: 10; }}
+.eq-card {{ background: #fff; border: 1px solid #ddd; border-radius: 6px;
+            padding: 12px 14px; margin-bottom: 10px; }}
+.eq-card.fail {{ border-color: #e57373; background: #fff5f5; }}
+.eq-head {{ font: 11px/1 monospace; color: #888; margin-bottom: 6px; }}
+.eq-render {{ font-size: 17px; min-height: 30px; overflow-x: auto; }}
+.eq-latex {{ font: 11px/1.4 monospace; color: #555; margin-top: 6px;
+             white-space: pre-wrap; word-break: break-word;
+             padding: 4px 6px; background: #fafafa; border-radius: 3px; }}
+.eq-err {{ font: 11px monospace; color: #c00; margin-top: 4px; }}
+</style>
+</head><body>
+<h1>Equation rendering diagnostic — {len(eqs)} random equations</h1>
+<div id="stats">Loading KaTeX…</div>
+<div id="out"></div>
+<script>
+const EQS = {_j.dumps(eqs)};
+function strip(src) {{
+  let b = (src || '').trim();
+  b = b.replace(/^\\s*\\$\\$\\s*/, '').replace(/\\s*\\$\\$\\s*$/, '');
+  b = b.replace(/^\\s*\\$\\s*/, '').replace(/\\s*\\$\\s*$/, '');
+  b = b.replace(/^\\s*\\\\\\[\\s*/, '').replace(/\\s*\\\\\\]\\s*$/, '');
+  b = b.replace(/^\\s*\\\\\\(\\s*/, '').replace(/\\s*\\\\\\)\\s*$/, '');
+  return b.trim();
+}}
+function esc(s) {{
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}}
+function run() {{
+  if (typeof window.katex === 'undefined') {{ setTimeout(run, 200); return; }}
+  const out = document.getElementById('out');
+  const stats = document.getElementById('stats');
+  let ok = 0, fail = 0, failMsgs = new Map();
+  let html = '';
+  for (const eq of EQS) {{
+    const body = strip(eq.content);
+    let rendered = '', errMsg = '', failed = false;
+    try {{
+      rendered = window.katex.renderToString(body, {{
+        displayMode: true, throwOnError: true, strict: false, output: 'html'
+      }});
+      ok++;
+    }} catch (e) {{
+      failed = true;
+      fail++;
+      errMsg = (e.message || String(e)).split('\\n')[0];
+      const key = errMsg.replace(/pos \\d+/g, 'pos N').slice(0, 70);
+      failMsgs.set(key, (failMsgs.get(key) || 0) + 1);
+      try {{
+        rendered = window.katex.renderToString(body, {{
+          displayMode: true, throwOnError: false, strict: 'ignore', output: 'html'
+        }});
+      }} catch (_) {{
+        rendered = '<em>KaTeX refused even in lenient mode</em>';
+      }}
+    }}
+    html += '<div class="eq-card' + (failed ? ' fail' : '') + '">'
+      + '<div class="eq-head">' + esc(eq.id.slice(0, 8)) + (failed ? ' — FAIL' : ' — ok') + '</div>'
+      + '<div class="eq-render">' + rendered + '</div>'
+      + (failed ? '<div class="eq-err">' + esc(errMsg) + '</div>' : '')
+      + '<div class="eq-latex">' + esc(body) + '</div>'
+      + '</div>';
+  }}
+  out.innerHTML = html;
+  const sorted = [...failMsgs.entries()].sort((a, b) => b[1] - a[1]);
+  let sHtml = '<strong>' + ok + '/' + (ok + fail) + ' rendered (' + Math.round(100 * ok / (ok + fail)) + '%).</strong>';
+  if (fail > 0) {{
+    sHtml += ' <strong>' + fail + ' failed.</strong> Error buckets:<ul style="margin:4px 0 0 18px;">';
+    for (const [msg, count] of sorted) {{
+      sHtml += '<li>' + count + '× ' + esc(msg) + '</li>';
+    }}
+    sHtml += '</ul>';
+  }}
+  stats.innerHTML = sHtml;
+}}
+run();
+</script>
+</body></html>
+"""
+    return HTMLResponse(body)
+
+
 @app.get("/api/visuals/image/{visual_id}")
 async def api_visuals_image(visual_id: str):
     """Phase 54.6.61 — stream a figure's JPG back to the browser.
@@ -21889,32 +22007,67 @@ async function loadVisuals(append) {{
 
     results.innerHTML = html + loadMoreHtml;
 
-    // 54.6.105 — drive KaTeX programmatically on every .eq-target
-    // we just inserted. Bypasses auto-render's delimiter-matching
-    // entirely (which was flaky across 54.6.101-103). If `katex`
-    // isn't global yet we retry with backoff; once KaTeX loads,
-    // every card switches from plain text to rendered math.
+    // 54.6.105/107 — drive KaTeX programmatically on every .eq-target
+    // we just inserted. 54.6.107 adds diagnostics: count ok/failed,
+    // mark failures with a red border + post-it note so the user can
+    // see WHICH equations fail and what they contained. Console logs
+    // the LaTeX that killed KaTeX so we have something to debug with.
     const renderAllEquations = () => {{
       const targets = results.querySelectorAll('.eq-target[data-latex]');
       if (!targets.length) return true;
       if (typeof window.katex === 'undefined') return false;
+      let ok = 0, fail = 0;
       targets.forEach(el => {{
-        if (el.dataset.rendered === '1') return;
+        if (el.dataset.rendered === '1') {{ ok++; return; }}
         const tex = el.dataset.latex || '';
         try {{
+          // displayMode+throwOnError:true lets us catch KaTeX parse
+          // errors explicitly so we can badge the card. With
+          // throwOnError:false KaTeX would embed a red error token
+          // silently — the user reports "half don't render" because
+          // the inline red error LOOKS like raw LaTeX next to the
+          // parts that rendered. Turning throwOnError back on and
+          // handling the exception ourselves gives clean classification.
           window.katex.render(tex, el, {{
             displayMode: true,
-            throwOnError: false,
+            throwOnError: true,
             output: 'html',
+            strict: false,   // tolerate LaTeX-incompatible constructs
           }});
           el.dataset.rendered = '1';
+          ok++;
         }} catch (e) {{
-          // KaTeX never throws when throwOnError is false, but be
-          // defensive: surface the raw LaTeX so the user sees
-          // something rather than an empty card.
-          el.textContent = tex;
+          // Fall back to throwOnError:false so the user sees
+          // partial rendering (KaTeX highlights the offending token
+          // in red but renders what it can), and badge the container
+          // so it's obvious which ones failed.
+          try {{
+            window.katex.render(tex, el, {{
+              displayMode: true, throwOnError: false, output: 'html',
+              strict: 'ignore',
+            }});
+          }} catch (_) {{
+            el.textContent = tex;
+          }}
+          el.dataset.rendered = '0';
+          el.style.border = '2px dashed #e57373';
+          el.title = 'KaTeX: ' + (e.message || '').slice(0, 200);
+          console.warn('[vis-eq] parse failed:', (e.message || '').split('\\n')[0],
+                       '\\n  latex:', tex.slice(0, 180));
+          fail++;
         }}
       }});
+      // Post a small stats footer so the user can see the tally
+      // without opening devtools.
+      const statsEl = document.getElementById('vis-stats');
+      if (statsEl && (ok + fail) > 0) {{
+        const prev = statsEl.textContent || '';
+        if (!prev.includes('· eq')) {{
+          statsEl.textContent = prev + '  · eq ' + ok + '/' + (ok + fail) + ' rendered';
+        }} else {{
+          statsEl.textContent = prev.replace(/· eq \\d+\\/\\d+ rendered/, '· eq ' + ok + '/' + (ok + fail) + ' rendered');
+        }}
+      }}
       return true;
     }};
     if (!renderAllEquations()) {{
