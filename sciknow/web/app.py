@@ -11112,6 +11112,26 @@ window.addEventListener('DOMContentLoaded', () => {{
   if (window._kgPendingShare) {{
     try {{ openKgModal(); }} catch (e) {{}}
   }}
+  // 54.6.105 — #visuals[=equation|figure|chart|table|code] auto-opens
+  // the Explore > Visuals modal with the given kind. Used by the
+  // equation-render diagnostic harness; also handy as a share-link.
+  const hash = location.hash || '';
+  const visM = hash.match(/^#visuals(?:=(figure|chart|equation|table|code))?$/);
+  if (visM) {{
+    setTimeout(() => {{
+      try {{
+        openVisualsModal();
+        if (visM[1]) {{
+          setTimeout(() => {{
+            const mode = document.getElementById('vis-mode');
+            const kind = document.getElementById('vis-kind-filter');
+            if (mode && visM[1] !== 'figure' && visM[1] !== 'chart') mode.value = 'list';
+            if (kind) {{ kind.value = visM[1]; kind.dispatchEvent(new Event('change')); }}
+          }}, 600);
+        }}
+      }} catch (e) {{}}
+    }}, 300);
+  }}
 }});
 
 function switchKgTab(name) {{
@@ -16246,15 +16266,27 @@ async function loadWikiVisuals() {{
       return;
     }}
     list.innerHTML = renderWikiVisuals(items, kind);
-    // KaTeX render pass for any equation blocks we just injected.
-    if (kind === 'equation' && typeof renderMathInElement === 'function') {{
-      try {{ renderMathInElement(list, {{
-        delimiters: [
-          {{left: '$$', right: '$$', display: true}},
-          {{left: '$', right: '$', display: false}},
-        ],
-        throwOnError: false,
-      }}); }} catch (e) {{ /* non-fatal */ }}
+    // 54.6.105 — direct katex.render on each .eq-target we inserted.
+    // Replaces the old auto-render pass (which was flaky).
+    if (kind === 'equation') {{
+      const renderEqs = () => {{
+        const targets = list.querySelectorAll('.eq-target[data-latex]');
+        if (!targets.length) return true;
+        if (typeof window.katex === 'undefined') return false;
+        targets.forEach(el => {{
+          if (el.dataset.rendered === '1') return;
+          try {{
+            window.katex.render(el.dataset.latex || '', el,
+              {{displayMode: true, throwOnError: false, output: 'html'}});
+            el.dataset.rendered = '1';
+          }} catch (_) {{ el.textContent = el.dataset.latex || ''; }}
+        }});
+        return true;
+      }};
+      if (!renderEqs()) {{
+        let n = 0;
+        const t = setInterval(() => {{ if (renderEqs() || ++n > 10) clearInterval(t); }}, 200);
+      }}
     }}
   }} catch (e) {{
     list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--danger);">Error: ' + e.message + '</div>';
@@ -16300,15 +16332,18 @@ function renderWikiVisuals(items, kind) {{
     const caption = _escHtml(v.caption || '');
     let body = '';
     if (kind === 'equation') {{
-      // 54.6.103 — strip pre-existing $$ from MinerU content + HTML-
-      // escape so embedded '<' doesn't break KaTeX auto-render. Same
-      // fix as the Explore > Visuals modal.
+      // 54.6.105 — direct katex.render on an .eq-target div (same as
+      // the Explore > Visuals modal after 54.6.105). Auto-render
+      // proved flaky; data-latex + programmatic render is bulletproof.
       let eqBody = String(v.content || '').trim();
       eqBody = eqBody.replace(/^\\s*\\$\\$\\s*/, '').replace(/\\s*\\$\\$\\s*$/, '');
       eqBody = eqBody.replace(/^\\s*\\$\\s*/, '').replace(/\\s*\\$\\s*$/, '').trim();
+      const attrSafe = _escHtml(eqBody);
       body = '<div class="vis-eq" style="padding:14px 16px;background:#fff;color:#111;border-radius:6px;border:1px solid var(--border);">'
-           + '<div style="font-size:17px;line-height:1.55;text-align:center;overflow-x:auto;">$$'
-           + _escHtml(eqBody) + '$$</div></div>';
+           + '<div class="eq-target" data-latex="' + attrSafe + '" '
+           +      'style="font-size:17px;line-height:1.55;text-align:center;overflow-x:auto;">'
+           +      _escHtml(eqBody)
+           + '</div></div>';
     }} else if (kind === 'table') {{
       // MinerU stores table_body as HTML — inject directly (scoped
       // .vis-table-wrap styles give it borders + zebra rows).
@@ -21637,40 +21672,40 @@ async function loadVisuals(append) {{
           + 'onerror="this.parentElement.innerHTML=\\'<em style=padding:8px;color:var(--fg-muted);font-size:11px;>image unavailable</em>\\'"></a>';
       }}
       if (v.kind === 'equation') {{
-        // 54.6.101 — KaTeX display-mode rendering.
-        // 54.6.102 — MinerU already stores equation content wrapped in
-        // $$...$$ (confirmed: DB rows start and end with $$), so my
-        // earlier re-wrap produced $$$$latex$$$$ which KaTeX refused.
-        // Strip any existing LaTeX delimiters before rewrapping so the
-        // final output is exactly one $$…$$ pair around the formula.
+        // 54.6.105 — dropped auto-render. The previous approach built
+        // HTML strings like `$$<body>$$` and hoped KaTeX auto-render
+        // would find the delimiters at a text-node boundary. It
+        // worked in isolated JSDOM tests but kept failing in the real
+        // app across four iterations (54.6.101-103). Root cause:
+        // auto-render walks the live DOM and matches delimiters
+        // against text nodes; any adjacent HTML structure or escaped
+        // entity that changed the text-node layout could drop the
+        // match and leave raw `$$…$$` visible.
+        //
+        // Fix: emit a container with the LaTeX body stashed in a
+        // data-latex attribute (exempt from HTML parsing since it's
+        // an attribute value) and call katex.render() directly in a
+        // post-pass. No delimiter matching needed — we know exactly
+        // which elements carry equations and what their LaTeX source
+        // is, so we drive the render programmatically.
         const raw = String(v.content || '').trim();
         let body = raw;
-        // Strip leading/trailing $$ (possibly on their own lines) + $
-        // + \\[ \\] + \\( \\) — normalize to bare LaTeX body.
         body = body.replace(/^\\s*\\$\\$\\s*/, '').replace(/\\s*\\$\\$\\s*$/, '');
         body = body.replace(/^\\s*\\$\\s*/, '').replace(/\\s*\\$\\s*$/, '');
         body = body.replace(/^\\s*\\\\\\[\\s*/, '').replace(/\\s*\\\\\\]\\s*$/, '');
         body = body.replace(/^\\s*\\\\\\(\\s*/, '').replace(/\\s*\\\\\\)\\s*$/, '');
         body = body.trim();
         const truncated = body.length > 600 ? body.substring(0, 600) + '…' : body;
-        const eqId = 'eq-src-' + Math.random().toString(36).slice(2, 10);
-        // 54.6.103 — HTML-escape the LaTeX body before injecting.
-        // LaTeX syntax frequently contains '<' and '>' (e.g.
-        // "- \infty < x < \infty" or "z_i < \zeta_1") and when those
-        // chars land inside an innerHTML assignment, the browser's
-        // HTML parser treats '<x' as the start of an unknown-tag and
-        // mangles everything around it — KaTeX never sees the $$
-        // delimiters and the equation renders as broken raw text.
-        // Escaping turns '<' into '&lt;' in the HTML source; the
-        // browser decodes it back to a literal '<' in the text node,
-        // which is exactly what KaTeX needs.
+        // Escape attribute value: &, <, >, ", ' so `data-latex="..."` is well-formed.
+        const attrSafe = _escHtml(truncated);
         return '<div class="vis-eq" style="padding:14px 16px;background:#fff;color:#111;border-radius:6px;border:1px solid var(--border);margin:2px 0;">'
-          + '<div class="eq-display" style="font-size:17px;line-height:1.55;text-align:center;overflow-x:auto;min-height:30px;">'
-          +   '$$' + _escHtml(truncated) + '$$'
+          + '<div class="eq-target" data-latex="' + attrSafe + '" '
+          +      'style="font-size:17px;line-height:1.55;text-align:center;overflow-x:auto;min-height:30px;">'
+          +      _escHtml(truncated) /* fallback text if KaTeX unavailable */
           + '</div>'
           + '<details style="margin-top:8px;">'
           +   '<summary style="font-size:10px;color:var(--fg-muted);cursor:pointer;user-select:none;">LaTeX source</summary>'
-          +   '<pre id="' + eqId + '" style="font-family:var(--font-mono);font-size:11px;margin:6px 0 0;padding:6px 8px;background:var(--bg);border-radius:4px;white-space:pre-wrap;word-break:break-word;">'
+          +   '<pre style="font-family:var(--font-mono);font-size:11px;margin:6px 0 0;padding:6px 8px;background:var(--bg);border-radius:4px;white-space:pre-wrap;word-break:break-word;">'
           +   _escHtml(raw)
           +   '</pre>'
           + '</details>'
@@ -21753,19 +21788,42 @@ async function loadVisuals(append) {{
 
     results.innerHTML = html + loadMoreHtml;
 
-    // Render KaTeX on any equations we just injected. _renderMathInEl
-    // is defined elsewhere in the template. 54.6.102 — add a short
-    // retry because the KaTeX auto-render script is loaded with
-    // `defer`, so if the user opens the Visuals modal very quickly
-    // on a fresh page load it can still be pending. One retry at
-    // 250ms + a final check at 800ms catches that race without
-    // a hard dependency.
-    const doRender = () => {{
-      if (typeof _renderMathInEl === 'function') _renderMathInEl(results);
+    // 54.6.105 — drive KaTeX programmatically on every .eq-target
+    // we just inserted. Bypasses auto-render's delimiter-matching
+    // entirely (which was flaky across 54.6.101-103). If `katex`
+    // isn't global yet we retry with backoff; once KaTeX loads,
+    // every card switches from plain text to rendered math.
+    const renderAllEquations = () => {{
+      const targets = results.querySelectorAll('.eq-target[data-latex]');
+      if (!targets.length) return true;
+      if (typeof window.katex === 'undefined') return false;
+      targets.forEach(el => {{
+        if (el.dataset.rendered === '1') return;
+        const tex = el.dataset.latex || '';
+        try {{
+          window.katex.render(tex, el, {{
+            displayMode: true,
+            throwOnError: false,
+            output: 'html',
+          }});
+          el.dataset.rendered = '1';
+        }} catch (e) {{
+          // KaTeX never throws when throwOnError is false, but be
+          // defensive: surface the raw LaTeX so the user sees
+          // something rather than an empty card.
+          el.textContent = tex;
+        }}
+      }});
+      return true;
     }};
-    doRender();
-    setTimeout(doRender, 250);
-    setTimeout(doRender, 800);
+    if (!renderAllEquations()) {{
+      // KaTeX still loading; retry a few times at increasing delay.
+      let attempts = 0;
+      const tick = setInterval(() => {{
+        attempts++;
+        if (renderAllEquations() || attempts > 10) clearInterval(tick);
+      }}, 200);
+    }}
   }} catch (exc) {{
     results.innerHTML = '<em style="color:var(--danger);">Failed: ' + exc + '</em>';
   }}
