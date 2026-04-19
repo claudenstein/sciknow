@@ -8396,6 +8396,7 @@ body.task-bar-open {{ padding-top: 40px; }}
     </div>
     <div class="tabs">
       <button class="tab active" data-tab="plan-book" onclick="switchPlanTab('plan-book')">Book</button>
+      <button class="tab" data-tab="plan-outline" onclick="switchPlanTab('plan-outline')" id="plan-tab-outline">Outline</button>
       <button class="tab" data-tab="plan-chapters" onclick="switchPlanTab('plan-chapters')" id="plan-tab-chapters">Chapters</button>
       <button class="tab" data-tab="plan-chapter" onclick="switchPlanTab('plan-chapter')" id="plan-tab-chapter">Sections</button>
     </div>
@@ -8441,6 +8442,50 @@ body.task-bar-open {{ padding-top: 40px; }}
           </p>
         </div>
       </div>
+      <!-- Phase 54.6.96 — Outline tab: promoted from a footer button
+           into its own pane so the user has a clear home for chapter
+           STRUCTURE generation (distinct from Book's leitmotiv and
+           from per-draft Review). Mirrors `sciknow book outline`. -->
+      <div class="tab-pane" id="plan-outline-pane" style="display:none;">
+        <p style="font-size:12px;color:var(--fg-muted);margin-bottom:12px;">
+          <strong>Outline</strong> proposes a chapter structure for the book from your paper
+          corpus. The LLM generates 3 candidate outlines (temperature-diversified),
+          scores each for breadth + section-count variance, picks the winner, and
+          then density-resizes each chapter&rsquo;s section list by counting corpus
+          evidence per topic. Insert is <strong>additive</strong>: existing chapters
+          and drafts are never touched &mdash; new chapters are appended with fresh
+          numbers. Run again to re-roll when the first pass isn&rsquo;t right.
+        </p>
+        <p style="font-size:11px;color:var(--fg-muted);background:var(--bg-alt);padding:8px 10px;border-radius:6px;margin-bottom:14px;">
+          <strong>Outline vs Review:</strong>
+          <em>Outline</em> plans the book&rsquo;s chapter/section structure from the corpus (no drafts needed).
+          <em>Review</em> (in the draft toolbar) critiques the prose in a single existing draft
+          across 5 dimensions (groundedness, completeness, accuracy, coherence, redundancy).
+          Different inputs, different outputs, different stages of the workflow.
+        </p>
+        <div class="field">
+          <label>Elicitation method (optional)
+            <span style="font-size:11px;color:var(--fg-muted);">&mdash; steers the LLM through a named cognitive technique.</span>
+          </label>
+          <select id="plan-outline-method-select" style="width:100%;padding:6px 8px;">
+            <option value="">(default generic prompt)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Model override (optional)
+            <span style="font-size:11px;color:var(--fg-muted);">&mdash; leave empty to use <code>LLM_MODEL</code>.</span>
+          </label>
+          <input type="text" id="plan-outline-model-input" placeholder="(leave empty for default)"
+                 style="width:100%;padding:6px 8px;font-family:var(--font-mono);font-size:12px;">
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">
+          <button class="btn-primary" id="plan-outline-run-btn" onclick="runOutlineFromTab()">&#128214; Generate outline</button>
+          <button class="btn-secondary" id="plan-outline-cancel-btn" onclick="cancelOutline()" style="display:none;">Cancel</button>
+          <span id="plan-outline-status" style="font-size:12px;color:var(--fg-muted);"></span>
+        </div>
+        <div id="plan-outline-stream" style="display:none;max-height:200px;overflow:auto;font-family:var(--font-mono);font-size:11px;line-height:1.4;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px;white-space:pre-wrap;margin-bottom:12px;"></div>
+        <div id="plan-outline-result" style="font-size:12px;"></div>
+      </div>
       <!-- Phase 54.6.66 — Chapters tab (book-wide chapter manager):
            list all chapters with editable title / description /
            topic_query, ↑/↓ reorder, delete, and an Add-chapter row.
@@ -8485,21 +8530,7 @@ body.task-bar-open {{ padding-top: 40px; }}
     </div>
     <div class="modal-footer" style="flex-wrap:wrap;gap:6px;">
       <button class="btn-secondary" onclick="closeModal('plan-modal')">Close</button>
-      <!-- Phase 54.6.14 — elicitation method picker. Steers outline
-           generation through a named technique (Tree of Thoughts,
-           Peer Review Simulation, etc.) rather than the generic prompt. -->
-      <label style="font-size:11px;display:flex;align-items:center;gap:4px;margin-right:auto;"
-             title="Optional: steer outline generation through a named cognitive method.">
-        Method:
-        <select id="plan-method-select" style="font-size:11px;padding:2px 4px;max-width:220px;">
-          <option value="">(default)</option>
-        </select>
-      </label>
-      <button class="btn-secondary" onclick="regenerateOutline()" id="plan-outline-btn"
-              title="Ask the LLM to propose a full chapter structure from your paper corpus. Adds new chapters without touching existing ones. Mirrors `sciknow book outline`.">
-        &#128214; Generate outline
-      </button>
-      <button class="btn-secondary" onclick="regeneratePlan()" id="plan-regen-btn">&#9889; Regenerate with LLM</button>
+      <button class="btn-secondary" onclick="regeneratePlan()" id="plan-regen-btn" style="margin-left:auto;">&#9889; Regenerate with LLM</button>
       <button class="btn-primary" onclick="savePlan()">Save</button>
     </div>
   </div>
@@ -18281,9 +18312,9 @@ async function openPlanModal(context) {{
     }}
   }}
   _planContext = context;
-  // Phase 54.6.14 — populate the elicitation-method dropdown on first
-  // open. Cached on window to avoid refetching every modal open.
-  _populateMethodSelect('plan-method-select', 'elicitation');
+  // Phase 54.6.14 → 54.6.96: elicitation-method picker now lives in the
+  // Outline tab. Populated lazily on first Outline-tab switch (see
+  // switchPlanTab). Cached via _populateMethodSelect's own caching.
 
   // Phase 32.2 — reset per-chapter editing state every time the modal
   // opens so slug collisions between chapters (e.g. "introduction"
@@ -18370,22 +18401,20 @@ function switchPlanTab(name) {{
   }});
   const show = {{
     'plan-book':     'plan-book-pane',
+    'plan-outline':  'plan-outline-pane',
     'plan-chapters': 'plan-chapters-pane',
     'plan-chapter':  'plan-chapter-pane',   // ← "Sections" tab keeps old id
   }};
-  ['plan-book-pane', 'plan-chapters-pane', 'plan-chapter-pane'].forEach(function(id) {{
+  ['plan-book-pane', 'plan-outline-pane', 'plan-chapters-pane', 'plan-chapter-pane'].forEach(function(id) {{
     const el = document.getElementById(id);
     if (el) el.style.display = (show[name] === id) ? 'block' : 'none';
   }});
   // The Regenerate button only makes sense for the book leitmotiv.
   const regenBtn = document.getElementById('plan-regen-btn');
   if (regenBtn) regenBtn.style.display = (name === 'plan-book') ? '' : 'none';
-  // "Generate outline" button is relevant on Book and Chapters tabs
-  // (it populates both). Irrelevant inside the per-chapter Sections view.
-  const outlineBtn = document.getElementById('plan-outline-btn');
-  if (outlineBtn) {{
-    outlineBtn.style.display = (name === 'plan-chapter') ? 'none' : '';
-  }}
+  // When entering the Outline tab, lazy-populate the method picker
+  // from /api/methods (same catalogue the footer used to read).
+  if (name === 'plan-outline') _populateOutlineMethodPicker();
 }}
 
 // ── Phase 54.6.66 — Chapters tab: book-wide chapter manager ────────────
@@ -19259,8 +19288,24 @@ async function regeneratePlan() {{
 // tokens into a read-only buffer on the plan-status line; on completion,
 // refreshes the sidebar so any newly-inserted chapters appear without
 // a full page reload. Does NOT touch existing chapters (additive).
-async function regenerateOutline() {{
-  const status = document.getElementById('plan-status');
+// Phase 54.6.96 — Outline tab handler (replaces old footer-button
+// regenerateOutline). Reads method + model from the tab controls,
+// streams tokens into #plan-outline-stream, surfaces inserted /
+// skipped counts inline, and refreshes the sidebar on success.
+let _outlineSource = null;
+
+function _populateOutlineMethodPicker() {{
+  // Same elicitation catalogue the old footer picker used; we populate
+  // once and rely on the helper's own caching to avoid refetching.
+  _populateMethodSelect('plan-outline-method-select', 'elicitation');
+}}
+
+async function runOutlineFromTab() {{
+  const status = document.getElementById('plan-outline-status');
+  const stream = document.getElementById('plan-outline-stream');
+  const result = document.getElementById('plan-outline-result');
+  const btn = document.getElementById('plan-outline-run-btn');
+  const cancelBtn = document.getElementById('plan-outline-cancel-btn');
   if (!confirm(
     'Generate a chapter outline from your corpus?\\n\\n'
     + 'The LLM reads your paper library and proposes chapter titles + '
@@ -19269,59 +19314,96 @@ async function regenerateOutline() {{
     + 'fresh suggestion if the first pass isn\\'t great.\\n\\n'
     + 'Mirrors `sciknow book outline`.'
   )) return;
-  const btn = document.getElementById('plan-outline-btn');
+
   btn.disabled = true;
+  if (cancelBtn) cancelBtn.style.display = '';
+  result.innerHTML = '';
+  stream.style.display = 'block';
+  stream.textContent = '';
   status.textContent = 'Starting outline generation…';
+
   const fd = new FormData();
-  // Phase 54.6.14 — forward the selected elicitation method if any.
-  const methodEl = document.getElementById('plan-method-select');
+  const methodEl = document.getElementById('plan-outline-method-select');
   if (methodEl && methodEl.value) fd.append('method', methodEl.value);
+  const modelEl = document.getElementById('plan-outline-model-input');
+  if (modelEl && modelEl.value.trim()) fd.append('model', modelEl.value.trim());
+
   let res;
   try {{
     res = await fetch('/api/book/outline/generate', {{method: 'POST', body: fd}});
   }} catch (exc) {{
     status.textContent = 'Request failed: ' + exc.message;
     btn.disabled = false;
+    if (cancelBtn) cancelBtn.style.display = 'none';
     return;
   }}
   const data = await res.json();
-  if (currentEventSource) currentEventSource.close();
+  if (_outlineSource) _outlineSource.close();
   const source = new EventSource('/api/stream/' + data.job_id);
-  currentEventSource = source;
+  _outlineSource = source;
   let tokBuf = '';
   source.onmessage = async function(e) {{
     let evt;
     try {{ evt = JSON.parse(e.data); }} catch (_) {{ return; }}
     if (evt.type === 'token') {{
       tokBuf += evt.text;
-      // Show just the tail so the user knows something's happening
-      // without flooding the status line. The full JSON is parsed
-      // server-side — no need to render it in the client.
-      status.textContent = 'Drafting… ' + String(tokBuf.length) + ' chars so far';
+      stream.textContent = tokBuf.slice(-3000);  // tail — avoid huge DOM
+      stream.scrollTop = stream.scrollHeight;
+      status.textContent = 'Drafting… ' + String(tokBuf.length) + ' chars';
     }} else if (evt.type === 'progress') {{
       status.textContent = evt.detail || evt.stage;
     }} else if (evt.type === 'completed') {{
-      source.close(); currentEventSource = null;
-      status.innerHTML = `<span style="color:var(--success);">&#10003; Outline generated — `
-        + `<strong>${{evt.n_inserted}}</strong> new chapter(s), `
-        + `<strong>${{evt.n_skipped}}</strong> skipped (already existed).</span>`;
+      source.close(); _outlineSource = null;
+      status.innerHTML = '<span style="color:var(--success);">\\u2713 Outline generated — <strong>'
+        + evt.n_inserted + '</strong> new chapter(s), <strong>'
+        + evt.n_skipped + '</strong> skipped (already existed).</span>';
       btn.disabled = false;
-      // Refresh sidebar so new chapters appear.
+      if (cancelBtn) cancelBtn.style.display = 'none';
+      // Pull fresh chapter list so both sidebar AND the inline result
+      // preview reflect what just landed.
       try {{
         const sidebarRes = await fetch('/api/chapters');
         const sd = await sidebarRes.json();
-        rebuildSidebar(sd.chapters || sd, currentDraftId);
+        const chapters = sd.chapters || sd;
+        rebuildSidebar(chapters, currentDraftId);
+        // Inline preview of the chapters now in the book.
+        let html = '<h4 style="margin:12px 0 6px;">Current chapters</h4>';
+        html += '<ol style="margin:0;padding-left:20px;">';
+        for (const ch of chapters) {{
+          const n = (ch.sections || []).length;
+          html += '<li><strong>' + (ch.title || 'Untitled') + '</strong>'
+            + ' <span style="color:var(--fg-muted);">&mdash; ' + n + ' section' + (n === 1 ? '' : 's') + '</span></li>';
+        }}
+        html += '</ol>';
+        result.innerHTML = html;
       }} catch (_) {{}}
     }} else if (evt.type === 'error') {{
-      source.close(); currentEventSource = null;
-      status.textContent = 'Error: ' + evt.message;
+      source.close(); _outlineSource = null;
+      status.innerHTML = '<span style="color:var(--danger);">\\u2717 ' + (evt.message || 'error') + '</span>';
       btn.disabled = false;
+      if (cancelBtn) cancelBtn.style.display = 'none';
     }} else if (evt.type === 'done') {{
-      source.close(); currentEventSource = null;
+      source.close(); _outlineSource = null;
       btn.disabled = false;
+      if (cancelBtn) cancelBtn.style.display = 'none';
     }}
   }};
 }}
+
+function cancelOutline() {{
+  if (_outlineSource) {{ _outlineSource.close(); _outlineSource = null; }}
+  const btn = document.getElementById('plan-outline-run-btn');
+  const cancelBtn = document.getElementById('plan-outline-cancel-btn');
+  const status = document.getElementById('plan-outline-status');
+  if (btn) btn.disabled = false;
+  if (cancelBtn) cancelBtn.style.display = 'none';
+  if (status) status.textContent = 'Cancelled (stream disconnected — any chapters already committed stay).';
+}}
+
+// Backwards-compat shim: some menus (and tests) still reference the old
+// name. Keep it pointing at the new implementation until they're all
+// migrated.
+const regenerateOutline = runOutlineFromTab;
 
 // ── Phase 14.3: Chapter scope modal (description + topic_query) ─────
 // Phase 18 — chapter modal carries an in-memory copy of the chapter's
