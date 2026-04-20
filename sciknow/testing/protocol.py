@@ -9460,6 +9460,91 @@ def l1_phase54_6_56_refresh_ingests_downloads_and_failed() -> None:
         )
 
 
+def l1_phase54_6_138_visuals_mention_linker_surface() -> None:
+    """Phase 54.6.138 — mention-paragraph linker surface + regex behaviour.
+
+    The linker is infrastructure for the visuals-in-writer signal 3
+    from docs/RESEARCH.md §7.X — body paragraphs that reference a
+    figure (``"Fig. 3 shows …"``) are the strongest retrieval signal
+    for matching a figure to target draft prose per SciCap+. This test
+    pins the regex behaviour on the hardest cases (sub-figure labels,
+    subpanel letters, range refs) so a future tweak doesn't silently
+    regress link quality.
+    """
+    from sciknow.core import visuals_mentions as vm
+
+    # A) Public API is wired
+    for fn in ("link_visuals_for_doc", "link_visuals_for_corpus",
+               "_extract_mentions_for_number", "_parse_figure_number",
+               "_kind_matches"):
+        assert hasattr(vm, fn), f"visuals_mentions.{fn} missing"
+
+    # B) Regex distinguishes hierarchical sub-figure labels (which are
+    # DIFFERENT figures) from references to figure N proper.
+    pat = vm._REF_RE
+    import re
+
+    def _num(text: str) -> list[str]:
+        return [m.group("num") for m in pat.finditer(text)]
+
+    # Must match these — they ARE references to figure N
+    assert _num("as shown in Fig. 3") == ["3"], (
+        "regex must match plain Fig. N"
+    )
+    assert _num("see Figure 3a for details") == ["3"], (
+        "regex must match subpanel letter (Fig Na)"
+    )
+    assert _num("see Fig. 3(a,b)") == ["3"], (
+        "regex must match parenthetical subpanels"
+    )
+    assert _num("Fig. 2 and Fig. 3 show") == ["2", "3"], (
+        "regex must match multiple keyword-prefixed references in one paragraph"
+    )
+    # "Tables 2 and 3" catches only the first ref — the bare "3" has no
+    # keyword prefix. Known limitation: papers that write "Tables 2 and 3"
+    # will miss Table 3's link unless there's another sentence that
+    # references Table 3 explicitly. Acceptable because most authors
+    # write "Table 2 and Table 3" in full; if this becomes material,
+    # extend the regex with a conjunction-aware pass.
+    assert _num("Tables 2 and 3 show") == ["2"]
+
+    # Must REJECT these — they're sub-figure labels (i.e. refer to a
+    # hierarchical figure id, NOT to figure N itself)
+    assert _num("Fig. 2.1 Changes in Earth") == [], (
+        "regex must REJECT hierarchical sub-figure labels (Fig. 2.1 ≠ Fig. 2)"
+    )
+    assert _num("Fig 2.1.1 is the map") == [], (
+        "regex must REJECT deeper hierarchies (Fig. 2.1.1 ≠ Fig. 2)"
+    )
+
+    # C) Kind matching: "Fig" must apply to figure/chart/image, not table/equation
+    assert vm._kind_matches("figure", "Fig") is True
+    assert vm._kind_matches("chart",  "Figure") is True
+    assert vm._kind_matches("table",  "Fig") is False
+    assert vm._kind_matches("table",  "Table") is True
+    assert vm._kind_matches("equation", "Eq.") is True
+    assert vm._kind_matches("equation", "Fig") is False
+
+    # D) Number parser strips free-form figure_num strings to a leading int
+    assert vm._parse_figure_number("Fig. 3") == 3
+    assert vm._parse_figure_number("Figure 12a") == 12
+    assert vm._parse_figure_number(None) is None
+    assert vm._parse_figure_number("Table IV") is None  # roman not supported
+
+    # E) CLI is registered on the db app
+    from sciknow.cli import db as db_cli
+    cmd_names = {cmd.name for cmd in db_cli.app.registered_commands}
+    assert "link-visual-mentions" in cmd_names, (
+        "`sciknow db link-visual-mentions` command must be registered"
+    )
+
+    # F) Storage model has the column
+    from sciknow.storage import models as _m
+    assert hasattr(_m.Visual, "mention_paragraphs"), (
+        "Visual model must have mention_paragraphs (added in migration 0033)"
+    )
+
+
 def l1_phase54_6_137_velocity_watcher_surface() -> None:
     """Phase 54.6.137 — velocity-query watcher surface + replay round-trip.
 
@@ -9930,6 +10015,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_136_fts_is_chunk_level,
     # Phase 54.6.137 — velocity-query watcher surface + replay round-trip
     l1_phase54_6_137_velocity_watcher_surface,
+    # Phase 54.6.138 — visuals mention-paragraph linker surface + regex
+    l1_phase54_6_138_visuals_mention_linker_surface,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness

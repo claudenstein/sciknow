@@ -5653,6 +5653,107 @@ def extract_visuals_cmd(
     )
 
 
+# ── link-visual-mentions (Phase 54.6.138 — RESEARCH.md §7.X signal 3) ─────────
+
+@app.command(name="link-visual-mentions")
+def link_visual_mentions_cmd(
+    doc_id: str = typer.Option(
+        None, "--doc-id",
+        help="Restrict to one paper (UUID or prefix). Useful for smoke "
+             "testing on a single document before a bulk run.",
+    ),
+    limit: int = typer.Option(
+        0, "--limit",
+        help="Process at most N papers after the doc-id filter (0 = all).",
+    ),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Re-link even visuals that already have mention_paragraphs "
+             "populated. Use when the regex or extraction heuristics change.",
+    ),
+):
+    """Phase 54.6.138 — link body-text paragraphs to each visual.
+
+    For every ``visuals`` row with a numeric ``figure_num``, scans the
+    source paper's ``content_list.json`` for body paragraphs that
+    reference that number (``Fig. 3``, ``Figure 3``, ``Table 2``,
+    ``Eq. 5``) and persists them as JSONB on
+    ``visuals.mention_paragraphs``.
+
+    This is the infrastructure half of the visuals-in-writer feature
+    (docs/RESEARCH.md §7.X, signal 3). Per SciCap+ findings, the
+    mention-paragraph is the single strongest retrieval signal for
+    matching a figure to target draft prose — stronger than the caption
+    or the image itself — because it carries the author's rhetorical
+    framing of why the figure was cited at that point.
+
+    Idempotent: skips visuals that already have ``mention_paragraphs``
+    unless ``--force``. Safe to re-run. Runs against existing
+    content_list.json files — no re-ingestion needed.
+
+    Examples:
+
+      sciknow db link-visual-mentions                      # link all papers
+      sciknow db link-visual-mentions --doc-id abc123      # smoke test one paper
+      sciknow db link-visual-mentions --limit 10           # first 10 papers
+      sciknow db link-visual-mentions --force              # re-link all
+
+    After this runs, ``visuals.mention_paragraphs`` is either ``[]``
+    (no body references found — e.g. decorative figures) or a list of
+    ``{block_idx, text, context_before}`` entries ordered by paper
+    position. Downstream: the 5-signal write-loop ranker (docs/RESEARCH.md
+    §7.X.3) uses these against draft sentences as its mention-paragraph
+    alignment signal.
+    """
+    from sciknow.cli import preflight
+    preflight()
+    from sciknow.core import visuals_mentions as vm
+
+    # Resolve doc-id prefix if given
+    target_doc: str | None = None
+    if doc_id:
+        from sqlalchemy import text as _sql
+        from sciknow.storage.db import get_session as _gs
+        with _gs() as session:
+            row = session.execute(_sql(
+                "SELECT id::text FROM documents WHERE id::text LIKE :q LIMIT 1"
+            ), {"q": f"{doc_id.strip()}%"}).fetchone()
+        if not row:
+            console.print(f"[red]No document matches {doc_id!r}.[/red]")
+            raise typer.Exit(1)
+        target_doc = row[0]
+        console.print(f"[dim]Resolved --doc-id to {target_doc}[/dim]\n")
+
+    if target_doc:
+        n = vm.link_visuals_for_doc(target_doc, force=force)
+        console.print(
+            f"[green]✓ Linked {n} visual row(s)[/green] for document "
+            f"{target_doc[:12]}…"
+        )
+        return
+
+    console.print(
+        f"[bold]Linking mention-paragraphs[/bold] "
+        f"(force={force}, limit={limit or 'all'})…\n"
+    )
+    total_rows = 0
+    total_docs = 0
+    for did, n_updated in vm.link_visuals_for_corpus(
+        limit=limit, force=force,
+    ):
+        total_docs += 1
+        total_rows += n_updated
+        if n_updated:
+            console.print(
+                f"  [dim]{did[:12]}…[/dim]  [green]{n_updated}[/green] visual(s) linked"
+            )
+
+    console.print(
+        f"\n[bold]Done.[/bold] {total_docs} paper(s) processed, "
+        f"{total_rows} visual row(s) updated."
+    )
+
+
 # ── caption-visuals (Phase 54.6.72 — #1) ──────────────────────────────────────
 
 @app.command(name="caption-visuals")

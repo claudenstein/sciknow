@@ -561,6 +561,11 @@ class Visual(Base):
     ai_caption: Mapped[str | None] = mapped_column(Text)
     ai_caption_model: Mapped[str | None] = mapped_column(Text)
     ai_captioned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Phase 54.6.138 — paragraphs from the source paper's body that
+    # reference this visual ("… as shown in Fig. 3 …"). List of
+    # {"block_idx": int, "text": str, "context_before": str | null}.
+    # NULL = linker hasn't run; [] = ran and found no mentions.
+    mention_paragraphs: Mapped[list | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
