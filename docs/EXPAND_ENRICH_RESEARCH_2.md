@@ -82,15 +82,22 @@ as authoritative. Add:
   rule, `hybrid_search` should drop retracted chunks with a hard filter.
   **Effort:** half-day + a small rule pass through the writer prompt.
 
-### 1.3 Preprint → journal version reconciliation
+### 1.3 Preprint → journal version reconciliation — SHIPPED 54.6.125
 
-Many climate papers arrive as arXiv preprints and later get a journal
-DOI. Today these are two separate `documents` rows. OpenAlex's
-`ids.mag`, `ids.pmid`, `ids.pmcid`, `ids.doi` for the same work are
-linked — we can reconcile. Add a `paper_metadata.preprint_doi` field
-and merge chunks / citations between preprint-row and published-row
-without losing provenance. Reduces noise in the `expand` one-timer
-filter.
+Migration 0030 adds `documents.canonical_document_id` FK. New
+`sciknow/core/preprint_reconcile.py` detects pairs via OpenAlex
+`work_id` grouping; journal wins over preprint by default (tie-break
+by chunk count → year → doc_id). Non-destructive: non-canonical rows
+stay in the DB + Qdrant but are hidden by `hybrid_search` via the
+new `canonical_document_id IS NULL` filter. Preprint DOI is copied
+to the canonical's `paper_metadata.extra.preprint_doi` so both IDs
+remain visible on the surviving row.
+
+CLI: `db reconcile-preprints [--dry-run]` / `reconciliations` /
+`unreconcile <doc_id>`. GUI: Corpus modal utility row gains
+**Detect duplicates** / **Reconcile preprints** / **Reconciliations**
+buttons; the Reconciliations modal shows every active pair with an
+Undo button per row.
 
 ### 1.4 Keywords + MeSH + JEL code enrichment
 

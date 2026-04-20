@@ -1361,6 +1361,153 @@ def provenance_cmd(
                           f"selected_at={h.get('selected_at')}[/dim]")
 
 
+@app.command(name="reconcile-preprints")
+def reconcile_preprints_cmd(
+    dry_run: bool = typer.Option(False, "--dry-run",
+        help="Show the candidate pairs without writing canonical_document_id."),
+):
+    """Phase 54.6.125 (Tier 3 #3) — detect + reconcile preprint+journal pairs.
+
+    Groups corpus DOIs by OpenAlex work_id and, for any group of ≥ 2
+    papers, picks one canonical (journal > preprint; tie by chunk
+    count; then year; then deterministic doc_id) and marks the others
+    with ``canonical_document_id`` pointing at the canonical. The
+    non-canonical rows become invisible to retrieval but are NOT
+    deleted — run ``sciknow db unreconcile <doc_id>`` to reverse.
+
+    Preprint DOI is copied onto the canonical's
+    ``paper_metadata.extra.preprint_doi`` so both identifiers stay
+    visible on the single canonical row.
+
+    Examples:
+
+      sciknow db reconcile-preprints --dry-run     # show the plan
+      sciknow db reconcile-preprints               # apply
+    """
+    from sciknow.cli import preflight
+    preflight(qdrant=False)
+
+    from sciknow.core.preprint_reconcile import (
+        detect_pairs, apply_reconciliation,
+    )
+
+    t0 = time.monotonic()
+    console.print("[dim]Scanning corpus DOIs against OpenAlex (cached, 1 call/DOI)…[/dim]")
+
+    def _progress(i: int, total: int, doi: str) -> None:
+        if i % 25 == 0:
+            console.print(f"  [dim][{i}/{total}] {doi[:60]}[/dim]")
+
+    pairs = detect_pairs(on_progress=_progress)
+    elapsed = time.monotonic() - t0
+
+    if not pairs:
+        console.print(f"[green]No preprint+journal duplicates found.[/green] "
+                      f"[dim]({elapsed:.1f}s)[/dim]")
+        raise typer.Exit(0)
+
+    console.print(f"\n[bold]{len(pairs)} reconciliation pair(s):[/bold]\n")
+    for i, p in enumerate(pairs, 1):
+        console.print(
+            f"  [bold]{i}.[/bold]  "
+            f"[green]canonical[/green] {p.canonical.doc_id[:8]}  "
+            f"({p.canonical.year or '????'}, {p.canonical.n_chunks} chunks)  "
+            f"{p.canonical.doi}"
+        )
+        console.print(
+            f"      [red]non-canon[/red] {p.non_canonical.doc_id[:8]}  "
+            f"({p.non_canonical.year or '????'}, {p.non_canonical.n_chunks} chunks)  "
+            f"{p.non_canonical.doi}"
+        )
+        console.print(
+            f"      [dim]title: {(p.canonical.title or '')[:80]}[/dim]"
+        )
+        console.print(f"      [dim]reason: {p.reason} · openalex: {p.openalex_work_id}[/dim]")
+
+    if dry_run:
+        console.print("\n[dim]Dry run — nothing written. Re-run without --dry-run to apply.[/dim]")
+        raise typer.Exit(0)
+
+    applied = 0
+    for p in pairs:
+        try:
+            apply_reconciliation(p)
+            applied += 1
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"  [red]apply failed for {p.non_canonical.doc_id[:8]}: {exc}[/red]")
+    console.print(
+        f"\n[green]✓ Reconciled {applied}/{len(pairs)} pair(s).[/green] "
+        f"[dim]({elapsed:.1f}s total)[/dim]"
+    )
+    console.print(
+        "[dim]Non-canonical rows are now hidden from retrieval. "
+        "Run `sciknow db reconciliations` to list them, "
+        "`sciknow db unreconcile <doc_id>` to undo.[/dim]"
+    )
+
+
+@app.command(name="reconciliations")
+def reconciliations_cmd():
+    """List current preprint↔journal reconciliations."""
+    from sciknow.cli import preflight
+    preflight(qdrant=False)
+    from sciknow.core.preprint_reconcile import list_reconciliations
+
+    pairs = list_reconciliations()
+    if not pairs:
+        console.print("[dim]No reconciliations on this project.[/dim]")
+        raise typer.Exit(0)
+    console.print(f"[bold]{len(pairs)} reconciliation(s):[/bold]\n")
+    for i, p in enumerate(pairs, 1):
+        console.print(
+            f"  [bold]{i}.[/bold]  [green]canonical[/green] "
+            f"{p['canonical_id'][:8]}  ({p['canonical_year'] or '????'})  "
+            f"{p['canonical_doi']}"
+        )
+        console.print(
+            f"      [red]non-canon[/red] {p['non_canonical_id'][:8]}  "
+            f"({p['non_canonical_year'] or '????'})  {p['non_canonical_doi']}"
+        )
+        console.print(
+            f"      [dim]{(p['canonical_title'] or '')[:90]}[/dim]"
+        )
+
+
+@app.command(name="unreconcile")
+def unreconcile_cmd(
+    doc_id: Annotated[str, typer.Argument(
+        help="Non-canonical document_id (prefix OK). Clears canonical_document_id.")],
+):
+    """Reverse a reconciliation: clear canonical_document_id on the
+    non-canonical row so it surfaces in retrieval again."""
+    from sciknow.cli import preflight
+    preflight(qdrant=False)
+    from sqlalchemy import text as _t
+    from sciknow.storage.db import get_session
+    from sciknow.core.preprint_reconcile import undo_reconciliation
+
+    # Resolve prefix to a full id
+    with get_session() as session:
+        row = session.execute(_t("""
+            SELECT id::text FROM documents
+            WHERE id::text LIKE :p || '%' AND canonical_document_id IS NOT NULL
+            LIMIT 2
+        """), {"p": doc_id}).fetchall()
+    if len(row) == 0:
+        console.print(f"[red]No non-canonical document matches {doc_id!r}.[/red]")
+        raise typer.Exit(1)
+    if len(row) > 1:
+        console.print(f"[red]{doc_id!r} is ambiguous — matches {len(row)} documents. "
+                      "Give more of the UUID.[/red]")
+        raise typer.Exit(2)
+    full = row[0][0]
+    if undo_reconciliation(full):
+        console.print(f"[green]✓ Unreconciled[/green] {full[:8]}. "
+                      "Chunks will surface in retrieval again.")
+    else:
+        console.print(f"[yellow]No change — {full[:8]} wasn't marked non-canonical.[/yellow]")
+
+
 @app.command(name="expand-inbound")
 def expand_inbound_cmd(
     per_seed_cap: int = typer.Option(50, "--per-seed-cap",

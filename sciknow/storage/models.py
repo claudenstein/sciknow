@@ -39,6 +39,18 @@ class Document(Base):
     ingest_source: Mapped[str] = mapped_column(
         Text, nullable=False, server_default="seed"
     )
+    # Phase 54.6.125 (Tier 3 #3) — preprint ↔ journal reconciliation.
+    # When two documents represent the same paper (preprint + journal
+    # publication, same arXiv v1/v2 merges), the non-canonical row
+    # gets this FK set to the canonical row's id. Retrieval filters
+    # WHERE canonical_document_id IS NULL so the non-canonical is
+    # invisible without being deleted. Fully reversible via
+    # `sciknow db unreconcile <doc_id>`.
+    canonical_document_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
     # Phase 54.6.117 (Tier 4 #1) — structured provenance JSON.
     # Shape (all fields optional; source is always set when we write):
     #   {

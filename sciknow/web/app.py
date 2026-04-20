@@ -5944,6 +5944,38 @@ async def api_projects_init(request: Request):
     })
 
 
+@app.get("/api/reconciliations")
+async def api_reconciliations():
+    """Phase 54.6.125 (Tier 3 #3) — list current preprint↔journal
+    reconciliations for the active project."""
+    from sciknow.core.preprint_reconcile import list_reconciliations
+    return JSONResponse({"pairs": list_reconciliations()})
+
+
+@app.post("/api/reconciliations/undo")
+async def api_reconciliations_undo(request: Request):
+    """Body: {doc_id: 'uuid prefix'}. Clears canonical_document_id."""
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    doc_id = (body.get("doc_id") or "").strip()
+    if not doc_id:
+        raise HTTPException(400, "doc_id required")
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+    from sciknow.core.preprint_reconcile import undo_reconciliation
+    with get_session() as session:
+        rows = session.execute(text("""
+            SELECT id::text FROM documents
+            WHERE id::text LIKE :p || '%' AND canonical_document_id IS NOT NULL
+            LIMIT 2
+        """), {"p": doc_id}).fetchall()
+    if len(rows) == 0:
+        raise HTTPException(404, "no non-canonical document matches")
+    if len(rows) > 1:
+        raise HTTPException(409, "ambiguous prefix — give more of the UUID")
+    ok = undo_reconciliation(rows[0][0])
+    return JSONResponse({"ok": bool(ok), "doc_id": rows[0][0]})
+
+
 @app.get("/api/provenance")
 async def api_provenance(key: str):
     """Phase 54.6.117 (Tier 4 #1) — provenance record by DOI / arxiv / doc-id prefix."""
@@ -6240,6 +6272,7 @@ async def api_cli_stream(request: Request):
         ("db", "parse-tables"),
         ("db", "expand-oeuvre"),
         ("db", "expand-inbound"),
+        ("db", "reconcile-preprints"),
     }
     if len(argv) < 2 or (argv[0], argv[1]) not in ALLOWED:
         raise HTTPException(403, f"command not on allowlist: {argv[:2]}")
@@ -9133,6 +9166,24 @@ body.task-bar-open {{ padding-top: 40px; }}
   </div>
 </div>
 
+<!-- Phase 54.6.125 — Reconciliations viewer -->
+<div class="modal-overlay" id="reconciliations-modal" onclick="if(event.target===this)closeModal('reconciliations-modal')">
+  <div class="modal wide">
+    <div class="modal-header">
+      <h3>&#128203; Preprint ↔ journal reconciliations</h3>
+      <button class="modal-close" onclick="closeModal('reconciliations-modal')">&times;</button>
+    </div>
+    <div class="modal-body" style="font-size:13px;line-height:1.5;">
+      <p style="font-size:11px;color:var(--fg-muted);margin-bottom:10px;">
+        Phase 54.6.125. Each row is a pair where two corpus documents resolved to the same OpenAlex work_id (usually a preprint + its journal publication).
+        The <em>canonical</em> row stays visible to retrieval; the <em>non-canonical</em> row is hidden (not deleted).
+        Click <strong>Undo</strong> to restore a non-canonical row to retrieval.
+      </p>
+      <div id="recon-list" style="font-size:12px;">Loading…</div>
+    </div>
+  </div>
+</div>
+
 <!-- Phase 54.6.97 — AI Actions Help modal. Central reference for every
      LLM button in the draft toolbar, with what it does, when to use it,
      what it requires, what it produces, and the CLI equivalent. -->
@@ -9955,6 +10006,18 @@ body.task-bar-open {{ padding-top: 40px; }}
           <button class="btn-secondary" onclick="runCorpusCliAction(['db','refresh-retractions'], 'Retraction sweep…')"
                   title="Phase 54.6.111 — query Crossref's update-type:retraction index for every paper with a DOI, flag retracted/corrected. Skips papers checked within 30 days.">
             &#128203; Retraction sweep
+          </button>
+          <button class="btn-secondary" onclick="runCorpusCliAction(['db','reconcile-preprints','--dry-run'], 'Detecting preprint+journal pairs…')"
+                  title="Phase 54.6.125 — detect preprint↔journal duplicates via OpenAlex work_id grouping. Shows the plan without applying.">
+            &#128202; Detect duplicates
+          </button>
+          <button class="btn-secondary" onclick="if(confirm('Apply reconciliations? Non-canonical rows will be hidden from retrieval (reversible via Reconciliations list).')) runCorpusCliAction(['db','reconcile-preprints'], 'Reconciling preprint+journal pairs…')"
+                  title="Phase 54.6.125 — apply preprint↔journal reconciliation. Non-canonical rows get canonical_document_id set; hidden from retrieval, fully reversible via `db unreconcile` or the Reconciliations tab.">
+            &#128279; Reconcile preprints
+          </button>
+          <button class="btn-secondary" onclick="openReconciliationsModal()"
+                  title="List all active reconciliations; reverse individual mappings.">
+            &#128203; Reconciliations
           </button>
           <span style="color:var(--fg-muted);">
             Cleanup removes already-ingested dupes <em>and</em> the failed-ingest archive. Pending lists papers still waiting on an OA PDF. Retraction sweep flags newly-retracted work.
@@ -17747,6 +17810,60 @@ function switchCorpusTab(name) {{
     const pane = document.getElementById(n + '-pane');
     if (pane) pane.style.display = (n === name) ? 'block' : 'none';
   }});
+}}
+
+// Phase 54.6.125 (Tier 3 #3) — preprint↔journal reconciliation viewer.
+async function openReconciliationsModal() {{
+  document.querySelectorAll('.nav-dropdown.open').forEach(d => d.classList.remove('open'));
+  openModal('reconciliations-modal');
+  const list = document.getElementById('recon-list');
+  list.textContent = 'Loading…';
+  try {{
+    const res = await fetch('/api/reconciliations');
+    const d = await res.json();
+    const pairs = d.pairs || [];
+    if (!pairs.length) {{
+      list.innerHTML = '<em style="color:var(--fg-muted);">No active reconciliations. Run <code>Detect duplicates</code> then <code>Reconcile preprints</code> in the Corpus modal utility row.</em>';
+      return;
+    }}
+    let html = '<table style="width:100%;border-collapse:collapse;">'
+      + '<tr style="border-bottom:1px solid var(--border);"><th style="text-align:left;padding:4px 6px;">Canonical</th>'
+      + '<th style="text-align:left;padding:4px 6px;">Non-canonical (hidden)</th>'
+      + '<th style="padding:4px 6px;">Action</th></tr>';
+    for (const p of pairs) {{
+      html += '<tr style="border-bottom:1px solid var(--border);vertical-align:top;">'
+        + '<td style="padding:6px;"><strong>' + _escHtml(p.canonical_id.slice(0, 8)) + '</strong>'
+          + ' <span style="font-size:10px;color:var(--fg-muted);">'
+          + _escHtml(String(p.canonical_year || '')) + ' · ' + _escHtml(p.canonical_journal || '') + '</span>'
+          + '<br>' + _escHtml((p.canonical_title || '').substring(0, 100))
+          + '<br><span style="font-family:var(--font-mono);font-size:10px;color:var(--fg-muted);">' + _escHtml(p.canonical_doi || '') + '</span></td>'
+        + '<td style="padding:6px;"><strong>' + _escHtml(p.non_canonical_id.slice(0, 8)) + '</strong>'
+          + ' <span style="font-size:10px;color:var(--fg-muted);">' + _escHtml(String(p.non_canonical_year || '')) + '</span>'
+          + '<br>' + _escHtml((p.non_canonical_title || '').substring(0, 100))
+          + '<br><span style="font-family:var(--font-mono);font-size:10px;color:var(--fg-muted);">' + _escHtml(p.non_canonical_doi || '') + '</span></td>'
+        + '<td style="padding:6px;"><button onclick="undoReconciliation(\\'' + p.non_canonical_id + '\\')" '
+          + 'style="background:rgba(80,200,120,0.15);color:var(--success);border:1px solid var(--success);border-radius:3px;padding:2px 8px;font-size:11px;cursor:pointer;">Undo</button></td>'
+        + '</tr>';
+    }}
+    html += '</table>';
+    html += '<p style="font-size:10px;color:var(--fg-muted);margin-top:10px;">'
+      + pairs.length + ' active reconciliation(s).</p>';
+    list.innerHTML = html;
+  }} catch (exc) {{
+    list.innerHTML = '<em style="color:var(--danger);">Failed: ' + exc + '</em>';
+  }}
+}}
+
+async function undoReconciliation(docId) {{
+  if (!confirm('Restore non-canonical document ' + docId.slice(0, 8) + ' to retrieval?')) return;
+  try {{
+    const res = await fetch('/api/reconciliations/undo', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{doc_id: docId}}),
+    }});
+    if (res.ok) openReconciliationsModal();
+  }} catch (_) {{}}
 }}
 
 // Phase 54.6.123 (Tier 3 #2) — inbound "cites-me" expansion.

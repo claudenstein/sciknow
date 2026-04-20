@@ -259,12 +259,16 @@ def _postgres_fts(
 
     extra_where = ("AND " + " AND ".join(extra_conditions)) if extra_conditions else ""
 
+    # Phase 54.6.125 (Tier 3 #3) — drop chunks whose document is
+    # marked non-canonical (reconciled preprint+journal pair).
     sql = text(f"""
         SELECT c.qdrant_point_id::text
         FROM paper_metadata pm
         JOIN chunks c ON c.document_id = pm.document_id
+        JOIN documents d ON d.id = pm.document_id
         WHERE pm.search_vector @@ websearch_to_tsquery('english', :query)
           AND c.qdrant_point_id IS NOT NULL
+          AND d.canonical_document_id IS NULL
           {extra_where}
         ORDER BY ts_rank_cd(pm.search_vector, websearch_to_tsquery('english', :query)) DESC
         LIMIT :top_k
@@ -338,19 +342,30 @@ def _hydrate(
     # Fetch metadata from PostgreSQL
     from sqlalchemy import text
     meta_rows = {}
+    # Phase 54.6.125 (Tier 3 #3) — hide non-canonical documents from
+    # retrieval. The INNER JOIN to ``documents`` with
+    # canonical_document_id IS NULL drops preprint rows that have been
+    # reconciled with their journal counterpart; their chunks are
+    # still in Qdrant but never surface in search results.
+    non_canonical_doc_ids: set[str] = set()
     if doc_ids:
         placeholders = ", ".join(f":d{i}" for i, _ in enumerate(doc_ids))
         params = {f"d{i}": did for i, did in enumerate(doc_ids)}
         rows = session.execute(
             text(f"""
                 SELECT pm.document_id::text, pm.title, pm.year,
-                       pm.authors, pm.journal, pm.doi
+                       pm.authors, pm.journal, pm.doi,
+                       d.canonical_document_id::text
                 FROM paper_metadata pm
+                JOIN documents d ON d.id = pm.document_id
                 WHERE pm.document_id::text IN ({placeholders})
             """),
             params,
         ).fetchall()
         for row in rows:
+            if row[6]:  # canonical_document_id != NULL → non-canonical
+                non_canonical_doc_ids.add(row[0])
+                continue
             meta_rows[row[0]] = {
                 "title": row[1],
                 "year": row[2],
@@ -396,6 +411,11 @@ def _hydrate(
 
         # Leaf chunk: standard PG metadata join.
         doc_id = payload.get("document_id", "")
+        # Phase 54.6.125 — drop chunks whose document was reconciled
+        # with a canonical counterpart (non-canonical). Their chunks
+        # stay in Qdrant but never surface in search results.
+        if doc_id in non_canonical_doc_ids:
+            continue
         meta = meta_rows.get(doc_id, {})
         candidates.append(SearchCandidate(
             chunk_id=chunk_id,
