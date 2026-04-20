@@ -9469,12 +9469,14 @@ body.task-bar-open {{ padding-top: 40px; }}
       <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center;">
         <label style="font-size:11px;display:flex;align-items:center;gap:4px;">
           Mode:
-          <select id="vis-mode" onchange="loadVisuals()" style="padding:4px 8px;">
+          <select id="vis-mode" onchange="loadVisuals()" style="padding:4px 8px;"
+                  title="Gallery = CSS grid of thumbnails (figures + charts). List = all kinds in a row layout (equations / tables / code render inline, images get real thumbnails).">
             <option value="gallery" selected>Gallery (figures + charts)</option>
             <option value="list">List (all kinds)</option>
           </select>
         </label>
-        <select id="vis-kind-filter" onchange="loadVisuals()" style="padding:4px 8px;">
+        <select id="vis-kind-filter" onchange="loadVisuals()" style="padding:4px 8px;"
+                title="Narrow to a single visual kind. In Gallery mode, non-image kinds widen the card grid to 340px columns.">
           <option value="">All types</option>
           <option value="figure">Figures</option>
           <option value="chart">Charts</option>
@@ -9484,7 +9486,8 @@ body.task-bar-open {{ padding-top: 40px; }}
         </select>
         <label style="font-size:11px;display:flex;align-items:center;gap:4px;" title="How to order the visuals">
           Order:
-          <select id="vis-order" onchange="loadVisuals()" style="padding:4px 6px;">
+          <select id="vis-order" onchange="loadVisuals()" style="padding:4px 6px;"
+                  title="Importance = deterministic composite score (year + caption richness + has-figure-num + paper-type weight). Others are single-signal sorts; Random picks a non-stable sample for variety.">
             <option value="importance" selected>Importance (ranked)</option>
             <option value="recent">Recent papers first</option>
             <option value="paper">By paper (title)</option>
@@ -9493,8 +9496,10 @@ body.task-bar-open {{ padding-top: 40px; }}
             <option value="random">Random</option>
           </select>
         </label>
-        <input type="text" id="vis-search" placeholder="Search captions..." style="flex:1;min-width:150px;padding:4px 8px;" onkeyup="if(event.key==='Enter')loadVisuals()">
-        <button class="btn-secondary" onclick="loadVisuals()">&#128269; Search</button>
+        <input type="text" id="vis-search" placeholder="Search captions..." style="flex:1;min-width:150px;padding:4px 8px;" onkeyup="if(event.key==='Enter')loadVisuals()"
+               title="Substring match against caption + surrounding text. Press Enter to search."/>
+        <button class="btn-secondary" onclick="loadVisuals()"
+                title="Apply the current search + filter + order and reload.">&#128269; Search</button>
         <span id="vis-stats" style="color:var(--fg-muted);font-size:11px;"></span>
       </div>
       <div id="vis-results" style="max-height:calc(85vh - 220px);overflow-y:auto;">
@@ -9521,14 +9526,16 @@ body.task-bar-open {{ padding-top: 40px; }}
         <summary style="cursor:pointer;font-weight:600;">&#128339; Schedule auto-backup</summary>
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px;">
           <label>Frequency:
-            <select id="backup-sched-freq" style="padding:4px;">
+            <select id="backup-sched-freq" style="padding:4px;"
+                    title="How often to snapshot the project(s). Hourly for active work; Daily for the default; Weekly if you mostly do bulk runs.">
               <option value="hourly">Hourly</option>
               <option value="daily" selected>Daily</option>
               <option value="weekly">Weekly</option>
             </select>
           </label>
           <label id="backup-sched-weekday-label" style="display:none;">Day:
-            <select id="backup-sched-weekday" style="padding:4px;">
+            <select id="backup-sched-weekday" style="padding:4px;"
+                    title="Day of the week to run the backup. Only applies when Frequency = Weekly.">
               <option value="0">Sun</option><option value="1">Mon</option>
               <option value="2">Tue</option><option value="3">Wed</option>
               <option value="4">Thu</option><option value="5">Fri</option>
@@ -9536,26 +9543,34 @@ body.task-bar-open {{ padding-top: 40px; }}
             </select>
           </label>
           <label id="backup-sched-hour-label">Hour:
-            <input type="number" id="backup-sched-hour" min="0" max="23" value="3" style="width:60px;padding:4px;">
+            <input type="number" id="backup-sched-hour" min="0" max="23" value="3" style="width:60px;padding:4px;"
+                   title="Hour of the day (0–23) when the backup fires. Defaults to 03:00 — usually off-hours."/>
           </label>
           <label>Minute:
-            <input type="number" id="backup-sched-minute" min="0" max="59" value="0" style="width:60px;padding:4px;">
+            <input type="number" id="backup-sched-minute" min="0" max="59" value="0" style="width:60px;padding:4px;"
+                   title="Minute past the hour. Hourly mode uses this alone (e.g. `:15` = every hour at quarter past)."/>
           </label>
-          <button class="btn-primary" onclick="enableBackupSchedule()">Save schedule</button>
-          <button class="btn-secondary" id="backup-unschedule-btn" onclick="disableBackupSchedule()" style="display:none;">Disable</button>
+          <button class="btn-primary" onclick="enableBackupSchedule()"
+                  title="Install the crontab entry. Overwrites any existing sciknow-auto-backup line.">Save schedule</button>
+          <button class="btn-secondary" id="backup-unschedule-btn" onclick="disableBackupSchedule()" style="display:none;"
+                  title="Remove the crontab entry. Existing backups are NOT deleted.">Disable</button>
         </div>
       </details>
 
       <details style="margin-bottom:12px;border:1px solid var(--border);border-radius:6px;padding:8px 10px;">
         <summary style="cursor:pointer;font-weight:600;">&#128465; Autodelete old backups</summary>
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px;">
-          <label><input type="checkbox" id="backup-purge-all-check"> Delete ALL backups</label>
+          <label title="DESTRUCTIVE: wipes every backup in archives/backups/. Confirms first. No recovery.">
+            <input type="checkbox" id="backup-purge-all-check"
+                   title="Check to wipe EVERY backup. Overrides the days field."> Delete ALL backups</label>
           <span style="color:var(--fg-muted);">— or —</span>
           <label>Older than
-            <input type="number" id="backup-purge-days" min="1" value="30" style="width:70px;padding:4px;">
+            <input type="number" id="backup-purge-days" min="1" value="30" style="width:70px;padding:4px;"
+                   title="Delete backups strictly older than this many days. 30 is a safe starting point."/>
             days
           </label>
-          <button class="btn-secondary" onclick="purgeBackups()" style="color:var(--danger);border-color:var(--danger);">Purge now</button>
+          <button class="btn-secondary" onclick="purgeBackups()" style="color:var(--danger);border-color:var(--danger);"
+                  title="Apply the selected purge rule. Confirms first and cannot be undone — archives/backups/* files are deleted from disk.">Purge now</button>
         </div>
         <p style="font-size:11px;color:var(--fg-muted);margin:8px 0 0;">
           Auto-age retention on every run is controlled by <code>BACKUP_RETAIN_DAYS</code> in <code>.env</code>
@@ -9564,8 +9579,10 @@ body.task-bar-open {{ padding-top: 40px; }}
       </details>
 
       <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
-        <button class="btn-primary" onclick="runBackupNow()">&#128190; Run Backup Now</button>
-        <button class="btn-secondary" onclick="restoreBackup()">&#128260; Restore Latest</button>
+        <button class="btn-primary" onclick="runBackupNow()"
+                title="Take a fresh snapshot of all projects + optional system bundle. Streams progress into the log below.">&#128190; Run Backup Now</button>
+        <button class="btn-secondary" onclick="restoreBackup()"
+                title="Restore the most recent backup. DESTRUCTIVE — overwrites current projects with the backup version. Confirms first; Qdrant vectors will need rebuilding after.">&#128260; Restore Latest</button>
       </div>
       <div id="backup-log" style="display:none;max-height:120px;overflow-y:auto;font-family:var(--font-mono);font-size:11px;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:8px;margin-bottom:12px;white-space:pre-wrap;"></div>
       <h4 style="margin:0 0 8px;">Backup History</h4>
@@ -10118,14 +10135,18 @@ body.task-bar-open {{ padding-top: 40px; }}
           </div>
           <div class="field" style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;">
             <div style="flex:1;min-width:70px;"><label>Limit</label>
-              <input type="number" id="tl-enr-limit" value="0" min="0" title="0 = all"></div>
+              <input type="number" id="tl-enr-limit" value="0" min="0"
+                     title="Max papers to process this run. 0 = all papers lacking a DOI."/></div>
             <div style="flex:1;min-width:80px;"><label>Threshold</label>
-              <input type="number" id="tl-enr-thresh" value="0.85" min="0" max="1" step="0.01"></div>
+              <input type="number" id="tl-enr-thresh" value="0.85" min="0" max="1" step="0.01"
+                     title="Minimum title-similarity score (0–1) to accept a Crossref match. 0.85 is conservative; 0.78 is the 54.6.x dual-signal default when author+year also agree."/></div>
             <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
-              <input type="checkbox" id="tl-enr-dry"> dry-run
+              <input type="checkbox" id="tl-enr-dry"
+                     title="Show what would be updated without writing to the database."> dry-run
             </label>
           </div>
-          <button class="btn-primary" style="margin-top:8px;" onclick="doToolCorpus('enrich')">Run Enrich</button>
+          <button class="btn-primary" style="margin-top:8px;" onclick="doToolCorpus('enrich')"
+                  title="Run `db enrich`: Crossref/OpenAlex/arXiv title search to fill missing DOIs + persist OpenAlex concepts/funders/grants/ROR. Streams logs into the console below.">Run Enrich</button>
         </div>
 
         <!-- Expand by citations -->
@@ -10142,38 +10163,47 @@ body.task-bar-open {{ padding-top: 40px; }}
               <input type="number" id="tl-exp-budget" value="50" min="5" max="200"
                      title="Phase 54.6.113 — RRF pool size per round. Smaller = tighter top picks only."></div>
             <div style="flex:1;min-width:80px;"><label>Workers</label>
-              <input type="number" id="tl-exp-workers" value="0" min="0" title="0 = .env default"></div>
+              <input type="number" id="tl-exp-workers" value="0" min="0"
+                     title="Parallel ingestion worker subprocesses. 0 = use INGEST_WORKERS from .env (default 1). Each worker loads its own MinerU (~7GB VRAM) + bge-m3 — raise only when the LLM is off-GPU."/></div>
             <div style="flex:1;min-width:80px;"><label>Relev. thr</label>
-              <input type="number" id="tl-exp-relthr" value="0.0" min="0" max="1" step="0.05"></div>
+              <input type="number" id="tl-exp-relthr" value="0.0" min="0" max="1" step="0.05"
+                     title="Cosine similarity floor against the corpus centroid. 0 = use EXPAND_RELEVANCE_THRESHOLD from .env (default 0.55). Raise to require tighter topical match."/></div>
           </div>
           <div class="field" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:4px;">
             <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
-              <input type="checkbox" id="tl-exp-dry"> dry-run
+              <input type="checkbox" id="tl-exp-dry"
+                     title="Run the ranker + preview shortlist without downloading any PDFs. Writes the shortlist TSV to data/downloads/expand_shortlist.tsv."> dry-run
             </label>
             <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
-              <input type="checkbox" id="tl-exp-resolve"> resolve titles
+              <input type="checkbox" id="tl-exp-resolve"
+                     title="Also resolve title-only references (no DOI in source) via Crossref title-search. Slow (~0.3s per title)."> resolve titles
             </label>
-            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
+                   title="Run the full ingest pipeline (convert → metadata → chunk → embed) on downloaded PDFs. Uncheck to only download into data/downloads without ingesting.">
               <input type="checkbox" id="tl-exp-ingest" checked> ingest
             </label>
-            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
+                   title="Gate downloads by centroid/anchor cosine threshold. Uncheck to download every ranked candidate regardless of topical similarity.">
               <input type="checkbox" id="tl-exp-relevance" checked> relevance filter
             </label>
           </div>
           <div class="field" style="margin-top:4px;display:flex;gap:8px;align-items:flex-end;">
             <div style="flex:3;">
               <label>Relevance anchor query (optional)</label>
-              <input type="text" id="tl-exp-relq" placeholder="(corpus centroid if blank)">
+              <input type="text" id="tl-exp-relq" placeholder="(corpus centroid if blank)"
+                     title="Free-text anchor for relevance scoring. Leave blank to use the corpus centroid (avg of all paper embeddings). A sharp query tightens results; a broad corpus benefits from a focused anchor.">
             </div>
             <div style="flex:2;">
               <label>Anchor from topic</label>
-              <select id="tl-exp-relq-topic" onchange="if(this.value){{document.getElementById('tl-exp-relq').value=this.value;}}">
+              <select id="tl-exp-relq-topic" onchange="if(this.value){{document.getElementById('tl-exp-relq').value=this.value;}}"
+                      title="Shortcut: pick one of your catalog topic clusters and its label will be copied into the anchor textbox on the left.">
                 <option value="">(pick a topic…)</option>
               </select>
             </div>
           </div>
           <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
-            <button class="btn-primary" onclick="openExpandCitesPreview()">
+            <button class="btn-primary" onclick="openExpandCitesPreview()"
+                    title="Build the ranked shortlist and open the preview modal. You can inspect, filter and individually check candidates before downloading.">
               &#128269; Preview candidates
             </button>
             <button class="btn-secondary" onclick="doToolCorpus('expand')"
@@ -10221,7 +10251,8 @@ body.task-bar-open {{ padding-top: 40px; }}
             </label>
           </div>
           <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap;">
-            <button class="btn-primary" onclick="runAgenticExpand()">&#129504; Start agentic expansion</button>
+            <button class="btn-primary" onclick="runAgenticExpand()"
+                    title="LLM decomposes the question → measures coverage per sub-topic → runs expand on gaps → replans. Loops until every sub-topic is covered or max rounds reached.">&#129504; Start agentic expansion</button>
             <span style="color:var(--fg-muted);font-size:11px;">
               Streams the plan + per-sub-topic progress into the log panel. Close at any time — job continues server-side.
             </span>
@@ -10235,16 +10266,21 @@ body.task-bar-open {{ padding-top: 40px; }}
               <code>expand-author</code> for each (ORCID-preferred, strict-author). Uses the same relevance + retraction + MMR filters as any other expansion.
             </p>
             <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
-              <div><label style="font-size:11px;">Min corpus papers
-                <input type="number" id="tl-oeu-min" value="3" min="2" max="10" style="width:60px;padding:2px 6px;font-size:12px;"></label></div>
-              <div><label style="font-size:11px;">Per-author limit
-                <input type="number" id="tl-oeu-limit" value="10" min="1" max="50" style="width:60px;padding:2px 6px;font-size:12px;"></label></div>
-              <div><label style="font-size:11px;">Max authors
-                <input type="number" id="tl-oeu-max" value="10" min="1" max="30" style="width:60px;padding:2px 6px;font-size:12px;"></label></div>
-              <label style="display:flex;align-items:center;gap:4px;font-size:11px;">
+              <div><label style="font-size:11px;" title="Minimum number of papers an author must already have in this corpus to qualify for oeuvre expansion. Lower = more authors, noisier; higher = focus on the highly-represented names.">Min corpus papers
+                <input type="number" id="tl-oeu-min" value="3" min="2" max="10" style="width:60px;padding:2px 6px;font-size:12px;"
+                       title="Minimum corpus papers for an author to qualify. Default 3."></label></div>
+              <div><label style="font-size:11px;" title="Max new papers fetched per qualifying author, passed as --limit to expand-author.">Per-author limit
+                <input type="number" id="tl-oeu-limit" value="10" min="1" max="50" style="width:60px;padding:2px 6px;font-size:12px;"
+                       title="Max new papers per qualifying author. Default 10."></label></div>
+              <div><label style="font-size:11px;" title="Cap on how many authors get processed this run. Prevents an unbounded sweep over the whole corpus.">Max authors
+                <input type="number" id="tl-oeu-max" value="10" min="1" max="30" style="width:60px;padding:2px 6px;font-size:12px;"
+                       title="Cap on authors processed this run. Default 10, ordered by corpus citation count."></label></div>
+              <label style="display:flex;align-items:center;gap:4px;font-size:11px;"
+                     title="Compute the author list + per-author plan without downloading. Useful to confirm which names will be processed.">
                 <input type="checkbox" id="tl-oeu-dry"> dry-run
               </label>
-              <button class="btn-secondary" onclick="runOeuvreExpand()">Run oeuvre expansion</button>
+              <button class="btn-secondary" onclick="runOeuvreExpand()"
+                      title="Scan corpus → find authors with ≥ Min papers → loop expand-author over them with the configured limits. ORCID-preferred, strict-author match.">Run oeuvre expansion</button>
             </div>
           </div>
         </div>
@@ -10265,11 +10301,13 @@ body.task-bar-open {{ padding-top: 40px; }}
               <input type="text" id="tl-eauth-q"
                      placeholder="Type a name — e.g. Solanki, Lockwood…"
                      oninput="onExpandAuthorSearchInput(event)"
-                     onkeydown="if(event.key==='Enter'){{event.preventDefault();onExpandAuthorSearchInput(event);}}">
+                     onkeydown="if(event.key==='Enter'){{event.preventDefault();onExpandAuthorSearchInput(event);}}"
+                     title="Search OpenAlex authors by name. Results are ranked by citations within THIS corpus, then by overall paper count. Click a row to select.">
             </div>
             <div style="flex:2;">
               <label>ORCID (optional)</label>
-              <input type="text" id="tl-eauth-orcid" placeholder="0000-0000-0000-0000">
+              <input type="text" id="tl-eauth-orcid" placeholder="0000-0000-0000-0000"
+                     title="Pin to a specific ORCID iD — use when two authors share a name. Overrides name-search disambiguation.">
             </div>
           </div>
           <div id="tl-eauth-results"
@@ -10281,37 +10319,47 @@ body.task-bar-open {{ padding-top: 40px; }}
           </div>
           <div class="field" style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;margin-top:6px;">
             <div style="flex:1;min-width:80px;"><label>Year from</label>
-              <input type="number" id="tl-eauth-yfrom" placeholder="(any)"></div>
+              <input type="number" id="tl-eauth-yfrom" placeholder="(any)"
+                     title="Only fetch papers published in this year or later. Leave blank for no lower bound."></div>
             <div style="flex:1;min-width:80px;"><label>Year to</label>
-              <input type="number" id="tl-eauth-yto" placeholder="(any)"></div>
+              <input type="number" id="tl-eauth-yto" placeholder="(any)"
+                     title="Only fetch papers published in this year or earlier. Leave blank for no upper bound."></div>
             <div style="flex:1;min-width:70px;"><label>Limit</label>
-              <input type="number" id="tl-eauth-limit" value="0" min="0" title="0 = all"></div>
+              <input type="number" id="tl-eauth-limit" value="0" min="0" title="Cap on papers downloaded for this author. 0 = no cap (fetch all)."></div>
             <div style="flex:1;min-width:80px;"><label>Workers</label>
-              <input type="number" id="tl-eauth-workers" value="0" min="0"></div>
+              <input type="number" id="tl-eauth-workers" value="0" min="0"
+                     title="Parallel download workers. 0 = use EXPAND_WORKERS from .env (default 8)."></div>
             <div style="flex:1;min-width:80px;"><label>Relev. thr</label>
-              <input type="number" id="tl-eauth-relthr" value="0.0" min="0" max="1" step="0.05"></div>
+              <input type="number" id="tl-eauth-relthr" value="0.0" min="0" max="1" step="0.05"
+                     title="Cosine-similarity floor against the corpus centroid or anchor. 0 = use EXPAND_RELEVANCE_THRESHOLD from .env (default 0.55)."></div>
           </div>
           <div class="field" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:4px;">
-            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
+                   title="Filter fetched papers to keep only those where this author is actually on the authorship list (defends against OpenAlex name-collision hits).">
               <input type="checkbox" id="tl-eauth-strict" checked> strict author match
             </label>
-            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
+                   title="Skip the interactive disambiguation banner and keep every hit that matches the queried name. Use for truly unambiguous names.">
               <input type="checkbox" id="tl-eauth-all"> keep all matches (skip disamb.)
             </label>
-            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
+                   title="Gate downloads by centroid/anchor cosine threshold. Uncheck to download every paper by this author regardless of topical similarity.">
               <input type="checkbox" id="tl-eauth-relevance" checked> relevance filter
             </label>
-            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
+                   title="Run the full convert → metadata → chunk → embed pipeline on downloaded PDFs. Uncheck to download-only into data/downloads/.">
               <input type="checkbox" id="tl-eauth-ingest" checked> ingest
             </label>
-            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
+                   title="Compute the plan (candidate list + relevance scores) without downloading PDFs.">
               <input type="checkbox" id="tl-eauth-dry"> dry-run
             </label>
           </div>
           <div class="field" style="margin-top:4px;">
             <label>Relevance anchor query (optional)</label>
             <input type="text" id="tl-eauth-relq"
-                   placeholder="(corpus centroid if blank)">
+                   placeholder="(corpus centroid if blank)"
+                   title="Free-text anchor for relevance scoring. Leave blank to use the corpus centroid. A focused anchor helps keep the author's off-topic papers out.">
           </div>
           <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
             <button class="btn-primary" onclick="openExpandAuthorPreview()">
@@ -10337,13 +10385,15 @@ body.task-bar-open {{ padding-top: 40px; }}
           </div>
           <div class="field" style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;">
             <div style="flex:1;min-width:120px;"><label>Per-seed cap</label>
-              <input type="number" id="tl-inb-seed" value="30" min="1" title="Max papers per seed."></div>
+              <input type="number" id="tl-inb-seed" value="30" min="1" title="Max citing-papers fetched per corpus seed. Keeps viral-cited seeds from dominating the shortlist."></div>
             <div style="flex:1;min-width:100px;"><label>Total limit</label>
-              <input type="number" id="tl-inb-total" value="300" min="10"></div>
+              <input type="number" id="tl-inb-total" value="300" min="10"
+                     title="Hard cap on the combined candidate pool across all seeds."></div>
           </div>
           <div class="field" style="margin-top:4px;">
             <label>Relevance anchor query (optional)</label>
-            <input type="text" id="tl-inb-relq" placeholder="(corpus centroid if blank)">
+            <input type="text" id="tl-inb-relq" placeholder="(corpus centroid if blank)"
+                   title="Free-text anchor for relevance scoring. Leave blank to use the corpus centroid (avg of all paper embeddings).">
           </div>
           <!-- Phase 54.6.123 (Tier 3 #2) — full-pipeline inbound crawl -->
           <div class="field" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-top:4px;">
@@ -10353,7 +10403,8 @@ body.task-bar-open {{ padding-top: 40px; }}
             <div style="flex:1;min-width:80px;"><label>Relev. thr</label>
               <input type="number" id="tl-inb-relthr" value="0.55" min="0" max="1" step="0.05"
                      title="Drop candidates below this bge-m3 cosine score."></div>
-            <label style="display:flex;align-items:center;gap:4px;font-size:11px;">
+            <label style="display:flex;align-items:center;gap:4px;font-size:11px;"
+                   title="Compute the candidate shortlist without downloading. Useful to check per-seed fan-out sizes.">
               <input type="checkbox" id="tl-inb-dry"> dry-run
             </label>
             <label style="display:flex;align-items:center;gap:4px;font-size:11px;"
@@ -10362,7 +10413,8 @@ body.task-bar-open {{ padding-top: 40px; }}
             </label>
           </div>
           <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
-            <button class="btn-primary" onclick="openExpandInboundPreview()">&#128269; Preview candidates</button>
+            <button class="btn-primary" onclick="openExpandInboundPreview()"
+                    title="Build the cites-me shortlist and open the preview modal. You can cherry-pick rows before downloading.">&#128269; Preview candidates</button>
             <button class="btn-primary" onclick="runInboundExpand()"
                     title="Phase 54.6.123 — runs the full cites-me pipeline: crawl → relevance filter → download → ingest.">
               &#127793; Expand now
@@ -10383,16 +10435,20 @@ body.task-bar-open {{ padding-top: 40px; }}
           <div class="field">
             <label>Topic query</label>
             <input type="text" id="tl-top-q" placeholder="e.g. thermospheric cooling"
-                   onkeydown="if(event.key==='Enter')openExpandTopicPreview()">
+                   onkeydown="if(event.key==='Enter')openExpandTopicPreview()"
+                   title="Free-text search over OpenAlex title/abstract/keywords. Press Enter to run the preview.">
           </div>
           <div class="field" style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;">
             <div style="flex:1;min-width:100px;"><label>Limit</label>
-              <input type="number" id="tl-top-limit" value="300" min="10"></div>
+              <input type="number" id="tl-top-limit" value="300" min="10"
+                     title="How many OpenAlex hits to pull before relevance filtering. Results come back sorted by citation count."></div>
             <div style="flex:3;min-width:200px;"><label>Relevance anchor (defaults to the query itself)</label>
-              <input type="text" id="tl-top-relq" placeholder="(query if blank)"></div>
+              <input type="text" id="tl-top-relq" placeholder="(query if blank)"
+                     title="Override the anchor used for relevance scoring. Leave blank to score against the topic query."></div>
           </div>
           <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
-            <button class="btn-primary" onclick="openExpandTopicPreview()">&#128269; Preview candidates</button>
+            <button class="btn-primary" onclick="openExpandTopicPreview()"
+                    title="Run the topic search, score candidates by relevance, and open the cherry-pick preview.">&#128269; Preview candidates</button>
             <span style="font-size:11px;color:var(--fg-muted);">
               Results sorted by citation count, then filtered by relevance.
             </span>
@@ -10409,21 +10465,25 @@ body.task-bar-open {{ padding-top: 40px; }}
           </div>
           <div class="field" style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;">
             <div style="flex:1;min-width:100px;"><label>Depth</label>
-              <select id="tl-coa-depth">
+              <select id="tl-coa-depth"
+                      title="Depth of the coauthor graph walk. 1 = coauthors of corpus papers. 2 = coauthors-of-coauthors (much noisier — use only with a tight relevance threshold).">
                 <option value="1" selected>1 (recommended)</option>
                 <option value="2">2 (noisy — use with strict threshold)</option>
               </select></div>
             <div style="flex:1;min-width:120px;"><label>Per-author cap</label>
-              <input type="number" id="tl-coa-per" value="8" min="1" title="Max papers per author."></div>
+              <input type="number" id="tl-coa-per" value="8" min="1" title="Max papers per coauthor. Keeps prolific coauthors from swamping the shortlist."></div>
             <div style="flex:1;min-width:100px;"><label>Total limit</label>
-              <input type="number" id="tl-coa-total" value="300" min="10"></div>
+              <input type="number" id="tl-coa-total" value="300" min="10"
+                     title="Hard cap on the combined candidate pool across all coauthors."></div>
           </div>
           <div class="field" style="margin-top:4px;">
             <label>Relevance anchor query (optional)</label>
-            <input type="text" id="tl-coa-relq" placeholder="(corpus centroid if blank)">
+            <input type="text" id="tl-coa-relq" placeholder="(corpus centroid if blank)"
+                   title="Free-text anchor for relevance scoring. Leave blank to use the corpus centroid. For coauthor snowballing a focused anchor is strongly recommended.">
           </div>
           <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
-            <button class="btn-primary" onclick="openExpandCoauthPreview()">&#128269; Preview candidates</button>
+            <button class="btn-primary" onclick="openExpandCoauthPreview()"
+                    title="Build the coauthor shortlist and open the cherry-pick preview. No downloads until you approve rows.">&#128269; Preview candidates</button>
             <span style="font-size:11px;color:var(--fg-muted);">
               Best with a tight relevance threshold (0.6+) — this method has the noisiest recall.
             </span>
@@ -10431,9 +10491,11 @@ body.task-bar-open {{ padding-top: 40px; }}
         </div>
 
         <div style="display:flex;gap:8px;align-items:center;margin-top:12px;">
-          <div id="tl-corpus-status" style="flex:1;font-size:12px;color:var(--fg-muted);"></div>
+          <div id="tl-corpus-status" style="flex:1;font-size:12px;color:var(--fg-muted);"
+               title="Current status of the running command (enrich/expand/agentic/…). Updated as events stream in."></div>
           <button id="tl-corpus-cancel" onclick="cancelToolCorpus()"
-                  style="display:none;background:var(--danger,#c53030);color:white;border:0;padding:4px 10px;border-radius:4px;cursor:pointer;">
+                  style="display:none;background:var(--danger,#c53030);color:white;border:0;padding:4px 10px;border-radius:4px;cursor:pointer;"
+                  title="Stop the currently running corpus command. In-flight downloads and ingestion jobs are interrupted at the next checkpoint.">
             Cancel
           </button>
         </div>
