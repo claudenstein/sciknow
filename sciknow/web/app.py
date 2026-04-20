@@ -8448,7 +8448,8 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="stream-panel" id="stream-panel">
     <div class="stream-header">
       <span class="status" id="stream-status">Starting...</span>
-      <button class="stop-btn" id="stream-stop" onclick="stopJob()">Stop</button>
+      <button class="stop-btn" id="stream-stop" onclick="stopJob()"
+              title="Cancel the running job (write/review/revise/autowrite/ask/…). Partial output is kept.">Stop</button>
     </div>
     <div class="stream-scores" id="stream-scores"></div>
     <div class="stream-body" id="stream-body"></div>
@@ -8696,7 +8697,8 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div class="field" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
           <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
                  title="Also run LLM-based contradiction detection across paper summaries. Significantly slower (one LLM call per concept).">
-            <input type="checkbox" id="wiki-lint-deep"> deep (LLM contradiction detection)
+            <input type="checkbox" id="wiki-lint-deep"
+                   title="Also run LLM-based contradiction detection. Significantly slower (one LLM call per concept)."> deep (LLM contradiction detection)
           </label>
           <button class="btn-primary" id="wiki-lint-run" onclick="doWikiLint()"
                   title="Scan the wiki for broken links, stale pages, orphan concepts and missing KG triples.">Run Lint</button>
@@ -8722,7 +8724,8 @@ body.task-bar-open {{ padding-top: 40px; }}
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
             <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
                    title="Re-run KG extraction on every paper, not just those with zero triples. Expensive — use only after changing the extraction prompt or model.">
-              <input type="checkbox" id="wiki-extractkg-force"> force re-extract every paper
+              <input type="checkbox" id="wiki-extractkg-force"
+                     title="Re-run KG extraction on every paper, not just those with zero triples."> force re-extract every paper
             </label>
             <button class="btn-primary" id="wiki-extractkg-run"
                     onclick="doWikiExtractKg()"
@@ -8899,10 +8902,14 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button class="modal-close" onclick="closeModal('plan-modal')">&times;</button>
     </div>
     <div class="tabs">
-      <button class="tab active" data-tab="plan-book" onclick="switchPlanTab('plan-book')">Book</button>
-      <button class="tab" data-tab="plan-outline" onclick="switchPlanTab('plan-outline')" id="plan-tab-outline">Outline</button>
-      <button class="tab" data-tab="plan-chapters" onclick="switchPlanTab('plan-chapters')" id="plan-tab-chapters">Chapters</button>
-      <button class="tab" data-tab="plan-chapter" onclick="switchPlanTab('plan-chapter')" id="plan-tab-chapter">Sections</button>
+      <button class="tab active" data-tab="plan-book" onclick="switchPlanTab('plan-book')"
+              title="Book-level plan / leitmotiv — 200–500 words defining thesis, scope, audience, key terms. Injected into every writer prompt.">Book</button>
+      <button class="tab" data-tab="plan-outline" onclick="switchPlanTab('plan-outline')" id="plan-tab-outline"
+              title="LLM-generated high-level chapter outline. Edit here to reshape the book before drafting.">Outline</button>
+      <button class="tab" data-tab="plan-chapters" onclick="switchPlanTab('plan-chapters')" id="plan-tab-chapters"
+              title="List + reorder chapters. Each chapter has its own scope description and target word count.">Chapters</button>
+      <button class="tab" data-tab="plan-chapter" onclick="switchPlanTab('plan-chapter')" id="plan-tab-chapter"
+              title="Edit sections within the active chapter. Each section becomes its own draft when you Write / Autowrite.">Sections</button>
     </div>
     <div class="modal-body">
       <!-- Book tab — the leitmotiv (existing) -->
@@ -9045,7 +9052,8 @@ body.task-bar-open {{ padding-top: 40px; }}
       <div id="plan-stream-stats" class="stream-stats"></div>
     </div>
     <div class="modal-footer" style="flex-wrap:wrap;gap:6px;">
-      <button class="btn-secondary" onclick="closeModal('plan-modal')">Close</button>
+      <button class="btn-secondary" onclick="closeModal('plan-modal')"
+              title="Dismiss the Plan modal. Unsaved edits to any tab are discarded.">Close</button>
       <button class="btn-secondary" onclick="regeneratePlan()" id="plan-regen-btn" style="margin-left:auto;"
               title="LLM-regenerate the Book plan (leitmotiv) from current chapters + paper corpus. Visible only on the Book tab.">&#9889; Regenerate with LLM</button>
       <button class="btn-primary" onclick="savePlan()"
@@ -9486,7 +9494,8 @@ body.task-bar-open {{ padding-top: 40px; }}
       </ol>
     </div>
     <div class="modal-footer">
-      <button class="btn-primary" onclick="closeModal('ai-help-modal')">Got it</button>
+      <button class="btn-primary" onclick="closeModal('ai-help-modal')"
+              title="Close this help card.">Got it</button>
     </div>
   </div>
 </div>
@@ -9803,7 +9812,8 @@ body.task-bar-open {{ padding-top: 40px; }}
                    title="Pick one or many PDFs from your browser. They're uploaded to the server's inbox.">
             <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;margin-bottom:4px;"
                    title="Kick off the convert → metadata → chunk → embed pipeline right after upload. Uncheck to just stage the files.">
-              <input type="checkbox" id="sw-upload-start-ingest" checked>
+              <input type="checkbox" id="sw-upload-start-ingest" checked
+                     title="Kick off the convert → metadata → chunk → embed pipeline right after upload.">
               start ingesting immediately
             </label>
             <button class="btn-primary" onclick="swUploadPDFs()"
@@ -9822,11 +9832,13 @@ body.task-bar-open {{ padding-top: 40px; }}
             <div class="field" style="display:flex;gap:10px;flex-wrap:wrap;">
               <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
                      title="Walk sub-directories. Uncheck to only ingest PDFs directly in the given folder.">
-                <input type="checkbox" id="sw-ingest-recursive" checked> recursive
+                <input type="checkbox" id="sw-ingest-recursive" checked
+                       title="Walk sub-directories. Uncheck to only ingest PDFs directly in the given folder."> recursive
               </label>
               <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
                      title="Re-ingest PDFs even if their SHA-256 is already in the DB. Use only when you deliberately want to re-run the pipeline.">
-                <input type="checkbox" id="sw-ingest-force"> force re-ingest
+                <input type="checkbox" id="sw-ingest-force"
+                       title="Re-ingest PDFs even if their SHA-256 hash is already present in the DB."> force re-ingest
               </label>
             </div>
             <button class="btn-primary" onclick="swIngestDirectory()"
@@ -9865,7 +9877,8 @@ body.task-bar-open {{ padding-top: 40px; }}
             </p>
             <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;margin-bottom:4px;"
                    title="Drop the existing clusters and rebuild from all abstracts. Default is incremental (only new papers).">
-              <input type="checkbox" id="sw-cluster-rebuild"> rebuild from scratch
+              <input type="checkbox" id="sw-cluster-rebuild"
+                     title="Drop the existing clusters and rebuild from all abstracts. Default is incremental."> rebuild from scratch
             </label>
             <button class="btn-primary" onclick="swRunIndex('cluster')"
                     title="Run BERTopic over paper abstracts. Needed before `--topic` filtering or the Topics browser works.">Cluster</button>
@@ -9887,11 +9900,13 @@ body.task-bar-open {{ padding-top: 40px; }}
             </p>
             <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;margin-bottom:4px;"
                    title="Re-compile every paper's wiki page, even if it's already present.">
-              <input type="checkbox" id="sw-wiki-rebuild"> rebuild
+              <input type="checkbox" id="sw-wiki-rebuild"
+                     title="Re-compile every paper's wiki page, even if it's already present."> rebuild
             </label>
             <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;margin-bottom:4px;"
                    title="Re-compile only pages flagged as stale (sources have changed since last compile).">
-              <input type="checkbox" id="sw-wiki-stale" checked> rewrite stale
+              <input type="checkbox" id="sw-wiki-stale" checked
+                     title="Re-compile only pages flagged as stale (sources changed since last compile)."> rewrite stale
             </label>
             <button class="btn-primary" onclick="swRunIndex('wiki')"
                     title="Run `sciknow wiki compile`: one LLM call per paper → page, visuals, KG triples.">Compile wiki</button>
@@ -10101,7 +10116,8 @@ body.task-bar-open {{ padding-top: 40px; }}
           <div style="flex:1;min-width:100px;display:flex;align-items:center;">
             <label style="display:flex;align-items:center;gap:6px;font-weight:400;"
                    title="Ask an LLM to rewrite / expand your query (HyDE-style) before retrieval. Slight latency cost, sometimes big recall win for terse queries.">
-              <input type="checkbox" id="tl-search-expand"> LLM expand
+              <input type="checkbox" id="tl-search-expand"
+                     title="Ask an LLM to rewrite / expand your query (HyDE-style) before retrieval. Small latency cost, sometimes big recall win for terse queries."> LLM expand
             </label></div>
           <button class="btn-primary" onclick="doToolSearch('query')"
                   title="Run the hybrid search. Streams results inline.">Search</button>
@@ -10223,13 +10239,19 @@ body.task-bar-open {{ padding-top: 40px; }}
           </span>
         </div>
         <div class="tabs" style="margin-bottom:10px;">
-          <button class="tab active" data-ctab="corp-enrich" onclick="switchCorpusTab('corp-enrich')">&#128270; Enrich</button>
-          <button class="tab" data-ctab="corp-cites" onclick="switchCorpusTab('corp-cites')">&#127760; Expand (citations)</button>
+          <button class="tab active" data-ctab="corp-enrich" onclick="switchCorpusTab('corp-enrich')"
+                  title="Fill missing DOIs via Crossref/OpenAlex/arXiv title-search and persist OpenAlex concepts/funders/grants/ROR. No new papers downloaded.">&#128270; Enrich</button>
+          <button class="tab" data-ctab="corp-cites" onclick="switchCorpusTab('corp-cites')"
+                  title="Follow references FROM each corpus paper → download OA PDFs → ingest. The classic expand command.">&#127760; Expand (citations)</button>
           <button class="tab" data-ctab="corp-agentic" onclick="switchCorpusTab('corp-agentic')" title="Phase 54.6.114 — LLM decomposes a research question into sub-topics, measures corpus coverage, auto-expands gaps.">&#129504; Agentic (question-driven)</button>
-          <button class="tab" data-ctab="corp-author" onclick="switchCorpusTab('corp-author')">&#128100; Expand by author</button>
-          <button class="tab" data-ctab="corp-inbound" onclick="switchCorpusTab('corp-inbound')">&#128258; Inbound cites</button>
-          <button class="tab" data-ctab="corp-topic" onclick="switchCorpusTab('corp-topic')">&#128269; Topic search</button>
-          <button class="tab" data-ctab="corp-coauth" onclick="switchCorpusTab('corp-coauth')">&#128101; Coauthors</button>
+          <button class="tab" data-ctab="corp-author" onclick="switchCorpusTab('corp-author')"
+                  title="Pull every paper by a specific author (ORCID-preferred). Strict-author matching to defend against name collisions.">&#128100; Expand by author</button>
+          <button class="tab" data-ctab="corp-inbound" onclick="switchCorpusTab('corp-inbound')"
+                  title="Find papers that CITE the corpus — forward-in-time mirror of db expand. Uses OpenAlex cites: filter.">&#128258; Inbound cites</button>
+          <button class="tab" data-ctab="corp-topic" onclick="switchCorpusTab('corp-topic')"
+                  title="Free-text OpenAlex search. Push-based expansion — solves bootstrap / sideways-expansion problem.">&#128269; Topic search</button>
+          <button class="tab" data-ctab="corp-coauth" onclick="switchCorpusTab('corp-coauth')"
+                  title="Snowball via coauthors of corpus papers. Captures the 'invisible college' — same-lab researchers who don't always cite each other.">&#128101; Coauthors</button>
         </div>
 
         <!-- Enrich (metadata) panel -->
@@ -10285,11 +10307,13 @@ body.task-bar-open {{ padding-top: 40px; }}
             </label>
             <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
                    title="Run the full ingest pipeline (convert → metadata → chunk → embed) on downloaded PDFs. Uncheck to only download into data/downloads without ingesting.">
-              <input type="checkbox" id="tl-exp-ingest" checked> ingest
+              <input type="checkbox" id="tl-exp-ingest" checked
+                     title="Run the full convert → metadata → chunk → embed pipeline on downloaded PDFs. Uncheck for download-only."> ingest
             </label>
             <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
                    title="Gate downloads by centroid/anchor cosine threshold. Uncheck to download every ranked candidate regardless of topical similarity.">
-              <input type="checkbox" id="tl-exp-relevance" checked> relevance filter
+              <input type="checkbox" id="tl-exp-relevance" checked
+                     title="Gate downloads by centroid/anchor cosine threshold. Uncheck to download every ranked candidate."> relevance filter
             </label>
           </div>
           <div class="field" style="margin-top:4px;display:flex;gap:8px;align-items:flex-end;">
@@ -10348,11 +10372,13 @@ body.task-bar-open {{ padding-top: 40px; }}
               <input type="number" id="tl-ag-threshold" value="3" min="1" max="20"
                      title="Corpus papers required to call a sub-topic 'covered'."></div>
             <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
-              <input type="checkbox" id="tl-ag-dry"> dry-run
+              <input type="checkbox" id="tl-ag-dry"
+                     title="Compute the plan + coverage measurement without downloading. Useful to confirm sub-topic decomposition before burning API calls."> dry-run
             </label>
             <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
                    title="Phase 54.6.124 — resume from a prior checkpoint. The same question re-uses its state via a slug+hash path at <project>/data/expand/agentic/">
-              <input type="checkbox" id="tl-ag-resume"> resume
+              <input type="checkbox" id="tl-ag-resume"
+                     title="Phase 54.6.124 — resume from a prior checkpoint. Same question → same state path at <project>/data/expand/agentic/"> resume
             </label>
           </div>
           <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap;">
@@ -10382,7 +10408,8 @@ body.task-bar-open {{ padding-top: 40px; }}
                        title="Cap on authors processed this run. Default 10, ordered by corpus citation count."></label></div>
               <label style="display:flex;align-items:center;gap:4px;font-size:11px;"
                      title="Compute the author list + per-author plan without downloading. Useful to confirm which names will be processed.">
-                <input type="checkbox" id="tl-oeu-dry"> dry-run
+                <input type="checkbox" id="tl-oeu-dry"
+                       title="Compute the author list + per-author plan without downloading."> dry-run
               </label>
               <button class="btn-secondary" onclick="runOeuvreExpand()"
                       title="Scan corpus → find authors with ≥ Min papers → loop expand-author over them with the configured limits. ORCID-preferred, strict-author match.">Run oeuvre expansion</button>
@@ -10441,23 +10468,28 @@ body.task-bar-open {{ padding-top: 40px; }}
           <div class="field" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:4px;">
             <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
                    title="Filter fetched papers to keep only those where this author is actually on the authorship list (defends against OpenAlex name-collision hits).">
-              <input type="checkbox" id="tl-eauth-strict" checked> strict author match
+              <input type="checkbox" id="tl-eauth-strict" checked
+                     title="Drop fetched papers where the queried author is NOT on the authorship list. Defends against OpenAlex name collisions."> strict author match
             </label>
             <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
                    title="Skip the interactive disambiguation banner and keep every hit that matches the queried name. Use for truly unambiguous names.">
-              <input type="checkbox" id="tl-eauth-all"> keep all matches (skip disamb.)
+              <input type="checkbox" id="tl-eauth-all"
+                     title="Skip the multi-candidate disambiguation banner and keep every hit matching the queried name. Use only for unambiguous names."> keep all matches (skip disamb.)
             </label>
             <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
                    title="Gate downloads by centroid/anchor cosine threshold. Uncheck to download every paper by this author regardless of topical similarity.">
-              <input type="checkbox" id="tl-eauth-relevance" checked> relevance filter
+              <input type="checkbox" id="tl-eauth-relevance" checked
+                     title="Gate downloads by centroid/anchor cosine threshold. Uncheck to download every paper by this author."> relevance filter
             </label>
             <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
                    title="Run the full convert → metadata → chunk → embed pipeline on downloaded PDFs. Uncheck to download-only into data/downloads/.">
-              <input type="checkbox" id="tl-eauth-ingest" checked> ingest
+              <input type="checkbox" id="tl-eauth-ingest" checked
+                     title="Run the full ingest pipeline on downloaded PDFs. Uncheck for download-only."> ingest
             </label>
             <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
                    title="Compute the plan (candidate list + relevance scores) without downloading PDFs.">
-              <input type="checkbox" id="tl-eauth-dry"> dry-run
+              <input type="checkbox" id="tl-eauth-dry"
+                     title="Compute the plan (candidate list + relevance scores) without downloading PDFs."> dry-run
             </label>
           </div>
           <div class="field" style="margin-top:4px;">
@@ -10467,7 +10499,8 @@ body.task-bar-open {{ padding-top: 40px; }}
                    title="Free-text anchor for relevance scoring. Leave blank to use the corpus centroid. A focused anchor helps keep the author's off-topic papers out.">
           </div>
           <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
-            <button class="btn-primary" onclick="openExpandAuthorPreview()">
+            <button class="btn-primary" onclick="openExpandAuthorPreview()"
+                    title="Build the author's candidate shortlist and open the cherry-pick preview. Nothing downloads until you tick rows.">
               &#128269; Preview candidates
             </button>
             <button class="btn-secondary" onclick="doToolCorpus('expand-author')"
@@ -10510,11 +10543,13 @@ body.task-bar-open {{ padding-top: 40px; }}
                      title="Drop candidates below this bge-m3 cosine score."></div>
             <label style="display:flex;align-items:center;gap:4px;font-size:11px;"
                    title="Compute the candidate shortlist without downloading. Useful to check per-seed fan-out sizes.">
-              <input type="checkbox" id="tl-inb-dry"> dry-run
+              <input type="checkbox" id="tl-inb-dry"
+                     title="Compute the candidate shortlist without downloading. Useful to check per-seed fan-out sizes."> dry-run
             </label>
             <label style="display:flex;align-items:center;gap:4px;font-size:11px;"
                    title="Ignore the no_oa / ingest_failed caches.">
-              <input type="checkbox" id="tl-inb-retry"> retry failed
+              <input type="checkbox" id="tl-inb-retry"
+                     title="Ignore the .no_oa_cache + .ingest_failed sidecar files for this batch."> retry failed
             </label>
           </div>
           <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
@@ -10695,7 +10730,8 @@ body.task-bar-open {{ padding-top: 40px; }}
           </label>
           <label style="font-size:12px;display:flex;align-items:center;gap:4px;"
                  title="Run the full ingest pipeline (convert → metadata → chunk → embed) on the selected PDFs right after they download. Uncheck for download-only.">
-            <input type="checkbox" id="eap-ingest" checked> ingest after download
+            <input type="checkbox" id="eap-ingest" checked
+                   title="Run the full ingest pipeline on downloaded PDFs. Uncheck for download-only."> ingest after download
           </label>
           <!-- Phase 54.6.52 — retry bypasses .no_oa_cache + .ingest_failed
                for this batch. Off by default (honor the cache) so the
@@ -10704,7 +10740,8 @@ body.task-bar-open {{ padding-top: 40px; }}
                a broken PDF. -->
           <label style="font-size:12px;display:flex;align-items:center;gap:4px;"
                  title="Ignore the .no_oa_cache + .ingest_failed sidecar files for this batch. Use after adding a new OA source (HAL/Zenodo in 54.6.51) or fixing a broken PDF converter.">
-            <input type="checkbox" id="eap-retry-failed"> retry previously-failed
+            <input type="checkbox" id="eap-retry-failed"
+                   title="Ignore the .no_oa_cache + .ingest_failed sidecars for this batch. Use after adding a new OA source or fixing a broken PDF converter."> retry previously-failed
           </label>
           <button class="btn-primary" id="eap-download-btn"
                   onclick="eapDownloadSelected()" style="margin-left:auto;"
@@ -11193,7 +11230,8 @@ body.task-bar-open {{ padding-top: 40px; }}
   </div>
 </div>
 
-<button class="theme-toggle" onclick="toggleTheme()" id="theme-btn">
+<button class="theme-toggle" onclick="toggleTheme()" id="theme-btn"
+        title="Toggle between light and dark themes. Preference is saved to localStorage.">
   <span id="theme-icon">&#9788;</span>
   <span class="label" id="theme-label">Light</span>
 </button>
@@ -11424,7 +11462,7 @@ function showEmptyHint(html) {{
     hint.className = 'empty-hint';
     document.body.appendChild(hint);
   }}
-  hint.innerHTML = html + '<button onclick="document.getElementById(&#39;empty-hint&#39;).remove()" style="margin-left:12px;background:transparent;border:1px solid var(--border);color:var(--fg);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">Dismiss</button>';
+  hint.innerHTML = html + '<button onclick="document.getElementById(&#39;empty-hint&#39;).remove()" style="margin-left:12px;background:transparent;border:1px solid var(--border);color:var(--fg);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;" title="Hide this hint. It auto-dismisses after 6 seconds.">Dismiss</button>';
   // Auto-dismiss after 6s
   if (hint._timer) clearTimeout(hint._timer);
   hint._timer = setTimeout(() => {{
@@ -14759,7 +14797,7 @@ async function showDashboard() {{
       if (g.type === 'draft' && g.chapter_num) {{
         // Phase 42 — data-action dispatch; chapter_num is a numeric
         // attr, parsed back via parseInt in the handler.
-        btn = '<button data-action="write-for-gap" data-chapter-num="' + g.chapter_num + '">Write</button>';
+        btn = '<button data-action="write-for-gap" data-chapter-num="' + g.chapter_num + '" title="Open this gap chapter + start a write job scoped to its topic.">Write</button>';
       }} else if (g.type === 'topic' || g.type === 'evidence') {{
         // Phase 54.6.5 — replace the old "Run: sciknow db expand" alert
         // with a real one-click flow: prefill the Topic-search subtab
@@ -14873,8 +14911,8 @@ function previewEmptySection(chapterId, sectionType) {{
     '</div>' +
     planHtml +
     '<div style="margin-top:24px;display:flex;gap:8px;flex-wrap:wrap;">' +
-    '<button class="btn-primary" onclick="doWrite()">\\u270e Start writing</button>' +
-    '<button class="btn-secondary" onclick="doAutowrite()">\\u26a1 Autowrite (with iterations)</button>' +
+    '<button class="btn-primary" onclick="doWrite()" title="Write one draft: retrieve → generate → persist. Stops after a single pass.">\\u270e Start writing</button>' +
+    '<button class="btn-secondary" onclick="doAutowrite()" title="Write, score, and iterate (auto-revise) until the scorer + claim verifier pass thresholds. Configurable in Autowrite settings.">\\u26a1 Autowrite (with iterations)</button>' +
     '</div>' +
     '<p style="margin-top:24px;font-size:12px;color:var(--fg-muted);">' +
     'This section has no draft yet. Click <strong>Start writing</strong> for a single ' +
@@ -16909,9 +16947,9 @@ async function loadWikiPages(page) {{
 
     if (data.n_pages > 1) {{
       html += '<div class="catalog-pager">';
-      html += '<button data-action="load-wiki-pages" data-page="' + (wikiBrowsePage - 1) + '" ' + (wikiBrowsePage <= 1 ? 'disabled' : '') + '>‹ Prev</button>';
+      html += '<button data-action="load-wiki-pages" data-page="' + (wikiBrowsePage - 1) + '" ' + (wikiBrowsePage <= 1 ? 'disabled' : '') + ' title="Previous page of wiki results.">‹ Prev</button>';
       html += '<span>Page ' + data.page + ' of ' + data.n_pages + '  ·  ' + data.total + ' pages</span>';
-      html += '<button data-action="load-wiki-pages" data-page="' + (wikiBrowsePage + 1) + '" ' + (wikiBrowsePage >= data.n_pages ? 'disabled' : '') + '>Next ›</button>';
+      html += '<button data-action="load-wiki-pages" data-page="' + (wikiBrowsePage + 1) + '" ' + (wikiBrowsePage >= data.n_pages ? 'disabled' : '') + ' title="Next page of wiki results.">Next ›</button>';
       html += '</div>';
     }}
 
@@ -18454,7 +18492,7 @@ async function openExpandAuthorPreview() {{
         + `<th style="padding:2px 8px;">ID</th></tr></thead>`
         + `<tbody>${{rows}}</tbody></table>`
         + `<div style="margin-top:8px;display:flex;gap:8px;align-items:center;">`
-        + `<button class="btn-primary" onclick="eapRequeryWithSelected()" style="font-size:11px;padding:4px 10px;">`
+        + `<button class="btn-primary" onclick="eapRequeryWithSelected()" style="font-size:11px;padding:4px 10px;" title="Re-run the search pinned to the ticked author IDs only. Defeats OpenAlex name-collision disambiguation.">`
         + `&#128269; Re-query with <span id="eap-sel-count">${{numSelected}}</span> selected</button>`
         + `<span style="font-size:10px;color:var(--fg-muted);">`
         + `Click rows to toggle. Re-query runs preview scoped to the ticked author IDs only.`
@@ -18595,7 +18633,7 @@ async function eapRequeryWithSelected() {{
         + `<th style="padding:2px 8px;">ID</th></tr></thead>`
         + `<tbody>${{rows}}</tbody></table>`
         + `<div style="margin-top:8px;display:flex;gap:8px;align-items:center;">`
-        + `<button class="btn-primary" onclick="eapRequeryWithSelected()" style="font-size:11px;padding:4px 10px;">`
+        + `<button class="btn-primary" onclick="eapRequeryWithSelected()" style="font-size:11px;padding:4px 10px;" title="Re-run the search pinned to the ticked author IDs only. Defeats OpenAlex name-collision disambiguation.">`
         + `&#128269; Re-query with <span id="eap-sel-count">${{numSelected}}</span> selected</button>`
         + `</div></div>`;
       document.getElementById('eap-info').innerHTML += banner;
@@ -19762,9 +19800,9 @@ async function loadCatalog(page) {{
     html += '</tbody></table>';
 
     html += '<div class="catalog-pager">';
-    html += '<button data-action="load-catalog" data-page="' + (catalogPage - 1) + '" ' + (catalogPage <= 1 ? 'disabled' : '') + '>‹ Prev</button>';
+    html += '<button data-action="load-catalog" data-page="' + (catalogPage - 1) + '" ' + (catalogPage <= 1 ? 'disabled' : '') + ' title="Previous page of papers.">‹ Prev</button>';
     html += '<span>Page ' + data.page + ' of ' + data.n_pages + '  ·  ' + data.total + ' papers</span>';
-    html += '<button data-action="load-catalog" data-page="' + (catalogPage + 1) + '" ' + (catalogPage >= data.n_pages ? 'disabled' : '') + '>Next ›</button>';
+    html += '<button data-action="load-catalog" data-page="' + (catalogPage + 1) + '" ' + (catalogPage >= data.n_pages ? 'disabled' : '') + ' title="Next page of papers.">Next ›</button>';
     html += '</div>';
 
     results.innerHTML = html;
@@ -20245,7 +20283,7 @@ function populatePlanChapterTab(ch) {{
   }});
   // Phase 54.6.67 — + Add section button below the list.
   html += '<div style="margin-top:12px;">'
-       +  '<button class="btn-secondary" onclick="addPlanSection()">+ Add section</button>'
+       +  '<button class="btn-secondary" onclick="addPlanSection()" title="Append a new empty section to the end of this chapter. You can rename and reorder after adding.">+ Add section</button>'
        +  '</div>';
   list.innerHTML = html;
 }}
@@ -22160,7 +22198,7 @@ async function loadBundleList(scope) {{
       html += '<td style="padding:6px 4px;color:var(--fg-muted);">' + (s.word_count || 0).toLocaleString() + '</td>';
       html += '<td style="padding:6px 4px;color:var(--fg-muted);font-size:11px;">' + created + '</td>';
       html += '<td style="padding:6px 4px;text-align:right;">';
-      html += '<button data-action="restore-bundle" data-snapshot-id="' + s.id + '" data-scope="' + scope + '" style="font-size:12px;padding:3px 10px;">Restore</button>';
+      html += '<button data-action="restore-bundle" data-snapshot-id="' + s.id + '" data-scope="' + scope + '" style="font-size:12px;padding:3px 10px;" title="Restore every draft in this bundle as NEW draft versions. Existing drafts are kept as an undo path.">Restore</button>';
       html += '</td></tr>';
     }});
     html += '</tbody></table>';
@@ -22223,8 +22261,8 @@ async function showSnapshots() {{
     html += '<div class="snap-item">';
     html += '<span>' + s.name + ' (' + s.word_count + 'w)</span>';
     html += '<div>';
-    html += '<button data-action="diff-snapshot" data-snapshot-id="' + s.id + '">Diff</button> ';
-    html += '<button data-action="restore-snapshot" data-snapshot-id="' + s.id + '">Restore</button>';
+    html += '<button data-action="diff-snapshot" data-snapshot-id="' + s.id + '" title="Show a line-diff between this snapshot and the current draft.">Diff</button> ';
+    html += '<button data-action="restore-snapshot" data-snapshot-id="' + s.id + '" title="Restore this snapshot as a new draft version. Current draft is preserved.">Restore</button>';
     html += '</div></div>';
   }});
   html += '</div>';
@@ -22354,7 +22392,7 @@ async function swLoadProjectsForWizard() {{
         ? ' <span style="color:var(--accent);font-size:10px;">(running here)</span>'
         : '';
       const useBtn = p.slug === active ? '' :
-        `<button onclick="swUseProject('${{p.slug}}')">Use</button>`;
+        `<button onclick="swUseProject('${{p.slug}}')" title="Set this project as active (.active-project file). Requires restarting \`sciknow book serve\` to take effect.">Use</button>`;
       return `<div style="padding:6px 10px;border-bottom:1px solid var(--border);
                            display:flex;align-items:center;gap:8px;">
         <span style="color:var(--accent);">${{mark}}</span>
@@ -22860,7 +22898,7 @@ async function loadVisuals(append) {{
     const loadMoreHtml =
       '<div id="vis-loadmore-wrap" style="display:flex;justify-content:center;padding:10px 0;">'
       + (hasMore
-          ? '<button class="btn-secondary" onclick="loadVisuals(true)" style="font-size:12px;">Load more (' + items.length + ' / ' + universe + ')</button>'
+          ? '<button class="btn-secondary" onclick="loadVisuals(true)" style="font-size:12px;" title="Fetch the next page of visuals matching the current filters.">Load more (' + items.length + ' / ' + universe + ')</button>'
           : '<span style="font-size:11px;color:var(--fg-muted);">End of list (' + items.length + ' / ' + universe + ')</span>')
       + '</div>';
 
@@ -23406,7 +23444,7 @@ async function refreshProjectsList() {{
         : `<button onclick="useProject('${{p.slug}}')" title="Set .active-project to ${{p.slug}}">Use</button>`;
       const destroyBtn = (p.is_default || isRunning) ? ''
         : `<button onclick="destroyProject('${{p.slug}}')" style="color:var(--danger);" title="Drop DB + collections + data dir">Destroy</button>`;
-      const showBtn = `<button onclick="showProjectDetail('${{p.slug}}')">Details</button>`;
+      const showBtn = `<button onclick="showProjectDetail('${{p.slug}}')" title="Show this project's stats (paper count, chunk count, embedding model) and migration + venue-config state.">Details</button>`;
       return `<tr>
         <td style="text-align:center;width:30px;">${{activeMark}}</td>
         <td style="font-weight:600;">${{p.slug}}${{isRunning ? ' <span style="font-size:10px;color:var(--accent);">(running)</span>' : ''}}</td>
@@ -23449,7 +23487,7 @@ async function showProjectDetail(slug) {{
     dest.innerHTML = `<div style="border:1px solid var(--border);border-radius:var(--r-md);padding:10px;background:var(--toolbar-bg);">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
         <strong>${{d.slug}}${{d.is_default ? ' <span style="font-size:11px;color:var(--fg-muted);">(legacy default)</span>' : ''}}</strong>
-        <button onclick="document.getElementById('proj-detail').innerHTML=''">&times;</button>
+        <button onclick="document.getElementById('proj-detail').innerHTML=''" title="Close the project details panel.">&times;</button>
       </div>
       <dl style="display:grid;grid-template-columns:140px 1fr;gap:4px 12px;font-size:12px;margin:0;">
         <dt style="color:var(--fg-muted);">Root</dt><dd style="font-family:var(--font-mono);font-size:11px;">${{d.root}}</dd>
