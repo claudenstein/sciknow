@@ -137,20 +137,38 @@ bge-m3 we already load.
 
 **Effort:** 3-4h. Biggest win in this section.
 
-### 2.2 SPECTER2 rerank (parked in Phase 49, now revisit)
+### 2.2 SPECTER2 rerank (PARKED — measured 2026-04-19, decisive negative)
 
-Originally parked because "marginal improvement, 440 MB VRAM cost."
-The 2025 release (SPECTER2 Adapters) works at 110 MB per adapter
-(climate-science adapter exists). Now worth revisiting: (a) smaller
-VRAM, (b) co-resides with the writer at bench time only, (c) the
-published +6% MRR@10 on SciDocs-Climate is larger than the Phase 49
-gain from any single signal except co-citation.
+Originally parked in Phase 49 as "marginal improvement, 440 MB VRAM
+cost." Re-tested in Phase 54.6.121 against the 54.6.69 retrieval
+probe set (200 queries, global-cooling corpus). Result was **−0.37
+MRR@10 vs the bge-m3 + RRF baseline** — not marginal improvement
+but catastrophic degradation:
 
-**When to ship:** after we measure Phase 49 RRF's MRR@10 on the 54.6.69
-retrieval bench (baseline 0.514). If SPECTER2 pushes past 0.60, it's
-the new default rerank. If it lands at 0.55-0.58, park again.
+| metric | bge-m3 baseline | SPECTER2 rerank | delta |
+| --- | --- | --- | --- |
+| MRR@10 | 0.576 | 0.206 | **−0.37** |
+| Recall@1 | 41.0% | 13.5% | **−27.5pp** |
+| Recall@10 | 87.5% | 44.0% | **−43.5pp** |
+| NDCG@10 | 0.649 | 0.260 | **−0.39** |
 
-**Effort:** 1-2 days.
+Why: SPECTER2 was trained on **title + abstract pairs**. Our chunks
+are ~512-token paragraphs of mid-paper prose with section headers
+and citation markers — out-of-distribution for SPECTER2's training
+contract. bge-m3 is purpose-trained for hybrid dense+sparse retrieval
+on arbitrary passage shapes.
+
+**Decision: permanent PARK as a chunk-level reranker.** SPECTER2 is
+*not* a drop-in replacement for our bge-m3 + RRF + cross-encoder
+pipeline.
+
+**Where SPECTER2 might still help:** PAPER-level retrieval (rerank
+the `abstracts` Qdrant collection against a query). That's a separate
+use case from chunk retrieval and a future bench when we have a
+paper-level eval set. Not on the current roadmap.
+
+The bench code stays at `sciknow/testing/specter2_bench.py` so
+future re-tests against new releases / new corpora are one-shot.
 
 ### 2.3 Diversity sampling (MMR / DPP)
 
