@@ -1226,6 +1226,15 @@ def _vlm_sweep_layer() -> list[tuple[str, BenchFn]]:
     return list(_v.SWEEP_BENCHES)
 
 
+def _specter2_layer() -> list[tuple[str, BenchFn]]:
+    """Phase 54.6.122 — SPECTER2 reranker bench. Single function, but
+    keeps the lazy-import discipline: pulls in torch + transformers +
+    the SPECTER2 model (~440 MB) on first call; we don't pay for that
+    on every bench invocation."""
+    from sciknow.testing import specter2_bench as _s2
+    return [("retrieval", _s2.b_specter2_rerank)]
+
+
 LAYERS: dict[str, list[tuple[str, BenchFn]]] = {
     "fast":  _FAST,
     "live":  _LIVE,
@@ -1233,11 +1242,11 @@ LAYERS: dict[str, list[tuple[str, BenchFn]]] = {
     "full":  _FAST + _LIVE + _LLM,
 }
 
-# "sweep", "quality", "vlm-sweep" are pseudo-layers: not stored in
-# LAYERS (which would break the invariant that every layer has >= 1
-# bench fn) — resolved lazily in run_layer().
+# "sweep", "quality", "vlm-sweep", "specter2" are pseudo-layers: not
+# stored in LAYERS (which would break the invariant that every layer
+# has >= 1 bench fn) — resolved lazily in run_layer().
 VALID_LAYERS: tuple[str, ...] = tuple(LAYERS.keys()) + (
-    "sweep", "quality", "vlm-sweep",
+    "sweep", "quality", "vlm-sweep", "specter2",
 )
 
 
@@ -1248,6 +1257,8 @@ def run_layer(layer: str) -> list[BenchResult]:
         benches = _quality_layer()
     elif layer == "vlm-sweep":
         benches = _vlm_sweep_layer()
+    elif layer == "specter2":
+        benches = _specter2_layer()
     else:
         benches = LAYERS.get(layer)
     if benches is None:

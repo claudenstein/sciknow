@@ -204,6 +204,14 @@ def bench_cmd(
                scorer, wiki consensus). Uses a ~440 MB NLI cross-encoder
                (cross-encoder/nli-deberta-v3-base) for entailment,
                downloaded on first run. ~30-60 min for 3 models × 7 tasks.
+      specter2 — SPECTER2 rerank measurement (54.6.121-122). Runs the
+               54.6.69 retrieval probe set through hybrid_search top-50
+               → SPECTER2 rerank, reports MRR@10 / Recall@1 / Recall@10
+               / NDCG@10 vs the bge-m3 baseline + ship-decision verdict
+               (criterion: delta ≥ +0.06 MRR). ~20 s for 200 probes
+               once the SPECTER2 model is cached. Currently PARKED per
+               docs/EXPAND_ENRICH_RESEARCH_2.md §2.2; this layer exists
+               so future re-tests against new releases are one-shot.
       full   — every bench. Run before a release or after infra change.
     """
     from sciknow.testing import bench as bench_mod
