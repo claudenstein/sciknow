@@ -295,7 +295,69 @@ def check_coverage(
     return out
 
 
-# ── Phase 54.6.132 — preview-mode candidate gathering ───────────────
+# ── Phase 54.6.132 → 54.6.133 — RRF-parity preview gathering ───────
+
+
+def _parse_shortlist_tsv(tsv_path) -> list[dict]:
+    """Parse a Phase-49 ``expand_shortlist.tsv`` into the candidate
+    dict shape eapRender expects. Mirrors the parser in the
+    ``/api/corpus/expand/preview/.../candidates`` web endpoint so the
+    agentic preview produces the same row shape as the non-agentic
+    expand preview."""
+    import csv
+
+    out: list[dict] = []
+
+    def _f(row, k):
+        v = row.get(k)
+        if not v or v in ("None", "nan"):
+            return None
+        try:
+            return float(v)
+        except Exception:
+            return None
+
+    def _i(row, k):
+        v = row.get(k)
+        if not v or v in ("None", "nan"):
+            return None
+        try:
+            return int(float(v))
+        except Exception:
+            return None
+
+    with open(tsv_path, "r", encoding="utf-8", newline="") as f:
+        for row in csv.DictReader(f, delimiter="\t"):
+            decision = (row.get("decision") or "").upper()
+            # Preview surfaces only KEEP rows — the dropped ones were
+            # filtered out by the same hard filters auto-mode applies
+            # (retraction / predatory / one-timer) and would never be
+            # downloaded. Showing them just clutters the cherry-pick UI.
+            if decision != "KEEP":
+                continue
+            doi = (row.get("doi") or "").strip() or None
+            out.append({
+                "doi": doi,
+                "arxiv_id": (row.get("arxiv_id") or "").strip() or None,
+                "title": (row.get("title") or "").strip(),
+                "authors": [],
+                "year": _i(row, "year"),
+                "relevance_score": _f(row, "bge_m3_cosine"),
+                "rrf_score": _f(row, "rrf_score"),
+                "decision": decision,
+                "drop_reason": None,
+                "signals": {
+                    "co_citation":       _f(row, "co_citation"),
+                    "bib_coupling":      _f(row, "bib_coupling"),
+                    "pagerank":          _f(row, "pagerank"),
+                    "influential_cites": _i(row, "influential_cites"),
+                    "cited_by":          _i(row, "cited_by"),
+                    "velocity":          _f(row, "velocity"),
+                    "concept_overlap":   _f(row, "concept_overlap"),
+                    "venue":             (row.get("venue") or "").strip() or None,
+                },
+            })
+    return out
 
 
 def gather_candidates_for_gaps(
@@ -303,74 +365,126 @@ def gather_candidates_for_gaps(
     *,
     budget_per_gap: int = 10,
     on_progress=None,
+    project_root=None,
 ) -> dict:
-    """Phase 54.6.132 — single-round PREVIEW path. For each gap
-    sub-topic, run an OpenAlex topic search via
-    ``find_topic_candidates`` (the same backend ``expand-topic`` uses),
-    annotate every candidate with its source sub-topic, dedup by DOI
-    across gaps, and return the merged shortlist for cherry-pick.
+    """Phase 54.6.133 — HONEST preview: per gap, spawn the same
+    ``db expand --relevance-query <gap>`` pipeline auto-mode runs,
+    but in dry-run mode that emits a shortlist TSV instead of
+    downloading. Parse each TSV into candidate dicts annotated with
+    ``_agentic_subtopic`` so the GUI shows them grouped, dedup by
+    DOI across gaps, and return the merged list.
 
-    NOTE: in auto-mode the round runs ``db expand --relevance-query
-    <gap>`` per gap, which does an OUTBOUND citation crawl (papers
-    referenced by the corpus, ranked by similarity to <gap>). In
-    preview-mode we deliberately use a free OpenAlex topic search
-    instead — much faster and easier to evaluate, at the cost of
-    pulling from a different source distribution. The CLAIMED
-    candidates may differ; the goal here is to give the user a
-    fast, transparent picture of "what's out there for this gap"
-    before any disk write.
+    Why subprocess + TSV: ``_run_rrf_ranker`` is wired into the CLI
+    ``expand`` command's reference-extraction + cosine-prefiltering
+    pipeline; calling it in-process would require reproducing a few
+    hundred lines of upstream setup. The subprocess + TSV mechanism
+    is already proven (used by ``/api/corpus/expand/preview``) and
+    gives true parity: the candidates surfaced here are exactly the
+    ones auto-mode would download, just deferred to user approval.
+
+    Cost: ~30-90s per gap subprocess (bge-m3 cold-load + reference
+    extraction + RRF). For 5 gaps that's typically 3-7 min wall.
+    Worth it because the preview now matches reality.
     """
-    from sciknow.core.expand_ops import find_topic_candidates
+    import os
+    import subprocess
+    import sys as _sys
+    import tempfile
+    import time as _time
+    from pathlib import Path as _Path
 
     out: list[dict] = []
     seen_dois: set[str] = set()
     per_gap_stats: list[dict] = []
-    total_raw = 0
+    total_kept = 0
     cross_gap_dups = 0
-    for i, gap in enumerate(gaps, start=1):
-        if on_progress:
+
+    tmp_dir = _Path(tempfile.mkdtemp(prefix="sciknow-agentic-preview-"))
+    try:
+        for i, gap in enumerate(gaps, start=1):
+            if on_progress:
+                try:
+                    on_progress(i, len(gaps), gap)
+                except Exception:
+                    pass
+            tsv_path = tmp_dir / f"gap-{i}.tsv"
+            argv = [
+                _sys.executable, "-m", "sciknow.cli.main",
+                "db", "expand",
+                "--strategy", "rrf",
+                "--relevance-query", gap,
+                "--budget", str(budget_per_gap),
+                "--dry-run",
+                "--shortlist-tsv", str(tsv_path),
+                "--no-resolve",   # skip slow Crossref title lookup
+                "--workers", "0",
+            ]
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+            t0 = _time.monotonic()
             try:
-                on_progress(i, len(gaps), gap)
-            except Exception:
-                pass
-        try:
-            res = find_topic_candidates(
-                query=gap, limit=max(budget_per_gap * 2, budget_per_gap),
-                relevance_query="", score_relevance=True,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("gather candidates failed for gap %r: %s", gap, exc)
-            per_gap_stats.append({
-                "subtopic": gap, "n_candidates": 0,
-                "error": str(exc)[:200],
-            })
-            continue
-        cands = (res.get("candidates") or [])[:budget_per_gap]
-        total_raw += len(cands)
-        kept = 0
-        for c in cands:
-            doi = (c.get("doi") or "").lower()
-            if doi and doi in seen_dois:
-                cross_gap_dups += 1
+                res = subprocess.run(
+                    argv, capture_output=True, text=True,
+                    env=env, timeout=600,
+                )
+                elapsed = _time.monotonic() - t0
+            except subprocess.TimeoutExpired:
+                per_gap_stats.append({
+                    "subtopic": gap, "n_candidates": 0,
+                    "error": "timeout (600s) — corpus too large or LLM stuck?",
+                })
                 continue
-            if doi:
-                seen_dois.add(doi)
-            c = dict(c)
-            c["_agentic_subtopic"] = gap
-            out.append(c)
-            kept += 1
-        per_gap_stats.append({
-            "subtopic": gap, "n_candidates": kept,
-        })
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("RRF preview subprocess failed for gap %r: %s", gap, exc)
+                per_gap_stats.append({
+                    "subtopic": gap, "n_candidates": 0,
+                    "error": str(exc)[:200],
+                })
+                continue
+            if not tsv_path.exists():
+                stderr_tail = (res.stderr or "")[-300:].strip()
+                per_gap_stats.append({
+                    "subtopic": gap, "n_candidates": 0,
+                    "error": (
+                        "no shortlist produced (no qualifying refs?). "
+                        f"stderr tail: {stderr_tail}"
+                    )[:300],
+                })
+                continue
+            kept = 0
+            for c in _parse_shortlist_tsv(tsv_path):
+                doi = (c.get("doi") or "").lower()
+                if doi and doi in seen_dois:
+                    cross_gap_dups += 1
+                    continue
+                if doi:
+                    seen_dois.add(doi)
+                c["_agentic_subtopic"] = gap
+                out.append(c)
+                kept += 1
+            total_kept += kept
+            per_gap_stats.append({
+                "subtopic": gap, "n_candidates": kept,
+                "elapsed_s": round(elapsed, 1),
+            })
+    finally:
+        # Best-effort cleanup of the per-gap TSVs + tmp dir.
+        try:
+            import shutil as _sh
+            _sh.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
+
     return {
         "candidates": out,
         "gaps": per_gap_stats,
         "info": {
             "n_gaps": len(gaps),
-            "raw_candidates": total_raw,
+            "raw_candidates": total_kept + cross_gap_dups,
             "merged_candidates": len(out),
             "cross_gap_duplicates": cross_gap_dups,
             "budget_per_gap": budget_per_gap,
+            "ranker": "rrf",  # Phase 54.6.133 — parity with auto-mode
         },
     }
 

@@ -10450,7 +10450,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           </div>
           <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap;">
             <button class="btn-primary" onclick="openAgenticPreview()"
-                    title="Phase 54.6.132 — INTERACTIVE per-round preview. Decomposes the question, measures coverage, and shows you the candidate papers for each gap sub-topic. You cherry-pick before any download. After ingestion, click again to advance to round 2 (coverage will be re-measured against the new corpus). Recommended for personal-bibliography work.">
+                    title="Phase 54.6.133 — INTERACTIVE per-round preview using the SAME Phase-49 RRF ranker auto-mode runs. Decomposes the question, measures coverage, runs the ranker per gap sub-topic, and shows you exactly the candidates auto would download — you cherry-pick before any disk write. ~30-90s per gap (typically 3-7 min total for 5 gaps). After ingestion, click again to advance to round 2 (coverage gets re-measured). Recommended for personal-bibliography work.">
               &#128269; Preview round candidates
             </button>
             <button class="btn-secondary" onclick="runAgenticExpand()"
@@ -18410,8 +18410,8 @@ async function openAgenticPreview() {{
   const threshold = parseInt(document.getElementById('tl-ag-threshold').value || '3', 10);
   _eapResetModal(
     '&#129504; Agentic &mdash; Preview Round Candidates',
-    'Decomposing question + measuring coverage…',
-    '(LLM decompose ~5s · per-gap topic search ~3-10s each)'
+    'Decomposing question + measuring coverage + running RRF ranker per gap…',
+    '(LLM decompose ~5s · per-gap RRF subprocess ~30-90s each — same ranker auto-mode uses, so preview = exactly what auto would download)'
   );
   const fd = new FormData();
   fd.append('question', q);
@@ -18470,12 +18470,14 @@ async function openAgenticPreview() {{
       `<div style="margin-bottom:8px;">`
       + `LLM decomposed into <strong>${{subtopics.length}}</strong> sub-topic(s); `
       + `<strong>${{gaps.length}}</strong> gap(s) under the ≥${{info.doc_threshold}}-paper threshold. `
-      + `Pulled <strong>${{info.merged_candidates || 0}}</strong> candidate(s) `
-      + `(<strong>${{info.cross_gap_duplicates || 0}}</strong> cross-gap duplicates dropped).`
+      + `Pulled <strong>${{info.merged_candidates || 0}}</strong> candidate(s) via the `
+      + `<strong>Phase-49 RRF ranker</strong> `
+      + `(<strong>${{info.cross_gap_duplicates || 0}}</strong> cross-gap duplicates dropped). `
+      + `<span style="color:var(--success);font-size:11px;">✓ same ranker auto-mode uses</span>`
       + `</div>`
       + `<div style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;"><strong>Coverage snapshot:</strong></div>`
       + `<div style="margin-bottom:8px;">${{covRows}}</div>`
-      + `<div style="font-size:11px;color:var(--fg-muted);margin-bottom:4px;"><strong>Gap candidates:</strong></div>`
+      + `<div style="font-size:11px;color:var(--fg-muted);margin-bottom:4px;"><strong>Per-gap candidate counts:</strong></div>`
       + `<div style="font-size:11px;line-height:1.7;margin-bottom:4px;">${{gapChips}}</div>`
       + `<div style="font-size:11px;color:var(--fg-muted);">Each row shows its source sub-topic below the title. After downloading, re-click <em>Preview round</em> to advance — the next round will re-measure coverage against the new corpus and propose fresh gaps.</div>`;
     document.getElementById('eap-loading').style.display = 'none';
