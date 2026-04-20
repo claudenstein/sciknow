@@ -435,6 +435,126 @@ def _run_rrf_ranker(
     return top_refs, ranked
 
 
+# ── Phase 54.6.114 (Tier 2 #2) — agentic question-driven expansion ──────
+
+def _run_agentic_expand(
+    *,
+    question: str,
+    download_dir,
+    max_rounds: int,
+    budget_per_gap: int,
+    doc_threshold: int,
+    strategy: str,
+    delay: float,
+    resolve: bool,
+    ingest: bool,
+    dry_run: bool,
+    workers: int,
+    rrf_no_openalex: bool,
+    rrf_no_s2: bool,
+    cleanup: bool,
+    retry_failed: bool,
+) -> None:
+    """Orchestrator for ``sciknow db expand --question "..."``.
+
+    Plans → checks coverage → runs per-sub-topic expansion via the
+    existing Phase 49 pipeline (``sciknow db expand --relevance-query``
+    as a subprocess) → re-checks → stops when covered or max_rounds.
+    """
+    import subprocess
+    import sys as _sys
+    from sciknow.ingestion.agentic_expand import run_agentic_expansion
+
+    console.print(f"\n[bold]Agentic expansion[/bold]  question: "
+                  f"[cyan]{question[:120]}[/cyan]\n")
+
+    def _execute_round(gaps: list[str], budget: int, round_n: int) -> dict:
+        """Run ``db expand --relevance-query <gap>`` for each gap in a
+        subprocess so we don't tangle Qdrant/DB/asyncio state. Per-sub-
+        topic budget; one crash doesn't kill the round."""
+        stats: dict = {"subtopics": [], "downloaded_total": 0}
+        for i, topic in enumerate(gaps, start=1):
+            console.print(f"\n  [bold]Round {round_n} sub-topic {i}/{len(gaps)}[/bold]: {topic}")
+            argv = [
+                _sys.executable, "-m", "sciknow.cli.main", "db", "expand",
+                "--strategy", strategy,
+                "--relevance-query", topic,
+                "--budget", str(budget),
+                "--delay", str(delay),
+                "--workers", str(workers),
+            ]
+            if not resolve:
+                argv.append("--no-resolve")
+            if not ingest:
+                argv.append("--no-ingest")
+            if dry_run:
+                argv.append("--dry-run")
+            if rrf_no_openalex:
+                argv.append("--no-openalex")
+            if rrf_no_s2:
+                argv.append("--no-semantic-scholar")
+            if not cleanup:
+                argv.append("--no-cleanup")
+            if retry_failed:
+                argv.append("--retry-failed")
+            try:
+                res = subprocess.run(argv, check=False)
+                stats["subtopics"].append({
+                    "subtopic": topic,
+                    "return_code": res.returncode,
+                })
+            except Exception as exc:  # noqa: BLE001
+                console.print(f"  [red]sub-topic failed: {exc}[/red]")
+                stats["subtopics"].append({
+                    "subtopic": topic,
+                    "error": str(exc)[:200],
+                })
+        return stats
+
+    for event in run_agentic_expansion(
+        question,
+        max_rounds=max_rounds,
+        budget_per_gap=budget_per_gap,
+        doc_threshold=doc_threshold,
+        execute_round_callback=_execute_round,
+    ):
+        t = event.get("type")
+        if t == "progress":
+            console.print(f"  [dim]… {event.get('detail', event.get('stage', ''))}[/dim]")
+        elif t == "decomp":
+            subs = event.get("subtopics") or []
+            label = "[Refined] " if event.get("replanned") else ""
+            console.print(f"\n  {label}[bold]Sub-topics[/bold] ({len(subs)}):")
+            for i, s in enumerate(subs, start=1):
+                console.print(f"    {i}. {s}")
+        elif t == "coverage":
+            rn = event.get("round")
+            console.print(f"\n  [bold]Coverage (round {rn}):[/bold]")
+            for d in event.get("data") or []:
+                badge = "[green]✓[/green]" if d.get("covered") else "[yellow]·[/yellow]"
+                console.print(
+                    f"    {badge} {d['n_papers']:>3} papers (top {d['top_score']:.2f})  {d['subtopic']}"
+                )
+        elif t == "round_start":
+            console.print(f"\n  [bold]Expanding {len(event['gaps'])} gap sub-topic(s) "
+                          f"(budget {event['budget']} each)…[/bold]")
+        elif t == "round_done":
+            n = sum(1 for s in (event.get("stats") or {}).get("subtopics", [])
+                    if s.get("return_code") == 0)
+            console.print(f"\n  [green]Round {event['round']}: "
+                          f"{n} sub-topic(s) completed[/green]")
+        elif t == "stopped":
+            console.print(f"\n[bold green]✓ Stopped:[/bold green] {event.get('reason')}")
+            fc = event.get("final_coverage") or []
+            if fc:
+                covered = sum(1 for c in fc if c.get("n_papers", 0) >= doc_threshold)
+                console.print(f"  Final: {covered}/{len(fc)} sub-topics covered "
+                              f"(≥{doc_threshold} papers each).")
+        elif t == "error":
+            console.print(f"\n[red]✗ {event.get('message')}[/red]")
+            return
+
+
 # ── backup ─────────────────────────────────────────────────────────────────────
 
 @app.command()
@@ -1626,6 +1746,20 @@ def expand(
     retry_failed: bool  = typer.Option(False, "--retry-failed",
                                         help="Ignore the .ingest_failed cache and re-try permanently-failed refs from "
                                              "a prior run. Default OFF (failed refs are skipped to save compute)."),
+    # ── Phase 54.6.114 (Tier 2 #2) — agentic question-driven expansion
+    question:     str   = typer.Option("", "--question",
+                                        help="Agentic mode (54.6.114). Give a research question; the LLM "
+                                             "decomposes it into 3-6 sub-topics, measures corpus coverage for "
+                                             "each, and runs targeted expansion on the gaps. Uses the corpus "
+                                             "coverage check as the stopping rule (all sub-topics ≥ N papers) "
+                                             "instead of the default median-drop / novelty heuristic. Mutually "
+                                             "exclusive with --relevance-query."),
+    question_rounds: int = typer.Option(3, "--question-rounds",
+                                         help="Max agentic-mode rounds before stopping. Default 3."),
+    question_budget: int = typer.Option(10, "--question-budget",
+                                         help="Per-sub-topic download budget in agentic mode. Default 10."),
+    question_threshold: int = typer.Option(3, "--question-threshold",
+                                            help="Corpus papers per sub-topic required to call it 'covered'. Default 3."),
 ):
     """
     Expand the collection by following references in existing papers.
@@ -1675,6 +1809,37 @@ def expand(
     from sciknow.storage.db import get_session
 
     download_dir.mkdir(parents=True, exist_ok=True)
+
+    # Phase 54.6.114 (Tier 2 #2) — agentic question-driven mode.
+    # Dispatches early so the rest of the static-expand logic below
+    # can assume no --question. The agentic orchestrator calls the
+    # same static expand loop per-sub-topic via a callback.
+    if (question or "").strip():
+        if relevance_query:
+            console.print(
+                "[red]--question and --relevance-query are mutually "
+                "exclusive. Pick one.[/red]"
+            )
+            raise typer.Exit(2)
+        _run_agentic_expand(
+            question=question.strip(),
+            download_dir=download_dir,
+            max_rounds=question_rounds,
+            budget_per_gap=question_budget,
+            doc_threshold=question_threshold,
+            # pass-throughs to the per-sub-topic static ranker
+            strategy=strategy,
+            delay=delay,
+            resolve=resolve,
+            ingest=ingest,
+            dry_run=dry_run,
+            workers=workers,
+            rrf_no_openalex=rrf_no_openalex,
+            rrf_no_s2=rrf_no_s2,
+            cleanup=cleanup,
+            retry_failed=retry_failed,
+        )
+        return
 
     # ── Step 1: load all papers and their existing DOIs/arXiv IDs ────────────
     with get_session() as session:

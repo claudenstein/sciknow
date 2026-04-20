@@ -9881,6 +9881,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div class="tabs" style="margin-bottom:10px;">
           <button class="tab active" data-ctab="corp-enrich" onclick="switchCorpusTab('corp-enrich')">&#128270; Enrich</button>
           <button class="tab" data-ctab="corp-cites" onclick="switchCorpusTab('corp-cites')">&#127760; Expand (citations)</button>
+          <button class="tab" data-ctab="corp-agentic" onclick="switchCorpusTab('corp-agentic')" title="Phase 54.6.114 — LLM decomposes a research question into sub-topics, measures corpus coverage, auto-expands gaps.">&#129504; Agentic (question-driven)</button>
           <button class="tab" data-ctab="corp-author" onclick="switchCorpusTab('corp-author')">&#128100; Expand by author</button>
           <button class="tab" data-ctab="corp-inbound" onclick="switchCorpusTab('corp-inbound')">&#128258; Inbound cites</button>
           <button class="tab" data-ctab="corp-topic" onclick="switchCorpusTab('corp-topic')">&#128269; Topic search</button>
@@ -9955,6 +9956,44 @@ body.task-bar-open {{ padding-top: 40px; }}
             </button>
             <span style="font-size:11px;color:var(--fg-muted);">
               Preview shows the ranked shortlist (RRF signals) and lets you check papers one-by-one.
+            </span>
+          </div>
+        </div>
+
+        <!-- Phase 54.6.114 (Tier 2 #2) — Agentic question-driven expansion -->
+        <div id="corp-agentic-pane" style="display:none;border:1px solid var(--border);border-radius:6px;padding:10px;">
+          <div style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;">
+            <strong>Agentic mode.</strong> Give a research question; the LLM decomposes it
+            into 3-6 sub-topics, measures corpus coverage for each (via hybrid search),
+            and runs targeted expansion on the gaps. Stops when every sub-topic has
+            ≥ <em>threshold</em> papers OR when <em>max rounds</em> is reached. Uses
+            the EXISTING Phase 49 RRF ranker (with the new citation-context signal
+            from Tier 2 #1) for each sub-topic.
+          </div>
+          <div class="field">
+            <label>Research question</label>
+            <textarea id="tl-ag-question" rows="3"
+                      style="width:100%;padding:8px;font-size:13px;line-height:1.45;"
+                      placeholder="e.g. What is the current best estimate of equilibrium climate sensitivity, and how confident are we?"></textarea>
+          </div>
+          <div class="field" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-top:4px;">
+            <div style="flex:1;min-width:80px;"><label>Max rounds</label>
+              <input type="number" id="tl-ag-rounds" value="3" min="1" max="8"
+                     title="Max agentic rounds. Each round re-measures coverage and expands remaining gaps."></div>
+            <div style="flex:1;min-width:80px;"><label>Budget / gap</label>
+              <input type="number" id="tl-ag-budget" value="10" min="1" max="60"
+                     title="Max papers to download per gap sub-topic per round."></div>
+            <div style="flex:1;min-width:80px;"><label>Cover threshold</label>
+              <input type="number" id="tl-ag-threshold" value="3" min="1" max="20"
+                     title="Corpus papers required to call a sub-topic 'covered'."></div>
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+              <input type="checkbox" id="tl-ag-dry"> dry-run
+            </label>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap;">
+            <button class="btn-primary" onclick="runAgenticExpand()">&#129504; Start agentic expansion</button>
+            <span style="color:var(--fg-muted);font-size:11px;">
+              Streams the plan + per-sub-topic progress into the log panel. Close at any time — job continues server-side.
             </span>
           </div>
         </div>
@@ -17571,11 +17610,31 @@ function switchCorpusTab(name) {{
   document.querySelectorAll('#tl-corpus-pane .tab').forEach(t => {{
     t.classList.toggle('active', t.dataset.ctab === name);
   }});
-  ['corp-enrich', 'corp-cites', 'corp-author',
+  ['corp-enrich', 'corp-cites', 'corp-agentic', 'corp-author',
    'corp-inbound', 'corp-topic', 'corp-coauth'].forEach(n => {{
     const pane = document.getElementById(n + '-pane');
     if (pane) pane.style.display = (n === name) ? 'block' : 'none';
   }});
+}}
+
+// Phase 54.6.114 (Tier 2 #2) — agentic question-driven expansion.
+// Streams CLI output into the Corpus modal's existing log panel.
+async function runAgenticExpand() {{
+  const q = (document.getElementById('tl-ag-question').value || '').trim();
+  if (!q) {{ alert('Please enter a research question.'); return; }}
+  const rounds = parseInt(document.getElementById('tl-ag-rounds').value || '3', 10);
+  const budget = parseInt(document.getElementById('tl-ag-budget').value || '10', 10);
+  const threshold = parseInt(document.getElementById('tl-ag-threshold').value || '3', 10);
+  const dry = document.getElementById('tl-ag-dry').checked;
+  const argv = [
+    'db', 'expand',
+    '--question', q,
+    '--question-rounds', String(rounds),
+    '--question-budget', String(budget),
+    '--question-threshold', String(threshold),
+  ];
+  if (dry) argv.push('--dry-run');
+  runCorpusCliAction(argv, 'Agentic expansion starting…');
 }}
 
 
