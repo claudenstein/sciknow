@@ -9460,6 +9460,63 @@ def l1_phase54_6_56_refresh_ingests_downloads_and_failed() -> None:
         )
 
 
+def l1_phase54_6_139_visuals_ranker_surface() -> None:
+    """Phase 54.6.139 — 5-signal visuals ranker surface + composition math.
+
+    Implements signals 1/2/3/5 from docs/RESEARCH.md §7.X.3 (signal 4
+    VLM faithfulness is deferred until an eval set exists to calibrate
+    its weight). This test pins the signal weights, the section-prior
+    mapping, and the public API shape — a refactor that silently
+    changes the composition math would change ranking quality without
+    crashing any test, so source-grep invariants matter here.
+    """
+    from sciknow.retrieval import visuals_ranker as vr
+
+    # A) Public API
+    assert hasattr(vr, "rank_visuals"), "visuals_ranker.rank_visuals missing"
+    assert hasattr(vr, "RankedVisual"), "RankedVisual dataclass missing"
+
+    # B) Signal weights sum-check: no signal should dominate the
+    # composite by itself. Catches accidental weight drift.
+    total = vr.W_CAPTION + vr.W_MENTION + vr.W_SAME_PAPER + vr.W_SECTION_PRIOR
+    assert 0.9 < total < 1.1, (
+        f"signal weights must sum to ~1.0; got {total} "
+        f"(weights: cap={vr.W_CAPTION} ment={vr.W_MENTION} "
+        f"same={vr.W_SAME_PAPER} sec={vr.W_SECTION_PRIOR}). "
+        f"Non-unit sums silently bias the composite."
+    )
+    # Mention signal must be meaningful — SciCap+ identified it as the
+    # strongest retrieval signal; a weight ≈0 would defeat the point
+    # of the Phase 54.6.138 linker infrastructure.
+    assert vr.W_MENTION >= 0.2, (
+        f"mention-paragraph signal must be meaningfully weighted "
+        f"(>= 0.2); got {vr.W_MENTION}. See docs/RESEARCH.md §7.X signal 3."
+    )
+
+    # C) Section prior sanity: results sections prefer chart/table;
+    # methods prefer figure (schematic).
+    assert vr._section_prior_hit("chart",    "results") == 1.0
+    assert vr._section_prior_hit("figure",   "methods") == 1.0
+    assert vr._section_prior_hit("table",    "methods") == 0.0
+    # Unknown section → neutral 0.5 so the prior neither helps nor hurts
+    assert vr._section_prior_hit("chart",    None) == 0.5
+    assert vr._section_prior_hit("chart",    "wibble") == 0.5
+
+    # D) RankedVisual carries the signal breakdown (used both for
+    # "why was this suggested" explanations and for ablation studies)
+    required_fields = {
+        "visual_id", "document_id", "kind", "figure_num",
+        "ai_caption", "caption_score", "mention_score",
+        "same_paper", "section_prior_hit", "composite_score",
+        "best_mention_text",
+    }
+    got_fields = {f.name for f in vr.RankedVisual.__dataclass_fields__.values()}
+    missing = required_fields - got_fields
+    assert not missing, (
+        f"RankedVisual missing signal-breakdown fields: {missing}"
+    )
+
+
 def l1_phase54_6_138_visuals_mention_linker_surface() -> None:
     """Phase 54.6.138 — mention-paragraph linker surface + regex behaviour.
 
@@ -10017,6 +10074,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_137_velocity_watcher_surface,
     # Phase 54.6.138 — visuals mention-paragraph linker surface + regex
     l1_phase54_6_138_visuals_mention_linker_surface,
+    # Phase 54.6.139 — 5-signal visuals ranker surface + composition math
+    l1_phase54_6_139_visuals_ranker_surface,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness
