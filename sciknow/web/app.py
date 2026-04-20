@@ -8519,12 +8519,18 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button class="modal-close" onclick="closeModal('wiki-modal')">&times;</button>
     </div>
     <div class="tabs">
-      <button class="tab active" data-tab="wiki-query" onclick="switchWikiTab('wiki-query')">&#128270; Query</button>
-      <button class="tab" data-tab="wiki-summaries" onclick="switchWikiTab('wiki-summaries')">&#128196; Summaries</button>
-      <button class="tab" data-tab="wiki-visuals" onclick="switchWikiTab('wiki-visuals')">&#128444;&#65039; Visuals</button>
-      <button class="tab" data-tab="wiki-browse" onclick="switchWikiTab('wiki-browse')">&#128194; Browse pages</button>
-      <button class="tab" data-tab="wiki-lint" onclick="switchWikiTab('wiki-lint')">&#9888;&#65039; Lint</button>
-      <button class="tab" data-tab="wiki-consensus" onclick="switchWikiTab('wiki-consensus')">&#9878;&#65039; Consensus</button>
+      <button class="tab active" data-tab="wiki-query" onclick="switchWikiTab('wiki-query')"
+              title="Ask a natural-language question against the compiled wiki summaries. Fastest mode — no retrieval over raw chunks.">&#128270; Query</button>
+      <button class="tab" data-tab="wiki-summaries" onclick="switchWikiTab('wiki-summaries')"
+              title="Browse every per-paper LLM-written summary from `sciknow wiki compile`.">&#128196; Summaries</button>
+      <button class="tab" data-tab="wiki-visuals" onclick="switchWikiTab('wiki-visuals')"
+              title="Figures, tables, equations and code snippets extracted from papers. Rendered inline with captions.">&#128444;&#65039; Visuals</button>
+      <button class="tab" data-tab="wiki-browse" onclick="switchWikiTab('wiki-browse')"
+              title="Browse the full wiki page tree: paper pages, concept pages and synthesis pages.">&#128194; Browse pages</button>
+      <button class="tab" data-tab="wiki-lint" onclick="switchWikiTab('wiki-lint')"
+              title="Health check for the wiki: broken links, stale pages, orphan concepts, missing KG triples, contradictions.">&#9888;&#65039; Lint</button>
+      <button class="tab" data-tab="wiki-consensus" onclick="switchWikiTab('wiki-consensus')"
+              title="Build a consensus map for a topic: strong / moderate / weak / contested claims across the corpus.">&#9878;&#65039; Consensus</button>
     </div>
     <div class="modal-body">
       <!-- Query tab -->
@@ -8594,17 +8600,20 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div class="field" style="display:flex;gap:8px;align-items:flex-end;">
           <div style="flex:1;">
             <label>Filter by type</label>
-            <select id="wiki-type-filter" onchange="loadWikiPages(1)">
+            <select id="wiki-type-filter" onchange="loadWikiPages(1)"
+                    title="Filter pages by kind: Paper (one per ingested paper), Concept (entity glossary), Synthesis (consensus maps).">
               <option value="">All types</option>
             </select>
           </div>
-          <button class="btn-secondary" onclick="loadWikiPages(1)">Refresh</button>
+          <button class="btn-secondary" onclick="loadWikiPages(1)"
+                  title="Re-fetch the wiki page list from the server.">Refresh</button>
         </div>
         <div id="wiki-browse-list" style="margin-top:12px;"></div>
         <!-- Detail view (hidden until a page is opened) -->
         <div id="wiki-page-detail" style="display:none;">
           <div class="wiki-detail-toolbar">
-            <button class="btn-secondary" onclick="closeWikiPageDetail()">&larr; Back to list</button>
+            <button class="btn-secondary" onclick="closeWikiPageDetail()"
+                    title="Return to the wiki page list.">&larr; Back to list</button>
             <button class="btn-secondary" onclick="copyWikiPermalink()" title="Copy permalink to this page">&#128279; Copy link</button>
             <kbd class="wiki-kbd-hint">Press <kbd>Ctrl</kbd>+<kbd>K</kbd> to jump to any page</kbd>
           </div>
@@ -8639,8 +8648,10 @@ body.task-bar-open {{ padding-top: 40px; }}
                           placeholder="Your own notes on this page — disagreements, follow-up questions, how it connects to other work. Saved locally in your project database."
                           rows="4"></textarea>
                 <div class="wiki-annotation-actions">
-                  <button class="btn-primary" onclick="saveWikiAnnotation()" id="wiki-annotation-save">Save note</button>
-                  <button class="btn-secondary" onclick="deleteWikiAnnotation()" id="wiki-annotation-delete">Clear</button>
+                  <button class="btn-primary" onclick="saveWikiAnnotation()" id="wiki-annotation-save"
+                          title="Save your personal note to the project database. Only visible in this project.">Save note</button>
+                  <button class="btn-secondary" onclick="deleteWikiAnnotation()" id="wiki-annotation-delete"
+                          title="Delete this page's annotation. Does NOT affect the wiki content itself.">Clear</button>
                   <span id="wiki-annotation-status" class="wiki-ask-status"></span>
                 </div>
               </section>
@@ -8650,11 +8661,14 @@ body.task-bar-open {{ padding-top: 40px; }}
                 <form class="wiki-ask-form" onsubmit="event.preventDefault(); askWikiPage();">
                   <input type="text" id="wiki-ask-input"
                          placeholder="e.g. What effect size is reported?"
-                         autocomplete="off"/>
+                         autocomplete="off"
+                         title="Inline RAG: ask a question scoped to this page's source chunks (press Enter to submit)."/>
                   <label class="wiki-ask-broaden" title="Search the whole corpus instead of just this page's sources">
-                    <input type="checkbox" id="wiki-ask-broaden"/> broaden
+                    <input type="checkbox" id="wiki-ask-broaden"
+                           title="Expand retrieval from this page's sources to the full corpus."/> broaden
                   </label>
-                  <button type="submit" class="btn-primary" id="wiki-ask-submit">Ask</button>
+                  <button type="submit" class="btn-primary" id="wiki-ask-submit"
+                          title="Run the scoped RAG query and stream the answer inline below.">Ask</button>
                 </form>
                 <div id="wiki-ask-status" class="wiki-ask-status"></div>
                 <div id="wiki-ask-stream" class="wiki-ask-stream"></div>
@@ -8680,11 +8694,14 @@ body.task-bar-open {{ padding-top: 40px; }}
           summaries (deep mode uses the LLM — slower).
         </div>
         <div class="field" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-          <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+          <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
+                 title="Also run LLM-based contradiction detection across paper summaries. Significantly slower (one LLM call per concept).">
             <input type="checkbox" id="wiki-lint-deep"> deep (LLM contradiction detection)
           </label>
-          <button class="btn-primary" id="wiki-lint-run" onclick="doWikiLint()">Run Lint</button>
-          <button class="btn-secondary" id="wiki-lint-stop" onclick="stopWikiLint()" style="display:none;">Stop</button>
+          <button class="btn-primary" id="wiki-lint-run" onclick="doWikiLint()"
+                  title="Scan the wiki for broken links, stale pages, orphan concepts and missing KG triples.">Run Lint</button>
+          <button class="btn-secondary" id="wiki-lint-stop" onclick="stopWikiLint()" style="display:none;"
+                  title="Cancel the running lint job.">Stop</button>
         </div>
         <div id="wiki-lint-status" style="margin-top:8px;font-size:12px;color:var(--fg-muted);"></div>
         <div id="wiki-lint-summary" style="margin-top:8px;"></div>
@@ -8703,11 +8720,13 @@ body.task-bar-open {{ padding-top: 40px; }}
             re-summarizing). Mirrors <code>sciknow wiki extract-kg</code>.
           </div>
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
+                   title="Re-run KG extraction on every paper, not just those with zero triples. Expensive — use only after changing the extraction prompt or model.">
               <input type="checkbox" id="wiki-extractkg-force"> force re-extract every paper
             </label>
             <button class="btn-primary" id="wiki-extractkg-run"
-                    onclick="doWikiExtractKg()">Extract / Backfill KG</button>
+                    onclick="doWikiExtractKg()"
+                    title="One LLM call per orphan paper (or all papers if force is checked) to populate knowledge_graph rows. No re-summarization.">Extract / Backfill KG</button>
           </div>
           <div id="wiki-extractkg-status" style="margin-top:8px;font-size:12px;color:var(--fg-muted);"></div>
           <pre id="wiki-extractkg-log" style="display:none;margin-top:6px;max-height:280px;overflow:auto;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:8px;font-size:11px;font-family:ui-monospace,monospace;white-space:pre-wrap;"></pre>
@@ -8726,11 +8745,14 @@ body.task-bar-open {{ padding-top: 40px; }}
           <label>Topic</label>
           <input type="text" id="wiki-consensus-topic"
                  placeholder="e.g. cosmic ray cloud nucleation"
-                 onkeydown="if(event.key==='Enter')doWikiConsensus()">
+                 onkeydown="if(event.key==='Enter')doWikiConsensus()"
+                 title="Free-text topic for the consensus map. Press Enter to run. The LLM will classify claims as strong / moderate / weak / contested and cite supporting vs contradicting papers.">
         </div>
         <div style="display:flex;gap:8px;align-items:center;">
-          <button class="btn-primary" id="wiki-consensus-run" onclick="doWikiConsensus()">Map Consensus</button>
-          <button class="btn-secondary" id="wiki-consensus-stop" onclick="stopWikiConsensus()" style="display:none;">Stop</button>
+          <button class="btn-primary" id="wiki-consensus-run" onclick="doWikiConsensus()"
+                  title="Build the consensus map and save it as a synthesis page under /synthesis/.">Map Consensus</button>
+          <button class="btn-secondary" id="wiki-consensus-stop" onclick="stopWikiConsensus()" style="display:none;"
+                  title="Cancel the running consensus job.">Stop</button>
         </div>
         <div id="wiki-consensus-status" style="margin-top:8px;font-size:12px;color:var(--fg-muted);"></div>
         <div id="wiki-consensus-summary" style="margin-top:8px;font-size:13px;"></div>
@@ -8778,7 +8800,8 @@ body.task-bar-open {{ padding-top: 40px; }}
            placeholder="Jump to wiki page… (type to filter)"
            autocomplete="off"
            oninput="_renderWikiPalette()"
-           onkeydown="_wikiPaletteKey(event)"/>
+           onkeydown="_wikiPaletteKey(event)"
+           title="Fuzzy-search every wiki page by title. Arrow keys + Enter to open, Esc to close."/>
     <ol id="wiki-palette-results"></ol>
     <div class="wiki-palette-foot">
       <kbd>&uarr;</kbd><kbd>&darr;</kbd> navigate
@@ -8799,20 +8822,24 @@ body.task-bar-open {{ padding-top: 40px; }}
       <div class="field">
         <label>Question</label>
         <input type="text" id="ask-input" placeholder="What are the main mechanisms of ..."
-               onkeydown="if(event.key==='Enter')doAsk()">
+               onkeydown="if(event.key==='Enter')doAsk()"
+               title="Natural-language question. Hybrid retrieval (dense + sparse + FTS) → RRF fusion → reranker → LLM answer. Press Enter to submit.">
       </div>
       <div class="field" style="display:flex;gap:8px;">
         <div style="flex:1;">
           <label>Year from</label>
-          <input type="number" id="ask-year-from" placeholder="(optional)">
+          <input type="number" id="ask-year-from" placeholder="(optional)"
+                 title="Restrict retrieval to papers published in this year or later.">
         </div>
         <div style="flex:1;">
           <label>Year to</label>
-          <input type="number" id="ask-year-to" placeholder="(optional)">
+          <input type="number" id="ask-year-to" placeholder="(optional)"
+                 title="Restrict retrieval to papers published in this year or earlier.">
         </div>
       </div>
       <div class="field">
-        <button class="btn-primary" onclick="doAsk()">Ask</button>
+        <button class="btn-primary" onclick="doAsk()"
+                title="Run the RAG pipeline and stream the answer + source citations inline below.">Ask</button>
         <span style="font-size:11px;color:var(--fg-muted);margin-left:8px;">Hybrid retrieval + bge-reranker + LLM</span>
       </div>
       <div id="ask-status" style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;"></div>
@@ -9036,8 +9063,10 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button class="modal-close" onclick="closeModal('chapter-modal')">&times;</button>
     </div>
     <div class="tabs">
-      <button class="tab active" data-tab="ch-scope" onclick="switchChapterTab('ch-scope')">Scope</button>
-      <button class="tab" data-tab="ch-sections" onclick="switchChapterTab('ch-sections')">Sections</button>
+      <button class="tab active" data-tab="ch-scope" onclick="switchChapterTab('ch-scope')"
+              title="Edit the chapter title, scope description, and retrieval topic query.">Scope</button>
+      <button class="tab" data-tab="ch-sections" onclick="switchChapterTab('ch-sections')"
+              title="Manage the sections that make up this chapter. Each section gets its own draft when you Write / Autowrite.">Sections</button>
     </div>
     <div class="modal-body">
       <!-- Scope tab -->
@@ -9050,15 +9079,18 @@ body.task-bar-open {{ padding-top: 40px; }}
         </p>
         <div class="field">
           <label>Chapter title</label>
-          <input type="text" id="ch-title-input">
+          <input type="text" id="ch-title-input"
+                 title="Human-readable chapter title. Used in the sidebar, TOC, and exported book.">
         </div>
         <div class="field">
           <label>Description (per-chapter scope)</label>
-          <textarea id="ch-desc-input" style="min-height:120px;"></textarea>
+          <textarea id="ch-desc-input" style="min-height:120px;"
+                    title="1–3 sentence scope for this chapter. Tells the writer what belongs IN the chapter and (equally important) what stays out."></textarea>
         </div>
         <div class="field">
           <label>Topic query (retrieval phrase)</label>
-          <input type="text" id="ch-tq-input" placeholder="e.g. solar irradiance satellite measurements">
+          <input type="text" id="ch-tq-input" placeholder="e.g. solar irradiance satellite measurements"
+                 title="3–6 word search phrase. Used by hybrid retrieval to pull the most relevant chunks when writing this chapter.">
         </div>
       </div>
       <!-- Sections tab -->
@@ -9073,15 +9105,18 @@ body.task-bar-open {{ padding-top: 40px; }}
           they keep their old slug until rewritten.
         </p>
         <div id="ch-sections-list"></div>
-        <button class="btn-secondary" onclick="addSection()" style="margin-top:8px;">
+        <button class="btn-secondary" onclick="addSection()" style="margin-top:8px;"
+                title="Append a new empty section to the end of the chapter. You can rename and reorder after adding.">
           &#43; Add section
         </button>
       </div>
       <div id="chapter-modal-status" style="font-size:12px;color:var(--fg-muted);margin:8px 0;"></div>
     </div>
     <div class="modal-footer">
-      <button class="btn-secondary" onclick="closeModal('chapter-modal')">Close</button>
-      <button class="btn-primary" onclick="saveChapterInfo()">Save</button>
+      <button class="btn-secondary" onclick="closeModal('chapter-modal')"
+              title="Dismiss without saving. Unsaved edits to title/description/topic are discarded.">Close</button>
+      <button class="btn-primary" onclick="saveChapterInfo()"
+              title="Persist chapter + section changes to the database.">Save</button>
     </div>
   </div>
 </div>
@@ -9097,21 +9132,26 @@ body.task-bar-open {{ padding-top: 40px; }}
       <div class="field" style="display:flex;gap:8px;align-items:flex-end;">
         <div style="flex:2;">
           <label>Author</label>
-          <input type="text" id="cat-author" placeholder="(any)">
+          <input type="text" id="cat-author" placeholder="(any)"
+                 title="Substring match against the authors field. Partial names are fine (e.g. 'Lockwood' will match 'M. Lockwood').">
         </div>
         <div style="flex:2;">
           <label>Journal</label>
-          <input type="text" id="cat-journal" placeholder="(any)">
+          <input type="text" id="cat-journal" placeholder="(any)"
+                 title="Substring match against the journal/venue name. Useful to e.g. filter 'Nature' papers.">
         </div>
         <div style="flex:1;">
           <label>Year from</label>
-          <input type="number" id="cat-year-from">
+          <input type="number" id="cat-year-from"
+                 title="Only show papers from this year onward.">
         </div>
         <div style="flex:1;">
           <label>Year to</label>
-          <input type="number" id="cat-year-to">
+          <input type="number" id="cat-year-to"
+                 title="Only show papers up to and including this year.">
         </div>
-        <button class="btn-primary" onclick="loadCatalog(1)">Filter</button>
+        <button class="btn-primary" onclick="loadCatalog(1)"
+                title="Apply the filter and reload the paper list from page 1.">Filter</button>
       </div>
       <div id="catalog-results" style="margin-top:12px;"></div>
     </div>
@@ -9126,10 +9166,14 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button class="modal-close" onclick="closeModal('book-settings-modal')">&times;</button>
     </div>
     <div class="tabs">
-      <button class="tab active" data-tab="bs-basics" onclick="switchBookSettingsTab('bs-basics')">Basics</button>
-      <button class="tab" data-tab="bs-leitmotiv" onclick="switchBookSettingsTab('bs-leitmotiv')">Leitmotiv</button>
-      <button class="tab" data-tab="bs-style" onclick="switchBookSettingsTab('bs-style')">Style</button>
-      <button class="tab" data-tab="bs-models" onclick="switchBookSettingsTab('bs-models')">Models</button>
+      <button class="tab active" data-tab="bs-basics" onclick="switchBookSettingsTab('bs-basics')"
+              title="Title, description, book type, target length.">Basics</button>
+      <button class="tab" data-tab="bs-leitmotiv" onclick="switchBookSettingsTab('bs-leitmotiv')"
+              title="The guiding argument of the book — a 1–3 sentence thesis threaded through every chapter's scoring.">Leitmotiv</button>
+      <button class="tab" data-tab="bs-style" onclick="switchBookSettingsTab('bs-style')"
+              title="Tone, voice, reading level and persona guide used by the writer.">Style</button>
+      <button class="tab" data-tab="bs-models" onclick="switchBookSettingsTab('bs-models')"
+              title="Per-role model assignments (writer, scorer, verifier, reviewer, extractor). Overrides .env defaults.">Models</button>
     </div>
     <div class="modal-body">
 
@@ -9607,7 +9651,8 @@ body.task-bar-open {{ padding-top: 40px; }}
         restarting <code>sciknow book serve</code>.
       </p>
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;">
-        <button class="btn-primary" onclick="refreshProjectsList()">Refresh</button>
+        <button class="btn-primary" onclick="refreshProjectsList()"
+                title="Reload the project list from the server.">Refresh</button>
         <span id="proj-msg" style="font-size:12px;color:var(--fg-muted);flex:1;"></span>
       </div>
       <div id="projects-list-wrap" style="margin-bottom:16px;">
@@ -9648,8 +9693,10 @@ body.task-bar-open {{ padding-top: 40px; }}
             </div>
             <div style="display:flex;gap:4px;margin-bottom:6px;">
               <input type="text" id="proj-ven-block-in" placeholder="e.g. scirp"
-                     style="flex:1;padding:4px 6px;font-size:11px;" onkeydown="if(event.key==='Enter')addVenuePattern('block')">
-              <button class="btn-secondary" style="font-size:11px;padding:2px 8px;" onclick="addVenuePattern('block')">+</button>
+                     style="flex:1;padding:4px 6px;font-size:11px;" onkeydown="if(event.key==='Enter')addVenuePattern('block')"
+                     title="Substring (or regex with ^/$) to block. Matched against candidate publisher / host-organization / source names.">
+              <button class="btn-secondary" style="font-size:11px;padding:2px 8px;" onclick="addVenuePattern('block')"
+                      title="Add this pattern to the project's blocklist.">+</button>
             </div>
             <ul id="proj-ven-block-list" style="list-style:none;margin:0;padding:0;max-height:140px;overflow:auto;font-size:11px;"></ul>
           </div>
@@ -9660,8 +9707,10 @@ body.task-bar-open {{ padding-top: 40px; }}
             </div>
             <div style="display:flex;gap:4px;margin-bottom:6px;">
               <input type="text" id="proj-ven-allow-in" placeholder="e.g. frontiers in climate"
-                     style="flex:1;padding:4px 6px;font-size:11px;" onkeydown="if(event.key==='Enter')addVenuePattern('allow')">
-              <button class="btn-secondary" style="font-size:11px;padding:2px 8px;" onclick="addVenuePattern('allow')">+</button>
+                     style="flex:1;padding:4px 6px;font-size:11px;" onkeydown="if(event.key==='Enter')addVenuePattern('allow')"
+                     title="Substring (or regex) to ALWAYS allow — wins over both the built-in predatory pattern set and the blocklist.">
+              <button class="btn-secondary" style="font-size:11px;padding:2px 8px;" onclick="addVenuePattern('allow')"
+                      title="Add this pattern to the project's allowlist.">+</button>
             </div>
             <ul id="proj-ven-allow-list" style="list-style:none;margin:0;padding:0;max-height:140px;overflow:auto;font-size:11px;"></ul>
           </div>
@@ -9711,9 +9760,11 @@ body.task-bar-open {{ padding-top: 40px; }}
             <h4 style="font-size:13px;margin:0 0 6px;">Create new</h4>
             <div class="field">
               <label>Slug</label>
-              <input type="text" id="sw-new-slug" placeholder="global-cooling">
+              <input type="text" id="sw-new-slug" placeholder="global-cooling"
+                     title="Lowercase letters / digits / hyphens only. Used as the PostgreSQL DB name suffix (sciknow_<slug>), Qdrant collection prefix and data/ sub-directory.">
             </div>
-            <button class="btn-primary" onclick="swCreateProject()">Create empty project</button>
+            <button class="btn-primary" onclick="swCreateProject()"
+                    title="Runs migrations + creates Qdrant collections for the new slug (~3s). Then you still need to restart `sciknow book serve` to use it.">Create empty project</button>
             <p style="font-size:11px;color:var(--fg-muted);margin-top:6px;">
               Slug is lowercase alphanumerics + hyphens. Runs migrations
               + creates Qdrant collections (~3 s).
@@ -9722,7 +9773,8 @@ body.task-bar-open {{ padding-top: 40px; }}
         </div>
         <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;">
           <span id="sw-project-status" style="font-size:12px;color:var(--fg-muted);"></span>
-          <button class="btn-primary" onclick="swGoto('corpus')">Next: Corpus &rarr;</button>
+          <button class="btn-primary" onclick="swGoto('corpus')"
+                  title="Advance to Step 2 — feed PDFs into the active project.">Next: Corpus &rarr;</button>
         </div>
       </div>
 
@@ -9747,12 +9799,15 @@ body.task-bar-open {{ padding-top: 40px; }}
               ingested.
             </p>
             <input type="file" id="sw-upload-files" accept="application/pdf,.pdf" multiple
-                   style="display:block;margin-bottom:8px;">
-            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;margin-bottom:4px;">
+                   style="display:block;margin-bottom:8px;"
+                   title="Pick one or many PDFs from your browser. They're uploaded to the server's inbox.">
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;margin-bottom:4px;"
+                   title="Kick off the convert → metadata → chunk → embed pipeline right after upload. Uncheck to just stage the files.">
               <input type="checkbox" id="sw-upload-start-ingest" checked>
               start ingesting immediately
             </label>
-            <button class="btn-primary" onclick="swUploadPDFs()">Upload</button>
+            <button class="btn-primary" onclick="swUploadPDFs()"
+                    title="Send selected PDFs to the server's uploads_<ts>/ inbox. If 'start ingesting' is checked the pipeline runs next.">Upload</button>
           </div>
           <div style="border:1px solid var(--border);border-radius:6px;padding:10px;">
             <div style="font-weight:600;font-size:13px;margin-bottom:4px;">&#128193; Server directory</div>
@@ -9761,25 +9816,32 @@ body.task-bar-open {{ padding-top: 40px; }}
               already on disk (or over a network mount).
             </p>
             <div class="field">
-              <input type="text" id="sw-ingest-path" placeholder="/path/to/pdfs">
+              <input type="text" id="sw-ingest-path" placeholder="/path/to/pdfs"
+                     title="Absolute server-side path to a directory of PDFs. Must be readable by the sciknow process (no remote paths, no ~).">
             </div>
             <div class="field" style="display:flex;gap:10px;flex-wrap:wrap;">
-              <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+              <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
+                     title="Walk sub-directories. Uncheck to only ingest PDFs directly in the given folder.">
                 <input type="checkbox" id="sw-ingest-recursive" checked> recursive
               </label>
-              <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+              <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
+                     title="Re-ingest PDFs even if their SHA-256 is already in the DB. Use only when you deliberately want to re-run the pipeline.">
                 <input type="checkbox" id="sw-ingest-force"> force re-ingest
               </label>
             </div>
-            <button class="btn-primary" onclick="swIngestDirectory()">Ingest directory</button>
+            <button class="btn-primary" onclick="swIngestDirectory()"
+                    title="Stream the ingestion log from the server. Idempotent — re-runs skip completed papers unless force is on.">Ingest directory</button>
           </div>
         </div>
         <pre id="sw-ingest-log" style="margin-top:10px;max-height:260px;overflow:auto;background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:11px;font-family:ui-monospace,monospace;white-space:pre-wrap;"></pre>
         <div style="display:flex;gap:8px;justify-content:space-between;margin-top:8px;">
-          <button onclick="swGoto('project')">&larr; Back</button>
+          <button onclick="swGoto('project')"
+                  title="Return to Step 1 (pick / create project).">&larr; Back</button>
           <div>
-            <button onclick="swRefreshStatus()">Refresh status</button>
-            <button class="btn-primary" onclick="swGoto('indices')">Next: Indices &rarr;</button>
+            <button onclick="swRefreshStatus()"
+                    title="Re-read corpus stats (paper count, status breakdown) from the server.">Refresh status</button>
+            <button class="btn-primary" onclick="swGoto('indices')"
+                    title="Advance to Step 3 — build optional retrieval/synthesis indices.">Next: Indices &rarr;</button>
           </div>
         </div>
       </div>
@@ -9801,10 +9863,12 @@ body.task-bar-open {{ padding-top: 40px; }}
               <code>--topic</code> filtering in retrieval + the Topics
               browser.
             </p>
-            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;margin-bottom:4px;">
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;margin-bottom:4px;"
+                   title="Drop the existing clusters and rebuild from all abstracts. Default is incremental (only new papers).">
               <input type="checkbox" id="sw-cluster-rebuild"> rebuild from scratch
             </label>
-            <button class="btn-primary" onclick="swRunIndex('cluster')">Cluster</button>
+            <button class="btn-primary" onclick="swRunIndex('cluster')"
+                    title="Run BERTopic over paper abstracts. Needed before `--topic` filtering or the Topics browser works.">Cluster</button>
           </div>
           <div style="border:1px solid var(--border);border-radius:6px;padding:10px;">
             <div style="font-weight:600;font-size:13px;margin-bottom:4px;">&#127794; RAPTOR tree</div>
@@ -9812,7 +9876,8 @@ body.task-bar-open {{ padding-top: 40px; }}
               Hierarchical summaries (UMAP + GMM). Slow (5–30 min).
               Enables broad-synthesis retrieval.
             </p>
-            <button class="btn-primary" onclick="swRunIndex('raptor')">Build RAPTOR</button>
+            <button class="btn-primary" onclick="swRunIndex('raptor')"
+                    title="Cluster chunks with UMAP+GMM, summarize each cluster and recurse. Enables broad-synthesis retrieval on long queries.">Build RAPTOR</button>
           </div>
           <div style="border:1px solid var(--border);border-radius:6px;padding:10px;">
             <div style="font-weight:600;font-size:13px;margin-bottom:4px;">&#128218; Wiki compile</div>
@@ -9820,21 +9885,27 @@ body.task-bar-open {{ padding-top: 40px; }}
               Compile per-paper wiki pages + KG triples. Slow
               (LLM-bound, ~1 min per paper).
             </p>
-            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;margin-bottom:4px;">
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;margin-bottom:4px;"
+                   title="Re-compile every paper's wiki page, even if it's already present.">
               <input type="checkbox" id="sw-wiki-rebuild"> rebuild
             </label>
-            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;margin-bottom:4px;">
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;margin-bottom:4px;"
+                   title="Re-compile only pages flagged as stale (sources have changed since last compile).">
               <input type="checkbox" id="sw-wiki-stale" checked> rewrite stale
             </label>
-            <button class="btn-primary" onclick="swRunIndex('wiki')">Compile wiki</button>
+            <button class="btn-primary" onclick="swRunIndex('wiki')"
+                    title="Run `sciknow wiki compile`: one LLM call per paper → page, visuals, KG triples.">Compile wiki</button>
           </div>
         </div>
         <pre id="sw-indices-log" style="margin-top:10px;max-height:260px;overflow:auto;background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:11px;font-family:ui-monospace,monospace;white-space:pre-wrap;"></pre>
         <div style="display:flex;gap:8px;justify-content:space-between;margin-top:8px;">
-          <button onclick="swGoto('corpus')">&larr; Back</button>
+          <button onclick="swGoto('corpus')"
+                  title="Return to Step 2 (corpus ingestion).">&larr; Back</button>
           <div>
-            <button onclick="swRefreshStatus()">Refresh status</button>
-            <button class="btn-primary" onclick="swGoto('expand')">Next: Expand &rarr;</button>
+            <button onclick="swRefreshStatus()"
+                    title="Re-read index status from the server.">Refresh status</button>
+            <button class="btn-primary" onclick="swGoto('expand')"
+                    title="Advance to Step 4 — optional corpus expansion.">Next: Expand &rarr;</button>
           </div>
         </div>
       </div>
@@ -9848,13 +9919,16 @@ body.task-bar-open {{ padding-top: 40px; }}
           the detailed surface.
         </p>
         <div style="display:flex;gap:10px;">
-          <button class="btn-primary" onclick="closeModal('setup-wizard-modal');openCorpusModal();">
+          <button class="btn-primary" onclick="closeModal('setup-wizard-modal');openCorpusModal();"
+                  title="Close the wizard and jump straight to the full Tools → Corpus panel (enrich / expand / author / inbound / topic / coauthor / agentic).">
             &#128736; Open Tools &rarr; Corpus tab
           </button>
         </div>
         <div style="display:flex;gap:8px;justify-content:space-between;margin-top:20px;">
-          <button onclick="swGoto('indices')">&larr; Back</button>
-          <button class="btn-primary" onclick="swGoto('book')">Next: Book &rarr;</button>
+          <button onclick="swGoto('indices')"
+                  title="Return to Step 3 (indices).">&larr; Back</button>
+          <button class="btn-primary" onclick="swGoto('book')"
+                  title="Advance to Step 5 — create the writing project.">Next: Book &rarr;</button>
         </div>
       </div>
 
@@ -9870,29 +9944,36 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div class="field" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
           <div style="flex:3;min-width:220px;">
             <label>Title</label>
-            <input type="text" id="sw-book-title" placeholder="e.g. Global Cooling: The Coming Solar Minimum">
+            <input type="text" id="sw-book-title" placeholder="e.g. Global Cooling: The Coming Solar Minimum"
+                   title="Full book title. Used in sidebar, browser tab, and PDF/epub exports.">
           </div>
           <div style="flex:2;min-width:180px;">
             <label>Type</label>
-            <select id="sw-book-type">
+            <select id="sw-book-type"
+                    title="Book = hierarchical (chapters → sections). Paper = flat IMRaD (one chapter, canonical sections). Drives prompt conditioning + default lengths.">
               <option value="scientific_book" selected>Scientific Book (chapters)</option>
               <option value="scientific_paper">Scientific Paper (IMRaD, flat)</option>
             </select>
           </div>
           <div style="flex:1;min-width:120px;">
             <label>Target words/chap</label>
-            <input type="number" id="sw-book-target" placeholder="(type default)">
+            <input type="number" id="sw-book-target" placeholder="(type default)"
+                   title="Target word count per chapter. Leave blank to use the type default (book ≈ 4000, paper ≈ 800).">
           </div>
         </div>
         <div class="field">
           <label>Description (optional)</label>
-          <input type="text" id="sw-book-desc" placeholder="One-line blurb.">
+          <input type="text" id="sw-book-desc" placeholder="One-line blurb."
+                 title="Short description shown in the catalog.">
         </div>
-        <button class="btn-primary" onclick="swCreateBook()">Create project</button>
+        <button class="btn-primary" onclick="swCreateBook()"
+                title="Create the book + LLM-generate an initial chapter outline. You can reorder / edit chapters afterwards.">Create project</button>
         <div id="sw-book-status" style="margin-top:8px;font-size:12px;color:var(--fg-muted);"></div>
         <div style="display:flex;gap:8px;justify-content:space-between;margin-top:14px;">
-          <button onclick="swGoto('expand')">&larr; Back</button>
-          <button onclick="closeModal('setup-wizard-modal')">Done</button>
+          <button onclick="swGoto('expand')"
+                  title="Return to Step 4 (expand).">&larr; Back</button>
+          <button onclick="closeModal('setup-wizard-modal')"
+                  title="Close the wizard. You can re-open from the top navigation at any time.">Done</button>
         </div>
       </div>
 
@@ -9908,8 +9989,10 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button class="modal-close" onclick="closeModal('bundle-modal')">&times;</button>
     </div>
     <div class="tabs">
-      <button class="tab active" data-tab="sb-chapter" onclick="switchBundleTab('sb-chapter')">Chapter</button>
-      <button class="tab" data-tab="sb-book" onclick="switchBundleTab('sb-book')">Book</button>
+      <button class="tab active" data-tab="sb-chapter" onclick="switchBundleTab('sb-chapter')"
+              title="Snapshot / restore every draft in the currently active chapter.">Chapter</button>
+      <button class="tab" data-tab="sb-book" onclick="switchBundleTab('sb-book')"
+              title="Snapshot / restore every draft across every chapter. Slow on big books.">Book</button>
     </div>
     <div class="modal-body">
 
@@ -9924,9 +10007,11 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div class="field" style="display:flex;gap:8px;align-items:flex-end;">
           <div style="flex:2;">
             <label>Snapshot label (optional)</label>
-            <input type="text" id="sb-chapter-name" placeholder="(auto: chapter title + timestamp)">
+            <input type="text" id="sb-chapter-name" placeholder="(auto: chapter title + timestamp)"
+                   title="Optional human label for this snapshot. Leave blank to auto-generate from chapter title + timestamp.">
           </div>
-          <button class="btn-primary" onclick="doBundleSnapshot('chapter')">Snapshot Current Chapter</button>
+          <button class="btn-primary" onclick="doBundleSnapshot('chapter')"
+                  title="Create a bundle containing every draft in this chapter. Restore is non-destructive (new draft versions).">Snapshot Current Chapter</button>
         </div>
         <div id="sb-chapter-status" style="font-size:12px;color:var(--fg-muted);margin:8px 0;"></div>
         <div id="sb-chapter-list" style="margin-top:10px;"></div>
@@ -9942,9 +10027,11 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div class="field" style="display:flex;gap:8px;align-items:flex-end;">
           <div style="flex:2;">
             <label>Snapshot label (optional)</label>
-            <input type="text" id="sb-book-name" placeholder="(auto: book title + timestamp)">
+            <input type="text" id="sb-book-name" placeholder="(auto: book title + timestamp)"
+                   title="Optional human label for this snapshot. Leave blank to auto-generate.">
           </div>
-          <button class="btn-primary" onclick="doBundleSnapshot('book')">Snapshot Whole Book</button>
+          <button class="btn-primary" onclick="doBundleSnapshot('book')"
+                  title="Create a bundle containing every draft across every chapter. Recommended before a full-book autowrite or bulk revision.">Snapshot Whole Book</button>
         </div>
         <div id="sb-book-status" style="font-size:12px;color:var(--fg-muted);margin:8px 0;"></div>
         <div id="sb-book-list" style="margin-top:10px;"></div>
@@ -9962,10 +10049,14 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button class="modal-close" onclick="closeModal('tools-modal')">&times;</button>
     </div>
     <div class="tabs">
-      <button class="tab active" data-tab="tl-search" onclick="switchToolsTab('tl-search')">Search</button>
-      <button class="tab" data-tab="tl-synth" onclick="switchToolsTab('tl-synth')">Synthesize</button>
-      <button class="tab" data-tab="tl-topics" onclick="switchToolsTab('tl-topics')">Topics</button>
-      <button class="tab" data-tab="tl-corpus" onclick="switchToolsTab('tl-corpus')">Corpus</button>
+      <button class="tab active" data-tab="tl-search" onclick="switchToolsTab('tl-search')"
+              title="Hybrid retrieval over the corpus. Chunk-level results with rerank — the CLI's `sciknow search query/similar`.">Search</button>
+      <button class="tab" data-tab="tl-synth" onclick="switchToolsTab('tl-synth')"
+              title="Multi-chunk synthesized answer with citations — the CLI's `sciknow ask synthesize`.">Synthesize</button>
+      <button class="tab" data-tab="tl-topics" onclick="switchToolsTab('tl-topics')"
+              title="Browse the BERTopic clusters and jump to papers in each topic.">Topics</button>
+      <button class="tab" data-tab="tl-corpus" onclick="switchToolsTab('tl-corpus')"
+              title="Grow / enrich / reconcile the corpus: enrich DOIs, follow citations, pull by author, inbound cites, topic search, coauthor snowball, agentic expansion, author oeuvre.">Corpus</button>
     </div>
     <div class="modal-body">
 
@@ -9979,18 +10070,23 @@ body.task-bar-open {{ padding-top: 40px; }}
           <div style="flex:3;min-width:220px;">
             <label>Query &nbsp;<span style="color:var(--fg-muted);font-weight:400;">or DOI / title fragment for similar-paper search</span></label>
             <input type="text" id="tl-search-q" placeholder="e.g. sea surface temperature reconstruction"
-                   onkeydown="if(event.key==='Enter')doToolSearch('query')">
+                   onkeydown="if(event.key==='Enter')doToolSearch('query')"
+                   title="Free-text query OR a DOI/title fragment to find similar papers. Press Enter to run.">
           </div>
           <div style="flex:1;min-width:100px;"><label>Top-K</label>
-            <input type="number" id="tl-search-topk" value="10" min="1" max="50"></div>
+            <input type="number" id="tl-search-topk" value="10" min="1" max="50"
+                   title="How many reranked results to return."></div>
           <div style="flex:1;min-width:90px;"><label>Year from</label>
-            <input type="number" id="tl-search-yfrom"></div>
+            <input type="number" id="tl-search-yfrom"
+                   title="Restrict retrieval to papers published in this year or later."></div>
           <div style="flex:1;min-width:90px;"><label>Year to</label>
-            <input type="number" id="tl-search-yto"></div>
+            <input type="number" id="tl-search-yto"
+                   title="Restrict retrieval to papers published in this year or earlier."></div>
         </div>
         <div class="field" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
           <div style="flex:2;min-width:160px;"><label>Section</label>
-            <select id="tl-search-section">
+            <select id="tl-search-section"
+                    title="Limit hits to chunks from a specific paper section.">
               <option value="">(any)</option>
               <option value="abstract">abstract</option>
               <option value="introduction">introduction</option>
@@ -10000,12 +10096,15 @@ body.task-bar-open {{ padding-top: 40px; }}
               <option value="conclusion">conclusion</option>
             </select></div>
           <div style="flex:2;min-width:160px;"><label>Topic cluster</label>
-            <input type="text" id="tl-search-topic" placeholder="(any)"></div>
+            <input type="text" id="tl-search-topic" placeholder="(any)"
+                   title="Filter by BERTopic cluster label (substring match). Requires `catalog cluster` to have been run."></div>
           <div style="flex:1;min-width:100px;display:flex;align-items:center;">
-            <label style="display:flex;align-items:center;gap:6px;font-weight:400;">
+            <label style="display:flex;align-items:center;gap:6px;font-weight:400;"
+                   title="Ask an LLM to rewrite / expand your query (HyDE-style) before retrieval. Slight latency cost, sometimes big recall win for terse queries.">
               <input type="checkbox" id="tl-search-expand"> LLM expand
             </label></div>
-          <button class="btn-primary" onclick="doToolSearch('query')">Search</button>
+          <button class="btn-primary" onclick="doToolSearch('query')"
+                  title="Run the hybrid search. Streams results inline.">Search</button>
           <button onclick="doToolSearch('similar')" title="Find papers with a similar abstract to the one you typed (DOI or title fragment)">Similar</button>
         </div>
         <div id="tl-search-status" style="font-size:12px;color:var(--fg-muted);margin:4px 0;"></div>
@@ -10022,16 +10121,22 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div class="field">
           <label>Topic</label>
           <input type="text" id="tl-synth-topic" placeholder="e.g. solar activity and climate variability"
-                 onkeydown="if(event.key==='Enter')doToolSynthesize()">
+                 onkeydown="if(event.key==='Enter')doToolSynthesize()"
+                 title="Topic to synthesize across. Press Enter to run.">
         </div>
         <div class="field" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
           <div style="flex:1;"><label>Context-K</label>
-            <input type="number" id="tl-synth-k" value="12" min="4" max="30"></div>
-          <div style="flex:1;"><label>Year from</label><input type="number" id="tl-synth-yfrom"></div>
-          <div style="flex:1;"><label>Year to</label><input type="number" id="tl-synth-yto"></div>
+            <input type="number" id="tl-synth-k" value="12" min="4" max="30"
+                   title="How many reranked chunks to feed the synthesizer. Higher = broader context but longer prompt."></div>
+          <div style="flex:1;"><label>Year from</label><input type="number" id="tl-synth-yfrom"
+                   title="Lower year bound for retrieval."></div>
+          <div style="flex:1;"><label>Year to</label><input type="number" id="tl-synth-yto"
+                   title="Upper year bound for retrieval."></div>
           <div style="flex:2;"><label>Topic cluster filter</label>
-            <input type="text" id="tl-synth-topicfilter" placeholder="(any)"></div>
-          <button class="btn-primary" onclick="doToolSynthesize()">Synthesize</button>
+            <input type="text" id="tl-synth-topicfilter" placeholder="(any)"
+                   title="Restrict the synthesis to papers whose BERTopic cluster label matches (substring)."></div>
+          <button class="btn-primary" onclick="doToolSynthesize()"
+                  title="Retrieve + rerank → LLM synthesizes a consensus-biased answer with citations.">Synthesize</button>
         </div>
         <div id="tl-synth-status" style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;"></div>
         <div class="modal-stream" id="tl-synth-stream"></div>
@@ -10555,7 +10660,8 @@ body.task-bar-open {{ padding-top: 40px; }}
                silently skip. Count filled in by eapRender. -->
           <label style="font-size:12px;display:flex;align-items:center;gap:4px;"
                  title="Rows previously marked as no-OA or ingest-failed are hidden by default. Uncheck to see them.">
-            <input type="checkbox" id="eap-hide-cached" checked onchange="eapRender()">
+            <input type="checkbox" id="eap-hide-cached" checked onchange="eapRender()"
+                   title="Hide rows previously marked as no-OA or ingest-failed. Uncheck to see them.">
             Hide cached <span id="eap-cached-count" style="color:var(--fg-muted);"></span>
           </label>
           <span id="eap-selected-count" style="margin-left:auto;font-size:12px;color:var(--fg-muted);"></span>
@@ -10567,7 +10673,8 @@ body.task-bar-open {{ padding-top: 40px; }}
               <tr>
                 <th style="width:32px;padding:6px 8px;text-align:left;">
                   <input type="checkbox" id="eap-header-cb"
-                         onchange="eapSelectAll(this.checked)">
+                         onchange="eapSelectAll(this.checked)"
+                         title="Select or deselect every row in the current filtered view.">
                 </th>
                 <th style="padding:6px 8px;text-align:left;">Title</th>
                 <th style="padding:6px 8px;text-align:left;white-space:nowrap;">Authors</th>
@@ -10586,7 +10693,8 @@ body.task-bar-open {{ padding-top: 40px; }}
                    style="width:60px;font-size:12px;padding:2px 4px;"
                    title="0 = INGEST_WORKERS from .env">
           </label>
-          <label style="font-size:12px;display:flex;align-items:center;gap:4px;">
+          <label style="font-size:12px;display:flex;align-items:center;gap:4px;"
+                 title="Run the full ingest pipeline (convert → metadata → chunk → embed) on the selected PDFs right after they download. Uncheck for download-only.">
             <input type="checkbox" id="eap-ingest" checked> ingest after download
           </label>
           <!-- Phase 54.6.52 — retry bypasses .no_oa_cache + .ingest_failed
@@ -10599,7 +10707,8 @@ body.task-bar-open {{ padding-top: 40px; }}
             <input type="checkbox" id="eap-retry-failed"> retry previously-failed
           </label>
           <button class="btn-primary" id="eap-download-btn"
-                  onclick="eapDownloadSelected()" style="margin-left:auto;">
+                  onclick="eapDownloadSelected()" style="margin-left:auto;"
+                  title="Download the checked rows (OA cascade: Unpaywall / S2 / EuropePMC / arXiv / HAL / Zenodo). Rows with no OA fallback go to the Pending Downloads queue.">
             &#128229; Download selected
           </button>
         </div>
@@ -10632,7 +10741,8 @@ body.task-bar-open {{ padding-top: 40px; }}
         <label style="font-size:12px;">
           Status:
           <select id="pdl-status" onchange="refreshPendingDownloads()"
-                  style="font-size:12px;padding:2px 4px;margin-left:4px;">
+                  style="font-size:12px;padding:2px 4px;margin-left:4px;"
+                  title="Filter rows by pipeline status. 'pending' = still awaiting acquisition. 'manual_acquired' = you ticked it off after getting the PDF yourself. 'abandoned' = gave up.">
             <option value="pending" selected>pending</option>
             <option value="manual_acquired">manual_acquired</option>
             <option value="abandoned">abandoned</option>
@@ -10642,7 +10752,8 @@ body.task-bar-open {{ padding-top: 40px; }}
         <label style="font-size:12px;">
           Source:
           <select id="pdl-source" onchange="refreshPendingDownloads()"
-                  style="font-size:12px;padding:2px 4px;margin-left:4px;">
+                  style="font-size:12px;padding:2px 4px;margin-left:4px;"
+                  title="Filter rows by which expand command queued them.">
             <option value="">(any)</option>
             <option value="expand">expand</option>
             <option value="expand-author">expand-author</option>
@@ -10653,11 +10764,14 @@ body.task-bar-open {{ padding-top: 40px; }}
             <option value="download-dois">download-dois</option>
           </select>
         </label>
-        <button class="btn-secondary" onclick="refreshPendingDownloads()">Refresh</button>
+        <button class="btn-secondary" onclick="refreshPendingDownloads()"
+                title="Re-fetch the pending-downloads list from the server.">Refresh</button>
         <span id="pdl-count" style="font-size:11px;color:var(--fg-muted);"></span>
         <span style="margin-left:auto;"></span>
-        <button class="btn-secondary" onclick="pendingSelectAll(true)">Select all</button>
-        <button class="btn-secondary" onclick="pendingSelectAll(false)">Select none</button>
+        <button class="btn-secondary" onclick="pendingSelectAll(true)"
+                title="Check every visible row.">Select all</button>
+        <button class="btn-secondary" onclick="pendingSelectAll(false)"
+                title="Uncheck every row.">Select none</button>
         <button class="btn-primary" onclick="pendingRetrySelected()"
                 title="Retry the selected DOIs against the OA cascade, bypassing .no_oa_cache.">
           &#8635; Retry selected
@@ -10672,7 +10786,8 @@ body.task-bar-open {{ padding-top: 40px; }}
           <thead style="background:var(--bg-alt,#f8f8f8);position:sticky;top:0;z-index:1;">
             <tr>
               <th style="width:32px;padding:6px 8px;text-align:left;">
-                <input type="checkbox" id="pdl-header-cb" onchange="pendingSelectAll(this.checked)">
+                <input type="checkbox" id="pdl-header-cb" onchange="pendingSelectAll(this.checked)"
+                       title="Select or deselect every visible row.">
               </th>
               <th style="padding:6px 8px;text-align:left;">Title / DOI</th>
               <th style="padding:6px 8px;text-align:left;white-space:nowrap;">Authors</th>
@@ -10702,8 +10817,10 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button class="modal-close" onclick="closeModal('kg-modal')">&times;</button>
     </div>
     <div class="tabs">
-      <button class="tab active" data-tab="kg-graph" onclick="switchKgTab('kg-graph')">Graph</button>
-      <button class="tab" data-tab="kg-table" onclick="switchKgTab('kg-table')">Table</button>
+      <button class="tab active" data-tab="kg-graph" onclick="switchKgTab('kg-graph')"
+              title="3D force-directed graph of (subject, predicate, object) triples.">Graph</button>
+      <button class="tab" data-tab="kg-table" onclick="switchKgTab('kg-table')"
+              title="Searchable table of triples. Faster when you want to scan rows instead of panning a graph.">Table</button>
     </div>
     <div class="modal-body">
       <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
@@ -10715,32 +10832,43 @@ body.task-bar-open {{ padding-top: 40px; }}
       <div class="field" style="display:flex;gap:8px;align-items:flex-end;">
         <div style="flex:2;">
           <label>Subject contains</label>
-          <input type="text" id="kg-subject" placeholder="(any)" onkeydown="if(event.key==='Enter')loadKg(0)">
+          <input type="text" id="kg-subject" placeholder="(any)" onkeydown="if(event.key==='Enter')loadKg(0)"
+                 title="Substring match against the triple's subject. Press Enter to filter.">
         </div>
         <div style="flex:1;">
           <label>Predicate</label>
-          <select id="kg-predicate" onchange="loadKg(0)">
+          <select id="kg-predicate" onchange="loadKg(0)"
+                  title="Exact predicate match. The dropdown is populated from triples currently in the database.">
             <option value="">(any)</option>
           </select>
         </div>
         <div style="flex:2;">
           <label>Object contains</label>
-          <input type="text" id="kg-object" placeholder="(any)" onkeydown="if(event.key==='Enter')loadKg(0)">
+          <input type="text" id="kg-object" placeholder="(any)" onkeydown="if(event.key==='Enter')loadKg(0)"
+                 title="Substring match against the triple's object. Press Enter to filter.">
         </div>
-        <button class="btn-primary" onclick="loadKg(0)">Filter</button>
+        <button class="btn-primary" onclick="loadKg(0)"
+                title="Apply the three filters and reload the graph + table.">Filter</button>
       </div>
       <div id="kg-status" style="font-size:11px;color:var(--fg-muted);margin:8px 0;"></div>
       <!-- Graph tab pane (default) -->
       <div id="kg-graph-pane" style="display:block;">
         <div class="kg-controls">
           <span class="kg-controls-label">Theme</span>
-          <button class="kg-theme-chip" data-theme="deep-space"></button>
-          <button class="kg-theme-chip" data-theme="paper"></button>
-          <button class="kg-theme-chip" data-theme="blueprint"></button>
-          <button class="kg-theme-chip" data-theme="solarized"></button>
-          <button class="kg-theme-chip" data-theme="solarized-light"></button>
-          <button class="kg-theme-chip" data-theme="terminal"></button>
-          <button class="kg-theme-chip" data-theme="neon"></button>
+          <button class="kg-theme-chip" data-theme="deep-space"
+                  title="Deep Space — dark navy background, cool cyan edges."></button>
+          <button class="kg-theme-chip" data-theme="paper"
+                  title="Paper — light cream background, sepia edges. Print-friendly."></button>
+          <button class="kg-theme-chip" data-theme="blueprint"
+                  title="Blueprint — dark blue background, white edges. Engineering drawing vibe."></button>
+          <button class="kg-theme-chip" data-theme="solarized"
+                  title="Solarized (dark) — Ethan Schoonover palette."></button>
+          <button class="kg-theme-chip" data-theme="solarized-light"
+                  title="Solarized (light) — same palette on a cream background."></button>
+          <button class="kg-theme-chip" data-theme="terminal"
+                  title="Terminal — black background, green phosphor edges."></button>
+          <button class="kg-theme-chip" data-theme="neon"
+                  title="Neon — black background, magenta/cyan gradient nodes."></button>
           <button class="kg-invert-btn" onclick="invertKgTheme()"
                   title="Swap to the paired light/dark preset">
             &#8646; Invert
@@ -10794,7 +10922,8 @@ body.task-bar-open {{ padding-top: 40px; }}
                  title="Filter nodes by label (substring). Pulse-matches stay bright, everything else dims."/>
           <label class="kg-chip-group" title="Color scheme for nodes + edges">
             <span class="kg-controls-label">Color</span>
-            <select class="kg-select" onchange="kgSetColorBy(this.value)">
+            <select class="kg-select" onchange="kgSetColorBy(this.value)"
+                    title="Color-by: Cluster colors nodes by connected component; Predicate family colors edges by verb class; Plain uses only the active theme's single accent.">
               <option value="cluster">Cluster</option>
               <option value="predicate">Predicate family</option>
               <option value="theme">Plain</option>
@@ -10812,7 +10941,8 @@ body.task-bar-open {{ padding-top: 40px; }}
                hurts contrast. -->
           <label class="kg-chip-group" title="Label typography + solid/halo treatment">
             <span class="kg-controls-label">Font</span>
-            <select class="kg-select" id="kg-font-select" onchange="kgSetFont(this.value)">
+            <select class="kg-select" id="kg-font-select" onchange="kgSetFont(this.value)"
+                    title="Font family + halo treatment. 'Solid' variants drop the paint-order halo (stroke=none) — more readable on bright themes.">
               <option value="sans-halo">Sans &middot; halo</option>
               <option value="sans-solid">Sans &middot; solid</option>
               <option value="serif-solid">Serif &middot; solid</option>
@@ -10919,12 +11049,18 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button class="viz-ctrl-btn" onclick="vizDownloadPng()" title="Download the current tab as PNG">&#128190;</button>
     </div>
     <div class="tabs">
-      <button class="tab active" data-tab="viz-topic" onclick="switchVizTab('viz-topic')">&#127760; Topic map</button>
-      <button class="tab" data-tab="viz-sunburst" onclick="switchVizTab('viz-sunburst')">&#127773; RAPTOR</button>
-      <button class="tab" data-tab="viz-consensus" onclick="switchVizTab('viz-consensus')">&#9878;&#65039; Consensus</button>
-      <button class="tab" data-tab="viz-timeline" onclick="switchVizTab('viz-timeline')">&#128200; Timeline</button>
-      <button class="tab" data-tab="viz-ego" onclick="switchVizTab('viz-ego')">&#128269; Ego radial</button>
-      <button class="tab" data-tab="viz-radar" onclick="switchVizTab('viz-radar')">&#128504;&#65039; Gap radar</button>
+      <button class="tab active" data-tab="viz-topic" onclick="switchVizTab('viz-topic')"
+              title="UMAP 2D projection of abstract embeddings, coloured by BERTopic cluster.">&#127760; Topic map</button>
+      <button class="tab" data-tab="viz-sunburst" onclick="switchVizTab('viz-sunburst')"
+              title="Sunburst of the RAPTOR cluster hierarchy. Inner rings = higher-level summaries.">&#127773; RAPTOR</button>
+      <button class="tab" data-tab="viz-consensus" onclick="switchVizTab('viz-consensus')"
+              title="Consensus landscape — strength of support for each claim family in the corpus.">&#9878;&#65039; Consensus</button>
+      <button class="tab" data-tab="viz-timeline" onclick="switchVizTab('viz-timeline')"
+              title="Stacked timeline of papers per year per topic cluster.">&#128200; Timeline</button>
+      <button class="tab" data-tab="viz-ego" onclick="switchVizTab('viz-ego')"
+              title="Radial ego graph centered on one paper, showing citation neighbours and their topic clusters.">&#128269; Ego radial</button>
+      <button class="tab" data-tab="viz-radar" onclick="switchVizTab('viz-radar')"
+              title="Coverage gap radar — which topic axes have thin corpus coverage vs strong ones.">&#128504;&#65039; Gap radar</button>
     </div>
     <div class="modal-body" style="padding:var(--sp-3);">
       <div id="viz-status" style="font-size:12px;color:var(--fg-muted);margin-bottom:6px;"></div>
@@ -10936,8 +11072,10 @@ body.task-bar-open {{ padding-top: 40px; }}
           authors / year; click "Refresh" after re-clustering.
         </div>
         <div style="display:flex;gap:6px;margin-bottom:6px;">
-          <button class="btn-secondary" onclick="loadTopicMap(false)">Load</button>
-          <button class="btn-secondary" onclick="loadTopicMap(true)">Refresh UMAP</button>
+          <button class="btn-secondary" onclick="loadTopicMap(false)"
+                  title="Load the topic map from cache (fast).">Load</button>
+          <button class="btn-secondary" onclick="loadTopicMap(true)"
+                  title="Re-run UMAP from scratch. Slower — only needed after re-clustering or ingesting new papers.">Refresh UMAP</button>
           <span id="viz-topic-legend" style="font-size:11px;"></span>
         </div>
         <div id="viz-topic-chart" class="viz-chart"></div>
@@ -10949,7 +11087,8 @@ body.task-bar-open {{ padding-top: 40px; }}
           level summaries, outer rings = children. Click a slice to zoom in,
           click the centre to zoom back out.
         </div>
-        <button class="btn-secondary" onclick="loadSunburst()" style="margin-bottom:6px;">Load</button>
+        <button class="btn-secondary" onclick="loadSunburst()" style="margin-bottom:6px;"
+                title="Build the RAPTOR sunburst from the server. Requires `catalog raptor build` to have been run.">Load</button>
         <div id="viz-sunburst-chart" class="viz-chart"></div>
       </div>
       <!-- Consensus landscape -->
@@ -10964,8 +11103,10 @@ body.task-bar-open {{ padding-top: 40px; }}
           <input type="text" id="viz-consensus-topic"
                  placeholder="Topic (e.g. cosmic ray cloud nucleation)"
                  onkeydown="if(event.key==='Enter')loadConsensusLandscape()"
-                 style="flex:1;padding:4px 8px;font-size:12px;">
-          <button class="btn-primary" onclick="loadConsensusLandscape()">Map Consensus</button>
+                 style="flex:1;padding:4px 8px;font-size:12px;"
+                 title="Free-text topic label. Press Enter to run `wiki consensus`.">
+          <button class="btn-primary" onclick="loadConsensusLandscape()"
+                  title="Compute the consensus landscape for this topic (LLM-backed, 30s–2min).">Map Consensus</button>
         </div>
         <div id="viz-consensus-chart" class="viz-chart"></div>
       </div>
@@ -10976,7 +11117,8 @@ body.task-bar-open {{ padding-top: 40px; }}
           The "history of the field" view. Drag the mini-map below the
           axis to zoom into a specific era.
         </div>
-        <button class="btn-secondary" onclick="loadTimeline()" style="margin-bottom:6px;">Load</button>
+        <button class="btn-secondary" onclick="loadTimeline()" style="margin-bottom:6px;"
+                title="Build the stacked timeline chart (cluster × year).">Load</button>
         <div id="viz-timeline-chart" class="viz-chart"></div>
       </div>
       <!-- Ego radial -->
@@ -10989,11 +11131,13 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div style="display:flex;gap:6px;margin-bottom:6px;">
           <input type="text" id="viz-ego-docid"
                  placeholder="Document UUID or the first ~8 chars"
-                 style="flex:1;padding:4px 8px;font-size:12px;">
+                 style="flex:1;padding:4px 8px;font-size:12px;"
+                 title="UUID (or uniquely matching prefix) of the center paper. Find these in Browse Papers or the Catalog.">
           <input type="number" id="viz-ego-k" value="20" min="4" max="60"
                  style="width:70px;padding:4px 8px;font-size:12px;"
-                 title="Top-K neighbours">
-          <button class="btn-primary" onclick="loadEgoRadial()">Show</button>
+                 title="How many nearest-neighbour papers to plot.">
+          <button class="btn-primary" onclick="loadEgoRadial()"
+                  title="Render the polar-plot ego graph for this paper.">Show</button>
         </div>
         <div id="viz-ego-chart" class="viz-chart"></div>
       </div>
@@ -11005,7 +11149,8 @@ body.task-bar-open {{ padding-top: 40px; }}
           results / discussion / conclusion / related_work); values
           are penalised by any open gap naming the section.
         </div>
-        <button class="btn-secondary" onclick="loadGapRadar()" style="margin-bottom:6px;">Load</button>
+        <button class="btn-secondary" onclick="loadGapRadar()" style="margin-bottom:6px;"
+                title="Compute the per-chapter section-coverage radar. Requires `book gaps` to have been run.">Load</button>
         <div id="viz-radar-chart" class="viz-chart"></div>
       </div>
     </div>
