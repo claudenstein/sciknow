@@ -8425,7 +8425,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="scores-panel" id="scores-panel">
     <div class="scores-header">
       <h4>Convergence trajectory</h4>
-      <button class="modal-close" onclick="document.getElementById('scores-panel').classList.remove('open')">&times;</button>
+      <button class="modal-close" onclick="document.getElementById('scores-panel').classList.remove('open')" title="Close the scores panel.">&times;</button>
     </div>
     <div id="scores-panel-body"></div>
   </div>
@@ -8517,7 +8517,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="modal wide">
     <div class="modal-header">
       <h3>&#128218; Compiled Knowledge Wiki</h3>
-      <button class="modal-close" onclick="closeModal('wiki-modal')">&times;</button>
+      <button class="modal-close" onclick="closeModal('wiki-modal')" title="Close the Compiled Knowledge Wiki modal.">&times;</button>
     </div>
     <div class="tabs">
       <button class="tab active" data-tab="wiki-query" onclick="switchWikiTab('wiki-query')"
@@ -8819,7 +8819,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="modal">
     <div class="modal-header">
       <h3>&#128270; Ask the Corpus (RAG)</h3>
-      <button class="modal-close" onclick="closeModal('ask-modal')">&times;</button>
+      <button class="modal-close" onclick="closeModal('ask-modal')" title="Close the Ask the Corpus modal.">&times;</button>
     </div>
     <div class="modal-body">
       <div class="field">
@@ -8858,7 +8858,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="modal" style="max-width:480px;">
     <div class="modal-header">
       <h3>&#9889; Autowrite</h3>
-      <button class="modal-close" onclick="closeModal('autowrite-config-modal')">&times;</button>
+      <button class="modal-close" onclick="closeModal('autowrite-config-modal')" title="Close the Autowrite Config modal.">&times;</button>
     </div>
     <div class="modal-body">
       <p id="aw-config-scope" style="font-size:13px;color:var(--fg);margin-bottom:16px;font-weight:600;"></p>
@@ -8899,7 +8899,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="modal wide">
     <div class="modal-header">
       <h3>&#128221; Plans</h3>
-      <button class="modal-close" onclick="closeModal('plan-modal')">&times;</button>
+      <button class="modal-close" onclick="closeModal('plan-modal')" title="Close the Plans modal.">&times;</button>
     </div>
     <div class="tabs">
       <button class="tab active" data-tab="plan-book" onclick="switchPlanTab('plan-book')"
@@ -9068,7 +9068,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="modal wide">
     <div class="modal-header">
       <h3>&#9881; Chapter</h3>
-      <button class="modal-close" onclick="closeModal('chapter-modal')">&times;</button>
+      <button class="modal-close" onclick="closeModal('chapter-modal')" title="Close the Chapter modal.">&times;</button>
     </div>
     <div class="tabs">
       <button class="tab active" data-tab="ch-scope" onclick="switchChapterTab('ch-scope')"
@@ -9134,7 +9134,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="modal wide">
     <div class="modal-header">
       <h3>&#128194; Browse Papers</h3>
-      <button class="modal-close" onclick="closeModal('catalog-modal')">&times;</button>
+      <button class="modal-close" onclick="closeModal('catalog-modal')" title="Close the Browse Papers modal.">&times;</button>
     </div>
     <div class="modal-body">
       <div class="field" style="display:flex;gap:8px;align-items:flex-end;">
@@ -9171,7 +9171,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="modal wide">
     <div class="modal-header">
       <h3>&#9881; Book Settings</h3>
-      <button class="modal-close" onclick="closeModal('book-settings-modal')">&times;</button>
+      <button class="modal-close" onclick="closeModal('book-settings-modal')" title="Close the Book Settings modal.">&times;</button>
     </div>
     <div class="tabs">
       <button class="tab active" data-tab="bs-basics" onclick="switchBookSettingsTab('bs-basics')"
@@ -9298,7 +9298,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="modal wide">
     <div class="modal-header">
       <h3>&#128203; Preprint ↔ journal reconciliations</h3>
-      <button class="modal-close" onclick="closeModal('reconciliations-modal')">&times;</button>
+      <button class="modal-close" onclick="closeModal('reconciliations-modal')" title="Close the Preprint Reconciliations modal.">&times;</button>
     </div>
     <div class="modal-body" style="font-size:13px;line-height:1.5;">
       <p style="font-size:11px;color:var(--fg-muted);margin-bottom:10px;">
@@ -9318,7 +9318,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="modal wide">
     <div class="modal-header">
       <h3>&#128161; AI Actions &mdash; what each button does</h3>
-      <button class="modal-close" onclick="closeModal('ai-help-modal')">&times;</button>
+      <button class="modal-close" onclick="closeModal('ai-help-modal')" title="Close the AI Actions Help modal.">&times;</button>
     </div>
     <div class="modal-body" style="font-size:13px;line-height:1.55;">
       <p style="color:var(--fg-muted);">
@@ -9506,7 +9506,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="modal wide">
     <div class="modal-header">
       <h3>&#128202; Visual Elements</h3>
-      <button class="modal-close" onclick="closeModal('visuals-modal')">&times;</button>
+      <button class="modal-close" onclick="closeModal('visuals-modal')" title="Close the Visuals modal.">&times;</button>
     </div>
     <div class="modal-body" style="font-size:13px;">
       <!-- Phase 54.6.99 — Visual Elements browser redesigned:
@@ -9567,7 +9567,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="modal wide">
     <div class="modal-header">
       <h3>&#128190; Backups</h3>
-      <button class="modal-close" onclick="closeModal('backups-modal')">&times;</button>
+      <button class="modal-close" onclick="closeModal('backups-modal')" title="Close the Backups modal.">&times;</button>
     </div>
     <div class="modal-body" style="font-size:13px;">
       <div id="backup-status" style="margin-bottom:12px;padding:10px;background:var(--bg-alt);border-radius:6px;">
@@ -9650,7 +9650,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="modal wide">
     <div class="modal-header">
       <h3>&#128193; Projects</h3>
-      <button class="modal-close" onclick="closeModal('projects-modal')">&times;</button>
+      <button class="modal-close" onclick="closeModal('projects-modal')" title="Close the Projects modal.">&times;</button>
     </div>
     <div class="modal-body">
       <p style="font-size:11px;color:var(--fg-muted);margin-bottom:12px;">
@@ -9734,7 +9734,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="modal wide">
     <div class="modal-header">
       <h3>&#128736; Setup Wizard</h3>
-      <button class="modal-close" onclick="closeModal('setup-wizard-modal')">&times;</button>
+      <button class="modal-close" onclick="closeModal('setup-wizard-modal')" title="Close the Setup Wizard modal.">&times;</button>
     </div>
     <!-- Step progress trail -->
     <div id="sw-trail" style="display:flex;gap:8px;padding:8px 18px;border-bottom:1px solid var(--border);font-size:12px;">
@@ -10001,7 +10001,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="modal wide">
     <div class="modal-header">
       <h3>&#128230; Snapshot Bundles</h3>
-      <button class="modal-close" onclick="closeModal('bundle-modal')">&times;</button>
+      <button class="modal-close" onclick="closeModal('bundle-modal')" title="Close the Snapshot Bundles modal.">&times;</button>
     </div>
     <div class="tabs">
       <button class="tab active" data-tab="sb-chapter" onclick="switchBundleTab('sb-chapter')"
@@ -10061,7 +10061,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="modal wide">
     <div class="modal-header">
       <h3>&#128736; Tools</h3>
-      <button class="modal-close" onclick="closeModal('tools-modal')">&times;</button>
+      <button class="modal-close" onclick="closeModal('tools-modal')" title="Close the Tools modal.">&times;</button>
     </div>
     <div class="tabs">
       <button class="tab active" data-tab="tl-search" onclick="switchToolsTab('tl-search')"
@@ -10196,7 +10196,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="modal wide xwide">
     <div class="modal-header">
       <h3>&#127793; Corpus &mdash; Enrich &amp; Expand</h3>
-      <button class="modal-close" onclick="closeModal('corpus-modal')">&times;</button>
+      <button class="modal-close" onclick="closeModal('corpus-modal')" title="Close the Corpus modal.">&times;</button>
     </div>
     <div class="modal-body">
       <!-- Corpus tab (Phase 46.E + 54.6.4 — expand/enrich/cleanup) -->
@@ -10655,7 +10655,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="modal wide xwide">
     <div class="modal-header">
       <h3 id="eap-title">&#128269; Preview Candidates</h3>
-      <button class="modal-close" onclick="closeModal('candidates-preview-modal')">&times;</button>
+      <button class="modal-close" onclick="closeModal('candidates-preview-modal')" title="Close the Candidates Preview modal.">&times;</button>
     </div>
     <div class="modal-body">
       <div id="eap-loading" style="display:none;padding:20px;text-align:center;color:var(--fg-muted);">
@@ -10764,7 +10764,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="modal wide xwide">
     <div class="modal-header">
       <h3>&#128203; Pending downloads</h3>
-      <button class="modal-close" onclick="closeModal('pending-downloads-modal')">&times;</button>
+      <button class="modal-close" onclick="closeModal('pending-downloads-modal')" title="Close the Pending Downloads modal.">&times;</button>
     </div>
     <div class="modal-body">
       <div style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;">
@@ -10851,7 +10851,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="modal wide">
     <div class="modal-header">
       <h3>&#128279; Knowledge Graph</h3>
-      <button class="modal-close" onclick="closeModal('kg-modal')">&times;</button>
+      <button class="modal-close" onclick="closeModal('kg-modal')" title="Close the Knowledge Graph modal.">&times;</button>
     </div>
     <div class="tabs">
       <button class="tab active" data-tab="kg-graph" onclick="switchKgTab('kg-graph')"
@@ -11033,7 +11033,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="modal wide xwide">
     <div class="modal-header">
       <h3>&#128200; Visualize</h3>
-      <button class="modal-close" onclick="closeModal('viz-modal')">&times;</button>
+      <button class="modal-close" onclick="closeModal('viz-modal')" title="Close the Visualize modal.">&times;</button>
     </div>
     <!-- Phase 54.6.15 — shared theming bar above the tabs. Theme chips,
          font, label-size, fullscreen and download PNG apply to ALL six
@@ -11199,7 +11199,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="modal">
     <div class="modal-header">
       <h3>&#128229; Export</h3>
-      <button class="modal-close" onclick="closeModal('export-modal')">&times;</button>
+      <button class="modal-close" onclick="closeModal('export-modal')" title="Close the Export modal.">&times;</button>
     </div>
     <div class="modal-body">
       <p style="font-size:12px;color:var(--fg-muted);margin-bottom:14px;">
@@ -11421,14 +11421,14 @@ function showChapterEmptyState(chLabel, chId) {{
           (tq ? '<code>' + tq.replace(/</g, '&lt;') + '</code>' : '<em style="color:var(--fg-faint);">Not set &mdash; the chapter title will be used as the retrieval query.</em>') +
           '</div></div>';
   // Phase 42 — data-action dispatch (see ACTIONS registry).
-  html += '<button class="btn-secondary" style="margin-top:8px;font-size:12px;" data-action="open-chapter-modal" data-chapter-id="' + chId + '">&#9881; Edit chapter scope</button>';
+  html += '<button class="btn-secondary" style="margin-top:8px;font-size:12px;" data-action="open-chapter-modal" data-chapter-id="' + chId + '" title="Open the Chapter modal to edit this chapter\\'s title, scope, topic query and sections.">&#9881; Edit chapter scope</button>';
   html += '</div>';
 
   html += '<p>Once the scope feels right, choose a section type below and click <strong>Write</strong> in the toolbar, or click <strong>Autowrite</strong> to draft a section autonomously with the convergence loop.</p>';
   html += '<div class="empty-section-picker">';
   sections.forEach(s => {{
     const active = s === currentSectionType ? ' active' : '';
-    html += '<button class="section-chip' + active + '" data-action="set-section-type" data-sec-type="' + s + '">' + s.replace(/_/g, ' ') + '</button>';
+    html += '<button class="section-chip' + active + '" data-action="set-section-type" data-sec-type="' + s + '" title="Switch the active draft to this section type. Each section gets its own draft + section-specific writer prompt.">' + s.replace(/_/g, ' ') + '</button>';
   }});
   html += '</div>';
   html += '<p style="margin-top:16px;font-size:12px;color:var(--fg-muted);">Tip: you can also explore the corpus without writing anything &mdash; use <strong>Ask Corpus</strong>, <strong>Wiki Query</strong>, or <strong>Browse Papers</strong>. The book&#39;s overall <strong>&#128221; Plan</strong> is also editable from the toolbar.</p>';
@@ -18472,7 +18472,7 @@ async function openExpandAuthorPreview() {{
         rows += `<tr data-action="eap-toggle-author" data-sid="${{_escHtml(sid)}}" `
           + `style="cursor:pointer;${{isChecked ? 'background:rgba(80,200,120,0.12);' : ''}}">`
           + `<td style="padding:4px 8px;">`
-          + `<input type="checkbox" class="eap-author-cb" data-sid="${{_escHtml(sid)}}" ${{isChecked ? 'checked' : ''}}></td>`
+          + `<input type="checkbox" class="eap-author-cb" data-sid="${{_escHtml(sid)}}" ${{isChecked ? 'checked' : ''}} title="Pin this author ID. Re-query will scope the search to only the ticked authors — defeats OpenAlex name-collision disambiguation."></td>`
           + `<td style="padding:2px 8px;"><strong>${{_escHtml(a.display_name || '')}}</strong></td>`
           + `<td style="padding:2px 8px;text-align:right;">${{a.works_count || 0}}w</td>`
           + `<td style="padding:2px 8px;font-size:10px;color:var(--fg-muted);">${{_escHtml(affil)}}</td>`
@@ -18614,7 +18614,7 @@ async function eapRequeryWithSelected() {{
         rows += `<tr data-action="eap-toggle-author" data-sid="${{_escHtml(sid)}}" `
           + `style="cursor:pointer;${{isChecked ? 'background:rgba(80,200,120,0.12);' : ''}}">`
           + `<td style="padding:4px 8px;">`
-          + `<input type="checkbox" class="eap-author-cb" data-sid="${{_escHtml(sid)}}" ${{isChecked ? 'checked' : ''}}></td>`
+          + `<input type="checkbox" class="eap-author-cb" data-sid="${{_escHtml(sid)}}" ${{isChecked ? 'checked' : ''}} title="Pin this author ID. Re-query will scope the search to only the ticked authors — defeats OpenAlex name-collision disambiguation."></td>`
           + `<td style="padding:2px 8px;"><strong>${{_escHtml(a.display_name || '')}}</strong></td>`
           + `<td style="padding:2px 8px;text-align:right;">${{a.works_count || 0}}w</td>`
           + `<td style="padding:2px 8px;font-size:10px;color:var(--fg-muted);">${{_escHtml(affil)}}</td>`
@@ -18953,7 +18953,7 @@ function _renderPendingTable() {{
               title="Abandon">&#215;</button>
     `;
     return `<tr data-doi="${{_escHtml(r.doi)}}" style="border-top:1px solid var(--border);">
-      <td style="padding:6px 8px;"><input type="checkbox" class="pdl-row-cb" data-doi="${{_escHtml(r.doi)}}" ${{checked}}></td>
+      <td style="padding:6px 8px;"><input type="checkbox" class="pdl-row-cb" data-doi="${{_escHtml(r.doi)}}" ${{checked}} title="Select this row for bulk Retry / Mark-done / Abandon / Export."></td>
       <td style="padding:6px 8px;">
         <div style="font-weight:500;">${{_escHtml(r.title || '(untitled)')}}</div>
         <div style="font-size:10px;margin-top:2px;">${{doiUrl}}</div>
@@ -20271,10 +20271,10 @@ function populatePlanChapterTab(ch) {{
             escapeHtml(s.plan || '') + '</textarea>';
     html += '    <div class="sec-size-row">';
     html += '      <label>Target:</label>';
-    html += '      <select onchange="updatePlanChapterTargetWords(\\'' + s.slug + '\\', this.value)">' + optsHtml + '</select>';
+    html += '      <select onchange="updatePlanChapterTargetWords(\\'' + s.slug + '\\', this.value)" title="Pick a preset word target for this section. Choose Custom to enter an exact number in the box on the right.">' + optsHtml + '</select>';
     html += '      <input type="number" class="sec-size-custom" placeholder="words" min="100" step="100" ';
     html += '             value="' + customVal + '" style="' + customStyle + '" ';
-    html += '             oninput="updatePlanChapterTargetWordsCustom(\\'' + s.slug + '\\', this.value)">';
+    html += '             oninput="updatePlanChapterTargetWordsCustom(\\'' + s.slug + '\\', this.value)" title="Custom target word count. Visible only when the preset dropdown is set to Custom.">';
     html += '      <span class="' + badgeClass + '">~' + effectiveTw + ' words ' + badgeTag + '</span>';
     html += '    </div>';
     html += '    <div class="sec-slug">slug: <code>' + s.slug + '</code></div>';
@@ -21106,10 +21106,10 @@ function renderSectionEditor() {{
       : 'Auto: chapter target / number of sections';
     html += '    <div class="sec-size-row">';
     html += '      <label>Target:</label>';
-    html += '      <select onchange="updateSectionTargetWords(' + i + ', this.value)">' + optsHtml + '</select>';
+    html += '      <select onchange="updateSectionTargetWords(' + i + ', this.value)" title="Pick a preset word target for this section. Choose Custom to enter an exact number in the box on the right. Auto = chapter target divided evenly across sections.">' + optsHtml + '</select>';
     html += '      <input type="number" class="sec-size-custom" placeholder="words" min="100" step="100" ';
     html += '             value="' + customVal + '" style="' + customStyle + '" ';
-    html += '             oninput="updateSectionTargetWordsCustom(' + i + ', this.value)">';
+    html += '             oninput="updateSectionTargetWordsCustom(' + i + ', this.value)" title="Custom target word count. Visible only when the preset dropdown is set to Custom.">';
     html += '      <span class="' + targetBadgeClass + '" title="' + targetBadgeTitle + '">';
     html += '~' + effectiveTw + ' words';
     html += (tw && tw > 0 ? ' <span class="badge-tag">override</span>' : ' <span class="badge-tag muted">auto</span>');
