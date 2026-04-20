@@ -1721,43 +1721,13 @@ def expand_oeuvre_cmd(
     from sciknow.cli import preflight
     preflight()
 
-    import json as _json
     import subprocess
     import sys as _sys
-    from collections import Counter
-    from sqlalchemy import text as sql_text
-    from sciknow.storage.db import get_session
+    from sciknow.core.expand_ops import qualifying_oeuvre_authors
 
-    with get_session() as session:
-        rows = session.execute(sql_text("""
-            SELECT authors FROM paper_metadata
-            WHERE authors IS NOT NULL
-        """)).fetchall()
-
-    # Authors column is JSONB list of {name, orcid?, affiliation?}
-    author_counts: Counter = Counter()
-    orcid_by_name: dict[str, str] = {}
-    for (authors,) in rows:
-        try:
-            items = authors if isinstance(authors, list) else _json.loads(authors or "[]")
-        except Exception:
-            continue
-        for a in items or []:
-            if isinstance(a, dict):
-                name = (a.get("name") or "").strip()
-                if not name:
-                    continue
-                author_counts[name] += 1
-                oid = (a.get("orcid") or "").strip()
-                if oid and name not in orcid_by_name:
-                    orcid_by_name[name] = oid
-            elif isinstance(a, str) and a.strip():
-                author_counts[a.strip()] += 1
-
-    qualifying = [
-        (name, n) for name, n in author_counts.most_common()
-        if n >= min_corpus_papers
-    ][:max_authors]
+    qualifying = qualifying_oeuvre_authors(
+        min_corpus_papers=min_corpus_papers, max_authors=max_authors,
+    )
 
     if not qualifying:
         console.print(
@@ -1772,12 +1742,13 @@ def expand_oeuvre_cmd(
         f"(≥{min_corpus_papers} corpus papers), "
         f"cap {per_author_limit} new paper(s) each:\n"
     )
-    for name, n in qualifying:
+    for row in qualifying:
         orcid_hint = (
-            f"  [dim]orcid={orcid_by_name[name]}[/dim]"
-            if name in orcid_by_name else ""
+            f"  [dim]orcid={row['orcid']}[/dim]" if row["orcid"] else ""
         )
-        console.print(f"  • {n:>3} corpus papers  {name}{orcid_hint}")
+        console.print(
+            f"  • {row['n_corpus_papers']:>3} corpus papers  {row['name']}{orcid_hint}"
+        )
 
     if dry_run:
         console.print("\n[dim]Dry run — nothing executed.[/dim]")
@@ -1785,7 +1756,9 @@ def expand_oeuvre_cmd(
 
     t0 = time.monotonic()
     done = 0
-    for i, (name, n) in enumerate(qualifying, start=1):
+    for i, row in enumerate(qualifying, start=1):
+        name = row["name"]
+        n = row["n_corpus_papers"]
         console.print(f"\n[bold]Author {i}/{len(qualifying)}[/bold]: {name} "
                       f"([cyan]{n}[/cyan] in corpus)")
         argv = [
@@ -1793,8 +1766,8 @@ def expand_oeuvre_cmd(
             "db", "expand-author", name,
             "--limit", str(per_author_limit),
         ]
-        if name in orcid_by_name:
-            argv += ["--orcid", orcid_by_name[name]]
+        if row["orcid"]:
+            argv += ["--orcid", row["orcid"]]
         if strict_author:
             argv.append("--strict-author")
         if relevance_query:

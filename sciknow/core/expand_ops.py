@@ -660,3 +660,148 @@ def find_coauthor_candidates(
         "dedup_dropped": dropped,
         "relevance_query_used": rq_used,
     }}
+
+
+# ── Phase 54.6.131 — oeuvre preview ─────────────────────────────────
+
+
+def qualifying_oeuvre_authors(
+    *, min_corpus_papers: int = 3, max_authors: int = 10,
+) -> list[dict[str, Any]]:
+    """Scan paper_metadata.authors and return the top-``max_authors``
+    names with ≥``min_corpus_papers`` papers in the corpus, ordered
+    by descending paper count. Each row has ``{name, n_corpus_papers,
+    orcid}``. Used by both the ``db expand-oeuvre`` CLI and the GUI's
+    Preview-oeuvre flow so they enumerate authors identically.
+    """
+    import json as _json
+    from collections import Counter
+    from sqlalchemy import text as sql_text
+
+    with get_session() as session:
+        rows = session.execute(sql_text(
+            "SELECT authors FROM paper_metadata WHERE authors IS NOT NULL"
+        )).fetchall()
+    counts: Counter = Counter()
+    orcid_by_name: dict[str, str] = {}
+    for (authors,) in rows:
+        try:
+            items = authors if isinstance(authors, list) else _json.loads(authors or "[]")
+        except Exception:
+            continue
+        for a in items or []:
+            if isinstance(a, dict):
+                name = (a.get("name") or "").strip()
+                if not name:
+                    continue
+                counts[name] += 1
+                oid = (a.get("orcid") or "").strip()
+                if oid and name not in orcid_by_name:
+                    orcid_by_name[name] = oid
+            elif isinstance(a, str) and a.strip():
+                counts[a.strip()] += 1
+    qualifying: list[dict[str, Any]] = []
+    for name, n in counts.most_common():
+        if n < min_corpus_papers:
+            break
+        qualifying.append({
+            "name": name,
+            "n_corpus_papers": n,
+            "orcid": orcid_by_name.get(name, ""),
+        })
+        if len(qualifying) >= max_authors:
+            break
+    return qualifying
+
+
+def find_oeuvre_candidates(
+    *,
+    min_corpus_papers: int = 3,
+    per_author_limit: int = 10,
+    max_authors: int = 10,
+    relevance_query: str = "",
+    strict_author: bool = True,
+    score_relevance: bool = True,
+    on_progress=None,
+) -> dict[str, Any]:
+    """Phase 54.6.131 — oeuvre preview: enumerate qualifying authors
+    and per-author candidates in one shot, returning a flat shortlist
+    annotated with the source author so the GUI can show + group +
+    cherry-pick before any download. Mirrors the CLI ``expand-oeuvre``
+    plan exactly but without spawning subprocesses or downloading.
+    """
+    authors = qualifying_oeuvre_authors(
+        min_corpus_papers=min_corpus_papers, max_authors=max_authors,
+    )
+    if not authors:
+        return {"candidates": [], "info": {
+            "qualifying_authors": 0,
+            "min_corpus_papers": min_corpus_papers,
+            "message": (
+                f"No author has ≥{min_corpus_papers} corpus papers. "
+                "Lower --min-corpus-papers or expand the corpus first."
+            ),
+        }, "authors": []}
+
+    out: list[dict[str, Any]] = []
+    seen_dois: set[str] = set()
+    per_author_stats: list[dict[str, Any]] = []
+    total_raw = 0
+    total_dropped_dup = 0
+    for i, row in enumerate(authors, start=1):
+        name = row["name"]
+        orcid = row["orcid"] or None
+        if on_progress:
+            try:
+                on_progress(i, len(authors), name)
+            except Exception:
+                pass
+        try:
+            res = find_author_candidates(
+                name=name,
+                orcid=orcid,
+                limit=per_author_limit,
+                strict_author=strict_author,
+                relevance_query=relevance_query,
+                score_relevance=score_relevance,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("oeuvre preview failed for %s: %s", name, exc)
+            per_author_stats.append({
+                "name": name, "n_corpus": row["n_corpus_papers"],
+                "n_candidates": 0, "error": str(exc)[:200],
+            })
+            continue
+        cands = res.get("candidates") or []
+        total_raw += len(cands)
+        kept = 0
+        for c in cands:
+            doi = (c.get("doi") or "").lower()
+            if doi and doi in seen_dois:
+                total_dropped_dup += 1
+                continue
+            if doi:
+                seen_dois.add(doi)
+            c = dict(c)
+            c["_oeuvre_author"] = name
+            c["_oeuvre_author_orcid"] = orcid or ""
+            out.append(c)
+            kept += 1
+        per_author_stats.append({
+            "name": name, "n_corpus": row["n_corpus_papers"],
+            "n_candidates": kept, "orcid": orcid or "",
+        })
+    return {
+        "candidates": out,
+        "authors": per_author_stats,
+        "info": {
+            "qualifying_authors": len(authors),
+            "raw_candidates": total_raw,
+            "merged_candidates": len(out),
+            "cross_author_duplicates": total_dropped_dup,
+            "min_corpus_papers": min_corpus_papers,
+            "per_author_limit": per_author_limit,
+            "max_authors": max_authors,
+            "relevance_query_used": relevance_query or "centroid",
+        },
+    }

@@ -5020,6 +5020,38 @@ async def api_corpus_expand_author(
     return JSONResponse({"job_id": job_id})
 
 
+@app.post("/api/corpus/expand-oeuvre/preview")
+async def api_corpus_expand_oeuvre_preview(
+    min_corpus_papers: int = Form(3),
+    per_author_limit: int = Form(10),
+    max_authors: int = Form(10),
+    relevance_query: str = Form(""),
+    strict_author: bool = Form(True),
+):
+    """Phase 54.6.131 — Oeuvre preview. Enumerates qualifying authors
+    + per-author candidates without downloading; returns the merged
+    shortlist annotated with the source author for cherry-pick in the
+    candidates modal. Reuses ``find_oeuvre_candidates`` so the GUI
+    plan matches the CLI plan exactly."""
+    from sciknow.core.expand_ops import find_oeuvre_candidates
+
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: find_oeuvre_candidates(
+                min_corpus_papers=min_corpus_papers,
+                per_author_limit=per_author_limit,
+                max_authors=max_authors,
+                relevance_query=relevance_query.strip(),
+                strict_author=strict_author,
+                score_relevance=True,
+            ),
+        )
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)[:500]}, status_code=500)
+    return JSONResponse(result)
+
+
 @app.post("/api/corpus/expand-author/download-selected")
 async def api_corpus_expand_author_download_selected(request: Request):
     """Phase 54.6.1 — download + ingest the user-chosen subset from the
@@ -10411,8 +10443,12 @@ body.task-bar-open {{ padding-top: 40px; }}
                 <input type="checkbox" id="tl-oeu-dry"
                        title="Compute the author list + per-author plan without downloading."> dry-run
               </label>
+              <button class="btn-primary" onclick="openExpandOeuvrePreview()"
+                      title="Phase 54.6.131 — Pre-fetch every qualifying author's candidates without downloading. Surfaces the merged shortlist (annotated with the source author per row) in the candidates modal so you can cherry-pick before any disk write.">
+                &#128269; Preview oeuvre candidates
+              </button>
               <button class="btn-secondary" onclick="runOeuvreExpand()"
-                      title="Scan corpus → find authors with ≥ Min papers → loop expand-author over them with the configured limits. ORCID-preferred, strict-author match.">Run oeuvre expansion</button>
+                      title="Auto-mode: scan corpus → find authors with ≥ Min papers → loop expand-author over them with the configured limits. ORCID-preferred, strict-author match. NO preview — downloads and ingests every candidate above the relevance threshold.">Run oeuvre expansion</button>
             </div>
           </div>
         </div>
@@ -18231,6 +18267,75 @@ async function runOeuvreExpand() {{
   runCorpusCliAction(argv, 'Scanning corpus authors…');
 }}
 
+// Phase 54.6.131 — Oeuvre PREVIEW. Pre-fetches every qualifying
+// author's candidates and surfaces the merged shortlist in the
+// candidates modal so the user cherry-picks before any download.
+async function openExpandOeuvrePreview() {{
+  const min_ = parseInt(document.getElementById('tl-oeu-min').value || '3', 10);
+  const lim = parseInt(document.getElementById('tl-oeu-limit').value || '10', 10);
+  const mx  = parseInt(document.getElementById('tl-oeu-max').value || '10', 10);
+  _eapResetModal(
+    '&#128100; Oeuvre &mdash; Preview Candidates',
+    `Scanning ${{mx}} top corpus author(s) and fetching their bibliographies…`,
+    `(typically ${{mx}} × 10-30s — slowest preview because it serially probes each author)`
+  );
+  const fd = new FormData();
+  fd.append('min_corpus_papers', String(min_));
+  fd.append('per_author_limit', String(lim));
+  fd.append('max_authors', String(mx));
+  fd.append('strict_author', 'true');
+  try {{
+    const res = await fetch('/api/corpus/expand-oeuvre/preview', {{
+      method: 'POST', body: fd,
+    }});
+    if (!res.ok) {{
+      const detail = await res.text();
+      throw new Error('HTTP ' + res.status + ': ' + detail);
+    }}
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    _eapCandidates = data.candidates || [];
+    const info = data.info || {{}};
+    const authors = data.authors || [];
+    if (!authors.length) {{
+      _eapShowError(
+        info.message ||
+        `No author has ≥${{min_}} corpus papers. Lower the threshold or expand the corpus first.`
+      );
+      return;
+    }}
+    // Pre-select non-cached candidates (no relevance threshold —
+    // preview is by-design pre-rank).
+    document.getElementById('eap-threshold').value = '0.55';
+    _eapCandidates.forEach(c => {{
+      if (c.doi && !c.cached_status) _eapSelected.add(c.doi);
+    }});
+    // Build per-author summary chips for the info line.
+    const chips = authors.slice(0, 8).map(a => {{
+      const orc = a.orcid ? ` <span style="color:var(--accent);">[ORCID]</span>` : '';
+      const cls = a.error ? 'color:var(--danger);' : '';
+      return `<span style="display:inline-block;background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);padding:1px 6px;border-radius:3px;margin-right:4px;${{cls}}">`
+        + `${{_escHtml(a.name)}} <span style="color:var(--fg-muted);">(${{a.n_corpus}}c · ${{a.n_candidates}}n)</span>${{orc}}</span>`;
+    }}).join('');
+    const more = authors.length > 8 ? ` <span style="color:var(--fg-muted);">+${{authors.length - 8}} more</span>` : '';
+    document.getElementById('eap-info').innerHTML =
+      `<div style="margin-bottom:6px;">`
+      + `Pulled candidates from <strong>${{info.qualifying_authors || 0}}</strong> author(s) with ≥${{info.min_corpus_papers}} corpus papers `
+      + `(per-author cap ${{info.per_author_limit}}). `
+      + `<strong>${{info.merged_candidates || 0}}</strong> unique paper(s) after dedup `
+      + `(<strong>${{info.cross_author_duplicates || 0}}</strong> cross-author duplicates dropped). `
+      + `Anchor: <code>${{_escHtml(info.relevance_query_used || 'centroid')}}</code>.`
+      + `</div>`
+      + `<div style="font-size:11px;line-height:1.7;">${{chips}}${{more}}</div>`
+      + `<div style="font-size:11px;color:var(--fg-muted);margin-top:4px;">Each row in the table shows the source author below its title — sort by author by clicking the column header.</div>`;
+    document.getElementById('eap-loading').style.display = 'none';
+    document.getElementById('eap-content').style.display = 'block';
+    eapRender();
+  }} catch (e) {{
+    _eapShowError(e && e.message ? e.message : String(e));
+  }}
+}}
+
 // Phase 54.6.114 (Tier 2 #2) — agentic question-driven expansion.
 // Streams CLI output into the Corpus modal's existing log panel.
 async function runAgenticExpand() {{
@@ -18369,6 +18474,16 @@ function _eapResetModal(title, loadingMsg, loadingSub) {{
   document.getElementById('eap-log').textContent = '';
   document.getElementById('eap-status').textContent = '';
   openModal('candidates-preview-modal');
+}}
+
+// Phase 54.6.131 — small helper used by oeuvre + agentic preview
+// flows to show an error inside the candidates modal without writing
+// the same 4 lines per call site.
+function _eapShowError(msg) {{
+  document.getElementById('eap-loading').style.display = 'none';
+  const el = document.getElementById('eap-error');
+  el.textContent = msg || 'Unknown error';
+  el.style.display = 'block';
 }}
 
 async function openExpandAuthorPreview() {{
@@ -19193,12 +19308,22 @@ function eapRender() {{
       cachedBadge = ` <span title="Prior run downloaded the PDF but the converter (MinerU/Marker) couldn't parse it. Re-tick 'retry previously-failed' to re-try." style="background:rgba(220,160,80,0.18);color:var(--warning);padding:1px 5px;border-radius:3px;font-size:9px;margin-left:4px;">&#9888; cached: ingest fail</span>`;
       rowStyle += 'opacity:0.55;';
     }}
+    // Phase 54.6.131 — oeuvre + agentic preview source badge.
+    // Shows "from: <author>" or "topic: <subtopic>" under the title
+    // so the user knows which gap/author surfaced this row.
+    let sourceBadge = '';
+    if (c._oeuvre_author) {{
+      sourceBadge = `<div style="font-size:10px;margin-top:2px;color:var(--accent);">&#128100; from oeuvre author: <strong>${{_escHtml(c._oeuvre_author)}}</strong></div>`;
+    }} else if (c._agentic_subtopic) {{
+      sourceBadge = `<div style="font-size:10px;margin-top:2px;color:var(--accent);">&#129504; sub-topic: <strong>${{_escHtml(c._agentic_subtopic)}}</strong></div>`;
+    }}
     return `<tr style="${{rowStyle}}" data-doi="${{_escHtml(c.doi || '')}}">
       <td style="padding:6px 8px;"><input type="checkbox" class="eap-row-cb" ${{checked}}
            data-doi="${{_escHtml(c.doi || '')}}" onclick="event.stopPropagation();"></td>
       <td style="padding:6px 8px;">
         <div style="font-weight:500;">${{_escHtml(c.title || '(untitled)')}}</div>
         <div style="font-size:10px;margin-top:2px;">${{doi}}${{altBadge}}${{cachedBadge}}</div>
+        ${{sourceBadge}}
       </td>
       <td style="padding:6px 8px;color:var(--fg-muted);">${{_escHtml(authors)}}</td>
       <td style="padding:6px 8px;color:var(--fg-muted);">${{c.year || '—'}}</td>
