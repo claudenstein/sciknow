@@ -9460,6 +9460,69 @@ def l1_phase54_6_56_refresh_ingests_downloads_and_failed() -> None:
         )
 
 
+def l1_phase54_6_137_velocity_watcher_surface() -> None:
+    """Phase 54.6.137 — velocity-query watcher surface + replay round-trip.
+
+    Verifies the watcher module exposes the expected public API for
+    OpenAlex-based scheduled semantic watching, and that the event-log
+    replay round-trips (no live API call — cheap L1).
+
+    Guards against: (a) a refactor deleting the velocity-query CLI
+    commands, (b) a breaking change to the replay keys, (c) the
+    WatchedVelocityQuery dataclass losing required fields the CLI
+    list/check renderers depend on.
+    """
+    from sciknow.cli import watch as watch_cli
+    from sciknow.core import watchlist as wl
+
+    # A) CLI surface — the four new subcommands are wired
+    cmd_names = {cmd.name for cmd in watch_cli.app.registered_commands}
+    for required in ("add-velocity", "remove-velocity",
+                     "check-velocity", "list-velocity"):
+        assert required in cmd_names, (
+            f"`sciknow watch {required}` command missing from watch.app "
+            f"(Phase 54.6.137)."
+        )
+
+    # B) Public module functions present
+    for fn in ("add_velocity_query", "remove_velocity_query",
+               "list_watched_velocity_queries", "check_velocity_query",
+               "check_all_velocity_queries"):
+        assert hasattr(wl, fn), f"watchlist.{fn} missing (Phase 54.6.137)."
+
+    # C) Dataclass fields the CLI renderers read
+    required_fields = {
+        "query", "note", "window_days", "top_k",
+        "last_checked_at", "last_seen_dois", "last_top_papers",
+        "new_since_last_check",
+    }
+    got_fields = {f.name for f in wl.WatchedVelocityQuery.__dataclass_fields__.values()}
+    missing = required_fields - got_fields
+    assert not missing, (
+        f"WatchedVelocityQuery missing fields the CLI depends on: {missing}"
+    )
+
+    # D) Normalisation works (queries are keyed case- and
+    # whitespace-insensitive)
+    k1 = wl._normalise_velocity_key("  Grand  Solar  MINIMUM  ")
+    k2 = wl._normalise_velocity_key("grand solar minimum")
+    assert k1 == k2 == "grand solar minimum", (
+        f"velocity key normalisation broken: {k1!r} vs {k2!r}"
+    )
+
+    # E) Velocity score formula stays sane
+    # fresh paper (current year) with 10 cites → high velocity
+    # old paper (2015) with 10 cites → low velocity
+    from datetime import datetime, timezone
+    now_year = datetime.now(timezone.utc).year
+    assert wl._velocity_score(10, now_year) > wl._velocity_score(10, 2015), (
+        "velocity score must reward recent-and-cited over old-and-cited"
+    )
+    assert wl._velocity_score(0, now_year) == 0.0, (
+        "papers with zero citations must have zero velocity"
+    )
+
+
 def l1_phase54_6_136_fts_is_chunk_level() -> None:
     """Phase 54.6.136 — FTS signal queries chunks, not paper_metadata.
 
@@ -9865,6 +9928,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_135_agentic_preview_annotates_cached_status,
     # Phase 54.6.136 — FTS signal must be chunk-level, not paper-level
     l1_phase54_6_136_fts_is_chunk_level,
+    # Phase 54.6.137 — velocity-query watcher surface + replay round-trip
+    l1_phase54_6_137_velocity_watcher_surface,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness

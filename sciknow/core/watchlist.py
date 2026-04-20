@@ -46,7 +46,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -877,3 +877,309 @@ def check_all_benchmarks(
         except Exception as exc:
             logger.warning("bench_check %s failed: %s", b.key, exc)
             yield b, "error"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Phase 54.6.137 — velocity queries (scheduled OpenAlex semantic watch).
+#
+# A third watched-entity kind, sharing the same append-only log + replay
+# pattern as repos and benchmarks. Purpose: surface *new* papers in the
+# last N days that match a stored semantic query, ranked by citation
+# velocity, so researchers don't forget to re-expand their corpus when
+# a topic starts moving.
+# ══════════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class WatchedVelocityQuery:
+    """A stored OpenAlex semantic query watched for new high-velocity papers.
+
+    ``query`` is the primary key (normalised: trimmed + case preserved
+    since OpenAlex's ``search`` is case-insensitive, but we keep the
+    original casing for display). ``window_days`` controls how far back
+    each ``check`` looks; ``top_k`` caps the number of papers surfaced
+    per check.
+
+    Per-check output lives in the log; the dataclass only carries the
+    *current* snapshot so the ``list`` command is cheap.
+    """
+    query: str
+    note: str = ""
+    window_days: int = 180
+    top_k: int = 20
+    # Rolling state
+    last_checked_at: str | None = None
+    # DOIs (lowercased) surfaced on the previous check, used to compute
+    # the delta on the next check.
+    last_seen_dois: list[str] = field(default_factory=list)
+    # Top-K paper snapshots from the last check — each is
+    # {doi, title, year, cited_by_count, velocity, authors (≤3)}.
+    last_top_papers: list[dict] = field(default_factory=list)
+    new_since_last_check: int = 0
+
+    @property
+    def key(self) -> str:
+        """Stable primary key. Normalised for dedup: lowercased, whitespace-collapsed."""
+        return " ".join(self.query.lower().split())
+
+
+def _normalise_velocity_key(q: str) -> str:
+    """Normalise a query string for velocity lookup: lowercase + collapse whitespace."""
+    return " ".join((q or "").lower().split())
+
+
+def _replay_velocity_queries() -> dict[str, WatchedVelocityQuery]:
+    """Rebuild the velocity-query index from the shared append-only log."""
+    index: dict[str, WatchedVelocityQuery] = {}
+    path = _log_path()
+    if not path.exists():
+        return index
+    with path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except Exception:
+                continue
+            kind = ev.get("kind") or ""
+            if not kind.startswith("velo_"):
+                continue
+            q = ev.get("query") or ""
+            if not q:
+                continue
+            key = _normalise_velocity_key(q)
+            if kind == "velo_add":
+                index[key] = WatchedVelocityQuery(
+                    query=q,
+                    note=ev.get("note") or "",
+                    window_days=int(ev.get("window_days") or 180),
+                    top_k=int(ev.get("top_k") or 20),
+                )
+            elif kind == "velo_remove":
+                index.pop(key, None)
+            elif kind == "velo_check" and key in index:
+                w = index[key]
+                w.last_checked_at     = ev.get("ts")
+                w.last_seen_dois      = list(ev.get("seen_dois") or [])
+                w.last_top_papers     = list(ev.get("top_papers") or [])
+                w.new_since_last_check = int(ev.get("new_count") or 0)
+            elif kind == "velo_note" and key in index:
+                index[key].note = ev.get("note", index[key].note)
+            elif kind == "velo_config" and key in index:
+                w = index[key]
+                if ev.get("window_days") is not None:
+                    w.window_days = int(ev["window_days"])
+                if ev.get("top_k") is not None:
+                    w.top_k = int(ev["top_k"])
+    return index
+
+
+def list_watched_velocity_queries() -> list[WatchedVelocityQuery]:
+    """Current velocity-query watchlist, sorted by last-check-time desc."""
+    index = _replay_velocity_queries()
+    return sorted(
+        index.values(),
+        key=lambda w: (w.last_checked_at or "", w.key),
+        reverse=True,
+    )
+
+
+def add_velocity_query(
+    query: str,
+    *,
+    note: str = "",
+    window_days: int = 180,
+    top_k: int = 20,
+) -> WatchedVelocityQuery:
+    """Register a velocity query. Idempotent — re-adding updates the note
+    and the window/top_k parameters without resetting the rolling state."""
+    q = (query or "").strip()
+    if not q:
+        raise ValueError("velocity query must not be empty")
+    if window_days < 1:
+        raise ValueError("window_days must be >= 1")
+    if top_k < 1:
+        raise ValueError("top_k must be >= 1")
+    key = _normalise_velocity_key(q)
+    index = _replay_velocity_queries()
+    existing = index.get(key)
+    if existing is None:
+        _append({
+            "kind": "velo_add",
+            "query": q,
+            "note": note,
+            "window_days": window_days,
+            "top_k": top_k,
+        })
+        return WatchedVelocityQuery(
+            query=q, note=note, window_days=window_days, top_k=top_k,
+        )
+    # Update path: emit a velo_config event to change params without
+    # wiping the rolling state.
+    _append({
+        "kind": "velo_config",
+        "query": existing.query,
+        "window_days": window_days,
+        "top_k": top_k,
+    })
+    if note and note != existing.note:
+        _append({"kind": "velo_note", "query": existing.query, "note": note})
+        existing.note = note
+    existing.window_days = window_days
+    existing.top_k = top_k
+    return existing
+
+
+def remove_velocity_query(query: str) -> bool:
+    """Remove a velocity query. Returns True if it was present."""
+    key = _normalise_velocity_key(query)
+    index = _replay_velocity_queries()
+    if key not in index:
+        return False
+    _append({"kind": "velo_remove", "query": index[key].query})
+    return True
+
+
+def _velocity_score(cited_by_count: int, publication_year: int | None) -> float:
+    """Compute citations-per-active-year for a candidate paper.
+
+    Denominator is clamped to 0.25 so brand-new papers with any citations
+    get a large but finite velocity rather than exploding. This intentionally
+    rewards recently-cited papers: that's the signal the watcher exists
+    to surface.
+    """
+    if cited_by_count <= 0:
+        return 0.0
+    now_year = datetime.now(timezone.utc).year
+    if publication_year is None or publication_year < 1900 or publication_year > now_year + 1:
+        years = 1.0
+    else:
+        years = max(now_year - publication_year + 1, 0.25)  # include current year
+    return float(cited_by_count) / years
+
+
+def check_velocity_query(
+    query: str,
+    *,
+    force: bool = False,
+    cooldown_hours: float | None = None,
+) -> WatchedVelocityQuery:
+    """Hit OpenAlex for papers published in the last ``window_days`` matching
+    the stored query, rank by citation velocity, diff against the previous
+    check's DOI set, and record the result.
+
+    The politeness cooldown (default 24h) applies — the anonymous OpenAlex
+    API is lenient but cooperative usage is the documented norm.
+    """
+    import httpx
+    key = _normalise_velocity_key(query)
+    index = _replay_velocity_queries()
+    cached = index.get(key)
+    if cached is None:
+        raise ValueError(
+            f"velocity query not on the watchlist: {query!r}. "
+            f"Run `sciknow watch add-velocity {query!r}` first."
+        )
+
+    cooldown = cooldown_hours if cooldown_hours is not None else CHECK_COOLDOWN_HOURS
+    if not force and cached.last_checked_at:
+        hrs = _hours_since(cached.last_checked_at)
+        if hrs is not None and hrs < cooldown:
+            raise RateLimited(
+                hours_remaining=round(cooldown - hrs, 2),
+                cached=cached,  # type: ignore[arg-type]
+            )
+
+    from_date = (
+        datetime.now(timezone.utc) - timedelta(days=cached.window_days)
+    ).strftime("%Y-%m-%d")
+
+    # Re-use the project's polite-pool Crossref email — OpenAlex routes
+    # requests with a `mailto` to a separate rate-limit pool. Mirrors
+    # how `core.expand_ops` builds its OpenAlex params.
+    from sciknow.config import settings as _settings
+    mailto = (getattr(_settings, "crossref_email", "") or "").strip()
+    params = {
+        "search": cached.query,
+        "filter": f"from_publication_date:{from_date}",
+        "sort": "cited_by_count:desc",
+        "per-page": "50",
+    }
+    if mailto:
+        params["mailto"] = mailto
+
+    ua = "sciknow/0.1 (+https://github.com/claudenstein/sciknow)"
+    raw: list[dict] = []
+    with httpx.Client(timeout=20.0, headers={"User-Agent": ua}) as client:
+        r = client.get("https://api.openalex.org/works", params=params)
+        r.raise_for_status()
+        data = r.json()
+        for w in (data.get("results") or []):
+            doi = (w.get("doi") or "").lower().replace("https://doi.org/", "")
+            title = (w.get("display_name") or "").strip()
+            pub_year = w.get("publication_year")
+            cited = int(w.get("cited_by_count") or 0)
+            authors = []
+            for a in (w.get("authorships") or [])[:3]:
+                name = ((a.get("author") or {}).get("display_name") or "").strip()
+                if name:
+                    authors.append(name)
+            raw.append({
+                "doi": doi or None,
+                "title": title,
+                "year": pub_year,
+                "cited_by_count": cited,
+                "velocity": round(_velocity_score(cited, pub_year), 3),
+                "authors": authors,
+            })
+
+    # Velocity re-rank; OpenAlex returned in cited_by_count order, we want
+    # citations-per-active-year (favours recent-and-hot over old-and-ubiquitous).
+    raw.sort(key=lambda p: p["velocity"], reverse=True)
+    top = raw[: cached.top_k]
+
+    # Diff against the previous check's DOI set.
+    prev_set = {d for d in (cached.last_seen_dois or []) if d}
+    current_dois = [p["doi"] for p in top if p.get("doi")]
+    new_count = sum(1 for d in current_dois if d and d not in prev_set)
+
+    ev = {
+        "kind": "velo_check",
+        "query": cached.query,
+        "seen_dois": current_dois,
+        "top_papers": top,
+        "new_count": new_count,
+    }
+    _append(ev)
+
+    return WatchedVelocityQuery(
+        query=cached.query,
+        note=cached.note,
+        window_days=cached.window_days,
+        top_k=cached.top_k,
+        last_checked_at=_ts(),
+        last_seen_dois=current_dois,
+        last_top_papers=top,
+        new_since_last_check=new_count,
+    )
+
+
+def check_all_velocity_queries(
+    *,
+    force: bool = False,
+    cooldown_hours: float | None = None,
+) -> Iterable[tuple[WatchedVelocityQuery, str]]:
+    """Mirror of ``check_all`` for velocity queries; yields ``(query, status)``."""
+    for w in list_watched_velocity_queries():
+        try:
+            got = check_velocity_query(
+                w.query, force=force, cooldown_hours=cooldown_hours,
+            )
+            yield got, "checked"
+        except RateLimited as rl:
+            yield rl.cached, "cached"   # type: ignore[misc]
+        except Exception as exc:
+            logger.warning("velo_check %s failed: %s", w.key, exc)
+            yield w, "error"

@@ -354,3 +354,222 @@ def seed():
         console.print("[dim]Run `sciknow watch list` to see them.[/dim]")
     else:
         console.print("[yellow]Watchlist already has entries — nothing to seed.[/yellow]")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Phase 54.6.137 — velocity query watcher
+# ══════════════════════════════════════════════════════════════════════
+
+
+@app.command(name="add-velocity")
+def add_velocity_cmd(
+    query: str = typer.Argument(
+        ..., help='Semantic search string, e.g. "thermospheric cooling".',
+    ),
+    note: str = typer.Option(
+        "", "--note", "-n", help="Free-form note displayed in the watchlist.",
+    ),
+    window_days: int = typer.Option(
+        180, "--window-days", "-w",
+        help="How many days back each check scans OpenAlex. Default 180 "
+             "= ~6 months, enough to surface papers that are gathering "
+             "momentum without drowning in day-one noise.",
+    ),
+    top_k: int = typer.Option(
+        20, "--top-k", "-k",
+        help="Max papers surfaced per check, ranked by citations-per-"
+             "active-year. Default 20.",
+    ),
+):
+    """Phase 54.6.137 — register a semantic query to watch for new hot papers.
+
+    On each ``watch check``, OpenAlex is queried for papers published
+    in the last ``window_days`` matching the query; results are ranked
+    by citation velocity and the delta from the last check is surfaced
+    as ``+N new`` so you can see what just started moving.
+
+    Complementary to the interactive expand paths: ``expand-topic`` does
+    one-shot bootstrapping, ``watch add-velocity`` subscribes you to a
+    topic for ongoing delta notifications.
+    """
+    try:
+        w = wl.add_velocity_query(
+            query, note=note, window_days=window_days, top_k=top_k,
+        )
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2)
+    console.print(
+        f"[green]✓ Watching velocity query:[/green] {w.query!r}  "
+        f"[dim](window={w.window_days}d, top_k={w.top_k})[/dim]"
+    )
+    console.print("[dim]Run `sciknow watch check-velocity` to get the first snapshot.[/dim]")
+
+
+@app.command(name="remove-velocity")
+def remove_velocity_cmd(
+    query: str = typer.Argument(..., help="The exact query string."),
+):
+    """Stop watching a velocity query. The log entry stays for auditability."""
+    if wl.remove_velocity_query(query):
+        console.print(f"[green]✓ Stopped watching:[/green] {query!r}")
+    else:
+        console.print(f"[yellow]No velocity query matches {query!r}.[/yellow]")
+        raise typer.Exit(1)
+
+
+@app.command(name="check-velocity")
+def check_velocity_cmd(
+    query: str = typer.Argument(
+        None,
+        help="Query to check. Omit to check every registered velocity query.",
+    ),
+    force: bool = typer.Option(
+        False, "--force", "-f",
+        help="Bypass the 24h cooldown. OpenAlex doesn't hard-limit the "
+             "anonymous API, but cooperative usage is the documented norm.",
+    ),
+    auto_ingest: int = typer.Option(
+        0, "--auto-ingest",
+        help="If > 0, after each check ingest the top-N *new* papers "
+             "(those not in the previous check's DOI set) via "
+             "`sciknow db download-dois`. 0 = off (default, user-review "
+             "gate honored). Set to ~3-5 for light auto-growth on "
+             "trusted queries; leave 0 for personal bibliographies.",
+    ),
+):
+    """Phase 54.6.137 — hit OpenAlex for the registered velocity queries."""
+    targets: list[wl.WatchedVelocityQuery]
+    if query:
+        key = wl._normalise_velocity_key(query)
+        index = {w.key: w for w in wl.list_watched_velocity_queries()}
+        if key not in index:
+            console.print(
+                f"[red]not watching[/red] {query!r}. "
+                f"Run `sciknow watch add-velocity {query!r}` first."
+            )
+            raise typer.Exit(1)
+        targets = [index[key]]
+    else:
+        targets = wl.list_watched_velocity_queries()
+        if not targets:
+            console.print("[yellow]No velocity queries on the watchlist.[/yellow]")
+            console.print(
+                "Run [bold]sciknow watch add-velocity \"your topic\"[/bold] to start."
+            )
+            return
+
+    table = Table(
+        title=f"Velocity queries — last {targets[0].window_days if len(targets) == 1 else '180'}d window",
+        show_lines=False, expand=True,
+    )
+    table.add_column("Query", style="bold", overflow="fold")
+    table.add_column("Top paper (title · year · cites/yr)", overflow="fold")
+    table.add_column("+new", justify="right", width=6)
+    table.add_column("Status", style="dim", width=8)
+
+    # Track which DOIs are "new since last check" for optional auto-ingest.
+    new_dois_across_all: list[str] = []
+
+    for t in targets:
+        prev_dois = set(t.last_seen_dois or [])
+        try:
+            got = wl.check_velocity_query(t.query, force=force)
+            status = "checked"
+        except wl.RateLimited as rl:
+            got = rl.cached        # type: ignore[assignment]
+            status = "cached"
+        except Exception as exc:
+            console.print(f"[red]velocity check {t.query!r} failed:[/red] {exc}")
+            table.add_row(t.query[:60], "[red](error)[/red]", "—", "[red]err[/red]")
+            continue
+
+        top_paper_cell = "[dim](no papers in window)[/dim]"
+        if got.last_top_papers:
+            p = got.last_top_papers[0]
+            title = (p.get("title") or "")[:90]
+            yr = p.get("year") or "?"
+            vel = p.get("velocity") or 0.0
+            top_paper_cell = f"{title} · {yr} · {vel:.1f}/yr"
+
+        # Mark newly-surfaced DOIs (not in the previous check's set).
+        if status == "checked":
+            fresh = [p for p in got.last_top_papers
+                     if p.get("doi") and p["doi"] not in prev_dois]
+            new_dois_across_all.extend(
+                p["doi"] for p in fresh[: max(auto_ingest, 0)]
+            )
+
+        status_mark = (
+            "[green]✓[/green]" if status == "checked"
+            else "[yellow]cached[/yellow]"
+        )
+        delta = got.new_since_last_check or 0
+        delta_cell = (
+            f"[green]+{delta}[/green]" if delta > 0 else "[dim]—[/dim]"
+        )
+        table.add_row(got.query[:60], top_paper_cell, delta_cell, status_mark)
+
+    console.print(table)
+
+    # Optional auto-ingest path. Hands DOIs to the existing pipeline —
+    # no per-paper manual selection, but capped by --auto-ingest N per
+    # query so a hot topic doesn't dump hundreds of papers at once.
+    if auto_ingest > 0 and new_dois_across_all:
+        # Dedup across queries and cap.
+        seen: set[str] = set()
+        unique = [d for d in new_dois_across_all if not (d in seen or seen.add(d))]
+        console.print(
+            f"\n[bold]--auto-ingest[/bold]: queuing {len(unique)} new DOI(s) "
+            "to `sciknow db download-dois`…"
+        )
+        import subprocess, sys
+        for doi in unique:
+            console.print(f"  {doi}")
+        try:
+            res = subprocess.run(
+                [sys.executable, "-m", "sciknow.cli.main", "db",
+                 "download-dois", *unique],
+                check=False,
+            )
+            if res.returncode == 0:
+                console.print("[green]✓ Queued for ingestion.[/green]")
+            else:
+                console.print(
+                    f"[yellow]download-dois exited with code "
+                    f"{res.returncode} — check the log.[/yellow]"
+                )
+        except Exception as exc:
+            console.print(f"[red]auto-ingest failed:[/red] {exc}")
+
+
+@app.command(name="list-velocity")
+def list_velocity_cmd():
+    """Show all registered velocity queries with their rolling state."""
+    rows = wl.list_watched_velocity_queries()
+    if not rows:
+        console.print("[yellow]No velocity queries on the watchlist.[/yellow]")
+        console.print(
+            "Run [bold]sciknow watch add-velocity \"your topic\"[/bold] to start."
+        )
+        return
+    table = Table(title="Watched Velocity Queries", show_lines=False, expand=True)
+    table.add_column("Query", style="bold", overflow="fold")
+    table.add_column("Window", justify="right", width=8)
+    table.add_column("Top-K", justify="right", width=7)
+    table.add_column("Last check", style="dim", width=12)
+    table.add_column("Δ", justify="right", width=5)
+    table.add_column("Note", overflow="fold")
+    for w in rows:
+        last = (w.last_checked_at or "")[:10]
+        delta = w.new_since_last_check or 0
+        delta_cell = f"[green]+{delta}[/green]" if delta > 0 else "[dim]—[/dim]"
+        table.add_row(
+            w.query,
+            f"{w.window_days}d",
+            str(w.top_k),
+            last or "[dim]never[/dim]",
+            delta_cell,
+            (w.note or "")[:80],
+        )
+    console.print(table)
