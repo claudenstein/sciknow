@@ -10075,6 +10075,10 @@ body.task-bar-open {{ padding-top: 40px; }}
             <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
               <input type="checkbox" id="tl-ag-dry"> dry-run
             </label>
+            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
+                   title="Phase 54.6.124 — resume from a prior checkpoint. The same question re-uses its state via a slug+hash path at <project>/data/expand/agentic/">
+              <input type="checkbox" id="tl-ag-resume"> resume
+            </label>
           </div>
           <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap;">
             <button class="btn-primary" onclick="runAgenticExpand()">&#129504; Start agentic expansion</button>
@@ -17792,6 +17796,7 @@ async function runAgenticExpand() {{
   const budget = parseInt(document.getElementById('tl-ag-budget').value || '10', 10);
   const threshold = parseInt(document.getElementById('tl-ag-threshold').value || '3', 10);
   const dry = document.getElementById('tl-ag-dry').checked;
+  const resume = document.getElementById('tl-ag-resume').checked;
   const argv = [
     'db', 'expand',
     '--question', q,
@@ -17800,6 +17805,7 @@ async function runAgenticExpand() {{
     '--question-threshold', String(threshold),
   ];
   if (dry) argv.push('--dry-run');
+  if (resume) argv.push('--resume');
   runCorpusCliAction(argv, 'Agentic expansion starting…');
 }}
 

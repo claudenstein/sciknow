@@ -1,4 +1,5 @@
 """Phase 54.6.114 (Tier 2 #2) — question-driven agentic expansion.
+Phase 54.6.124 (Tier 4 #2) — resume / checkpointing.
 
 A thin orchestrator on top of the Phase 49 RRF ranker that lets the
 user hand sciknow a *research question* rather than a seed corpus and
@@ -87,6 +88,62 @@ class SubtopicCoverage:
     n_papers: int          # distinct document_ids in top hybrid-search hits
     top_score: float       # top RRF score from hybrid_search
     sample_titles: list[str] = field(default_factory=list)
+
+
+# ── Checkpointing (Tier 4 #2, 54.6.124) ─────────────────────────────
+
+def _state_path(project_root, question: str):
+    """Slug the question into a deterministic state-file path so the
+    same question re-uses its state on resume. Keeps runs isolated by
+    a short hash suffix; collisions between two different questions
+    with the same first 48 chars are fine (the full question is
+    stored inside the JSON and verified on load)."""
+    import hashlib
+    from pathlib import Path
+    slug = "".join(c if (c.isalnum() or c in "-_") else "-"
+                   for c in question[:48].strip().lower())
+    slug = slug.strip("-") or "question"
+    h = hashlib.sha1(question.encode("utf-8")).hexdigest()[:8]
+    d = Path(project_root) / "data" / "expand" / "agentic"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{slug}-{h}.json"
+
+
+def load_state(project_root, question: str) -> dict | None:
+    """Return the persisted state for this question, or None if absent."""
+    import json as _json
+    p = _state_path(project_root, question)
+    if not p.exists():
+        return None
+    try:
+        data = _json.loads(p.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("agentic state unreadable at %s: %s", p, exc)
+        return None
+    if data.get("question") != question:
+        # Hash collision — don't silently clobber a different question.
+        logger.warning("agentic state question mismatch at %s — ignoring",
+                       p)
+        return None
+    return data
+
+
+def save_state(project_root, question: str, state: dict) -> None:
+    """Overwrite the state file atomically-ish (write-then-rename)."""
+    import json as _json
+    p = _state_path(project_root, question)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(
+        _json.dumps({"question": question, **state}, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    tmp.replace(p)
+
+
+def clear_state(project_root, question: str) -> None:
+    p = _state_path(project_root, question)
+    if p.exists():
+        p.unlink()
 
 
 @dataclass
@@ -249,6 +306,8 @@ def run_agentic_expansion(
     model: str | None = None,
     execute_round_callback=None,
     progress_callback=None,
+    project_root=None,
+    resume: bool = False,
 ) -> Iterator[dict]:
     """Drive the plan → check → expand → re-check loop.
 
@@ -259,26 +318,72 @@ def run_agentic_expansion(
     - ``{"type": "round_start", "round": N, "gaps": [...], "budget": N}``
     - ``{"type": "round_done", "round": N, "stats": {...}}``
     - ``{"type": "stopped", "reason": "...", "final_coverage": [...]}``
+    - ``{"type": "resumed", "from_round": N, "prior_rounds": [...]}``  (54.6.124)
 
     ``execute_round_callback(gap_subtopics, budget, round_n)`` is invoked
     with the list of gap sub-topics to expand in this round; return a
     stats dict. The callback owns the actual ranker + download + ingest
     work so this module stays I/O-lean.
+
+    Phase 54.6.124 — when ``project_root`` is supplied, state (subtopics,
+    completed rounds, coverage history) is persisted to
+    ``<project>/data/expand/agentic/<slug>-<hash>.json`` between rounds.
+    ``resume=True`` loads that state so a crash / manual stop between
+    rounds can be picked up with ``db expand --question "..." --resume``.
     """
-    # 1. Initial decomposition
-    yield {"type": "progress", "stage": "decomposing",
-           "detail": "LLM decomposing the research question into sub-topics…"}
-    subtopics = decompose_question(question, model=model)
+    # 1. Resume or decompose
+    state: dict = {}
+    starting_round = 1
+    if resume and project_root is not None:
+        prior = load_state(project_root, question)
+        if prior:
+            state = prior
+            subtopics = list(prior.get("subtopics") or [])
+            starting_round = int(prior.get("next_round", 1))
+            yield {"type": "resumed",
+                   "from_round": starting_round,
+                   "prior_rounds": prior.get("rounds") or [],
+                   "subtopics": subtopics}
+        else:
+            yield {"type": "progress", "stage": "resume_miss",
+                   "detail": "No prior state for this question — starting fresh."}
+            subtopics = None
+    else:
+        subtopics = None
+
     if not subtopics:
-        yield {"type": "error",
-               "message": "LLM failed to decompose the question. Try rephrasing."}
-        return
-    yield {"type": "decomp", "subtopics": subtopics}
+        yield {"type": "progress", "stage": "decomposing",
+               "detail": "LLM decomposing the research question into sub-topics…"}
+        subtopics = decompose_question(question, model=model)
+        if not subtopics:
+            yield {"type": "error",
+                   "message": "LLM failed to decompose the question. Try rephrasing."}
+            return
+        yield {"type": "decomp", "subtopics": subtopics}
+        state = {
+            "subtopics": list(subtopics),
+            "rounds": [],
+            "next_round": 1,
+            "max_rounds": max_rounds,
+            "budget_per_gap": budget_per_gap,
+            "doc_threshold": doc_threshold,
+        }
+        if project_root is not None:
+            save_state(project_root, question, state)
 
     prev_coverage_n: dict[str, int] = {}
     last_gap_ids: set[str] = set()
+    # On resume, seed the progress trackers from the last recorded round
+    # so the "no-progress → replan" logic doesn't fire spuriously.
+    if state.get("rounds"):
+        last_record = state["rounds"][-1]
+        prev_coverage_n = {
+            e["subtopic"]: e.get("n_papers", 0)
+            for e in (last_record.get("coverage") or [])
+        }
+        last_gap_ids = set(last_record.get("gaps") or [])
 
-    for round_n in range(1, max_rounds + 1):
+    for round_n in range(starting_round, max_rounds + 1):
         # 2. Coverage
         yield {"type": "progress", "stage": "coverage",
                "detail": f"Round {round_n}: measuring corpus coverage for {len(subtopics)} sub-topics…"}
@@ -306,6 +411,9 @@ def run_agentic_expansion(
                        {"subtopic": sc.subtopic, "n_papers": sc.n_papers}
                        for sc in coverage.values()
                    ]}
+            # 54.6.124 — clean state on early success too.
+            if project_root is not None:
+                clear_state(project_root, question)
             return
 
         # Check if this round would repeat the same gap set with no progress
@@ -343,6 +451,22 @@ def run_agentic_expansion(
             try:
                 stats = execute_round_callback(gaps, budget_per_gap, round_n) or {}
             except Exception as exc:  # noqa: BLE001
+                # 54.6.124 — persist the CURRENT state so `--resume`
+                # can retry from this round after the user fixes the
+                # issue. `next_round` stays at round_n so the round
+                # is not marked complete.
+                if project_root is not None:
+                    state["next_round"] = round_n
+                    state.setdefault("rounds", []).append({
+                        "round": round_n,
+                        "coverage": [
+                            {"subtopic": sc.subtopic, "n_papers": sc.n_papers}
+                            for sc in coverage.values()
+                        ],
+                        "gaps": list(gaps),
+                        "error": f"{type(exc).__name__}: {exc}"[:400],
+                    })
+                    save_state(project_root, question, state)
                 yield {"type": "error",
                        "message": f"round {round_n} callback crashed: {exc}"}
                 return
@@ -355,9 +479,26 @@ def run_agentic_expansion(
         prev_coverage_n = current_gap_counts
         last_gap_ids = set(gap_set)
 
+        # 54.6.124 — checkpoint after the round lands cleanly. Advances
+        # next_round so a subsequent `--resume` skips this one.
+        if project_root is not None:
+            state.setdefault("rounds", []).append({
+                "round": round_n,
+                "coverage": [
+                    {"subtopic": sc.subtopic, "n_papers": sc.n_papers}
+                    for sc in coverage.values()
+                ],
+                "gaps": list(gaps),
+            })
+            state["next_round"] = round_n + 1
+            save_state(project_root, question, state)
+
     yield {"type": "stopped",
            "reason": f"reached max_rounds={max_rounds}",
            "final_coverage": [
                {"subtopic": sc.subtopic, "n_papers": sc.n_papers}
                for sc in coverage.values()
            ]}
+    # Clean state on a fully-completed run so `--resume` doesn't loop.
+    if project_root is not None:
+        clear_state(project_root, question)

@@ -476,6 +476,7 @@ def _run_agentic_expand(
     rrf_no_s2: bool,
     cleanup: bool,
     retry_failed: bool,
+    resume: bool = False,
 ) -> None:
     """Orchestrator for ``sciknow db expand --question "..."``.
 
@@ -533,14 +534,28 @@ def _run_agentic_expand(
                 })
         return stats
 
+    # Phase 54.6.124 — pass project_root so state checkpoints land in
+    # the active project's data dir, and threading `resume` through so
+    # --resume picks up where a prior run stopped.
+    from sciknow.core.project import get_active_project
+    _proj_root = get_active_project().root
+
     for event in run_agentic_expansion(
         question,
         max_rounds=max_rounds,
         budget_per_gap=budget_per_gap,
         doc_threshold=doc_threshold,
         execute_round_callback=_execute_round,
+        project_root=_proj_root,
+        resume=resume,
     ):
         t = event.get("type")
+        if t == "resumed":
+            console.print(
+                f"\n[cyan]Resumed from round {event.get('from_round')}"
+                f"[/cyan]  ({len(event.get('prior_rounds') or [])} prior round(s) on record)"
+            )
+            continue
         if t == "progress":
             console.print(f"  [dim]… {event.get('detail', event.get('stage', ''))}[/dim]")
         elif t == "decomp":
@@ -2274,6 +2289,11 @@ def expand(
                                          help="Per-sub-topic download budget in agentic mode. Default 10."),
     question_threshold: int = typer.Option(3, "--question-threshold",
                                             help="Corpus papers per sub-topic required to call it 'covered'. Default 3."),
+    # Phase 54.6.124 (Tier 4 #2) — resume from persisted round state
+    question_resume: bool = typer.Option(False, "--resume",
+                                          help="Resume an in-progress agentic run. State lives at "
+                                               "<project>/data/expand/agentic/<slug>-<hash>.json and is "
+                                               "written after each round; same --question re-uses it."),
 ):
     """
     Expand the collection by following references in existing papers.
@@ -2341,6 +2361,7 @@ def expand(
             max_rounds=question_rounds,
             budget_per_gap=question_budget,
             doc_threshold=question_threshold,
+            resume=question_resume,
             # pass-throughs to the per-sub-topic static ranker
             strategy=strategy,
             delay=delay,

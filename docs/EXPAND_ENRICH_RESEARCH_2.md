@@ -316,16 +316,21 @@ the whole round.
 
 ## 4. Quality-of-life / reliability
 
-### 4.1 Resume / checkpointing for long expansions
+### 4.1 Resume / checkpointing for agentic expansion — SHIPPED 54.6.124
 
-Expand runs today are single-shot. A 500-paper expansion takes ~2 hours
-at 5 minutes per ingest; if the machine sleeps or ingest crashes on
-paper #330, state is lost. Persist round state in
-`<project>/data/expand/rounds/<ts>.json`: `{round_n, processed, failed,
-survived_to_dl, downloaded, ingested}`. `db expand --resume` picks up.
+Agentic runs (`db expand --question "..."`) can be multi-hour. Each
+round now writes state to `<project>/data/expand/agentic/<slug>-<hash>.json`;
+`db expand --question "..." --resume` loads that state, skips
+completed rounds, and picks up at the last `next_round`. Crash
+mid-round persists the error on the partial round record so resume
+can show where it failed before retrying.
 
-**Effort:** 3-4h. Natural companion to §3.1 (agentic expansion
-generates more rounds, needs more robust state).
+GUI: new **resume** checkbox in the Corpus modal's Agentic tab.
+
+Static (non-agentic) `db expand` resume stays open — its single-shot
+shape needs different state (per-candidate download progress, not
+per-round coverage) and isn't as painful since individual rounds are
+typically 5-30 min, not hours.
 
 ### 4.2 Per-paper provenance
 
