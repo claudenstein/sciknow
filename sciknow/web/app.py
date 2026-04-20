@@ -3470,8 +3470,16 @@ async def api_wiki_consensus(topic: str = Form(...), model: str = Form(None)):
 
 # ── Phase 50.B — user feedback capture (LambdaMART feedstock) ────────────
 
-@app.post("/api/feedback")
-async def api_feedback(
+# Phase 54.6.135 — route was `/api/feedback` which collided with the
+# Phase-54.6.115 expand-candidates ±mark endpoint (line 6072). FastAPI
+# dispatched to whichever was registered first (this one), so the active
+# ±mark JS calls always hit the form-based thumbs handler here and got
+# 422 "score: Field required". The thumbs UI was removed long ago but
+# the endpoint stayed; moved to a disambiguated path so the ±mark route
+# can own `/api/feedback` again. The rename has no frontend caller
+# (there never was one at the time of the fix).
+@app.post("/api/feedback/thumbs")
+async def api_feedback_thumbs(
     op: str = Form("ask"),
     score: int = Form(...),
     query: str = Form(""),
@@ -3482,10 +3490,10 @@ async def api_feedback(
 ):
     """Record one thumbs-up / thumbs-down row.
 
-    Called from a 👍/👎 button next to any generated answer in the
-    reader. Fields are permissive — only `op` and `score` are required
-    structurally; everything else is optional metadata the eventual
-    LambdaMART trainer will project.
+    Originally called from a 👍/👎 button next to any generated answer
+    in the reader (the UI was later removed). Fields are permissive —
+    only `op` and `score` are required structurally; everything else is
+    optional metadata the eventual LambdaMART trainer will project.
 
     Returns {id, created_at} so the client can render a confirmation
     toast or offer an undo via a follow-up PATCH."""

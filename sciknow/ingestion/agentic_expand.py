@@ -489,6 +489,28 @@ def gather_candidates_for_gaps(
         except Exception:
             pass
 
+    # Phase 54.6.135 — annotate cached_status so the web UI's
+    # "Hide cached" checkbox actually filters agentic-preview rows.
+    # The TSV shortlist format doesn't carry cache state, and the
+    # preview subprocess runs with `--dry-run` (so the downloader's
+    # skip-cached logic never gets a chance to flag them), which means
+    # candidates reach eapRender with cached_status unset — the filter
+    # sees `!undefined === true` and lets every row through.
+    try:
+        from sciknow.core.expand_ops import _load_download_caches
+        no_oa_keys, fail_keys = _load_download_caches()
+        for c in out:
+            doi_k = (c.get("doi") or "").lower()
+            arx_k = (c.get("arxiv_id") or "").lower()
+            cs = None
+            if doi_k and doi_k in no_oa_keys:       cs = "no_oa"
+            elif arx_k and arx_k in no_oa_keys:     cs = "no_oa"
+            elif doi_k and doi_k in fail_keys:      cs = "ingest_failed"
+            elif arx_k and arx_k in fail_keys:      cs = "ingest_failed"
+            c["cached_status"] = cs
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("agentic preview cache annotation failed: %s", exc)
+
     return {
         "candidates": out,
         "gaps": per_gap_stats,

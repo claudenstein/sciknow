@@ -7376,9 +7376,12 @@ def l1_phase50b_feedback_surface() -> None:
     # Score alias table covers the standard synonyms
     aliases = fb_cli._SCORE_ALIASES
     assert aliases["up"] == 1 and aliases["down"] == -1 and aliases["neutral"] == 0
-    # Web endpoints exist
+    # Web endpoints exist. Phase 54.6.135 — thumbs POST moved from
+    # `/api/feedback` to `/api/feedback/thumbs` to avoid colliding with
+    # the ±mark endpoint that owns `/api/feedback` (the mark endpoint
+    # added a GET at the same path in Phase 54.6.115).
     route_paths = {r.path for r in web_app.app.routes if hasattr(r, "path")}
-    assert "/api/feedback" in route_paths, "/api/feedback POST missing"
+    assert "/api/feedback/thumbs" in route_paths, "/api/feedback/thumbs POST missing"
     assert "/api/feedback/stats" in route_paths, "/api/feedback/stats GET missing"
 
 
@@ -9457,6 +9460,110 @@ def l1_phase54_6_56_refresh_ingests_downloads_and_failed() -> None:
         )
 
 
+def l1_phase54_6_135_feedback_route_collision_resolved() -> None:
+    """Phase 54.6.135 — `/api/feedback` POST owned by ±mark, not thumbs.
+
+    Two POST handlers were registered on `/api/feedback`: Phase 50.B's
+    form-based thumbs-up/down (requires a `score` field) and
+    Phase 54.6.115's JSON-based ±mark on expand candidates. FastAPI
+    dispatches to whichever was registered first — the thumbs handler —
+    so every click on the ±buttons in the shortlist got a 422 "score:
+    Field required" and did nothing user-visible. The thumbs UI was
+    already removed long before the collision, so this test pins the
+    final arrangement:
+
+      * POST `/api/feedback` is the JSON ±mark endpoint
+        (accepts `{action, kind, doi/arxiv_id/title}`)
+      * POST `/api/feedback/thumbs` is the renamed Phase 50.B endpoint
+        (still form-based, requires `score`)
+
+    Guards against someone re-adding a duplicate `@app.post("/api/feedback")`
+    in a future refactor.
+    """
+    from sciknow.web import app as web_app
+    import inspect as _inspect
+
+    post_routes = [
+        r for r in web_app.app.routes
+        if hasattr(r, "path") and hasattr(r, "methods") and "POST" in (r.methods or set())
+    ]
+    feedback_post = [r for r in post_routes if r.path == "/api/feedback"]
+    thumbs_post   = [r for r in post_routes if r.path == "/api/feedback/thumbs"]
+
+    # A) Exactly one POST on /api/feedback (no collision).
+    assert len(feedback_post) == 1, (
+        f"expected exactly 1 POST /api/feedback route, got {len(feedback_post)} — "
+        f"duplicate registrations shadow each other and the later one is dead code. "
+        f"See Phase 54.6.135."
+    )
+
+    # B) The /api/feedback POST is the JSON ±mark handler, not the
+    # form-based thumbs handler. Identify by signature: thumbs takes
+    # a required `score`, ±mark reads JSON from the request body.
+    fb_handler = feedback_post[0].endpoint
+    sig = _inspect.signature(fb_handler)
+    assert "score" not in sig.parameters, (
+        "POST /api/feedback must be the JSON-body ±mark handler "
+        "(Phase 54.6.115), not the form-based thumbs handler. "
+        "The JS at line ~19364 sends JSON without a `score` field, "
+        "so a form-based handler here returns 422."
+    )
+    fb_src = _inspect.getsource(fb_handler)
+    assert "await request.json()" in fb_src or "Request" in str(sig), (
+        "POST /api/feedback must parse a JSON body (the ±mark contract)."
+    )
+
+    # C) The thumbs handler still exists under the disambiguated path.
+    assert len(thumbs_post) == 1, (
+        "POST /api/feedback/thumbs must exist (Phase 50.B LambdaMART feedstock)."
+    )
+    thumbs_sig = _inspect.signature(thumbs_post[0].endpoint)
+    assert "score" in thumbs_sig.parameters, (
+        "POST /api/feedback/thumbs still takes a required `score` form field."
+    )
+
+
+def l1_phase54_6_135_agentic_preview_annotates_cached_status() -> None:
+    """Phase 54.6.135 — agentic preview candidates carry cached_status.
+
+    `gather_candidates_for_gaps` runs a dry-run expand subprocess per
+    gap and parses the resulting TSV shortlist. The TSV format doesn't
+    include `cached_status`, so candidates reached `eapRender` with the
+    field unset — the frontend filter `!c.cached_status` evaluates
+    `true` on undefined, letting every cached row through the "Hide
+    cached" checkbox. The user reported selecting papers the downloader
+    then skipped as already-cached, confirming the filter was a no-op
+    on this path.
+
+    Fix: after the TSV-parse loop, call `_load_download_caches()` and
+    annotate each merged candidate with `cached_status` matching the
+    convention the other preview paths use (`"no_oa"` / `"ingest_failed"`
+    / None). This test guards the invariant at the source level so a
+    refactor that removes the loop can't silently break the filter
+    again.
+    """
+    import inspect as _inspect
+    from sciknow.ingestion import agentic_expand
+
+    src = _inspect.getsource(agentic_expand.gather_candidates_for_gaps)
+    assert "_load_download_caches" in src, (
+        "gather_candidates_for_gaps must call _load_download_caches() "
+        "so merged candidates carry cached_status — see Phase 54.6.135."
+    )
+    assert '"cached_status"' in src or "'cached_status'" in src, (
+        "gather_candidates_for_gaps must set cached_status on each "
+        "candidate so the 'Hide cached' checkbox can filter agentic "
+        "preview rows. See Phase 54.6.135."
+    )
+    # The annotation must set one of the three recognised values
+    # ("no_oa" / "ingest_failed" / None) — anything else is silently
+    # ignored by the frontend filter which expects these exact strings.
+    assert '"no_oa"' in src or "'no_oa'" in src, (
+        "cached_status annotation must use the 'no_oa' literal the "
+        "frontend badge/filter recognises (see web/app.py eapRender)."
+    )
+
+
 def l1_phase54_6_134_agentic_coverage_uses_reranker() -> None:
     """Phase 54.6.134 — coverage check must rerank before the score floor.
 
@@ -9712,6 +9819,10 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_56_refresh_ingests_downloads_and_failed,
     # Phase 54.6.134 — agentic coverage check must rerank before score floor
     l1_phase54_6_134_agentic_coverage_uses_reranker,
+    # Phase 54.6.135 — /api/feedback collision resolved; JSON ±mark wins
+    l1_phase54_6_135_feedback_route_collision_resolved,
+    # Phase 54.6.135 — agentic preview annotates cached_status
+    l1_phase54_6_135_agentic_preview_annotates_cached_status,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness
