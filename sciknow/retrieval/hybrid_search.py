@@ -232,12 +232,23 @@ def _postgres_fts(
     topic_cluster: str | None = None,
 ) -> list[str]:
     """
-    Full-text search over paper_metadata.search_vector, joined to chunks.
-    Returns chunk qdrant_point_ids in relevance order.
+    Full-text search over ``chunks.search_vector`` (chunk body content,
+    English dictionary). Returns chunk ``qdrant_point_id`` values in
+    ts_rank_cd order.
+
+    Phase 54.6.136 — switched from paper-level FTS (title+abstract+
+    keywords on ``paper_metadata.search_vector``) to chunk-level FTS.
+    Paper-level FTS was structurally disjoint from dense/sparse (which
+    operate on chunk content), which the bench's signal-overlap probe
+    caught as sparse ∩ FTS ≈ 0.0. The chunk-level index is a true
+    lexical complement to sparse: it surfaces chunks whose body text
+    contains the query terms exactly, catching rare formulas / numbers
+    / uncommon terminology that don't appear in titles or abstracts.
+    Paper-level relevance is still captured by dense embeddings +
+    the separate abstracts collection.
     """
     from sqlalchemy import text
 
-    # Build WHERE clause additions
     extra_conditions = []
     params: dict = {"query": query, "top_k": top_k}
 
@@ -257,20 +268,23 @@ def _postgres_fts(
         extra_conditions.append("pm.topic_cluster = :topic_cluster")
         params["topic_cluster"] = topic_cluster
 
+    # The filter-aware joins to paper_metadata / documents are kept
+    # so payload filters (year, domain, topic_cluster, canonical) work
+    # the same as before — only the FTS predicate moved tables.
+    needs_pm = any("pm." in c for c in extra_conditions)
+    pm_join = "JOIN paper_metadata pm ON pm.document_id = c.document_id" if needs_pm else ""
     extra_where = ("AND " + " AND ".join(extra_conditions)) if extra_conditions else ""
 
-    # Phase 54.6.125 (Tier 3 #3) — drop chunks whose document is
-    # marked non-canonical (reconciled preprint+journal pair).
     sql = text(f"""
         SELECT c.qdrant_point_id::text
-        FROM paper_metadata pm
-        JOIN chunks c ON c.document_id = pm.document_id
-        JOIN documents d ON d.id = pm.document_id
-        WHERE pm.search_vector @@ websearch_to_tsquery('english', :query)
+        FROM chunks c
+        JOIN documents d ON d.id = c.document_id
+        {pm_join}
+        WHERE c.search_vector @@ websearch_to_tsquery('english', :query)
           AND c.qdrant_point_id IS NOT NULL
           AND d.canonical_document_id IS NULL
           {extra_where}
-        ORDER BY ts_rank_cd(pm.search_vector, websearch_to_tsquery('english', :query)) DESC
+        ORDER BY ts_rank_cd(c.search_vector, websearch_to_tsquery('english', :query)) DESC
         LIMIT :top_k
     """)
 

@@ -717,7 +717,8 @@ def b_retrieval_signal_overlap() -> Iterable[BenchMetric]:
                       note="dense vs PostgreSQL tsvector")
     yield BenchMetric("jaccard_sparse_fts",
                       round(statistics.mean(overlaps_sparse_fts), 3), "",
-                      note="sparse vs FTS — both lexical, so should be higher")
+                      note="sparse vs chunk-level FTS — both lexical; "
+                           "expect modest non-zero overlap (~0.03-0.10) on targeted queries")
     # Complementarity score: how different are the three signals on
     # average? Lower Jaccard -> more complementary -> RRF fusion buys
     # more than any single signal.

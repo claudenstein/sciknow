@@ -108,6 +108,25 @@ Ranked by effort × impact:
 
 Items 5 and 7 remain open and require more than mechanical fixes — an autowrite scorer calibration study and a RAPTOR-depth A/B respectively.
 
+## Retrieval scorecard — 2026-04-20, chunk-level FTS (Phase 54.6.136 vs 54.6.135)
+
+Switching `_postgres_fts` from `paper_metadata.search_vector` (title+abstract+keywords+journal) to `chunks.search_vector` (a GENERATED tsvector over chunk body text). Same corpus, same probe set, same RRF weights. Artifacts: `20260420T181318Z.jsonl` → `20260420T183309Z.jsonl`.
+
+| Metric | Paper-level FTS | Chunk-level FTS | Δ |
+|---|---:|---:|---:|
+| MRR@10 | 0.563 | **0.587** | **+0.024 (+4.2%)** |
+| Recall@1 | 40.5% | **44.0%** | **+3.5 pp (+8.6% rel)** |
+| Recall@10 | 84.5% | 84.5% | unchanged |
+| NDCG@10 | 0.633 | **0.651** | **+0.018 (+2.9%)** |
+| not_found_pct | 8.0% | 8.0% | unchanged |
+| jaccard_sparse_fts | 0.000 | 0.049 | signal now meaningful |
+| jaccard_dense_fts | 0.000 | 0.008 | slight non-zero |
+| p50 latency | 29 ms | ~87 ms | +58 ms (measured clean — bench's 121 ms was system noise) |
+
+Interpretation: paper-level FTS returned 50 chunks of 1–3 topic-matching papers, so it **almost never overlapped** with the specific chunks dense/sparse actually picked — the FTS signal was effectively contributing noise to RRF, not complementary evidence. Chunk-level FTS rewards exact-term matches in body text (rare formulas, specific numbers, uncommon terminology) that didn't appear in titles/abstracts. The +8.6% R@1 relative is the single biggest retrieval win in the corpus's measurement history. Latency cost is real but stays comfortably interactive (<100 ms p50).
+
+The `live` bench's reranker-throughput and embedder-throughput numbers on the post-migration run (~1 chunks/s, ~1 pairs/s) were artefacts of concurrent GPU load during that run — the FTS change doesn't touch those models. Clean isolated FTS query latency on 8 probes: 1–8 ms each.
+
 ## Retrieval snapshot — 2026-04-20 (post-Phase-54.6.135, global-cooling @ 807 papers / 33k chunks)
 
 First time the `live` layer has been persisted with retrieval-quality metrics — the Phase 44 baseline and 44.1 scorecard above were a different corpus size (2774 papers), so the numbers are not directly diff-able, but today's run establishes the anchor for future comparisons. Run command: `uv run sciknow bench --layer live --tag phase-54.6.135-post-rerank-fix --no-compare`. Artifact: `projects/global-cooling/data/bench/20260420T181318Z.jsonl`.

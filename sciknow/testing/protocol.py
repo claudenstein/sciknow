@@ -9460,6 +9460,46 @@ def l1_phase54_6_56_refresh_ingests_downloads_and_failed() -> None:
         )
 
 
+def l1_phase54_6_136_fts_is_chunk_level() -> None:
+    """Phase 54.6.136 — FTS signal queries chunks, not paper_metadata.
+
+    Pre-54.6.136, `_postgres_fts` searched `paper_metadata.search_vector`
+    (title+abstract+keywords+journal) and returned all chunks of matching
+    papers. That signal was structurally disjoint from dense/sparse
+    (which operate on chunk content) — the bench's signal-overlap probe
+    caught this as sparse ∩ FTS ≈ 0.0 on every probe query. Moving FTS
+    to `chunks.search_vector` (a GENERATED tsvector over `chunks.content`)
+    made FTS a true lexical chunk-level complement to sparse and lifted
+    MRR@10 by +4.2%, R@1 by +8.6% relative on the 200-query recall probe.
+
+    This test guards the wiring at the source level so a refactor that
+    reverts FTS to paper-level (or forgets the migration) gets caught
+    before shipping.
+    """
+    import inspect as _inspect
+    from sciknow.retrieval import hybrid_search
+
+    src = _inspect.getsource(hybrid_search._postgres_fts)
+
+    # A) The chunk-level tsvector column is the predicate target
+    assert "c.search_vector" in src, (
+        "_postgres_fts must filter on c.search_vector (the chunks tsvector "
+        "column added in migration 0032). Paper-level FTS was replaced in "
+        "Phase 54.6.136 because it had ~0 overlap with dense/sparse."
+    )
+    # B) Paper-level FTS is NOT used for the predicate anymore. pm.search_vector
+    # may still appear in comments or docstrings (describing the old design);
+    # what must not appear is a `@@` predicate against it.
+    assert "pm.search_vector @@" not in src and "paper_metadata.search_vector @@" not in src, (
+        "_postgres_fts must not filter on the paper-level search_vector — "
+        "that's the pre-54.6.136 path that produced ~0.0 signal overlap."
+    )
+    # C) ts_rank_cd must rank by the chunk-level vector too
+    assert "ts_rank_cd(c.search_vector" in src, (
+        "_postgres_fts must rank by ts_rank_cd against c.search_vector, not pm.search_vector."
+    )
+
+
 def l1_phase54_6_135_feedback_route_collision_resolved() -> None:
     """Phase 54.6.135 — `/api/feedback` POST owned by ±mark, not thumbs.
 
@@ -9823,6 +9863,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_135_feedback_route_collision_resolved,
     # Phase 54.6.135 — agentic preview annotates cached_status
     l1_phase54_6_135_agentic_preview_annotates_cached_status,
+    # Phase 54.6.136 — FTS signal must be chunk-level, not paper-level
+    l1_phase54_6_136_fts_is_chunk_level,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness
