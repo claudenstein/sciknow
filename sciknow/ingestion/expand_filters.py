@@ -78,20 +78,57 @@ def is_retracted(work: dict | None) -> bool:
     return bool(work.get("is_retracted") or False)
 
 
-def is_predatory_venue(work: dict | None) -> bool:
-    """Substring match of the candidate's publisher / host org name
-    against `PREDATORY_PUBLISHER_PATTERNS`. Case-insensitive. Reads
-    both `primary_location.source.host_organization_name` and the
-    older `primary_location.source.publisher` field for coverage
-    across OpenAlex schema versions."""
+def _venue_names(work: dict | None) -> list[str]:
+    """Return the venue-identifying strings to match against block /
+    allow / predatory patterns. Extends the Phase 49 match surface
+    (host_organization_name + publisher) to also include the source's
+    display_name so a venue like "Journal of Multidisciplinary X"
+    matches on its actual name, not just its parent publisher."""
     if not work:
-        return False
+        return []
     loc = work.get("primary_location") or {}
     source = loc.get("source") or {}
-    for key in ("host_organization_name", "publisher"):
-        val = source.get(key)
-        if not isinstance(val, str):
-            continue
+    out: list[str] = []
+    for key in ("host_organization_name", "publisher", "display_name"):
+        v = source.get(key)
+        if isinstance(v, str) and v:
+            out.append(v)
+    # Top-level alternate fields OpenAlex occasionally surfaces
+    for key in ("host_venue_display_name", "host_venue_publisher"):
+        v = work.get(key)
+        if isinstance(v, str) and v:
+            out.append(v)
+    return out
+
+
+def is_predatory_venue(work: dict | None) -> bool:
+    """Substring match of the candidate's publisher / host org /
+    source-display-name against `PREDATORY_PUBLISHER_PATTERNS`.
+    Case-insensitive. Extended in 54.6.112 to consume the per-project
+    ``venue_config.json`` blocklist + allowlist; the allowlist wins
+    when both match so users can rescue legitimate venues that happen
+    to hit a substring pattern."""
+    venues = _venue_names(work)
+    if not venues:
+        return False
+    # Per-project overrides (Phase 54.6.112). Allowlist wins even if a
+    # built-in predatory pattern would have matched.
+    try:
+        from sciknow.core.project import get_active_project
+        from sciknow.core import venue_config as _vc
+        cfg = _vc.load(get_active_project().root)
+        for v in venues:
+            if cfg.matches_allow(v):
+                return False
+            if cfg.matches_block(v):
+                return True
+    except Exception:  # noqa: BLE001
+        # Config load failures must not break expand — silently fall
+        # through to the built-in list.
+        pass
+    # Built-in predatory patterns — keep as the last check so an
+    # allowlist entry can rescue a venue from them.
+    for val in venues:
         v = val.lower()
         for pat in PREDATORY_PUBLISHER_PATTERNS:
             if pat in v:

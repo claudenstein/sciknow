@@ -5938,6 +5938,57 @@ async def api_projects_init(request: Request):
     })
 
 
+@app.get("/api/projects/{slug}/venues")
+async def api_project_venues_get(slug: str):
+    """Phase 54.6.112 — return the project's venue_config.json as JSON."""
+    from sciknow.core.project import Project, get_active_project
+    from sciknow.core import venue_config as _vc
+    if slug == "active":
+        project = get_active_project()
+    else:
+        project = Project(slug=slug, repo_root=get_active_project().repo_root)
+    cfg = _vc.load(project.root)
+    return JSONResponse({
+        "slug": project.slug,
+        "path": str(_vc.path_for(project.root)),
+        "blocklist": cfg.blocklist,
+        "allowlist": cfg.allowlist,
+    })
+
+
+@app.post("/api/projects/{slug}/venues")
+async def api_project_venues_post(slug: str, request: Request):
+    """Mutate the venue block/allow lists. Body: ``{action, kind, pattern}``.
+
+    action ∈ {add, remove}. kind ∈ {block, allow}.
+    """
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    action = body.get("action")
+    kind = body.get("kind")
+    pattern = (body.get("pattern") or "").strip()
+    if action not in ("add", "remove") or kind not in ("block", "allow") or not pattern:
+        raise HTTPException(400, "Body must be {action:'add'|'remove', kind:'block'|'allow', pattern:'...'}")
+
+    from sciknow.core.project import Project, get_active_project
+    from sciknow.core import venue_config as _vc
+    if slug == "active":
+        project = get_active_project()
+    else:
+        project = Project(slug=slug, repo_root=get_active_project().repo_root)
+
+    if action == "add":
+        _, changed = _vc.add_pattern(project.root, pattern, kind=kind)
+    else:
+        _, changed = _vc.remove_pattern(project.root, pattern, kind=kind)
+    cfg = _vc.load(project.root)
+    return JSONResponse({
+        "slug": project.slug,
+        "changed": changed,
+        "blocklist": cfg.blocklist,
+        "allowlist": cfg.allowlist,
+    })
+
+
 @app.post("/api/projects/destroy")
 async def api_projects_destroy(request: Request):
     """Drop a project's DB + collections + data dir. Requires ``confirm``
@@ -9351,6 +9402,44 @@ body.task-bar-open {{ padding-top: 40px; }}
         </div>
       </div>
       <div id="proj-detail" style="margin-top:14px;"></div>
+
+      <!-- Phase 54.6.112 (Tier 1 #5) — Venue block/allow lists for
+           db expand. JSON lives at <project>/venue_config.json. -->
+      <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:14px;">
+        <h4 style="font-size:13px;margin-bottom:6px;">&#128683; Venues — block / allow lists</h4>
+        <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+          Per-project substring patterns matched against candidate papers' publisher / host-organization / source names during
+          <code>db expand</code>. Blocklist extends the built-in predatory pattern set; allowlist wins over both so you can
+          rescue legitimate venues from a false-positive. Prefix with <code>^</code> or suffix with <code>$</code> for regex.
+          Mirrors <code>sciknow project venue-block / venue-allow / venue-remove</code>.
+        </p>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+          <div style="border:1px solid var(--border);border-radius:6px;padding:10px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+              <strong style="font-size:12px;color:var(--danger);">Blocklist</strong>
+              <span id="proj-ven-block-count" style="font-size:10px;color:var(--fg-muted);"></span>
+            </div>
+            <div style="display:flex;gap:4px;margin-bottom:6px;">
+              <input type="text" id="proj-ven-block-in" placeholder="e.g. scirp"
+                     style="flex:1;padding:4px 6px;font-size:11px;" onkeydown="if(event.key==='Enter')addVenuePattern('block')">
+              <button class="btn-secondary" style="font-size:11px;padding:2px 8px;" onclick="addVenuePattern('block')">+</button>
+            </div>
+            <ul id="proj-ven-block-list" style="list-style:none;margin:0;padding:0;max-height:140px;overflow:auto;font-size:11px;"></ul>
+          </div>
+          <div style="border:1px solid var(--border);border-radius:6px;padding:10px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+              <strong style="font-size:12px;color:var(--success);">Allowlist</strong>
+              <span id="proj-ven-allow-count" style="font-size:10px;color:var(--fg-muted);"></span>
+            </div>
+            <div style="display:flex;gap:4px;margin-bottom:6px;">
+              <input type="text" id="proj-ven-allow-in" placeholder="e.g. frontiers in climate"
+                     style="flex:1;padding:4px 6px;font-size:11px;" onkeydown="if(event.key==='Enter')addVenuePattern('allow')">
+              <button class="btn-secondary" style="font-size:11px;padding:2px 8px;" onclick="addVenuePattern('allow')">+</button>
+            </div>
+            <ul id="proj-ven-allow-list" style="list-style:none;margin:0;padding:0;max-height:140px;overflow:auto;font-size:11px;"></ul>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -22523,6 +22612,66 @@ setTimeout(function() {{
 function openProjectsModal() {{
   openModal('projects-modal');
   refreshProjectsList();
+  // Phase 54.6.112 — load the venue config for the active project.
+  refreshVenueConfig();
+}}
+
+// Phase 54.6.112 — venue block/allow UI
+async function refreshVenueConfig() {{
+  try {{
+    const res = await fetch('/api/projects/active/venues');
+    if (!res.ok) return;
+    const d = await res.json();
+    const blockList = document.getElementById('proj-ven-block-list');
+    const allowList = document.getElementById('proj-ven-allow-list');
+    const blockCount = document.getElementById('proj-ven-block-count');
+    const allowCount = document.getElementById('proj-ven-allow-count');
+    const render = (items, ulEl, kind) => {{
+      if (!ulEl) return;
+      if (!items.length) {{
+        ulEl.innerHTML = '<li style="color:var(--fg-muted);padding:4px 0;">(empty)</li>';
+        return;
+      }}
+      ulEl.innerHTML = items.map(p => {{
+        const enc = _escHtml(p);
+        return '<li style="display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px dotted var(--border);">'
+          + '<code style="font-family:var(--font-mono);font-size:11px;">' + enc + '</code>'
+          + '<button onclick="removeVenuePattern(\\'' + kind + '\\', ' + JSON.stringify(p) + ')" '
+            + 'style="background:none;border:none;color:var(--fg-muted);cursor:pointer;font-size:13px;padding:0 4px;" '
+            + 'title="remove">\\u00d7</button>'
+          + '</li>';
+      }}).join('');
+    }};
+    render(d.blocklist || [], blockList, 'block');
+    render(d.allowlist || [], allowList, 'allow');
+    if (blockCount) blockCount.textContent = (d.blocklist || []).length + ' pattern(s)';
+    if (allowCount) allowCount.textContent = (d.allowlist || []).length + ' pattern(s)';
+  }} catch (_) {{}}
+}}
+
+async function addVenuePattern(kind) {{
+  const inp = document.getElementById('proj-ven-' + kind + '-in');
+  const pat = (inp.value || '').trim();
+  if (!pat) return;
+  try {{
+    const res = await fetch('/api/projects/active/venues', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{action: 'add', kind: kind, pattern: pat}}),
+    }});
+    if (res.ok) {{ inp.value = ''; refreshVenueConfig(); }}
+  }} catch (_) {{}}
+}}
+
+async function removeVenuePattern(kind, pattern) {{
+  try {{
+    const res = await fetch('/api/projects/active/venues', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{action: 'remove', kind: kind, pattern: pattern}}),
+    }});
+    if (res.ok) refreshVenueConfig();
+  }} catch (_) {{}}
 }}
 
 function _projMsg(text, kind) {{

@@ -538,6 +538,95 @@ def use(slug: Annotated[str, typer.Argument(help="Project slug to activate.")]):
     console.print(f"[green]✓ Active project: {slug}[/green]")
 
 
+@app.command(name="venue-list")
+def venue_list_cmd(
+    slug: str = typer.Argument(None, help="Project slug. Defaults to active."),
+):
+    """Phase 54.6.112 (Tier 1 #5) — show the project's venue block/allow lists.
+
+    The JSON lives at ``<project root>/venue_config.json``. A venue
+    name that matches ANY blocklist substring is hard-dropped from
+    ``db expand`` candidates; matching the allowlist rescues it even
+    when it also matches a blocklist / built-in predatory pattern.
+    """
+    from sciknow.core import venue_config as _vc
+    project = _resolve_slug_or_default(slug)
+    cfg = _vc.load(project.root)
+    path = _vc.path_for(project.root)
+    console.print(f"[bold]{project.slug}[/bold]  {path}"
+                  + ("  [dim](file not yet present)[/dim]" if not path.exists() else ""))
+    console.print(f"[red]Blocklist[/red] ({len(cfg.blocklist)}):")
+    if cfg.blocklist:
+        for p in cfg.blocklist:
+            console.print(f"  - {p}")
+    else:
+        console.print("  [dim](empty)[/dim]")
+    console.print(f"[green]Allowlist[/green] ({len(cfg.allowlist)}):")
+    if cfg.allowlist:
+        for p in cfg.allowlist:
+            console.print(f"  - {p}")
+    else:
+        console.print("  [dim](empty)[/dim]")
+
+
+@app.command(name="venue-block")
+def venue_block_cmd(
+    pattern: Annotated[str, typer.Argument(help="Substring to match against venue / publisher / host-org name (case-insensitive). Prefix with ^ or suffix with $ for a regex.")],
+    slug: str = typer.Option(None, "--project", help="Project slug. Defaults to active."),
+):
+    """Add a venue pattern to the project's blocklist for db expand."""
+    from sciknow.core import venue_config as _vc
+    project = _resolve_slug_or_default(slug)
+    _, added = _vc.add_pattern(project.root, pattern, kind="block")
+    if added:
+        console.print(f"[green]✓ Blocked[/green] pattern [bold]{pattern!r}[/bold] "
+                      f"for project [bold]{project.slug}[/bold].")
+    else:
+        console.print(f"[yellow]Already blocked:[/yellow] {pattern!r}")
+
+
+@app.command(name="venue-allow")
+def venue_allow_cmd(
+    pattern: Annotated[str, typer.Argument(help="Substring to match against venue / publisher / host-org name (case-insensitive). Prefix with ^ or suffix with $ for a regex.")],
+    slug: str = typer.Option(None, "--project", help="Project slug. Defaults to active."),
+):
+    """Rescue a venue from the blocklist / built-in predatory patterns.
+
+    Allowlist matches win over blocklist + built-in predatory patterns.
+    Use for legitimate venues whose name happens to substring-match a
+    predatory pattern (false positive).
+    """
+    from sciknow.core import venue_config as _vc
+    project = _resolve_slug_or_default(slug)
+    _, added = _vc.add_pattern(project.root, pattern, kind="allow")
+    if added:
+        console.print(f"[green]✓ Allowed[/green] pattern [bold]{pattern!r}[/bold] "
+                      f"for project [bold]{project.slug}[/bold].")
+    else:
+        console.print(f"[yellow]Already allowed:[/yellow] {pattern!r}")
+
+
+@app.command(name="venue-remove")
+def venue_remove_cmd(
+    pattern: Annotated[str, typer.Argument(help="Pattern to remove.")],
+    from_: str = typer.Option("block", "--from",
+                              help="Which list: block | allow."),
+    slug: str = typer.Option(None, "--project", help="Project slug. Defaults to active."),
+):
+    """Remove a pattern from the project's block- or allow-list."""
+    if from_ not in ("block", "allow"):
+        console.print("[red]--from must be 'block' or 'allow'.[/red]")
+        raise typer.Exit(1)
+    from sciknow.core import venue_config as _vc
+    project = _resolve_slug_or_default(slug)
+    _, removed = _vc.remove_pattern(project.root, pattern, kind=from_)
+    if removed:
+        console.print(f"[green]✓ Removed[/green] {pattern!r} from {from_}list "
+                      f"({project.slug}).")
+    else:
+        console.print(f"[yellow]Not found in {from_}list:[/yellow] {pattern!r}")
+
+
 @app.command()
 def destroy(
     slug: Annotated[str, typer.Argument(help="Project slug to destroy.")],
