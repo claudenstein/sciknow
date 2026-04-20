@@ -108,6 +108,54 @@ Ranked by effort × impact:
 
 Items 5 and 7 remain open and require more than mechanical fixes — an autowrite scorer calibration study and a RAPTOR-depth A/B respectively.
 
+## Retrieval snapshot — 2026-04-20 (post-Phase-54.6.135, global-cooling @ 807 papers / 33k chunks)
+
+First time the `live` layer has been persisted with retrieval-quality metrics — the Phase 44 baseline and 44.1 scorecard above were a different corpus size (2774 papers), so the numbers are not directly diff-able, but today's run establishes the anchor for future comparisons. Run command: `uv run sciknow bench --layer live --tag phase-54.6.135-post-rerank-fix --no-compare`. Artifact: `projects/global-cooling/data/bench/20260420T181318Z.jsonl`.
+
+**Retrieval quality** (200-query probe set, `retrieval_eval.py`):
+
+| Metric | Value | Interpretation |
+|---|---:|---|
+| MRR@10 | 0.563 | higher = better |
+| Recall@1 | 40.5% | source chunk at top-1 |
+| Recall@10 | 84.5% | source chunk in top-10 |
+| NDCG@10 | 0.633 | binary-relevance NDCG |
+| **not_found_pct** | **8.0%** | 16/200 queries had their source chunk escape the top-50 entirely |
+| latency p50 | 28.7 ms | |
+| latency mean | 30.7 ms | |
+
+**Rerank behaviour** (4-query sanity probe):
+
+| Metric | Value | Interpretation |
+|---|---:|---|
+| avg_displacement | 5.25 positions | cross-encoder actively reorders |
+| top1_change_rate | 75.0% | 3/4 of queries get a new top-1 after rerank |
+| rerank_latency_mean | 910 ms | CPU (LLM resident on GPU) |
+
+**Signal overlap** (Jaccard of top-50 candidate IDs across dense / sparse / FTS):
+
+| Pair | Jaccard | Note |
+|---|---:|---|
+| dense ∩ sparse | 0.051 | small overlap, both vector-family |
+| dense ∩ FTS | **0.000** | bench's own note: *"both lexical, so should be higher"* for sparse pair |
+| sparse ∩ FTS | **0.000** | zero shared candidates — either perfect complementarity or a bug |
+| mean overlap | 0.017 | low is good (more complementary signals) |
+
+The `sparse ∩ FTS = 0.0` specifically contradicts the bench's built-in "should be higher" expectation because both are lexical signals. Two hypotheses: (a) FTS is complementing vector signals by design and the note is stale — needs a design review to confirm; (b) the Postgres `tsvector` column is indexing something disjoint from what `chunks` are embedded (e.g. wrong content field, wrong tokenizer, stale index). Open action item — worth a 30-min investigation before calling retrieval "healthy". Flagged in `docs/PHASE_LOG.md` 54.6.135 as follow-up.
+
+**Model throughput** (single-pass, CPU):
+
+| Metric | Value |
+|---|---:|
+| bge-m3 embedder | 99.1 chunks/s (159 k char/s), batch 16 |
+| bge-reranker-v2-m3 | 87.1 pairs/s |
+
+### Reading the numbers
+
+- **R@10 = 84.5%** is a solid hybrid-retrieval figure on a scientific corpus; most of the gap to 100% is concentrated in the 8% not-found bucket.
+- **R@1 = 40.5%** matches the intuition that cross-encoder reranking is doing the heavy lift: the RRF-fused top-1 is correct only 40% of the time, but the right chunk is almost always within reach (top-10), which is exactly where the reranker reshapes results (75% top-1 change rate).
+- Future deltas to watch: (i) whether FTS-overlap investigation exposes a lexical-index bug; (ii) whether Phase 54.6.134's coverage-check rerank fix affects any upstream metric (shouldn't — that was a filter, not a retrieval config); (iii) whether the eventual visuals-write-loop integration (§7.X in RESEARCH.md) ships on a corpus whose text-retrieval numbers held steady.
+
 ## Adding a new bench function
 
 Same pattern as the test harness: write a zero-arg function that yields `BenchMetric` objects, then register it in `LAYERS` in `sciknow/testing/bench.py`.
