@@ -324,7 +324,7 @@ def _run_rrf_ranker(
         else:
             console.print("  [dim]  (subgraph empty — PageRank skipped)[/dim]")
 
-        # ── 8. Semantic Scholar isInfluential + intents ────────────────────
+        # ── 8. Semantic Scholar isInfluential + intents + contexts ─────────
         if not no_s2:
             survivors = [f for f in feats if not f.hard_drop_reason and f.doi]
             if survivors:
@@ -332,11 +332,36 @@ def _run_rrf_ranker(
                     f"  fetching Semantic Scholar citations for {len(survivors)} "
                     "survivors (1 RPS throttled)…"
                 )
+                # Phase 54.6.113 (Tier 2 #1) — compute the corpus
+                # centroid once here so the citation-context cosine
+                # uses the same anchor as bge_m3_cosine. Cheap after
+                # compute_corpus_centroid caches; returns None when
+                # the abstracts collection is empty (new project).
+                from sciknow.retrieval.relevance import compute_corpus_centroid
+                from sciknow.retrieval import citation_context as _cc
+                corpus_anchor = compute_corpus_centroid()
+                ctx_hits = 0
                 for f in survivors:
                     data = expand_apis.fetch_s2_citations(f.doi)
                     f.influential_cite_count = expand_apis.count_influential_from_corpus(
                         data, existing_dois
                     )
+                    # Citation-context embedding + cosine vs centroid.
+                    bundle = _cc.build_bundle(data)
+                    f.citation_context_n = bundle.n_contexts
+                    f.citation_context_cosine = _cc.context_cosine(
+                        bundle.embedding, corpus_anchor,
+                    )
+                    if bundle.first_preview:
+                        f.decisions.append(
+                            f"cite_ctx[{bundle.n_contexts}]: {bundle.first_preview[:80]}"
+                        )
+                    if bundle.n_contexts:
+                        ctx_hits += 1
+                console.print(
+                    f"  [dim]  citation-context embeddings computed for "
+                    f"{ctx_hits}/{len(survivors)} candidates[/dim]"
+                )
 
         # ── 9. Author overlap ──────────────────────────────────────────────
         #     From paper_metadata (existing corpus) + OpenAlex authorships

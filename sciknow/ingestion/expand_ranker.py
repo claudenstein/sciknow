@@ -64,6 +64,12 @@ class CandidateFeatures:
 
     # Semantic / content signals (higher = better)
     bge_m3_cosine: float = 0.0
+    # Phase 54.6.113 (Tier 2 #1) — Cohan 2024 SciRepEval. Cosine of
+    # "how OTHER papers describe this paper" (S2 citation contexts,
+    # bge-m3-embedded) against the corpus centroid. 0.0 when the
+    # candidate has no citations yet or S2 was skipped.
+    citation_context_cosine: float = 0.0
+    citation_context_n: int = 0     # count of unique contexts used
     concept_overlap: float = 0.0    # Jaccard against corpus concept histogram
     author_overlap: int = 0         # #authors with ≥2 corpus papers
     venue_weight: float = 0.0       # corpus-coverage of the venue
@@ -344,6 +350,11 @@ def score_via_rrf(
         _rank_by(kept, lambda c: c.bib_coupling),
         _rank_by(kept, lambda c: c.pagerank),
         _rank_by(kept, lambda c: c.bge_m3_cosine),
+        # Phase 54.6.113 — citation-context cosine as a distinct signal
+        # from bge_m3_cosine (title+abstract). They're complementary:
+        # new papers have no contexts, old papers with bad abstracts
+        # have no abstract signal.
+        _rank_by(kept, lambda c: c.citation_context_cosine),
         _rank_by(kept, lambda c: c.influential_cite_count),
         _rank_by(kept, lambda c: c.citation_velocity),
         _rank_by(kept, lambda c: c.concept_overlap),
@@ -463,7 +474,8 @@ def write_shortlist_tsv(
         "doi", "arxiv_id", "title", "year", "venue", "doc_type",
         "co_citation", "bib_coupling", "pagerank",
         "influential_cites", "cited_by", "velocity",
-        "bge_m3_cosine", "concept_overlap", "author_overlap", "venue_weight",
+        "bge_m3_cosine", "citation_context_cosine", "citation_context_n",
+        "concept_overlap", "author_overlap", "venue_weight",
         "corpus_cites", "external_cites", "openalex_id",
     ]
     with p.open("w", encoding="utf-8") as f:
@@ -488,6 +500,8 @@ def write_shortlist_tsv(
                 str(c.cited_by_count),
                 f"{c.citation_velocity:.2f}",
                 f"{c.bge_m3_cosine:.4f}",
+                f"{c.citation_context_cosine:.4f}",
+                str(c.citation_context_n),
                 f"{c.concept_overlap:.4f}",
                 str(c.author_overlap),
                 f"{c.venue_weight:.4f}",
