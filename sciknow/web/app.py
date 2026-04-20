@@ -5938,6 +5938,69 @@ async def api_projects_init(request: Request):
     })
 
 
+@app.get("/api/feedback")
+async def api_feedback_get():
+    """Phase 54.6.115 (Tier 2 #3) — active project's expand feedback."""
+    from sciknow.core.project import get_active_project
+    from sciknow.core import expand_feedback as _fb
+    project = get_active_project()
+    fb = _fb.load(project.root)
+    return JSONResponse({
+        "slug": project.slug,
+        "path": str(_fb.path_for(project.root)),
+        "positive": [e.to_dict() for e in fb.positive],
+        "negative": [e.to_dict() for e in fb.negative],
+    })
+
+
+@app.post("/api/feedback")
+async def api_feedback_post(request: Request):
+    """Mutate the active project's feedback.
+
+    Body:
+      {"action":"add","kind":"positive"|"negative","doi":"...","arxiv_id":"...","title":"...","topic":"..."}
+      {"action":"remove","key":"...","kind":"positive"|"negative"|null}
+    """
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    action = body.get("action")
+    from sciknow.core.project import get_active_project
+    from sciknow.core import expand_feedback as _fb
+    project = get_active_project()
+    if action == "add":
+        kind = body.get("kind")
+        if kind in ("pos", "+"): kind = "positive"
+        if kind in ("neg", "-"): kind = "negative"
+        if kind not in ("positive", "negative"):
+            raise HTTPException(400, "kind must be 'positive' or 'negative'")
+        doi = body.get("doi") or ""
+        arxiv_id = body.get("arxiv_id") or ""
+        title = body.get("title") or ""
+        topic = body.get("topic") or ""
+        if not (doi or arxiv_id or title):
+            raise HTTPException(400, "need at least one of doi / arxiv_id / title")
+        fb, added = _fb.add_entry(
+            project.root, kind=kind, doi=doi, arxiv_id=arxiv_id,
+            title=title, topic=topic,
+        )
+    elif action == "remove":
+        key = (body.get("key") or "").strip()
+        if not key:
+            raise HTTPException(400, "key required")
+        kind = body.get("kind")
+        if kind in ("pos", "+"): kind = "positive"
+        if kind in ("neg", "-"): kind = "negative"
+        if kind not in (None, "positive", "negative"):
+            raise HTTPException(400, "kind must be 'positive' or 'negative' if given")
+        fb, _removed = _fb.remove_entry(project.root, key=key, kind=kind)
+    else:
+        raise HTTPException(400, "action must be 'add' or 'remove'")
+    return JSONResponse({
+        "slug": project.slug,
+        "positive": [e.to_dict() for e in fb.positive],
+        "negative": [e.to_dict() for e in fb.negative],
+    })
+
+
 @app.get("/api/projects/{slug}/venues")
 async def api_project_venues_get(slug: str):
     """Phase 54.6.112 — return the project's venue_config.json as JSON."""
@@ -10235,6 +10298,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                 <th style="padding:6px 8px;text-align:left;white-space:nowrap;">Authors</th>
                 <th style="padding:6px 8px;text-align:left;white-space:nowrap;">Year</th>
                 <th style="padding:6px 8px;text-align:left;white-space:nowrap;">Score</th>
+                <th style="padding:6px 8px;text-align:left;white-space:nowrap;" title="Phase 54.6.115 — ± marks feed future expand rounds via anchor-vector bias">Feedback</th>
               </tr>
             </thead>
             <tbody id="eap-tbody"></tbody>
@@ -18488,6 +18552,35 @@ function pendingExportCsv() {{
   URL.revokeObjectURL(url);
 }}
 
+// Phase 54.6.115 (Tier 2 #3) — ±mark a candidate from the shortlist.
+async function eapFeedback(ev, kind, paperJsonStr) {{
+  if (ev) ev.stopPropagation();
+  let paper;
+  try {{ paper = JSON.parse(paperJsonStr); }}
+  catch (_) {{ return; }}
+  const btn = ev ? ev.currentTarget : null;
+  try {{
+    const res = await fetch('/api/feedback', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{
+        action: 'add',
+        kind: kind,
+        doi: paper.doi || '',
+        arxiv_id: paper.arxiv_id || '',
+        title: paper.title || '',
+      }}),
+    }});
+    if (!res.ok) return;
+    // Quick visual ack — briefly flash the button's background.
+    if (btn) {{
+      const prev = btn.style.background;
+      btn.style.background = kind === 'positive' ? 'rgba(80,200,120,0.55)' : 'rgba(220,80,80,0.55)';
+      setTimeout(() => {{ btn.style.background = prev; }}, 500);
+    }}
+  }} catch (_) {{}}
+}}
+
 function eapRender() {{
   const tbody = document.getElementById('eap-tbody');
   const sort = document.getElementById('eap-sort').value;
@@ -18549,6 +18642,14 @@ function eapRender() {{
       <td style="padding:6px 8px;color:var(--fg-muted);">${{_escHtml(authors)}}</td>
       <td style="padding:6px 8px;color:var(--fg-muted);">${{c.year || '—'}}</td>
       <td style="padding:6px 8px;font-family:ui-monospace,monospace;">${{scoreText}}</td>
+      <td style="padding:6px 8px;white-space:nowrap;" onclick="event.stopPropagation();">
+        <button title="Mark as positive — next expand round will favour similar papers"
+                onclick="eapFeedback(event, 'positive', ${{JSON.stringify(JSON.stringify({{doi:c.doi||'',arxiv_id:c.arxiv_id||'',title:c.title||''}}))}})"
+                style="background:rgba(80,200,120,0.15);color:var(--success);border:1px solid var(--success);border-radius:3px;padding:1px 6px;font-size:11px;cursor:pointer;margin-right:2px;">+</button>
+        <button title="Mark as negative — next expand round will penalize similar papers"
+                onclick="eapFeedback(event, 'negative', ${{JSON.stringify(JSON.stringify({{doi:c.doi||'',arxiv_id:c.arxiv_id||'',title:c.title||''}}))}})"
+                style="background:rgba(220,80,80,0.15);color:var(--danger);border:1px solid var(--danger);border-radius:3px;padding:1px 6px;font-size:11px;cursor:pointer;">−</button>
+      </td>
     </tr>`;
   }}).join('');
   tbody.innerHTML = rows;

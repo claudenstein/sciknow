@@ -339,7 +339,29 @@ def _run_rrf_ranker(
                 # the abstracts collection is empty (new project).
                 from sciknow.retrieval.relevance import compute_corpus_centroid
                 from sciknow.retrieval import citation_context as _cc
-                corpus_anchor = compute_corpus_centroid()
+                base_anchor = compute_corpus_centroid()
+                # Phase 54.6.115 (Tier 2 #3) — bias the anchor with
+                # the project's ±marks. Tiny cost (one Qdrant scroll
+                # per feedback entry, cached in-process); substantial
+                # ranking benefit as labels accumulate.
+                try:
+                    from sciknow.core.project import get_active_project
+                    from sciknow.core import expand_feedback as _fb
+                    from sciknow.retrieval.feedback_anchor import bias_anchor as _bias
+                    fb = _fb.load(get_active_project().root)
+                    if fb.positive or fb.negative:
+                        corpus_anchor, stats = _bias(
+                            base_anchor, fb.positive, fb.negative,
+                        )
+                        if stats.get("pos") or stats.get("neg"):
+                            console.print(
+                                f"  [dim]  anchor biased by feedback: +{stats['pos']} / -{stats['neg']}[/dim]"
+                            )
+                    else:
+                        corpus_anchor = base_anchor
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("feedback anchor bias failed: %s", exc)
+                    corpus_anchor = base_anchor
                 ctx_hits = 0
                 for f in survivors:
                     data = expand_apis.fetch_s2_citations(f.doi)
@@ -1226,6 +1248,97 @@ def refresh_metadata(
         f"[yellow]skipped {skipped}[/yellow]  "
         f"[red]failed {failed}[/red]"
     )
+
+
+@app.command(name="feedback-list")
+def feedback_list_cmd():
+    """Phase 54.6.115 (Tier 2 #3) — show the project's expand feedback.
+
+    ±Marks from prior shortlist reviews. Positive entries bias the
+    ranker's anchor vector toward similar papers; negative entries
+    bias it away. File lives at ``<project root>/expand_feedback.json``.
+    """
+    from sciknow.core.project import get_active_project
+    from sciknow.core import expand_feedback as _fb
+    project = get_active_project()
+    fb = _fb.load(project.root)
+    path = _fb.path_for(project.root)
+    console.print(f"[bold]{project.slug}[/bold]  {path}"
+                  + ("  [dim](file not yet present)[/dim]" if not path.exists() else ""))
+    console.print(f"[green]Positive[/green] ({len(fb.positive)}):")
+    for e in fb.positive:
+        who = e.doi or e.arxiv_id or e.title[:80]
+        console.print(f"  + [{who}]  {e.title[:80]}"
+                      + (f"  [dim]topic={e.topic}[/dim]" if e.topic else ""))
+    console.print(f"[red]Negative[/red] ({len(fb.negative)}):")
+    for e in fb.negative:
+        who = e.doi or e.arxiv_id or e.title[:80]
+        console.print(f"  - [{who}]  {e.title[:80]}"
+                      + (f"  [dim]topic={e.topic}[/dim]" if e.topic else ""))
+
+
+@app.command(name="feedback-add")
+def feedback_add_cmd(
+    kind: Annotated[str, typer.Argument(help="'positive' or 'negative' (or 'pos'/'neg').")],
+    doi: str = typer.Option("", "--doi", help="DOI of the paper."),
+    arxiv_id: str = typer.Option("", "--arxiv", help="arXiv ID."),
+    title: str = typer.Option("", "--title", help="Paper title (for display + fallback embedding)."),
+    topic: str = typer.Option("", "--topic", help="Optional free-text topic for provenance."),
+):
+    """Add a ±mark to the project's expand feedback.
+
+    Examples:
+
+      sciknow db feedback-add positive --doi 10.1029/2022JD037524 --topic "ECS"
+      sciknow db feedback-add neg --title "Off-topic computer-vision paper"
+    """
+    kind_norm = {"pos": "positive", "positive": "positive",
+                 "neg": "negative", "negative": "negative",
+                 "+": "positive", "-": "negative"}.get(kind.strip().lower())
+    if not kind_norm:
+        console.print(f"[red]kind must be 'positive' | 'negative'.[/red]")
+        raise typer.Exit(2)
+    if not (doi or arxiv_id or title):
+        console.print("[red]Provide at least one of --doi, --arxiv, --title.[/red]")
+        raise typer.Exit(2)
+    from sciknow.core.project import get_active_project
+    from sciknow.core import expand_feedback as _fb
+    fb, added = _fb.add_entry(
+        get_active_project().root,
+        kind=kind_norm, doi=doi, arxiv_id=arxiv_id,
+        title=title, topic=topic,
+    )
+    badge = "[green]+[/green]" if kind_norm == "positive" else "[red]-[/red]"
+    if added:
+        console.print(f"{badge} {kind_norm} mark added. "
+                      f"Total: +{len(fb.positive)} / -{len(fb.negative)}.")
+    else:
+        console.print("[yellow]Nothing added — no usable identifier.[/yellow]")
+
+
+@app.command(name="feedback-remove")
+def feedback_remove_cmd(
+    key: Annotated[str, typer.Argument(help="DOI, arXiv ID, or title prefix.")],
+    kind: str = typer.Option("", "--kind", help="Restrict to 'positive' or 'negative'."),
+):
+    """Remove a ±mark from the project's expand feedback."""
+    kind_norm = None
+    if kind:
+        kind_norm = {"pos": "positive", "positive": "positive",
+                     "neg": "negative", "negative": "negative"}.get(kind.strip().lower())
+        if kind_norm is None:
+            console.print("[red]--kind must be 'positive' or 'negative' if given.[/red]")
+            raise typer.Exit(2)
+    from sciknow.core.project import get_active_project
+    from sciknow.core import expand_feedback as _fb
+    fb, removed = _fb.remove_entry(
+        get_active_project().root, key=key, kind=kind_norm,
+    )
+    if removed:
+        console.print(f"[green]✓ Removed[/green] {key!r}. "
+                      f"Total: +{len(fb.positive)} / -{len(fb.negative)}.")
+    else:
+        console.print(f"[yellow]Not found:[/yellow] {key!r}")
 
 
 @app.command(name="refresh-retractions")
