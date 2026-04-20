@@ -8192,11 +8192,16 @@ body.task-bar-open {{ padding-top: 40px; }}
       &#128214; Book &#9662;
     </button>
     <div class="nav-dropdown-menu" role="menu">
-      <button role="menuitem" onclick="showCorkboard()">&#128204; Corkboard</button>
-      <button role="menuitem" onclick="showVersions()">&#128344; History</button>
-      <button role="menuitem" onclick="takeSnapshot()">&#128248; Snapshot</button>
-      <button role="menuitem" onclick="openExportModal()">&#128229; Export</button>
-      <button role="menuitem" onclick="openBookSettings()">&#9881; Settings</button>
+      <button role="menuitem" onclick="showCorkboard()"
+              title="Book-wide corkboard view: every chapter's sections as cards you can drag + reorder.">&#128204; Corkboard</button>
+      <button role="menuitem" onclick="showVersions()"
+              title="Per-draft version history. Every save keeps the prior version so you can diff or revert.">&#128344; History</button>
+      <button role="menuitem" onclick="takeSnapshot()"
+              title="Snapshot the whole book's draft state — safety net before a destructive operation like autowrite-all.">&#128248; Snapshot</button>
+      <button role="menuitem" onclick="openExportModal()"
+              title="Export the book to Markdown, HTML, PDF (WeasyPrint), EPUB (pandoc), LaTeX, DOCX, or BibTeX.">&#128229; Export</button>
+      <button role="menuitem" onclick="openBookSettings()"
+              title="Per-book settings: title, description, plan (leitmotiv), target chapter length, style fingerprint, per-role model assignments.">&#9881; Settings</button>
     </div>
   </div>
   <!-- Explore — corpus query surfaces -->
@@ -8206,10 +8211,14 @@ body.task-bar-open {{ padding-top: 40px; }}
       &#128269; Explore &#9662;
     </button>
     <div class="nav-dropdown-menu" role="menu">
-      <button role="menuitem" onclick="openAskModal()">&#128270; Ask Corpus</button>
-      <button role="menuitem" onclick="openWikiModal()">&#128218; Wiki Query</button>
-      <button role="menuitem" onclick="openCatalogModal()">&#128194; Browse Papers</button>
-      <button role="menuitem" onclick="openVisualsModal()">&#128202; Visuals (Tables/Figs/Eqs)</button>
+      <button role="menuitem" onclick="openAskModal()"
+              title="Natural-language question against the corpus with grounded citations. Mirrors `sciknow ask question`.">&#128270; Ask Corpus</button>
+      <button role="menuitem" onclick="openWikiModal()"
+              title="Query the pre-compiled wiki summaries (one per paper). Faster than Ask Corpus and returns the summary prose + source paper list.">&#128218; Wiki Query</button>
+      <button role="menuitem" onclick="openCatalogModal()"
+              title="Browse every paper in the corpus with filters for year, section type, topic cluster, paper type.">&#128194; Browse Papers</button>
+      <button role="menuitem" onclick="openVisualsModal()"
+              title="Browse every extracted table, equation, figure, chart, and code block. Gallery + list modes with pagination and importance ranking.">&#128202; Visuals (Tables/Figs/Eqs)</button>
     </div>
   </div>
   <!-- Phase 54.6.18 — Corpus: every enrich / expand surface lifted
@@ -8222,15 +8231,23 @@ body.task-bar-open {{ padding-top: 40px; }}
       &#127793; Corpus &#9662;
     </button>
     <div class="nav-dropdown-menu" role="menu">
-      <button role="menuitem" onclick="openCorpusModal('corp-enrich')">&#128270; Enrich metadata</button>
-      <button role="menuitem" onclick="openCorpusModal('corp-cites')">&#127760; Expand (citations)</button>
-      <button role="menuitem" onclick="openCorpusModal('corp-author')">&#128100; Expand by author</button>
-      <button role="menuitem" onclick="openCorpusModal('corp-inbound')">&#128258; Inbound cites</button>
-      <button role="menuitem" onclick="openCorpusModal('corp-topic')">&#128269; Topic search</button>
-      <button role="menuitem" onclick="openCorpusModal('corp-coauth')">&#128101; Coauthors</button>
+      <button role="menuitem" onclick="openCorpusModal('corp-enrich')"
+              title="Fill missing DOIs via Crossref/OpenAlex/arXiv title search + persist OpenAlex extras (concepts/funders/grants/ROR). Mirrors `sciknow db enrich`.">&#128270; Enrich metadata</button>
+      <button role="menuitem" onclick="openCorpusModal('corp-cites')"
+              title="Outbound reference crawl — follow citations IN your papers to discover new work. RRF + MMR diversity + citation-context signals. Mirrors `sciknow db expand`.">&#127760; Expand (citations)</button>
+      <button role="menuitem" onclick="openCorpusModal('corp-author')"
+              title="Fetch every paper by a named author via OpenAlex. Use when you want an author's full bibliography regardless of current citations. Mirrors `sciknow db expand-author`.">&#128100; Expand by author</button>
+      <button role="menuitem" onclick="openCorpusModal('corp-inbound')"
+              title="Forward-in-time mirror of Expand: find papers that CITE your corpus. Mirrors `sciknow db expand-inbound`.">&#128258; Inbound cites</button>
+      <button role="menuitem" onclick="openCorpusModal('corp-topic')"
+              title="OpenAlex free-text topic search ranked by citation count. Good for kickstarting a new project.">&#128269; Topic search</button>
+      <button role="menuitem" onclick="openCorpusModal('corp-coauth')"
+              title="Find people who coauthored with your corpus's authors. Useful for invisible-college expansion.">&#128101; Coauthors</button>
       <div style="height:1px;background:var(--border);margin:2px 0;"></div>
-      <button role="menuitem" onclick="openCorpusModal('corp-enrich');doToolCorpus('cleanup')">&#129529; Cleanup downloads + failed</button>
-      <button role="menuitem" onclick="openPendingDownloadsModal()">&#128203; Pending downloads</button>
+      <button role="menuitem" onclick="openCorpusModal('corp-enrich');doToolCorpus('cleanup')"
+              title="Remove already-ingested duplicates from the downloads/ directory AND permanently delete the failed-ingest archive. Frees disk; the main pipeline archive stays intact.">&#129529; Cleanup downloads + failed</button>
+      <button role="menuitem" onclick="openPendingDownloadsModal()"
+              title="Papers you selected for download but couldn't be auto-retrieved (no open-access PDF). Retry, mark manually acquired, or export for ILL.">&#128203; Pending downloads</button>
     </div>
   </div>
   <!-- Visualize — seven views of the corpus (KG + the six Viz tabs) -->
@@ -8238,13 +8255,20 @@ body.task-bar-open {{ padding-top: 40px; }}
     <button class="nav-btn" onclick="toggleNavDropdown('viz-dropdown', event)"
             title="Seven visualizations of the corpus">&#128202; Visualize &#9662;</button>
     <div class="nav-dropdown-menu" id="viz-dropdown-menu" role="menu">
-      <button role="menuitem" onclick="openKgModal()">&#128279; Knowledge Graph</button>
-      <button role="menuitem" onclick="openVizModal('viz-topic')">&#127760; Topic map (UMAP)</button>
-      <button role="menuitem" onclick="openVizModal('viz-sunburst')">&#127773; RAPTOR sunburst</button>
-      <button role="menuitem" onclick="openVizModal('viz-consensus')">&#9878;&#65039; Consensus landscape</button>
-      <button role="menuitem" onclick="openVizModal('viz-timeline')">&#128200; Timeline river</button>
-      <button role="menuitem" onclick="openVizModal('viz-ego')">&#128269; Ego radial</button>
-      <button role="menuitem" onclick="openVizModal('viz-radar')">&#128504;&#65039; Gap radar</button>
+      <button role="menuitem" onclick="openKgModal()"
+              title="Knowledge graph of entities + relationships extracted from the corpus (Phase 54.6.50+). Zoomable force layout + table view.">&#128279; Knowledge Graph</button>
+      <button role="menuitem" onclick="openVizModal('viz-topic')"
+              title="UMAP 2D projection of every paper's abstract embedding. Colour-coded by topic cluster. Hover to identify.">&#127760; Topic map (UMAP)</button>
+      <button role="menuitem" onclick="openVizModal('viz-sunburst')"
+              title="Hierarchical RAPTOR summary tree as a sunburst: root is the whole corpus, each ring is a coarser summary level. Click a wedge to drill in.">&#127773; RAPTOR sunburst</button>
+      <button role="menuitem" onclick="openVizModal('viz-consensus')"
+              title="Consensus landscape: for a topic, show claim-level support/contradict structure across papers.">&#9878;&#65039; Consensus landscape</button>
+      <button role="menuitem" onclick="openVizModal('viz-timeline')"
+              title="Timeline river: paper counts by year, colour-banded by topic cluster. Reveals temporal trends.">&#128200; Timeline river</button>
+      <button role="menuitem" onclick="openVizModal('viz-ego')"
+              title="Ego radial: pick a paper, see its citation neighbourhood as concentric rings (depth-1/2 citers + cited-by).">&#128269; Ego radial</button>
+      <button role="menuitem" onclick="openVizModal('viz-radar')"
+              title="Gap radar: per-topic coverage vs what the corpus plan says it should cover. Big gaps visible at a glance.">&#128504;&#65039; Gap radar</button>
     </div>
   </div>
   <!-- Manage — admin + corpus growth -->
@@ -8254,11 +8278,16 @@ body.task-bar-open {{ padding-top: 40px; }}
       &#128736;&#65039; Manage &#9662;
     </button>
     <div class="nav-dropdown-menu" role="menu">
-      <button role="menuitem" onclick="openToolsModal()">&#128736; Tools &middot; CLI parity</button>
-      <button role="menuitem" onclick="openSetupWizard()">&#128295; Setup Wizard</button>
-      <button role="menuitem" onclick="openProjectsModal()"><span id="proj-btn-label">&#128193; Projects</span></button>
+      <button role="menuitem" onclick="openToolsModal()"
+              title="CLI parity modal: Search / Synthesize / Topics tabs exposing the same commands from the web.">&#128736; Tools &middot; CLI parity</button>
+      <button role="menuitem" onclick="openSetupWizard()"
+              title="Five-step guided flow for a fresh project: Project → Corpus → Indices → Expand → Book.">&#128295; Setup Wizard</button>
+      <button role="menuitem" onclick="openProjectsModal()"
+              title="List / create / switch projects. Each project has its own PostgreSQL DB, Qdrant collections, and data/ directory."><span id="proj-btn-label">&#128193; Projects</span></button>
       <div style="height:1px;background:var(--border);margin:2px 0;"></div>
-      <button role="menuitem" onclick="openBackupsModal()">&#128190; Backups <span id="backup-badge" style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-left:4px;vertical-align:middle;"></span></button>
+      <button role="menuitem" onclick="openBackupsModal()"
+              title="Backup status, schedule, delete, purge. Badge colour: green = fresh (<25h), yellow = aging, red = none or stale (>2d)."
+              >&#128190; Backups <span id="backup-badge" style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-left:4px;vertical-align:middle;"></span></button>
     </div>
   </div>
 </header>
@@ -8270,7 +8299,8 @@ body.task-bar-open {{ padding-top: 40px; }}
   <h2>{book_title}</h2>
   <div class="search-bar">
     <form action="/search" method="get">
-      <input type="text" name="q" placeholder="Search..." value="{search_q}">
+      <input type="text" name="q" placeholder="Search..." value="{search_q}"
+             title="Hybrid retrieval across the corpus (dense + sparse + FTS + reranker). Press Enter to search. Same pipeline as `sciknow search query`."/>
     </form>
   </div>
   {search_results_html}
@@ -8288,13 +8318,17 @@ body.task-bar-open {{ padding-top: 40px; }}
     {sidebar_html}
   </div>
   <div class="ch-add-form" id="ch-add-form" style="display:none;">
-    <input type="text" id="ch-add-title" placeholder="New chapter title...">
-    <button onclick="addChapter()">Add Chapter</button>
-    <button onclick="document.getElementById('ch-add-form').style.display='none'" style="background:var(--danger);">Cancel</button>
+    <input type="text" id="ch-add-title" placeholder="New chapter title..."
+           title="Title for the new chapter. A slug is auto-generated from the title."/>
+    <button onclick="addChapter()"
+            title="Create a new empty chapter at the end of the book. Sections can be added via the Plan modal's Chapters tab.">Add Chapter</button>
+    <button onclick="document.getElementById('ch-add-form').style.display='none'" style="background:var(--danger);"
+            title="Close without creating a chapter.">Cancel</button>
   </div>
   <div style="padding: 4px 16px;">
     <button onclick="document.getElementById('ch-add-form').style.display='block'"
-            style="font-size:11px;padding:2px 8px;border:1px solid var(--border);border-radius:4px;cursor:pointer;background:var(--bg);color:var(--fg);">+ Add Chapter</button>
+            style="font-size:11px;padding:2px 8px;border:1px solid var(--border);border-radius:4px;cursor:pointer;background:var(--bg);color:var(--fg);"
+            title="Add a new chapter at the end of the book. Opens an inline title input.">+ Add Chapter</button>
   </div>
   <div class="job-indicator" id="job-indicator">Working...</div>
   <div style="padding: 8px 16px; font-size: 12px; opacity: 0.5; margin-top: 16px; cursor:pointer;"
@@ -8314,8 +8348,10 @@ body.task-bar-open {{ padding-top: 40px; }}
       <span id="word-target-text"></span>
       <span class="word-target-bar"><span class="word-target-fill" id="word-target-fill"></span></span>
     </span>
-    <button class="edit-btn" onclick="toggleEdit()">Edit</button>
-    <select class="status-select" id="status-select" onchange="updateStatus(this.value)">
+    <button class="edit-btn" onclick="toggleEdit()"
+            title="Toggle the in-browser markdown editor with autosave, KaTeX math, and inline figure thumbnails.">Edit</button>
+    <select class="status-select" id="status-select" onchange="updateStatus(this.value)"
+            title="Workflow status for this draft. Drafted → Reviewed → Revised → Final. `final` / `reviewed` / `revised` drafts feed the style-fingerprint extractor.">
       <option value="to_do">To Do</option>
       <option value="drafted" selected>Drafted</option>
       <option value="reviewed">Reviewed</option>
@@ -8434,13 +8470,17 @@ body.task-bar-open {{ padding-top: 40px; }}
     </div>
     <div class="editor-split">
       <div class="editor-src">
-        <textarea class="edit-area" id="edit-area" oninput="edPreview()"></textarea>
+        <textarea class="edit-area" id="edit-area" oninput="edPreview()"
+                  title="Markdown source. Autosaves every 5s. Supports $$…$$ KaTeX and ![alt](/api/visuals/image/<id>) for inline figures."></textarea>
       </div>
-      <div class="editor-preview" id="edit-preview"></div>
+      <div class="editor-preview" id="edit-preview"
+           title="Live-rendered preview of the markdown source."></div>
     </div>
     <div style="margin-top:8px;">
-      <button class="edit-btn" onclick="edSave()">Save</button>
-      <button class="edit-btn" style="background:var(--danger);" onclick="toggleEdit()">Cancel</button>
+      <button class="edit-btn" onclick="edSave()"
+              title="Save immediately. The autosave also fires every 5s.">Save</button>
+      <button class="edit-btn" style="background:var(--danger);" onclick="toggleEdit()"
+              title="Close the editor. Unsaved changes are lost — the autosave is your safety net.">Cancel</button>
     </div>
   </div>
 
@@ -8460,8 +8500,10 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div id="panel-comments">{comments_html}</div>
   <form class="comment-form" action="/comment" method="post" id="comment-form">
     <input type="hidden" name="draft_id" value="{active_id}" id="comment-draft-id">
-    <textarea name="comment" placeholder="Add a comment..."></textarea>
-    <button type="submit">Add Comment</button>
+    <textarea name="comment" placeholder="Add a comment..."
+              title="Per-draft comments persist in the database. Use Markdown; @-mentions are NOT wired."></textarea>
+    <button type="submit"
+            title="Save the comment to this draft. Resolved comments get struck through via the Resolve button on each saved comment.">Add Comment</button>
   </form>
 </aside>
 
@@ -8490,10 +8532,12 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div class="field">
           <label>Question</label>
           <input type="text" id="wiki-query-input" placeholder="What does the wiki say about ..."
-                 onkeydown="if(event.key==='Enter')doWikiQuery()">
+                 onkeydown="if(event.key==='Enter')doWikiQuery()"
+                 title="Natural-language question against the pre-compiled wiki summaries (one per paper). Press Enter to search."/>
         </div>
         <div class="field">
-          <button class="btn-primary" onclick="doWikiQuery()">Search Wiki</button>
+          <button class="btn-primary" onclick="doWikiQuery()"
+                  title="Query the wiki summaries. Faster than Ask Corpus; returns a synthesized answer + list of source summaries.">Search Wiki</button>
         </div>
         <div id="wiki-status" style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;"></div>
         <div class="modal-stream" id="wiki-stream"></div>
@@ -8505,9 +8549,11 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
           <input type="text" id="wiki-sum-search" placeholder="Filter by title or author…"
                  style="flex:1;min-width:200px;padding:6px 10px;"
-                 oninput="renderWikiSummaries()">
+                 oninput="renderWikiSummaries()"
+                 title="Substring match against paper title, authors, or slug. Filters live as you type."/>
           <label style="font-size:12px;color:var(--fg-muted);">Sort:</label>
-          <select id="wiki-sum-sort" onchange="renderWikiSummaries()" style="padding:4px 8px;">
+          <select id="wiki-sum-sort" onchange="renderWikiSummaries()" style="padding:4px 8px;"
+                  title="How to order the summary list.">
             <option value="year_desc">Year (newest first)</option>
             <option value="year_asc">Year (oldest first)</option>
             <option value="updated_desc">Recently compiled</option>
@@ -8522,7 +8568,8 @@ body.task-bar-open {{ padding-top: 40px; }}
            with actual image rendering for figures via /api/visuals/image. -->
       <div class="tab-pane" id="wiki-visuals-pane" style="display:none;">
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
-          <select id="wiki-vis-kind" onchange="loadWikiVisuals()" style="padding:4px 8px;">
+          <select id="wiki-vis-kind" onchange="loadWikiVisuals()" style="padding:4px 8px;"
+                  title="Which visual kind to show. Figures/charts render as thumbnails; equations as KaTeX; tables as HTML; code in a pre block.">
             <option value="figure">Figures (thumbnails)</option>
             <option value="chart">Charts (thumbnails)</option>
             <option value="table">Tables</option>
@@ -8531,10 +8578,13 @@ body.task-bar-open {{ padding-top: 40px; }}
           </select>
           <input type="text" id="wiki-vis-search" placeholder="Search captions…"
                  style="flex:1;min-width:160px;padding:4px 8px;"
-                 onkeydown="if(event.key==='Enter')loadWikiVisuals()">
+                 onkeydown="if(event.key==='Enter')loadWikiVisuals()"
+                 title="Substring match against caption + surrounding text. Press Enter to search."/>
           <input type="number" id="wiki-vis-limit" value="60" min="10" max="500" step="10"
-                 title="Results per load" style="width:70px;padding:4px 6px;">
-          <button class="btn-secondary" onclick="loadWikiVisuals()">&#128269; Load</button>
+                 title="How many visuals to load per click. Raise to 200+ for a full-corpus review; 60 is a fast browse size."
+                 style="width:70px;padding:4px 6px;">
+          <button class="btn-secondary" onclick="loadWikiVisuals()"
+                  title="Fetch visuals matching the current filters.">&#128269; Load</button>
           <span id="wiki-vis-stats" style="font-size:11px;color:var(--fg-muted);"></span>
         </div>
         <div id="wiki-visuals-list" style="max-height:calc(85vh - 220px);overflow-y:auto;"></div>
@@ -8784,12 +8834,14 @@ body.task-bar-open {{ padding-top: 40px; }}
       <p id="aw-config-scope" style="font-size:13px;color:var(--fg);margin-bottom:16px;font-weight:600;"></p>
       <div class="field">
         <label>Max iterations per section</label>
-        <input type="number" id="aw-config-max-iter" value="3" min="1" max="10" style="width:80px;">
+        <input type="number" id="aw-config-max-iter" value="3" min="1" max="10" style="width:80px;"
+               title="Upper bound on revise cycles per section. Each iteration: write → score → verify → (CoVe) → revise → rescore. Default 3 is usually enough; raise to 5 for tough sections."/>
         <span style="font-size:11px;color:var(--fg-muted);margin-left:8px;">Each iteration: score &rarr; verify &rarr; revise</span>
       </div>
       <div class="field">
         <label>Target score (0.0 &ndash; 1.0)</label>
-        <input type="number" id="aw-config-target-score" value="0.85" min="0" max="1" step="0.05" style="width:80px;">
+        <input type="number" id="aw-config-target-score" value="0.85" min="0" max="1" step="0.05" style="width:80px;"
+               title="Early-stop threshold on the scorer's `overall` dimension. Autowrite stops as soon as it hits this, before exhausting Max iterations. 0.85 is conservative; 0.8 is faster, 0.9 requires very clean drafts."/>
         <span style="font-size:11px;color:var(--fg-muted);margin-left:8px;">Stop iterating when overall &ge; this</span>
       </div>
       <div id="aw-config-mode-section" style="display:none;margin-top:16px;">
@@ -8803,8 +8855,10 @@ body.task-bar-open {{ padding-top: 40px; }}
       </div>
     </div>
     <div class="modal-footer">
-      <button class="btn-secondary" onclick="closeModal('autowrite-config-modal')">Cancel</button>
-      <button class="btn-primary" onclick="confirmAutowrite()">&#9889; Start</button>
+      <button class="btn-secondary" onclick="closeModal('autowrite-config-modal')"
+              title="Close without starting autowrite.">Cancel</button>
+      <button class="btn-primary" onclick="confirmAutowrite()"
+              title="Start autowrite with the current settings. Streams tokens live; close the modal at any time — the job keeps running server-side and the persistent task bar reflects progress.">&#9889; Start</button>
     </div>
   </div>
 </div>
@@ -8836,22 +8890,28 @@ body.task-bar-open {{ padding-top: 40px; }}
         </p>
         <div class="field">
           <label>Book title</label>
-          <input type="text" id="plan-title-input">
+          <input type="text" id="plan-title-input"
+                 title="The book's display title. Shown in the sidebar, browser tab, and every export."/>
         </div>
         <div class="field">
           <label>Short description (one or two sentences)</label>
-          <textarea id="plan-desc-input" style="min-height:50px;"></textarea>
+          <textarea id="plan-desc-input" style="min-height:50px;"
+                    title="One-line blurb shown in the catalog + stats. Not injected into writer prompts."></textarea>
         </div>
         <div class="field">
           <label>Plan / leitmotiv (the full thesis &amp; scope document)</label>
-          <textarea id="plan-text-input" style="min-height:280px;font-family:var(--font-serif);font-size:14px;line-height:1.6;"></textarea>
+          <textarea id="plan-text-input" style="min-height:280px;font-family:var(--font-serif);font-size:14px;line-height:1.6;"
+                    title="200–500 word thesis document. Injected into every `write` / `autowrite` prompt so all chapters stay aligned with the same argument. Most important field for writer consistency."></textarea>
         </div>
         <div class="field">
           <label>Target chapter length &mdash; autowrite &amp; write aim for this many words per chapter</label>
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-            <button type="button" class="btn-secondary" onclick="setLengthPreset(3000)">Short &middot; 3000</button>
-            <button type="button" class="btn-secondary" onclick="setLengthPreset(6000)">Standard &middot; 6000</button>
-            <button type="button" class="btn-secondary" onclick="setLengthPreset(10000)">Long &middot; 10000</button>
+            <button type="button" class="btn-secondary" onclick="setLengthPreset(3000)"
+                    title="3000 words per chapter — blog-post length. About 750 words per section in a 4-section chapter.">Short &middot; 3000</button>
+            <button type="button" class="btn-secondary" onclick="setLengthPreset(6000)"
+                    title="6000 words per chapter (sciknow default). About 1500 words per section in a 4-section chapter.">Standard &middot; 6000</button>
+            <button type="button" class="btn-secondary" onclick="setLengthPreset(10000)"
+                    title="10 000 words per chapter — substantial chapter-of-record length. About 2500 words per section in a 4-section chapter.">Long &middot; 10000</button>
             <input type="number" id="plan-target-words-input" min="0" step="500" placeholder="custom"
                    style="width:120px;padding:6px 8px;font-size:13px;"
                    title="Words per chapter. Leave empty for the default (6000). Zero clears the setting.">
@@ -8890,7 +8950,8 @@ body.task-bar-open {{ padding-top: 40px; }}
           <label>Elicitation method (optional)
             <span style="font-size:11px;color:var(--fg-muted);">&mdash; steers the LLM through a named cognitive technique.</span>
           </label>
-          <select id="plan-outline-method-select" style="width:100%;padding:6px 8px;">
+          <select id="plan-outline-method-select" style="width:100%;padding:6px 8px;"
+                  title="Optional elicitation method prepended to the outline prompt as a preamble. Steers the LLM through a named cognitive technique (e.g. Tree of Thoughts, First Principles, Peer Review Simulation). See docs/BOOK_ACTIONS.md for the full 24-method catalogue.">
             <option value="">(default generic prompt)</option>
           </select>
         </div>
@@ -8899,11 +8960,14 @@ body.task-bar-open {{ padding-top: 40px; }}
             <span style="font-size:11px;color:var(--fg-muted);">&mdash; leave empty to use <code>LLM_MODEL</code>.</span>
           </label>
           <input type="text" id="plan-outline-model-input" placeholder="(leave empty for default)"
-                 style="width:100%;padding:6px 8px;font-family:var(--font-mono);font-size:12px;">
+                 style="width:100%;padding:6px 8px;font-family:var(--font-mono);font-size:12px;"
+                 title="Optional Ollama model tag to override the default (LLM_MODEL). Useful for experimenting with a different planner without changing .env. Leave empty to use the configured default."/>
         </div>
         <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">
-          <button class="btn-primary" id="plan-outline-run-btn" onclick="runOutlineFromTab()">&#128214; Generate outline</button>
-          <button class="btn-secondary" id="plan-outline-cancel-btn" onclick="cancelOutline()" style="display:none;">Cancel</button>
+          <button class="btn-primary" id="plan-outline-run-btn" onclick="runOutlineFromTab()"
+                  title="Generate 3 candidate chapter outlines at rising temperatures, score by breadth + section-count variance, pick the winner, density-resize sections, and add to book_chapters. Additive: never touches existing chapters. Mirrors `sciknow book outline`.">&#128214; Generate outline</button>
+          <button class="btn-secondary" id="plan-outline-cancel-btn" onclick="cancelOutline()" style="display:none;"
+                  title="Cancel the running outline generation. Any chapters already committed stay; the in-flight LLM call is aborted.">Cancel</button>
           <span id="plan-outline-status" style="font-size:12px;color:var(--fg-muted);"></span>
         </div>
         <div id="plan-outline-stream" style="display:none;max-height:200px;overflow:auto;font-family:var(--font-mono);font-size:11px;line-height:1.4;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px;white-space:pre-wrap;margin-bottom:12px;"></div>
@@ -8923,7 +8987,8 @@ body.task-bar-open {{ padding-top: 40px; }}
         </p>
         <div id="plan-chapters-list" style="display:flex;flex-direction:column;gap:10px;"></div>
         <div style="margin-top:12px;">
-          <button class="btn-secondary" onclick="addPlanChapter()">+ Add chapter</button>
+          <button class="btn-secondary" onclick="addPlanChapter()"
+                  title="Append a new empty chapter to the book at the next chapter number.">+ Add chapter</button>
         </div>
       </div>
       <!-- Sections tab (was "Chapter sections"). Now includes a
@@ -8941,7 +9006,8 @@ body.task-bar-open {{ padding-top: 40px; }}
           <label style="font-size:12px;color:var(--fg-muted);">Chapter:</label>
           <select id="plan-sections-chapter-picker"
                   onchange="onPlanSectionsChapterChange(this.value)"
-                  style="flex:1;min-width:200px;padding:4px 8px;">
+                  style="flex:1;min-width:200px;padding:4px 8px;"
+                  title="Which chapter's sections to edit. Changing the picker saves the current chapter's edits before loading the next.">
             <option value="">(choose a chapter…)</option>
           </select>
         </div>
@@ -8953,8 +9019,10 @@ body.task-bar-open {{ padding-top: 40px; }}
     </div>
     <div class="modal-footer" style="flex-wrap:wrap;gap:6px;">
       <button class="btn-secondary" onclick="closeModal('plan-modal')">Close</button>
-      <button class="btn-secondary" onclick="regeneratePlan()" id="plan-regen-btn" style="margin-left:auto;">&#9889; Regenerate with LLM</button>
-      <button class="btn-primary" onclick="savePlan()">Save</button>
+      <button class="btn-secondary" onclick="regeneratePlan()" id="plan-regen-btn" style="margin-left:auto;"
+              title="LLM-regenerate the Book plan (leitmotiv) from current chapters + paper corpus. Visible only on the Book tab.">&#9889; Regenerate with LLM</button>
+      <button class="btn-primary" onclick="savePlan()"
+              title="Persist changes on the currently-visible tab (Book / Chapters / Sections) to the database. Outline-tab changes are committed inline when you click Generate outline.">Save</button>
     </div>
   </div>
 </div>
@@ -9073,17 +9141,20 @@ body.task-bar-open {{ padding-top: 40px; }}
         </p>
         <div class="field">
           <label>Title</label>
-          <input type="text" id="bs-title" placeholder="(required)">
+          <input type="text" id="bs-title" placeholder="(required)"
+                 title="The book's display title. Sidebar + browser tab + export filename are derived from this."/>
         </div>
         <div class="field">
           <label>Description</label>
-          <input type="text" id="bs-description" placeholder="One-line blurb shown in catalog / stats">
+          <input type="text" id="bs-description" placeholder="One-line blurb shown in catalog / stats"
+                 title="Free-text blurb for the catalog + stats. NOT injected into writer prompts — use the Leitmotiv tab for thesis-level guidance."/>
         </div>
         <div class="field" style="display:flex;gap:8px;align-items:flex-end;">
           <div style="flex:1;">
             <label>Target words per chapter</label>
             <input type="number" id="bs-target-chapter-words" min="0" step="500"
-                   placeholder="6000 (default)">
+                   placeholder="6000 (default)"
+                   title="Autowrite and write use this as the per-chapter word target; per-section share = chapter target ÷ section count. 0 clears the override back to the 6000 default."/>
           </div>
           <div style="flex:2;font-size:11px;color:var(--fg-muted);padding-bottom:8px;">
             Per-section target = chapter target ÷ number of sections.
@@ -9093,7 +9164,8 @@ body.task-bar-open {{ padding-top: 40px; }}
         </div>
         <div id="bs-basics-meta" style="margin-top:10px;font-size:11px;color:var(--fg-muted);"></div>
         <div style="display:flex;gap:8px;align-items:center;margin-top:14px;">
-          <button class="btn-primary" onclick="saveBookSettings('basics')">Save Basics</button>
+          <button class="btn-primary" onclick="saveBookSettings('basics')"
+                  title="Save title / description / target words. Empty fields are left unchanged.">Save Basics</button>
           <span id="bs-basics-status" style="font-size:12px;color:var(--fg-muted);"></span>
         </div>
       </div>
@@ -9108,10 +9180,12 @@ body.task-bar-open {{ padding-top: 40px; }}
         </p>
         <div class="field">
           <label>Plan / leitmotiv</label>
-          <textarea id="bs-plan" rows="16" style="font-family:var(--font-sans,inherit);font-size:13px;line-height:1.55;"></textarea>
+          <textarea id="bs-plan" rows="16" style="font-family:var(--font-sans,inherit);font-size:13px;line-height:1.55;"
+                    title="The book's thesis / scope document (200–500 words). Injected into every writer prompt. Same field edited by the ⚡ Plan quick-editor + regenerate button; this tab is for direct editing."></textarea>
         </div>
         <div style="display:flex;gap:8px;align-items:center;margin-top:8px;">
-          <button class="btn-primary" onclick="saveBookSettings('leitmotiv')">Save Plan</button>
+          <button class="btn-primary" onclick="saveBookSettings('leitmotiv')"
+                  title="Save the leitmotiv / plan text to the database. Future `write` / `autowrite` calls use the new value immediately.">Save Plan</button>
           <span id="bs-leitmotiv-status" style="font-size:12px;color:var(--fg-muted);"></span>
         </div>
       </div>
@@ -9157,7 +9231,8 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div id="bs-style-fingerprint"
              style="padding:14px;border:1px solid var(--border);border-radius:6px;background:var(--bg-alt,#f8f8f8);min-height:120px;"></div>
         <div style="display:flex;gap:8px;align-items:center;margin-top:10px;">
-          <button class="btn-primary" onclick="refreshStyleFingerprint()">Recompute Fingerprint</button>
+          <button class="btn-primary" onclick="refreshStyleFingerprint()"
+                  title="Re-scan drafts marked `final` / `reviewed` / `revised` and rebuild the style fingerprint (median sentence length, citations per 100 words, hedging rate, top transitions). Future autowrite runs pick up the new fingerprint immediately.">Recompute Fingerprint</button>
           <span id="bs-style-status" style="font-size:12px;color:var(--fg-muted);"></span>
         </div>
       </div>
@@ -9530,8 +9605,10 @@ body.task-bar-open {{ padding-top: 40px; }}
         </p>
         <div style="display:flex;gap:8px;align-items:center;">
           <input type="text" id="proj-new-slug" placeholder="new-project-slug (lowercase, hyphens)"
-                 style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--bg);color:var(--fg);">
-          <button class="btn-primary" onclick="createProject()">Create</button>
+                 style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--bg);color:var(--fg);"
+                 title="Slug for the new project. Must be lowercase alphanumeric + hyphens; becomes the PostgreSQL database name `sciknow_<slug>` and the Qdrant collection prefix."/>
+          <button class="btn-primary" onclick="createProject()"
+                  title="Create the project: PG database, Qdrant collections (papers / abstracts / wiki / visuals), data directory, .env.overlay template, Alembic migrations. Empty corpus — ingest papers after.">Create</button>
         </div>
       </div>
       <div id="proj-detail" style="margin-top:14px;"></div>
@@ -10388,19 +10465,24 @@ body.task-bar-open {{ padding-top: 40px; }}
       <div id="eap-content" style="display:none;">
         <div id="eap-info" style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;padding:8px;background:var(--bg-alt,#f8f8f8);border-radius:4px;"></div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
-          <button class="btn-secondary" onclick="eapSelectAll(true)">Select all</button>
-          <button class="btn-secondary" onclick="eapSelectAll(false)">Select none</button>
+          <button class="btn-secondary" onclick="eapSelectAll(true)"
+                  title="Check every row in the current filtered view.">Select all</button>
+          <button class="btn-secondary" onclick="eapSelectAll(false)"
+                  title="Uncheck every row.">Select none</button>
           <label style="font-size:12px;display:flex;align-items:center;gap:4px;">
             Select where score &ge;
             <input type="number" id="eap-threshold" value="0.55" min="0" max="1" step="0.05"
-                   style="width:70px;font-size:12px;padding:2px 4px;">
+                   style="width:70px;font-size:12px;padding:2px 4px;"
+                   title="bge-m3 cosine similarity threshold (0–1). 0.55 is a reasonable floor; raise for a tighter shortlist, lower to see more."/>
             <button class="btn-secondary" onclick="eapSelectByThreshold()"
-                    style="font-size:11px;padding:2px 8px;">Apply</button>
+                    style="font-size:11px;padding:2px 8px;"
+                    title="Check every row whose relevance score is at or above the threshold.">Apply</button>
           </label>
           <label style="font-size:12px;display:flex;align-items:center;gap:4px;">
             Sort:
             <select id="eap-sort" onchange="eapRender()"
-                    style="font-size:12px;padding:2px 4px;">
+                    style="font-size:12px;padding:2px 4px;"
+                    title="Order the candidate rows by relevance, year, or title.">
               <option value="score">by relevance score</option>
               <option value="year">by year (newest)</option>
               <option value="title">by title (A-Z)</option>
