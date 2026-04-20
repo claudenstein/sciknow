@@ -2434,6 +2434,47 @@ def _retrieve(session, qdrant, query: str, candidate_k: int = 50,
     return results, sources
 
 
+def _retrieve_visuals(
+    query: str,
+    *,
+    cited_doc_ids: list[str] | tuple[str, ...] = (),
+    section_type: str | None = None,
+    candidate_k: int = 15,
+    top_k: int = 5,
+) -> list:
+    """Phase 54.6.141 — writer-side visuals retrieval helper.
+
+    Thin wrapper around ``rank_visuals`` that fits the ``_retrieve()``
+    pattern (takes the query + cited docs, returns ranked results).
+    Kept as a separate helper so the writer-integration decision (when
+    to call this, how much weight to give it in the prompt, whether to
+    validate [Fig. N] markers in verify pass) can be made per call site
+    without modifying the existing ``_retrieve`` signature.
+
+    Returns an empty list on any internal failure — the caller is
+    expected to treat visuals as *optional* augmentation, not as a
+    hard dependency of the writer stage.
+
+    ``section_type`` should be one of the canonical chunker section
+    types ("introduction", "methods", "results", "discussion", ...)
+    so the Phase 54.6.139 section-type prior signal activates.
+    """
+    if not (query or "").strip():
+        return []
+    try:
+        from sciknow.retrieval.visuals_ranker import rank_visuals
+        return rank_visuals(
+            query,
+            cited_doc_ids=list(cited_doc_ids or []),
+            section_type=section_type,
+            candidate_k=candidate_k,
+            top_k=top_k,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("_retrieve_visuals failed (writer continues without visuals): %s", exc)
+        return []
+
+
 def _generate_step_back_query(query: str, model: str | None = None) -> str | None:
     """Ask the LLM for an abstract reformulation of `query`.
 

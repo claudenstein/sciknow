@@ -9460,6 +9460,64 @@ def l1_phase54_6_56_refresh_ingests_downloads_and_failed() -> None:
         )
 
 
+def l1_phase54_6_141_writer_visuals_helpers_surface() -> None:
+    """Phase 54.6.141 — writer-side visuals helpers ready for autowrite wiring.
+
+    Pins the two helpers the autowrite integration will call:
+    ``book_ops._retrieve_visuals`` (retrieve + rank) and
+    ``prompts.format_visuals_prompt_block`` (render as a writer-facing
+    appendix).
+
+    Neither is wired into the writer loop yet — the actual autowrite
+    prompt integration will land in a follow-up phase pending user
+    sign-off on details (word-target counting, verify-citations pass
+    extension). This test just guards the infrastructure so the
+    follow-up can call into known-good helpers.
+    """
+    import inspect
+    from sciknow.core import book_ops
+    from sciknow.rag import prompts
+
+    # A) _retrieve_visuals present with the right signature
+    assert hasattr(book_ops, "_retrieve_visuals"), (
+        "book_ops._retrieve_visuals missing (Phase 54.6.141)"
+    )
+    sig = inspect.signature(book_ops._retrieve_visuals)
+    for required in ("query", "cited_doc_ids", "section_type", "top_k"):
+        assert required in sig.parameters, (
+            f"_retrieve_visuals missing parameter {required!r} "
+            f"— the autowrite wiring needs all four"
+        )
+
+    # B) format_visuals_prompt_block present
+    assert hasattr(prompts, "format_visuals_prompt_block"), (
+        "prompts.format_visuals_prompt_block missing (Phase 54.6.141)"
+    )
+
+    # C) Empty input → empty string (so writer can always concat)
+    assert prompts.format_visuals_prompt_block([]) == "", (
+        "format_visuals_prompt_block([]) must return empty string "
+        "so unconditional concatenation in the writer is safe"
+    )
+
+    # D) Format block on a minimal RankedVisual round-trips the `[Fig. N]` tag
+    from sciknow.retrieval.visuals_ranker import RankedVisual
+    rv = RankedVisual(
+        visual_id="test", document_id="test-doc",
+        kind="figure", figure_num="Fig. 3",
+        ai_caption="A test caption",
+        paper_title="Sample paper",
+        composite_score=0.85, same_paper=True,
+    )
+    block = prompts.format_visuals_prompt_block([rv])
+    assert "Fig. 3" in block, "block must contain the [Fig. N] tag"
+    assert "Sample paper" in block, "block must include the paper title"
+    assert "same paper as a cited source" in block, (
+        "same-paper badge missing — writers rely on this as a "
+        "faithfulness cue"
+    )
+
+
 def l1_phase54_6_140_visuals_eval_surface() -> None:
     """Phase 54.6.140 — visuals eval harness + CLI surface.
 
@@ -10121,6 +10179,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_139_visuals_ranker_surface,
     # Phase 54.6.140 — visuals eval harness + CLI surface
     l1_phase54_6_140_visuals_eval_surface,
+    # Phase 54.6.141 — writer-side visuals helpers ready for autowrite wiring
+    l1_phase54_6_141_writer_visuals_helpers_surface,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness

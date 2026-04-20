@@ -163,6 +163,71 @@ def format_sources(results: list[SearchResult]) -> str:
     return "\n".join(lines)
 
 
+# ── Phase 54.6.141 — visual-citation prompt block ───────────────────
+
+def format_visuals_prompt_block(
+    ranked_visuals: list,  # list[sciknow.retrieval.visuals_ranker.RankedVisual]
+    *,
+    max_chars: int = 2500,
+) -> str:
+    """Render a writer-facing "Available figures / tables" appendix.
+
+    The caller should concatenate this AFTER the main retrieved-context
+    block so the writer sees: (a) the text evidence they already had,
+    then (b) a compact shortlist of visuals that the
+    ``sciknow/retrieval/visuals_ranker.rank_visuals`` scored as
+    relevant to the current claim.
+
+    Format is designed to be scanned quickly by the LLM:
+
+        ─── Available figures / tables ───
+        [Fig. 3 · Smith et al. 2022]
+          kind: chart · score: 0.97 · same paper as a cited source
+          caption: The chart displays temperature anomalies …
+          body ref: "Fig. 3 shows the time-series of Aberdeen sea level …"
+
+        [Fig. 5 · Smith et al. 2022]
+          …
+
+    Each row carries enough signal for the writer to decide whether
+    to cite a specific visual — the ``[Fig. N]`` marker is ready to
+    copy inline, and the body-ref excerpt makes it obvious *why* the
+    ranker surfaced this candidate.
+
+    Empty input → empty string, so the caller can always concatenate
+    without a conditional.
+    """
+    if not ranked_visuals:
+        return ""
+
+    parts: list[str] = ["─── Available figures / tables ───"]
+    total = len(parts[0])
+
+    for rv in ranked_visuals:
+        fig_tag = rv.figure_num or f"[{rv.kind}]"
+        paper_ref = ""
+        if rv.paper_title:
+            paper_ref = f" · {rv.paper_title[:80]}"
+        header = f"\n[{fig_tag}{paper_ref}]"
+        body_lines = [
+            header,
+            f"  kind: {rv.kind or 'figure'} · score: {rv.composite_score:.2f}"
+            + (" · same paper as a cited source" if rv.same_paper else ""),
+        ]
+        cap = (rv.ai_caption or "").strip().replace("\n", " ")
+        if cap:
+            body_lines.append(f"  caption: {cap[:220]}")
+        if rv.best_mention_text:
+            mt = rv.best_mention_text.strip().replace("\n", " ")
+            body_lines.append(f"  body ref: \"{mt[:220]}\"")
+        block = "\n".join(body_lines)
+        if total + len(block) > max_chars:
+            break
+        parts.append(block)
+        total += len(block)
+    return "\n".join(parts)
+
+
 # ── RAPTOR cluster summarisation (Sarthi et al., ICLR 2024) ─────────────────
 #
 # Used by sciknow.ingestion.raptor to compress a cluster of related chunks
