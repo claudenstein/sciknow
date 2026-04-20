@@ -197,17 +197,23 @@ this); on the next round:
 **Effort:** 1h for the column + subtraction trick. The LambdaMART
 piece stays parked until ≥500 labels accumulate.
 
-### 2.5 Inbound "cites me" crawl (parked in Phase 49)
+### 2.5 Inbound "cites me" crawl — SHIPPED 54.6.123
 
-"What papers cite a seed" complements "what seed cites". Cheap via
-OpenAlex `filter=cites:{seed_id}`. Catches recent papers that haven't
-yet been co-cited — the same gap bib-coupling addresses, but from the
-other direction. In the original doc this was parked because outbound
-+ co-cite already covered most of the value; worth revisiting now that
-the corpus is ~2× larger and hitting the corpus-coverage diminishing-
-returns zone where new papers are harder to find.
+"What papers cite a seed" complements "what seed cites". New CLI:
 
-**Effort:** 2-3h.
+```
+sciknow db expand-inbound [-n LIMIT] [--relevance-threshold T] \
+                          [--per-seed-cap N] [--total-limit N] \
+                          [-q "topic"] [--dry-run] [--retry-failed]
+```
+
+Reuses `find_inbound_citation_candidates` (which was the backing for
+the existing preview-only UI), adds relevance threshold + cached-skip
++ download/ingest + provenance writes with `source="expand-inbound"`.
+Complementary to `db expand` (forward-in-time vs backward).
+
+GUI: Inbound-cites tab in the Corpus modal gained **Expand now** button
+next to the existing Preview button.
 
 ### 2.6 Author oeuvre completion
 

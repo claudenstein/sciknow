@@ -6239,6 +6239,7 @@ async def api_cli_stream(request: Request):
         ("db", "classify-papers"),
         ("db", "parse-tables"),
         ("db", "expand-oeuvre"),
+        ("db", "expand-inbound"),
     }
     if len(argv) < 2 or (argv[0], argv[1]) not in ALLOWED:
         raise HTTPException(403, f"command not on allowlist: {argv[:2]}")
@@ -10200,10 +10201,30 @@ body.task-bar-open {{ padding-top: 40px; }}
             <label>Relevance anchor query (optional)</label>
             <input type="text" id="tl-inb-relq" placeholder="(corpus centroid if blank)">
           </div>
+          <!-- Phase 54.6.123 (Tier 3 #2) — full-pipeline inbound crawl -->
+          <div class="field" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-top:4px;">
+            <div style="flex:1;min-width:80px;"><label>Limit</label>
+              <input type="number" id="tl-inb-limit" value="20" min="1" max="200"
+                     title="Max papers to download + ingest this run."></div>
+            <div style="flex:1;min-width:80px;"><label>Relev. thr</label>
+              <input type="number" id="tl-inb-relthr" value="0.55" min="0" max="1" step="0.05"
+                     title="Drop candidates below this bge-m3 cosine score."></div>
+            <label style="display:flex;align-items:center;gap:4px;font-size:11px;">
+              <input type="checkbox" id="tl-inb-dry"> dry-run
+            </label>
+            <label style="display:flex;align-items:center;gap:4px;font-size:11px;"
+                   title="Ignore the no_oa / ingest_failed caches.">
+              <input type="checkbox" id="tl-inb-retry"> retry failed
+            </label>
+          </div>
           <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
             <button class="btn-primary" onclick="openExpandInboundPreview()">&#128269; Preview candidates</button>
+            <button class="btn-primary" onclick="runInboundExpand()"
+                    title="Phase 54.6.123 — runs the full cites-me pipeline: crawl → relevance filter → download → ingest.">
+              &#127793; Expand now
+            </button>
             <span style="font-size:11px;color:var(--fg-muted);">
-              Takes 30s–2min depending on corpus size (each seed hits OpenAlex once).
+              Preview shows the shortlist without downloading. Expand now runs the full pipeline.
             </span>
           </div>
         </div>
@@ -17722,6 +17743,28 @@ function switchCorpusTab(name) {{
     const pane = document.getElementById(n + '-pane');
     if (pane) pane.style.display = (n === name) ? 'block' : 'none';
   }});
+}}
+
+// Phase 54.6.123 (Tier 3 #2) — inbound "cites-me" expansion.
+async function runInboundExpand() {{
+  const seed = parseInt(document.getElementById('tl-inb-seed').value || '30', 10);
+  const total = parseInt(document.getElementById('tl-inb-total').value || '300', 10);
+  const lim = parseInt(document.getElementById('tl-inb-limit').value || '20', 10);
+  const thr = parseFloat(document.getElementById('tl-inb-relthr').value || '0.55');
+  const relq = (document.getElementById('tl-inb-relq').value || '').trim();
+  const dry = document.getElementById('tl-inb-dry').checked;
+  const retry = document.getElementById('tl-inb-retry').checked;
+  const argv = [
+    'db', 'expand-inbound',
+    '--per-seed-cap', String(seed),
+    '--total-limit', String(total),
+    '--limit', String(lim),
+    '--relevance-threshold', String(thr),
+  ];
+  if (relq) argv.push('--relevance-query', relq);
+  if (dry) argv.push('--dry-run');
+  if (retry) argv.push('--retry-failed');
+  runCorpusCliAction(argv, 'Inbound expansion starting…');
 }}
 
 // Phase 54.6.116 (Tier 2 #4) — author oeuvre completion.

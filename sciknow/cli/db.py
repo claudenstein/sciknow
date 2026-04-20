@@ -1346,6 +1346,179 @@ def provenance_cmd(
                           f"selected_at={h.get('selected_at')}[/dim]")
 
 
+@app.command(name="expand-inbound")
+def expand_inbound_cmd(
+    per_seed_cap: int = typer.Option(50, "--per-seed-cap",
+        help="Max citing papers to fetch per corpus seed (OpenAlex page size)."),
+    total_limit: int = typer.Option(500, "--total-limit",
+        help="Hard cap on the raw candidate pool before relevance/dedup."),
+    limit: int = typer.Option(20, "--limit", "-n",
+        help="Max papers to download + ingest this run."),
+    relevance_threshold: float = typer.Option(
+        0.55, "--relevance-threshold",
+        help="Drop candidates with bge-m3 cosine below this vs corpus centroid."),
+    relevance_query: str = typer.Option("", "--relevance-query", "-q",
+        help="Optional free-text topic anchor for the relevance filter."),
+    dry_run: bool = typer.Option(False, "--dry-run",
+        help="Print the shortlist without downloading."),
+    retry_failed: bool = typer.Option(False, "--retry-failed",
+        help="Ignore the prior no_oa / ingest_failed caches for these candidates."),
+    ingest: bool = typer.Option(True, "--ingest/--no-ingest"),
+):
+    """Phase 54.6.123 (Tier 3 #2) — inbound "cites-me" expansion.
+
+    Finds papers that **cite** papers already in the corpus
+    (``OpenAlex filter=cites:<seed_id>``). Complementary to the Phase
+    49 outbound crawl (``db expand`` follows OUR references); this
+    one discovers recent papers the corpus hasn't cited yet but which
+    cite us. Useful for staying current on a topic once the corpus
+    is substantial.
+
+    Applies the bge-m3 relevance filter + the existing cache-skip
+    (no_oa / ingest_failed) + download-pipeline retraction/predatory
+    filters, then downloads + ingests up to ``--limit`` survivors.
+    Writes provenance with ``source="expand-inbound"``.
+
+    Examples:
+
+      sciknow db expand-inbound                             # top 20 @ 0.55 thr
+      sciknow db expand-inbound -n 50 --relevance-threshold 0.6
+      sciknow db expand-inbound --dry-run                   # see shortlist only
+      sciknow db expand-inbound -q "climate sensitivity" -n 30
+    """
+    from sciknow.cli import preflight
+    preflight()
+
+    from pathlib import Path as _Path
+    from sciknow.config import settings as _s
+    from sciknow.core.expand_ops import find_inbound_citation_candidates
+    from sciknow.core import provenance as _prov
+    from sciknow.ingestion.downloader import find_and_download
+
+    download_dir = _s.data_dir / "downloads"
+    download_dir.mkdir(parents=True, exist_ok=True)
+
+    console.print(
+        f"\n[bold]Inbound expansion[/bold]  "
+        f"(cites-me crawl, per-seed-cap={per_seed_cap}, "
+        f"total-limit={total_limit})"
+    )
+
+    t0 = time.monotonic()
+    result = find_inbound_citation_candidates(
+        per_seed_cap=per_seed_cap,
+        total_limit=total_limit,
+        relevance_query=relevance_query,
+        score_relevance=True,
+    )
+    cands = result.get("candidates") or []
+    info = result.get("info") or {}
+
+    # Apply relevance threshold + cached-skip + final limit
+    def _keep(c: dict) -> bool:
+        score = c.get("relevance_score")
+        if relevance_threshold > 0 and (score is None or score < relevance_threshold):
+            return False
+        if not retry_failed and c.get("cached_status"):
+            return False
+        return True
+
+    survivors = [c for c in cands if _keep(c)]
+    survivors = survivors[:limit]
+
+    console.print(
+        f"  seeds resolved: {info.get('seeds_resolved', 0)} / "
+        f"{info.get('seeds_requested', 0)}\n"
+        f"  raw candidates: {len(cands)}\n"
+        f"  after threshold (≥{relevance_threshold}) + cache-skip: {len(survivors)}\n"
+    )
+
+    if not survivors:
+        console.print("[yellow]Nothing to download.[/yellow]")
+        raise typer.Exit(0)
+
+    console.print(f"[bold]Top {len(survivors)}:[/bold]")
+    for i, c in enumerate(survivors, 1):
+        score = c.get("relevance_score")
+        score_s = f"{score:.3f}" if isinstance(score, float) else "—"
+        console.print(
+            f"  {i:>3}. [{score_s}]  {c.get('year') or '????'}  "
+            f"{(c.get('title') or '')[:100]}"
+        )
+
+    if dry_run:
+        console.print("\n[dim]Dry run — nothing downloaded.[/dim]")
+        raise typer.Exit(0)
+
+    downloaded = skipped = failed_dl = 0
+    paths_to_ingest: list = []
+    for i, c in enumerate(survivors, 1):
+        doi = (c.get("doi") or "").strip()
+        if not doi:
+            continue
+        try:
+            pdf_path = find_and_download(
+                doi=doi, arxiv_id=c.get("arxiv_id"),
+                download_dir=download_dir,
+            )
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"  [red]✗[/red] {i:>3}. {doi}  {exc}")
+            failed_dl += 1
+            continue
+        if pdf_path is None:
+            failed_dl += 1
+            console.print(f"  [yellow]⊘[/yellow] {i:>3}. {doi}  no OA PDF")
+            continue
+        downloaded += 1
+        paths_to_ingest.append((pdf_path, c))
+        console.print(f"  [green]↓[/green] {i:>3}. {doi}")
+
+    # Ingest using the existing parallel worker pool
+    ingested = 0
+    if ingest and paths_to_ingest:
+        from sciknow.cli.db import _run_parallel_workers
+        from rich.progress import Progress
+
+        ingest_results: list = []
+        ingest_failed_files: list = []
+        with Progress(console=console, transient=False) as progress:
+            itask = progress.add_task("Ingesting", total=len(paths_to_ingest))
+            _run_parallel_workers(
+                [p for p, _ in paths_to_ingest],
+                progress, itask,
+                ingest_results, ingest_failed_files,
+                force=False, num_workers=1,
+                ingest_source="expand-inbound",
+            )
+        ingested = len([r for r in ingest_results if r.get("status") == "complete"])
+
+        # Provenance: mark each ingested paper with source=expand-inbound
+        for _pdf, c in paths_to_ingest:
+            doi = c.get("doi")
+            if not doi:
+                continue
+            try:
+                _prov.record(
+                    doi=doi, source="expand-inbound",
+                    relevance_query=relevance_query or None,
+                    signals={
+                        "relevance_score": c.get("relevance_score"),
+                        "cited_by_count": c.get("cited_by_count"),
+                        "year": c.get("year"),
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+    console.print(
+        f"\n[bold]Summary:[/bold] "
+        f"[green]↓ {downloaded} downloaded[/green]  "
+        f"[green]✓ {ingested} ingested[/green]  "
+        f"[red]✗ {failed_dl} no OA PDF[/red]  "
+        f"[dim]{time.monotonic() - t0:.1f}s wall[/dim]"
+    )
+
+
 @app.command(name="expand-oeuvre")
 def expand_oeuvre_cmd(
     min_corpus_papers: int = typer.Option(3, "--min-corpus-papers",
