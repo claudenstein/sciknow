@@ -18611,32 +18611,37 @@ function pendingExportCsv() {{
   URL.revokeObjectURL(url);
 }}
 
-// Phase 54.6.115 (Tier 2 #3) — ±mark a candidate from the shortlist.
-async function eapFeedback(ev, kind, paperJsonStr) {{
-  if (ev) ev.stopPropagation();
-  let paper;
-  try {{ paper = JSON.parse(paperJsonStr); }}
-  catch (_) {{ return; }}
-  const btn = ev ? ev.currentTarget : null;
+// Phase 54.6.115/120 — ±mark a candidate from the shortlist.
+// 54.6.120 fix: moved from inline onclick with JSON.stringify(JSON.stringify(x))
+// (which broke HTML attributes on any title containing '<' / '"' etc.) to
+// data-* attributes + a delegated click handler attached after render.
+async function eapFeedback(btn) {{
+  if (!btn) return;
+  const kind = btn.dataset.kind;
+  const doi = btn.dataset.doi || '';
+  const arxiv_id = btn.dataset.arxivId || '';
+  const title = btn.dataset.title || '';
+  if (!kind || !(doi || arxiv_id || title)) return;
   try {{
     const res = await fetch('/api/feedback', {{
       method: 'POST',
       headers: {{'Content-Type': 'application/json'}},
       body: JSON.stringify({{
-        action: 'add',
-        kind: kind,
-        doi: paper.doi || '',
-        arxiv_id: paper.arxiv_id || '',
-        title: paper.title || '',
+        action: 'add', kind: kind,
+        doi: doi, arxiv_id: arxiv_id, title: title,
       }}),
     }});
     if (!res.ok) return;
-    // Quick visual ack — briefly flash the button's background.
-    if (btn) {{
-      const prev = btn.style.background;
-      btn.style.background = kind === 'positive' ? 'rgba(80,200,120,0.55)' : 'rgba(220,80,80,0.55)';
-      setTimeout(() => {{ btn.style.background = prev; }}, 500);
-    }}
+    // Visual ack — flash the button background and disable briefly.
+    const prev = btn.style.background;
+    btn.style.background = kind === 'positive'
+      ? 'rgba(80,200,120,0.55)'
+      : 'rgba(220,80,80,0.55)';
+    btn.disabled = true;
+    setTimeout(() => {{
+      btn.style.background = prev;
+      btn.disabled = false;
+    }}, 600);
   }} catch (_) {{}}
 }}
 
@@ -18649,7 +18654,11 @@ function eapRender() {{
   const hideCached = hideCachedEl ? hideCachedEl.checked : true;
   const totalCached = _eapCandidates.filter(c => c.cached_status).length;
   const cntEl = document.getElementById('eap-cached-count');
-  if (cntEl) cntEl.textContent = totalCached > 0 ? `(${{totalCached}})` : '';
+  // 54.6.120 — always show the count so the user can see when there's
+  // nothing to hide (previously empty string was indistinguishable from
+  // the rendering being broken — the user reported the checkbox "didn't
+  // seem to work" on a preview that had no cached rows to hide).
+  if (cntEl) cntEl.textContent = `(${{totalCached}})`;
   const pool = hideCached
     ? _eapCandidates.filter(c => !c.cached_status)
     : _eapCandidates.slice();
@@ -18702,16 +18711,30 @@ function eapRender() {{
       <td style="padding:6px 8px;color:var(--fg-muted);">${{c.year || '—'}}</td>
       <td style="padding:6px 8px;font-family:ui-monospace,monospace;">${{scoreText}}</td>
       <td style="padding:6px 8px;white-space:nowrap;" onclick="event.stopPropagation();">
-        <button title="Mark as positive — next expand round will favour similar papers"
-                onclick="eapFeedback(event, 'positive', ${{JSON.stringify(JSON.stringify({{doi:c.doi||'',arxiv_id:c.arxiv_id||'',title:c.title||''}}))}})"
+        <button class="eap-fb-btn" data-kind="positive"
+                data-doi="${{_escHtml(c.doi || '')}}"
+                data-arxiv-id="${{_escHtml(c.arxiv_id || '')}}"
+                data-title="${{_escHtml(c.title || '')}}"
+                title="Mark as positive — next expand round will favour similar papers"
                 style="background:rgba(80,200,120,0.15);color:var(--success);border:1px solid var(--success);border-radius:3px;padding:1px 6px;font-size:11px;cursor:pointer;margin-right:2px;">+</button>
-        <button title="Mark as negative — next expand round will penalize similar papers"
-                onclick="eapFeedback(event, 'negative', ${{JSON.stringify(JSON.stringify({{doi:c.doi||'',arxiv_id:c.arxiv_id||'',title:c.title||''}}))}})"
+        <button class="eap-fb-btn" data-kind="negative"
+                data-doi="${{_escHtml(c.doi || '')}}"
+                data-arxiv-id="${{_escHtml(c.arxiv_id || '')}}"
+                data-title="${{_escHtml(c.title || '')}}"
+                title="Mark as negative — next expand round will penalize similar papers"
                 style="background:rgba(220,80,80,0.15);color:var(--danger);border:1px solid var(--danger);border-radius:3px;padding:1px 6px;font-size:11px;cursor:pointer;">−</button>
       </td>
     </tr>`;
   }}).join('');
   tbody.innerHTML = rows;
+  // 54.6.120 — attach click handlers for the ± feedback buttons
+  // (data-attr based; replaces the broken inline onclick in 54.6.115).
+  tbody.querySelectorAll('.eap-fb-btn').forEach(btn => {{
+    btn.addEventListener('click', function(e) {{
+      e.stopPropagation();
+      eapFeedback(this);
+    }});
+  }});
   // Row click toggles the row's checkbox (but not on link click — event.stopPropagation above).
   tbody.querySelectorAll('tr').forEach(row => {{
     row.addEventListener('click', () => {{

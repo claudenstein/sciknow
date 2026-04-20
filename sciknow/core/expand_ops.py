@@ -338,6 +338,24 @@ def _score_and_dedup(raw: list[dict], *, relevance_query: str,
         except Exception as exc:
             logger.warning("relevance scoring failed: %s", exc)
 
+    # Phase 54.6.120 — annotate cached_status so the web UI's
+    # "Hide cached" checkbox actually has something to filter. Was a
+    # no-op for cites / topic / coauthors / inbound paths because
+    # only search_author_candidates called _cache_status_for.
+    try:
+        no_oa_keys, fail_keys = _load_download_caches()
+        for c in raw:
+            doi_k = (c.get("doi") or "").lower()
+            arx_k = (c.get("arxiv_id") or "").lower()
+            cs = None
+            if doi_k and doi_k in no_oa_keys:       cs = "no_oa"
+            elif arx_k and arx_k in no_oa_keys:     cs = "no_oa"
+            elif doi_k and doi_k in fail_keys:      cs = "ingest_failed"
+            elif arx_k and arx_k in fail_keys:      cs = "ingest_failed"
+            c["cached_status"] = cs
+    except Exception as exc:
+        logger.warning("_load_download_caches() failed: %s", exc)
+
     raw.sort(
         key=lambda c: (
             c.get("relevance_score") if c.get("relevance_score") is not None else -1.0,
