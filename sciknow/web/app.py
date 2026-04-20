@@ -5020,6 +5020,41 @@ async def api_corpus_expand_author(
     return JSONResponse({"job_id": job_id})
 
 
+@app.post("/api/corpus/agentic/preview")
+async def api_corpus_agentic_preview(
+    question: str = Form(""),
+    budget: int = Form(10),
+    threshold: int = Form(3),
+    model: str = Form(""),
+):
+    """Phase 54.6.132 — Agentic preview, single round. Decomposes the
+    question, measures coverage, identifies gap sub-topics, gathers
+    candidates per gap (OpenAlex topic search via
+    ``find_topic_candidates``) and returns the merged shortlist
+    annotated with each candidate's source sub-topic for cherry-pick
+    in the candidates modal. The user picks + downloads via the
+    existing ``/api/corpus/expand-author/download-selected`` route;
+    re-calling this endpoint advances to the next round (coverage is
+    re-measured against the now-updated corpus)."""
+    from sciknow.ingestion.agentic_expand import run_preview_round
+
+    q = (question or "").strip()
+    if not q:
+        return JSONResponse({"error": "question is required"}, status_code=400)
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: run_preview_round(
+                q, budget_per_gap=budget,
+                doc_threshold=threshold,
+                model=(model.strip() or None),
+            ),
+        )
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)[:500]}, status_code=500)
+    return JSONResponse(result)
+
+
 @app.post("/api/corpus/expand-oeuvre/preview")
 async def api_corpus_expand_oeuvre_preview(
     min_corpus_papers: int = Form(3),
@@ -10414,10 +10449,14 @@ body.task-bar-open {{ padding-top: 40px; }}
             </label>
           </div>
           <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap;">
-            <button class="btn-primary" onclick="runAgenticExpand()"
-                    title="LLM decomposes the question → measures coverage per sub-topic → runs expand on gaps → replans. Loops until every sub-topic is covered or max rounds reached.">&#129504; Start agentic expansion</button>
+            <button class="btn-primary" onclick="openAgenticPreview()"
+                    title="Phase 54.6.132 — INTERACTIVE per-round preview. Decomposes the question, measures coverage, and shows you the candidate papers for each gap sub-topic. You cherry-pick before any download. After ingestion, click again to advance to round 2 (coverage will be re-measured against the new corpus). Recommended for personal-bibliography work.">
+              &#128269; Preview round candidates
+            </button>
+            <button class="btn-secondary" onclick="runAgenticExpand()"
+                    title="AUTO mode: LLM decomposes the question → measures coverage per sub-topic → runs expand on gaps → re-plans. Loops automatically until every sub-topic is covered or max rounds reached. Worst case: rounds × gaps × budget papers downloaded WITHOUT user approval (default 3 × 5 × 10 = 150).">&#129504; Start agentic expansion (auto)</button>
             <span style="color:var(--fg-muted);font-size:11px;">
-              Streams the plan + per-sub-topic progress into the log panel. Close at any time — job continues server-side.
+              Auto streams progress into the log panel. Preview opens an interactive shortlist per round.
             </span>
           </div>
 
@@ -18356,6 +18395,95 @@ async function runAgenticExpand() {{
   if (dry) argv.push('--dry-run');
   if (resume) argv.push('--resume');
   runCorpusCliAction(argv, 'Agentic expansion starting…');
+}}
+
+// Phase 54.6.132 — Agentic PREVIEW. Single-round flow: decompose
+// question → measure coverage → identify gaps → fetch candidates per
+// gap → user cherry-picks in the candidates modal → downloads via
+// the existing pipeline. To advance to round 2, the user re-clicks
+// after ingestion settles (coverage gets re-measured against the
+// updated corpus, gaps may disappear or change).
+async function openAgenticPreview() {{
+  const q = (document.getElementById('tl-ag-question').value || '').trim();
+  if (!q) {{ alert('Please enter a research question.'); return; }}
+  const budget = parseInt(document.getElementById('tl-ag-budget').value || '10', 10);
+  const threshold = parseInt(document.getElementById('tl-ag-threshold').value || '3', 10);
+  _eapResetModal(
+    '&#129504; Agentic &mdash; Preview Round Candidates',
+    'Decomposing question + measuring coverage…',
+    '(LLM decompose ~5s · per-gap topic search ~3-10s each)'
+  );
+  const fd = new FormData();
+  fd.append('question', q);
+  fd.append('budget', String(budget));
+  fd.append('threshold', String(threshold));
+  try {{
+    const res = await fetch('/api/corpus/agentic/preview', {{
+      method: 'POST', body: fd,
+    }});
+    if (!res.ok) {{
+      const detail = await res.text();
+      throw new Error('HTTP ' + res.status + ': ' + detail);
+    }}
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    const subtopics = data.subtopics || [];
+    const coverage = data.coverage || [];
+    const gaps = data.gaps || [];
+    const info = data.info || {{}};
+    if (info.error) {{
+      _eapShowError(info.error);
+      return;
+    }}
+    if (info.all_covered) {{
+      _eapShowError(info.message || 'All sub-topics already covered.');
+      return;
+    }}
+    if (!subtopics.length) {{
+      _eapShowError('LLM decomposition returned no sub-topics. Try rephrasing.');
+      return;
+    }}
+    _eapCandidates = data.candidates || [];
+    document.getElementById('eap-threshold').value = '0.55';
+    _eapCandidates.forEach(c => {{
+      if (c.doi && !c.cached_status) _eapSelected.add(c.doi);
+    }});
+    // Coverage table — every sub-topic with green/yellow/red dot.
+    const covRows = coverage.map(r => {{
+      const dot = r.covered
+        ? '<span style="color:var(--success);">●</span>'
+        : (r.n_papers > 0 ? '<span style="color:var(--warning);">●</span>'
+                          : '<span style="color:var(--danger);">●</span>');
+      return `<div style="font-size:11px;line-height:1.5;">${{dot}} `
+        + `<span title="${{_escHtml(r.sample_titles.join(' • '))}}">${{_escHtml(r.subtopic)}}</span> `
+        + `<span style="color:var(--fg-muted);">— ${{r.n_papers}} paper(s)`
+        + (r.covered ? ` · covered` : ` · gap`)
+        + `</span></div>`;
+    }}).join('');
+    // Per-gap chips
+    const gapChips = (gaps || []).map(g => {{
+      const cls = g.error ? 'color:var(--danger);' : '';
+      return `<span style="display:inline-block;background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);padding:1px 6px;border-radius:3px;margin-right:4px;${{cls}}">`
+        + `${{_escHtml(g.subtopic)}} <span style="color:var(--fg-muted);">(${{g.n_candidates}})</span></span>`;
+    }}).join('');
+    document.getElementById('eap-info').innerHTML =
+      `<div style="margin-bottom:8px;">`
+      + `LLM decomposed into <strong>${{subtopics.length}}</strong> sub-topic(s); `
+      + `<strong>${{gaps.length}}</strong> gap(s) under the ≥${{info.doc_threshold}}-paper threshold. `
+      + `Pulled <strong>${{info.merged_candidates || 0}}</strong> candidate(s) `
+      + `(<strong>${{info.cross_gap_duplicates || 0}}</strong> cross-gap duplicates dropped).`
+      + `</div>`
+      + `<div style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;"><strong>Coverage snapshot:</strong></div>`
+      + `<div style="margin-bottom:8px;">${{covRows}}</div>`
+      + `<div style="font-size:11px;color:var(--fg-muted);margin-bottom:4px;"><strong>Gap candidates:</strong></div>`
+      + `<div style="font-size:11px;line-height:1.7;margin-bottom:4px;">${{gapChips}}</div>`
+      + `<div style="font-size:11px;color:var(--fg-muted);">Each row shows its source sub-topic below the title. After downloading, re-click <em>Preview round</em> to advance — the next round will re-measure coverage against the new corpus and propose fresh gaps.</div>`;
+    document.getElementById('eap-loading').style.display = 'none';
+    document.getElementById('eap-content').style.display = 'block';
+    eapRender();
+  }} catch (e) {{
+    _eapShowError(e && e.message ? e.message : String(e));
+  }}
 }}
 
 

@@ -295,6 +295,167 @@ def check_coverage(
     return out
 
 
+# ── Phase 54.6.132 — preview-mode candidate gathering ───────────────
+
+
+def gather_candidates_for_gaps(
+    gaps: list[str],
+    *,
+    budget_per_gap: int = 10,
+    on_progress=None,
+) -> dict:
+    """Phase 54.6.132 — single-round PREVIEW path. For each gap
+    sub-topic, run an OpenAlex topic search via
+    ``find_topic_candidates`` (the same backend ``expand-topic`` uses),
+    annotate every candidate with its source sub-topic, dedup by DOI
+    across gaps, and return the merged shortlist for cherry-pick.
+
+    NOTE: in auto-mode the round runs ``db expand --relevance-query
+    <gap>`` per gap, which does an OUTBOUND citation crawl (papers
+    referenced by the corpus, ranked by similarity to <gap>). In
+    preview-mode we deliberately use a free OpenAlex topic search
+    instead — much faster and easier to evaluate, at the cost of
+    pulling from a different source distribution. The CLAIMED
+    candidates may differ; the goal here is to give the user a
+    fast, transparent picture of "what's out there for this gap"
+    before any disk write.
+    """
+    from sciknow.core.expand_ops import find_topic_candidates
+
+    out: list[dict] = []
+    seen_dois: set[str] = set()
+    per_gap_stats: list[dict] = []
+    total_raw = 0
+    cross_gap_dups = 0
+    for i, gap in enumerate(gaps, start=1):
+        if on_progress:
+            try:
+                on_progress(i, len(gaps), gap)
+            except Exception:
+                pass
+        try:
+            res = find_topic_candidates(
+                query=gap, limit=max(budget_per_gap * 2, budget_per_gap),
+                relevance_query="", score_relevance=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("gather candidates failed for gap %r: %s", gap, exc)
+            per_gap_stats.append({
+                "subtopic": gap, "n_candidates": 0,
+                "error": str(exc)[:200],
+            })
+            continue
+        cands = (res.get("candidates") or [])[:budget_per_gap]
+        total_raw += len(cands)
+        kept = 0
+        for c in cands:
+            doi = (c.get("doi") or "").lower()
+            if doi and doi in seen_dois:
+                cross_gap_dups += 1
+                continue
+            if doi:
+                seen_dois.add(doi)
+            c = dict(c)
+            c["_agentic_subtopic"] = gap
+            out.append(c)
+            kept += 1
+        per_gap_stats.append({
+            "subtopic": gap, "n_candidates": kept,
+        })
+    return {
+        "candidates": out,
+        "gaps": per_gap_stats,
+        "info": {
+            "n_gaps": len(gaps),
+            "raw_candidates": total_raw,
+            "merged_candidates": len(out),
+            "cross_gap_duplicates": cross_gap_dups,
+            "budget_per_gap": budget_per_gap,
+        },
+    }
+
+
+def run_preview_round(
+    question: str,
+    *,
+    budget_per_gap: int = 10,
+    doc_threshold: int = 3,
+    model: str | None = None,
+    on_progress=None,
+) -> dict:
+    """Phase 54.6.132 — single-round preview orchestrator. Decompose
+    question → measure coverage → identify gaps → gather candidates
+    per gap. Returns everything the GUI needs to render an interactive
+    cherry-pick step before any download. Intentionally synchronous
+    and stateless: each call advances ONE round, the user picks +
+    downloads, then re-calls to do the next round (so coverage is
+    re-measured against the new corpus state).
+    """
+    if on_progress:
+        on_progress(0, 4, "decomposing question")
+    subtopics = decompose_question(question, model=model)
+    if not subtopics:
+        return {
+            "subtopics": [], "coverage": [], "gaps": [],
+            "candidates": [], "info": {
+                "error": "LLM decomposition returned no sub-topics. "
+                         "Try rephrasing the question.",
+            },
+        }
+
+    if on_progress:
+        on_progress(1, 4, "measuring corpus coverage")
+    coverage = check_coverage(subtopics, doc_threshold=doc_threshold)
+    coverage_rows = [
+        {
+            "subtopic": sc.subtopic, "n_papers": sc.n_papers,
+            "top_score": sc.top_score, "covered": sc.n_papers >= doc_threshold,
+            "sample_titles": sc.sample_titles[:3],
+        }
+        for sc in coverage.values()
+    ]
+    gaps = [sc.subtopic for sc in coverage.values()
+            if sc.n_papers < doc_threshold]
+
+    if not gaps:
+        return {
+            "subtopics": subtopics,
+            "coverage": coverage_rows,
+            "gaps": [], "candidates": [],
+            "info": {
+                "all_covered": True,
+                "doc_threshold": doc_threshold,
+                "message": (
+                    f"All {len(subtopics)} sub-topics already have "
+                    f"≥{doc_threshold} papers. No expansion needed."
+                ),
+            },
+        }
+
+    if on_progress:
+        on_progress(2, 4, f"gathering candidates for {len(gaps)} gap(s)")
+    gathered = gather_candidates_for_gaps(
+        gaps, budget_per_gap=budget_per_gap,
+        on_progress=lambda i, n, g: (
+            on_progress(2 + (i / max(n, 1)) * 2, 4, f"gathering: {g}")
+            if on_progress else None
+        ),
+    )
+    if on_progress:
+        on_progress(4, 4, "done")
+    return {
+        "subtopics": subtopics,
+        "coverage": coverage_rows,
+        "gaps": gathered["gaps"],
+        "candidates": gathered["candidates"],
+        "info": {
+            **gathered["info"],
+            "doc_threshold": doc_threshold,
+            "all_covered": False,
+        },
+    }
+
+
 # ── Orchestrator ────────────────────────────────────────────────────
 
 def run_agentic_expansion(
