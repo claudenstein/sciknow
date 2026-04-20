@@ -9460,6 +9460,49 @@ def l1_phase54_6_56_refresh_ingests_downloads_and_failed() -> None:
         )
 
 
+def l1_phase54_6_140_visuals_eval_surface() -> None:
+    """Phase 54.6.140 — visuals eval harness + CLI surface.
+
+    Guards the eval module (corpus-mined ground-truth generator) and
+    the bench-visuals-ranker CLI command that runs it. These are the
+    regression-protection substrate for the ranker weights — a change
+    that silently regresses P@1 is caught by re-running this bench,
+    which can only happen if the surface stays intact.
+    """
+    from sciknow.testing import visuals_eval as ve
+    from sciknow.cli import main as main_cli
+
+    # A) Public API
+    for fn in ("mine_eval_items", "sample_stratified", "run_eval",
+               "_classify_sentence", "_has_ref_for_num"):
+        assert hasattr(ve, fn), f"visuals_eval.{fn} missing"
+    for cls in ("EvalItem", "EvalReport"):
+        assert hasattr(ve, cls), f"visuals_eval.{cls} missing"
+
+    # B) Sentence classifier: the three buckets stratified sampling uses
+    assert ve._classify_sentence("Fig. 3 shows the trend") == "evidentiary"
+    assert ve._classify_sentence("We apply the method from Fig. 3") == "methods"
+    assert ve._classify_sentence("The schematic in Fig. 3 depicts the flow") == "illustrative"
+    # "depicts" is in _SPECIFIC_VERBS but "schematic" is in _ILLUSTRATIVE_HINTS —
+    # illustrative wins because hint check runs first. This test pins that.
+
+    # C) CLI command is registered
+    cmd_names = {cmd.name for cmd in main_cli.app.registered_commands}
+    assert "bench-visuals-ranker" in cmd_names, (
+        "`sciknow bench-visuals-ranker` command missing (Phase 54.6.140)"
+    )
+
+    # D) Report dataclass: p_at_1 / r_at_3 properties compute correctly
+    rep = ve.EvalReport(
+        n_items=10, n_top1_correct=6, n_top3_correct=8,
+        n_same_paper_top1=9, mean_composite_top1=0.7,
+        mean_composite_correct=0.8, elapsed_s=1.0,
+    )
+    assert rep.p_at_1 == 0.6
+    assert rep.r_at_3 == 0.8
+    assert rep.same_paper_rate == 0.9
+
+
 def l1_phase54_6_139_visuals_ranker_surface() -> None:
     """Phase 54.6.139 — 5-signal visuals ranker surface + composition math.
 
@@ -10076,6 +10119,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_138_visuals_mention_linker_surface,
     # Phase 54.6.139 — 5-signal visuals ranker surface + composition math
     l1_phase54_6_139_visuals_ranker_surface,
+    # Phase 54.6.140 — visuals eval harness + CLI surface
+    l1_phase54_6_140_visuals_eval_surface,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness

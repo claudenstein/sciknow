@@ -108,6 +108,24 @@ Ranked by effort × impact:
 
 Items 5 and 7 remain open and require more than mechanical fixes — an autowrite scorer calibration study and a RAPTOR-depth A/B respectively.
 
+## Visuals ranker — 2026-04-20 baseline (Phase 54.6.140, global-cooling @ 18,928 visuals / 6,980 linked)
+
+First measurement of the 5-signal visuals ranker (Phase 54.6.139) on a corpus-mined stratified 30-item eval set (Phase 54.6.140). Each eval item is `(query_sentence, correct_visual_id)` where the query sentence is extracted from a stored `mention_paragraph` (the source paper's body text explicitly cited that figure for that claim) — ground truth without hand curation, single-correct-answer. Ablation isolates the same-paper co-citation bonus.
+
+Run command: `sciknow bench-visuals-ranker -n 30 --seed 42`. Artifact: `projects/global-cooling/data/bench/visuals_ranker-<ts>.jsonl`.
+
+| Setup | P@1 | R@3 | Same-paper top-1 |
+|---|---:|---:|---:|
+| Full (signals 1+2+3+5) | **60.0%** | **83.3%** | 100% |
+| Ablated (signal 2 off) | 40.0% | 43.3% | 60% |
+| **Δ from same-paper bonus** | **+20 pp** | **+40 pp** | +40 pp |
+
+Interpretation: the same-paper co-citation bonus is the largest single lever, contributing 20pp of P@1 and 40pp of R@3. Intuitively correct — when the writer is citing a paper, that paper's figures should dominate for nearby claims. Even with the bonus off, caption + mention-paragraph signals alone reach 40% P@1 (~6× random on a 15-candidate pool), meaning the text-only signals do meaningful work; the bonus amplifies them rather than compensating for their weakness. R@3 collapses more than P@1 under ablation (+40pp vs +20pp), indicating that without the bonus, when the correct answer isn't top-1 it tends to be deep in the ranking (not rank 2 or 3) — caption + mention alone are coarser.
+
+RESEARCH.md §7.X.4 target was "+15 P@1 over caption-only baseline". The ablation test here is more stringent (caption + mention vs full), and the full-ranker lift is +20pp, clearing the target. A true caption-only ablation (signals 2, 3, 5 all off) is a future follow-up.
+
+Latency: ~1.0 s/item on CPU with the LLM co-resident on GPU (bge-reranker-v2-m3 CPU fallback). Interactive-acceptable.
+
 ## Retrieval scorecard — 2026-04-20, chunk-level FTS (Phase 54.6.136 vs 54.6.135)
 
 Switching `_postgres_fts` from `paper_metadata.search_vector` (title+abstract+keywords+journal) to `chunks.search_vector` (a GENERATED tsvector over chunk body text). Same corpus, same probe set, same RRF weights. Artifacts: `20260420T181318Z.jsonl` → `20260420T183309Z.jsonl`.

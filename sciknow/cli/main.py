@@ -270,6 +270,135 @@ def mcp_serve_cmd():
     asyncio.run(serve_stdio())
 
 
+@app.command(name="bench-visuals-ranker")
+def bench_visuals_ranker_cmd(
+    n: int = typer.Option(
+        30, "-n", "--n-items",
+        help="Size of the stratified eval set (default 30 per "
+             "RESEARCH.md §7.X.4). Items are mined automatically from "
+             "the corpus's Phase-54.6.138 mention-paragraphs — no hand "
+             "curation required.",
+    ),
+    seed: int = typer.Option(
+        42, "--seed",
+        help="Random seed for stratified sampling. Reproducible across runs.",
+    ),
+    mine_limit: int = typer.Option(
+        500, "--mine-limit",
+        help="Cap on raw items mined before stratification (default 500).",
+    ),
+    ablation: bool = typer.Option(
+        False, "--ablate-same-paper",
+        help="Run with signal 2 (same-paper bonus) ablated — drops "
+             "cited_doc_ids to measure caption + mention-paragraph "
+             "signals' discriminative power in isolation.",
+    ),
+    tag: str = typer.Option(
+        "", "--tag",
+        help="Free-form label stamped into the output JSONL filename.",
+    ),
+):
+    """Phase 54.6.140 — measure the 5-signal visuals ranker.
+
+    Mines a stratified eval set from the corpus (every stored
+    ``mention_paragraph`` is a ground-truth "author said this figure
+    supports this claim" pair; extracting the sentence gives an
+    honest query-to-correct-figure pair without hand curation),
+    runs the ranker, reports P@1 / R@3 / same-paper-rate.
+
+    Emits JSONL to ``{data_dir}/bench/visuals_ranker-<ts>[-tag].jsonl``
+    with per-item detail so regressions can be traced back to specific
+    (sentence, figure) pairs that started missing.
+
+    Examples:
+
+      sciknow bench-visuals-ranker                  # 30 items, full ranker
+      sciknow bench-visuals-ranker -n 100           # larger set
+      sciknow bench-visuals-ranker --ablate-same-paper  # signal 2 off
+
+    The eval is deterministic: same seed + same corpus state → same
+    numbers. Running it before/after any ranker change produces a
+    clean A/B.
+    """
+    from sciknow.cli import preflight
+    preflight()
+
+    import json as _json
+    from datetime import datetime as _dt, timezone as _tz
+    from pathlib import Path as _P
+    from sciknow.config import settings as _settings
+    from sciknow.testing import visuals_eval as ve
+
+    console.print(
+        f"[bold]Mining eval items[/bold] (mine_limit={mine_limit})…"
+    )
+    items = ve.mine_eval_items(limit=mine_limit)
+    console.print(
+        f"[dim]Mined {len(items)} raw items.[/dim] "
+        f"Sampling stratified {n} (seed={seed})…"
+    )
+    sampled = ve.sample_stratified(items, n=n, seed=seed)
+    if len(sampled) < n:
+        console.print(
+            f"[yellow]Only {len(sampled)} items after stratification — "
+            f"corpus may lack diverse mention-paragraphs. "
+            f"Run `sciknow db link-visual-mentions --force` first.[/yellow]"
+        )
+
+    from collections import Counter
+    type_counts = Counter(it.sentence_type for it in sampled)
+    console.print(f"[dim]By sentence type: {dict(type_counts)}[/dim]\n")
+
+    console.print(
+        f"[bold]Running ranker[/bold] "
+        f"({'ABLATED — signal 2 off' if ablation else 'full 5-signal'})…"
+    )
+    report = ve.run_eval(sampled, use_cited_doc=(not ablation))
+
+    console.print(f"\n[bold]Results ({report.n_items} items, "
+                  f"{report.elapsed_s:.1f}s total, "
+                  f"{report.elapsed_s/max(report.n_items,1):.2f}s/item):[/bold]")
+    console.print(f"  [green]P@1:[/green]              "
+                  f"{report.p_at_1:.3f}  ({report.n_top1_correct}/{report.n_items})")
+    console.print(f"  [green]R@3:[/green]              "
+                  f"{report.r_at_3:.3f}  ({report.n_top3_correct}/{report.n_items})")
+    console.print(f"  Same-paper top1: "
+                  f"{report.same_paper_rate:.3f}  ({report.n_same_paper_top1}/{report.n_items})")
+    console.print(f"  Mean composite:  "
+                  f"top1={report.mean_composite_top1:.3f}  "
+                  f"correct={report.mean_composite_correct:.3f}")
+
+    # Persist
+    ts = _dt.now(_tz.utc).strftime("%Y%m%dT%H%M%SZ")
+    slug = f"visuals_ranker-{ts}"
+    if tag:
+        slug += f"-{tag}"
+    if ablation:
+        slug += "-ablated"
+    out_dir = _P(_settings.data_dir) / "bench"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{slug}.jsonl"
+    with out_path.open("w") as f:
+        # Summary as line 1
+        f.write(_json.dumps({
+            "type": "summary",
+            "n_items": report.n_items,
+            "n_top1_correct": report.n_top1_correct,
+            "n_top3_correct": report.n_top3_correct,
+            "p_at_1": round(report.p_at_1, 4),
+            "r_at_3": round(report.r_at_3, 4),
+            "same_paper_rate": round(report.same_paper_rate, 4),
+            "mean_composite_top1": report.mean_composite_top1,
+            "mean_composite_correct": report.mean_composite_correct,
+            "elapsed_s": report.elapsed_s,
+            "ablation_same_paper": ablation,
+            "seed": seed,
+        }) + "\n")
+        for item in report.per_item:
+            f.write(_json.dumps({"type": "item", **item}) + "\n")
+    console.print(f"\n[dim]Results written to[/dim] {out_path}")
+
+
 @app.command(name="bench-vlm-gen")
 def bench_vlm_gen_cmd(
     n: int = typer.Option(
