@@ -1250,6 +1250,138 @@ def refresh_metadata(
     )
 
 
+@app.command(name="expand-oeuvre")
+def expand_oeuvre_cmd(
+    min_corpus_papers: int = typer.Option(3, "--min-corpus-papers",
+        help="Author must have ≥ N papers already in the corpus to qualify."),
+    per_author_limit: int = typer.Option(10, "--per-author-limit",
+        help="Cap on new papers downloaded per author per run."),
+    max_authors: int = typer.Option(10, "--max-authors",
+        help="Upper bound on authors to expand in one run (sorted by corpus paper count, descending)."),
+    dry_run: bool = typer.Option(False, "--dry-run",
+        help="Show the author list + expansion plan without downloading anything."),
+    relevance_query: str = typer.Option("", "--relevance-query", "-q",
+        help="Free-text relevance anchor for each per-author expansion. Empty → corpus centroid."),
+    strict_author: bool = typer.Option(True, "--strict-author/--no-strict-author",
+        help="Pass through to db expand-author. Default ON: only OpenAlex canonical-author-ID matches."),
+):
+    """Phase 54.6.116 (Tier 2 #4) — auto-complete author oeuvres.
+
+    Finds every author who already has ≥``--min-corpus-papers`` papers
+    in the corpus and runs ``sciknow db expand-author`` for each,
+    capping new downloads per author. Complementary to ``db expand``
+    (outbound reference crawl) and ``db expand-author`` (manual single-
+    author expansion): this automates the "go through the most-
+    represented authors' full bibliographies" step.
+
+    Uses existing ``search_author`` / ``expand-author`` machinery via
+    subprocess so each run is fully gated by relevance filter,
+    retraction / predatory / one-timer filters, MMR diversity, and
+    citation-context signals (same as any other expansion). ORCIDs
+    from ``paper_metadata.authors[*].orcid`` are passed through when
+    present for disambiguation; falls back to strict-author name match.
+
+    Examples:
+
+      sciknow db expand-oeuvre                     # default: 10 authors × 10 papers
+      sciknow db expand-oeuvre --min-corpus-papers 5 --max-authors 5 --dry-run
+      sciknow db expand-oeuvre -q "climate sensitivity"
+    """
+    from sciknow.cli import preflight
+    preflight()
+
+    import json as _json
+    import subprocess
+    import sys as _sys
+    from collections import Counter
+    from sqlalchemy import text as sql_text
+    from sciknow.storage.db import get_session
+
+    with get_session() as session:
+        rows = session.execute(sql_text("""
+            SELECT authors FROM paper_metadata
+            WHERE authors IS NOT NULL
+        """)).fetchall()
+
+    # Authors column is JSONB list of {name, orcid?, affiliation?}
+    author_counts: Counter = Counter()
+    orcid_by_name: dict[str, str] = {}
+    for (authors,) in rows:
+        try:
+            items = authors if isinstance(authors, list) else _json.loads(authors or "[]")
+        except Exception:
+            continue
+        for a in items or []:
+            if isinstance(a, dict):
+                name = (a.get("name") or "").strip()
+                if not name:
+                    continue
+                author_counts[name] += 1
+                oid = (a.get("orcid") or "").strip()
+                if oid and name not in orcid_by_name:
+                    orcid_by_name[name] = oid
+            elif isinstance(a, str) and a.strip():
+                author_counts[a.strip()] += 1
+
+    qualifying = [
+        (name, n) for name, n in author_counts.most_common()
+        if n >= min_corpus_papers
+    ][:max_authors]
+
+    if not qualifying:
+        console.print(
+            f"[yellow]No author has ≥{min_corpus_papers} corpus papers. "
+            "Try lowering --min-corpus-papers or expanding the corpus first.[/yellow]"
+        )
+        raise typer.Exit(0)
+
+    console.print(
+        f"\n[bold]Expand oeuvre[/bold]  "
+        f"{len(qualifying)} qualifying author(s) "
+        f"(≥{min_corpus_papers} corpus papers), "
+        f"cap {per_author_limit} new paper(s) each:\n"
+    )
+    for name, n in qualifying:
+        orcid_hint = (
+            f"  [dim]orcid={orcid_by_name[name]}[/dim]"
+            if name in orcid_by_name else ""
+        )
+        console.print(f"  • {n:>3} corpus papers  {name}{orcid_hint}")
+
+    if dry_run:
+        console.print("\n[dim]Dry run — nothing executed.[/dim]")
+        raise typer.Exit(0)
+
+    t0 = time.monotonic()
+    done = 0
+    for i, (name, n) in enumerate(qualifying, start=1):
+        console.print(f"\n[bold]Author {i}/{len(qualifying)}[/bold]: {name} "
+                      f"([cyan]{n}[/cyan] in corpus)")
+        argv = [
+            _sys.executable, "-m", "sciknow.cli.main",
+            "db", "expand-author", name,
+            "--limit", str(per_author_limit),
+        ]
+        if name in orcid_by_name:
+            argv += ["--orcid", orcid_by_name[name]]
+        if strict_author:
+            argv.append("--strict-author")
+        if relevance_query:
+            argv += ["--relevance-query", relevance_query]
+        try:
+            res = subprocess.run(argv, check=False)
+            if res.returncode == 0:
+                done += 1
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"  [red]author expansion failed: {exc}[/red]")
+
+    console.print(
+        f"\n[green]✓ Oeuvre expansion done:[/green] "
+        f"{done}/{len(qualifying)} authors completed  "
+        f"[dim]{time.monotonic() - t0:.1f}s wall[/dim]"
+    )
+
+
 @app.command(name="feedback-list")
 def feedback_list_cmd():
     """Phase 54.6.115 (Tier 2 #3) — show the project's expand feedback.

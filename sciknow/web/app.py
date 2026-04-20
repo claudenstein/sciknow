@@ -6221,6 +6221,7 @@ async def api_cli_stream(request: Request):
         ("db", "refresh-retractions"),
         ("db", "classify-papers"),
         ("db", "parse-tables"),
+        ("db", "expand-oeuvre"),
     }
     if len(argv) < 2 or (argv[0], argv[1]) not in ALLOWED:
         raise HTTPException(403, f"command not on allowlist: {argv[:2]}")
@@ -10058,6 +10059,27 @@ body.task-bar-open {{ padding-top: 40px; }}
             <span style="color:var(--fg-muted);font-size:11px;">
               Streams the plan + per-sub-topic progress into the log panel. Close at any time — job continues server-side.
             </span>
+          </div>
+
+          <!-- Phase 54.6.116 (Tier 2 #4) — author oeuvre completion -->
+          <div style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--border);">
+            <h5 style="margin:0 0 6px;font-size:12px;">&#128100; Author oeuvre completion</h5>
+            <p style="font-size:11px;color:var(--fg-muted);margin:0 0 8px;line-height:1.4;">
+              Scan the corpus, find authors with ≥ N papers already present, run
+              <code>expand-author</code> for each (ORCID-preferred, strict-author). Uses the same relevance + retraction + MMR filters as any other expansion.
+            </p>
+            <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
+              <div><label style="font-size:11px;">Min corpus papers
+                <input type="number" id="tl-oeu-min" value="3" min="2" max="10" style="width:60px;padding:2px 6px;font-size:12px;"></label></div>
+              <div><label style="font-size:11px;">Per-author limit
+                <input type="number" id="tl-oeu-limit" value="10" min="1" max="50" style="width:60px;padding:2px 6px;font-size:12px;"></label></div>
+              <div><label style="font-size:11px;">Max authors
+                <input type="number" id="tl-oeu-max" value="10" min="1" max="30" style="width:60px;padding:2px 6px;font-size:12px;"></label></div>
+              <label style="display:flex;align-items:center;gap:4px;font-size:11px;">
+                <input type="checkbox" id="tl-oeu-dry"> dry-run
+              </label>
+              <button class="btn-secondary" onclick="runOeuvreExpand()">Run oeuvre expansion</button>
+            </div>
           </div>
         </div>
 
@@ -17679,6 +17701,22 @@ function switchCorpusTab(name) {{
     const pane = document.getElementById(n + '-pane');
     if (pane) pane.style.display = (n === name) ? 'block' : 'none';
   }});
+}}
+
+// Phase 54.6.116 (Tier 2 #4) — author oeuvre completion.
+async function runOeuvreExpand() {{
+  const min_ = parseInt(document.getElementById('tl-oeu-min').value || '3', 10);
+  const lim = parseInt(document.getElementById('tl-oeu-limit').value || '10', 10);
+  const mx  = parseInt(document.getElementById('tl-oeu-max').value || '10', 10);
+  const dry = document.getElementById('tl-oeu-dry').checked;
+  const argv = [
+    'db', 'expand-oeuvre',
+    '--min-corpus-papers', String(min_),
+    '--per-author-limit', String(lim),
+    '--max-authors', String(mx),
+  ];
+  if (dry) argv.push('--dry-run');
+  runCorpusCliAction(argv, 'Scanning corpus authors…');
 }}
 
 // Phase 54.6.114 (Tier 2 #2) — agentic question-driven expansion.
