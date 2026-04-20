@@ -5458,6 +5458,9 @@ async def api_corpus_expand_preview_candidates(job_id: str):
 @app.post("/api/corpus/expand")
 async def api_corpus_expand(
     limit: int = Form(0),
+    # Phase 54.6.113 — RRF pool size per round. Default mirrors the CLI's
+    # default (50). Separate from `limit` which is the total download cap.
+    budget: int = Form(50),
     dry_run: bool = Form(False),
     resolve: bool = Form(False),
     ingest: bool = Form(True),
@@ -5468,13 +5471,16 @@ async def api_corpus_expand(
 ):
     """Invoke `sciknow db expand` from the web UI — SSE log stream.
 
-    The heavy flags (download_dir, delay) are left at CLI defaults to
-    keep the web UX simple; power users can still invoke the CLI
-    directly for unusual configurations.
+    ``budget`` is the RRF pool size per round (default 50); ``limit`` is
+    the hard cap on total downloads. See ``docs/EXPAND_RESEARCH.md`` §6a.
+    Heavy flags (download_dir, delay) are left at CLI defaults to keep
+    the web UX simple.
     """
     job_id, _queue = _create_job("corpus_expand")
     loop = asyncio.get_event_loop()
-    argv = ["db", "expand", "--limit", str(limit),
+    argv = ["db", "expand",
+            "--limit", str(limit),
+            "--budget", str(max(5, min(int(budget), 200))),
             "--relevance-threshold", str(relevance_threshold),
             "--workers", str(workers)]
     if dry_run:
@@ -9988,8 +9994,12 @@ body.task-bar-open {{ padding-top: 40px; }}
             Mirrors <code>sciknow db expand</code>.
           </div>
           <div class="field" style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;">
-            <div style="flex:1;min-width:70px;"><label>Limit</label>
-              <input type="number" id="tl-exp-limit" value="0" min="0"></div>
+            <div style="flex:1;min-width:70px;"><label title="Hard cap on total papers downloaded this run. 0 = no cap.">Limit</label>
+              <input type="number" id="tl-exp-limit" value="0" min="0"
+                     title="Hard cap on total papers downloaded this run. 0 = no cap."></div>
+            <div style="flex:1;min-width:70px;"><label title="Phase 54.6.113 — RRF pool size per round. The ranker fuses signals, applies MMR diversity, then takes the top-N for the download phase. Default 50. Smaller = tighter top picks only.">Budget</label>
+              <input type="number" id="tl-exp-budget" value="50" min="5" max="200"
+                     title="Phase 54.6.113 — RRF pool size per round. Smaller = tighter top picks only."></div>
             <div style="flex:1;min-width:80px;"><label>Workers</label>
               <input type="number" id="tl-exp-workers" value="0" min="0" title="0 = .env default"></div>
             <div style="flex:1;min-width:80px;"><label>Relev. thr</label>
@@ -19162,6 +19172,9 @@ async function doToolCorpus(action) {{
     if (rq) fd.append('relevance_query', rq);
   }} else {{
     fd.append('limit', document.getElementById('tl-exp-limit').value || '0');
+    // Phase 54.6.113 — RRF pool size per round. Pass-through to the
+    // expand endpoint which forwards to `db expand --budget N`.
+    fd.append('budget', document.getElementById('tl-exp-budget').value || '50');
     fd.append('workers', document.getElementById('tl-exp-workers').value || '0');
     fd.append('relevance_threshold', document.getElementById('tl-exp-relthr').value || '0.0');
     fd.append('dry_run', document.getElementById('tl-exp-dry').checked ? 'true' : 'false');
