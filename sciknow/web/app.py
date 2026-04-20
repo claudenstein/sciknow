@@ -5938,6 +5938,17 @@ async def api_projects_init(request: Request):
     })
 
 
+@app.get("/api/provenance")
+async def api_provenance(key: str):
+    """Phase 54.6.117 (Tier 4 #1) — provenance record by DOI / arxiv / doc-id prefix."""
+    from sciknow.core.provenance import lookup as _lookup
+    doc_id, rec = _lookup(key)
+    return JSONResponse({
+        "document_id": doc_id,
+        "provenance": rec,
+    })
+
+
 @app.get("/api/feedback")
 async def api_feedback_get():
     """Phase 54.6.115 (Tier 2 #3) — active project's expand feedback."""

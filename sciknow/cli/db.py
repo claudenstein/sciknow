@@ -1250,6 +1250,54 @@ def refresh_metadata(
     )
 
 
+@app.command(name="provenance")
+def provenance_cmd(
+    key: Annotated[str, typer.Argument(help="DOI, arXiv ID, or document-id prefix.")],
+):
+    """Phase 54.6.117 (Tier 4 #1) — show why a paper entered the corpus.
+
+    Looks up ``documents.provenance`` by DOI / arXiv ID / document-id
+    prefix and pretty-prints the structured record: source, round,
+    relevance query, RRF signals at selection time, seed papers,
+    and any merge history from re-discovery.
+    """
+    import json as _json
+    from sciknow.core import provenance as _prov
+    doc_id, rec = _prov.lookup(key)
+    if not doc_id:
+        console.print(f"[red]No document matches {key!r}.[/red]")
+        raise typer.Exit(1)
+    console.print(f"[bold]document_id:[/bold] {doc_id}")
+    if not rec:
+        console.print("[yellow]No provenance record on this document.[/yellow]")
+        console.print("[dim]Provenance writes started in Phase 54.6.117; "
+                      "papers ingested before that have no record.[/dim]")
+        raise typer.Exit(0)
+    console.print(f"[bold]source:[/bold] {rec.get('source', '?')}")
+    if "round" in rec:
+        console.print(f"[bold]round:[/bold] {rec['round']}")
+    if rec.get("relevance_query"):
+        console.print(f"[bold]relevance_query:[/bold] {rec['relevance_query']}")
+    if rec.get("question"):
+        console.print(f"[bold]question:[/bold] {rec['question']}")
+    if rec.get("subtopic"):
+        console.print(f"[bold]subtopic:[/bold] {rec['subtopic']}")
+    if rec.get("signals"):
+        console.print("[bold]signals:[/bold]")
+        for k, v in rec["signals"].items():
+            if isinstance(v, float):
+                console.print(f"  {k:<24} {v:.4f}")
+            else:
+                console.print(f"  {k:<24} {v}")
+    if rec.get("selected_at"):
+        console.print(f"[dim]selected_at: {rec['selected_at']}[/dim]")
+    if rec.get("history"):
+        console.print(f"\n[dim]History ({len(rec['history'])}):[/dim]")
+        for h in rec["history"]:
+            console.print(f"  [dim]- {h.get('source')} round={h.get('round')} "
+                          f"selected_at={h.get('selected_at')}[/dim]")
+
+
 @app.command(name="expand-oeuvre")
 def expand_oeuvre_cmd(
     min_corpus_papers: int = typer.Option(3, "--min-corpus-papers",
@@ -2741,6 +2789,55 @@ def expand(
                 ingest_source="expand",
                 on_file_done=_on_file_done,
             )
+
+    # Phase 54.6.117 (Tier 4 #1) — write provenance records for every
+    # paper that made it through download + ingest. ``ranked_features``
+    # carries the RRF signal values per candidate; we look up by DOI
+    # (or arxiv_id) against the documents table to attach them. Safe
+    # to call repeatedly — record() merges with existing provenance.
+    if ingested and ranked_features:
+        try:
+            from sciknow.core import provenance as _prov
+            feats_by_doi = {(f.doi or "").lower(): f
+                             for f in ranked_features if f.doi}
+            feats_by_arx = {(f.arxiv_id or "").lower(): f
+                             for f in ranked_features if f.arxiv_id}
+            written = 0
+            for f in ranked_features:
+                if f.hard_drop_reason:
+                    continue
+                key = (f.doi or "").lower()
+                if not key:
+                    key = (f.arxiv_id or "").lower()
+                if not key:
+                    continue
+                signals = {
+                    "rrf_score": f.rrf_score,
+                    "bge_m3_cosine": f.bge_m3_cosine,
+                    "citation_context_cosine": f.citation_context_cosine,
+                    "citation_context_n": f.citation_context_n,
+                    "co_citation": f.co_citation,
+                    "bib_coupling": f.bib_coupling,
+                    "pagerank": f.pagerank,
+                    "influential_cites": f.influential_cite_count,
+                    "cited_by": f.cited_by_count,
+                    "velocity": f.citation_velocity,
+                    "author_overlap": f.author_overlap,
+                    "venue": f.venue,
+                    "doc_type": f.doc_type,
+                }
+                ok = _prov.record(
+                    doi=f.doi or None,
+                    source="expand-agentic" if False else "expand",
+                    relevance_query=relevance_query,
+                    signals=signals,
+                )
+                if ok:
+                    written += 1
+            if written:
+                _log(f"PROVENANCE recorded signals for {written} ingested paper(s)")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("provenance write skipped: %s", exc)
 
     _log(
         f"SUMMARY  downloaded={downloaded}  ingested={ingested}  "

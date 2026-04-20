@@ -39,6 +39,24 @@ class Document(Base):
     ingest_source: Mapped[str] = mapped_column(
         Text, nullable=False, server_default="seed"
     )
+    # Phase 54.6.117 (Tier 4 #1) — structured provenance JSON.
+    # Shape (all fields optional; source is always set when we write):
+    #   {
+    #     "source": "expand" | "expand-author" | "expand-oeuvre"
+    #               | "expand-agentic" | "ingest" | ...,
+    #     "round": int,
+    #     "relevance_query": str, "question": str,
+    #     "subtopic": str,            # agentic sub-topic that led to us
+    #     "seed_paper_ids": [uuid, …],
+    #     "signals": {                # RRF feature values at selection time
+    #       "rrf_score": float, "bge_m3_cosine": float,
+    #       "citation_context_cosine": float, "co_citation": int,
+    #       "bib_coupling": float, "pagerank": float,
+    #       "influential_cites": int, "concept_overlap": float, ...
+    #     },
+    #     "selected_at": iso-ts,
+    #   }
+    provenance: Mapped[dict | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
