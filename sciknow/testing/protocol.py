@@ -9457,6 +9457,59 @@ def l1_phase54_6_56_refresh_ingests_downloads_and_failed() -> None:
         )
 
 
+def l1_phase54_6_134_agentic_coverage_uses_reranker() -> None:
+    """Phase 54.6.134 — coverage check must rerank before the score floor.
+
+    The agentic-expand ``check_coverage`` applies a ``score_floor=0.15``
+    filter to decide which sub-topics are "covered". Up through
+    Phase 54.6.133 that floor was applied to the raw RRF score returned
+    by ``hybrid_search`` — but RRF scores plateau at ~0.04 regardless of
+    match quality (rank-based fusion, theoretical max ≈ sum(1/(60+rank))
+    ≈ 0.05 for three signals), which is strictly below 0.15. Result:
+    EVERY sub-topic was classified as a gap, even ones with 8+ highly
+    relevant papers in the corpus.
+
+    The fix is to cross-encoder rerank the candidates before the floor
+    check. ``bge-reranker-v2-m3`` emits normalised [0..1] similarities
+    that cleanly separate matches (~0.9) from noise (~0.01), which is
+    what the 0.15 floor was always intended to operate on.
+
+    This test guards the invariant by source-grep so a future refactor
+    can't silently delete the rerank step and re-introduce the all-gaps
+    pathology.
+    """
+    import inspect as _inspect
+    from sciknow.ingestion import agentic_expand
+
+    src = _inspect.getsource(agentic_expand.check_coverage)
+
+    # A) check_coverage must invoke the reranker
+    assert "reranker" in src and ".rerank(" in src, (
+        "check_coverage must call reranker.rerank() before applying the "
+        "score_floor — raw RRF scores plateau at ~0.04 and cannot be "
+        "compared against an absolute floor. See Phase 54.6.134."
+    )
+
+    # B) The score_floor comment/docstring must flag the score scale
+    # so a future reader doesn't "fix" the floor back to an RRF value.
+    assert "cross-encoder" in src.lower() or "reranker score" in src.lower(), (
+        "check_coverage must document that score_floor operates on the "
+        "cross-encoder score, not the raw RRF score — see Phase 54.6.134."
+    )
+
+    # C) The rerank must happen BEFORE the score_floor check (otherwise
+    # we'd filter on raw RRF and the rerank is wasted).
+    rerank_pos = src.find(".rerank(")
+    floor_pos = src.find("score_floor")
+    # floor_pos finds the signature; we need the *comparison* site.
+    compare_pos = src.find("< score_floor")
+    assert rerank_pos != -1 and compare_pos != -1 and rerank_pos < compare_pos, (
+        "check_coverage must call .rerank() BEFORE the `< score_floor` "
+        "comparison — otherwise the floor still runs against raw RRF "
+        "scores. See Phase 54.6.134."
+    )
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -9657,6 +9710,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_51_downloader_parallelism_and_dedup,
     # Phase 54.6.56 — refresh sweeps inbox + downloads + failed
     l1_phase54_6_56_refresh_ingests_downloads_and_failed,
+    # Phase 54.6.134 — agentic coverage check must rerank before score floor
+    l1_phase54_6_134_agentic_coverage_uses_reranker,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness

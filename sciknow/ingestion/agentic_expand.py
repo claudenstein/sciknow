@@ -248,15 +248,26 @@ def decompose_question(
 def check_coverage(
     subtopics: list[str],
     *,
-    candidate_k: int = 30,
+    candidate_k: int = 15,
     doc_threshold: int = 3,       # papers needed to count as covered
-    score_floor: float = 0.15,    # RRF score floor for "relevant"
+    score_floor: float = 0.15,    # cross-encoder score floor for "relevant" (0..1)
 ) -> dict[str, SubtopicCoverage]:
-    """Run hybrid search over the corpus for each sub-topic and
+    """Run hybrid search + cross-encoder rerank for each sub-topic and
     compute coverage. ``doc_threshold`` is the count of distinct
     document_ids required to call a sub-topic "covered".
+
+    Phase 54.6.134 — uses the reranker for the relevance floor.
+    Raw RRF scores from ``hybrid_search`` plateau at ~0.04 regardless
+    of semantic match (rank-based fusion of dense/sparse/FTS), so a
+    static floor on them cannot discriminate covered vs gap — the
+    original implementation silently marked every sub-topic as a gap
+    because 0.04 < 0.15. The cross-encoder ``bge-reranker-v2-m3``
+    produces normalized [0..1] similarity scores that cleanly separate
+    matches (~0.9) from noise (~0.01), which is what the 0.15 floor
+    was always meant to operate on.
     """
     from sciknow.retrieval.hybrid_search import search
+    from sciknow.retrieval import reranker as _reranker
     from sciknow.storage.db import get_session
     from sciknow.storage.qdrant import get_client
 
@@ -266,18 +277,21 @@ def check_coverage(
         for topic in subtopics:
             try:
                 hits = search(topic, client, session, candidate_k=candidate_k)
+                if hits:
+                    hits = _reranker.rerank(topic, hits, top_k=candidate_k)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("coverage check failed for %r: %s", topic, exc)
                 out[topic] = SubtopicCoverage(subtopic=topic, n_papers=0, top_score=0.0)
                 continue
             # Count distinct papers whose top hit beats the floor.
+            # After rerank(), h.rrf_score holds the cross-encoder score.
             per_doc_best: dict[str, float] = {}
             titles: dict[str, str] = {}
             for h in hits:
                 doc_id = str(getattr(h, "document_id", "") or "")
                 if not doc_id:
                     continue
-                score = float(getattr(h, "rrf_score", 0.0) or getattr(h, "score", 0.0))
+                score = float(getattr(h, "rrf_score", 0.0) or 0.0)
                 if score < score_floor:
                     continue
                 if score > per_doc_best.get(doc_id, -1.0):
