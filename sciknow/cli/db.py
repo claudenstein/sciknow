@@ -1250,6 +1250,54 @@ def refresh_metadata(
     )
 
 
+@app.command(name="drift")
+def drift_cmd(
+    n: int = typer.Option(10, "--n", help="How many recent drift records to show."),
+    snapshot: bool = typer.Option(False, "--snapshot",
+        help="Take a fresh drift snapshot now (not tied to an expand round)."),
+    tag: str = typer.Option("manual", "--tag", help="Tag for the manual snapshot."),
+    reason: str = typer.Option("", "--reason", help="Free-text reason."),
+):
+    """Phase 54.6.118 (Tier 4 #3) — corpus-drift log.
+
+    Shows the last N drift records from ``<project data>/expand/drift.log``,
+    or takes a new snapshot with ``--snapshot``. Drift is the cosine
+    distance between the current abstract-centroid and the previous
+    snapshot — a fast proxy for "this expansion changed what the
+    corpus is about".
+    """
+    from sciknow.cli import preflight
+    preflight()
+    from sciknow.core.project import get_active_project
+    from sciknow.retrieval.corpus_drift import record_drift, read_recent
+
+    proj = get_active_project()
+    if snapshot:
+        summary = record_drift(proj.root, tag=tag, reason=reason)
+        console.print(f"[green]✓ Drift snapshot recorded.[/green]")
+        if summary.get("drift_delta") is not None:
+            console.print(
+                f"  delta={summary['drift_delta']:.4f} "
+                f"(cosine={summary['drift_cosine']:.4f})"
+            )
+        else:
+            console.print("  [dim](first snapshot — no prior centroid to diff against)[/dim]")
+        return
+
+    records = read_recent(proj.root, n=n)
+    if not records:
+        console.print("[yellow]No drift records yet. Run `sciknow db drift --snapshot` "
+                      "or trigger an expand round.[/yellow]")
+        return
+    console.print(f"[bold]Recent drift ({len(records)}):[/bold]")
+    for r in records:
+        ts = r.get("timestamp", "?")
+        tag_ = r.get("tag", "-")
+        delta = r.get("delta", "None")
+        reason_ = (r.get("reason") or "-")[:60]
+        console.print(f"  {ts}  tag={tag_:<10}  delta={delta}  {reason_}")
+
+
 @app.command(name="provenance")
 def provenance_cmd(
     key: Annotated[str, typer.Argument(help="DOI, arXiv ID, or document-id prefix.")],
@@ -2838,6 +2886,30 @@ def expand(
                 _log(f"PROVENANCE recorded signals for {written} ingested paper(s)")
         except Exception as exc:  # noqa: BLE001
             logger.debug("provenance write skipped: %s", exc)
+
+    # Phase 54.6.118 (Tier 4 #3) — corpus-drift snapshot after the
+    # new papers landed. Cheap (one centroid read); surfaces whether
+    # the expansion pulled the corpus toward a new subtopic.
+    if ingested:
+        try:
+            from sciknow.core.project import get_active_project
+            from sciknow.retrieval.corpus_drift import record_drift
+            proj = get_active_project()
+            summary = record_drift(
+                proj.root,
+                tag="expand",
+                reason=(relevance_query or "centroid")[:80],
+                also_size=ingested,
+            )
+            if summary.get("drift_delta") is not None:
+                d = summary["drift_delta"]
+                colour = "dim" if d < 0.01 else ("yellow" if d < 0.05 else "red")
+                console.print(
+                    f"[{colour}]corpus drift: delta={d:.4f} "
+                    f"(cosine={summary['drift_cosine']:.4f})[/{colour}]"
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("drift recording skipped: %s", exc)
 
     _log(
         f"SUMMARY  downloaded={downloaded}  ingested={ingested}  "
