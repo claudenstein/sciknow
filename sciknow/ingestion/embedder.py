@@ -227,6 +227,43 @@ def embed_to_visuals_collection(
     return point_id
 
 
+def embed_paper_abstract(paper_metadata_id: str) -> UUID | None:
+    """Phase 54.6.111 (Tier 1 #4) — re-embed a paper's abstract into
+    Qdrant when it was just updated (e.g. by enrich filling in a
+    previously-NULL abstract).
+
+    Looks up ``paper_metadata`` by id, joins to ``documents`` for the
+    document_id, and writes a new point into the `abstracts` Qdrant
+    collection. Idempotent: the old point stays (no ledger to find it)
+    but the newer one will outrank it at query time via recency.
+    """
+    from sqlalchemy import text as _text
+    from sciknow.storage.db import get_session
+    from sciknow.storage.qdrant import get_client as _get_q
+
+    with get_session() as session:
+        row = session.execute(_text("""
+            SELECT pm.abstract, pm.title, pm.year, pm.document_id::text
+            FROM paper_metadata pm
+            WHERE pm.id::text = :pid
+        """), {"pid": paper_metadata_id}).fetchone()
+    if not row or not (row[0] or "").strip():
+        return None
+    abstract_text, title, year, doc_id = row
+    payload = {
+        "title": title or "",
+        "year": year,
+        "paper_metadata_id": paper_metadata_id,
+        "embedded_via": "enrich-reembed",
+    }
+    return embed_abstract(
+        abstract_text=abstract_text,
+        document_id=doc_id,
+        payload_base=payload,
+        qdrant_client=_get_q(),
+    )
+
+
 def embed_abstract(
     abstract_text: str,
     document_id: UUID,

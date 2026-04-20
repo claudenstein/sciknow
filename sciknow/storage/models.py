@@ -100,6 +100,22 @@ class PaperMetadata(Base):
     crossref_raw: Mapped[dict | None] = mapped_column(JSONB)
     arxiv_raw: Mapped[dict | None] = mapped_column(JSONB)
 
+    # Phase 54.6.111 (Tier 1 #1) — persisted OpenAlex enrichment.
+    # Hydrated from a single /works/{id} call at enrich time; see
+    # docs/EXPAND_ENRICH_RESEARCH_2.md §1.1.
+    oa_concepts: Mapped[list | None] = mapped_column(JSONB)           # [{display_name, level, score}]
+    oa_funders: Mapped[list | None] = mapped_column(JSONB)            # [{name, id}]
+    oa_grants: Mapped[list | None] = mapped_column(JSONB)             # [{funder, award_id}]
+    oa_institutions_ror: Mapped[list | None] = mapped_column(JSONB)   # [ror_id]
+    oa_counts_by_year: Mapped[list | None] = mapped_column(JSONB)     # [{year, cited_by_count}]
+    oa_biblio: Mapped[dict | None] = mapped_column(JSONB)             # {volume, issue, first_page, last_page}
+    oa_cited_by_count: Mapped[int | None] = mapped_column(Integer)
+    oa_enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # Phase 54.6.111 (Tier 1 #2) — retraction sweep bookkeeping.
+    retraction_status: Mapped[str | None] = mapped_column(Text)       # none | retracted | corrected | withdrawn
+    retraction_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     # Full-text search vector (maintained by DB trigger)
     search_vector: Mapped[str | None] = mapped_column(TSVECTOR)
 

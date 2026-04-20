@@ -6098,6 +6098,15 @@ async def api_cli_stream(request: Request):
         ("book", "verify-draft"),
         ("book", "align-citations"),
         ("book", "ensemble-review"),
+        # Phase 54.6.111 — corpus-growth operations. Each is idempotent
+        # and stateful (updates PG + Qdrant, logs to data/*.log); none
+        # writes to the filesystem anywhere the user hasn't already
+        # sanctioned by running sciknow.
+        ("db", "enrich"),
+        ("db", "expand"),
+        ("db", "refresh-retractions"),
+        ("db", "classify-papers"),
+        ("db", "parse-tables"),
     }
     if len(argv) < 2 or (argv[0], argv[1]) not in ALLOWED:
         raise HTTPException(403, f"command not on allowlist: {argv[:2]}")
@@ -9640,6 +9649,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button class="tab active" data-tab="tl-search" onclick="switchToolsTab('tl-search')">Search</button>
       <button class="tab" data-tab="tl-synth" onclick="switchToolsTab('tl-synth')">Synthesize</button>
       <button class="tab" data-tab="tl-topics" onclick="switchToolsTab('tl-topics')">Topics</button>
+      <button class="tab" data-tab="tl-corpus" onclick="switchToolsTab('tl-corpus')">Corpus</button>
     </div>
     <div class="modal-body">
 
@@ -9771,8 +9781,12 @@ body.task-bar-open {{ padding-top: 40px; }}
                   title="Papers you selected but couldn't be auto-downloaded (no legal OA PDF). Retry, mark manually acquired, or export for ILL.">
             &#128203; Pending downloads
           </button>
+          <button class="btn-secondary" onclick="runCorpusCliAction(['db','refresh-retractions'], 'Retraction sweep…')"
+                  title="Phase 54.6.111 — query Crossref's update-type:retraction index for every paper with a DOI, flag retracted/corrected. Skips papers checked within 30 days.">
+            &#128203; Retraction sweep
+          </button>
           <span style="color:var(--fg-muted);">
-            Cleanup removes already-ingested dupes <em>and</em> the failed-ingest archive. Pending lists papers still waiting on an OA PDF.
+            Cleanup removes already-ingested dupes <em>and</em> the failed-ingest archive. Pending lists papers still waiting on an OA PDF. Retraction sweep flags newly-retracted work.
           </span>
         </div>
         <div class="tabs" style="margin-bottom:10px;">
@@ -18760,6 +18774,45 @@ async function loadToolTopicPapers(name) {{
 }}
 
 // ── Corpus tab (enrich / expand, subprocess SSE) ─────────────────────
+// Phase 54.6.111 — shell to the CLI via /api/cli-stream (allowlist-gated)
+// and stream stdout into the Corpus modal's log. Used by Retraction
+// Sweep; generalizable to any corpus-wide one-shot command.
+async function runCorpusCliAction(argv, startMsg) {{
+  const status = document.getElementById('tl-corpus-status');
+  const logEl = document.getElementById('tl-corpus-log');
+  if (logEl) logEl.textContent = '';
+  if (status) status.textContent = startMsg || 'Working…';
+  try {{
+    const res = await fetch('/api/cli-stream', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{argv: argv}}),
+    }});
+    const d = await res.json();
+    if (!res.ok || !d.job_id) {{
+      if (status) status.textContent = 'Failed: ' + (d.detail || res.status);
+      return;
+    }}
+    const src = new EventSource('/api/stream/' + d.job_id);
+    src.onmessage = function(e) {{
+      const evt = JSON.parse(e.data);
+      if (evt.type === 'log') {{
+        if (logEl) {{ logEl.textContent += evt.text + '\\n'; logEl.scrollTop = logEl.scrollHeight; }}
+      }} else if (evt.type === 'completed') {{
+        if (status) status.innerHTML = '<span style="color:var(--success);">\\u2713 Done.</span>';
+        src.close();
+      }} else if (evt.type === 'error') {{
+        if (status) status.innerHTML = '<span style="color:var(--danger);">\\u2717 ' + (evt.message || 'error') + '</span>';
+        src.close();
+      }} else if (evt.type === 'done') {{
+        src.close();
+      }}
+    }};
+  }} catch (exc) {{
+    if (status) status.textContent = 'Request failed: ' + exc.message;
+  }}
+}}
+
 async function doToolCorpus(action) {{
   const status = document.getElementById('tl-corpus-status');
   const logEl = document.getElementById('tl-corpus-log');

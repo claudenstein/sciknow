@@ -251,6 +251,78 @@ def apply_one_timer_filter(
             c.decisions.append(c.hard_drop_reason)
 
 
+def apply_mmr(
+    ranked: list[CandidateFeatures],
+    concept_sets: dict[str, set[str]],
+    *,
+    lambda_: float = 0.7,
+    top_k: int | None = None,
+) -> list[CandidateFeatures]:
+    """Phase 54.6.111 (Tier 1 #3) — Maximal Marginal Relevance diversity
+    re-rank over a score-sorted candidate list.
+
+    Penalises each pick by its max concept-set Jaccard similarity to
+    already-picked candidates, then re-orders. ``lambda_=0.7`` keeps
+    70% of the original RRF signal and 30% of the diversity signal —
+    enough to break monoculture without destroying the ranker's intent.
+
+    ``concept_sets`` maps candidate.key → set of OpenAlex concept
+    display_names (already computed for the ``concept_overlap`` signal).
+    Candidates absent from ``concept_sets`` are treated as "no concepts"
+    and Jaccard collapses to 0 — neutral, never penalized.
+
+    When ``top_k`` is set, only the first ``top_k`` survive MMR; the
+    tail keeps its RRF order. Hard-dropped candidates (rrf_score == 0)
+    are skipped to preserve the dry-run TSV's "dropped-first" section.
+    """
+    kept = [c for c in ranked if not c.hard_drop_reason]
+    tail = [c for c in ranked if c.hard_drop_reason]
+    if len(kept) <= 1:
+        return kept + tail
+    limit = top_k if (top_k is not None and top_k > 0) else len(kept)
+    limit = min(limit, len(kept))
+
+    selected: list[CandidateFeatures] = []
+    selected_keys: set[str] = set()
+    pool = kept.copy()
+
+    def _jaccard(a: set[str], b: set[str]) -> float:
+        if not a or not b:
+            return 0.0
+        inter = len(a & b)
+        union = len(a | b)
+        return inter / union if union else 0.0
+
+    # Normalize the RRF score to [0, 1] for the MMR convex combination.
+    max_rrf = max((c.rrf_score for c in kept), default=1.0) or 1.0
+    while pool and len(selected) < limit:
+        best = None
+        best_score = -1e18
+        for c in pool:
+            relevance = c.rrf_score / max_rrf
+            if selected:
+                c_set = concept_sets.get(c.key, set())
+                max_sim = max(
+                    _jaccard(c_set, concept_sets.get(s.key, set()))
+                    for s in selected
+                )
+            else:
+                max_sim = 0.0
+            mmr = lambda_ * relevance - (1.0 - lambda_) * max_sim
+            if mmr > best_score:
+                best_score = mmr
+                best = c
+        assert best is not None
+        best.decisions.append(f"mmr_pick@{len(selected)+1}: score={best_score:+.3f}")
+        selected.append(best)
+        selected_keys.add(best.key)
+        pool.remove(best)
+
+    # Appending the remaining pool in their original RRF order.
+    rest = [c for c in kept if c.key not in selected_keys]
+    return selected + rest + tail
+
+
 def score_via_rrf(
     candidates: list[CandidateFeatures],
     *,

@@ -175,6 +175,10 @@ def _run_rrf_ranker(
     for f in feats:
         f.corpus_cite_count = 1
 
+    # Phase 54.6.111 (Tier 1 #3) — populated in the OpenAlex branch;
+    # stays empty in --no-openalex mode so apply_mmr short-circuits.
+    concept_sets: dict[str, set[str]] = {}
+
     if no_openalex:
         console.print(
             "[yellow]  --no-openalex: skipping OpenAlex + PageRank + "
@@ -193,9 +197,19 @@ def _run_rrf_ranker(
             [(f.doi, f.arxiv_id) for f in feats],
             max_workers=8,
         )
+        # Phase 54.6.111 (Tier 1 #3) — build candidate concept sets
+        # once during the OpenAlex fetch pass so apply_mmr can use them
+        # as its diversity signal without a second API call.
         for f in feats:
             w = oa_works.get(f.key) or oa_works.get((f.doi or f"arxiv:{f.arxiv_id}").lower())
             enrich_from_openalex_work(f, w)
+            cs = {
+                (c.get("display_name") or "").lower()
+                for c in ((w or {}).get("concepts") or [])
+                if c.get("display_name")
+            }
+            if cs:
+                concept_sets[f.key] = cs
 
         # ── 3. Hard filters (retraction / predatory / doc-type) ──────────────
         hard_dropped = 0
@@ -368,6 +382,13 @@ def _run_rrf_ranker(
 
     # ── 12. RRF fusion ────────────────────────────────────────────────────
     ranked = score_via_rrf(feats)
+    # Phase 54.6.111 (Tier 1 #3) — MMR diversity re-rank over the top
+    # of the RRF-sorted list so the round's top-N spans multiple
+    # topics. lambda=0.7 keeps 70% of RRF's intent. Only active when
+    # we have OpenAlex concepts (no-openalex mode skips).
+    if not no_openalex and concept_sets:
+        from sciknow.ingestion.expand_ranker import apply_mmr
+        ranked = apply_mmr(ranked, concept_sets, lambda_=0.7, top_k=budget * 2)
     kept = [f for f in ranked if not f.hard_drop_reason]
     dropped = [f for f in ranked if f.hard_drop_reason]
     console.print(
@@ -1062,6 +1083,147 @@ def refresh_metadata(
     )
 
 
+@app.command(name="refresh-retractions")
+def refresh_retractions_cmd(
+    limit: int = typer.Option(0, "--limit", "-n",
+        help="Max papers to check this run (0 = all)."),
+    max_age_days: int = typer.Option(30, "--max-age-days",
+        help="Skip papers whose retraction_checked_at is newer than N days."),
+    delay: float = typer.Option(0.1, "--delay",
+        help="Seconds between Crossref API calls."),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+):
+    """Phase 54.6.111 (Tier 1 #2) — sweep the corpus for retractions.
+
+    Re-checks every paper with a DOI against Crossref's
+    ``update-type:retraction`` index and fills
+    ``paper_metadata.retraction_status`` /
+    ``paper_metadata.retraction_checked_at``. Skips papers checked
+    within ``--max-age-days``; pass ``--max-age-days 0`` to force.
+
+    Downstream effects: retracted papers are dropped by ``hybrid_search``
+    (see 54.6.81 paper-type weighting — retraction is treated as a
+    hard filter, not a soft weight) and flagged in the dashboard.
+
+    Examples:
+
+      sciknow db refresh-retractions              # all eligible
+      sciknow db refresh-retractions -n 100
+      sciknow db refresh-retractions --max-age-days 0   # force
+    """
+    from sciknow.cli import preflight
+    preflight(qdrant=False)
+
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import text as sql_text
+    from sciknow.storage.db import get_session
+    import httpx
+    from sciknow.config import settings as _s
+
+    _ua = {"User-Agent": f"sciknow/0.1 (mailto:{_s.crossref_email})"}
+
+    def _fetch_work(doi: str) -> dict | None:
+        try:
+            with httpx.Client(timeout=15) as c:
+                r = c.get(f"https://api.crossref.org/works/{doi}", headers=_ua)
+                if r.status_code != 200:
+                    return None
+                return r.json()
+        except Exception:
+            return None
+
+    now = datetime.now(timezone.utc)
+    max_age = timedelta(days=max_age_days) if max_age_days > 0 else None
+
+    with get_session() as session:
+        if max_age is None:
+            rows = session.execute(sql_text("""
+                SELECT id::text, doi FROM paper_metadata
+                WHERE doi IS NOT NULL AND doi <> ''
+                ORDER BY COALESCE(retraction_checked_at, '1970-01-01'::timestamptz) ASC
+            """)).fetchall()
+        else:
+            cutoff = now - max_age
+            rows = session.execute(sql_text("""
+                SELECT id::text, doi FROM paper_metadata
+                WHERE doi IS NOT NULL AND doi <> ''
+                  AND (retraction_checked_at IS NULL OR retraction_checked_at < :cutoff)
+                ORDER BY COALESCE(retraction_checked_at, '1970-01-01'::timestamptz) ASC
+            """), {"cutoff": cutoff}).fetchall()
+
+    if limit:
+        rows = rows[:limit]
+
+    total = len(rows)
+    if total == 0:
+        console.print("[green]Nothing to check — every paper was checked "
+                      f"within the last {max_age_days} days.[/green]")
+        raise typer.Exit(0)
+
+    console.print(
+        f"Checking [bold]{total}[/bold] paper(s) against Crossref retraction index"
+        + (f" (max-age {max_age_days}d)" if max_age else " (forced)")
+        + "…"
+    )
+
+    retracted = corrected = clean = errors = 0
+    t0 = time.monotonic()
+
+    for i, (pid, doi) in enumerate(rows, 1):
+        # Crossref's update-type filter on /works/{doi} tells us whether
+        # ANY retraction/withdrawal/correction has been attached. The
+        # "relation" field in the work metadata surfaces these edges.
+        status = "none"
+        try:
+            work = _fetch_work(doi)
+            msg = (work or {}).get("message", {}) if work else {}
+            updates = msg.get("update-to") or []
+            updated_by = msg.get("updated-by") or []
+            # A paper is retracted when any record "updated-by" it carries
+            # update-type=retraction / withdrawal. Corrections treated
+            # separately so the writer can still cite (with a flag).
+            flags = [u.get("type", "").lower() for u in (updates + updated_by)]
+            if any(f in ("retraction", "withdrawal") for f in flags):
+                status = "retracted"
+                retracted += 1
+            elif any(f == "correction" for f in flags):
+                status = "corrected"
+                corrected += 1
+            else:
+                clean += 1
+        except Exception as exc:  # noqa: BLE001
+            status = "error"
+            errors += 1
+            logger.debug("refresh-retractions %s: %s", doi, exc)
+
+        if status == "retracted":
+            console.print(f"  [dim][{i}/{total}][/dim] [red]✗ RETRACTED[/red]  {doi}")
+        elif status == "corrected":
+            console.print(f"  [dim][{i}/{total}][/dim] [yellow]! CORRECTED[/yellow]  {doi}")
+        elif status == "error":
+            console.print(f"  [dim][{i}/{total}][/dim] [dim]? error[/dim]  {doi}")
+
+        if not dry_run and status != "error":
+            with get_session() as session:
+                session.execute(sql_text("""
+                    UPDATE paper_metadata
+                    SET retraction_status = :s, retraction_checked_at = :ts
+                    WHERE id::text = :pid
+                """), {"s": status, "ts": now, "pid": pid})
+                session.commit()
+
+        if delay > 0 and i < total:
+            time.sleep(delay)
+
+    console.print(
+        f"\n[red]Retracted: {retracted}[/red] · "
+        f"[yellow]Corrected: {corrected}[/yellow] · "
+        f"[green]Clean: {clean}[/green] · "
+        f"[dim]Errors: {errors}[/dim] · "
+        f"[dim]{time.monotonic() - t0:.1f}s wall[/dim]"
+    )
+
+
 @app.command()
 def enrich(
     dry_run:   bool  = typer.Option(False,  "--dry-run",   help="Show what would be updated without making changes."),
@@ -1273,6 +1435,15 @@ def enrich(
                             progress.advance(task)
                             continue
 
+                        # Phase 54.6.111 (Tier 1 #4) — track abstract
+                        # transitions so we can re-embed the paper when
+                        # enrich lands an abstract on a previously-null
+                        # row (the paper's chunk embeddings were built
+                        # without that abstract prefix, so retrieval was
+                        # degraded).
+                        abstract_was_null = not (pm.abstract or "").strip()
+                        abstract_will_be_filled = bool((meta.abstract or "").strip())
+
                         pm.doi             = meta.doi or pm.doi
                         pm.arxiv_id        = meta.arxiv_id or pm.arxiv_id
                         pm.title           = meta.title or pm.title
@@ -1289,7 +1460,39 @@ def enrich(
                         pm.metadata_source = meta.source
                         pm.crossref_raw    = meta.crossref_raw or pm.crossref_raw
                         pm.arxiv_raw       = meta.arxiv_raw or pm.arxiv_raw
+
+                        # Phase 54.6.111 (Tier 1 #1) — hydrate oa_*
+                        # columns from the OpenAlex raw on the match
+                        # object when present. The search_openalex_…
+                        # helpers already attach the raw work on meta
+                        # (they keep the full response for debugging).
+                        try:
+                            from sciknow.ingestion.openalex_enrich import (
+                                extract_openalex_enrichment,
+                            )
+                            oa_raw = getattr(meta, "openalex_raw", None) or {}
+                            oa_updates = extract_openalex_enrichment(oa_raw)
+                            for k, v in oa_updates.items():
+                                setattr(pm, k, v)
+                        except Exception:  # noqa: BLE001
+                            pass
+
                         session.commit()
+
+                        # Re-embed when a previously empty abstract just
+                        # got filled. Best-effort — catches embedder
+                        # import/VRAM errors so enrich doesn't abort.
+                        if abstract_was_null and abstract_will_be_filled:
+                            try:
+                                from sciknow.ingestion.embedder import (
+                                    embed_paper_abstract,
+                                )
+                                embed_paper_abstract(str(pm.id))
+                            except Exception as exc:  # noqa: BLE001
+                                logger.debug(
+                                    "re-embed on enrich failed for %s: %s",
+                                    pm.id, exc,
+                                )
 
                     matched += 1
                     doi_str = (f"doi:{meta.doi}" if meta.doi

@@ -102,6 +102,9 @@ def refresh(
     no_ingest: bool = typer.Option(False, "--no-ingest",
         help="Skip the ingest step (use when no new PDFs, just reindex)."),
     no_enrich: bool = typer.Option(False, "--no-enrich"),
+    no_retraction_sweep: bool = typer.Option(False, "--no-retraction-sweep",
+        help="Skip Crossref retraction sweep (54.6.111). Runs weekly "
+             "by default on any paper not checked in the last 30 days."),
     no_citations: bool = typer.Option(False, "--no-citations"),
     no_classify: bool = typer.Option(False, "--no-classify",
         help="Skip paper-type classification (54.6.80)."),
@@ -222,6 +225,11 @@ def refresh(
     if not no_enrich:
         steps.append(("2. DOI enrichment (Crossref/OpenAlex/arXiv/S2)",
                       ["db", "enrich"], True))
+    if not no_retraction_sweep:
+        # Phase 54.6.111 — weekly-by-default retraction sweep against
+        # Crossref's update-type index. Skips papers checked within 30d.
+        steps.append(("2a. Retraction sweep (flag retracted/corrected)",
+                      ["db", "refresh-retractions"], True))
     if not no_citations:
         steps.append(("3. Link citations",
                       ["db", "link-citations"], True))
