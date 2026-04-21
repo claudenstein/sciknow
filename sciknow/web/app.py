@@ -9042,6 +9042,48 @@ body.task-bar-open {{ padding-top: 40px; }}
     <line x1="18" y1="6" x2="6" y2="18"/>
     <line x1="6" y1="6" x2="18" y2="18"/>
   </symbol>
+  <symbol id="i-book-open" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/>
+    <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>
+  </symbol>
+  <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="11" cy="11" r="7"/>
+    <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+  </symbol>
+  <symbol id="i-bar-chart" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="12" y1="20" x2="12" y2="10"/>
+    <line x1="18" y1="20" x2="18" y2="4"/>
+    <line x1="6" y1="20" x2="6" y2="16"/>
+  </symbol>
+  <symbol id="i-sprout" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M7 20h10"/>
+    <path d="M10 20c5.5-2.5.8-6.4 3-10"/>
+    <path d="M9.5 9.4c1.1.8 1.8 2.2 2.3 3.7-2 .4-3.5.4-4.8-.3-1.2-.6-2.3-1.9-3-4.2 2.8-.5 4.4 0 5.5.8z"/>
+    <path d="M14.1 6a7 7 0 0 0-1.1 4c1.9-.1 3.3-.6 4.3-1.4 1-1 1.6-2.3 1.7-4.6-2.7.1-4 1-4.9 2z"/>
+  </symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="4" y1="21" x2="4" y2="14"/>
+    <line x1="4" y1="10" x2="4" y2="3"/>
+    <line x1="12" y1="21" x2="12" y2="12"/>
+    <line x1="12" y1="8" x2="12" y2="3"/>
+    <line x1="20" y1="21" x2="20" y2="16"/>
+    <line x1="20" y1="12" x2="20" y2="3"/>
+    <line x1="1" y1="14" x2="7" y2="14"/>
+    <line x1="9" y1="8" x2="15" y2="8"/>
+    <line x1="17" y1="16" x2="23" y2="16"/>
+  </symbol>
+  <symbol id="i-file-text" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+    <polyline points="14 2 14 8 20 8"/>
+    <line x1="16" y1="13" x2="8" y2="13"/>
+    <line x1="16" y1="17" x2="8" y2="17"/>
+  </symbol>
 </svg>
 
 <!-- Phase 30 — persistent global task bar.
@@ -9076,13 +9118,13 @@ body.task-bar-open {{ padding-top: 40px; }}
        four dropdowns: Book / Explore / Visualize / Manage. The
        Knowledge Graph moves under Visualize since it's the seventh
        data-exploration view. -->
-  <button class="nav-btn" onclick="openPlanModal()" title="View / edit / regenerate the book plan (the leitmotiv)">&#128221; Plan</button>
-  <button class="nav-btn" onclick="showDashboard()" title="Book dashboard with stats + heatmap">&#128200; Dashboard</button>
+  <button class="nav-btn" onclick="openPlanModal()" title="View / edit / regenerate the book plan (the leitmotiv)"><svg class="icon"><use href="#i-file-text"/></svg> Plan</button>
+  <button class="nav-btn" onclick="showDashboard()" title="Book dashboard with stats + heatmap"><svg class="icon"><use href="#i-bar-chart"/></svg> Dashboard</button>
   <!-- Book — state + output surfaces for the current book -->
   <div class="nav-dropdown" id="book-dropdown">
     <button class="nav-btn" onclick="toggleNavDropdown('book-dropdown', event)"
             title="Book-level surfaces: visual browse, history, snapshots, export, settings">
-      &#128214; Book &#9662;
+      <svg class="icon"><use href="#i-book-open"/></svg> Book <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
     </button>
     <div class="nav-dropdown-menu" role="menu">
       <button role="menuitem" onclick="showCorkboard()"
@@ -9101,7 +9143,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="nav-dropdown" id="explore-dropdown">
     <button class="nav-btn" onclick="toggleNavDropdown('explore-dropdown', event)"
             title="Query the corpus: RAG, compiled wiki, paper catalog">
-      &#128269; Explore &#9662;
+      <svg class="icon"><use href="#i-search"/></svg> Explore <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
     </button>
     <div class="nav-dropdown-menu" role="menu">
       <button role="menuitem" onclick="openAskModal()"
@@ -9121,7 +9163,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="nav-dropdown" id="corpus-dropdown">
     <button class="nav-btn" onclick="toggleNavDropdown('corpus-dropdown', event)"
             title="Grow and enrich the corpus: enrich metadata + five expand vectors + cleanup + pending">
-      &#127793; Corpus &#9662;
+      <svg class="icon"><use href="#i-sprout"/></svg> Corpus <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
     </button>
     <div class="nav-dropdown-menu" role="menu">
       <button role="menuitem" onclick="openCorpusModal('corp-enrich')"
@@ -9168,7 +9210,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="nav-dropdown" id="manage-dropdown">
     <button class="nav-btn" onclick="toggleNavDropdown('manage-dropdown', event)"
             title="Tools, setup, projects">
-      &#128736;&#65039; Manage &#9662;
+      <svg class="icon"><use href="#i-sliders"/></svg> Manage <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
     </button>
     <div class="nav-dropdown-menu" role="menu">
       <button role="menuitem" onclick="openToolsModal()"
