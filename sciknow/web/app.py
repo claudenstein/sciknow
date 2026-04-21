@@ -5891,6 +5891,77 @@ async def list_jobs():
 # swapping the DB connection under the running app.
 
 
+@app.post("/api/chapters/{chapter_id}/plan-sections")
+async def api_chapter_plan_sections(
+    chapter_id: str,
+    force: bool = Form(False),
+    model: str = Form(None),
+):
+    """Phase 54.6.155 — web wrapper over book_ops.generate_section_plan.
+
+    Walks every section of the chapter, generates a concept-list plan
+    via LLM_FAST_MODEL (or the model override), skips sections with an
+    existing plan unless force=True. Returns per-section results so
+    the UI can re-render and show what changed.
+
+    Non-streaming — each section takes ~5-10s on a cheap fast model,
+    and total chapter latency is usually under 30s; a plain JSON
+    response is simpler than wiring SSE for this. If chapter size
+    grows beyond 8 sections per typical book, revisit.
+    """
+    from sciknow.core.book_ops import (
+        generate_section_plan,
+        _get_chapter_sections_normalized,
+    )
+    with get_session() as session:
+        # Confirm chapter exists + pull sections list (read-only — the
+        # generator re-reads inside its own session)
+        row = session.execute(text(
+            "SELECT book_id::text FROM book_chapters WHERE id::text = :cid"
+        ), {"cid": chapter_id}).fetchone()
+        if not row:
+            return JSONResponse({"error": f"no chapter {chapter_id!r}"}, status_code=404)
+        book_id = row[0]
+        sections = _get_chapter_sections_normalized(session, chapter_id)
+
+    results = []
+    for s in sections:
+        slug = s.get("slug", "")
+        try:
+            r = generate_section_plan(
+                book_id, chapter_id, slug,
+                model=model or None,
+                force=force,
+            )
+            results.append({
+                "slug": slug,
+                "title": s.get("title", ""),
+                "wrote": r["wrote"],
+                "n_concepts": r["n_concepts"],
+                "skipped_reason": r["skipped_reason"],
+                "first_bullet": (r["new_plan"].splitlines() or [""])[0][:120],
+            })
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("plan-sections failed for %s: %s", slug, exc)
+            results.append({
+                "slug": slug,
+                "title": s.get("title", ""),
+                "wrote": False,
+                "n_concepts": 0,
+                "skipped_reason": f"error: {str(exc)[:120]}",
+                "first_bullet": "",
+            })
+    n_planned = sum(1 for r in results if r["wrote"])
+    n_skipped = sum(1 for r in results if not r["wrote"] and r.get("skipped_reason"))
+    return JSONResponse({
+        "chapter_id": chapter_id,
+        "results": results,
+        "n_total": len(results),
+        "n_planned": n_planned,
+        "n_skipped": n_skipped,
+    })
+
+
 @app.get("/api/chapters/{chapter_id}/resolved-targets")
 async def api_chapter_resolved_targets(chapter_id: str):
     """Phase 54.6.149 — per-section target + which fallback level fired.
@@ -9413,10 +9484,27 @@ body.task-bar-open {{ padding-top: 40px; }}
           they keep their old slug until rewritten.
         </p>
         <div id="ch-sections-list"></div>
-        <button class="btn-secondary" onclick="addSection()" style="margin-top:8px;"
-                title="Append a new empty section to the end of the chapter. You can rename and reorder after adding.">
-          &#43; Add section
-        </button>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
+          <button class="btn-secondary" onclick="addSection()"
+                  title="Append a new empty section to the end of the chapter. You can rename and reorder after adding.">
+            &#43; Add section
+          </button>
+          <!-- Phase 54.6.155 — wrap `sciknow book plan-sections --chapter N`
+               so users can trigger LLM-generated concept plans from the
+               modal. Default: skip sections that already have a plan
+               (matches the CLI's default behaviour). Force overwrites. -->
+          <button class="btn-secondary" onclick="autoPlanChapterSections()"
+                  title="Phase 54.6.154/155 — LLM-generate a 3-4 bullet concept plan per empty section, using this chapter's scope + section titles. Bullet counts drive the Phase-54.6.146 concept-density resolver: target_words = N bullets × wpc_midpoint. Skips sections that already have a plan unless 'Force overwrite' is ticked. Cost: ~5-10s per empty section (LLM_FAST_MODEL, cheap structured task). See docs/RESEARCH.md §24.">
+            &#129504; Auto-plan sections
+          </button>
+          <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;"
+                 title="Overwrite existing plans instead of skipping them. Use when you want to regenerate from scratch — e.g. after changing the chapter description.">
+            <input type="checkbox" id="ch-auto-plan-force"
+                   title="Overwrite existing plans instead of skipping.">
+            force overwrite
+          </label>
+          <span id="ch-auto-plan-status" style="font-size:12px;color:var(--fg-muted);margin-left:8px;"></span>
+        </div>
       </div>
       <div id="chapter-modal-status" style="font-size:12px;color:var(--fg-muted);margin:8px 0;"></div>
     </div>
@@ -22377,6 +22465,64 @@ function addSection() {{
       if (input) input.focus();
     }}
   }}, 50);
+}}
+
+// Phase 54.6.155 — LLM-auto-plan every section in the current chapter.
+// Wraps `sciknow book plan-sections --chapter N` (54.6.154) as a single
+// POST + JSON response; no SSE because per-section cost is small (~5-10s
+// on LLM_FAST_MODEL) and total chapter latency typically stays under
+// 30s. Refreshes the sections list on success so the new plans light
+// up the live concept-count readout + resolver badge immediately.
+async function autoPlanChapterSections() {{
+  const chId = document.getElementById('chapter-modal').dataset.chId;
+  if (!chId) return;
+  const force = document.getElementById('ch-auto-plan-force').checked;
+  const status = document.getElementById('ch-auto-plan-status');
+  // Commit any pending edits first — otherwise a user who renamed
+  // sections in this modal would find the server writing plans keyed
+  // by the old slugs.
+  try {{
+    status.innerHTML = '<em>saving pending edits first…</em>';
+    await saveChapterInfo();
+  }} catch (e) {{
+    status.innerHTML = '<span style="color:var(--danger);">save failed: '
+                     + _escHtml(String(e).slice(0, 120)) + '</span>';
+    return;
+  }}
+  status.innerHTML = '<em>generating plans… (~5-10s per empty section)</em>';
+  try {{
+    const fd = new FormData();
+    if (force) fd.append('force', 'true');
+    const res = await fetch('/api/chapters/' + chId + '/plan-sections', {{
+      method: 'POST', body: fd,
+    }});
+    if (!res.ok) {{
+      const t = await res.text();
+      status.innerHTML = '<span style="color:var(--danger);">failed: '
+                        + _escHtml(t.slice(0, 200)) + '</span>';
+      return;
+    }}
+    const data = await res.json();
+    status.innerHTML = '<span style="color:var(--success);">✓ planned '
+                     + data.n_planned + ' section(s), '
+                     + (data.n_skipped || 0) + ' skipped.</span> '
+                     + '<span style="color:var(--fg-muted);">'
+                     + '(force overwrite is ' + (force ? 'on' : 'off') + ')</span>';
+    // Re-open the modal against the same chapter so the newly-written
+    // plans show up in the sections editor. openChapterModal re-loads
+    // from the DB + resets _resolvedTargetsByChapter[chId] via a fresh
+    // fetch so the resolver badges also update to concept_density.
+    if (window._resolvedTargetsByChapter) {{
+      delete window._resolvedTargetsByChapter[chId];
+    }}
+    openChapterModal(chId);
+    // openChapterModal switches to the scope tab by default; flip back
+    // to sections so the user sees the new plans.
+    setTimeout(() => switchChapterTab('ch-sections'), 100);
+  }} catch (e) {{
+    status.innerHTML = '<span style="color:var(--danger);">error: '
+                     + _escHtml(String(e).slice(0, 200)) + '</span>';
+  }}
 }}
 
 function removeSection(idx) {{

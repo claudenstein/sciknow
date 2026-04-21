@@ -9544,6 +9544,113 @@ def l1_phase54_6_145_finalize_draft_surface() -> None:
     )
 
 
+def l1_phase54_6_155_auto_plan_chapter_button() -> None:
+    """Phase 54.6.155 — Chapter modal "Auto-plan sections" button wraps 54.6.154.
+
+    Surfaces ``book plan-sections --chapter N`` in the Chapter modal so
+    users can trigger LLM-generated concept plans from the GUI.
+    Non-SSE (per-section cost is small + chapter-scoped, so a plain
+    JSON POST is simpler than SSE wiring).
+
+    Pins:
+      (A) POST /api/chapters/{id}/plan-sections endpoint registered
+          with `force` + `model` form fields
+      (B) Endpoint delegates to generate_section_plan (no logic
+          duplication; drift protection)
+      (C) Button + force checkbox present in the Chapter modal sections
+          tab, with Phase 54.6.126-129 tooltip citations
+      (D) JS saveChapterInfo runs BEFORE the auto-plan POST so pending
+          renames don't end up with plans keyed to old slugs
+      (E) On success the JS refreshes the modal + flips back to the
+          sections tab (so the user sees the new plans + resolver badges)
+    """
+    import inspect
+    from sciknow.testing.helpers import get_test_client, web_app_full_source
+    from sciknow.web import app as web_app
+    client = get_test_client()
+
+    # A) Endpoint registered + has both form fields
+    openapi = client.get("/openapi.json").json()
+    path = "/api/chapters/{chapter_id}/plan-sections"
+    methods = openapi.get("paths", {}).get(path, {})
+    post = methods.get("post", {})
+    body = (post.get("requestBody") or {}).get("content", {})
+    form = (body.get("application/x-www-form-urlencoded") or {}).get("schema", {})
+    ref = form.get("$ref", "")
+    if ref.startswith("#/components/schemas/"):
+        schema = openapi.get("components", {}).get("schemas", {}).get(ref.split("/")[-1], {})
+        props = set(schema.get("properties", {}).keys())
+    else:
+        props = set(form.get("properties", {}).keys())
+    assert {"force", "model"} <= props, (
+        f"POST /api/chapters/.../plan-sections must accept force + model "
+        f"form fields (Phase 54.6.155). Got: {sorted(props)}"
+    )
+
+    # B) Endpoint delegates to generate_section_plan
+    handler_src = inspect.getsource(web_app.api_chapter_plan_sections)
+    assert "generate_section_plan" in handler_src, (
+        "endpoint must delegate to core.book_ops.generate_section_plan "
+        "— no inline LLM-prompt duplication (drift from 54.6.154 CLI is "
+        "the risk this guards against)"
+    )
+
+    # C) Template has the button + checkbox + status spans
+    src = web_app_full_source()
+    assert "Auto-plan sections" in src, (
+        "Chapter modal sections tab must have the 'Auto-plan sections' button"
+    )
+    assert 'id="ch-auto-plan-force"' in src, (
+        "force-overwrite checkbox must have id=ch-auto-plan-force for the JS"
+    )
+    assert 'id="ch-auto-plan-status"' in src, (
+        "status span must have id=ch-auto-plan-status for progress display"
+    )
+    # Phase 54.6.126-129 tooltip policy — button must have a title=
+    # referencing its purpose
+    assert ('title="Phase 54.6.154' in src
+            or 'LLM-generate a 3-4 bullet concept plan' in src), (
+        "Auto-plan button must have an explanatory title= tooltip "
+        "(Phase 54.6.126-129 accessibility policy)"
+    )
+
+    # D) JS handler exists + calls saveChapterInfo before the POST
+    assert ("async function autoPlanChapterSections" in src
+            or "function autoPlanChapterSections" in src), (
+        "autoPlanChapterSections() JS function missing"
+    )
+    # Find the function + check ordering relative to the function's start.
+    # The template is an f-string so `}}` sequences appear mid-function
+    # (Python brace-escapes); finding the function end by `}}` is
+    # unreliable. Use a generous 4000-char window from the function start.
+    start = src.find("function autoPlanChapterSections")
+    assert start >= 0
+    body_js = src[start : start + 4000]
+    save_pos = body_js.find("saveChapterInfo")
+    fetch_pos = body_js.find("'/api/chapters/' + chId + '/plan-sections'")
+    reopen_pos = body_js.find("openChapterModal(chId)")
+    tab_pos = body_js.find("switchChapterTab('ch-sections')")
+    assert save_pos >= 0 and fetch_pos >= 0, (
+        "autoPlanChapterSections body must call saveChapterInfo AND "
+        "fetch the plan-sections endpoint"
+    )
+    assert save_pos < fetch_pos, (
+        "autoPlanChapterSections must save pending edits BEFORE firing "
+        "plan-sections — otherwise section renames in the current modal "
+        "session produce plans keyed to old slugs"
+    )
+
+    # E) JS re-opens the modal + switches to the sections tab after success
+    assert reopen_pos >= 0, (
+        "autoPlanChapterSections must re-open the modal so the new "
+        "plans are visible + resolver badges update"
+    )
+    assert tab_pos >= 0, (
+        "autoPlanChapterSections must flip back to the sections tab "
+        "after re-open (openChapterModal defaults to ch-scope)"
+    )
+
+
 def l1_phase54_6_154_plan_sections_surface() -> None:
     """Phase 54.6.154 — LLM-assisted section-plan generation.
 
@@ -11363,6 +11470,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_153_length_report_surface,
     # Phase 54.6.154 — LLM-assisted section-plan generation
     l1_phase54_6_154_plan_sections_surface,
+    # Phase 54.6.155 — Chapter modal auto-plan button
+    l1_phase54_6_155_auto_plan_chapter_button,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness
