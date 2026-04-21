@@ -9544,6 +9544,90 @@ def l1_phase54_6_145_finalize_draft_surface() -> None:
     )
 
 
+def l1_phase54_6_156_auto_plan_entire_book_button() -> None:
+    """Phase 54.6.156 — Book Settings "Auto-plan entire book" button.
+
+    GUI cap on the concept-density track: one click runs
+    ``sciknow book plan-sections <book_id>`` for the whole book via
+    the existing cli-stream SSE channel. Reuses the 54.6.154 CLI
+    (same generator, same prompt, same safety) so backend stays
+    identical to the Chapter modal's per-chapter button (54.6.155).
+
+    Pins:
+      (A) ("book", "plan-sections") on the /api/cli-stream allowlist
+      (B) Template has button + force checkbox + dedicated status +
+          log elements in Book Settings Basics tab
+      (C) JS function autoPlanEntireBook exists + resolves the book
+          id via GET /api/book (CLI accepts UUID prefix via ILIKE)
+      (D) JS appends '--force' when the checkbox is ticked
+      (E) JS opens an EventSource on the returned job_id (SSE
+          streaming is required for the 4-8 min book-scope action)
+    """
+    import inspect
+    from sciknow.testing.helpers import get_test_client, web_app_full_source
+    from sciknow.web import app as web_app
+    client = get_test_client()
+
+    # A) Allowlist accepts the new argv (not 403)
+    r = client.post("/api/cli-stream", json={
+        "argv": ["book", "plan-sections", "fake-id"],
+    })
+    assert r.status_code != 403, (
+        f"('book', 'plan-sections') must be on the /api/cli-stream "
+        f"allowlist (Phase 54.6.156). Got {r.status_code} — allowlist "
+        f"likely rejected the argv."
+    )
+
+    # Also source-grep the allowlist so a future refactor of the
+    # CLI-stream dispatcher can't silently drop this entry.
+    handler_src = inspect.getsource(web_app.api_cli_stream)
+    assert '"plan-sections"' in handler_src, (
+        "allowlist must contain ('book', 'plan-sections') by string literal "
+        "so source-grep can catch a silent removal"
+    )
+
+    # B) Template has button + checkbox + status + log elements
+    src = web_app_full_source()
+    assert "Auto-plan entire book" in src, (
+        "Book Settings Basics tab must have the 'Auto-plan entire book' button"
+    )
+    for marker in ('id="bs-plan-book-force"',
+                   'id="bs-plan-book-status"',
+                   'id="bs-plan-book-log"'):
+        assert marker in src, (
+            f"Book Settings must have {marker} (Phase 54.6.156 scoped "
+            f"log area — reusing Corpus modal's log would be confusing)"
+        )
+
+    # C) JS handler exists + resolves book id via GET /api/book
+    assert ("async function autoPlanEntireBook" in src
+            or "function autoPlanEntireBook" in src), (
+        "autoPlanEntireBook() JS missing"
+    )
+    start = src.find("function autoPlanEntireBook")
+    body_js = src[start : start + 3000]
+    assert "fetch('/api/book')" in body_js, (
+        "autoPlanEntireBook must GET /api/book to resolve the current "
+        "book_id — hard-coding wouldn't work when book serve is on a "
+        "different project"
+    )
+    assert "'book', 'plan-sections', bookId" in body_js, (
+        "autoPlanEntireBook must POST argv=['book','plan-sections',<id>]"
+    )
+
+    # D) Force flag plumbed in
+    assert "'--force'" in body_js or "--force" in body_js, (
+        "autoPlanEntireBook must append --force when the checkbox is ticked"
+    )
+
+    # E) SSE stream opened on the returned job_id
+    assert "new EventSource('/api/stream/'" in body_js, (
+        "autoPlanEntireBook must open an EventSource on the returned "
+        "job_id — the 4-8 min book-scope action needs streaming, not "
+        "a blocking fetch"
+    )
+
+
 def l1_phase54_6_155_auto_plan_chapter_button() -> None:
     """Phase 54.6.155 — Chapter modal "Auto-plan sections" button wraps 54.6.154.
 
@@ -11472,6 +11556,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_154_plan_sections_surface,
     # Phase 54.6.155 — Chapter modal auto-plan button
     l1_phase54_6_155_auto_plan_chapter_button,
+    # Phase 54.6.156 — Book Settings auto-plan entire book button
+    l1_phase54_6_156_auto_plan_entire_book_button,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness

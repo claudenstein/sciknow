@@ -6624,6 +6624,12 @@ async def api_cli_stream(request: Request):
         ("db", "expand-oeuvre"),
         ("db", "expand-inbound"),
         ("db", "reconcile-preprints"),
+        # Phase 54.6.156 — book-wide auto-plan. Reuses the existing
+        # sciknow book plan-sections CLI (54.6.154) via the cli-stream
+        # SSE channel so the long-running book-scope action (48 sections
+        # × ~5-10s = 4-8 min) streams progress without needing a bespoke
+        # job pipeline.
+        ("book", "plan-sections"),
     }
     if len(argv) < 2 or (argv[0], argv[1]) not in ALLOWED:
         raise HTTPException(403, f"command not on allowlist: {argv[:2]}")
@@ -9613,6 +9619,29 @@ body.task-bar-open {{ padding-top: 40px; }}
           Override per section in the Chapter modal's Sections tab.
           See <code>docs/RESEARCH.md §24</code> for the research behind these ranges.
         </p>
+        <!-- Phase 54.6.156 — book-wide auto-plan wrapper for the 54.6.154 CLI. -->
+        <div style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--border);">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <button class="btn-secondary" onclick="autoPlanEntireBook()"
+                    title="Phase 54.6.156 — iterate every chapter × every empty section and ask LLM_FAST_MODEL for a 3-4 bullet concept plan per section. Uses the same generator as the Chapter modal's per-chapter button (54.6.155) but scoped to the whole book. Cost: ~5-10s per empty section (typical book ≈ 4-8 min). Streams progress into a log panel. Skips sections that already have a plan unless 'Force overwrite' is ticked. Activates the Phase-54.6.146 concept-density resolver across the book in one click.">
+              &#129504; Auto-plan entire book
+            </button>
+            <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;"
+                   title="Overwrite existing plans instead of skipping them.">
+              <input type="checkbox" id="bs-plan-book-force"
+                     title="Overwrite existing plans instead of skipping.">
+              force overwrite
+            </label>
+          </div>
+          <p style="font-size:11px;color:var(--fg-muted);margin:6px 0 0 4px;line-height:1.4;">
+            One-click adoption for the concept-density resolver: empty sections become
+            bottom-up-sized (bullet count × wpc midpoint) instead of top-down (chapter ÷ sections).
+            Run <code>sciknow book length-report</code> before/after to see the shift.
+          </p>
+          <div id="bs-plan-book-status" style="margin-top:6px;font-size:11px;color:var(--fg-muted);"></div>
+          <pre id="bs-plan-book-log"
+               style="display:none;margin-top:6px;max-height:220px;overflow:auto;padding:8px;background:var(--toolbar-bg);border:1px solid var(--border);border-radius:4px;font-size:10px;font-family:ui-monospace,monospace;line-height:1.3;white-space:pre-wrap;"></pre>
+        </div>
         <div id="bs-basics-meta" style="margin-top:10px;font-size:11px;color:var(--fg-muted);"></div>
         <div style="display:flex;gap:8px;align-items:center;margin-top:14px;">
           <button class="btn-primary" onclick="saveBookSettings('basics')"
@@ -22849,6 +22878,80 @@ function bsUpdateTypeInfo() {{
       <span>~${{totalLo}}–${{totalHi}} words</span>
     </div>
   `;
+}}
+
+// Phase 54.6.156 — book-wide auto-plan wrapper. Streams
+// `sciknow book plan-sections <book_id>` via /api/cli-stream and
+// pipes log + status into the Basics tab's dedicated elements
+// (runCorpusCliAction targets different DOM ids). Reuses the
+// allowlisted CLI so the backend stays identical to the Chapter
+// modal's per-chapter button (54.6.155) — same generator, same
+// LLM prompt, same safety checks.
+async function autoPlanEntireBook() {{
+  const status = document.getElementById('bs-plan-book-status');
+  const logEl  = document.getElementById('bs-plan-book-log');
+  const force  = document.getElementById('bs-plan-book-force').checked;
+
+  // Resolve the current book's id so the CLI subprocess targets the
+  // right project even when `book serve` is running.
+  let bookId = '';
+  try {{
+    const r = await fetch('/api/book');
+    const d = await r.json();
+    bookId = d.id || '';
+  }} catch (_) {{}}
+  if (!bookId) {{
+    status.innerHTML = '<span style="color:var(--danger);">Failed to resolve current book.</span>';
+    return;
+  }}
+
+  // CLI accepts a UUID prefix via its ILIKE match.
+  const argv = ['book', 'plan-sections', bookId];
+  if (force) argv.push('--force');
+
+  status.innerHTML = '<em>Starting book-wide auto-plan… (typical book ~4-8 min)</em>';
+  logEl.style.display = 'block';
+  logEl.textContent = '';
+
+  try {{
+    const res = await fetch('/api/cli-stream', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{argv: argv}}),
+    }});
+    const d = await res.json();
+    if (!res.ok || !d.job_id) {{
+      status.innerHTML = '<span style="color:var(--danger);">Failed: '
+                       + _escHtml(d.detail || ('status ' + res.status)) + '</span>';
+      return;
+    }}
+    const src = new EventSource('/api/stream/' + d.job_id);
+    src.onmessage = function(e) {{
+      const evt = JSON.parse(e.data);
+      if (evt.type === 'log') {{
+        logEl.textContent += evt.text + '\\n';
+        logEl.scrollTop = logEl.scrollHeight;
+      }} else if (evt.type === 'completed') {{
+        status.innerHTML = '<span style="color:var(--success);">✓ Done.</span> '
+                         + '<span style="color:var(--fg-muted);">'
+                         + 'Open a chapter to see the new plans + concept-density badges.</span>';
+        src.close();
+      }} else if (evt.type === 'error') {{
+        status.innerHTML = '<span style="color:var(--danger);">✗ '
+                         + _escHtml(evt.message || 'error') + '</span>';
+        src.close();
+      }} else if (evt.type === 'done') {{
+        src.close();
+      }}
+    }};
+    src.onerror = function() {{
+      status.innerHTML = '<span style="color:var(--danger);">Connection lost.</span>';
+      src.close();
+    }};
+  }} catch (e) {{
+    status.innerHTML = '<span style="color:var(--danger);">Error: '
+                     + _escHtml(String(e).slice(0, 200)) + '</span>';
+  }}
 }}
 
 function switchBookSettingsTab(name) {{
