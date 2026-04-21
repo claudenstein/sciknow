@@ -209,6 +209,22 @@ See [`docs/PROJECTS.md`](docs/PROJECTS.md) for the full design.
 sciknow is active; the [`docs/PHASE_LOG.md`](docs/PHASE_LOG.md) records
 every Phase commit. Most recent batches:
 
+- **54.6.134-162 (April 2026).** Two major tracks closed end-to-end:
+  **(A) visuals-in-writer** (138-145) — MinerU-extracted figures/tables
+  are now first-class citable evidence in autowrite via a 5-signal
+  ranker (caption similarity + same-paper co-citation + mention-paragraph
+  alignment + section-type prior), per-iteration L1+L2 verify for
+  `[Fig. N]` markers, and a pre-export L3 VLM claim-depiction check
+  (`book finalize-draft`). **(B) concept-density length sizing** (146-162)
+  — sections with a bullet plan auto-size bottom-up (Cowan 2001 3-4
+  novel chunks × per-type words-per-concept), with live readout as
+  the user types, a resolver-explanation badge per section, a
+  retrieval-density widener (RESEARCH.md §24 guideline 4), a soft
+  Delgado-2018 digital ceiling, corpus-grounded §24 validation
+  bench, Brown 2008 idea-density regression harness, and a bottom-up
+  vs top-down autowrite A/B harness. Research brief lives in
+  `docs/RESEARCH.md §24`. Also shipped: chunk-level FTS (**+8.6% R@1**),
+  scheduled OpenAlex velocity watcher.
 - **54.6.68-83 (April 2026).** Research-sweep implementation: retrieval
   MRR/Recall/NDCG bench, citation marker alignment, vision captioning
   pipeline + VLM sweep harness, chapter/book snapshot CLI, GPU-time
@@ -250,6 +266,15 @@ every Phase commit. Most recent batches:
 | **Retry pending downloads** (new OA links may have appeared) | `sciknow db pending retry` |
 | **Backfill the KG** (empty or stale `knowledge_graph`) | `sciknow wiki extract-kg` |
 | **Draft a chapter outline** from the LLM | `sciknow book outline "Title"` (also available from the Plans modal) |
+| **Auto-plan section concepts** (3-4 bullets per section) | `sciknow book plan-sections "Title"` (also the Chapter modal + Book Settings buttons) |
+| **See whole-book projected length** at a glance | `sciknow book length-report "Title"` (also the Book Settings panel) |
+| **Pre-export verify figure citations** ([Fig. N] → VLM) | `sciknow book finalize-draft <draft-id>` (also the Verify dropdown) |
+| **Switch a book's project type** (or unfreeze default) | `sciknow book set-target "Title" --unset` then `book set-target "Title" --words N` |
+| **Link body-text mentions to figures** | `sciknow db link-visual-mentions` |
+| **Watch a topic for new hot papers** | `sciknow watch add-velocity "thermospheric cooling"` |
+| **Measure visuals ranker quality** (P@1 / R@3) | `sciknow bench-visuals-ranker` |
+| **Measure corpus idea density vs §24** | `sciknow bench-idea-density` *(needs spaCy)* |
+| **A/B autowrite: bottom-up vs top-down** | `sciknow bench-autowrite-ab <chapter-id>` |
 
 ---
 
@@ -313,6 +338,7 @@ Core guides — how to use sciknow, how it works, how to extend it:
 | **[Testing Protocol](docs/TESTING.md)** | 3-layer smoke harness (`sciknow test`); how to add checks |
 | **[Benchmarks](docs/BENCHMARKS.md)** | `sciknow bench` — performance + quality measurement; baseline findings |
 | **[Bench methodology](docs/BENCH_METHODOLOGY.md)** | Hard-won rules for fair LLM/VLM benchmarking; the 2026-04-17 failure that motivated them |
+| **[Concept-density length sizing](docs/CONCEPT_DENSITY.md)** | Bottom-up section sizing via Cowan 2001 (3-4 novel chunks × per-genre wpc). How to use the auto-plan buttons, length-report, retrieval-density widener, and Brown 2008 regression harness. |
 | **[Expand + enrich research (2026-04)](docs/EXPAND_ENRICH_RESEARCH_2.md)** | Gaps audit + 2024-2026 literature sweep; follow-on to `EXPAND_RESEARCH.md` for what's next in corpus growth |
 
 Project planning and release history:

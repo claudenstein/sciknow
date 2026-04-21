@@ -6092,6 +6092,24 @@ async def api_chapter_resolved_targets(chapter_id: str):
     })
 
 
+@app.get("/api/book/length-report")
+async def api_book_length_report():
+    """Phase 54.6.162 — web wrapper over core.length_report.walk_book_lengths.
+
+    Surfaces the 54.6.153 CLI report in the GUI so users see the whole
+    book's projected length without leaving the browser. Pure wrapper —
+    no arithmetic duplication; the walker calls the real resolver
+    helpers.
+    """
+    from sciknow.core.length_report import walk_book_lengths
+    try:
+        report = walk_book_lengths(_book_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("length-report failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return JSONResponse(report.to_dict())
+
+
 @app.get("/api/bench/section-lengths")
 async def api_bench_section_lengths():
     """Phase 54.6.159 — surface the 54.6.157 section-length IQR bench
@@ -6678,6 +6696,10 @@ async def api_cli_stream(request: Request):
         # × ~5-10s = 4-8 min) streams progress without needing a bespoke
         # job pipeline.
         ("book", "plan-sections"),
+        # Phase 54.6.162 — pre-export L3 VLM claim-depiction verify
+        # (Phase 54.6.145). Exposes the CLI-only finalize-draft in the
+        # Verify dropdown so users don't drop to the CLI before export.
+        ("book", "finalize-draft"),
     }
     if len(argv) < 2 or (argv[0], argv[1]) not in ALLOWED:
         raise HTTPException(403, f"command not on allowlist: {argv[:2]}")
@@ -8800,6 +8822,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       <div class="nav-dropdown-menu" role="menu">
         <button role="menuitem" onclick="doVerify()" title="Verify citations against sources (Phases 7+11)">&#10003; Verify</button>
         <button role="menuitem" onclick="doVerifyDraft()" title="Atomize each sentence and NLI-check every sub-claim for mixed-truth failures (54.6.83)">&#129516; Verify Draft (claim-atomization)</button>
+        <button role="menuitem" onclick="doFinalizeDraft()" title="Phase 54.6.145/162 — Level-3 VLM claim-depiction verify on every [Fig. N] marker. Runs the vision-language model on (claim, image) pairs and flags figures whose images don't clearly depict the cited claim. Deferred from the per-iteration autowrite loop (too expensive) — run once before export. Exit code 0 if clean, 1 if any flagged. ~3-10s per marker on CPU; 8-figure chapter ≈ 1-2 min.">&#128190; Finalize Draft (L3 VLM verify)</button>
         <button role="menuitem" onclick="doAlignCitations()" title="Remap [N] markers to the chunk that actually entails each sentence (54.6.71, conservative)">&#128279; Align Citations</button>
         <button role="menuitem" onclick="doInsertCitations()" title="Two-pass LLM inserts [N] citation markers where needed; mirrors `sciknow book insert-citations`. Saves a new version.">&#128209; Insert Citations</button>
         <button role="menuitem" onclick="showScoresPanel()" title="Phase 13 — convergence trajectory for autowrite drafts">&#9783; Scores</button>
@@ -9689,6 +9712,24 @@ body.task-bar-open {{ padding-top: 40px; }}
           <div id="bs-plan-book-status" style="margin-top:6px;font-size:11px;color:var(--fg-muted);"></div>
           <pre id="bs-plan-book-log"
                style="display:none;margin-top:6px;max-height:220px;overflow:auto;padding:8px;background:var(--toolbar-bg);border:1px solid var(--border);border-radius:4px;font-size:10px;font-family:ui-monospace,monospace;line-height:1.3;white-space:pre-wrap;"></pre>
+        </div>
+        <!-- Phase 54.6.162 — projected length-report panel. GUI wrapper for
+             `sciknow book length-report` (54.6.153). Lets users see the
+             whole book's per-chapter + per-section projected target +
+             resolver level without leaving the GUI. -->
+        <div style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--border);">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <strong style="font-size:12px;">&#128196; Projected length report</strong>
+            <button class="btn-secondary" onclick="loadBookLengthReportPanel()"
+                    style="font-size:11px;padding:2px 8px;"
+                    title="Phase 54.6.153/162 — walks every chapter × every section through the resolver chain (per-section override → concept-density → chapter-split) and shows the target + level + explanation per section, plus chapter and book totals. No resolver arithmetic duplication — delegates to the real helpers.">
+              refresh
+            </button>
+          </div>
+          <div id="bs-length-report-panel"
+               style="margin-top:6px;font-size:11px;">
+            <em style="color:var(--fg-muted);">Click refresh to compute the whole-book projection…</em>
+          </div>
         </div>
         <!-- Phase 54.6.159 — corpus-grounded section-length panel.
              Surfaces the 54.6.157 bench data (per-section IQRs with
@@ -16126,6 +16167,25 @@ async function doVerifyDraft() {{
     ['book', 'verify-draft', currentDraftId],
     '&#129516; Verify Draft (claim atomization)',
     'Atomizing claims…'
+  );
+}}
+
+async function doFinalizeDraft() {{
+  if (!confirm(
+    'Run Finalize Draft (L3 VLM verify)?\\n\\n'
+    + 'Verifies every [Fig. N] / [Table N] / [Eq. N] marker in this draft by '
+    + 'running the vision-language model on (claim_sentence, image) pairs '
+    + 'and scoring whether the image depicts the claim (0-10 rubric).\\n\\n'
+    + 'Deferred from the per-iteration autowrite loop because it is '
+    + 'expensive (~3-10s per marker). Run once when the draft is stable, '
+    + 'before export.\\n\\n'
+    + 'Exit code 0 if every resolved marker passes, 1 if any are flagged '
+    + '(so CI can gate export on clean verify).'
+  )) return;
+  _runCliActionForDraft(
+    ['book', 'finalize-draft', currentDraftId],
+    '&#128190; Finalize Draft (L3 VLM verify)',
+    'Running VLM on each [Fig. N] marker…'
   );
 }}
 
@@ -22944,6 +23004,76 @@ function bsUpdateTypeInfo() {{
       <span>~${{totalLo}}–${{totalHi}} words</span>
     </div>
   `;
+}}
+
+// Phase 54.6.162 — populate the Book Settings "Projected length report"
+// panel. Wraps GET /api/book/length-report (which delegates to the
+// 54.6.153 walk_book_lengths helper). Renders chapter-by-chapter
+// collapsed view with per-section rows on expand.
+async function loadBookLengthReportPanel() {{
+  const host = document.getElementById('bs-length-report-panel');
+  if (!host) return;
+  host.innerHTML = '<em style="color:var(--fg-muted);">Loading…</em>';
+  try {{
+    const r = await fetch('/api/book/length-report');
+    if (!r.ok) {{
+      host.innerHTML = '<span style="color:var(--danger);">Failed: '
+                      + r.status + '</span>';
+      return;
+    }}
+    const d = await r.json();
+    const levelColour = {{
+      explicit_section_override: 'var(--success)',
+      concept_density:           'var(--accent)',
+      chapter_split:             'var(--fg-muted)',
+    }};
+    // Aggregate header
+    const hist = {{}};
+    for (const c of (d.chapters || [])) {{
+      for (const s of (c.sections || [])) {{
+        hist[s.level] = (hist[s.level] || 0) + 1;
+      }}
+    }}
+    let html = '<div style="margin-bottom:6px;">'
+             + '<strong>' + (d.total_words || 0).toLocaleString() + '</strong> projected words'
+             + '  ·  ' + (d.n_chapters || 0) + ' chapter(s)'
+             + '  ·  ' + (d.n_sections || 0) + ' section(s)'
+             + '  ·  book type <code>' + _escHtml(d.book_type || '') + '</code>'
+             + '</div>';
+    const histBits = Object.entries(hist).map(
+      ([lvl, n]) => '<span style="color:' + (levelColour[lvl] || 'var(--fg)') + ';">'
+                    + n + ' ' + lvl + '</span>'
+    );
+    if (histBits.length) {{
+      html += '<div style="margin-bottom:8px;color:var(--fg-muted);">Levels: '
+            + histBits.join('  ·  ') + '</div>';
+    }}
+    for (const c of (d.chapters || [])) {{
+      html += '<details style="margin-bottom:4px;">'
+            + '<summary style="cursor:pointer;padding:3px 0;">'
+            + '<strong>Ch.' + c.number + '</strong> '
+            + _escHtml(c.title || '')
+            + '  ·  <span style="color:var(--accent);">' + (c.total_words || 0).toLocaleString() + '</span> words'
+            + '  <span style="color:var(--fg-muted);">(' + (c.sections ? c.sections.length : 0) + ' sections · target ' + (c.chapter_target || 0).toLocaleString() + ' ' + (c.chapter_level || '') + ')</span>'
+            + '</summary>';
+      html += '<table style="width:100%;border-collapse:collapse;margin-left:12px;margin-top:4px;">';
+      for (const s of (c.sections || [])) {{
+        const colour = levelColour[s.level] || 'var(--fg)';
+        html += '<tr>'
+              + '<td style="padding:2px 6px;color:var(--fg-muted);font-family:ui-monospace,monospace;font-size:10px;">' + _escHtml((s.slug || '').slice(0, 28)) + '</td>'
+              + '<td style="padding:2px 6px;">' + _escHtml((s.title || '').slice(0, 36)) + '</td>'
+              + '<td style="padding:2px 6px;text-align:right;">' + (s.target || 0).toLocaleString() + '</td>'
+              + '<td style="padding:2px 6px;color:' + colour + ';">' + _escHtml(s.level || '') + '</td>'
+              + '<td style="padding:2px 6px;color:var(--fg-muted);">' + _escHtml((s.explanation || '').slice(0, 60)) + '</td>'
+              + '</tr>';
+      }}
+      html += '</table></details>';
+    }}
+    host.innerHTML = html;
+  }} catch (e) {{
+    host.innerHTML = '<span style="color:var(--danger);">Error: '
+                    + _escHtml(String(e).slice(0, 200)) + '</span>';
+  }}
 }}
 
 // Phase 54.6.159 — populate the Book Settings "Corpus section-length

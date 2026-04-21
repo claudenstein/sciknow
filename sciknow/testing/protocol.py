@@ -9544,6 +9544,90 @@ def l1_phase54_6_145_finalize_draft_surface() -> None:
     )
 
 
+def l1_phase54_6_162_gui_coverage_audit() -> None:
+    """Phase 54.6.162 — GUI accessibility + docs audit.
+
+    Closes the four-phase finale (159 panel, 160 regression, 161 A/B,
+    162 audit) by surfacing the two highest-value CLI-only commands in
+    the GUI and landing a consolidated feature doc.
+
+    Pins:
+      (A) `book finalize-draft` on the /api/cli-stream allowlist +
+          wired to a Verify-dropdown button + handler
+      (B) `/api/book/length-report` endpoint delegates to
+          `walk_book_lengths` (no SQL duplication)
+      (C) Book Settings template has the two new panels
+          (length-report + section-length) with refresh buttons
+      (D) `docs/CONCEPT_DENSITY.md` exists and links from README
+          Documentation table
+    """
+    import inspect
+    from sciknow.testing.helpers import get_test_client, web_app_full_source
+    from sciknow.web import app as web_app
+    from pathlib import Path
+
+    client = get_test_client()
+
+    # A) finalize-draft on allowlist + button + handler
+    r = client.post("/api/cli-stream", json={
+        "argv": ["book", "finalize-draft", "fake"],
+    })
+    assert r.status_code != 403, (
+        "('book', 'finalize-draft') must be on /api/cli-stream allowlist"
+    )
+    handler_src = inspect.getsource(web_app.api_cli_stream)
+    assert '"finalize-draft"' in handler_src, (
+        "allowlist must contain ('book', 'finalize-draft') as a literal"
+    )
+    src = web_app_full_source()
+    assert "Finalize Draft (L3 VLM verify)" in src, (
+        "Verify dropdown must include a 'Finalize Draft (L3 VLM verify)' "
+        "menu item"
+    )
+    assert "doFinalizeDraft" in src, (
+        "doFinalizeDraft() JS function missing"
+    )
+
+    # B) /api/book/length-report endpoint delegates to walk_book_lengths
+    assert hasattr(web_app, "api_book_length_report"), (
+        "api_book_length_report endpoint missing"
+    )
+    lr_src = inspect.getsource(web_app.api_book_length_report)
+    assert "walk_book_lengths" in lr_src, (
+        "length-report endpoint must delegate to the 54.6.153 helper "
+        "(no SQL duplication)"
+    )
+
+    # C) Template has both new panels + refresh buttons
+    assert 'id="bs-length-report-panel"' in src, (
+        "Book Settings must have id=bs-length-report-panel (Phase 54.6.162)"
+    )
+    assert "loadBookLengthReportPanel" in src, (
+        "loadBookLengthReportPanel JS missing"
+    )
+    # 54.6.159 panel also still present (regression guard)
+    assert 'id="bs-section-length-panel"' in src
+
+    # D) Docs consolidation
+    repo_root = Path(__file__).resolve().parents[2]
+    concept_doc = repo_root / "docs" / "CONCEPT_DENSITY.md"
+    assert concept_doc.exists(), (
+        f"docs/CONCEPT_DENSITY.md missing (Phase 54.6.162)"
+    )
+    concept_text = concept_doc.read_text()
+    # Must reference the core concepts + link back to §24
+    for marker in ("Cowan", "Brown 2008", "words-per-concept",
+                   "RESEARCH.md", "PHASE_LOG"):
+        assert marker in concept_text, (
+            f"docs/CONCEPT_DENSITY.md must reference {marker!r}"
+        )
+    # README links to the new doc
+    readme = (repo_root / "README.md").read_text()
+    assert "CONCEPT_DENSITY.md" in readme, (
+        "README Documentation table must link to docs/CONCEPT_DENSITY.md"
+    )
+
+
 def l1_phase54_6_161_autowrite_ab_surface() -> None:
     """Phase 54.6.161 — autowrite bottom-up vs top-down A/B harness.
 
@@ -11887,6 +11971,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_160_idea_density_regression_surface,
     # Phase 54.6.161 — autowrite bottom-up vs top-down A/B harness
     l1_phase54_6_161_autowrite_ab_surface,
+    # Phase 54.6.162 — GUI + docs audit
+    l1_phase54_6_162_gui_coverage_audit,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness
