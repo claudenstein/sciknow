@@ -5861,6 +5861,41 @@ async def list_jobs():
 # swapping the DB connection under the running app.
 
 
+@app.get("/api/book-types")
+async def api_book_types():
+    """Phase 54.6.147 — list all registered project types with their
+    research-grounded length ranges, for the setup-wizard dropdown +
+    info panel to render.
+
+    Each entry is self-contained (no joins needed): display_name,
+    description, chapter target, concept count range, words-per-
+    concept range, and a derived section-at-midpoint range so the UI
+    can show users what each type implies before they pick one.
+    """
+    from sciknow.core.project_type import list_project_types
+    out = []
+    for pt in list_project_types():
+        clo, chi = pt.concepts_per_section_range
+        wlo, whi = pt.words_per_concept_range
+        wmid = (wlo + whi) // 2
+        out.append({
+            "slug": pt.slug,
+            "display_name": pt.display_name,
+            "description": pt.description,
+            "is_flat": pt.is_flat,
+            "default_chapter_count": pt.default_chapter_count,
+            "default_target_chapter_words": pt.default_target_chapter_words,
+            "concepts_per_section_range": [clo, chi],
+            "words_per_concept_range":   [wlo, whi],
+            "section_at_midpoint_range": [clo * wmid, chi * wmid],
+            "default_sections": [
+                {"key": s.key, "title": s.title, "target_words": s.target_words}
+                for s in pt.default_sections
+            ],
+        })
+    return JSONResponse({"types": out})
+
+
 @app.get("/api/projects")
 async def api_projects_list():
     """List all projects with their active marker + health."""
@@ -10049,11 +10084,11 @@ body.task-bar-open {{ padding-top: 40px; }}
       <!-- STEP 5 — Book -->
       <div id="sw-step-book" class="sw-step-pane" style="display:none;padding:14px 18px;">
         <p style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;">
-          Create the writing project. Pick a type — <strong>scientific
-          book</strong> (hierarchical, chapters → sections) or
-          <strong>scientific paper</strong> (flat IMRaD, one chapter with
-          canonical sections). The type drives section defaults, prompt
-          conditioning, length targets.
+          Create the writing project. The <strong>type</strong> drives section
+          defaults, prompt conditioning, and length targets. Ranges below
+          each type come from the Phase 54.6.146 concept-density literature
+          review (see <code>docs/RESEARCH.md §24</code>) — Cowan 2001's
+          3&ndash;4 novel-chunk capacity × genre-appropriate words per concept.
         </p>
         <div class="field" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
           <div style="flex:3;min-width:220px;">
@@ -10063,19 +10098,24 @@ body.task-bar-open {{ padding-top: 40px; }}
           </div>
           <div style="flex:2;min-width:180px;">
             <label>Type</label>
-            <select id="sw-book-type"
-                    title="Book = hierarchical (chapters → sections). Paper = flat IMRaD (one chapter, canonical sections). Drives prompt conditioning + default lengths.">
-              <option value="scientific_book" selected>Scientific Book (chapters)</option>
-              <option value="scientific_paper">Scientific Paper (IMRaD, flat)</option>
+            <select id="sw-book-type" onchange="swUpdateTypeInfo()"
+                    title="Drives section defaults, prompt conditioning, default chapter length, and the concept-density resolver's wpc midpoint. See the info panel below for each type's length bands.">
+              <option value="scientific_book">Scientific Book (chapters)</option>
             </select>
           </div>
           <div style="flex:1;min-width:120px;">
             <label>Target words/chap</label>
             <input type="number" id="sw-book-target" placeholder="(type default)"
-                   title="Target word count per chapter. Leave blank to use the type default (book ≈ 4000, paper ≈ 800).">
+                   title="Target word count per chapter. Leave blank to use the type default shown in the info panel below. Concept-density resolver will still override this per-section when a section plan exists.">
           </div>
         </div>
-        <div class="field">
+        <!-- Phase 54.6.147 — live info panel showing the selected type's
+             length ranges so the user sees what they're committing to. -->
+        <div id="sw-book-type-info"
+             style="margin-top:6px;padding:10px 12px;background:var(--toolbar-bg);border:1px solid var(--border);border-radius:6px;font-size:12px;line-height:1.5;color:var(--fg);">
+          <em style="color:var(--fg-muted);">Loading type info…</em>
+        </div>
+        <div class="field" style="margin-top:12px;">
           <label>Description (optional)</label>
           <input type="text" id="sw-book-desc" placeholder="One-line blurb."
                  title="Short description shown in the catalog.">
@@ -22618,6 +22658,7 @@ function openSetupWizard() {{
   swGoto('project');
   swRefreshStatus();
   swLoadProjectsForWizard();
+  swLoadBookTypes();  // Phase 54.6.147 — populate book-type dropdown + info panel
 }}
 
 function swGoto(step) {{
@@ -22632,6 +22673,77 @@ function swGoto(step) {{
   }});
   // Auto-refresh status on entering steps 2 + 3 so counts are fresh
   if (step === 'corpus' || step === 'indices') swRefreshStatus();
+  if (step === 'book') swUpdateTypeInfo();   // Phase 54.6.147
+}}
+
+// Phase 54.6.147 — load project types (with concept-density ranges)
+// from /api/book-types and populate the wizard dropdown + live info
+// panel. Cached in window._swBookTypes so the `onchange` handler
+// doesn't re-fetch on every dropdown change.
+window._swBookTypes = null;
+async function swLoadBookTypes() {{
+  try {{
+    const res = await fetch('/api/book-types');
+    const data = await res.json();
+    window._swBookTypes = data.types || [];
+    const sel = document.getElementById('sw-book-type');
+    if (!sel) return;
+    // Preserve current value if user already picked something
+    const prior = sel.value;
+    sel.innerHTML = '';
+    for (const t of window._swBookTypes) {{
+      const opt = document.createElement('option');
+      opt.value = t.slug;
+      opt.textContent = `${{t.display_name}} (${{t.default_target_chapter_words.toLocaleString()}} words/chap)`;
+      if (t.slug === prior) opt.selected = true;
+      sel.appendChild(opt);
+    }}
+    if (!prior) sel.value = 'scientific_book';
+    swUpdateTypeInfo();
+  }} catch (e) {{
+    console.warn('swLoadBookTypes failed:', e);
+  }}
+}}
+
+function swUpdateTypeInfo() {{
+  const panel = document.getElementById('sw-book-type-info');
+  const sel = document.getElementById('sw-book-type');
+  if (!panel || !sel || !window._swBookTypes) return;
+  const slug = sel.value;
+  const t = window._swBookTypes.find(x => x.slug === slug);
+  if (!t) {{ panel.innerHTML = ''; return; }}
+  const [clo, chi]   = t.concepts_per_section_range;
+  const [wlo, whi]   = t.words_per_concept_range;
+  const [slo, shi]   = t.section_at_midpoint_range;
+  const chap         = t.default_target_chapter_words;
+  const nchap        = t.default_chapter_count;
+  const totalLo      = (chap * nchap * 0.7).toLocaleString();   // -30% lower envelope
+  const totalHi      = (chap * nchap * 1.3).toLocaleString();   // +30% upper envelope
+  const targetInput  = document.getElementById('sw-book-target');
+  if (targetInput && !targetInput.value) {{
+    targetInput.placeholder = `(type default: ${{chap.toLocaleString()}})`;
+  }}
+  panel.innerHTML = `
+    <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 12px;">
+      <span style="color:var(--fg-muted);">Description:</span>
+      <span>${{_escHtml(t.description)}}</span>
+      <span style="color:var(--fg-muted);">Default chapters:</span>
+      <span>${{nchap}} &middot; ${{chap.toLocaleString()}} words each
+            ${{t.is_flat ? '<em>(flat IMRaD — one chapter)</em>' : ''}}</span>
+      <span style="color:var(--fg-muted);">Concepts / section:</span>
+      <span>${{clo}}–${{chi}} novel chunks (Cowan 2001)</span>
+      <span style="color:var(--fg-muted);">Words / concept:</span>
+      <span>${{wlo}}–${{whi}} (midpoint ${{Math.floor((wlo + whi) / 2)}})</span>
+      <span style="color:var(--fg-muted);">Section at midpoint:</span>
+      <span>${{slo.toLocaleString()}}–${{shi.toLocaleString()}} words</span>
+      <span style="color:var(--fg-muted);">Typical book total:</span>
+      <span>~${{totalLo}}–${{totalHi}} words</span>
+    </div>
+    <div style="margin-top:6px;color:var(--fg-muted);font-size:11px;">
+      Sections with a bullet plan auto-size bottom-up (concept count × ${{Math.floor((wlo + whi) / 2)}} wpc).
+      Sections without a plan fall back to the chapter-level target.
+    </div>
+  `;
 }}
 
 async function swRefreshStatus() {{

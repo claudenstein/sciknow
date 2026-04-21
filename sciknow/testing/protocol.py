@@ -9544,6 +9544,91 @@ def l1_phase54_6_145_finalize_draft_surface() -> None:
     )
 
 
+def l1_phase54_6_147_book_types_api_and_wizard() -> None:
+    """Phase 54.6.147 — /api/book-types + setup-wizard dropdown/info panel.
+
+    Surfaces the Phase 54.6.146 concept-density metadata in both the
+    CLI `book types` command and the web setup wizard. Pins three
+    layers end-to-end so a refactor breaks visibly:
+
+      (1) /api/book-types returns every registered type with
+          concepts_per_section_range, words_per_concept_range, and a
+          derived section_at_midpoint_range (used by the wizard's
+          info panel)
+      (2) the wizard template has the dynamic dropdown (populated from
+          the API), the info-panel div, the onchange handler
+      (3) the wizard JS has the loader (swLoadBookTypes) + updater
+          (swUpdateTypeInfo) functions
+      (4) `book types` CLI table has the four new columns
+    """
+    from sciknow.testing.helpers import get_test_client, web_app_full_source
+
+    # Layer 1 — API contract
+    client = get_test_client()
+    r = client.get("/api/book-types")
+    assert r.status_code == 200, "/api/book-types must 200"
+    data = r.json()
+    assert "types" in data and len(data["types"]) >= 6, (
+        "/api/book-types must return the 6+ registered project types"
+    )
+    required_keys = {
+        "slug", "display_name", "description", "is_flat",
+        "default_chapter_count", "default_target_chapter_words",
+        "concepts_per_section_range", "words_per_concept_range",
+        "section_at_midpoint_range", "default_sections",
+    }
+    for t in data["types"]:
+        missing = required_keys - set(t.keys())
+        assert not missing, (
+            f"/api/book-types entry {t.get('slug')!r} missing keys: {missing}"
+        )
+        # section_at_midpoint_range must equal concepts × wpc_mid per layer
+        clo, chi = t["concepts_per_section_range"]
+        wlo, whi = t["words_per_concept_range"]
+        wmid = (wlo + whi) // 2
+        slo, shi = t["section_at_midpoint_range"]
+        assert slo == clo * wmid and shi == chi * wmid, (
+            f"section_at_midpoint_range arithmetic wrong for {t['slug']}: "
+            f"expected [{clo*wmid}, {chi*wmid}], got [{slo}, {shi}]"
+        )
+
+    # Layer 2 — wizard template
+    src = web_app_full_source()
+    assert 'id="sw-book-type"' in src, (
+        "setup wizard must expose the book-type dropdown with id=sw-book-type"
+    )
+    assert 'id="sw-book-type-info"' in src, (
+        "setup wizard must have the info panel div (id=sw-book-type-info)"
+    )
+    assert 'onchange="swUpdateTypeInfo()"' in src, (
+        "book-type dropdown must call swUpdateTypeInfo() on change so the "
+        "info panel updates live"
+    )
+
+    # Layer 3 — wizard JS
+    for fn in ("swLoadBookTypes", "swUpdateTypeInfo"):
+        assert f"function {fn}" in src or f"async function {fn}" in src, (
+            f"wizard JS must define {fn}() (Phase 54.6.147)"
+        )
+    assert "'/api/book-types'" in src, (
+        "swLoadBookTypes must fetch /api/book-types"
+    )
+
+    # Layer 4 — CLI table columns
+    import inspect
+    from sciknow.cli import book as book_cli
+    types_src = inspect.getsource(book_cli.types)
+    for col_header in ("Concepts", "Words", "Section"):
+        assert col_header in types_src, (
+            f"`book types` CLI table must include the '{col_header}' column "
+            f"(Phase 54.6.147 — surface the 54.6.146 concept-density metadata)"
+        )
+    assert "RESEARCH.md" in types_src or "§24" in types_src, (
+        "`book types` should cite RESEARCH.md §24 so users know where "
+        "the numbers come from"
+    )
+
+
 def l1_phase54_6_146_concept_density_resolver() -> None:
     """Phase 54.6.146 — Level-0 concept-density resolver + new ProjectType fields.
 
@@ -10687,6 +10772,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_145_finalize_draft_surface,
     # Phase 54.6.146 — concept-density resolver + new ProjectType fields
     l1_phase54_6_146_concept_density_resolver,
+    # Phase 54.6.147 — /api/book-types + wizard dropdown/info + CLI columns
+    l1_phase54_6_147_book_types_api_and_wizard,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness

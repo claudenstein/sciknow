@@ -481,27 +481,55 @@ def create(
 
 @app.command(name="types")
 def types():
-    """List available project types (Phase 45)."""
+    """List available project types with their research-grounded length ranges.
+
+    Phase 45 shipped the registry; Phase 54.6.146 added concept-density
+    metadata; Phase 54.6.147 surfaces it here. Columns:
+
+      Chapter default   — books.custom_metadata.target_chapter_words fallback
+      Section (mid)     — what Level-0 concept-density will target for
+                          a plan with 3-4 bullets (range = low × wpc_mid,
+                          high × wpc_mid)
+      Concepts/sec      — concepts_per_section_range from ProjectType
+                          (Cowan 2001 novel-chunk bound)
+      Words/concept     — words_per_concept_range from ProjectType
+                          (derived from literature per genre)
+
+    See docs/RESEARCH.md §24 for the research justification behind
+    every number.
+    """
     from rich.table import Table as _RT
     from sciknow.core.project_type import list_project_types
 
-    table = _RT(title="Project Types")
-    table.add_column("Slug", style="bold")
-    table.add_column("Display", style="cyan")
-    table.add_column("Flat", justify="center")
-    table.add_column("Default sections", overflow="fold")
-    table.add_column("Target words/chap", justify="right")
+    table = _RT(title="Project Types (with Phase 54.6.146 concept-density metadata)")
+    table.add_column("Slug", style="bold", overflow="fold")
+    table.add_column("Display", style="cyan", overflow="fold")
+    table.add_column("Flat", justify="center", width=4)
+    table.add_column("Chapter\ndefault", justify="right", width=8)
+    table.add_column("Section\n(mid)",   justify="right", overflow="fold")
+    table.add_column("Concepts\n/section", justify="center", width=9)
+    table.add_column("Words\n/concept",    justify="center", width=10)
     table.add_column("Description", style="dim", overflow="fold")
     for pt in list_project_types():
+        clo, chi = pt.concepts_per_section_range
+        wlo, whi = pt.words_per_concept_range
+        wmid = (wlo + whi) // 2
+        slo, shi = clo * wmid, chi * wmid
         table.add_row(
             pt.slug,
             pt.display_name,
             "●" if pt.is_flat else "",
-            ", ".join(s.key for s in pt.default_sections),
             f"{pt.default_target_chapter_words:,}",
+            f"{slo:,}–{shi:,}",
+            f"{clo}–{chi}",
+            f"{wlo}–{whi}",
             pt.description,
         )
     console.print(table)
+    console.print(
+        "[dim]Concept-density sizing: sections with a bullet plan "
+        "auto-size as N × (wpc midpoint). See `docs/RESEARCH.md §24`.[/dim]"
+    )
 
 
 # ── set-target (Phase 54.6.143) ────────────────────────────────────────────────
