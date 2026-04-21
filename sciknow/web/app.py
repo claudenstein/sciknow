@@ -7310,14 +7310,16 @@ body {{ font-family: var(--font-sans); color: var(--fg); background: var(--bg);
            flex-shrink: 0; flex-wrap: wrap; }}
 .topbar .topbar-brand {{ font-size: 13px; font-weight: 700; letter-spacing: -0.01em;
                          color: var(--fg-muted); margin-right: auto; padding-left: 4px; }}
-.topbar .nav-btn {{ font-size: 12px; font-weight: 500; padding: 6px 12px;
-                    border: 1px solid transparent; border-radius: var(--r-md);
-                    cursor: pointer; background: transparent; color: var(--fg);
-                    transition: all .12s ease; display: inline-flex;
-                    align-items: center; gap: 6px; line-height: 1; }}
-.topbar .nav-btn:hover {{ background: var(--bg-elevated); border-color: var(--border);
-                          box-shadow: var(--shadow-sm); }}
-.topbar .nav-btn:active {{ transform: translateY(1px); }}
+.topbar .nav-btn {{
+  font-size: 12px; padding: 5px 10px;
+  background: transparent; color: var(--fg);
+  border: 1px solid transparent;
+}}
+.topbar .nav-btn:hover {{
+  background: var(--bg-elevated); border-color: var(--border);
+  box-shadow: var(--shadow-sm);
+}}
+.topbar .nav-btn:active {{ transform: translateY(0.5px); }}
 .app-body {{ display: flex; flex: 1; overflow: hidden; min-height: 0; }}
 button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 /* Sidebar */
@@ -7434,11 +7436,12 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .sidebar-controls {{ padding: 6px var(--sp-4); border-bottom: 1px solid var(--border);
                     display: flex; justify-content: space-between;
                     align-items: center; gap: 6px; }}
-.sidebar-toggle-all {{ background: transparent; border: 1px solid var(--border);
-                      color: var(--fg-muted); padding: 3px 10px;
-                      border-radius: var(--r-sm); cursor: pointer;
-                      font-size: 11px; font-family: var(--font-sans);
-                      display: inline-flex; align-items: center; gap: 4px; }}
+.sidebar-toggle-all {{
+  font-size: 11px; padding: 3px 10px;
+  background: transparent; color: var(--fg-muted);
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  gap: 4px;
+}}
 .sidebar-toggle-all:hover {{ color: var(--accent); border-color: var(--accent); }}
 /* Phase 22 — chapter completion progress bar. Lives between the chapter
    title and its first section in the sidebar. Greyscale so it doesn't
@@ -7492,25 +7495,134 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .citation {{ color: var(--accent); cursor: pointer; font-weight: 600;
              text-decoration: none; padding: 0 1px; }}
 .citation:hover {{ background: var(--accent-light); border-radius: 2px; }}
+
+/* ── Phase 54.6.166 — Unified button system.
+   One foundation, five variants, four sizes. Every button-ish class
+   inherits consistent typography, focus ring, transitions, and radii
+   through the shared normalization selector below. Per-class rules
+   set only colour + size; structural properties live here. New code
+   should use `.btn` + `.btn--*` directly; legacy classes
+   (.btn-primary, .edit-btn, .stop-btn, .resolve-btn, …) are
+   visually aligned with the new system so the two can coexist. */
+
+/* Base normalization — shared across every button-ish class. */
+.btn, .btn-primary, .btn-secondary, .btn-link,
+.edit-btn, .stop-btn, .resolve-btn,
+.task-bar .tb-stop, .task-bar .tb-dismiss,
+.aw-mode-btn, .toolbar button, .topbar .nav-btn,
+.sidebar-toggle-all, .col-hide-btn, .col-peek-btn,
+.modal-close {{
+  font-family: var(--font-sans);
+  font-weight: 500;
+  letter-spacing: -0.003em;
+  line-height: 1;
+  border-radius: var(--r-md);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: background var(--t-fast), border-color var(--t-fast),
+              color var(--t-fast), box-shadow var(--t-fast),
+              opacity var(--t-fast), transform var(--t-fast);
+}}
+.btn:focus-visible, .btn-primary:focus-visible,
+.btn-secondary:focus-visible, .btn-link:focus-visible,
+.edit-btn:focus-visible, .stop-btn:focus-visible,
+.resolve-btn:focus-visible,
+.task-bar .tb-stop:focus-visible, .task-bar .tb-dismiss:focus-visible,
+.aw-mode-btn:focus-visible, .toolbar button:focus-visible,
+.topbar .nav-btn:focus-visible,
+.sidebar-toggle-all:focus-visible, .col-hide-btn:focus-visible,
+.col-peek-btn:focus-visible, .modal-close:focus-visible {{
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}}
+.btn[disabled], .btn-primary[disabled], .btn-secondary[disabled],
+.btn-link[disabled], .edit-btn[disabled], .stop-btn[disabled],
+.resolve-btn[disabled], .aw-mode-btn[disabled] {{
+  opacity: 0.5;
+  pointer-events: none;
+  cursor: not-allowed;
+}}
+
+/* Foundation — .btn default is a neutral, medium-size button. */
+.btn {{
+  font-size: 13px;
+  padding: 7px 14px;
+  background: var(--bg-elevated);
+  color: var(--fg);
+  border: 1px solid var(--border);
+}}
+.btn:hover {{ border-color: var(--border-strong); box-shadow: var(--shadow-sm); }}
+.btn:active {{ transform: translateY(0.5px); }}
+
+/* Variants — modifier classes. */
+.btn--primary {{
+  background: var(--accent); color: var(--accent-fg);
+  border-color: var(--accent);
+}}
+.btn--primary:hover {{
+  background: var(--accent-hover); border-color: var(--accent-hover);
+}}
+.btn--ghost {{
+  background: transparent; border-color: transparent;
+}}
+.btn--ghost:hover {{
+  background: var(--toolbar-bg); border-color: var(--border);
+  box-shadow: none;
+}}
+.btn--danger {{
+  background: var(--danger); color: #fff; border-color: var(--danger);
+}}
+.btn--danger:hover {{ filter: brightness(0.92); }}
+.btn--success {{
+  background: var(--success); color: #fff; border-color: var(--success);
+}}
+.btn--success:hover {{ filter: brightness(0.92); }}
+.btn--link {{
+  background: transparent; border-color: var(--border);
+  color: var(--accent);
+}}
+.btn--link:hover {{
+  background: var(--accent-light); border-color: var(--accent);
+}}
+
+/* Sizes — modifier classes applied on top of a variant. */
+.btn--xs {{ font-size: 11px; padding: 3px 8px; gap: 4px; border-radius: var(--r-sm); }}
+.btn--sm {{ font-size: 12px; padding: 5px 10px; gap: 5px; }}
+.btn--lg {{ font-size: 14px; padding: 9px 18px; gap: 8px; }}
+.btn--block {{ width: 100%; justify-content: center; }}
+.btn--icon {{ padding: 6px; aspect-ratio: 1; }}
+
 /* Action toolbar — grouped sections, modern pills */
 .toolbar {{ display: flex; gap: var(--sp-1); flex-wrap: wrap; margin-bottom: var(--sp-5);
             padding: var(--sp-2); background: var(--toolbar-bg);
             border-radius: var(--r-lg); border: 1px solid var(--border);
             box-shadow: var(--shadow-sm); align-items: center; }}
 .toolbar .tg {{ display: flex; gap: 2px; padding: 0 4px; }}
-.toolbar button {{ font-size: 12px; font-weight: 500; padding: 6px 12px;
-                   border: 1px solid transparent; border-radius: var(--r-md);
-                   cursor: pointer; background: transparent; color: var(--fg);
-                   transition: all .12s ease; display: inline-flex; align-items: center;
-                   gap: 6px; line-height: 1; }}
-.toolbar button:hover {{ background: var(--bg-elevated); border-color: var(--border);
-                         box-shadow: var(--shadow-sm); }}
-.toolbar button:active {{ transform: translateY(1px); }}
-.toolbar button.primary {{ background: var(--accent); color: var(--accent-fg);
-                           border-color: var(--accent); }}
-.toolbar button.primary:hover {{ background: var(--accent-hover); border-color: var(--accent-hover); }}
-.toolbar button.active {{ background: var(--accent); color: var(--accent-fg);
-                          border-color: var(--accent); }}
+.toolbar button {{
+  font-size: 12px; padding: 5px 10px;
+  background: transparent; color: var(--fg);
+  border: 1px solid transparent;
+}}
+.toolbar button:hover {{
+  background: var(--bg-elevated); border-color: var(--border);
+  box-shadow: var(--shadow-sm);
+}}
+.toolbar button:active {{ transform: translateY(0.5px); }}
+.toolbar button.primary {{
+  background: var(--accent); color: var(--accent-fg);
+  border-color: var(--accent);
+}}
+.toolbar button.primary:hover {{
+  background: var(--accent-hover); border-color: var(--accent-hover);
+}}
+.toolbar button.active {{
+  background: var(--accent-light); color: var(--accent);
+  border-color: var(--accent);
+}}
 .toolbar .sep {{ width: 1px; align-self: stretch; background: var(--border); margin: 4px 4px; }}
 .tg-label {{ font-size: 10px; font-weight: 600; color: var(--fg-faint);
              text-transform: uppercase; letter-spacing: 0.06em; padding: 0 6px;
@@ -7636,8 +7748,11 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .modal-header {{ padding: var(--sp-4) var(--sp-5); border-bottom: 1px solid var(--border);
                 display: flex; align-items: center; justify-content: space-between; }}
 .modal-header h3 {{ font-size: 16px; font-weight: 600; color: var(--fg); }}
-.modal-close {{ background: transparent; border: none; font-size: 22px; color: var(--fg-muted);
-                cursor: pointer; line-height: 1; padding: 4px 8px; border-radius: var(--r-sm); }}
+.modal-close {{
+  font-size: 18px; padding: 2px 10px;
+  background: transparent; color: var(--fg-muted);
+  border: 1px solid transparent; border-radius: var(--r-sm);
+}}
 .modal-close:hover {{ background: var(--toolbar-bg); color: var(--fg); }}
 .modal-body {{ padding: var(--sp-5); overflow-y: auto; flex: 1; }}
 .modal-footer {{ padding: var(--sp-3) var(--sp-5); border-top: 1px solid var(--border);
@@ -7661,18 +7776,34 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .field input:focus, .field textarea:focus {{ outline: none; border-color: var(--accent);
                 box-shadow: 0 0 0 3px var(--accent-light); }}
 .field textarea {{ resize: vertical; min-height: 80px; font-family: var(--font-sans); }}
-.btn-primary {{ background: var(--accent); color: var(--accent-fg); border: 1px solid var(--accent);
-                padding: 8px 16px; font-size: 13px; font-weight: 500; border-radius: var(--r-md);
-                cursor: pointer; transition: all .12s; }}
-.btn-primary:hover {{ background: var(--accent-hover); border-color: var(--accent-hover); }}
-.btn-secondary {{ background: var(--bg); color: var(--fg); border: 1px solid var(--border);
-                  padding: 8px 16px; font-size: 13px; font-weight: 500; border-radius: var(--r-md);
-                  cursor: pointer; transition: all .12s; }}
-.btn-secondary:hover {{ background: var(--toolbar-bg); border-color: var(--border-strong); }}
+.btn-primary {{
+  font-size: 13px; padding: 7px 14px;
+  background: var(--accent); color: var(--accent-fg);
+  border: 1px solid var(--accent);
+}}
+.btn-primary:hover {{
+  background: var(--accent-hover); border-color: var(--accent-hover);
+  box-shadow: var(--shadow-sm);
+}}
+.btn-secondary {{
+  font-size: 13px; padding: 7px 14px;
+  background: var(--bg-elevated); color: var(--fg);
+  border: 1px solid var(--border);
+}}
+.btn-secondary:hover {{
+  border-color: var(--border-strong); box-shadow: var(--shadow-sm);
+}}
 /* Phase 33 — autowrite mode picker buttons */
-.aw-mode-btn {{ font-size: 12px; padding: 6px 12px; }}
-.aw-mode-btn.active {{ background: var(--accent); color: var(--accent-fg);
-                       border-color: var(--accent); }}
+.aw-mode-btn {{
+  font-size: 12px; padding: 5px 10px;
+  background: var(--bg-elevated); color: var(--fg);
+  border: 1px solid var(--border);
+}}
+.aw-mode-btn:hover {{ border-color: var(--border-strong); }}
+.aw-mode-btn.active {{
+  background: var(--accent-light); color: var(--accent);
+  border-color: var(--accent);
+}}
 /* Modal-specific content classes */
 .modal-stream {{ font-family: var(--font-serif); font-size: 15px; line-height: 1.7;
                  padding: var(--sp-3); background: var(--toolbar-bg); border-radius: var(--r-md);
@@ -7796,8 +7927,12 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .score-bar .value.good {{ color: var(--success); }}
 .score-bar .value.mid {{ color: var(--warning); }}
 .score-bar .value.low {{ color: var(--danger); }}
-.stop-btn {{ font-size: 11px; padding: 3px 10px; background: var(--danger); color: white;
-             border: none; border-radius: 4px; cursor: pointer; }}
+.stop-btn {{
+  font-size: 11px; padding: 3px 10px;
+  background: var(--danger); color: #fff;
+  border: 1px solid var(--danger); border-radius: var(--r-sm);
+}}
+.stop-btn:hover {{ filter: brightness(0.92); }}
 /* Right panel */
 .panel {{ width: 320px; border-left: 1px solid var(--border); overflow-y: auto;
           padding: 16px; font-size: 13px; background: var(--sidebar-bg); }}
@@ -7811,20 +7946,25 @@ body.panel-hidden    .panel   {{ display: none; }}
 .panel-controls {{ display: flex; justify-content: flex-end;
                    padding-bottom: 8px; margin-bottom: 4px;
                    border-bottom: 1px solid var(--border); }}
-.col-hide-btn {{ background: transparent; border: 1px solid var(--border);
-                 color: var(--fg-muted); cursor: pointer;
-                 border-radius: var(--r-sm); padding: 3px 8px;
-                 font-size: 11px; font-family: var(--font-sans); line-height: 1;
-                 display: inline-flex; align-items: center; gap: 4px; }}
+.col-hide-btn {{
+  font-size: 11px; padding: 3px 8px;
+  background: transparent; color: var(--fg-muted);
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  gap: 4px;
+}}
 .col-hide-btn:hover {{ color: var(--accent); border-color: var(--accent); }}
-.col-peek-btn {{ position: fixed; top: 50%; transform: translateY(-50%);
-                 z-index: 90; background: var(--sidebar-bg);
-                 border: 1px solid var(--border); color: var(--fg-muted);
-                 cursor: pointer; font-size: 14px;
-                 padding: 14px 6px; line-height: 1;
-                 box-shadow: var(--shadow-sm); display: none; }}
-.col-peek-btn:hover {{ color: var(--accent); border-color: var(--accent);
-                       background: var(--accent-light); }}
+.col-peek-btn {{
+  position: fixed; top: 50%; transform: translateY(-50%);
+  z-index: 90; background: var(--sidebar-bg);
+  color: var(--fg-muted); font-size: 14px;
+  border: 1px solid var(--border); border-radius: 0;
+  padding: 14px 6px;
+  box-shadow: var(--shadow-sm); display: none;
+}}
+.col-peek-btn:hover {{
+  color: var(--accent); border-color: var(--accent);
+  background: var(--accent-light);
+}}
 .col-peek-sidebar {{ left: 0; border-left: none;
                      border-radius: 0 var(--r-md) var(--r-md) 0; }}
 .col-peek-panel   {{ right: 0; border-right: none;
@@ -7839,8 +7979,12 @@ body.panel-hidden   .col-peek-panel   {{ display: block; }}
 .para-ref {{ font-size: 11px; background: var(--accent); color: white; padding: 1px 6px;
              border-radius: 8px; }}
 .comm-text {{ margin: 4px 0; }}
-.resolve-btn {{ font-size: 11px; background: var(--success); color: white; border: none;
-                padding: 2px 8px; border-radius: 4px; cursor: pointer; }}
+.resolve-btn {{
+  font-size: 11px; padding: 3px 10px;
+  background: var(--success); color: #fff;
+  border: 1px solid var(--success); border-radius: var(--r-sm);
+}}
+.resolve-btn:hover {{ filter: brightness(0.92); }}
 .resolved-tag {{ font-size: 11px; color: var(--success); }}
 /* Comment form */
 .comment-form {{ margin-top: 12px; }}
@@ -7865,8 +8009,13 @@ body.panel-hidden   .col-peek-panel   {{ display: block; }}
 .theme-toggle:hover {{ background: var(--accent); color: white; border-color: var(--accent); }}
 .theme-toggle .label {{ font-size: 11px; }}
 /* Edit */
-.edit-btn {{ background: var(--accent); color: white; border: none; padding: 4px 12px;
-             border-radius: 4px; cursor: pointer; font-size: 12px; margin-left: 8px; }}
+.edit-btn {{
+  font-size: 11px; padding: 3px 10px;
+  background: var(--accent); color: var(--accent-fg);
+  border: 1px solid var(--accent); border-radius: var(--r-sm);
+  margin-left: 8px;
+}}
+.edit-btn:hover {{ background: var(--accent-hover); border-color: var(--accent-hover); }}
 .edit-area {{ width: 100%; min-height: 400px; padding: 12px; font-family: 'Courier New', monospace;
               font-size: 14px; border: 1px solid var(--border); border-radius: 4px;
               background: var(--bg); color: var(--fg); }}
@@ -7900,10 +8049,11 @@ body.panel-hidden   .col-peek-panel   {{ display: block; }}
 .heatmap-header {{ display: flex; align-items: center; justify-content: space-between;
                    margin-bottom: 4px; gap: var(--sp-3); }}
 .heatmap-header h3 {{ margin: 0; }}
-.btn-link {{ background: transparent; border: 1px solid var(--border);
-            color: var(--accent); padding: 4px 12px; font-size: 12px;
-            font-weight: 500; border-radius: var(--r-md); cursor: pointer;
-            transition: all .12s; display: inline-flex; align-items: center; gap: 4px; }}
+.btn-link {{
+  font-size: 12px; padding: 5px 12px;
+  background: transparent; color: var(--accent);
+  border: 1px solid var(--border);
+}}
 .btn-link:hover {{ background: var(--accent-light); border-color: var(--accent); }}
 /* Phase 15 — modal tabs (Wiki Query / Browse) */
 .tabs {{ display: flex; gap: 0; padding: 0 var(--sp-5); border-bottom: 1px solid var(--border);
@@ -8571,14 +8721,17 @@ body.task-bar-open {{ padding-top: 40px; }}
 .task-bar .tb-stat strong {{ color: var(--accent); font-weight: 700; }}
 .task-bar .tb-sep {{ color: var(--border-strong); }}
 .task-bar .tb-spacer {{ flex: 1; }}
-.task-bar .tb-stop, .task-bar .tb-dismiss {{ background: var(--danger);
-                    border: none; color: white; cursor: pointer;
-                    padding: 4px 12px; border-radius: var(--r-sm);
-                    font-size: 11px; font-family: var(--font-sans);
-                    font-weight: 600; }}
-.task-bar .tb-stop:hover, .task-bar .tb-dismiss:hover {{ background: #b91c1c; }}
-.task-bar .tb-dismiss {{ background: var(--fg-muted); }}
-.task-bar .tb-dismiss:hover {{ background: var(--fg); }}
+.task-bar .tb-stop, .task-bar .tb-dismiss {{
+  font-size: 11px; padding: 3px 10px; font-weight: 600;
+  background: var(--danger); color: #fff;
+  border: 1px solid var(--danger); border-radius: var(--r-sm);
+}}
+.task-bar .tb-stop:hover, .task-bar .tb-dismiss:hover {{
+  filter: brightness(0.92);
+}}
+.task-bar .tb-dismiss {{
+  background: var(--fg-muted); border-color: var(--fg-muted);
+}}
 /* Autowrite chart */
 .aw-dashboard {{ margin-bottom: 16px; }}
 .aw-chart {{ border: 1px solid var(--border); border-radius: 6px; padding: 8px;
