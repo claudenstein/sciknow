@@ -762,6 +762,117 @@ Available papers ({n_papers} total, showing top 50):
 Write the book plan."""
 
 
+# Phase 54.6.154 — per-section concept-list plan generator.
+#
+# Feeds the bottom-up concept-density resolver (54.6.146). Asks the LLM
+# to produce a **concept list** for a specific section, framed by the
+# chapter's scope and the section's title. Output is a bullet list of
+# 3-4 concepts (Cowan 2001 cap), not prose. The writer prompt later
+# uses this list as the section plan; the 54.6.146 resolver counts
+# bullets and sizes the target.
+#
+# Deliberately narrow: 3-4 bullets max per Cowan 2001 (5 allowed for
+# `academic_monograph`). Each bullet is one concept / claim / idea —
+# enough to be counted as a novel chunk, short enough to be composable.
+
+SECTION_PLAN_SYSTEM = """\
+You are a scientific book editor. For the given book chapter and section, \
+produce a **concept list** — a bulleted enumeration of the distinct novel \
+concepts this section should introduce and develop.
+
+Rules:
+
+- Output ONLY a markdown bullet list using dashes (``-``). No prose, no \
+preamble, no numbering. Nothing before or after the bullets.
+- Each bullet is ONE concept / claim / mechanism / idea the section covers, \
+phrased as a short declarative fragment (8-20 words). No sub-bullets.
+- Produce {min_concepts}-{max_concepts} bullets. Cowan (2001) shows working \
+memory holds 3-4 novel chunks; do not exceed {max_concepts} (reader cognitive \
+load). Expert-level material may use {max_concepts} bullets; introductory \
+material prefers 3.
+- Concepts must be DISTINCT — no rephrasings of the same idea. If two bullets \
+could be merged, merge them.
+- Respect the chapter scope — do not drift to adjacent chapters' territory.
+- Match the voice for the book type: {voice_hint}.
+- Use concrete technical vocabulary. Avoid filler ("we will explore", "this \
+section discusses"); a bullet should state a concept, not advertise it.
+
+Example output (3 bullets):
+
+- The thermohaline circulation as a heat-transport mechanism
+- Observational evidence for post-2005 AMOC slowdown
+- Why the IPCC uncertainty range for AMOC fate is wide
+
+Do NOT include:
+
+- The section title as a bullet
+- Meta bullets about "introducing" or "concluding" the section
+- Citations — the writer adds [N] markers later from retrieval
+- Any text outside the bullet list"""
+
+
+SECTION_PLAN_USER = """\
+Book: {book_title} ({book_type})
+Chapter {chapter_number}: {chapter_title}
+{chapter_description_line}
+Section: {section_title}
+{section_slug_line}
+
+Produce the concept list for this section."""
+
+
+# Compact voice hints per book type — steer the concept-list phrasing
+# without dragging the writer's full system-prompt voice rules here.
+_SECTION_PLAN_VOICE_HINTS = {
+    "scientific_paper":       "compressed research-paper voice, IMRaD style",
+    "review_article":         "synthesis voice, curatorial framing",
+    "scientific_book":        "hedged scientific voice, trade-science register",
+    "popular_science":        "narrative science voice, lay-accessible",
+    "instructional_textbook": "pedagogical voice, worked-example scaffolding",
+    "academic_monograph":     "formal monograph voice, derivation-ready",
+}
+
+
+def section_plan(
+    *,
+    book_title: str,
+    book_type: str,
+    chapter_number: int,
+    chapter_title: str,
+    chapter_description: str | None,
+    section_title: str,
+    section_slug: str,
+    concepts_range: tuple[int, int] = (3, 4),
+) -> tuple[str, str]:
+    """Phase 54.6.154 — build (system, user) prompts for section-plan
+    generation. See SECTION_PLAN_SYSTEM for the concept-list contract.
+    """
+    lo, hi = concepts_range
+    voice = _SECTION_PLAN_VOICE_HINTS.get(
+        book_type, "formal scientific prose"
+    )
+    sys_p = SECTION_PLAN_SYSTEM.format(
+        min_concepts=lo, max_concepts=hi, voice_hint=voice,
+    )
+    ch_desc_line = (
+        f"Chapter scope: {chapter_description.strip()}"
+        if (chapter_description or "").strip() else ""
+    )
+    slug_line = (
+        f"(section slug: {section_slug})" if section_slug else ""
+    )
+    usr_p = SECTION_PLAN_USER.format(
+        book_title=book_title,
+        book_type=book_type,
+        chapter_number=chapter_number,
+        chapter_title=chapter_title,
+        chapter_description_line=ch_desc_line,
+        section_title=section_title,
+        section_slug_line=slug_line,
+    )
+    return sys_p, usr_p
+
+
 def book_plan(
     book_title: str,
     description: str | None,

@@ -477,6 +477,154 @@ def _adjust_target_for_retrieval_density(
     return new_target, lerp, explanation
 
 
+def generate_section_plan(
+    book_id: str,
+    chapter_id: str,
+    section_slug: str,
+    *,
+    model: str | None = None,
+    force: bool = False,
+) -> dict:
+    """Phase 54.6.154 — generate a concept-list plan for a section via LLM.
+
+    Returns a dict with:
+      {
+        "slug": str,
+        "prior_plan": str,              # what was there before (empty if none)
+        "new_plan": str,                # the generated bullet list
+        "n_concepts": int,              # bullets counted via _count_plan_concepts
+        "wrote": bool,                  # True if persisted; False if skipped/force=False case
+        "skipped_reason": str | None,   # "already_has_plan" | None
+      }
+
+    Skips sections that already have a non-empty plan unless ``force=True``.
+    Uses ``LLM_FAST_MODEL`` by default — the task is structured-output and
+    short; no need for the flagship writer. Caller can override ``model``.
+
+    Writes by reconstructing the chapter's ``sections`` JSONB: reads the
+    current list via ``_get_chapter_sections_normalized``, patches the
+    target section's ``plan`` field, serialises back. Matches the shape
+    the existing PUT /api/chapters/{id}/sections endpoint writes.
+    """
+    from sqlalchemy import text as _sql
+    from sciknow.config import settings as _settings
+    from sciknow.rag import prompts as _prompts
+    from sciknow.rag.llm import complete as _llm_complete
+    from sciknow.core.project_type import get_project_type
+    from sciknow.storage.db import get_session
+
+    with get_session() as session:
+        book_row = session.execute(_sql("""
+            SELECT title, book_type FROM books WHERE id::text = :bid LIMIT 1
+        """), {"bid": book_id}).fetchone()
+        if not book_row:
+            raise ValueError(f"no book {book_id!r}")
+        book_title, book_type = book_row[0] or "", (book_row[1] or "scientific_book")
+
+        ch_row = session.execute(_sql("""
+            SELECT number, title, description FROM book_chapters
+            WHERE id::text = :cid LIMIT 1
+        """), {"cid": chapter_id}).fetchone()
+        if not ch_row:
+            raise ValueError(f"no chapter {chapter_id!r}")
+        ch_num, ch_title, ch_desc = ch_row[0], ch_row[1] or "", ch_row[2] or ""
+
+        sections = _get_chapter_sections_normalized(session, chapter_id)
+
+    # Find the section
+    target_idx = None
+    for i, s in enumerate(sections):
+        if s.get("slug", "") == section_slug:
+            target_idx = i
+            break
+    if target_idx is None:
+        raise ValueError(f"no section {section_slug!r} in chapter {chapter_id!r}")
+    section = sections[target_idx]
+    prior_plan = (section.get("plan") or "").strip()
+
+    if prior_plan and not force:
+        return {
+            "slug": section_slug,
+            "prior_plan": prior_plan,
+            "new_plan": prior_plan,
+            "n_concepts": _count_plan_concepts(prior_plan),
+            "wrote": False,
+            "skipped_reason": "already_has_plan",
+        }
+
+    try:
+        pt = get_project_type(book_type)
+        concepts_range = pt.concepts_per_section_range
+    except Exception:
+        concepts_range = (3, 4)
+
+    sys_p, usr_p = _prompts.section_plan(
+        book_title=book_title,
+        book_type=book_type,
+        chapter_number=int(ch_num),
+        chapter_title=ch_title,
+        chapter_description=ch_desc,
+        section_title=(section.get("title") or section_slug),
+        section_slug=section_slug,
+        concepts_range=concepts_range,
+    )
+
+    # Prefer LLM_FAST_MODEL for this structured task — short output,
+    # doesn't need the flagship writer's prose reasoning.
+    effective_model = model or _settings.llm_fast_model or _settings.llm_model
+    raw = _llm_complete(
+        sys_p, usr_p,
+        model=effective_model,
+        temperature=0.3,
+        num_ctx=4096,   # prompt is tiny, no need for big context
+        num_predict=400,
+        keep_alive=-1,
+    )
+    # Strip any <think> blocks thinking models might emit
+    cleaned = re.sub(r"<think>.*?</think>\s*", "", raw, flags=re.DOTALL).strip()
+    # Strip leading/trailing code fences if the model wrapped the output
+    cleaned = re.sub(r"^```(?:\w+)?\s*|\s*```$", "", cleaned, flags=re.MULTILINE).strip()
+
+    # Keep only the bullet lines — the prompt says "nothing else" but
+    # some models still narrate. Trim to bullet lines only.
+    kept_lines = []
+    for ln in cleaned.splitlines():
+        if re.match(r"^\s*(?:[-*•‣]|\d+\s*[.\)])\s+\S", ln):
+            kept_lines.append(ln.strip())
+    new_plan = "\n".join(kept_lines).strip()
+    n_concepts = _count_plan_concepts(new_plan)
+
+    if n_concepts == 0:
+        # Model produced no bullets; treat as failure (don't overwrite with junk).
+        return {
+            "slug": section_slug,
+            "prior_plan": prior_plan,
+            "new_plan": "",
+            "n_concepts": 0,
+            "wrote": False,
+            "skipped_reason": "llm_returned_no_bullets",
+        }
+
+    # Persist: patch the sections list + write back
+    sections[target_idx] = {**section, "plan": new_plan}
+    import json as _json
+    with get_session() as session:
+        session.execute(_sql("""
+            UPDATE book_chapters SET sections = CAST(:secs AS jsonb)
+            WHERE id::text = :cid
+        """), {"cid": chapter_id, "secs": _json.dumps(sections)})
+        session.commit()
+
+    return {
+        "slug": section_slug,
+        "prior_plan": prior_plan,
+        "new_plan": new_plan,
+        "n_concepts": n_concepts,
+        "wrote": True,
+        "skipped_reason": None,
+    }
+
+
 def _get_section_target_words(
     session, chapter_id: str, section_slug: str,
 ) -> int | None:

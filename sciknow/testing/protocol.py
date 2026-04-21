@@ -9544,6 +9544,105 @@ def l1_phase54_6_145_finalize_draft_surface() -> None:
     )
 
 
+def l1_phase54_6_154_plan_sections_surface() -> None:
+    """Phase 54.6.154 — LLM-assisted section-plan generation.
+
+    Pins the generator + CLI for ``sciknow book plan-sections``:
+      (A) core.book_ops.generate_section_plan function present
+      (B) rag.prompts.section_plan builds (system, user) prompts
+          honouring the project-type concepts_per_section_range
+      (C) SECTION_PLAN_SYSTEM imposes the bullet-only output contract
+          (the 54.6.146 concept-density resolver depends on bullet
+          parsing; prose-only output would silently break it)
+      (D) CLI registered with --chapter / --model / --force / --dry-run
+      (E) generator uses LLM_FAST_MODEL by default (cheap structured
+          task; flagship writer would waste VRAM and latency)
+      (F) Cowan 2001 cap cited in the system prompt so the threshold
+          origin is auditable
+    """
+    import inspect
+    from sciknow.core import book_ops
+    from sciknow.rag import prompts
+    from sciknow.cli import book as book_cli
+
+    # A) generator present
+    assert hasattr(book_ops, "generate_section_plan"), (
+        "core.book_ops.generate_section_plan missing (Phase 54.6.154)"
+    )
+    sig = inspect.signature(book_ops.generate_section_plan)
+    for param in ("book_id", "chapter_id", "section_slug", "model", "force"):
+        assert param in sig.parameters, (
+            f"generate_section_plan must take {param!r}"
+        )
+
+    # B) prompt builder present + takes concepts_range
+    assert hasattr(prompts, "section_plan"), (
+        "rag.prompts.section_plan missing (Phase 54.6.154)"
+    )
+    sig_p = inspect.signature(prompts.section_plan)
+    for param in (
+        "book_title", "book_type", "chapter_number", "chapter_title",
+        "section_title", "section_slug", "concepts_range",
+    ):
+        assert param in sig_p.parameters, (
+            f"prompts.section_plan must accept kwarg {param!r}"
+        )
+    sys_p, usr_p = prompts.section_plan(
+        book_title="Test Book", book_type="scientific_book",
+        chapter_number=3, chapter_title="Evidence",
+        chapter_description="What the observations show.",
+        section_title="Satellite Record",
+        section_slug="satellite_record",
+        concepts_range=(3, 4),
+    )
+    assert "3" in sys_p and "4" in sys_p, (
+        "concepts_range must propagate into the system prompt "
+        "({min_concepts}-{max_concepts}); without this the LLM "
+        "ignores per-type capacity"
+    )
+    # Book title / chapter / section must land in the user prompt
+    for piece in ("Test Book", "Evidence", "Satellite Record"):
+        assert piece in usr_p, (
+            f"prompts.section_plan user-prompt missing piece {piece!r}"
+        )
+
+    # C) Bullet-only output contract enforced by the system prompt
+    assert "bullet" in sys_p.lower(), (
+        "SECTION_PLAN_SYSTEM must say bullets — the concept-density "
+        "resolver parses the plan by bullet regex"
+    )
+    assert "dash" in sys_p.lower() or "``-``" in sys_p or "- " in sys_p, (
+        "SECTION_PLAN_SYSTEM must spec dash-bullet format — mixing "
+        "formats would throw off _count_plan_concepts"
+    )
+
+    # D) CLI registration + flags
+    cmd_names = {cmd.name for cmd in book_cli.app.registered_commands}
+    assert "plan-sections" in cmd_names, (
+        "`sciknow book plan-sections` missing (Phase 54.6.154)"
+    )
+    sig_c = inspect.signature(book_cli.plan_sections)
+    for f in ("book_title", "chapter", "model", "force", "dry_run"):
+        assert f in sig_c.parameters, (
+            f"`book plan-sections` must accept {f!r}"
+        )
+
+    # E) generator uses LLM_FAST_MODEL by default
+    gen_src = inspect.getsource(book_ops.generate_section_plan)
+    assert "llm_fast_model" in gen_src, (
+        "generate_section_plan must default to settings.llm_fast_model "
+        "— section-plan generation is structured-output, the flagship "
+        "writer would waste VRAM and latency"
+    )
+
+    # F) Cowan 2001 attribution in the system prompt (auditable threshold)
+    assert "Cowan" in prompts.SECTION_PLAN_SYSTEM or "2001" in prompts.SECTION_PLAN_SYSTEM, (
+        "SECTION_PLAN_SYSTEM must cite Cowan 2001 so the 3-4 bullet "
+        "cap's origin is auditable — a future maintainer who tweaks "
+        "the limit should know why it's 4"
+    )
+
+
 def l1_phase54_6_153_length_report_surface() -> None:
     """Phase 54.6.153 — ``sciknow book length-report`` + walk_book_lengths().
 
@@ -11262,6 +11361,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_152_live_plan_concept_readout,
     # Phase 54.6.153 — whole-book length-report CLI + core walker
     l1_phase54_6_153_length_report_surface,
+    # Phase 54.6.154 — LLM-assisted section-plan generation
+    l1_phase54_6_154_plan_sections_surface,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness

@@ -789,6 +789,170 @@ def length_report(
     )
 
 
+# ── plan-sections (Phase 54.6.154) ─────────────────────────────────────────────
+
+@app.command(name="plan-sections")
+def plan_sections(
+    book_title: Annotated[str, typer.Argument(help="Book title or ID fragment.")],
+    chapter: str = typer.Option(
+        None, "--chapter", "-c",
+        help="Chapter number or title fragment. Omit to plan every chapter.",
+    ),
+    model: str = typer.Option(
+        None, "--model",
+        help="LLM to use. Defaults to LLM_FAST_MODEL (structured output, "
+             "no need for the flagship writer).",
+    ),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Overwrite existing plans. Default: skip sections that "
+             "already have a plan.",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Show which sections would be planned without calling the "
+             "LLM or writing to the DB.",
+    ),
+):
+    """Phase 54.6.154 — auto-generate per-section concept plans via LLM.
+
+    For each section in the (filtered) chapters, asks the LLM for a
+    3-4 bullet concept list framed by the chapter scope and section
+    title. The resulting plan is written into ``book_chapters.sections[i].plan``,
+    activating the Phase 54.6.146 bottom-up concept-density resolver
+    the next time autowrite runs on that section.
+
+    Resolver impact: sections that were previously on the
+    ``chapter_split`` fallback (top-down chapter_target ÷ num_sections)
+    flip to ``concept_density`` (N bullets × wpc_midpoint). Run
+    ``sciknow book length-report`` before and after to see the shift.
+
+    Examples:
+
+      sciknow book plan-sections "Global Cooling"                  # whole book
+      sciknow book plan-sections "Global Cooling" --chapter 3      # one chapter
+      sciknow book plan-sections "Global Cooling" --force          # overwrite
+      sciknow book plan-sections "Global Cooling" --dry-run        # preview
+    """
+    from sqlalchemy import text
+    from sciknow.core.book_ops import generate_section_plan, _count_plan_concepts
+    from sciknow.storage.db import get_session
+
+    with get_session() as session:
+        row = session.execute(text("""
+            SELECT id::text, title FROM books
+            WHERE title ILIKE :q OR id::text LIKE :q
+            ORDER BY updated_at DESC LIMIT 1
+        """), {"q": f"%{book_title}%"}).fetchone()
+        if not row:
+            console.print(f"[red]No book matches {book_title!r}[/red]")
+            raise typer.Exit(1)
+        book_id, resolved_title = row
+
+        chapter_filter = ""
+        params: dict = {"bid": book_id}
+        if chapter:
+            chapter_filter = "AND (CAST(number AS text) = :q OR title ILIKE :qt)"
+            params["q"] = chapter.strip()
+            params["qt"] = f"%{chapter.strip()}%"
+        ch_rows = session.execute(text(f"""
+            SELECT id::text, number, title, sections
+            FROM book_chapters
+            WHERE book_id = CAST(:bid AS uuid) {chapter_filter}
+            ORDER BY number
+        """), params).fetchall()
+
+    if not ch_rows:
+        console.print(
+            f"[yellow]No chapters match {chapter!r} in {resolved_title!r}[/yellow]"
+        )
+        raise typer.Exit(1)
+
+    console.print(
+        f"\n[bold]{resolved_title}[/bold]  ·  "
+        f"planning {len(ch_rows)} chapter(s)  "
+        f"[dim](force={force}, dry_run={dry_run})[/dim]\n"
+    )
+
+    total_planned = 0
+    total_skipped = 0
+    total_failed = 0
+    for ch_id, ch_num, ch_title, raw_sections in ch_rows:
+        from sciknow.core.book_ops import _normalize_chapter_sections
+        sections = _normalize_chapter_sections(raw_sections)
+        if not sections:
+            console.print(
+                f"[dim]Ch.{ch_num} {ch_title!r} — no sections; skipping.[/dim]"
+            )
+            continue
+        console.print(
+            f"[bold]Ch.{ch_num}[/bold] {ch_title!r}  ·  "
+            f"{len(sections)} section(s)"
+        )
+        for s in sections:
+            slug = s.get("slug", "")
+            prior = (s.get("plan") or "").strip()
+            has_prior = bool(prior) and _count_plan_concepts(prior) > 0
+            if has_prior and not force:
+                console.print(
+                    f"  [dim]{slug[:24]:24s}[/dim] "
+                    f"[dim]→ already planned ({_count_plan_concepts(prior)} "
+                    f"bullets), skipping[/dim]"
+                )
+                total_skipped += 1
+                continue
+            if dry_run:
+                console.print(
+                    f"  [cyan]{slug[:24]:24s}[/cyan] "
+                    f"[dim]→ WOULD plan (currently "
+                    f"{'overwriting existing' if has_prior else 'empty'})[/dim]"
+                )
+                continue
+            console.print(
+                f"  [cyan]{slug[:24]:24s}[/cyan] "
+                f"[dim]→ calling LLM…[/dim]",
+                end="\r",
+            )
+            try:
+                result = generate_section_plan(
+                    book_id, ch_id, slug, model=model, force=force,
+                )
+            except Exception as exc:
+                console.print(
+                    f"  [red]{slug[:24]:24s}[/red] "
+                    f"[red]→ FAIL: {str(exc)[:80]}[/red]"
+                )
+                total_failed += 1
+                continue
+            if result["wrote"]:
+                n = result["n_concepts"]
+                first_bullet = (result["new_plan"].splitlines() or [""])[0][:70]
+                console.print(
+                    f"  [green]{slug[:24]:24s}[/green] "
+                    f"→ [bold]{n} concepts[/bold]  [dim]{first_bullet}[/dim]"
+                )
+                total_planned += 1
+            else:
+                reason = result.get("skipped_reason") or "unknown"
+                console.print(
+                    f"  [yellow]{slug[:24]:24s}[/yellow] "
+                    f"[yellow]→ skipped ({reason})[/yellow]"
+                )
+                total_skipped += 1
+
+    console.print(
+        f"\n[bold]Done.[/bold] planned: [green]{total_planned}[/green]  "
+        f"skipped: [yellow]{total_skipped}[/yellow]  "
+        f"failed: [red]{total_failed}[/red]"
+    )
+    if total_planned and not dry_run:
+        console.print(
+            "[dim]Next: run [bold]sciknow book length-report[/bold] to see "
+            "how many sections flipped from chapter-split to "
+            "concept-density.[/dim]"
+        )
+
+
 # ── list ───────────────────────────────────────────────────────────────────────
 
 @app.command(name="list")
