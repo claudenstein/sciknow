@@ -9627,6 +9627,22 @@ body.task-bar-open {{ padding-top: 40px; }}
     <line x1="3"  y1="12" x2="21" y2="12"/>
     <line x1="3"  y1="18" x2="21" y2="18"/>
   </symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="4"/>
+    <line x1="12" y1="2"  x2="12" y2="4"/>
+    <line x1="12" y1="20" x2="12" y2="22"/>
+    <line x1="4.93" y1="4.93"  x2="6.34"  y2="6.34"/>
+    <line x1="17.66" y1="17.66" x2="19.07" y2="19.07"/>
+    <line x1="2"  y1="12" x2="4"  y2="12"/>
+    <line x1="20" y1="12" x2="22" y2="12"/>
+    <line x1="4.93" y1="19.07" x2="6.34"  y2="17.66"/>
+    <line x1="17.66" y1="6.34"  x2="19.07" y2="4.93"/>
+  </symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+  </symbol>
 </svg>
 
 <!-- Phase 30 — persistent global task bar.
@@ -10045,7 +10061,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 <div class="modal-overlay" id="wiki-modal" onclick="if(event.target===this)closeModal('wiki-modal')">
   <div class="modal wide">
     <div class="modal-header">
-      <h3>&#128218; Compiled Knowledge Wiki</h3>
+      <h3><svg class="icon icon--lg"><use href="#i-book-open"/></svg> Compiled Knowledge Wiki</h3>
       <button class="modal-close" onclick="closeModal('wiki-modal')" title="Close the Compiled Knowledge Wiki modal.">&times;</button>
     </div>
     <div class="tabs">
@@ -10347,7 +10363,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 <div class="modal-overlay" id="ask-modal" onclick="if(event.target===this)closeModal('ask-modal')">
   <div class="modal">
     <div class="modal-header">
-      <h3>&#128270; Ask the Corpus (RAG)</h3>
+      <h3><svg class="icon icon--lg"><use href="#i-search"/></svg> Ask the Corpus (RAG)</h3>
       <button class="modal-close" onclick="closeModal('ask-modal')" title="Close the Ask the Corpus modal.">&times;</button>
     </div>
     <div class="modal-body">
@@ -10386,7 +10402,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 <div class="modal-overlay" id="autowrite-config-modal" onclick="if(event.target===this)closeModal('autowrite-config-modal')">
   <div class="modal" style="max-width:480px;">
     <div class="modal-header">
-      <h3>&#9889; Autowrite</h3>
+      <h3><svg class="icon icon--lg"><use href="#i-zap"/></svg> Autowrite</h3>
       <button class="modal-close" onclick="closeModal('autowrite-config-modal')" title="Close the Autowrite Config modal.">&times;</button>
     </div>
     <div class="modal-body">
@@ -10441,7 +10457,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 <div class="modal-overlay" id="plan-modal" onclick="if(event.target===this)closeModal('plan-modal')">
   <div class="modal wide">
     <div class="modal-header">
-      <h3>&#128221; Plans</h3>
+      <h3><svg class="icon icon--lg"><use href="#i-file-text"/></svg> Plans</h3>
       <button class="modal-close" onclick="closeModal('plan-modal')" title="Close the Plans modal.">&times;</button>
     </div>
     <div class="tabs">
@@ -10630,7 +10646,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 <div class="modal-overlay" id="chapter-modal" onclick="if(event.target===this)closeModal('chapter-modal')">
   <div class="modal wide">
     <div class="modal-header">
-      <h3>&#9881; Chapter</h3>
+      <h3><svg class="icon icon--lg"><use href="#i-sliders"/></svg> Chapter</h3>
       <button class="modal-close" onclick="closeModal('chapter-modal')" title="Close the Chapter modal.">&times;</button>
     </div>
     <div class="tabs">
@@ -10713,7 +10729,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 <div class="modal-overlay" id="catalog-modal" onclick="if(event.target===this)closeModal('catalog-modal')">
   <div class="modal wide">
     <div class="modal-header">
-      <h3>&#128194; Browse Papers</h3>
+      <h3><svg class="icon icon--lg"><use href="#i-folder"/></svg> Browse Papers</h3>
       <button class="modal-close" onclick="closeModal('catalog-modal')" title="Close the Browse Papers modal.">&times;</button>
     </div>
     <div class="modal-body">
@@ -10750,7 +10766,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 <div class="modal-overlay" id="book-settings-modal" onclick="if(event.target===this)closeModal('book-settings-modal')">
   <div class="modal wide">
     <div class="modal-header">
-      <h3>&#9881; Book Settings</h3>
+      <h3><svg class="icon icon--lg"><use href="#i-sliders"/></svg> Book Settings</h3>
       <button class="modal-close" onclick="closeModal('book-settings-modal')" title="Close the Book Settings modal.">&times;</button>
     </div>
     <div class="tabs">
@@ -10985,7 +11001,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 <div class="modal-overlay" id="reconciliations-modal" onclick="if(event.target===this)closeModal('reconciliations-modal')">
   <div class="modal wide">
     <div class="modal-header">
-      <h3>&#128203; Preprint ↔ journal reconciliations</h3>
+      <h3><svg class="icon icon--lg"><use href="#i-clipboard"/></svg> Preprint ↔ journal reconciliations</h3>
       <button class="modal-close" onclick="closeModal('reconciliations-modal')" title="Close the Preprint Reconciliations modal.">&times;</button>
     </div>
     <div class="modal-body" style="font-size:13px;line-height:1.5;">
@@ -11005,7 +11021,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 <div class="modal-overlay" id="ai-help-modal" onclick="if(event.target===this)closeModal('ai-help-modal')">
   <div class="modal wide">
     <div class="modal-header">
-      <h3>&#128161; AI Actions &mdash; what each button does</h3>
+      <h3><svg class="icon icon--lg"><use href="#i-help-circle"/></svg> AI Actions &mdash; what each button does</h3>
       <button class="modal-close" onclick="closeModal('ai-help-modal')" title="Close the AI Actions Help modal.">&times;</button>
     </div>
     <div class="modal-body" style="font-size:13px;line-height:1.55;">
@@ -11193,7 +11209,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 <div class="modal-overlay" id="visuals-modal" onclick="if(event.target===this)closeModal('visuals-modal')">
   <div class="modal wide">
     <div class="modal-header">
-      <h3>&#128202; Visual Elements</h3>
+      <h3><svg class="icon icon--lg"><use href="#i-image"/></svg> Visual Elements</h3>
       <button class="modal-close" onclick="closeModal('visuals-modal')" title="Close the Visuals modal.">&times;</button>
     </div>
     <div class="modal-body" style="font-size:13px;">
@@ -11254,7 +11270,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 <div class="modal-overlay" id="backups-modal" onclick="if(event.target===this)closeModal('backups-modal')">
   <div class="modal wide">
     <div class="modal-header">
-      <h3>&#128190; Backups</h3>
+      <h3><svg class="icon icon--lg"><use href="#i-archive"/></svg> Backups</h3>
       <button class="modal-close" onclick="closeModal('backups-modal')" title="Close the Backups modal.">&times;</button>
     </div>
     <div class="modal-body" style="font-size:13px;">
@@ -11337,7 +11353,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 <div class="modal-overlay" id="projects-modal" onclick="if(event.target===this)closeModal('projects-modal')">
   <div class="modal wide">
     <div class="modal-header">
-      <h3>&#128193; Projects</h3>
+      <h3><svg class="icon icon--lg"><use href="#i-folder"/></svg> Projects</h3>
       <button class="modal-close" onclick="closeModal('projects-modal')" title="Close the Projects modal.">&times;</button>
     </div>
     <div class="modal-body">
@@ -11421,7 +11437,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 <div class="modal-overlay" id="setup-wizard-modal" onclick="if(event.target===this)closeModal('setup-wizard-modal')">
   <div class="modal wide">
     <div class="modal-header">
-      <h3>&#128736; Setup Wizard</h3>
+      <h3><svg class="icon icon--lg"><use href="#i-wand"/></svg> Setup Wizard</h3>
       <button class="modal-close" onclick="closeModal('setup-wizard-modal')" title="Close the Setup Wizard modal.">&times;</button>
     </div>
     <!-- Step progress trail -->
@@ -11693,7 +11709,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 <div class="modal-overlay" id="bundle-modal" onclick="if(event.target===this)closeModal('bundle-modal')">
   <div class="modal wide">
     <div class="modal-header">
-      <h3>&#128230; Snapshot Bundles</h3>
+      <h3><svg class="icon icon--lg"><use href="#i-package"/></svg> Snapshot Bundles</h3>
       <button class="modal-close" onclick="closeModal('bundle-modal')" title="Close the Snapshot Bundles modal.">&times;</button>
     </div>
     <div class="tabs">
@@ -11753,7 +11769,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 <div class="modal-overlay" id="tools-modal" onclick="if(event.target===this)closeModal('tools-modal')">
   <div class="modal wide">
     <div class="modal-header">
-      <h3>&#128736; Tools</h3>
+      <h3><svg class="icon icon--lg"><use href="#i-wrench"/></svg> Tools</h3>
       <button class="modal-close" onclick="closeModal('tools-modal')" title="Close the Tools modal.">&times;</button>
     </div>
     <div class="tabs">
@@ -11888,7 +11904,7 @@ body.task-bar-open {{ padding-top: 40px; }}
      onclick="if(event.target===this)closeModal('corpus-modal')">
   <div class="modal wide xwide">
     <div class="modal-header">
-      <h3>&#127793; Corpus &mdash; Enrich &amp; Expand</h3>
+      <h3><svg class="icon icon--lg"><use href="#i-sprout"/></svg> Corpus &mdash; Enrich &amp; Expand</h3>
       <button class="modal-close" onclick="closeModal('corpus-modal')" title="Close the Corpus modal.">&times;</button>
     </div>
     <div class="modal-body">
@@ -12464,7 +12480,7 @@ body.task-bar-open {{ padding-top: 40px; }}
      onclick="if(event.target===this)closeModal('pending-downloads-modal')">
   <div class="modal wide xwide">
     <div class="modal-header">
-      <h3>&#128203; Pending downloads</h3>
+      <h3><svg class="icon icon--lg"><use href="#i-clipboard"/></svg> Pending downloads</h3>
       <button class="modal-close" onclick="closeModal('pending-downloads-modal')" title="Close the Pending Downloads modal.">&times;</button>
     </div>
     <div class="modal-body">
@@ -12551,7 +12567,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 <div class="modal-overlay" id="kg-modal" onclick="if(event.target===this)closeModal('kg-modal')">
   <div class="modal wide">
     <div class="modal-header">
-      <h3>&#128279; Knowledge Graph</h3>
+      <h3><svg class="icon icon--lg"><use href="#i-link"/></svg> Knowledge Graph</h3>
       <button class="modal-close" onclick="closeModal('kg-modal')" title="Close the Knowledge Graph modal.">&times;</button>
     </div>
     <div class="tabs">
@@ -12733,7 +12749,7 @@ body.task-bar-open {{ padding-top: 40px; }}
      onclick="if(event.target===this)closeModal('viz-modal')">
   <div class="modal wide xwide">
     <div class="modal-header">
-      <h3>&#128200; Visualize</h3>
+      <h3><svg class="icon icon--lg"><use href="#i-layers"/></svg> Visualize</h3>
       <button class="modal-close" onclick="closeModal('viz-modal')" title="Close the Visualize modal.">&times;</button>
     </div>
     <!-- Phase 54.6.15 — shared theming bar above the tabs. Theme chips,
@@ -12899,7 +12915,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 <div class="modal-overlay" id="export-modal" onclick="if(event.target===this)closeModal('export-modal')">
   <div class="modal">
     <div class="modal-header">
-      <h3>&#128229; Export</h3>
+      <h3><svg class="icon icon--lg"><use href="#i-download"/></svg> Export</h3>
       <button class="modal-close" onclick="closeModal('export-modal')" title="Close the Export modal.">&times;</button>
     </div>
     <div class="modal-body">
@@ -12933,7 +12949,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 
 <button class="theme-toggle" onclick="toggleTheme()" id="theme-btn"
         title="Toggle between light and dark themes. Preference is saved to localStorage.">
-  <span id="theme-icon">&#9788;</span>
+  <svg class="icon" id="theme-icon-svg"><use id="theme-icon-use" href="#i-sun"/></svg>
   <span class="label" id="theme-label">Light</span>
 </button>
 
@@ -13049,7 +13065,8 @@ function toggleTheme() {{
 }}
 function updateThemeButton() {{
   const isDark = document.documentElement.dataset.theme === 'dark';
-  document.getElementById('theme-icon').innerHTML = isDark ? '&#9790;' : '&#9788;';
+  const use = document.getElementById('theme-icon-use');
+  if (use) use.setAttribute('href', isDark ? '#i-moon' : '#i-sun');
   document.getElementById('theme-label').textContent = isDark ? 'Dark' : 'Light';
 }}
 if (localStorage.getItem('theme')) {{
