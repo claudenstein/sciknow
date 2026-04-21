@@ -209,6 +209,25 @@ See [`docs/PROJECTS.md`](docs/PROJECTS.md) for the full design.
 sciknow is active; the [`docs/PHASE_LOG.md`](docs/PHASE_LOG.md) records
 every Phase commit. Most recent batches:
 
+- **54.6.165-172 (April 2026).** Full web UI redesign — "scholar's
+  editor, not LLM dashboard." Seven-commit arc replaces the Tailwind-
+  starter look with a considered writing environment: **real webfonts**
+  (Inter Tight for chrome, Newsreader with optical sizes for the
+  reader body, JetBrains Mono for code), **warm stone neutrals on
+  ivory paper**, a **deep teal accent** (no more indigo), and
+  desaturated semantic colours. **Unified `.btn` system** collapses
+  12 legacy button classes into one foundation with variant + size
+  modifiers. **SVG icon sprite** (21 monoline Lucide-inspired icons)
+  replaces emoji in the toolbar, topbar nav, peek/hide buttons, and
+  Stop button. **Right panel** becomes a segmented-control context
+  rail (Sources / Review / Comments) instead of three always-on
+  stacks. **⌘K command palette** ships 25 commands with fuzzy
+  subsequence match + keyboard navigation, accessible from a topbar
+  trigger pill. **Reader canvas** runs at 720px / 17px Newsreader
+  with a 3.6em drop cap on the opening paragraph. Rendering order:
+  tokens (165) → buttons (166) → context rail (167) → icons (168)
+  → sidebar + topbar typography (169) → command palette (170) →
+  topbar icons (171) → drop cap + utilities (172).
 - **54.6.164 (April 2026).** Collapsible reader columns — hide buttons on
   the left (chapters) and right (sources/review/comments) panes, with
   edge peek buttons to bring them back. New **Book Settings → View** tab
