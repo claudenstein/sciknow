@@ -7472,6 +7472,12 @@ body {{ font-family: var(--font-sans); color: var(--fg); background: var(--bg);
   display: flex; align-items: center;
   gap: 1px; flex-wrap: nowrap;
 }}
+/* Home anchor rendered as a nav-btn — reset default link chrome
+   (underline + visited/link colour) so it matches the sibling
+   <button>s visually. */
+.topbar-home {{ text-decoration: none; color: var(--fg-muted); }}
+.topbar-home:link, .topbar-home:visited {{ color: var(--fg-muted); }}
+.topbar-home:hover {{ color: var(--accent); }}
 .topbar .toolbar {{
   background: transparent; border: none; box-shadow: none;
   padding: 0; margin: 0; border-radius: 0;
@@ -9696,6 +9702,10 @@ body.task-bar-open {{ padding-top: 40px; }}
     <line x1="3"  y1="12" x2="21" y2="12"/>
     <line x1="3"  y1="18" x2="21" y2="18"/>
   </symbol>
+  <symbol id="i-home" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3 9.5 12 2l9 7.5V20a2 2 0 0 1-2 2h-4v-7h-6v7H5a2 2 0 0 1-2-2z"/>
+  </symbol>
   <symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor"
           stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
     <circle cx="12" cy="12" r="4"/>
@@ -9747,14 +9757,28 @@ body.task-bar-open {{ padding-top: 40px; }}
      estate. -->
 <header class="topbar" id="topbar">
   <div class="topbar__left">
-    <button class="nav-btn" onclick="openPlanModal()" title="View / edit / regenerate the book plan (the leitmotiv)"><svg class="icon"><use href="#i-file-text"/></svg> Plan</button>
+    <!-- Phase 54.6.193 — home anchor at the leftmost position. Clicks
+         navigate to `/`, which reloads into the default reader view
+         regardless of current URL or overlay state (Dashboard /
+         Corkboard / Chapter Reader). Escape key does the same
+         (see keydown handler). -->
+    <a class="nav-btn topbar-home" href="/"
+       title="Return to the reader home. Press Escape anywhere to do the same."
+       aria-label="Return to reader home">
+      <svg class="icon"><use href="#i-home"/></svg>
+    </a>
     <button class="nav-btn" onclick="showDashboard()" title="Book dashboard with stats + heatmap"><svg class="icon"><use href="#i-bar-chart"/></svg> Dashboard</button>
     <div class="nav-dropdown" id="book-dropdown">
       <button class="nav-btn" onclick="toggleNavDropdown('book-dropdown', event)"
-              title="Book-level surfaces: visual browse, history, snapshots, export, settings">
+              title="Book-level surfaces: plan / leitmotiv, visual browse, history, snapshots, export, settings">
         <svg class="icon"><use href="#i-book-open"/></svg> Book <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
       </button>
       <div class="nav-dropdown-menu" role="menu">
+        <!-- Phase 54.6.193 — Plan moves out of the topbar direct row
+             and into the Book menu as the first item: it's book-level
+             rather than per-session and belongs alongside Corkboard /
+             History / Snapshot / Export / Settings. -->
+        <button role="menuitem" onclick="openPlanModal()" title="View / edit / regenerate the book plan (the leitmotiv)."><svg class="icon"><use href="#i-file-text"/></svg> Plan</button>
         <button role="menuitem" onclick="showCorkboard()" title="Book-wide corkboard view: every chapter's sections as cards you can drag + reorder."><svg class="icon"><use href="#i-layout-grid"/></svg> Corkboard</button>
         <button role="menuitem" onclick="showVersions()" title="Per-draft version history. Every save keeps the prior version so you can diff or revert."><svg class="icon"><use href="#i-history"/></svg> History</button>
         <button role="menuitem" onclick="takeSnapshot()" title="Snapshot the whole book's draft state — safety net before a destructive operation like autowrite-all."><svg class="icon"><use href="#i-camera"/></svg> Snapshot</button>
@@ -18097,11 +18121,36 @@ document.addEventListener('keydown', function(e) {{
   const inInput = (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
                    || e.target.isContentEditable);
 
-  // ── Esc — close modals (Phase 14, kept) ──────────────────────────
+  // ── Esc — close the closest open overlay, or go home ────────────
+  // Phase 54.6.193: progressive disclosure — Escape peels one layer
+  // off at a time, and when nothing's open it navigates to `/` so
+  // the user always has a reliable "get me out of here" key.
+  // Priority: open modal → ⌘K palette → open nav dropdown → home.
+  // Typing inside an input is respected (browser blurs the field
+  // on Escape and we stay put) so Escape never navigates away from
+  // an unsaved edit unless the user presses it a second time.
   if (e.key === 'Escape') {{
-    document.querySelectorAll('.modal-overlay.open').forEach(m => {{
-      closeModal(m.id);
-    }});
+    const openModals = document.querySelectorAll('.modal-overlay.open');
+    if (openModals.length > 0) {{
+      openModals.forEach(m => closeModal(m.id));
+      return;
+    }}
+    const cmdk = document.getElementById('cmdk');
+    if (cmdk && cmdk.style.display === 'block') {{
+      closeCmdK();
+      return;
+    }}
+    const openDropdown = document.querySelector('.nav-dropdown.open');
+    if (openDropdown) {{
+      openDropdown.classList.remove('open');
+      return;
+    }}
+    if (inInput) return;
+    const dashView = document.getElementById('dashboard-view');
+    const onOverlayView = dashView && dashView.style.display === 'block';
+    if (window.location.pathname !== '/' || onOverlayView) {{
+      window.location.href = '/';
+    }}
     return;
   }}
 
