@@ -1,0 +1,221 @@
+# Phase 54.6.209 — roadmap 3.7.1: rule-based entity canonicalization
+# for the knowledge graph.
+#
+# The LLM-based `db extract-kg` pass emits entity names verbatim from
+# each source sentence, which is great for fidelity but disastrous for
+# recall: "CO2", "CO₂", "carbon dioxide", "Carbon Dioxide" all land as
+# separate rows in `knowledge_graph`. This alias file collapses them
+# onto a canonical form BEFORE insert.
+#
+# Format: top-level keys are the *canonical* form (lowercased). Values
+# are lists of additional spellings / synonyms / abbreviations to map
+# onto that canonical form. Matching is case-insensitive AFTER the
+# incoming name is lowercased + light-normalized (whitespace
+# collapsed, trailing punctuation stripped).
+#
+# Pre-existing `knowledge_graph` rows are NOT migrated by the insert-
+# time canonicalizer. Run `sciknow wiki compile --rebuild` to re-
+# extract triples through the new mapping, OR run a one-off backfill
+# query (see docs/ROADMAP_INGESTION.md §3.7.1 notes).
+#
+# Contributions: this file is intentionally editable in-repo. Add
+# aliases when you see duplicate-looking entities in the KG UI; the
+# next `wiki compile --rebuild` picks them up. Keep the canonical
+# form lowercase + unicode-normalized so the file survives an ASCII
+# round-trip.
+
+carbon dioxide:
+  - co2
+  - co₂
+  - "co 2"
+  - carbon-dioxide
+
+methane:
+  - ch4
+  - ch₄
+
+nitrous oxide:
+  - n2o
+  - n₂o
+
+sulfur hexafluoride:
+  - sf6
+
+ozone:
+  - o3
+  - o₃
+
+water vapor:
+  - water vapour
+  - h2o vapor
+  - h₂o vapor
+
+global mean surface temperature:
+  - gmst
+  - global surface temperature
+  - mean surface temperature
+  - global-mean surface temperature
+
+sea surface temperature:
+  - sst
+  - sea-surface temperature
+  - sea surface temperatures
+
+total solar irradiance:
+  - tsi
+  - solar irradiance
+  - total solar-irradiance
+
+sunspot number:
+  - ssn
+  - sunspots
+  - sunspot count
+  - sunspot-number
+
+north atlantic oscillation:
+  - nao
+
+el niño–southern oscillation:
+  - enso
+  - el niño southern oscillation
+  - el nino-southern oscillation
+  - el nino southern oscillation
+
+atlantic multidecadal oscillation:
+  - amo
+
+pacific decadal oscillation:
+  - pdo
+
+quasi-biennial oscillation:
+  - qbo
+
+arctic oscillation:
+  - ao
+
+southern annular mode:
+  - sam
+
+madden–julian oscillation:
+  - mjo
+  - madden julian oscillation
+  - madden-julian oscillation
+
+intertropical convergence zone:
+  - itcz
+
+hadley circulation:
+  - hadley cell
+  - hadley cells
+
+thermohaline circulation:
+  - thc
+  - meridional overturning circulation
+  - moc
+  - atlantic meridional overturning circulation
+  - amoc
+
+maunder minimum:
+  - maunder-minimum
+
+dalton minimum:
+  - dalton-minimum
+
+little ice age:
+  - lia
+
+medieval warm period:
+  - mwp
+  - medieval climate anomaly
+  - mca
+
+holocene:
+  - holocene epoch
+
+eemian:
+  - eem
+  - last interglacial
+  - lig
+
+ipcc:
+  - intergovernmental panel on climate change
+
+noaa:
+  - national oceanic and atmospheric administration
+
+nasa:
+  - national aeronautics and space administration
+
+cmip:
+  - coupled model intercomparison project
+  - cmip5
+  - cmip6
+
+reanalysis:
+  - atmospheric reanalysis
+  - climate reanalysis
+
+era5:
+  - era-5
+  - ecmwf reanalysis v5
+
+proxy data:
+  - paleoclimate proxy
+  - paleoclimate proxies
+  - proxy record
+  - proxy records
+  - proxy reconstruction
+  - proxy reconstructions
+
+tree ring:
+  - tree rings
+  - tree-ring
+  - dendrochronology
+  - dendroclimatology
+
+ice core:
+  - ice cores
+  - ice-core
+
+speleothem:
+  - speleothems
+  - cave deposit
+  - cave deposits
+
+radiative forcing:
+  - radiative-forcing
+
+climate sensitivity:
+  - equilibrium climate sensitivity
+  - ecs
+  - transient climate response
+  - tcr
+
+feedback:
+  - climate feedback
+  - climate feedbacks
+
+albedo:
+  - surface albedo
+  - planetary albedo
+
+aerosol:
+  - aerosols
+  - atmospheric aerosol
+  - atmospheric aerosols
+
+volcanic eruption:
+  - volcanic eruptions
+  - volcanic event
+  - volcanic events
+  - volcanism
+
+stratospheric aerosol:
+  - stratospheric aerosols
+  - stratospheric sulfate
+  - stratospheric sulphate
+
+greenhouse gas:
+  - greenhouse gases
+  - ghg
+  - ghgs

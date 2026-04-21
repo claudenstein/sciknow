@@ -755,6 +755,13 @@ def _extract_entities_and_kg(
     triples = data.get("triples", [])
     kg_count = 0
     if triples:
+        # Phase 54.6.209 — roadmap 3.7.1: collapse surface-variant
+        # entity names onto a canonical form before insert so
+        # "CO2" / "CO₂" / "carbon dioxide" / "Carbon Dioxide" all
+        # become one KG node. Predicate left alone (different
+        # vocabulary-stabilisation concern — see roadmap 3.7.2).
+        from sciknow.core.kg_canonicalize import canonicalize as _canon_entity
+
         with get_session() as session:
             session.execute(text(
                 "DELETE FROM knowledge_graph WHERE source_doc_id::text = :did"
@@ -762,9 +769,9 @@ def _extract_entities_and_kg(
             for t in triples:
                 if not isinstance(t, dict):
                     continue
-                subj = _entity_name(t.get("subject")).strip().lower()[:200]
+                subj = _canon_entity(_entity_name(t.get("subject")))[:200]
                 pred = _entity_name(t.get("predicate")).strip().lower()[:100]
-                obj = _entity_name(t.get("object")).strip().lower()[:200]
+                obj = _canon_entity(_entity_name(t.get("object")))[:200]
                 # Phase 48d — empty / whitespace-only source sentence
                 # flows through as NULL so the UI can render "(no
                 # source sentence)" consistently instead of "".
