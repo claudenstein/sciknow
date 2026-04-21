@@ -7928,9 +7928,18 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
    may want to be user-resizable. Opt-in via `class="modal resizable"`
    — the handle sits in the bottom-right corner. */
 .modal.resizable {{ resize: both; min-width: 520px; min-height: 320px; }}
-.modal-header {{ padding: var(--sp-4) var(--sp-5); border-bottom: 1px solid var(--border);
-                display: flex; align-items: center; justify-content: space-between; }}
-.modal-header h3 {{ font-size: 16px; font-weight: 600; color: var(--fg); }}
+.modal-header {{
+  padding: var(--sp-4) var(--sp-5);
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--sp-3);
+}}
+.modal-header h3 {{
+  font-family: var(--font-serif); font-size: 19px;
+  font-weight: 600; letter-spacing: -0.01em;
+  color: var(--fg); line-height: 1.2;
+  font-variation-settings: "opsz" 24;
+}}
 .modal-close {{
   font-size: 18px; padding: 2px 10px;
   background: transparent; color: var(--fg-muted);
@@ -7951,13 +7960,28 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
            color: var(--fg-muted); border: 1px solid var(--border); }}
 .sw-step.active {{ background: var(--accent-light); color: var(--accent);
                   border-color: var(--accent); font-weight: 600; }}
-.field label {{ display: block; font-size: 12px; font-weight: 500;
-                color: var(--fg-muted); margin-bottom: var(--sp-1); }}
-.field input, .field textarea, .field select {{ width: 100%; padding: 8px var(--sp-3);
-                font-size: 14px; border: 1px solid var(--border); border-radius: var(--r-md);
-                background: var(--bg); color: var(--fg); transition: border-color .12s; }}
-.field input:focus, .field textarea:focus {{ outline: none; border-color: var(--accent);
-                box-shadow: 0 0 0 3px var(--accent-light); }}
+.field label {{
+  display: block; font-size: 11px; font-weight: 600;
+  color: var(--fg-muted); margin-bottom: var(--sp-1);
+  text-transform: uppercase; letter-spacing: 0.06em;
+}}
+.field input, .field textarea, .field select {{
+  width: 100%; padding: 8px var(--sp-3);
+  font-family: var(--font-sans); font-size: 14px;
+  background: var(--bg-elevated); color: var(--fg);
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  transition: border-color var(--t-fast), box-shadow var(--t-fast);
+}}
+.field input:hover, .field textarea:hover, .field select:hover {{
+  border-color: var(--border-strong);
+}}
+.field input:focus, .field textarea:focus, .field select:focus {{
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light);
+}}
+.field input::placeholder, .field textarea::placeholder {{
+  color: var(--fg-faint);
+}}
 .field textarea {{ resize: vertical; min-height: 80px; font-family: var(--font-sans); }}
 .btn-primary {{
   font-size: 13px; padding: 7px 14px;
@@ -8294,16 +8318,33 @@ body.panel-hidden   .col-peek-panel   {{ display: block; }}
   border: 1px solid var(--border);
 }}
 .btn-link:hover {{ background: var(--accent-light); border-color: var(--accent); }}
-/* Phase 15 — modal tabs (Wiki Query / Browse) */
-.tabs {{ display: flex; gap: 0; padding: 0 var(--sp-5); border-bottom: 1px solid var(--border);
-         background: var(--toolbar-bg); }}
-.tab {{ background: transparent; border: none; padding: 10px var(--sp-4);
-       font-size: 13px; font-weight: 500; color: var(--fg-muted); cursor: pointer;
-       border-bottom: 2px solid transparent; margin-bottom: -1px;
-       transition: all .12s; display: flex; align-items: center; gap: 6px; }}
+/* Phase 15 — modal tabs (Wiki Query / Browse).
+   Phase 54.6.174 — tightened to match the scholar's-editor voice:
+   less padding, quieter resting state, cleaner active indicator. */
+.tabs {{
+  display: flex; gap: 0;
+  padding: 0 var(--sp-5);
+  border-bottom: 1px solid var(--border);
+  background: var(--toolbar-bg);
+}}
+.tab {{
+  background: transparent; border: none;
+  padding: 9px var(--sp-3) 8px;
+  font-family: var(--font-sans);
+  font-size: 12px; font-weight: 500;
+  letter-spacing: -0.003em;
+  color: var(--fg-muted); cursor: pointer;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+  transition: color var(--t-fast), border-bottom-color var(--t-fast);
+  display: flex; align-items: center; gap: 5px;
+}}
 .tab:hover {{ color: var(--fg); }}
-.tab.active {{ color: var(--accent); border-bottom-color: var(--accent); }}
-.tab-pane {{ animation: fadeIn .15s ease; }}
+.tab.active {{
+  color: var(--accent); border-bottom-color: var(--accent);
+  font-weight: 600;
+}}
+.tab:focus-visible {{ outline: 2px solid var(--accent); outline-offset: -2px; }}
+.tab-pane {{ animation: fadeIn 0.15s ease; }}
 /* Phase 15 — wiki page detail rendering */
 .wiki-page-list {{ list-style: none; padding: 0; }}
 .wiki-page-row {{ display: flex; align-items: center; gap: var(--sp-3);
