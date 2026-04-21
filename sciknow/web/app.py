@@ -8313,8 +8313,20 @@ body.sidebar-rail .sidebar-rail-btn {{ color: var(--accent); border-color: var(-
    <table><tr><td>...</td></tr></table> with no CSS; without rules
    the output is borderless tiny text. Scope to .vis-table-wrap so
    the styling doesn't leak to other tables (notably the heatmap). */
+/* Phase 54.6.201 — vis-table-wrap keeps its light-on-white appearance
+   in both themes: these tables are VLM-rendered facsimiles of paper
+   excerpts, so the white background is the intended "page from the
+   paper" look. Dark mode only adds a subtle border-outline so the
+   white card doesn't sit on pitch black without a frame. */
 .vis-table-wrap table {{ border-collapse: collapse; width: 100%;
                          font-size: 12px; line-height: 1.4; color: #111; }}
+[data-theme="dark"] .vis-table-wrap {{
+  box-shadow: 0 0 0 1px var(--border-strong);
+  border-radius: var(--r-sm);
+}}
+[data-theme="dark"] .vis-eq {{
+  box-shadow: 0 0 0 1px var(--border-strong);
+}}
 .vis-table-wrap th, .vis-table-wrap td {{
   border: 1px solid #d7d7d7; padding: 5px 8px; vertical-align: top;
   text-align: left; }}
@@ -8718,6 +8730,34 @@ body.sidebar-rail .sidebar-rail-btn {{ color: var(--accent); border-color: var(-
    .app-body and still toggle visibility via the same class. */
 body.sidebar-hidden .sidebar {{ display: none; }}
 body.panel-hidden    .panel   {{ display: none; }}
+
+/* Phase 54.6.200 — full-page routed views. When a modal was
+   opened via its URL (/plan, /settings, /wiki, …) the overlay
+   pins below the topbar and the modal fills the viewport
+   instead of floating inside a scrim. Sidebar + reader + panel
+   still exist behind the modal; press × or Escape to close
+   (pops URL back to /) and they're visible again. */
+body.routed-view .modal-overlay.open {{
+  top: 48px;  /* below the consolidated topbar */
+  padding: 0;
+  background: var(--bg);
+  backdrop-filter: none; -webkit-backdrop-filter: none;
+  align-items: stretch; justify-content: stretch;
+}}
+body.routed-view .modal-overlay.open .modal {{
+  width: 100%; max-width: none;
+  height: 100%; max-height: none;
+  border: none; border-radius: 0;
+  box-shadow: none;
+  animation: fadeIn 180ms ease;
+}}
+body.routed-view .modal-overlay.open .modal-header {{
+  padding: var(--sp-4) var(--sp-7);
+}}
+body.routed-view .modal-overlay.open .modal-body {{
+  padding: var(--sp-5) var(--sp-7);
+}}
+body.routed-view .col-peek-btn {{ display: none !important; }}
 .panel-controls {{ display: flex; justify-content: flex-end;
                    padding-bottom: 8px; margin-bottom: 4px;
                    border-bottom: 1px solid var(--border); }}
@@ -18301,6 +18341,12 @@ function _modalSuppressRoute() {{
 function openModal(id) {{
   document.getElementById(id).classList.add('open');
   const path = _MODAL_ROUTES[id];
+  if (path) {{
+    // Phase 54.6.200 — routed modals render as full-page views
+    // (body.routed-view). Toggling this class is how the CSS
+    // switches the overlay from floating-scrim to full-page.
+    document.body.classList.add('routed-view');
+  }}
   if (path && !_modalSuppressRoute() && window.location.pathname !== path) {{
     history.pushState({{ modal: id }}, '', path);
   }}
@@ -18316,6 +18362,10 @@ function closeModal(id) {{
       currentJobId = null;
     }}
   }}
+  // Phase 54.6.200 — clear the full-page routed-view state if no other
+  // routed modal is still open.
+  const stillOpen = document.querySelector('.modal-overlay.open');
+  if (!stillOpen) document.body.classList.remove('routed-view');
   // If we closed a routed modal and the current URL points at it, pop
   // the history so the URL returns to the book root.
   const path = _MODAL_ROUTES[id];
@@ -18329,6 +18379,7 @@ window.addEventListener('popstate', function () {{
   window._routeNavigating = true;
   try {{
     const path = window.location.pathname;
+    let routedOpen = false;
     // Close any currently-open modal that doesn't match
     document.querySelectorAll('.modal-overlay.open').forEach(function (m) {{
       const id = m.id;
@@ -18339,9 +18390,13 @@ window.addEventListener('popstate', function () {{
       if (_MODAL_ROUTES[id] === path) {{
         const el = document.getElementById(id);
         if (el && !el.classList.contains('open')) el.classList.add('open');
+        routedOpen = true;
         break;
       }}
     }}
+    // Phase 54.6.200 — sync the full-page routed-view body class
+    // so back/forward can exit the full-page view cleanly.
+    document.body.classList.toggle('routed-view', routedOpen);
   }} finally {{
     window._routeNavigating = false;
   }}
