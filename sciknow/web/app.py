@@ -8006,43 +8006,10 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
              text-transform: uppercase; letter-spacing: 0.06em; padding: 0 6px;
              align-self: center; }}
 
-/* ── Phase 54.6.179 — AI cluster.
-   Segmented pill grouping Autowrite / Write / Review / Revise so
-   they read as one workflow. Quiet "AI" chip on the left labels
-   the group without leaning on per-button prefixes. */
-.ai-cluster {{
-  display: inline-flex; align-items: stretch;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  box-shadow: var(--shadow-sm);
-  overflow: hidden;
-}}
-.ai-cluster__label {{
-  display: inline-flex; align-items: center;
-  padding: 0 10px;
-  font-family: var(--font-mono); font-size: 9px; font-weight: 600;
-  text-transform: uppercase; letter-spacing: 0.12em;
-  color: var(--fg-faint);
-  background: var(--toolbar-bg);
-  border-right: 1px solid var(--border);
-  user-select: none;
-}}
-.ai-cluster button {{
-  border: none;
-  border-right: 1px solid var(--border);
-  border-radius: 0;
-  background: transparent;
-  padding: 6px 12px;
-  box-shadow: none;
-}}
-.ai-cluster button:last-child {{ border-right: none; }}
-.ai-cluster button:hover {{
-  background: var(--toolbar-bg);
-  border-color: var(--border);
-  box-shadow: none;
-}}
-.ai-cluster button:focus-visible {{ outline-offset: -2px; }}
+/* Phase 54.6.188 — the AI cluster retired. The 4 AI verbs
+   (Autowrite / Write / Review / Revise) moved into a single
+   #ai-tb-dropdown in the toolbar. Reclaims ~280px of toolbar
+   width and matches the Verify / Critique / Extras grouping. */
 /* Modal infrastructure */
 .modal-overlay {{ display: none; position: fixed; inset: 0; background: var(--modal-overlay);
                   backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
@@ -9828,12 +9795,22 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="topbar__right toolbar" id="toolbar">
     <button class="primary" onclick="toggleEdit()" title="Manually edit the draft content (in-browser markdown editor with autosave)"><svg class="icon"><use href="#i-edit"/></svg> Edit</button>
     <div class="sep"></div>
-    <div class="ai-cluster" role="group" aria-label="AI actions">
-      <span class="ai-cluster__label" aria-hidden="true">AI</span>
-      <button onclick="doAutowrite()" title="Autonomous AI write → review → revise loop"><svg class="icon"><use href="#i-zap"/></svg> Autowrite</button>
-      <button onclick="doWrite()" title="AI drafts this section from scratch (single pass)"><svg class="icon"><use href="#i-feather"/></svg> Write</button>
-      <button onclick="doReview()" title="AI critic pass on this section"><svg class="icon"><use href="#i-message-square"/></svg> Review</button>
-      <button onclick="doRevise()" title="AI revises based on review feedback"><svg class="icon"><use href="#i-refresh-cw"/></svg> Revise</button>
+    <!-- Phase 54.6.188 — the AI verbs (Autowrite / Write / Review /
+         Revise) collapse into one dropdown. Saves horizontal space
+         in the toolbar and matches the Verify / Critique / Extras
+         grouping pattern. Each item stays one click away via the
+         dropdown; ⌘K reaches them directly by name. -->
+    <div class="nav-dropdown nav-dropdown-left tb-dropdown" id="ai-tb-dropdown">
+      <button onclick="toggleNavDropdown('ai-tb-dropdown', event)"
+              title="AI writing actions — autowrite loop, one-shot draft, review, revise">
+        <svg class="icon"><use href="#i-zap"/></svg> AI <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
+      </button>
+      <div class="nav-dropdown-menu" role="menu">
+        <button role="menuitem" onclick="doAutowrite()" title="Autonomous AI write → review → revise loop"><svg class="icon"><use href="#i-zap"/></svg> Autowrite</button>
+        <button role="menuitem" onclick="doWrite()" title="AI drafts this section from scratch (single pass)"><svg class="icon"><use href="#i-feather"/></svg> Write</button>
+        <button role="menuitem" onclick="doReview()" title="AI critic pass on this section"><svg class="icon"><use href="#i-message-square"/></svg> Review</button>
+        <button role="menuitem" onclick="doRevise()" title="AI revises based on review feedback"><svg class="icon"><use href="#i-refresh-cw"/></svg> Revise</button>
+      </div>
     </div>
     <div class="sep"></div>
     <div class="nav-dropdown nav-dropdown-left tb-dropdown" id="verify-tb-dropdown">
