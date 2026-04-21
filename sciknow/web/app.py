@@ -7298,6 +7298,19 @@ TEMPLATE = """\
 }}
 * {{ margin:0; padding:0; box-sizing:border-box; }}
 html {{ -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }}
+/* Phase 54.6.173 — warm scrollbars. Defaults read as cold/blue; these
+   echo the stone palette so the chrome stays quiet as you scroll. */
+* {{ scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }}
+*::-webkit-scrollbar {{ width: 10px; height: 10px; }}
+*::-webkit-scrollbar-track {{ background: transparent; }}
+*::-webkit-scrollbar-thumb {{
+  background: var(--border-strong); border-radius: 5px;
+  border: 2px solid transparent; background-clip: padding-box;
+}}
+*::-webkit-scrollbar-thumb:hover {{
+  background: var(--fg-faint); background-clip: padding-box;
+  border: 2px solid transparent;
+}}
 body {{ font-family: var(--font-sans); color: var(--fg); background: var(--bg);
         display: flex; flex-direction: column; height: 100vh; font-size: 14px; }}
 /* Phase 54.6 — top bar spans the full viewport width above the sidebar+main.
@@ -7516,6 +7529,100 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .main h2 {{ font-size: 24px; line-height: 1.25; }}
 .main h3 {{ font-size: 19px; line-height: 1.3; }}
 .main h4 {{ font-size: 16px; line-height: 1.35; }}
+
+/* ── Phase 54.6.173 — Reader content types.
+   Style the markdown elements a draft renders into so every page
+   reads as a considered essay rather than the browser default. */
+.main ul, .main ol {{
+  font-family: var(--font-serif); font-size: 17px;
+  line-height: 1.72; color: var(--fg);
+  margin: 0 0 var(--sp-4) 1.4em;
+}}
+.main li {{ margin-bottom: var(--sp-1); }}
+.main li::marker {{ color: var(--fg-faint); }}
+.main ul > li {{ list-style: disc; }}
+.main ol > li {{ list-style: decimal; }}
+
+.main blockquote {{
+  margin: var(--sp-4) 0;
+  padding: var(--sp-1) var(--sp-5);
+  border-left: 2px solid var(--accent);
+  font-family: var(--font-serif); font-style: italic;
+  font-size: 17px; line-height: 1.72;
+  color: var(--fg-muted);
+}}
+.main blockquote p {{ color: var(--fg-muted); margin-bottom: var(--sp-2); }}
+.main blockquote p:last-child {{ margin-bottom: 0; }}
+
+.main code {{
+  font-family: var(--font-mono); font-size: 0.9em;
+  padding: 1px 6px; background: var(--code-bg);
+  border-radius: var(--r-sm);
+  font-feature-settings: "tnum";
+}}
+.main pre {{
+  margin: var(--sp-4) 0;
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  overflow-x: auto;
+  font-family: var(--font-mono); font-size: 13px;
+  line-height: 1.6;
+}}
+.main pre code {{
+  background: transparent; padding: 0;
+  border-radius: 0; font-size: inherit;
+}}
+
+.main table {{
+  width: 100%;
+  margin: var(--sp-4) 0;
+  border-collapse: collapse;
+  font-family: var(--font-sans); font-size: 13px;
+}}
+.main thead th {{
+  text-align: left;
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 2px solid var(--border-strong);
+  font-weight: 600; font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--fg-muted);
+}}
+.main tbody td {{
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border);
+  color: var(--fg);
+}}
+.main tbody tr:last-child td {{ border-bottom: none; }}
+
+.main hr {{
+  border: none; height: 1px;
+  background: var(--border);
+  margin: var(--sp-6) auto;
+  width: 40%;
+}}
+
+.main figure {{ margin: var(--sp-5) 0; text-align: center; }}
+.main img, .main figure img {{
+  max-width: 100%; height: auto;
+  border-radius: var(--r-sm);
+}}
+.main figcaption {{
+  margin-top: var(--sp-2);
+  font-family: var(--font-sans); font-size: 12px;
+  font-style: italic; color: var(--fg-muted);
+}}
+
+.main strong {{ font-weight: 600; }}
+.main em {{ font-style: italic; }}
+
+.main a {{
+  color: var(--accent); text-decoration: none;
+  border-bottom: 1px solid var(--accent-light);
+  transition: border-color var(--t-fast);
+}}
+.main a:hover {{ border-bottom-color: var(--accent); }}
 .citation {{ color: var(--accent); cursor: pointer; font-weight: 600;
              text-decoration: none; padding: 0 1px;
              font-feature-settings: "tnum"; }}
