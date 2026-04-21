@@ -704,19 +704,19 @@ Scoring: **Impact** (H/M/L) × **Effort** (H/M/L) → **Verdict**.
 
 | # | Proposal | Axes | Impact | Effort | Verdict | Notes |
 |---|---|---|---|---|---|---|
-| 3.2.3 | Retraction + correction watcher (cron) | R, Q | M | L | **Ship** | 1-day commit, unambiguous win |
+| 3.2.3 | Retraction + correction watcher (cron) | R, Q | M | L | **Rejected** | User veto 2026-04-22: not needed |
 | 3.2.5 | Language detection + multi-lingual FTS | C, Q | M | L | **Ship** | Fixes silent FTS failures on non-EN papers |
 | 3.7.1 | KG entity canonicalization (rule-based) | Q | H | L | **Ship** | Hand-curated alias table first; Wikidata later |
 | 3.9.1 | RAPTOR summary verification | Q | M | L | **Ship** | Reuses Phase 54.6.83 claim-atomization |
 | 3.11.2 | Incremental refresh (`--since`) | S | M | L | **Ship** | 2-3 days, frequent usage win |
 | 3.11.4 | Budget-aware refresh (`--budget-time`) | R, S | L | L | **Ship** | 2 days; unblocks overnight runs |
 | 3.11.6 | Failure-mode clinic view | R, O | M | L | **Ship** | Surfaces data already in ingestion_jobs |
-| 3.0.1 | Expand OA resolver set (Europe PMC + CORE + OSF) | C | H | M | **Investigate** | Pilot with Europe PMC first; measure yield lift |
-| 3.1.1 | Routed converter backend (heuristic gate) | S, Q | H | M | **Investigate** | Need 20-PDF edge-case bench set first |
-| 3.3.1 | Semantic chunking within section | Q | M | M | **Investigate** | Benchmark vs current MRR before committing |
-| 3.4.3 | ColBERT late-interaction on abstracts collection | Q | M | M | **Investigate** | Cheap pilot; storage cost is the gate |
+| 3.0.1 | Expand OA resolver set (Europe PMC + CORE + OSF) | C | H | M | **Next Review** | Queued for evaluation after Ship cluster lands. Pilot with Europe PMC first; measure yield lift |
+| 3.1.1 | Routed converter backend (heuristic gate) | S, Q | H | M | **Next Review** | Queued for evaluation after Ship cluster lands. Need 20-PDF edge-case bench set first |
+| 3.3.1 | Semantic chunking within section | Q | M | M | **Next Review** | Queued for evaluation after Ship cluster lands. Benchmark vs current MRR before committing |
+| 3.4.3 | ColBERT late-interaction on abstracts collection | Q | M | M | **Next Review** | Queued for evaluation after Ship cluster lands. Cheap pilot; storage cost is the gate |
+| 3.6.1 | Citation-purpose classification | Q | M | M | **Next Review** | Queued for evaluation after Ship cluster lands. Port ACL-ARC / SciCite classifier |
 | 3.5.1 | Caption quality audit + retry pass | Q, O | M | L | **Investigate** | 30-sample rubric; adjust prompts iteratively |
-| 3.6.1 | Citation-purpose classification | Q | M | M | **Investigate** | Port ACL-ARC / SciCite classifier |
 | 3.8.1 | Hierarchical BERTopic clusters | C, Q | M | L | **Investigate** | Check: does hierarchy reveal genuine sub-topics or over-split? |
 | 3.0.2 | Velocity watcher nightly cron | O | L | L | **Investigate** | User preference call — do they want a digest? |
 | 3.2.1 | S2 author disambiguation | Q, C | M | M | **Defer** | Requires S2 author IDs per author; schema burden |
@@ -790,19 +790,26 @@ listed reason:
 
 ## 6. Next action
 
-Recommended starting point (the "Ship" cluster above is designed to
-land in one or two sittings):
+User decision 2026-04-22: ship the cluster **minus 3.2.3** (vetoed
+as unnecessary). After the cluster lands, revisit the five "Next
+Review" proposals flagged in §4 (3.0.1, 3.1.1, 3.3.1, 3.4.3, 3.6.1)
+and decide which ones to advance to Ship.
 
-1. **3.11.2 Incremental refresh** — biggest quality-of-life lift, low
-   risk, enables everything else. Land first.
-2. **3.11.6 Failure-mode clinic** — surface existing telemetry. Cheap.
-3. **3.7.1 Entity canonicalization (rule-based)** — unblocks KG UX
-   improvements; user-owned alias file.
-4. **3.2.3 Retraction watcher cron** — one afternoon, unambiguous
-   safety win.
-5. **3.2.5 Language detection + multi-dict FTS** — fixes a silent
-   failure mode (non-EN papers) at low cost.
+Shipping order (smallest → largest scope):
 
-Total time estimate for the Ship cluster: **~10-15 focused hours**,
-spread across 2-3 sessions. After shipping, reassess the
-Investigate cluster against the new baseline.
+1. **3.11.6 Failure-mode clinic** — read-only aggregation over the
+   existing `ingestion_jobs` table. No schema change.
+2. **3.11.4 Budget-aware refresh (`--budget-time`)** — CLI flag +
+   per-step clock check. No schema change.
+3. **3.2.5 Language detection + multi-lingual FTS** — adds a
+   language column + switches FTS dict per row. One migration.
+4. **3.9.1 RAPTOR summary verification** — reuses claim-atomization
+   (Phase 54.6.83). No schema change.
+5. **3.7.1 KG entity canonicalization (rule-based)** — alias file
+   shipped in-repo + normalization in extract-kg. No schema change.
+6. **3.11.2 Incremental refresh (`--since`)** — touches every step's
+   filter; biggest scope, best landed after the smaller ones are in.
+
+Total time estimate for the ship cluster (minus 3.2.3): **~10
+focused hours**, spread across 2-3 sessions. After shipping,
+reassess the Next Review set against the new baseline.

@@ -1063,6 +1063,129 @@ def reset(
 
 
 @app.command()
+def failures(
+    limit: int = typer.Option(
+        20,
+        "--limit",
+        "-n",
+        help="Max error classes to show.",
+    ),
+    stage: str = typer.Option(
+        None,
+        "--stage",
+        help="Filter to one stage: converting, metadata_extraction, "
+        "chunking, embedding, or a refresh step name.",
+    ),
+    since: str = typer.Option(
+        None,
+        "--since",
+        help="ISO8601 timestamp — only consider jobs created after this.",
+    ),
+):
+    """Aggregate the `ingestion_jobs` table by (stage, error signature).
+
+    Phase 54.6.205 — fulfils roadmap item 3.11.6 (failure-mode clinic).
+    The `ingestion_jobs` table already records every stage outcome;
+    this command surfaces it as a grouped failure class table so the
+    user can see "7 papers failed metadata_extraction with an LLM
+    timeout, 4 papers failed converting with MinerU OOM" at a glance.
+
+    Error signature = the first 80 chars of the error message,
+    whitespace-collapsed. Same underlying cause usually produces the
+    same prefix, which is enough to cluster visually without NLP.
+    """
+    import re as _re
+    from datetime import datetime as _dt
+    from sqlalchemy import text
+
+    from sciknow.storage.db import get_session
+
+    params: dict = {"limit": int(limit)}
+    where = ["status = 'failed'"]
+    if stage:
+        where.append("stage = :stage")
+        params["stage"] = stage
+    if since:
+        try:
+            _dt.fromisoformat(since.replace("Z", "+00:00"))
+        except ValueError:
+            console.print(f"[red]Invalid --since:[/red] {since!r} — expected ISO8601")
+            raise typer.Exit(2)
+        where.append("created_at >= CAST(:since AS timestamptz)")
+        params["since"] = since
+    where_sql = " AND ".join(where)
+
+    # Extract a short signature from details->>'error'. details is
+    # JSONB; `jsonb_path_query_first` gracefully handles missing keys.
+    sql = text(f"""
+        WITH j AS (
+            SELECT
+                stage,
+                COALESCE(
+                    substring(regexp_replace(
+                        (details->>'error'),
+                        '\\s+', ' ', 'g'
+                    ) FROM 1 FOR 80),
+                    '(no error text)'
+                ) AS signature,
+                created_at,
+                document_id
+            FROM ingestion_jobs
+            WHERE {where_sql}
+        )
+        SELECT
+            stage,
+            signature,
+            COUNT(*) AS n,
+            MIN(created_at) AS first_seen,
+            MAX(created_at) AS last_seen
+        FROM j
+        GROUP BY stage, signature
+        ORDER BY n DESC, last_seen DESC
+        LIMIT :limit
+    """)
+
+    with get_session() as session:
+        rows = session.execute(sql, params).fetchall()
+
+    if not rows:
+        console.print("[green]No failed ingestion jobs[/green] match that filter.")
+        return
+
+    # Rich table
+    from rich.table import Table
+
+    t = Table(
+        title=f"Ingestion failures"
+        + (f" · stage={stage}" if stage else "")
+        + (f" · since={since}" if since else "")
+        + f" · top {len(rows)}",
+        show_lines=False,
+    )
+    t.add_column("Stage", style="cyan")
+    t.add_column("N", justify="right", style="magenta")
+    t.add_column("Last seen", style="dim")
+    t.add_column("Signature")
+    for r in rows:
+        t.add_row(
+            r.stage,
+            str(r.n),
+            r.last_seen.strftime("%Y-%m-%d %H:%M") if r.last_seen else "",
+            (r.signature or "")[:100],
+        )
+    console.print(t)
+
+    total = sum(r.n for r in rows)
+    console.print(
+        f"\n[dim]Total failed jobs in window: {total}. "
+        "Stage names match the ingestion state machine "
+        "(converting / metadata_extraction / chunking / embedding) "
+        "or the refresh step ('db enrich', 'catalog raptor build', "
+        "'db caption-visuals', …). Pass --stage to narrow.[/dim]"
+    )
+
+
+@app.command()
 def stats():
     """Show paper counts and ingestion status breakdown."""
     from sqlalchemy import func, text
