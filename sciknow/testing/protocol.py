@@ -9544,6 +9544,83 @@ def l1_phase54_6_145_finalize_draft_surface() -> None:
     )
 
 
+def l1_phase54_6_148_book_settings_type_picker() -> None:
+    """Phase 54.6.148 — Book Settings Basics tab gets the type picker +
+    info panel + round-trips via PUT /api/book.
+
+    Symmetric to the 54.6.147 wizard wiring — post-creation users can
+    switch project type (and thus the Level-3 fallback default) without
+    dropping to the CLI. The info panel reuses the cached
+    window._swBookTypes from the wizard's loader, so the Book Settings
+    modal doesn't re-fetch on every open if the wizard ran earlier.
+
+    Pins the three layers that the wizard test also pins, plus the
+    server-side validation of book_type.
+    """
+    from sciknow.testing.helpers import get_test_client, web_app_full_source
+    client = get_test_client()
+
+    # A) PUT /api/book accepts book_type
+    openapi = client.get("/openapi.json").json()
+    put_schema = openapi.get("paths", {}).get("/api/book", {}).get("put", {})
+    body = (put_schema.get("requestBody") or {}).get("content", {})
+    form = (body.get("application/x-www-form-urlencoded") or {}).get("schema", {})
+    ref = form.get("$ref", "")
+    if ref.startswith("#/components/schemas/"):
+        schema = openapi.get("components", {}).get("schemas", {}).get(ref.split("/")[-1], {})
+        props = set(schema.get("properties", {}).keys())
+    else:
+        props = set(form.get("properties", {}).keys())
+    assert "book_type" in props, (
+        f"PUT /api/book must accept book_type form field (Phase 54.6.148). "
+        f"Got: {sorted(props)}"
+    )
+
+    # B) Bad book_type gets 400 (server-side validation against registry)
+    import inspect
+    from sciknow.web import app as web_app
+    src = inspect.getsource(web_app.api_book_update)
+    assert "validate_type_slug" in src, (
+        "PUT /api/book must validate book_type against the ProjectType "
+        "registry before updating the column — otherwise a typo silently "
+        "makes the project fall back to scientific_book"
+    )
+
+    # C) _get_book_data selects book_type + _api_book returns it
+    data_src = inspect.getsource(web_app._get_book_data)
+    assert "book_type" in data_src, (
+        "_get_book_data must SELECT book_type so GET /api/book can "
+        "return the current value for the Basics dropdown to restore"
+    )
+    api_book_src = inspect.getsource(web_app.api_book)
+    assert "book_type" in api_book_src, (
+        "GET /api/book response must include the current book_type"
+    )
+
+    # D) Template + JS wiring
+    tmpl = web_app_full_source()
+    assert 'id="bs-book-type"' in tmpl, (
+        "Book Settings Basics tab must have the dropdown (id=bs-book-type)"
+    )
+    assert 'id="bs-book-type-info"' in tmpl, (
+        "Book Settings Basics tab must have the info panel "
+        "(id=bs-book-type-info)"
+    )
+    assert 'onchange="bsUpdateTypeInfo()"' in tmpl, (
+        "type dropdown must invoke bsUpdateTypeInfo() on change"
+    )
+    for fn in ("populateBookSettingsTypeDropdown", "bsUpdateTypeInfo"):
+        assert f"function {fn}" in tmpl or f"async function {fn}" in tmpl, (
+            f"Book Settings JS must define {fn}() (Phase 54.6.148)"
+        )
+
+    # E) Save path includes book_type in FormData
+    assert "fd.append('book_type'" in tmpl, (
+        "saveBookSettings must send book_type in the FormData (Phase 54.6.148). "
+        "Without this, the dropdown is read-only and the round-trip breaks."
+    )
+
+
 def l1_phase54_6_147_book_types_api_and_wizard() -> None:
     """Phase 54.6.147 — /api/book-types + setup-wizard dropdown/info panel.
 
@@ -10774,6 +10851,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_146_concept_density_resolver,
     # Phase 54.6.147 — /api/book-types + wizard dropdown/info + CLI columns
     l1_phase54_6_147_book_types_api_and_wizard,
+    # Phase 54.6.148 — Book Settings type picker + info panel + PUT round-trip
+    l1_phase54_6_148_book_settings_type_picker,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness

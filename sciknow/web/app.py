@@ -404,7 +404,8 @@ def _persist_llm_usage(job_id: str) -> None:
 def _get_book_data():
     with get_session() as session:
         book = session.execute(text("""
-            SELECT id::text, title, description, plan, status, custom_metadata
+            SELECT id::text, title, description, plan, status, custom_metadata,
+                   book_type
             FROM books WHERE id::text = :bid
         """), {"bid": _book_id}).fetchone()
 
@@ -686,6 +687,17 @@ async def api_book():
     # modal can render metrics + a "last refreshed" stamp without a
     # second round-trip.
     style_fingerprint = meta.get("style_fingerprint") if isinstance(meta, dict) else None
+    # Phase 54.6.148 — expose book_type so Book Settings can restore
+    # the dropdown selection, and derive the project-type default for
+    # the effective-target display so users see where the fallback
+    # currently lands.
+    from sciknow.core.project_type import get_project_type
+    book_type = (book[6] if book and len(book) > 6 else None) or "scientific_book"
+    try:
+        pt = get_project_type(book_type)
+        default_tcw = pt.default_target_chapter_words
+    except Exception:
+        default_tcw = 6000
     return {
         "id": book[0] if book else "",
         "title": book[1] if book else "",
@@ -693,7 +705,8 @@ async def api_book():
         "plan": (book[3] or "") if book else "",
         "status": (book[4] or "draft") if book else "draft",
         "target_chapter_words": target_chapter_words,  # may be None → client shows default
-        "default_target_chapter_words": 6000,
+        "default_target_chapter_words": default_tcw,
+        "book_type": book_type,
         "style_fingerprint": style_fingerprint,
         "chapters": len(chapters),
         "drafts": len(drafts),
@@ -708,16 +721,23 @@ async def api_book_update(
     description: str = Form(None),
     plan: str = Form(None),
     target_chapter_words: int = Form(None),
+    book_type: str = Form(None),  # Phase 54.6.148
 ):
     """Update the book's title, description (short blurb), plan
     (the 200-500 word thesis/scope document used by the writer prompt),
-    or length target. All fields are optional — only the ones you pass
-    get updated.
+    length target, or project type. All fields are optional — only the
+    ones you pass get updated.
 
     Phase 17 — target_chapter_words lives in books.custom_metadata as
     a JSONB key so we can add more book-level settings without a
     schema change each time. Passing a zero or negative value clears
-    the setting (reverts to the default 6000).
+    the setting (reverts to the project-type default via 54.6.143's
+    fallback chain).
+
+    Phase 54.6.148 — book_type can be changed post-creation. Validated
+    against the ProjectType registry (rejects unknown slugs). Changing
+    type only affects future autowrite runs via the resolver's Level 3
+    fallback; explicit per-chapter / per-section targets are unchanged.
     """
     updates = []
     params: dict = {"bid": _book_id}
@@ -730,6 +750,16 @@ async def api_book_update(
     if plan is not None:
         updates.append("plan = :plan")
         params["plan"] = plan
+    if book_type is not None:
+        # Validate against the registry so a typo doesn't silently
+        # downgrade to the default fallback in get_project_type.
+        from sciknow.core.project_type import validate_type_slug
+        try:
+            validate_type_slug(book_type)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        updates.append("book_type = :btype")
+        params["btype"] = book_type
     if target_chapter_words is not None:
         # Merge into JSONB so we preserve any other keys. We use the
         # `||` concat operator + jsonb_build_object so the JSON shape
@@ -9337,17 +9367,28 @@ body.task-bar-open {{ padding-top: 40px; }}
         </div>
         <div class="field" style="display:flex;gap:8px;align-items:flex-end;">
           <div style="flex:1;">
+            <label>Project type</label>
+            <select id="bs-book-type" onchange="bsUpdateTypeInfo()"
+                    title="Phase 54.6.148 — change the book type. Drives autowrite defaults via the fallback chain (per-section > per-chapter > book custom_metadata > project-type default > hardcoded 6000). Changing the type doesn't touch explicit overrides you've already set; it only shifts the Level-3 fallback."/>
+          </div>
+          <div style="flex:1;">
             <label>Target words per chapter</label>
             <input type="number" id="bs-target-chapter-words" min="0" step="500"
-                   placeholder="6000 (default)"
-                   title="Autowrite and write use this as the per-chapter word target; per-section share = chapter target ÷ section count. 0 clears the override back to the 6000 default."/>
-          </div>
-          <div style="flex:2;font-size:11px;color:var(--fg-muted);padding-bottom:8px;">
-            Per-section target = chapter target ÷ number of sections.
-            Set <strong>0</strong> to clear the override and use the default.
-            Override per section in the Chapter modal's Sections tab.
+                   placeholder="(type default)"
+                   title="Autowrite and write use this as the per-chapter word target. Leave blank to inherit the project-type default (shown in the info panel below). Set 0 to clear. Per-section share = chapter target ÷ section count — unless concept-density sizing (54.6.146) fires, which overrides when a section has a bullet plan."/>
           </div>
         </div>
+        <!-- Phase 54.6.148 — same concept-density info panel as the wizard. -->
+        <div id="bs-book-type-info"
+             style="margin-top:6px;padding:10px 12px;background:var(--toolbar-bg);border:1px solid var(--border);border-radius:6px;font-size:12px;line-height:1.5;color:var(--fg);">
+          <em style="color:var(--fg-muted);">Loading type info…</em>
+        </div>
+        <p style="font-size:11px;color:var(--fg-muted);margin:8px 0 0;">
+          Sections with a bullet plan auto-size bottom-up (concept count × wpc midpoint).
+          Sections without a plan fall back to chapter target ÷ section count.
+          Override per section in the Chapter modal's Sections tab.
+          See <code>docs/RESEARCH.md §24</code> for the research behind these ranges.
+        </p>
         <div id="bs-basics-meta" style="margin-top:10px;font-size:11px;color:var(--fg-muted);"></div>
         <div style="display:flex;gap:8px;align-items:center;margin-top:14px;">
           <button class="btn-primary" onclick="saveBookSettings('basics')"
@@ -22298,7 +22339,65 @@ async function showChapterReader() {{
 async function openBookSettings() {{
   openModal('book-settings-modal');
   switchBookSettingsTab('bs-basics');
+  // Phase 54.6.148 — reuse the wizard's book-types loader for the
+  // Basics-tab dropdown + info panel. swLoadBookTypes caches in
+  // window._swBookTypes so the subsequent bsUpdateTypeInfo() reads
+  // without a second fetch.
+  await swLoadBookTypes();
+  await populateBookSettingsTypeDropdown();
   await loadBookSettings();
+}}
+
+// Phase 54.6.148 — wire the Basics-tab book-type dropdown. Same
+// registry that powers the wizard (window._swBookTypes), just pointed
+// at a different `<select>` id. Kept separate from swLoadBookTypes so
+// the two dropdowns don't fight over the `<option>` list.
+async function populateBookSettingsTypeDropdown() {{
+  const sel = document.getElementById('bs-book-type');
+  if (!sel || !window._swBookTypes) return;
+  sel.innerHTML = '';
+  for (const t of window._swBookTypes) {{
+    const opt = document.createElement('option');
+    opt.value = t.slug;
+    opt.textContent = `${{t.display_name}} (${{t.default_target_chapter_words.toLocaleString()}} words/chap)`;
+    sel.appendChild(opt);
+  }}
+}}
+
+function bsUpdateTypeInfo() {{
+  const panel = document.getElementById('bs-book-type-info');
+  const sel = document.getElementById('bs-book-type');
+  if (!panel || !sel || !window._swBookTypes) return;
+  const t = window._swBookTypes.find(x => x.slug === sel.value);
+  if (!t) {{ panel.innerHTML = ''; return; }}
+  const [clo, chi]   = t.concepts_per_section_range;
+  const [wlo, whi]   = t.words_per_concept_range;
+  const [slo, shi]   = t.section_at_midpoint_range;
+  const chap         = t.default_target_chapter_words;
+  const nchap        = t.default_chapter_count;
+  const totalLo      = (chap * nchap * 0.7).toLocaleString();
+  const totalHi      = (chap * nchap * 1.3).toLocaleString();
+  const tcwInput     = document.getElementById('bs-target-chapter-words');
+  if (tcwInput && !tcwInput.value) {{
+    tcwInput.placeholder = `(type default: ${{chap.toLocaleString()}})`;
+  }}
+  panel.innerHTML = `
+    <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 12px;">
+      <span style="color:var(--fg-muted);">Description:</span>
+      <span>${{_escHtml(t.description)}}</span>
+      <span style="color:var(--fg-muted);">Default chapters:</span>
+      <span>${{nchap}} &middot; ${{chap.toLocaleString()}} words each
+            ${{t.is_flat ? '<em>(flat IMRaD — one chapter)</em>' : ''}}</span>
+      <span style="color:var(--fg-muted);">Concepts / section:</span>
+      <span>${{clo}}–${{chi}} novel chunks (Cowan 2001)</span>
+      <span style="color:var(--fg-muted);">Words / concept:</span>
+      <span>${{wlo}}–${{whi}} (midpoint ${{Math.floor((wlo + whi) / 2)}})</span>
+      <span style="color:var(--fg-muted);">Section at midpoint:</span>
+      <span>${{slo.toLocaleString()}}–${{shi.toLocaleString()}} words</span>
+      <span style="color:var(--fg-muted);">Typical book total:</span>
+      <span>~${{totalLo}}–${{totalHi}} words</span>
+    </div>
+  `;
 }}
 
 function switchBookSettingsTab(name) {{
@@ -22350,6 +22449,12 @@ async function loadBookSettings() {{
     document.getElementById('bs-description').value = data.description || '';
     document.getElementById('bs-target-chapter-words').value = (data.target_chapter_words != null) ? String(data.target_chapter_words) : '';
     document.getElementById('bs-plan').value = data.plan || '';
+    // Phase 54.6.148 — restore the current book_type + refresh info panel
+    const typeSel = document.getElementById('bs-book-type');
+    if (typeSel && data.book_type) {{
+      typeSel.value = data.book_type;
+      bsUpdateTypeInfo();
+    }}
     // Basics meta — chapter / draft / gaps counts come through the
     // same endpoint, so surface them as a read-only summary.
     const meta = document.getElementById('bs-basics-meta');
@@ -22409,6 +22514,9 @@ async function saveBookSettings(tab) {{
     const tcw = document.getElementById('bs-target-chapter-words').value;
     // Blank leaves unchanged; 0 clears back to default; positive sets.
     if (tcw !== '') fd.append('target_chapter_words', tcw);
+    // Phase 54.6.148 — send book_type too so type changes round-trip.
+    const typeSel = document.getElementById('bs-book-type');
+    if (typeSel && typeSel.value) fd.append('book_type', typeSel.value);
   }} else if (tab === 'leitmotiv') {{
     fd.append('plan', document.getElementById('bs-plan').value);
   }}
