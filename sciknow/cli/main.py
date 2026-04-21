@@ -399,6 +399,126 @@ def bench_visuals_ranker_cmd(
     console.print(f"\n[dim]Results written to[/dim] {out_path}")
 
 
+@app.command(name="bench-idea-density")
+def bench_idea_density_cmd(
+    sample_per_type: int = typer.Option(
+        500, "-n", "--sample-per-type",
+        help="Number of sections sampled per canonical section type "
+             "(abstract / introduction / methods / results / discussion "
+             "/ conclusion / related_work). 500 × 7 ≈ 4-8 min wall. "
+             "Drop to 100-200 for a quick smoke; raise for tighter "
+             "confidence intervals.",
+    ),
+    output_json: bool = typer.Option(
+        False, "--json",
+        help="Emit machine-readable JSON instead of the Rich table.",
+    ),
+    tag: str = typer.Option(
+        "", "--tag",
+        help="Free-form label stamped into the output JSONL filename.",
+    ),
+):
+    """Phase 54.6.160 — Brown 2008 propositional idea-density regression.
+
+    Computes empirical words-per-concept per section type by sampling
+    the corpus's paper_sections, running Brown 2008 P-density (Brown
+    et al., 2008, doi:10.3758/BRM.40.2.540) via spaCy POS tagging,
+    fitting ``word_count ~ n_ideas`` per section type, and reporting
+    the slope as the empirical wpc.
+
+    This is the "publishable on its own" experiment RESEARCH.md §24
+    §gaps lists. Complements (does not replace) the 54.6.146
+    research-grounded project-type wpc defaults — those come from a
+    literature survey; this gives corpus-specific numbers.
+
+    spaCy is required and not a default sciknow dependency:
+
+      uv add spacy
+      python -m spacy download en_core_web_sm
+
+    Without it the command exits with a pointed install message.
+
+    Output: per-section-type {n, mean word count, mean p-density,
+    slope wpc, R², wpc IQR}. Compare `slope_wpc` and `wpc_median`
+    against `sciknow book types` for the shipped defaults.
+
+    Writes the full report to
+    ``{data_dir}/bench/idea_density-<ts>[-tag].jsonl``.
+    """
+    from sciknow.cli import preflight
+    preflight()
+
+    import json as _json
+    from datetime import datetime as _dt, timezone as _tz
+    from pathlib import Path as _P
+    from rich.table import Table as _RT
+    from sciknow.config import settings as _settings
+    from sciknow.testing import idea_density_regression as idr
+
+    console.print(
+        f"[bold]Brown 2008 idea-density regression[/bold] "
+        f"(sample={sample_per_type} per type, "
+        f"{len(idr._CANONICAL_SECTIONS)} canonical types)"
+    )
+    console.print("[dim]spaCy POS tagging ~100 ms per section. "
+                  "Wall time scales with sample size × n_types.[/dim]\n")
+
+    try:
+        report = idr.run_regression(sample_per_type=sample_per_type)
+    except RuntimeError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]regression failed: {exc}[/red]")
+        raise typer.Exit(3)
+
+    if output_json:
+        console.print_json(_json.dumps(report.to_dict()))
+    else:
+        t = _RT(
+            title=(f"Brown 2008 idea-density per section type  "
+                   f"(n={report.n_total} sections, {report.elapsed_s:.1f}s)"),
+            show_lines=False,
+        )
+        t.add_column("Section", style="bold")
+        t.add_column("n", justify="right")
+        t.add_column("Mean words", justify="right")
+        t.add_column("Mean P-density", justify="right")
+        t.add_column("Slope wpc", justify="right")
+        t.add_column("R²", justify="right")
+        t.add_column("wpc median", justify="right")
+        t.add_column("wpc IQR", overflow="fold")
+        for st, r in report.by_type.items():
+            t.add_row(
+                st,
+                str(r.n_sections),
+                f"{r.mean_word_count:.0f}",
+                f"{r.mean_p_density:.3f}",
+                f"{r.slope_wpc:.1f}",
+                f"{r.r_squared:.2f}",
+                f"{r.wpc_median:.0f}",
+                f"{r.wpc_q1:.0f}–{r.wpc_q3:.0f}",
+            )
+        console.print(t)
+        console.print(
+            "\n[dim]slope_wpc: OLS slope of word_count ~ n_ideas; "
+            "wpc_median: median of per-section word/idea ratio; "
+            "compare to `sciknow book types` shipped wpc ranges.[/dim]"
+        )
+
+    # Persist to bench dir for comparability with other runs
+    ts = _dt.now(_tz.utc).strftime("%Y%m%dT%H%M%SZ")
+    slug = f"idea_density-{ts}"
+    if tag:
+        slug += f"-{tag}"
+    out_dir = _P(_settings.data_dir) / "bench"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{slug}.jsonl"
+    with out_path.open("w") as f:
+        f.write(_json.dumps(report.to_dict()) + "\n")
+    console.print(f"\n[dim]Saved to {out_path}[/dim]")
+
+
 @app.command(name="bench-vlm-gen")
 def bench_vlm_gen_cmd(
     n: int = typer.Option(

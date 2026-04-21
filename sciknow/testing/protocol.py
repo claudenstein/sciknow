@@ -9544,6 +9544,84 @@ def l1_phase54_6_145_finalize_draft_surface() -> None:
     )
 
 
+def l1_phase54_6_160_idea_density_regression_surface() -> None:
+    """Phase 54.6.160 — Brown 2008 idea-density regression surface.
+
+    RESEARCH.md §24 §gaps "publishable on its own" future-work item.
+    Ships as optional — spaCy is not a default sciknow dep. This L1
+    pins the module + CLI shape without requiring spaCy to be
+    installed (the runtime path yields a pointed RuntimeError with
+    install instructions if spaCy is missing; tested by inspecting
+    the error-message substring rather than trying to run it).
+
+    Pins:
+      (A) module + public functions + dataclasses
+      (B) Brown 2008 POS set matches the formula (V + Adj + Adv +
+          Prep + Conj via universal POS tags)
+      (C) CLI registered with expected flags
+      (D) Runtime error message cites both the install command AND
+          the model-download command (dep failure is the common case)
+      (E) Canonical-section list matches 54.6.157's
+    """
+    import inspect
+    from sciknow.testing import idea_density_regression as idr
+    from sciknow.cli import main as main_cli
+    from sciknow.testing.bench import b_corpus_section_length_distribution
+
+    # A) Public API present
+    for name in ("run_regression", "SectionMetric",
+                 "RegressionPerType", "RegressionReport"):
+        assert hasattr(idr, name), f"idea_density_regression.{name} missing"
+
+    # B) POS set matches the Brown 2008 formula. Required tags:
+    # VERB/AUX (verbs), ADJ (adjectives), ADV (adverbs), ADP
+    # (prepositions), CCONJ/SCONJ (conjunctions).
+    expected = {"VERB", "AUX", "ADJ", "ADV", "ADP", "CCONJ", "SCONJ"}
+    assert idr._P_DENSITY_POS == expected, (
+        f"_P_DENSITY_POS must match Brown 2008 (V+Adj+Adv+Prep+Conj). "
+        f"Got {idr._P_DENSITY_POS!r}, expected {expected!r}"
+    )
+
+    # C) CLI registered with the right flags
+    cmd_names = {cmd.name for cmd in main_cli.app.registered_commands}
+    assert "bench-idea-density" in cmd_names, (
+        "`sciknow bench-idea-density` CLI missing (Phase 54.6.160)"
+    )
+    sig = inspect.signature(main_cli.bench_idea_density_cmd)
+    for p in ("sample_per_type", "output_json", "tag"):
+        assert p in sig.parameters, f"bench-idea-density missing flag {p!r}"
+
+    # D) Install-message contents — catches refactors that silently
+    # drop the "download the model too" line (the common second failure)
+    loader_src = inspect.getsource(idr._load_spacy)
+    assert "uv add spacy" in loader_src, (
+        "spaCy install message must include `uv add spacy` — a common "
+        "failure is `pip install spacy` in a uv project"
+    )
+    assert "python -m spacy download en_core_web_sm" in loader_src, (
+        "install message must also tell users to download the English "
+        "model — spaCy will import fine without it but the regression "
+        "will crash at first use"
+    )
+
+    # E) Canonical sections match 54.6.157. A drift between the two
+    # means the panel UI would show one set and this regression
+    # another, confusing comparison.
+    bench_src = inspect.getsource(b_corpus_section_length_distribution)
+    # The 54.6.157 function lists canonical sections as a Python list literal
+    expected_sections = {"abstract", "introduction", "methods", "results",
+                         "discussion", "conclusion", "related_work"}
+    for st in expected_sections:
+        assert st in bench_src, (
+            f"54.6.157 bench must include {st!r} in canonical sections"
+        )
+        assert st in idr._CANONICAL_SECTIONS, (
+            f"54.6.160 regression must use the same canonical-section "
+            f"list as 54.6.157. Drift found: {st!r} missing from "
+            f"idea_density_regression._CANONICAL_SECTIONS"
+        )
+
+
 def l1_phase54_6_159_section_length_panel() -> None:
     """Phase 54.6.159 — Book Settings UI panel for 54.6.157 bench data.
 
@@ -11737,6 +11815,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_158_unfreeze_stale_book_targets,
     # Phase 54.6.159 — Book Settings section-length UI panel
     l1_phase54_6_159_section_length_panel,
+    # Phase 54.6.160 — Brown 2008 idea-density regression surface
+    l1_phase54_6_160_idea_density_regression_surface,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness
