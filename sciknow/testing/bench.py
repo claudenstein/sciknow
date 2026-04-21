@@ -459,6 +459,105 @@ def b_corpus_section_coverage() -> Iterable[BenchMetric]:
             )
 
 
+def b_corpus_section_length_distribution() -> Iterable[BenchMetric]:
+    """Phase 54.6.157 — corpus-grounded section-length validation of
+    docs/RESEARCH.md §24.
+
+    For every canonical section type (introduction / methods / results /
+    discussion), compute the IQR of word counts in THIS corpus's
+    ``paper_sections`` table. Emit both the raw q1/median/q3 and a
+    delta-string against §24's reference IQRs (sourced from PubMed
+    N=61,517 in the brief). The delta tells you whether your corpus
+    sits on-band, skews shorter, or skews longer than the general
+    scientific-paper distribution — useful input for tuning the
+    Phase 54.6.146 concept-density wpc ranges.
+
+    §24 reference IQRs (PubMed):
+        introduction: 400-760 words
+        results:      610-1660
+        discussion:   820-1480
+
+    This is the minimal defensible form of §24's "corpus-grounded
+    concept→word regression" future-work item (idea density via Brown
+    2008 POS measure is deferred — that needs a spaCy dependency we
+    don't have yet; section-length IQRs are the downstream of concept
+    density × wpc and give a useful validation signal without the NLP
+    stack).
+    """
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+
+    # Reference IQRs from RESEARCH.md §24. These are the PubMed
+    # (N=61,517) IQRs quantifyinghealth.com 2021 reported per canonical
+    # section. Comparing our corpus against these shows whether the
+    # corpus's genre mix is paper-like, monograph-like, or mixed.
+    REFERENCE_IQRS = {
+        "introduction": (400, 760),
+        "results":      (610, 1660),
+        "discussion":   (820, 1480),
+    }
+    # Canonical order — matches b_corpus_section_coverage for visual parity
+    canonical = [
+        "abstract", "introduction", "methods", "results",
+        "discussion", "conclusion", "related_work",
+    ]
+
+    with get_session() as session:
+        rows = session.execute(text("""
+            SELECT section_type,
+                   COUNT(*) AS n,
+                   percentile_cont(0.25) WITHIN GROUP (ORDER BY word_count) AS q1,
+                   percentile_cont(0.5)  WITHIN GROUP (ORDER BY word_count) AS med,
+                   percentile_cont(0.75) WITHIN GROUP (ORDER BY word_count) AS q3
+            FROM paper_sections
+            WHERE word_count IS NOT NULL AND word_count > 0
+              AND section_type = ANY(:cans)
+            GROUP BY section_type
+        """), {"cans": canonical}).fetchall()
+
+    if not rows:
+        skip("no paper_sections with word_count")
+
+    stats_by_type = {
+        r[0]: {
+            "n":   int(r[1] or 0),
+            "q1":  int(round(r[2] or 0)),
+            "med": int(round(r[3] or 0)),
+            "q3":  int(round(r[4] or 0)),
+        }
+        for r in rows
+    }
+
+    for st in canonical:
+        s = stats_by_type.get(st)
+        if not s or s["n"] == 0:
+            continue
+        note_parts = [f"n={s['n']}", f"median={s['med']:,}w"]
+        ref = REFERENCE_IQRS.get(st)
+        if ref:
+            ref_q1, ref_q3 = ref
+            # Alignment: does our IQR overlap the reference IQR?
+            overlap = not (s["q3"] < ref_q1 or s["q1"] > ref_q3)
+            if overlap:
+                # Shift direction: compare medians
+                ref_median = (ref_q1 + ref_q3) // 2
+                if s["med"] < ref_q1:
+                    align = "shorter-skewed"
+                elif s["med"] > ref_q3:
+                    align = "longer-skewed"
+                else:
+                    align = "aligned"
+            else:
+                align = ("below-range" if s["q3"] < ref_q1 else "above-range")
+            note_parts.append(f"ref IQR {ref_q1}-{ref_q3} → {align}")
+        yield BenchMetric(
+            f"iqr_{st}",
+            f"{s['q1']}-{s['q3']}",
+            "words",
+            note=" · ".join(note_parts),
+        )
+
+
 def b_corpus_year_distribution() -> Iterable[BenchMetric]:
     """Recency skew. Too recent = missing foundational work; too old =
     missing SOTA. Report min/median/max year + pct since 2020."""
@@ -1172,6 +1271,7 @@ _FAST: list[tuple[str, BenchFn]] = [
     ("corpus", b_corpus_chunk_stats),
     ("corpus", b_corpus_chunk_size_distribution),  # Phase 51.2
     ("corpus", b_corpus_section_coverage),
+    ("corpus", b_corpus_section_length_distribution),  # Phase 54.6.157
     ("corpus", b_corpus_year_distribution),
     ("corpus", b_pdf_backend_mix),                  # Phase 51.2
     ("qdrant", b_qdrant_collection_stats),

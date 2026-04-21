@@ -9544,6 +9544,63 @@ def l1_phase54_6_145_finalize_draft_surface() -> None:
     )
 
 
+def l1_phase54_6_157_section_length_distribution_bench() -> None:
+    """Phase 54.6.157 — corpus-grounded section-length IQR benchmark.
+
+    Minimal defensible form of RESEARCH.md §24's "corpus-grounded
+    concept→word regression" future-work item (Brown 2008 POS-based
+    idea density deferred — needs a spaCy dependency we don't have).
+    Section-length IQRs are the downstream of concept-density × wpc
+    and give a useful validation signal without the NLP stack.
+
+    Pins:
+      (A) bench function present + registered in _FAST layer
+      (B) references the §24 PubMed IQRs for intro / results /
+          discussion so alignment checks are grounded — catches a
+          refactor that changes the canonical reference numbers
+      (C) emits an alignment annotation (aligned / shorter-skewed /
+          longer-skewed / below-range / above-range) so the note
+          column is actionable, not just raw numbers
+    """
+    import inspect
+    from sciknow.testing import bench as bench_mod
+
+    # A) Function present
+    assert hasattr(bench_mod, "b_corpus_section_length_distribution"), (
+        "bench.b_corpus_section_length_distribution missing (Phase 54.6.157)"
+    )
+    # Registered in _FAST layer (this is a cheap descriptive bench,
+    # shouldn't bump to _LIVE or bigger)
+    fast_names = {fn.__name__ for _cat, fn in bench_mod._FAST}
+    assert "b_corpus_section_length_distribution" in fast_names, (
+        "b_corpus_section_length_distribution must be in the _FAST layer "
+        "(it's a pure SQL query, zero model calls)"
+    )
+
+    # B) References the three §24 reference IQRs with exact values
+    src = inspect.getsource(bench_mod.b_corpus_section_length_distribution)
+    for marker, expected in [
+        ('"introduction": (400, 760)', "intro IQR"),
+        ('"results":      (610, 1660)', "results IQR"),
+        ('"discussion":   (820, 1480)', "discussion IQR"),
+    ]:
+        assert marker in src, (
+            f"{expected} hardcoded to RESEARCH.md §24 PubMed values "
+            f"(N=61,517). A refactor that loses these reference numbers "
+            f"silently breaks the alignment annotation. Missing marker: "
+            f"{marker!r}"
+        )
+
+    # C) Emits alignment tags
+    for tag in ("aligned", "shorter-skewed", "longer-skewed",
+                "below-range", "above-range"):
+        assert tag in src, (
+            f"alignment annotation must emit '{tag}' so users can tell "
+            f"at a glance whether their corpus matches the §24 reference "
+            f"distribution per section type"
+        )
+
+
 def l1_phase54_6_156_auto_plan_entire_book_button() -> None:
     """Phase 54.6.156 — Book Settings "Auto-plan entire book" button.
 
@@ -11558,6 +11615,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_155_auto_plan_chapter_button,
     # Phase 54.6.156 — Book Settings auto-plan entire book button
     l1_phase54_6_156_auto_plan_entire_book_button,
+    # Phase 54.6.157 — corpus-grounded section-length IQR benchmark
+    l1_phase54_6_157_section_length_distribution_bench,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness

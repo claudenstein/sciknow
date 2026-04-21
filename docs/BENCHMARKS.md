@@ -126,6 +126,25 @@ RESEARCH.md §7.X.4 target was "+15 P@1 over caption-only baseline". The ablatio
 
 Latency: ~1.0 s/item on CPU with the LLM co-resident on GPU (bge-reranker-v2-m3 CPU fallback). Interactive-acceptable.
 
+## Corpus section-length validation vs RESEARCH.md §24 (Phase 54.6.157, 2026-04-21)
+
+Empirical check of the concept-density resolver's reference numbers. Run `sciknow bench --layer fast` — the new `b_corpus_section_length_distribution` function walks `paper_sections.word_count` and emits per-section-type IQRs, tagged against the §24 PubMed reference distribution (`quantifyinghealth.com` 2021, N=61,517).
+
+Global-cooling corpus (n=807 papers, ~32k sections):
+
+| Section | Corpus n | Corpus IQR | §24 PubMed IQR | Alignment |
+|---|---:|---:|---:|---|
+| `introduction` | 640 | 361–1,029 | 400–760 | **aligned** (median 630 sits inside reference) |
+| `results` | 156 | 305–1,520 | 610–1,660 | **aligned** (median 650 sits inside reference) |
+| `discussion` | 293 | 292–1,198 | 820–1,480 | **shorter-skewed** (median 625 vs reference median ~1,150) |
+| `methods` | 453 | 149–862 | — | no §24 reference |
+| `conclusion` | 535 | 206–642 | — | no §24 reference |
+| `abstract` | 280 | 170–299 | — | no §24 reference |
+
+**Reading**: introduction and results align with PubMed norms. Discussion skews meaningfully shorter — the corpus includes a lot of monograph-style chapter discussions and climate-science commentary where "discussion" tends to be a one-paragraph wrap rather than the full multi-hypothesis PubMed shape. For the concept-density resolver specifically this means the trade-science-band wpc (500–800 for `scientific_book`) is a reasonable target; lifting `scientific_book` defaults to monograph wpc would over-write discussion sections.
+
+**Scope caveat**: this is the minimal defensible form of §24's full "concept-density regression" future-work item. Brown (2008) POS-based propositional idea density is the published measure; implementing it requires a spaCy dependency we don't carry yet. Section-length IQRs are the downstream of concept-density × wpc, so they give a useful validation signal without the NLP stack. If the idea-density regression becomes a priority, Brown 2008 + the existing `chunker_version`-stamped sections are the substrate.
+
 ## Retrieval scorecard — 2026-04-20, chunk-level FTS (Phase 54.6.136 vs 54.6.135)
 
 Switching `_postgres_fts` from `paper_metadata.search_vector` (title+abstract+keywords+journal) to `chunks.search_vector` (a GENERATED tsvector over chunk body text). Same corpus, same probe set, same RRF weights. Artifacts: `20260420T181318Z.jsonl` → `20260420T183309Z.jsonl`.
