@@ -11997,6 +11997,34 @@ function startStream(jobId) {{
       currentEventSource = null;
       currentJobId = null;
     }}
+    else if (evt.type === 'retrieval_density_adjust') {{
+      // Phase 54.6.151 — surface the 54.6.150 widener in the log panel
+      // so users see the adjustment happen live instead of only in the
+      // backend log. Shown in the accent colour to distinguish it from
+      // pure progress events.
+      const delta = (evt.new_target || 0) - (evt.base_target || 0);
+      const deltaStr = (delta >= 0 ? '+' : '') + delta.toLocaleString();
+      body.innerHTML += '<div style="font-size:11px;color:var(--accent);padding:4px 0;" '
+        + 'title="' + _escHtml(evt.explanation || '') + '">'
+        + '&#9876; density widener: ' + (evt.n_chunks || 0) + ' chunks · '
+        + 'target ' + (evt.base_target || 0).toLocaleString() + ' &rarr; '
+        + (evt.new_target || 0).toLocaleString() + ' words (' + deltaStr + ')'
+        + '</div>';
+    }}
+    else if (evt.type === 'section_length_warning') {{
+      // Phase 54.6.151 — Guideline 3 (Delgado 2018 digital-section
+      // ceiling). Soft warning, non-blocking: autowrite still runs at
+      // the requested target, but the user sees that the section is
+      // above the comfort band.
+      body.innerHTML += '<div style="font-size:11px;color:var(--warning);padding:4px 0;" '
+        + 'title="' + _escHtml(evt.explanation || '') + '">'
+        + '&#9888;&#65039; section length: '
+        + (evt.target || 0).toLocaleString() + ' words exceeds the '
+        + (evt.soft_ceiling || 3000).toLocaleString() + '-word digital-comfort ceiling '
+        + '(RESEARCH.md &sect;24 guideline 3 — Delgado 2018). '
+        + 'Consider splitting the section.'
+        + '</div>';
+    }}
     else if (evt.type === 'done') {{
       stats.done('done');
       setStreamCursor(body, false);

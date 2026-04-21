@@ -4266,6 +4266,54 @@ def _autowrite_section_body(
         except Exception as exc:  # noqa: BLE001
             logger.debug("retrieval_density_adjust skipped: %s", exc)
 
+    # Phase 54.6.151 — digital-section soft ceiling (RESEARCH.md §24
+    # Guideline 3, Delgado 2018 screen-reading comprehension penalty).
+    # Checks the FINAL effective target (after optional 54.6.150 widener)
+    # and emits a warning when it exceeds the comfort band. Non-blocking:
+    # autowrite still proceeds at the requested target. Threshold is
+    # 3,000 for most types (digital expository text) but lifted to
+    # 5,000 for academic_monograph because monograph sections can
+    # legitimately sit in the 3k-4k band per RESEARCH.md §24 (reader
+    # is an expert; chunk templates inflate effective capacity per
+    # Gobet & Clarkson 2004).
+    _SOFT_CEILING_DEFAULT = 3000
+    _SOFT_CEILING_BY_TYPE = {
+        "academic_monograph": 5000,  # research-grade pedagogy
+    }
+    try:
+        from sqlalchemy import text as _sql2
+        with get_session() as _s2:
+            _bt_row2 = _s2.execute(_sql2(
+                "SELECT book_type FROM books WHERE id::text = :b LIMIT 1"
+            ), {"b": book_id}).fetchone()
+        _book_type2 = (_bt_row2[0] if _bt_row2 else None) or "scientific_book"
+        _soft_ceiling = _SOFT_CEILING_BY_TYPE.get(_book_type2, _SOFT_CEILING_DEFAULT)
+        if effective_target_words > _soft_ceiling:
+            _msg = (
+                f"target_words={effective_target_words:,} exceeds the "
+                f"{_soft_ceiling:,}-word digital-comfort ceiling for book "
+                f"type {_book_type2!r} (Delgado 2018 screen penalty; "
+                f"RESEARCH.md §24 guideline 3). Consider splitting the "
+                f"section for better absorption."
+            )
+            log.event(
+                "section_length_warning",
+                target=effective_target_words,
+                soft_ceiling=_soft_ceiling,
+                book_type=_book_type2,
+            )
+            yield {
+                "type": "section_length_warning",
+                "target": effective_target_words,
+                "soft_ceiling": _soft_ceiling,
+                "book_type": _book_type2,
+                "explanation": _msg,
+            }
+            logger.info("Phase 54.6.151 — %s/%s: %s",
+                        str(ch_id)[:8], section_type, _msg)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("section_length_warning check skipped: %s", exc)
+
     # Phase 32.6 — Compound learning Layer 0: open the autowrite_runs row
     # NOW (after retrieval succeeded) and persist the retrieval set with
     # source_position = SearchResult.rank. The run_id is held in a local

@@ -9544,6 +9544,79 @@ def l1_phase54_6_145_finalize_draft_surface() -> None:
     )
 
 
+def l1_phase54_6_151_section_length_ceiling_and_widener_ui() -> None:
+    """Phase 54.6.151 — concept-density visibility polish.
+
+    Two small additions on top of 54.6.150:
+      (A) Digital-section soft ceiling (RESEARCH.md §24 guideline 3,
+          Delgado 2018). After the 54.6.150 widener runs, if the final
+          effective target exceeds the per-book-type soft ceiling
+          (3,000 for most types, 5,000 for academic_monograph), a
+          non-blocking section_length_warning is emitted.
+      (B) SSE stream handler surfaces retrieval_density_adjust +
+          section_length_warning events in the autowrite log panel
+          so the user sees them live, not only post-hoc in the log.
+
+    Pins both halves so a future refactor can't silently decouple
+    the backend emission from the UI rendering.
+    """
+    import inspect
+    from sciknow.core import book_ops
+    from sciknow.testing.helpers import web_app_full_source
+
+    # A) Backend emits section_length_warning in the autowrite body
+    body_src = inspect.getsource(book_ops._autowrite_section_body)
+    assert "section_length_warning" in body_src, (
+        "_autowrite_section_body must emit section_length_warning "
+        "(Phase 54.6.151) when the final target exceeds the soft ceiling"
+    )
+    # Threshold must be reasonable (Delgado-2018 3000 for expository)
+    # and monograph carve-out must exist (RESEARCH.md §24 acknowledges
+    # monograph sections can legitimately push past 3k because the
+    # reader is an expert with chunk templates per Gobet & Clarkson).
+    assert "_SOFT_CEILING_DEFAULT" in body_src, (
+        "Phase 54.6.151 must expose _SOFT_CEILING_DEFAULT as a named "
+        "constant so the threshold is auditable"
+    )
+    assert "academic_monograph" in body_src and "5000" in body_src, (
+        "Phase 54.6.151 must carve out academic_monograph at 5,000 — "
+        "monograph readers tolerate longer sections (RESEARCH.md §24)"
+    )
+    # Delgado/guideline-3 attribution must appear in the warning text
+    # so a future contributor can trace back why 3,000
+    assert ("Delgado" in body_src or "guideline 3" in body_src), (
+        "section_length_warning explanation must cite Delgado 2018 or "
+        "RESEARCH.md §24 guideline 3 so the threshold origin is auditable"
+    )
+
+    # Ordering: the ceiling check must run AFTER the widener so it
+    # evaluates the FINAL target, not the pre-widener midpoint.
+    widener_pos = body_src.find("_adjust_target_for_retrieval_density")
+    ceiling_pos = body_src.find("section_length_warning")
+    assert 0 <= widener_pos < ceiling_pos, (
+        "section_length_warning must be emitted AFTER the retrieval-"
+        f"density widener. Got widener={widener_pos}, ceiling={ceiling_pos}"
+    )
+
+    # B) SSE handler surfaces both events
+    src = web_app_full_source()
+    for event_type in ("retrieval_density_adjust", "section_length_warning"):
+        assert f"evt.type === '{event_type}'" in src, (
+            f"Autowrite SSE handler must render the '{event_type}' event "
+            f"in the log panel (Phase 54.6.151). Without this, the "
+            f"54.6.150 widener / ceiling warning only shows up in "
+            f"server-side logs — users don't see it happen."
+        )
+
+    # Widener rendering must show the before/after numbers + chunk count
+    # so users can audit the adjustment without opening the JSONL log
+    for expected in ("base_target", "new_target", "n_chunks"):
+        assert expected in src, (
+            f"retrieval_density_adjust handler must render '{expected}' "
+            f"so the user can audit the widener live"
+        )
+
+
 def l1_phase54_6_150_retrieval_density_widener() -> None:
     """Phase 54.6.150 — retrieval-density widener (RESEARCH.md §24 §4).
 
@@ -11026,6 +11099,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_149_resolved_targets_endpoint,
     # Phase 54.6.150 — retrieval-density widener (RESEARCH.md §24 §4)
     l1_phase54_6_150_retrieval_density_widener,
+    # Phase 54.6.151 — section-length ceiling + widener UI surfacing
+    l1_phase54_6_151_section_length_ceiling_and_widener_ui,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness
