@@ -7593,7 +7593,7 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .ch-toggle {{ background: transparent; border: none; color: var(--fg);
              font-size: 13px; cursor: pointer; padding: 2px 4px;
              margin-right: 2px; line-height: 1; opacity: 0.7;
-             transition: transform 0.15s ease, opacity 0.12s ease, color 0.12s ease;
+             transition: transform var(--t-fast), opacity var(--t-fast), color var(--t-fast);
              display: inline-block; width: 18px; height: 18px;
              vertical-align: middle; border-radius: 3px; }}
 .ch-toggle:hover {{ color: var(--accent); opacity: 1;
@@ -7814,6 +7814,15 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .u-pill     {{ padding: 2px 8px; }}
 .u-pill-md  {{ padding: 4px 8px; }}
 .u-pill-lg  {{ padding: 6px 8px; }}
+/* Phase 54.6.184 — purge wave 3 combo utilities. Hints + margins
+   + flex layouts that appear 10+ times as a single style attr. */
+.u-note      {{ font-size: 11px; color: var(--fg-muted); margin-bottom: 8px; }}
+.u-note-sm   {{ font-size: 12px; color: var(--fg-muted); margin-bottom: 8px; }}
+.u-note-md   {{ font-size: 12px; color: var(--fg-muted); margin-bottom: 10px; }}
+.u-note-lg   {{ font-size: 12px; color: var(--fg-muted); margin-bottom: 12px; }}
+.u-note-xs   {{ font-size: 11px; color: var(--fg-muted); margin-bottom: 6px; }}
+.u-empty     {{ padding: 24px; text-align: center; color: var(--fg-muted); }}
+.u-col-num   {{ flex: 1; min-width: 80px; }}
 
 /* ── Phase 54.6.168 — Monoline icon system.
    Inline SVG sprite at the top of <body> defines <symbol>s;
@@ -8069,7 +8078,7 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
                        font-weight: 600; margin: 0 2px; }}
 .viz-theme-chip {{ width: 18px; height: 18px; border-radius: 50%;
                    border: 1px solid var(--border); cursor: pointer; padding: 0;
-                   transition: transform 0.1s ease, box-shadow 0.1s ease; }}
+                   transition: transform var(--t-fast), box-shadow var(--t-fast); }}
 .viz-theme-chip[data-theme="paper"]           {{ background: #f3f5f9; }}
 .viz-theme-chip[data-theme="deep-space"]      {{ background: #060b18; }}
 .viz-theme-chip[data-theme="blueprint"]       {{ background: #061530; }}
@@ -8273,7 +8282,7 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .stat-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
               gap: var(--sp-3); margin-bottom: var(--sp-5); }}
 .stat-tile {{ padding: var(--sp-4); background: var(--bg-elevated); border: 1px solid var(--border);
-              border-radius: var(--r-lg); transition: all .15s; }}
+              border-radius: var(--r-lg); transition: all var(--t-fast); }}
 .stat-tile:hover {{ box-shadow: var(--shadow-md); transform: translateY(-1px); }}
 .stat-tile .num {{ font-size: 26px; font-weight: 700; color: var(--accent);
                   letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }}
@@ -8286,7 +8295,7 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
                           color: var(--fg-muted); }}
 .raptor-bar .raptor-lvl strong {{ display: block; font-size: 13px; color: var(--accent); }}
 /* Phase 14.2 — empty-state UX for chapters without drafts */
-.ch-title.clickable {{ cursor: pointer; transition: color .12s; }}
+.ch-title.clickable {{ cursor: pointer; transition: color var(--t-fast); }}
 .ch-title.clickable:hover {{ color: var(--accent); }}
 .ch-group.selected .ch-title {{ color: var(--accent); }}
 .ch-group.selected {{ background: var(--accent-light); border-radius: var(--r-sm); }}
@@ -8303,7 +8312,7 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .empty-section-picker {{ display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-top: var(--sp-4); }}
 .section-chip {{ font-size: 12px; padding: 6px 14px; border: 1px solid var(--border);
                 background: var(--bg); color: var(--fg); border-radius: 999px;
-                cursor: pointer; transition: all .12s; }}
+                cursor: pointer; transition: all var(--t-fast); }}
 .section-chip:hover {{ border-color: var(--accent); color: var(--accent); }}
 .section-chip.active {{ background: var(--accent); color: var(--accent-fg);
                         border-color: var(--accent); }}
@@ -8478,7 +8487,7 @@ body.panel-hidden   .col-peek-panel   {{ display: block; }}
                  color: var(--fg); border: 1px solid var(--border); padding: 8px 14px;
                  border-radius: 20px; cursor: pointer; font-size: 16px; z-index: 100;
                  display: flex; align-items: center; gap: 6px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-                 transition: all .2s; }}
+                 transition: all var(--t-fast); }}
 .theme-toggle:hover {{ background: var(--accent); color: white; border-color: var(--accent); }}
 .theme-toggle .label {{ font-size: 11px; }}
 /* Edit */
@@ -8509,10 +8518,10 @@ body.panel-hidden   .col-peek-panel   {{ display: block; }}
                border-bottom: 2px solid var(--border); }}
 .heatmap td {{ padding: 6px 10px; text-align: center; border: 1px solid var(--border); }}
 .heatmap .ch-label {{ text-align: left; font-weight: 600; white-space: nowrap; }}
-.heatmap .ch-label.clickable {{ cursor: pointer; transition: color .12s; }}
+.heatmap .ch-label.clickable {{ cursor: pointer; transition: color var(--t-fast); }}
 .heatmap .ch-label.clickable:hover {{ color: var(--accent); }}
 .heatmap .ch-label-num {{ color: var(--fg-muted); font-weight: 500; margin-right: 4px; }}
-.heatmap .ch-label-edit {{ opacity: 0; margin-left: 4px; transition: opacity .12s; color: var(--accent); }}
+.heatmap .ch-label-edit {{ opacity: 0; margin-left: 4px; transition: opacity var(--t-fast); color: var(--accent); }}
 .heatmap .ch-label.clickable:hover .ch-label-edit {{ opacity: 1; }}
 .heatmap th {{ font-size: 11px; text-transform: capitalize; }}
 .hm-cell.off-template {{ background: transparent; color: var(--fg-faint); opacity: 0.4;
@@ -8559,7 +8568,7 @@ body.panel-hidden   .col-peek-panel   {{ display: block; }}
 .wiki-page-list {{ list-style: none; padding: 0; }}
 .wiki-page-row {{ display: flex; align-items: center; gap: var(--sp-3);
                  padding: 10px var(--sp-3); border-bottom: 1px solid var(--border);
-                 cursor: pointer; transition: background .12s; }}
+                 cursor: pointer; transition: background var(--t-fast); }}
 .wiki-page-row:hover {{ background: var(--toolbar-bg); }}
 .wiki-page-row .wp-title {{ flex: 1; font-weight: 500; color: var(--fg); min-width: 0; }}
 /* Phase 54.6.9 — year + authors columns alongside the existing
@@ -8636,7 +8645,7 @@ body.panel-hidden   .col-peek-panel   {{ display: block; }}
 .wiki-page-content .wiki-link {{ color: var(--accent);
     border-bottom: 1px solid rgba(79,158,255,0.35);
     text-decoration: none;
-    transition: border-bottom-color .1s ease; }}
+    transition: border-bottom-color var(--t-fast); }}
 .wiki-page-content .wiki-link:hover {{
     border-bottom-color: var(--accent); }}
 /* Phase 54 — Ctrl-K command palette */
@@ -8979,7 +8988,17 @@ body.panel-hidden   .col-peek-panel   {{ display: block; }}
 .editor-split .editor-preview {{ flex: 1; border: 1px solid var(--border); border-radius: 4px;
                                   padding: 12px; overflow-y: auto; max-height: 600px;
                                   font-size: 14px; line-height: 1.7; }}
-.editor-toolbar {{ display: flex; gap: 4px; margin-bottom: 6px; }}
+/* Phase 54.6.183 — markdown editor toolbar polish. Letter-glyph
+   buttons (B / I / H2 / H3 / [N]) gain proper typographic voice
+   instead of rendering in generic sans. */
+.editor-toolbar {{ display: flex; gap: 4px; margin-bottom: 6px; align-items: center; }}
+.editor-toolbar button b,
+.editor-toolbar button em {{
+  font-family: var(--font-serif); font-size: 14px;
+  font-style: inherit; line-height: 1;
+}}
+.editor-toolbar button b {{ font-weight: 700; }}
+.editor-toolbar button em {{ font-style: italic; font-weight: 500; }}
 .editor-toolbar button {{ font-size: 11px; padding: 3px 8px; border: 1px solid var(--border);
                           border-radius: 4px; cursor: pointer; background: var(--bg);
                           color: var(--fg); font-family: monospace; }}
@@ -9070,7 +9089,7 @@ body.panel-hidden   .col-peek-panel   {{ display: block; }}
 .kg-theme-chip {{ width: 22px; height: 22px; padding: 0;
                   border: 2px solid transparent; border-radius: 50%;
                   cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,0.25);
-                  transition: border-color 0.15s, transform 0.1s; }}
+                  transition: border-color var(--t-fast), transform var(--t-fast); }}
 .kg-theme-chip:hover {{ transform: scale(1.12); }}
 .kg-theme-chip.active {{ border-color: var(--accent);
                          box-shadow: 0 0 0 2px var(--bg-elevated),
@@ -9247,7 +9266,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 /* Corkboard */
 .corkboard {{ display: flex; flex-wrap: wrap; gap: 12px; padding: 8px 0; }}
 .cork-card {{ width: 180px; min-height: 140px; border: 1px solid var(--border); border-radius: 8px;
-              padding: 10px 12px; background: var(--bg); cursor: pointer; transition: all .15s;
+              padding: 10px 12px; background: var(--bg); cursor: pointer; transition: all var(--t-fast);
               display: flex; flex-direction: column; font-family: -apple-system, sans-serif; }}
 .cork-card:hover {{ box-shadow: 0 4px 12px rgba(0,0,0,0.1); transform: translateY(-2px); }}
 .cork-card .cc-head {{ font-size: 11px; font-weight: 600; margin-bottom: 6px; display: flex;
@@ -10091,7 +10110,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           <button class="btn-primary" onclick="doWikiQuery()"
                   title="Query the wiki summaries. Faster than Ask Corpus; returns a synthesized answer + list of source summaries.">Search Wiki</button>
         </div>
-        <div id="wiki-status" style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;"></div>
+        <div class="u-note-sm" id="wiki-status"></div>
         <div class="modal-stream" id="wiki-stream"></div>
         <div id="wiki-stream-stats" class="stream-stats"></div>
         <div class="modal-sources" id="wiki-sources" style="display:none;"></div>
@@ -10234,7 +10253,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       </div>
       <!-- Phase 54.6.2 — Lint tab: surfaces `sciknow wiki lint` in the GUI. -->
       <div class="tab-pane" id="wiki-lint-pane" style="display:none;">
-        <div style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;">
+        <div class="u-note-sm">
           Check wiki health: broken links, stale pages, orphaned concepts,
           missing summaries, and optionally contradictions across paper
           summaries (deep mode uses the LLM — slower).
@@ -10259,7 +10278,7 @@ body.task-bar-open {{ padding-top: 40px; }}
              paper pages can exist with zero triples. This walks those
              orphans and runs ONLY the extraction step (no re-summarize). -->
         <div style="margin-top:20px;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-alt,#f8f8f8);">
-          <div style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;">
+          <div class="u-note-sm">
             <strong>Backfill KG triples.</strong> Papers with a wiki page but no
             <code>knowledge_graph</code> rows — usually the result of an older
             <code>wiki compile</code> that predates the combined entity+KG
@@ -10282,7 +10301,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       </div>
       <!-- Phase 54.6.2 — Consensus tab: surfaces `sciknow wiki consensus` in the GUI. -->
       <div class="tab-pane" id="wiki-consensus-pane" style="display:none;">
-        <div style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;">
+        <div class="u-note-sm">
           Map the agreement landscape for a topic. Uses the knowledge graph
           plus paper summaries to classify claims as strong / moderate /
           weak / contested, identify supporting vs contradicting papers,
@@ -10390,7 +10409,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                 title="Run the RAG pipeline and stream the answer + source citations inline below.">Ask</button>
         <span style="font-size:11px;color:var(--fg-muted);margin-left:8px;">Hybrid retrieval + bge-reranker + LLM</span>
       </div>
-      <div id="ask-status" style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;"></div>
+      <div class="u-note-sm" id="ask-status"></div>
       <div class="modal-stream" id="ask-stream"></div>
       <div id="ask-stream-stats" class="stream-stats"></div>
       <div class="modal-sources" id="ask-sources" style="display:none;"></div>
@@ -10473,7 +10492,7 @@ body.task-bar-open {{ padding-top: 40px; }}
     <div class="modal-body">
       <!-- Book tab — the leitmotiv (existing) -->
       <div class="tab-pane active" id="plan-book-pane">
-        <p style="font-size:12px;color:var(--fg-muted);margin-bottom:12px;">
+        <p class="u-note-lg">
           The book plan is a 200&ndash;500 word document defining the central thesis,
           scope, intended audience, and key terms. It is injected into every
           <code>book write</code> / <code>autowrite</code> call so all chapters stay
@@ -10523,7 +10542,7 @@ body.task-bar-open {{ padding-top: 40px; }}
            STRUCTURE generation (distinct from Book's leitmotiv and
            from per-draft Review). Mirrors `sciknow book outline`. -->
       <div class="tab-pane" id="plan-outline-pane" style="display:none;">
-        <p style="font-size:12px;color:var(--fg-muted);margin-bottom:12px;">
+        <p class="u-note-lg">
           <strong>Outline</strong> proposes a chapter structure for the book from your paper
           corpus. The LLM generates 3 candidate outlines (temperature-diversified),
           scores each for breadth + section-count variance, picks the winner, and
@@ -10572,7 +10591,7 @@ body.task-bar-open {{ padding-top: 40px; }}
            Uses existing /api/chapters, /api/chapters/{{id}},
            /api/chapters/reorder, DELETE /api/chapters/{{id}}. -->
       <div class="tab-pane" id="plan-chapters-pane" style="display:none;">
-        <p style="font-size:12px;color:var(--fg-muted);margin-bottom:12px;">
+        <p class="u-note-lg">
           Book-wide chapter plan: every chapter&rsquo;s title, description, and
           retrieval query. Reorder with &uarr; / &darr;. Delete unlinks the
           chapter&rsquo;s drafts but does not delete them. Section-level editing
@@ -10589,7 +10608,7 @@ body.task-bar-open {{ padding-top: 40px; }}
            chapters without closing the modal. Each section row stays
            inline-editable (plan + target_words). -->
       <div class="tab-pane" id="plan-chapter-pane" style="display:none;">
-        <p style="font-size:12px;color:var(--fg-muted);margin-bottom:12px;">
+        <p class="u-note-lg">
           Per-chapter section plans: pick a chapter, then edit each
           section&rsquo;s plan and target word count. To rename / reorder /
           add / delete sections themselves, use the chapter modal&rsquo;s
@@ -10627,7 +10646,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div id="plan-chapter-header" style="margin-bottom:14px;font-size:13px;color:var(--fg-muted);"></div>
         <div id="plan-chapter-sections"></div>
       </div>
-      <div id="plan-status" style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;"></div>
+      <div class="u-note-sm" id="plan-status"></div>
       <div id="plan-stream-stats" class="stream-stats"></div>
     </div>
     <div class="modal-footer" style="flex-wrap:wrap;gap:6px;">
@@ -10658,7 +10677,7 @@ body.task-bar-open {{ padding-top: 40px; }}
     <div class="modal-body">
       <!-- Scope tab -->
       <div class="tab-pane active" id="ch-scope-pane">
-        <p style="font-size:12px;color:var(--fg-muted);margin-bottom:12px;">
+        <p class="u-note-lg">
           The chapter description sets the per-chapter scope: what the chapter
           covers and what stays out. The topic query is a 3&ndash;6 word search
           phrase used to retrieve the most relevant papers from the corpus when
@@ -10682,7 +10701,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       </div>
       <!-- Sections tab -->
       <div class="tab-pane" id="ch-sections-pane">
-        <p style="font-size:12px;color:var(--fg-muted);margin-bottom:12px;">
+        <p class="u-note-lg">
           A chapter is broken into named sections. Each section becomes its own
           draft when you click <strong>Write</strong> or <strong>Autowrite</strong>,
           and gets a proportional share of the chapter&rsquo;s word target. The
@@ -10892,7 +10911,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 
       <!-- Leitmotiv tab (the book plan) -->
       <div id="bs-leitmotiv-pane" style="display:none;">
-        <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+        <p class="u-note">
           The book's thesis / scope document (200&ndash;500 words). Injected into
           every writer prompt so chapter sections stay aligned with the overall
           argument. Use the <strong>&#128221; Plan</strong> quick-editor for
@@ -11373,7 +11392,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       </div>
       <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:8px;">
         <h4 style="font-size:13px;margin-bottom:8px;">Create new project</h4>
-        <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+        <p class="u-note">
           Creates an empty project (DB + collections + dir + migrations). For the one-shot
           migration of the legacy install, use <code>sciknow project init &lt;slug&gt; --from-existing</code>
           from the CLI.
@@ -11392,7 +11411,7 @@ body.task-bar-open {{ padding-top: 40px; }}
            db expand. JSON lives at <project>/venue_config.json. -->
       <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:14px;">
         <h4 style="font-size:13px;margin-bottom:6px;">&#128683; Venues — block / allow lists</h4>
-        <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+        <p class="u-note">
           Per-project substring patterns matched against candidate papers' publisher / host-organization / source names during
           <code>db expand</code>. Blocklist extends the built-in predatory pattern set; allowlist wins over both so you can
           rescue legitimate venues from a false-positive. Prefix with <code>^</code> or suffix with <code>$</code> for regex.
@@ -11453,7 +11472,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 
       <!-- STEP 1 — Project -->
       <div id="sw-step-project" class="sw-step-pane" style="padding:14px 18px;">
-        <p style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;">
+        <p class="u-note-md">
           A <strong>project</strong> isolates one corpus (its own DB + Qdrant
           collections + data dir). Pick an existing one or create a new one.
           The web reader is currently serving the project shown as
@@ -11493,7 +11512,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 
       <!-- STEP 2 — Corpus -->
       <div id="sw-step-corpus" class="sw-step-pane" style="display:none;padding:14px 18px;">
-        <p style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;">
+        <p class="u-note-md">
           Feed the project PDFs. Two paths:
           <strong>upload</strong> files from your browser, or point to a
           <strong>directory on this server</strong>. Either way, the
@@ -11506,7 +11525,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
           <div style="border:1px solid var(--border);border-radius:6px;padding:10px;">
             <div style="font-weight:600;font-size:13px;margin-bottom:4px;">&#128190; Upload PDFs</div>
-            <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+            <p class="u-note">
               Files are staged under
               <code>{{data_dir}}/inbox/uploads_&lt;ts&gt;/</code> and then
               ingested.
@@ -11525,7 +11544,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           </div>
           <div style="border:1px solid var(--border);border-radius:6px;padding:10px;">
             <div style="font-weight:600;font-size:13px;margin-bottom:4px;">&#128193; Server directory</div>
-            <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+            <p class="u-note">
               Path is resolved on the server. Useful when a corpus is
               already on disk (or over a network mount).
             </p>
@@ -11564,7 +11583,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 
       <!-- STEP 3 — Indices -->
       <div id="sw-step-indices" class="sw-step-pane" style="display:none;padding:14px 18px;">
-        <p style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;">
+        <p class="u-note-md">
           After ingestion, build the three optional indices. Each improves
           downstream quality — you can skip any of them. Run in any order.
         </p>
@@ -11574,7 +11593,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
           <div style="border:1px solid var(--border);border-radius:6px;padding:10px;">
             <div style="font-weight:600;font-size:13px;margin-bottom:4px;">&#127918; Topic Clusters</div>
-            <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+            <p class="u-note">
               BERTopic over abstracts. Fast (seconds). Enables
               <code>--topic</code> filtering in retrieval + the Topics
               browser.
@@ -11589,7 +11608,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           </div>
           <div style="border:1px solid var(--border);border-radius:6px;padding:10px;">
             <div style="font-weight:600;font-size:13px;margin-bottom:4px;">&#127794; RAPTOR tree</div>
-            <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+            <p class="u-note">
               Hierarchical summaries (UMAP + GMM). Slow (5–30 min).
               Enables broad-synthesis retrieval.
             </p>
@@ -11598,7 +11617,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           </div>
           <div style="border:1px solid var(--border);border-radius:6px;padding:10px;">
             <div style="font-weight:600;font-size:13px;margin-bottom:4px;">&#128218; Wiki compile</div>
-            <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+            <p class="u-note">
               Compile per-paper wiki pages + KG triples. Slow
               (LLM-bound, ~1 min per paper).
             </p>
@@ -11631,7 +11650,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 
       <!-- STEP 4 — Expand -->
       <div id="sw-step-expand" class="sw-step-pane" style="display:none;padding:14px 18px;">
-        <p style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;">
+        <p class="u-note-md">
           Optional: grow the corpus by following citations or pulling
           everything an author has published. Uses the full
           Expand tab — see the <strong>Tools</strong> toolbar button for
@@ -11653,7 +11672,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 
       <!-- STEP 5 — Book -->
       <div id="sw-step-book" class="sw-step-pane" style="display:none;padding:14px 18px;">
-        <p style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;">
+        <p class="u-note-md">
           Create the writing project. The <strong>type</strong> drives section
           defaults, prompt conditioning, and length targets. Ranges below
           each type come from the Phase 54.6.146 concept-density literature
@@ -11786,7 +11805,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 
       <!-- Search tab (sciknow search query + search similar) -->
       <div id="tl-search-pane">
-        <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+        <p class="u-note">
           Hybrid retrieval (dense + sparse + FTS) with cross-encoder rerank.
           Mirrors <code>sciknow search query</code> and <code>sciknow search similar</code>.
         </p>
@@ -11838,7 +11857,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 
       <!-- Synthesize tab (sciknow ask synthesize) -->
       <div id="tl-synth-pane" style="display:none;">
-        <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+        <p class="u-note">
           Multi-paper synthesis on a topic &mdash; biases the prompt toward
           consensus, methods and open questions. Mirrors <code>sciknow ask synthesize</code>.
           (For single Q&amp;A use <strong>&#128270; Ask Corpus</strong> in the toolbar.)
@@ -11863,7 +11882,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           <button class="btn-primary" onclick="doToolSynthesize()"
                   title="Retrieve + rerank → LLM synthesizes a consensus-biased answer with citations.">Synthesize</button>
         </div>
-        <div id="tl-synth-status" style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;"></div>
+        <div class="u-note-sm" id="tl-synth-status"></div>
         <div class="modal-stream" id="tl-synth-stream"></div>
         <div id="tl-synth-stats" class="stream-stats"></div>
         <div class="modal-sources" id="tl-synth-sources" style="display:none;"></div>
@@ -11873,14 +11892,14 @@ body.task-bar-open {{ padding-top: 40px; }}
       <div id="tl-topics-pane" style="display:none;">
         <div style="display:flex;gap:12px;align-items:flex-start;">
           <div class="u-flex-2">
-            <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+            <p class="u-note">
               <strong>Topic clusters</strong> (from <code>sciknow catalog cluster</code>).
               Click a cluster to see its papers. Ranked by paper count.
             </p>
             <div id="tl-topics-list" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;"></div>
           </div>
           <div style="flex:1;border-left:1px solid var(--border);padding-left:12px;min-width:180px;">
-            <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+            <p class="u-note">
               <strong>Domain tags</strong> (from <code>paper_metadata.domains</code>).
               Empty if no tags are populated for this corpus.
             </p>
@@ -11965,7 +11984,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 
         <!-- Enrich (metadata) panel -->
         <div id="corp-enrich-pane" style="border:1px solid var(--border);border-radius:6px;padding:10px;">
-          <div style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;">
+          <div class="u-note-sm">
             Fill missing DOIs via Crossref / OpenAlex / arXiv title search.
             Mirrors <code>sciknow db enrich</code>.
           </div>
@@ -11973,7 +11992,7 @@ body.task-bar-open {{ padding-top: 40px; }}
             <div style="flex:1;min-width:70px;"><label>Limit</label>
               <input type="number" id="tl-enr-limit" value="0" min="0"
                      title="Max papers to process this run. 0 = all papers lacking a DOI."/></div>
-            <div style="flex:1;min-width:80px;"><label>Threshold</label>
+            <div class="u-col-num"><label>Threshold</label>
               <input type="number" id="tl-enr-thresh" value="0.85" min="0" max="1" step="0.01"
                      title="Minimum title-similarity score (0–1) to accept a Crossref match. 0.85 is conservative; 0.78 is the 54.6.x dual-signal default when author+year also agree."/></div>
             <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
@@ -11987,7 +12006,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 
         <!-- Expand by citations -->
         <div id="corp-cites-pane" style="display:none;border:1px solid var(--border);border-radius:6px;padding:10px;">
-          <div style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;">
+          <div class="u-note-sm">
             Follow references &rarr; download OA PDFs &rarr; ingest.
             Mirrors <code>sciknow db expand</code>.
           </div>
@@ -11998,10 +12017,10 @@ body.task-bar-open {{ padding-top: 40px; }}
             <div style="flex:1;min-width:70px;"><label title="Phase 54.6.113 — RRF pool size per round. The ranker fuses signals, applies MMR diversity, then takes the top-N for the download phase. Default 50. Smaller = tighter top picks only.">Budget</label>
               <input type="number" id="tl-exp-budget" value="50" min="5" max="200"
                      title="Phase 54.6.113 — RRF pool size per round. Smaller = tighter top picks only."></div>
-            <div style="flex:1;min-width:80px;"><label>Workers</label>
+            <div class="u-col-num"><label>Workers</label>
               <input type="number" id="tl-exp-workers" value="0" min="0"
                      title="Parallel ingestion worker subprocesses. 0 = use INGEST_WORKERS from .env (default 1). Each worker loads its own MinerU (~7GB VRAM) + bge-m3 — raise only when the LLM is off-GPU."/></div>
-            <div style="flex:1;min-width:80px;"><label>Relev. thr</label>
+            <div class="u-col-num"><label>Relev. thr</label>
               <input type="number" id="tl-exp-relthr" value="0.0" min="0" max="1" step="0.05"
                      title="Cosine similarity floor against the corpus centroid. 0 = use EXPAND_RELEVANCE_THRESHOLD from .env (default 0.55). Raise to require tighter topical match."/></div>
           </div>
@@ -12056,7 +12075,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 
         <!-- Phase 54.6.114 (Tier 2 #2) — Agentic question-driven expansion -->
         <div id="corp-agentic-pane" style="display:none;border:1px solid var(--border);border-radius:6px;padding:10px;">
-          <div style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;">
+          <div class="u-note-md">
             <strong>Agentic mode.</strong> Give a research question; the LLM decomposes it
             into 3-6 sub-topics, measures corpus coverage for each (via hybrid search),
             and runs targeted expansion on the gaps. Stops when every sub-topic has
@@ -12071,13 +12090,13 @@ body.task-bar-open {{ padding-top: 40px; }}
                       placeholder="e.g. What is the current best estimate of equilibrium climate sensitivity, and how confident are we?"></textarea>
           </div>
           <div class="field" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-top:4px;">
-            <div style="flex:1;min-width:80px;"><label>Max rounds</label>
+            <div class="u-col-num"><label>Max rounds</label>
               <input type="number" id="tl-ag-rounds" value="3" min="1" max="8"
                      title="Max agentic rounds. Each round re-measures coverage and expands remaining gaps."></div>
-            <div style="flex:1;min-width:80px;"><label>Budget / gap</label>
+            <div class="u-col-num"><label>Budget / gap</label>
               <input type="number" id="tl-ag-budget" value="10" min="1" max="60"
                      title="Max papers to download per gap sub-topic per round."></div>
-            <div style="flex:1;min-width:80px;"><label>Cover threshold</label>
+            <div class="u-col-num"><label>Cover threshold</label>
               <input type="number" id="tl-ag-threshold" value="3" min="1" max="20"
                      title="Corpus papers required to call a sub-topic 'covered'."></div>
             <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
@@ -12136,7 +12155,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 
         <!-- Phase 46.E — Expand by author panel -->
         <div id="corp-author-pane" style="display:none;border:1px solid var(--border);border-radius:6px;padding:10px;">
-          <div style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;">
+          <div class="u-note-md">
             Find every paper by an author across OpenAlex + Crossref, then
             download the open-access ones and ingest. Mirrors
             <code>sciknow db expand-author</code>. The picker below ranks
@@ -12167,18 +12186,18 @@ body.task-bar-open {{ padding-top: 40px; }}
             No author selected yet — search above and click a row.
           </div>
           <div class="field" style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;margin-top:6px;">
-            <div style="flex:1;min-width:80px;"><label>Year from</label>
+            <div class="u-col-num"><label>Year from</label>
               <input type="number" id="tl-eauth-yfrom" placeholder="(any)"
                      title="Only fetch papers published in this year or later. Leave blank for no lower bound."></div>
-            <div style="flex:1;min-width:80px;"><label>Year to</label>
+            <div class="u-col-num"><label>Year to</label>
               <input type="number" id="tl-eauth-yto" placeholder="(any)"
                      title="Only fetch papers published in this year or earlier. Leave blank for no upper bound."></div>
             <div style="flex:1;min-width:70px;"><label>Limit</label>
               <input type="number" id="tl-eauth-limit" value="0" min="0" title="Cap on papers downloaded for this author. 0 = no cap (fetch all)."></div>
-            <div style="flex:1;min-width:80px;"><label>Workers</label>
+            <div class="u-col-num"><label>Workers</label>
               <input type="number" id="tl-eauth-workers" value="0" min="0"
                      title="Parallel download workers. 0 = use EXPAND_WORKERS from .env (default 8)."></div>
-            <div style="flex:1;min-width:80px;"><label>Relev. thr</label>
+            <div class="u-col-num"><label>Relev. thr</label>
               <input type="number" id="tl-eauth-relthr" value="0.0" min="0" max="1" step="0.05"
                      title="Cosine-similarity floor against the corpus centroid or anchor. 0 = use EXPAND_RELEVANCE_THRESHOLD from .env (default 0.55)."></div>
           </div>
@@ -12232,7 +12251,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 
         <!-- Phase 54.6.4 — Inbound cites panel -->
         <div id="corp-inbound-pane" style="display:none;border:1px solid var(--border);border-radius:6px;padding:10px;">
-          <div style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;">
+          <div class="u-note-md">
             Find papers that <strong>cite</strong> papers already in your
             corpus — the forward-in-time mirror of <code>db expand</code>.
             Calls OpenAlex's <code>/works?filter=cites:W…</code> per seed.
@@ -12252,10 +12271,10 @@ body.task-bar-open {{ padding-top: 40px; }}
           </div>
           <!-- Phase 54.6.123 (Tier 3 #2) — full-pipeline inbound crawl -->
           <div class="field" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-top:4px;">
-            <div style="flex:1;min-width:80px;"><label>Limit</label>
+            <div class="u-col-num"><label>Limit</label>
               <input type="number" id="tl-inb-limit" value="20" min="1" max="200"
                      title="Max papers to download + ingest this run."></div>
-            <div style="flex:1;min-width:80px;"><label>Relev. thr</label>
+            <div class="u-col-num"><label>Relev. thr</label>
               <input type="number" id="tl-inb-relthr" value="0.55" min="0" max="1" step="0.05"
                      title="Drop candidates below this bge-m3 cosine score."></div>
             <label style="display:flex;align-items:center;gap:4px;font-size:11px;"
@@ -12284,7 +12303,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 
         <!-- Phase 54.6.4 — Topic search panel -->
         <div id="corp-topic-pane" style="display:none;border:1px solid var(--border);border-radius:6px;padding:10px;">
-          <div style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;">
+          <div class="u-note-md">
             Free-text OpenAlex search. Push-based expansion — solves the
             bootstrap / sideways-expansion problem <code>expand</code> can't
             address. Mirrors <code>sciknow db expand-topic "QUERY"</code>.
@@ -12314,7 +12333,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 
         <!-- Phase 54.6.4 — Coauthor snowball panel -->
         <div id="corp-coauth-pane" style="display:none;border:1px solid var(--border);border-radius:6px;padding:10px;">
-          <div style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;">
+          <div class="u-note-md">
             Fetch papers by every OpenAlex author on any paper in the
             corpus (depth=1). Captures the <em>invisible college</em> —
             researchers in the same lab who don't always cite each
@@ -12484,7 +12503,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button class="modal-close" onclick="closeModal('pending-downloads-modal')" title="Close the Pending Downloads modal.">&times;</button>
     </div>
     <div class="modal-body">
-      <div style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;">
+      <div class="u-note-md">
         Papers you selected that had no legal open-access PDF. Retry runs
         the 6-source OA cascade again (sometimes Unpaywall / Semantic
         Scholar / Europe PMC surface a link that wasn't there before).
@@ -12577,7 +12596,7 @@ body.task-bar-open {{ padding-top: 40px; }}
               title="Searchable table of triples. Faster when you want to scan rows instead of panning a graph.">Table</button>
     </div>
     <div class="modal-body">
-      <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
+      <p class="u-note">
         Entity-relationship triples extracted from the corpus during wiki compile.
         Filter by subject substring, predicate (exact match), object substring,
         or document id. <strong>Graph</strong> shows up to 100 triples as nodes
@@ -12820,7 +12839,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       <div id="viz-status" style="font-size:12px;color:var(--fg-muted);margin-bottom:6px;"></div>
       <!-- Topic map -->
       <div id="viz-topic-pane" class="viz-pane">
-        <div style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;">
+        <div class="u-note-xs">
           UMAP 2D projection of every paper's abstract embedding,
           coloured by BERTopic cluster. Click a point to see title /
           authors / year; click "Refresh" after re-clustering.
@@ -12836,7 +12855,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       </div>
       <!-- RAPTOR sunburst -->
       <div id="viz-sunburst-pane" class="viz-pane" style="display:none;">
-        <div style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;">
+        <div class="u-note-xs">
           Sunburst of the RAPTOR cluster hierarchy. Inner ring = highest-
           level summaries, outer rings = children. Click a slice to zoom in,
           click the centre to zoom back out.
@@ -12847,7 +12866,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       </div>
       <!-- Consensus landscape -->
       <div id="viz-consensus-pane" class="viz-pane" style="display:none;">
-        <div style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;">
+        <div class="u-note-xs">
           Every claim in the corpus for this topic, plotted on
           (# supporting) × (# contradicting) axes. Colour =
           consensus_level (strong / moderate / weak / contested).
@@ -12866,7 +12885,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       </div>
       <!-- Timeline river -->
       <div id="viz-timeline-pane" class="viz-pane" style="display:none;">
-        <div style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;">
+        <div class="u-note-xs">
           Stacked-area of papers per year, coloured by BERTopic cluster.
           The "history of the field" view. Drag the mini-map below the
           axis to zoom into a specific era.
@@ -12877,7 +12896,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       </div>
       <!-- Ego radial -->
       <div id="viz-ego-pane" class="viz-pane" style="display:none;">
-        <div style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;">
+        <div class="u-note-xs">
           Pick a paper, see its top-K nearest papers arranged on a
           polar plot. Radius = cosine distance (closer → centre);
           angle spreads neighbours evenly. Drag to rotate.
@@ -12897,7 +12916,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       </div>
       <!-- Gap radar -->
       <div id="viz-radar-pane" class="viz-pane" style="display:none;">
-        <div style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;">
+        <div class="u-note-xs">
           Per-chapter section coverage for this book. Each polygon is
           one chapter over six canonical axes (intro / methods /
           results / discussion / conclusion / related_work); values
@@ -16484,7 +16503,7 @@ async function showDashboard() {{
   html += '<h3>Completion Heatmap</h3>';
   html += '<button class="btn-link" onclick="openPlanModal()" title="View, edit, or regenerate the book plan (the leitmotiv)">&#128221; Book Plan</button>';
   html += '</div>';
-  html += '<p style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;">Click a chapter title to edit its scope. Click an empty cell to preview that section. Click a filled cell to open the draft. Hover any cell to see the section title.</p>';
+  html += '<p class="u-note-xs">Click a chapter title to edit its scope. Click an empty cell to preview that section. Click a filled cell to open the draft. Hover any cell to see the section title.</p>';
   // Phase 30 — columns are POSITIONAL (1, 2, 3, ...) up to max(N) across
   // all chapters. Each chapter shows its actual sections in order;
   // chapters with fewer sections get blank "absent" cells in the extra
@@ -16651,7 +16670,7 @@ function previewEmptySection(chapterId, sectionType) {{
 
   const html =
     '<div class="empty-section-preview">' +
-    '<div style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;">' +
+    '<div class="u-note-sm">' +
     '<span class="sec-status-dot empty"></span> empty section &middot; ' +
     'target ~' + (sectionTarget || 'auto') + ' words' +
     '</div>' +
@@ -18721,7 +18740,7 @@ async function loadWikiPages(page) {{
     return;
   }}
   if (detail) detail.style.display = 'none';
-  list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--fg-muted);">Loading...</div>';
+  list.innerHTML = '<div class="u-empty">Loading...</div>';
 
   try {{
     const res = await fetch('/api/wiki/pages?' + params.toString());
@@ -18748,7 +18767,7 @@ async function loadWikiPages(page) {{
           + '<span class="u-tiny">Check the server log.</span>'
         : 'No wiki pages found.<br>'
           + '<span class="u-tiny">Run <code>uv run sciknow wiki compile</code> to build wiki pages from your corpus.</span>';
-      list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--fg-muted);">'
+      list.innerHTML = '<div class="u-empty">'
         + msg + '</div>';
       return;
     }}
@@ -18801,7 +18820,7 @@ async function loadWikiSummaries() {{
   const list = document.getElementById('wiki-summaries-list');
   if (!list) return;
   if (_wikiSummariesCache) {{ renderWikiSummaries(); return; }}
-  list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--fg-muted);">Loading summaries…</div>';
+  list.innerHTML = '<div class="u-empty">Loading summaries…</div>';
   try {{
     // per_page=2000 — we have ~630 summaries today; a single page keeps
     // the client-side sort/filter trivial and avoids paginator wiring.
@@ -18851,7 +18870,7 @@ function renderWikiSummaries() {{
   }}
 
   if (items.length === 0) {{
-    list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--fg-muted);">No summaries match.</div>';
+    list.innerHTML = '<div class="u-empty">No summaries match.</div>';
     return;
   }}
 
@@ -18864,7 +18883,7 @@ function renderWikiSummaries() {{
     const slug = _escHtml(p.slug || '');
     html += '<div class="wiki-summary-card" onclick="openWikiSummary(\\'' + slug + '\\')" '
          +  'style="border:1px solid var(--border);border-radius:8px;padding:10px 14px;'
-         +  'margin-bottom:8px;cursor:pointer;transition:background 0.1s;" '
+         +  'margin-bottom:8px;cursor:pointer;transition:background var(--t-fast);" '
          +  'onmouseover="this.style.background=\\'var(--bg-alt)\\'" '
          +  'onmouseout="this.style.background=\\'transparent\\'">'
          +  '<div style="font-weight:600;margin-bottom:3px;">' + title + '</div>'
@@ -18924,7 +18943,7 @@ async function loadWikiVisuals() {{
     const res = await fetch('/api/visuals?' + params.toString());
     const items = await res.json();
     if (!Array.isArray(items) || items.length === 0) {{
-      list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--fg-muted);">'
+      list.innerHTML = '<div class="u-empty">'
         + 'No ' + kind + 's found' + (query ? ' for “' + _escHtml(query) + '”' : '') + '.'
         + '</div>';
       return;
@@ -19050,7 +19069,7 @@ async function openWikiPage(slug) {{
   const toc = document.getElementById('wiki-toc');
   list.style.display = 'none';
   detail.style.display = 'block';
-  content.innerHTML = '<div style="padding:24px;text-align:center;color:var(--fg-muted);">Loading...</div>';
+  content.innerHTML = '<div class="u-empty">Loading...</div>';
   if (toc) toc.innerHTML = '';
   // Phase 54.3 — reset the inline "Ask this page" state when the
   // active page changes so a stale answer doesn't hang around on
@@ -20228,7 +20247,7 @@ async function openAgenticPreview() {{
       + `(<strong>${{info.cross_gap_duplicates || 0}}</strong> cross-gap duplicates dropped). `
       + `<span style="color:var(--success);font-size:11px;">✓ same ranker auto-mode uses</span>`
       + `</div>`
-      + `<div style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;"><strong>Coverage snapshot:</strong></div>`
+      + `<div class="u-note-xs"><strong>Coverage snapshot:</strong></div>`
       + `<div class="u-mb-2">${{covRows}}</div>`
       + `<div style="font-size:11px;color:var(--fg-muted);margin-bottom:4px;"><strong>Per-gap candidate counts:</strong></div>`
       + `<div style="font-size:11px;line-height:1.7;margin-bottom:4px;">${{gapChips}}</div>`
@@ -21780,13 +21799,13 @@ async function loadCatalog(page) {{
   if (yt) params.set('year_to', yt);
 
   const results = document.getElementById('catalog-results');
-  results.innerHTML = '<div style="padding:24px;text-align:center;color:var(--fg-muted);">Loading...</div>';
+  results.innerHTML = '<div class="u-empty">Loading...</div>';
 
   try {{
     const res = await fetch('/api/catalog?' + params.toString());
     const data = await res.json();
     if (!data.papers || data.papers.length === 0) {{
-      results.innerHTML = '<div style="padding:24px;text-align:center;color:var(--fg-muted);">No papers match.</div>';
+      results.innerHTML = '<div class="u-empty">No papers match.</div>';
       return;
     }}
 
@@ -26434,7 +26453,7 @@ function renderProjectSwitchBanner(newSlug, runningSlug) {{
     '<div style="margin-top:14px;padding:14px;border:2px solid var(--accent);'
     + 'border-radius:8px;background:var(--bg-elevated);">'
     + '<div style="font-weight:bold;margin-bottom:6px;">&#9888;&#65039; Restart required</div>'
-    + '<div style="font-size:12px;color:var(--fg-muted);margin-bottom:10px;">'
+    + '<div class="u-note-md">'
     + 'The <code>.active-project</code> file now points at <strong>' + safeNew
     + '</strong>, but this server is still bound to <strong>' + safeRun
     + '</strong>. DB / Qdrant clients can&rsquo;t hot-swap, so you need to '
