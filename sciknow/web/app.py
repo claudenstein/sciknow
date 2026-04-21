@@ -7933,10 +7933,65 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
   border: 1px solid var(--danger); border-radius: var(--r-sm);
 }}
 .stop-btn:hover {{ filter: brightness(0.92); }}
-/* Right panel */
-.panel {{ width: 320px; border-left: 1px solid var(--border); overflow-y: auto;
-          padding: 16px; font-size: 13px; background: var(--sidebar-bg); }}
-.panel h3 {{ font-size: 14px; margin: 16px 0 8px; color: var(--accent); }}
+/* Right panel — Phase 54.6.167 context rail.
+   A single-tab view with a segmented control at the top. Sections
+   (sources / review / comments) share the scroll area; only the
+   active one is visible. No more three stacked <h3>s competing. */
+.panel {{
+  width: 320px; flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  overflow-y: auto; font-size: 13px;
+  background: var(--sidebar-bg);
+  display: flex; flex-direction: column;
+}}
+.panel-head {{
+  position: sticky; top: 0; z-index: 2;
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px;
+  background: var(--sidebar-bg);
+  border-bottom: 1px solid var(--border);
+}}
+.panel-seg {{
+  display: inline-flex; flex: 1; gap: 2px;
+  padding: 2px; border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-elevated);
+}}
+.panel-seg-btn {{
+  flex: 1; padding: 4px 8px;
+  font-family: var(--font-sans); font-size: 11px;
+  font-weight: 500; letter-spacing: -0.003em; line-height: 1;
+  color: var(--fg-muted); background: transparent;
+  border: none; border-radius: calc(var(--r-md) - 2px);
+  cursor: pointer; white-space: nowrap;
+  transition: color var(--t-fast), background var(--t-fast);
+}}
+.panel-seg-btn:hover {{ color: var(--fg); }}
+.panel-seg-btn.is-active {{
+  color: var(--accent); background: var(--accent-light);
+  font-weight: 600;
+}}
+.panel-seg-btn:focus-visible {{
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}}
+.panel-pane {{
+  display: none;
+  padding: 14px;
+  flex: 1;
+}}
+.panel-pane.is-active {{ display: block; }}
+.panel-pane ol {{ padding-left: 20px; }}
+.panel-pane li {{ margin-bottom: 4px; font-size: 12px; }}
+.panel-pane > h3 {{  /* legacy slots still referenced by JS */
+  font-size: 11px; margin: 8px 0 6px;
+  color: var(--fg-faint); text-transform: uppercase;
+  letter-spacing: 0.06em; font-weight: 600;
+}}
+/* Retired — panel h3 used to carry a coloured accent; moved to the
+   seg-btn.is-active state instead. Keep a shim for any residual
+   <h3> inside source/review markup. */
+.panel h3 {{ font-size: 11px; margin: 8px 0 6px; color: var(--fg-faint);
+             text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }}
 .panel ol {{ padding-left: 20px; }} .panel li {{ margin-bottom: 4px; font-size: 12px; }}
 /* Phase 54.6.164 — collapsible left / right columns. Hide state is a
    body class so a fixed-position peek button can be a sibling of
@@ -9138,27 +9193,45 @@ body.task-bar-open {{ padding-top: 40px; }}
 
 <!-- Right panel -->
 <aside class="panel">
-  <div class="panel-controls">
+  <!-- Phase 54.6.167 — Context rail. One section visible at a time,
+       driven by a segmented control. Replaces the three always-on
+       <h3> stacks with focused single-tab view per draft. -->
+  <div class="panel-head">
+    <div class="panel-seg" role="tablist" aria-label="Context panel section">
+      <button class="panel-seg-btn is-active" role="tab" aria-selected="true"
+              data-ctx="sources" onclick="switchContextTab('sources')"
+              title="Retrieved chunks used to ground this draft.">Sources</button>
+      <button class="panel-seg-btn" role="tab" aria-selected="false"
+              data-ctx="review" onclick="switchContextTab('review')"
+              title="Critic pass output for the current draft version.">Review</button>
+      <button class="panel-seg-btn" role="tab" aria-selected="false"
+              data-ctx="comments" onclick="switchContextTab('comments')"
+              title="Per-draft comments. Supports resolve + Markdown.">Comments</button>
+    </div>
     <button class="col-hide-btn" onclick="toggleColumn('panel')"
-            title="Hide the sources/comments column. A peek button at the right edge brings it back. Auto-hide preference lives in Book Settings → View.">
-      Hide »
+            title="Hide this column. A peek button at the right edge brings it back. Auto-hide preference lives in Book Settings → View.">
+      »
     </button>
   </div>
-  <h3>Sources</h3>
-  <div id="panel-sources">{sources_html}</div>
 
-  <h3>Review Feedback</h3>
-  <div id="panel-review" style="font-size:12px;">{review_html}</div>
+  <div class="panel-pane is-active" id="panel-pane-sources" role="tabpanel">
+    <div id="panel-sources">{sources_html}</div>
+  </div>
 
-  <h3>Comments</h3>
-  <div id="panel-comments">{comments_html}</div>
-  <form class="comment-form" action="/comment" method="post" id="comment-form">
-    <input type="hidden" name="draft_id" value="{active_id}" id="comment-draft-id">
-    <textarea name="comment" placeholder="Add a comment..."
-              title="Per-draft comments persist in the database. Use Markdown; @-mentions are NOT wired."></textarea>
-    <button type="submit"
-            title="Save the comment to this draft. Resolved comments get struck through via the Resolve button on each saved comment.">Add Comment</button>
-  </form>
+  <div class="panel-pane" id="panel-pane-review" role="tabpanel">
+    <div id="panel-review">{review_html}</div>
+  </div>
+
+  <div class="panel-pane" id="panel-pane-comments" role="tabpanel">
+    <div id="panel-comments">{comments_html}</div>
+    <form class="comment-form" action="/comment" method="post" id="comment-form">
+      <input type="hidden" name="draft_id" value="{active_id}" id="comment-draft-id">
+      <textarea name="comment" placeholder="Add a comment…"
+                title="Per-draft comments persist in the database. Use Markdown; @-mentions are NOT wired."></textarea>
+      <button type="submit"
+              title="Save the comment to this draft. Resolved comments get struck through via the Resolve button on each saved comment.">Add Comment</button>
+    </form>
+  </div>
 </aside>
 
 </div> <!-- /.app-body -->
@@ -23677,6 +23750,33 @@ async function autoPlanEntireBook() {{
                      + _escHtml(String(e).slice(0, 200)) + '</span>';
   }}
 }}
+
+// Phase 54.6.167 — context rail tab switcher. One of sources / review
+// / comments is visible at a time; last choice is remembered in
+// localStorage so switching drafts keeps the user's rail preference.
+function switchContextTab(name) {{
+  const panes = ['sources', 'review', 'comments'];
+  if (!panes.includes(name)) name = 'sources';
+  panes.forEach(n => {{
+    const btn = document.querySelector('.panel-seg-btn[data-ctx="' + n + '"]');
+    const pane = document.getElementById('panel-pane-' + n);
+    const on = (n === name);
+    if (btn) {{
+      btn.classList.toggle('is-active', on);
+      btn.setAttribute('aria-selected', on ? 'true' : 'false');
+    }}
+    if (pane) pane.classList.toggle('is-active', on);
+  }});
+  try {{ localStorage.setItem('sciknow.ui.contextTab', name); }} catch (e) {{}}
+}}
+
+document.addEventListener('DOMContentLoaded', function () {{
+  let last = 'sources';
+  try {{ last = localStorage.getItem('sciknow.ui.contextTab') || 'sources'; }} catch (e) {{}}
+  // Only switch if the rail is present (some pages — Setup, Projects —
+  // render without the context rail).
+  if (document.querySelector('.panel-seg')) switchContextTab(last);
+}});
 
 function switchBookSettingsTab(name) {{
   document.querySelectorAll('#book-settings-modal .tab').forEach(t => {{
