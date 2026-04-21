@@ -209,8 +209,8 @@ See [`docs/PROJECTS.md`](docs/PROJECTS.md) for the full design.
 sciknow is active; the [`docs/PHASE_LOG.md`](docs/PHASE_LOG.md) records
 every Phase commit. Most recent batches:
 
-- **54.6.165-195 (April 2026).** Full web UI redesign — "scholar's
-  editor, not LLM dashboard." 31-commit arc replaces the Tailwind-
+- **54.6.165-201 (April 2026).** Full web UI redesign — "scholar's
+  editor, not LLM dashboard." 37-commit arc replaces the Tailwind-
   starter look with a considered writing environment. **Real
   webfonts** (Inter Tight for chrome, Newsreader with optical sizes
   for the reader body, JetBrains Mono for code), **warm stone
@@ -238,13 +238,20 @@ every Phase commit. Most recent batches:
   **AI ▾** dropdown (54.6.188). Topbar gets a **home anchor** at
   the leftmost position + Escape-goes-home progressive-disclosure
   key handler (54.6.193); Plan folds into the Book menu. **Sidebar
-  rail mode** (54.6.194) — optional compact 64-px navigator
+  rail mode** (54.6.194) — VS-Code-style compact 64-px navigator
   showing chapter numbers + status dots only, toggleable via a
   dedicated button, persists in localStorage. **Loading skeletons**
   (54.6.195) — shimmer-gradient placeholders for async lists.
-  **Inline-style purge** retired 547 of 1,218 `style="…"`
-  attributes (45%) across 5 mechanical waves into 50+ utility
-  classes. All L1 tests green through the arc.
+  **Full-page routed views** (54.6.200) — every modal opened via
+  URL fills the viewport below the topbar instead of floating as
+  a scrim; Escape or × pops back to the reader. **Dark-mode
+  vis-table / vis-eq outline** (54.6.201) so VLM-rendered white
+  table/equation cards have a visible edge on pitch black.
+  **Inline-style purge** retired **984 of 1,218** `style="…"`
+  attributes (**81%**) across 10 mechanical waves into 120+
+  utility classes — including a decomposing migrator that splits
+  multi-declaration combos and a paired JS-toggle rewrite for
+  `display:none`. All L1 tests green through the arc.
 - **54.6.164 (April 2026).** Collapsible reader columns — hide buttons on
   the left (chapters) and right (sources/review/comments) panes, with
   edge peek buttons to bring them back. New **Book Settings → View** tab
