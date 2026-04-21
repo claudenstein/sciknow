@@ -9544,6 +9544,124 @@ def l1_phase54_6_145_finalize_draft_surface() -> None:
     )
 
 
+def l1_phase54_6_163_plans_modal_parity() -> None:
+    """Phase 54.6.163 — Plans modal gets auto-plan button + live readout parity.
+
+    User-reported bug: 54.6.155 added "Auto-plan sections" to the
+    Chapter modal but users landing on the Plans modal's Sections tab
+    (where the per-section plan editor lives) naturally looked for it
+    there. Two modals with "Sections" tabs = UX confusion. Also the
+    54.6.152 live concept-count readout only worked under Chapter-
+    modal textareas, not the Plans-modal textareas.
+
+    Plus, while fixing, caught a `KeyError: 'id'` from an unescaped
+    `{id}` placeholder in a JS comment (Python str.format interpreted
+    the `{id}` as a substitution key). Regression guard added.
+
+    Pins:
+      (A) Plans modal has its own auto-plan button + force checkbox
+          + status span — all dedicated ids so the Chapter modal's
+          don't shadow them
+      (B) The Plans-modal auto-plan handler calls the same 54.6.155
+          endpoint and invalidates the resolver cache
+      (C) Plans-modal textareas get a slug-keyed readout via
+          `updatePlanConceptReadoutBySlug` + `_renderPlanConceptReadout`
+      (D) Initial render populates the readouts (same pattern as
+          54.6.152 in renderSectionEditor)
+      (E) No unescaped single-brace placeholders in the template —
+          all JS comments referencing URL paths like
+          `/api/chapters/{id}/...` must use `{{id}}` (Python `.format()`
+          would otherwise raise KeyError)
+    """
+    from sciknow.testing.helpers import web_app_full_source
+    src = web_app_full_source()
+
+    # A) Plans modal UI elements
+    for marker in (
+        'id="plan-auto-plan-force"',
+        'id="plan-auto-plan-status"',
+        'onclick="planModalAutoPlanSections()"',
+    ):
+        assert marker in src, (
+            f"Plans modal missing {marker!r} (Phase 54.6.163)"
+        )
+    # A button text string tied to the Plans-modal context (not the
+    # Chapter modal's)
+    assert "plan-auto-plan-force" in src, "force checkbox id missing"
+
+    # B) Handler delegates to the 54.6.155 endpoint + invalidates cache
+    start = src.find("function planModalAutoPlanSections")
+    assert start >= 0, "planModalAutoPlanSections JS missing"
+    body = src[start : start + 3000]
+    assert "/api/chapters/' + chId + '/plan-sections'" in body, (
+        "Plans-modal handler must POST to /api/chapters/<id>/plan-sections "
+        "(the same 54.6.155 endpoint — no backend duplication)"
+    )
+    assert "_resolvedTargetsByChapter" in body, (
+        "handler must invalidate resolver cache so Chapter-modal badges "
+        "refresh to concept_density after the run"
+    )
+    assert "onPlanSectionsChapterChange(chId)" in body, (
+        "handler must reload the chapter's sections list on success"
+    )
+
+    # C) Plans-modal textareas have the slug-keyed readout wired in
+    assert "plan-readout-slug-" in src, (
+        "slug-keyed readout host id missing from Plans-modal textarea render"
+    )
+    assert ("async function updatePlanConceptReadoutBySlug" in src
+            or "function updatePlanConceptReadoutBySlug" in src), (
+        "updatePlanConceptReadoutBySlug JS fn missing"
+    )
+    assert ("function _renderPlanConceptReadout" in src), (
+        "shared readout renderer _renderPlanConceptReadout missing — "
+        "both readout variants should share the render logic"
+    )
+    assert "updatePlanConceptReadoutBySlug(" in src, (
+        "Plans-modal textarea oninput must call the slug-keyed updater"
+    )
+
+    # D) Initial render populates the slug-keyed readouts
+    # (mirrors the 54.6.152 pattern for the Chapter modal)
+    assert "textarea[data-plan-slug]" in src, (
+        "initial-render loop must query textareas by data-plan-slug"
+    )
+
+    # E) Regression guard for the KeyError bug: any `/api/chapters/{id}/...`
+    # literal in JS/HTML strings MUST use doubled braces `{{id}}` because
+    # the outer template is `.format()`-ed. Catch this pattern.
+    import re
+    # Find single-brace {id}, {book_id}, {chapter_id}, {slug} in the
+    # Python source template (not in route decorators — those are
+    # inside @app.get(...) which uses a different mechanism).
+    lines = src.splitlines()
+    offenders: list[tuple[int, str]] = []
+    for i, ln in enumerate(lines, start=1):
+        # Only scan JS comments / strings inside the TEMPLATE body,
+        # which is roughly between the f-string's opening `TEMPLATE = f"""`
+        # and its closing `"""`. We approximate by excluding
+        # lines that look like FastAPI route decorators (`@app.get`,
+        # `@app.post`, etc).
+        stripped = ln.strip()
+        if stripped.startswith(("@app.", "'/api/", '"/api/')):
+            continue
+        # Find `{placeholder}` patterns with a single brace — these
+        # are the ones Python will try to substitute. Note that our
+        # rule here is "any `{id}` pattern inside a Python comment
+        # or JS comment should be doubled". We scope narrowly so we
+        # don't false-alarm on intended format substitutions.
+        # Negative look-around ensures we match `{id}` (single brace) but
+        # NOT `{{id}}` (the correctly-escaped form).
+        if re.search(r"//.*(?<!\{)\{(id|slug|chapter_id|book_id|draft_id)\}(?!\})", ln):
+            offenders.append((i, ln.rstrip()))
+    assert not offenders, (
+        f"Phase 54.6.163 regression: single-brace placeholders inside "
+        f"JS comments will be interpreted by Python str.format() and "
+        f"crash the page. Found:\n"
+        + "\n".join(f"  line {i}: {l}" for i, l in offenders)
+    )
+
+
 def l1_phase54_6_162_gui_coverage_audit() -> None:
     """Phase 54.6.162 — GUI accessibility + docs audit.
 
@@ -11973,6 +12091,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_161_autowrite_ab_surface,
     # Phase 54.6.162 — GUI + docs audit
     l1_phase54_6_162_gui_coverage_audit,
+    # Phase 54.6.163 — Plans modal auto-plan + live readout parity
+    l1_phase54_6_163_plans_modal_parity,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness

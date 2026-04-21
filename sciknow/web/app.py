@@ -9493,6 +9493,26 @@ body.task-bar-open {{ padding-top: 40px; }}
             <option value="">(choose a chapter…)</option>
           </select>
         </div>
+        <!-- Phase 54.6.163 — duplicate the 54.6.155 Chapter-modal
+             auto-plan button here in the Plans modal, because this
+             is where users naturally land when they want to plan
+             sections (the modal is literally titled "Plans" and has
+             a per-section plan editor). Previously the button only
+             lived in the Chapter modal's Sections tab, which is a
+             different modal with a different tab structure. -->
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;padding:8px;background:var(--toolbar-bg);border:1px solid var(--border);border-radius:6px;">
+          <button class="btn-secondary" onclick="planModalAutoPlanSections()"
+                  title="Phase 54.6.154/163 — LLM-generate a 3-4 bullet concept plan per empty section in the currently-picked chapter. Bullet counts drive the Phase-54.6.146 concept-density resolver: target_words = N bullets × wpc_midpoint. Skips sections that already have a plan unless 'Force overwrite' is ticked. Cost: ~5-10s per empty section (LLM_FAST_MODEL). See docs/RESEARCH.md §24 and docs/CONCEPT_DENSITY.md.">
+            &#129504; Auto-plan sections
+          </button>
+          <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;"
+                 title="Overwrite existing plans instead of skipping them.">
+            <input type="checkbox" id="plan-auto-plan-force"
+                   title="Overwrite existing plans instead of skipping.">
+            force overwrite
+          </label>
+          <span id="plan-auto-plan-status" style="font-size:11px;color:var(--fg-muted);"></span>
+        </div>
         <div id="plan-chapter-header" style="margin-bottom:14px;font-size:13px;color:var(--fg-muted);"></div>
         <div id="plan-chapter-sections"></div>
       </div>
@@ -20923,6 +20943,50 @@ function populatePlanSectionsPicker(preselectId) {{
   }}
 }}
 
+// Phase 54.6.163 — Plans modal auto-plan button. Uses the same
+// /api/chapters/{{id}}/plan-sections endpoint as the Chapter modal's
+// 54.6.155 button, just driven from the Plans modal's chapter picker.
+async function planModalAutoPlanSections() {{
+  const picker = document.getElementById('plan-sections-chapter-picker');
+  const status = document.getElementById('plan-auto-plan-status');
+  const force  = document.getElementById('plan-auto-plan-force').checked;
+  if (!picker || !picker.value) {{
+    status.innerHTML = '<span style="color:var(--warning);">Pick a chapter first.</span>';
+    return;
+  }}
+  const chId = picker.value;
+  status.innerHTML = '<em>Generating plans… (~5-10s per empty section)</em>';
+  try {{
+    const fd = new FormData();
+    if (force) fd.append('force', 'true');
+    const res = await fetch('/api/chapters/' + chId + '/plan-sections', {{
+      method: 'POST', body: fd,
+    }});
+    if (!res.ok) {{
+      const t = await res.text();
+      status.innerHTML = '<span style="color:var(--danger);">Failed: '
+                        + _escHtml(t.slice(0, 200)) + '</span>';
+      return;
+    }}
+    const data = await res.json();
+    status.innerHTML = '<span style="color:var(--success);">✓ planned '
+                     + data.n_planned + ' · skipped '
+                     + (data.n_skipped || 0) + '.</span>  '
+                     + '<span style="color:var(--fg-muted);">'
+                     + 'Reloading sections…</span>';
+    // Invalidate resolver cache so the Chapter modal (if reopened) shows
+    // the new concept-density badges. Then reload this chapter in the
+    // Plans modal Sections tab.
+    if (window._resolvedTargetsByChapter) {{
+      delete window._resolvedTargetsByChapter[chId];
+    }}
+    onPlanSectionsChapterChange(chId);
+  }} catch (e) {{
+    status.innerHTML = '<span style="color:var(--danger);">Error: '
+                      + _escHtml(String(e).slice(0, 200)) + '</span>';
+  }}
+}}
+
 function onPlanSectionsChapterChange(cid) {{
   if (!cid) {{
     document.getElementById('plan-chapter-header').innerHTML = '';
@@ -21044,9 +21108,15 @@ function populatePlanChapterTab(ch) {{
             'onclick="deletePlanSection(\\'' + s.slug + '\\')" ' +
             'style="padding:2px 8px;color:var(--danger,#c00);">&times;</button>';
     html += '    </div>';
-    html += '    <textarea data-plan-slug="' + s.slug + '" placeholder="Section plan — what THIS section must cover" ' +
-            'oninput="updatePlanChapterSection(\\'' + s.slug + '\\', this.value)">' +
+    // Phase 54.6.163 — live concept-count readout wired into the
+    // Plans-modal textareas (previously only present in the
+    // Chapter-modal via 54.6.152). Uses the slug-keyed variant of
+    // the shared renderer.
+    html += '    <textarea data-plan-slug="' + s.slug + '" placeholder="Section plan — what THIS section must cover (bullet one concept per line for concept-density sizing)" ' +
+            'oninput="updatePlanChapterSection(\\'' + s.slug + '\\', this.value); updatePlanConceptReadoutBySlug(\\'' + s.slug + '\\', this);">' +
             escapeHtml(s.plan || '') + '</textarea>';
+    html += '    <div id="plan-readout-slug-' + s.slug + '" class="plan-concept-readout" '
+         + 'style="font-size:11px;color:var(--fg-muted);margin:2px 0 0 4px;"></div>';
     html += '    <div class="sec-size-row">';
     html += '      <label>Target:</label>';
     html += '      <select onchange="updatePlanChapterTargetWords(\\'' + s.slug + '\\', this.value)" title="Pick a preset word target for this section. Choose Custom to enter an exact number in the box on the right.">' + optsHtml + '</select>';
@@ -21064,6 +21134,27 @@ function populatePlanChapterTab(ch) {{
        +  '<button class="btn-secondary" onclick="addPlanSection()" title="Append a new empty section to the end of this chapter. You can rename and reorder after adding.">+ Add section</button>'
        +  '</div>';
   list.innerHTML = html;
+  // Phase 54.6.163 — populate the concept-count readouts after render
+  // so users see "3 concepts × 650 wpc = ~1,950 words" before typing.
+  // Mirrors the pattern from 54.6.152 in renderSectionEditor.
+  list.querySelectorAll('textarea[data-plan-slug]').forEach(ta => {{
+    updatePlanConceptReadoutBySlug(ta.dataset.planSlug, ta);
+  }});
+  // Cache warm: if _swBookTypes or _currentBookType isn't loaded yet,
+  // fetch and re-render so wpc midpoint is correct per project type.
+  if (!window._currentBookType || !window._swBookTypes) {{
+    Promise.all([
+      fetch('/api/book').then(r => r.json()).catch(() => ({{}})),
+      (window._swBookTypes ? Promise.resolve(null) : swLoadBookTypes()),
+    ]).then(([bookData]) => {{
+      if (bookData && bookData.book_type) {{
+        window._currentBookType = bookData.book_type;
+      }}
+      list.querySelectorAll('textarea[data-plan-slug]').forEach(ta => {{
+        updatePlanConceptReadoutBySlug(ta.dataset.planSlug, ta);
+      }});
+    }}).catch(e => console.debug('plan-modal readout cache warm failed:', e));
+  }}
 }}
 
 // Track plan edits for the chapter tab so save can collect them.
@@ -22720,6 +22811,44 @@ function _countPlanConceptsJS(text) {{
   // Prose fallback: substantial lines >= 20 chars, capped at 6
   const lines = text.split('\\n').filter(ln => ln.trim().length >= 20);
   return Math.min(lines.length, 6);
+}}
+
+// Phase 54.6.163 — renderer that writes the concept-count readout into
+// a given element. Used by both the Chapter-modal (54.6.152,
+// idx-based) and the Plans-modal (slug-based) entry points.
+function _renderPlanConceptReadout(el, text) {{
+  if (!el) return;
+  const n = _countPlanConceptsJS(text || '');
+  if (n <= 0) {{
+    el.innerHTML = '<em style="color:var(--fg-muted);">No concepts detected yet — use bullet lines (<code>- concept</code>) or a few substantial sentences to activate concept-density sizing.</em>';
+    return;
+  }}
+  let wpcMid = 650;
+  const bookType = (window._currentBookType || 'scientific_book');
+  if (window._swBookTypes) {{
+    const t = window._swBookTypes.find(x => x.slug === bookType);
+    if (t && t.words_per_concept_range) {{
+      const [lo, hi] = t.words_per_concept_range;
+      wpcMid = Math.floor((lo + hi) / 2);
+    }}
+  }}
+  const target = Math.max(400, n * wpcMid);
+  const maxConcepts = 4;
+  let warn = '';
+  if (n > maxConcepts) {{
+    warn = ' <span style="color:var(--warning);">⚠ ' + n +
+           ' concepts exceeds Cowan 2001 cap of ' + maxConcepts +
+           ' — consider splitting.</span>';
+  }}
+  el.innerHTML = '<strong>' + n + '</strong> concept' + (n === 1 ? '' : 's') +
+                 ' × ' + wpcMid + ' wpc = <strong>~' + target.toLocaleString() + '</strong> words' +
+                 warn;
+}}
+
+// Phase 54.6.163 — wrapper used by the Plans modal (slug-keyed readouts)
+function updatePlanConceptReadoutBySlug(slug, textarea) {{
+  const el = document.getElementById('plan-readout-slug-' + slug);
+  _renderPlanConceptReadout(el, (textarea && textarea.value) || '');
 }}
 
 function updatePlanConceptReadout(idx, textarea) {{
