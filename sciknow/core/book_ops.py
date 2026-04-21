@@ -5048,6 +5048,7 @@ def autowrite_chapter_all_sections_stream(
     target_words: int | None = None,
     rebuild: bool = False,
     resume: bool = False,
+    include_visuals: bool = False,   # Phase 54.6.144
 ) -> Iterator[Event]:
     """Phase 20 — autowrite EVERY section of a chapter in sequence.
 
@@ -5211,6 +5212,7 @@ def autowrite_chapter_all_sections_stream(
                 cove_threshold=cove_threshold,
                 target_words=target_words,
                 resume_from_draft_id=resume_draft_id,
+                include_visuals=include_visuals,
             )
             for event in inner:
                 # Forward all child events; tag with section index so

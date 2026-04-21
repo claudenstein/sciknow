@@ -9460,6 +9460,68 @@ def l1_phase54_6_56_refresh_ingests_downloads_and_failed() -> None:
         )
 
 
+def l1_phase54_6_144_autowrite_include_visuals_web_wiring() -> None:
+    """Phase 54.6.144 — web-app checkbox for autowrite --include-visuals.
+
+    The Phase 54.6.142 CLI flag landed; this phase surfaces it in the
+    `sciknow book serve` autowrite config modal so non-CLI users can
+    turn it on. Pins three layers end-to-end so a refactor of any one
+    catches itself:
+
+      (1) Both /api/autowrite and /api/autowrite-chapter POST routes
+          accept `include_visuals` as a Form field.
+      (2) The autowrite-config modal contains the checkbox with the
+          documented ID (used by JS) and explanatory tooltip.
+      (3) The confirmAutowrite JS reads the checkbox and appends
+          `include_visuals` to the FormData.
+
+    Regression risk: the CLI flag keeps working if any of these break,
+    but the GUI path silently falls back to no-visuals (which looks
+    like the old workflow and users assume the feature is off
+    even when they ticked the box). This test makes that failure
+    mode loud.
+    """
+    from sciknow.testing.helpers import get_test_client, web_app_full_source
+    client = get_test_client()
+
+    # Layer 1 — endpoint accepts the form field
+    openapi = client.get("/openapi.json").json()
+    for path in ("/api/autowrite", "/api/autowrite-chapter"):
+        methods = openapi.get("paths", {}).get(path, {})
+        post = methods.get("post", {})
+        body = (post.get("requestBody") or {}).get("content", {})
+        form = (body.get("application/x-www-form-urlencoded") or {}).get("schema", {})
+        # FastAPI may inline the schema or emit a $ref — resolve either
+        ref = form.get("$ref", "")
+        if ref.startswith("#/components/schemas/"):
+            schema_name = ref.split("/")[-1]
+            schema = openapi.get("components", {}).get("schemas", {}).get(schema_name, {})
+            props = set(schema.get("properties", {}).keys())
+        else:
+            props = set(form.get("properties", {}).keys())
+        assert "include_visuals" in props, (
+            f"POST {path} must accept include_visuals form field "
+            f"(Phase 54.6.144). Got: {sorted(props)}"
+        )
+
+    # Layer 2 — template has the checkbox with the right ID
+    src = web_app_full_source()
+    assert "aw-config-include-visuals" in src, (
+        "autowrite-config modal must contain an input with id="
+        "'aw-config-include-visuals' (the JS in confirmAutowrite reads it)"
+    )
+    # And a tooltip so non-authors know what it does
+    assert "Include visuals in the writer" in src, (
+        "checkbox needs the user-facing label 'Include visuals in the writer'"
+    )
+
+    # Layer 3 — JS plumbs the checkbox into the POST FormData
+    assert "fd.append('include_visuals'" in src, (
+        "confirmAutowrite JS must append include_visuals to the FormData "
+        "when the checkbox is ticked"
+    )
+
+
 def l1_phase54_6_143_length_target_defaults() -> None:
     """Phase 54.6.143 — book-type-aware defaults + per-chapter override.
 
@@ -10401,6 +10463,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_142_autowrite_visuals_wiring,
     # Phase 54.6.143 — book-type-aware length defaults + per-chapter override
     l1_phase54_6_143_length_target_defaults,
+    # Phase 54.6.144 — web-app checkbox for autowrite --include-visuals
+    l1_phase54_6_144_autowrite_include_visuals_web_wiring,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness

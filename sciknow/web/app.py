@@ -2899,6 +2899,7 @@ async def api_autowrite_chapter(
     target_words: int = Form(None),
     rebuild: bool = Form(False),
     resume: bool = Form(False),
+    include_visuals: bool = Form(False),   # Phase 54.6.144
 ):
     """Phase 20 — autowrite EVERY section of a chapter in sequence.
 
@@ -2924,6 +2925,7 @@ async def api_autowrite_chapter(
             target_words=target_words if target_words and target_words > 0 else None,
             rebuild=rebuild,
             resume=resume,
+            include_visuals=include_visuals,
         )
 
     thread = threading.Thread(
@@ -2942,11 +2944,18 @@ async def api_autowrite(
     full: bool = Form(False),
     model: str = Form(None),
     target_words: int = Form(None),
+    include_visuals: bool = Form(False),   # Phase 54.6.144
 ):
     """Phase 17 — target_words is optional; when None, the effective
     per-section target is resolved from the book's custom_metadata
     (target_chapter_words / num_sections_in_chapter). When set, it
-    overrides the book-level value for this run only."""
+    overrides the book-level value for this run only.
+
+    Phase 54.6.144 — ``include_visuals`` turns on the 54.6.142 autowrite
+    visuals integration: the 5-signal ranker surfaces figures to the
+    writer, the gated instruction ships in the system prompt, and
+    ``visual_citation`` joins the scorer dimensions. Default off so the
+    existing workflow is untouched."""
     from sciknow.core.book_ops import autowrite_section_stream
 
     if full:
@@ -2964,6 +2973,7 @@ async def api_autowrite(
             section_type=section_type, model=model or None,
             max_iter=max_iter, target_score=target_score,
             target_words=target_words if target_words and target_words > 0 else None,
+            include_visuals=include_visuals,
         )
 
     thread = threading.Thread(
@@ -8957,6 +8967,20 @@ body.task-bar-open {{ padding-top: 40px; }}
           <button class="btn-secondary aw-mode-btn" data-mode="rebuild" onclick="selectAwMode('rebuild')" title="Overwrite all sections from scratch">Rebuild</button>
           <button class="btn-secondary aw-mode-btn" data-mode="resume" onclick="selectAwMode('resume')" title="Load existing content + run more iterations">Resume</button>
         </div>
+      </div>
+      <!-- Phase 54.6.144 — visuals-in-writer opt-in -->
+      <div class="field" style="margin-top:18px;padding-top:12px;border-top:1px dashed var(--border);">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"
+               title="Phase 54.6.142 visuals-in-writer. When on, the 5-signal ranker surfaces figures/tables to the writer, and the prompt includes the 'cite [Fig. N] only when directly depicted' gated instruction. Adds a visual_citation scoring dimension (hallucinated markers = hard 0.0, missed opportunities = 0.5). Level-1 + Level-2 verify run per iteration; Level-3 VLM claim-depiction is deferred to the finalize-draft pass. Default off so existing runs are untouched.">
+          <input type="checkbox" id="aw-config-include-visuals"
+                 title="Include visuals (figures / tables / equations) in the writer's retrieval pool. See docs/RESEARCH.md §7.X."/>
+          <span>&#128206; Include visuals in the writer</span>
+        </label>
+        <p style="font-size:11px;color:var(--fg-muted);margin:4px 0 0 28px;line-height:1.4;">
+          Writer gets a shortlist of ranked figures/tables per section and may cite them as
+          <code>[Fig.&nbsp;N]</code> when the claim is directly depicted. Verify pass catches hallucinated
+          markers each iteration. ~+0.7s per section on CPU.
+        </p>
       </div>
     </div>
     <div class="modal-footer">
@@ -15919,6 +15943,9 @@ async function confirmAutowrite() {{
   fd.append('target_score', String(awTargetScore));
   if (isAllSections && modeRebuild) fd.append('rebuild', 'true');
   if (isAllSections && modeResume) fd.append('resume', 'true');
+  // Phase 54.6.144 — visuals-in-writer opt-in.
+  const incVisEl = document.getElementById('aw-config-include-visuals');
+  if (incVisEl && incVisEl.checked) fd.append('include_visuals', 'true');
   const endpoint = isAllSections ? '/api/autowrite-chapter' : '/api/autowrite';
   const res = await fetch(endpoint, {{method: 'POST', body: fd}});
   const data = await res.json();
