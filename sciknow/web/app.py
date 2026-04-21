@@ -13138,7 +13138,6 @@ function showChapterEmptyState(chLabel, chId) {{
   subtitle.innerHTML = '<span class="u-muted">No drafts yet &mdash; pick a section type and click Write, or use Autowrite to draft all sections.</span>';
   subtitle.style.display = 'block';
   // Show toolbar
-  document.getElementById('toolbar').style.display = 'flex';
   // Hide other panels
   document.getElementById('dashboard-view').style.display = 'none';
   document.getElementById('edit-view').style.display = 'none';
@@ -13237,7 +13236,6 @@ async function loadSection(draftId) {{
     document.getElementById('dashboard-view').style.display = 'none';
     document.getElementById('read-view').style.display = 'block';
     document.getElementById('draft-subtitle').style.display = 'block';
-    document.getElementById('toolbar').style.display = 'flex';
     document.getElementById('argue-map-view').style.display = 'none';
 
     // Update main content
@@ -16600,7 +16598,6 @@ async function showDashboard() {{
   document.getElementById('edit-view').style.display = 'none';
   document.getElementById('draft-title').textContent = 'Dashboard';
   document.getElementById('draft-subtitle').style.display = 'none';
-  document.getElementById('toolbar').style.display = 'none';
   document.getElementById('stream-panel').style.display = 'none';
   document.getElementById('version-panel').style.display = 'none';
 
@@ -16617,7 +16614,6 @@ function writeForCell(chapterId, sectionType) {{
   document.getElementById('read-view').style.display = 'block';
   document.getElementById('read-view').innerHTML = '<p class="u-dim">Starting write...</p>';
   document.getElementById('draft-subtitle').style.display = 'block';
-  document.getElementById('toolbar').style.display = 'flex';
   doWrite();
 }}
 
@@ -16651,7 +16647,6 @@ function previewEmptySection(chapterId, sectionType) {{
   document.getElementById('dashboard-view').style.display = 'none';
   document.getElementById('read-view').style.display = 'block';
   document.getElementById('draft-subtitle').style.display = 'block';
-  document.getElementById('toolbar').style.display = 'flex';
   document.getElementById('edit-view').style.display = 'none';
 
   // Update the title bar to reflect the section
@@ -24314,7 +24309,6 @@ async function showCorkboard() {{
   document.getElementById('edit-view').style.display = 'none';
   document.getElementById('draft-title').textContent = 'Corkboard';
   document.getElementById('draft-subtitle').style.display = 'none';
-  document.getElementById('toolbar').style.display = 'none';
   document.getElementById('stream-panel').style.display = 'none';
   document.getElementById('version-panel').style.display = 'none';
   document.querySelectorAll('.sec-link').forEach(l => l.classList.remove('active'));
@@ -24364,7 +24358,6 @@ async function showChapterReader() {{
   document.getElementById('edit-view').style.display = 'none';
   document.getElementById('draft-title').textContent = 'Ch.' + data.chapter_num + ': ' + data.chapter_title;
   document.getElementById('draft-subtitle').style.display = 'none';
-  document.getElementById('toolbar').style.display = 'none';
 
   // Phase 18 — populate the right-hand sources panel with the chapter's
   // global (renumbered) source list so [N] click-to-source works in
