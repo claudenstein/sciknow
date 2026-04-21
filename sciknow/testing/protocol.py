@@ -9544,6 +9544,86 @@ def l1_phase54_6_145_finalize_draft_surface() -> None:
     )
 
 
+def l1_phase54_6_149_resolved_targets_endpoint() -> None:
+    """Phase 54.6.149 — per-section resolver explanation surfaces in Chapter modal.
+
+    Users couldn't tell which fallback level would fire for each section
+    without starting autowrite. New endpoint `/api/chapters/{cid}/
+    resolved-targets` runs the exact same resolver chain the autowrite
+    body uses and returns the per-section resolution. The sections
+    editor in the Chapter modal now shows "~1,950 words [concept-density]"
+    instead of a generic "~auto" badge.
+
+    Pins:
+      (A) endpoint registered + returns the documented JSON shape
+      (B) handler source invokes the real resolver helpers (no drift:
+          if someone changes _get_section_concept_density_target, this
+          endpoint reads the new behaviour for free)
+      (C) template/JS cache the response per-chapter + renderSectionEditor
+          reads it
+    """
+    from sciknow.testing.helpers import get_test_client, web_app_full_source
+    import inspect
+    from sciknow.web import app as web_app
+
+    client = get_test_client()
+
+    # A) Route is registered (OpenAPI is source-of-truth for FastAPI)
+    openapi = client.get("/openapi.json").json()
+    path = "/api/chapters/{chapter_id}/resolved-targets"
+    assert path in openapi.get("paths", {}), (
+        f"Phase 54.6.149 endpoint missing from routes: {path}"
+    )
+
+    # B) Handler calls the actual resolver helpers — no arithmetic
+    # duplication. If someone adds a Level-0.5 or changes the chain,
+    # the endpoint reflects it automatically. A refactor that replicates
+    # the logic inline would silently drift from autowrite's behaviour.
+    handler_src = inspect.getsource(web_app.api_chapter_resolved_targets)
+    required_calls = (
+        "_section_target_words",
+        "_get_section_target_words",
+        "_get_section_concept_density_target",
+        "_count_plan_concepts",
+        "get_project_type",
+    )
+    for fn_name in required_calls:
+        assert fn_name in handler_src, (
+            f"Phase 54.6.149 resolved-targets handler must call {fn_name} "
+            f"— duplicating resolver logic inline risks drift from "
+            f"autowrite's actual behaviour"
+        )
+
+    # Every documented level must appear in the response shape
+    required_levels = (
+        "explicit_section_override",
+        "concept_density",
+        "chapter_split",
+    )
+    for level in required_levels:
+        assert level in handler_src, (
+            f"resolved-targets response must include the '{level}' level. "
+            f"Users rely on these strings in the Chapter modal badge."
+        )
+
+    # C) Template/JS wire-up
+    src = web_app_full_source()
+    assert "_resolvedTargetsByChapter" in src, (
+        "renderSectionEditor must consult the per-chapter resolver cache "
+        "(window._resolvedTargetsByChapter) to show the actual target "
+        "per section, not a generic chapter-split fallback"
+    )
+    assert "'/api/chapters/'" in src and "'/resolved-targets'" in src, (
+        "openChapterModal must fetch /api/chapters/<id>/resolved-targets"
+    )
+    # Badge classes must exist for all three resolver-decided levels
+    # (override class already existed pre-54.6.149; concept-density is new)
+    assert "sec-target-badge concept-density" in src, (
+        "Chapter modal must visually distinguish concept-density-resolved "
+        "sections via the sec-target-badge.concept-density class"
+    )
+
+
 def l1_phase54_6_148_book_settings_type_picker() -> None:
     """Phase 54.6.148 — Book Settings Basics tab gets the type picker +
     info panel + round-trips via PUT /api/book.
@@ -10853,6 +10933,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_147_book_types_api_and_wizard,
     # Phase 54.6.148 — Book Settings type picker + info panel + PUT round-trip
     l1_phase54_6_148_book_settings_type_picker,
+    # Phase 54.6.149 — per-section resolver explanation endpoint + badges
+    l1_phase54_6_149_resolved_targets_endpoint,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness

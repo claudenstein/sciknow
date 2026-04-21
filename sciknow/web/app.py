@@ -5891,6 +5891,136 @@ async def list_jobs():
 # swapping the DB connection under the running app.
 
 
+@app.get("/api/chapters/{chapter_id}/resolved-targets")
+async def api_chapter_resolved_targets(chapter_id: str):
+    """Phase 54.6.149 — per-section target + which fallback level fired.
+
+    For each section in the chapter, calls the same resolver chain that
+    autowrite uses (core.book_ops) and returns the resulting target
+    along with a human-readable explanation of which level won. This
+    makes the concept-density + per-chapter + per-section + project-
+    type cascade visible in the Chapter modal so users don't need to
+    start autowrite to find out.
+
+    Returns:
+      {
+        "chapter_target": int,           # Level-3-style chapter target
+        "chapter_level": "explicit_override" | "book_default" | "type_default",
+        "sections": [
+          {"slug": str, "title": str,
+           "target": int,
+           "level": "explicit_override" | "concept_density" | "chapter_split",
+           "concepts": int | null,
+           "wpc_midpoint": int | null,
+           "explanation": str},
+          ...
+        ]
+      }
+    """
+    from sciknow.core.book_ops import (
+        _get_book_length_target, _section_target_words,
+        _get_section_target_words, _get_section_concept_density_target,
+        _get_chapter_sections_normalized, _count_plan_concepts,
+        _get_section_plan, DEFAULT_TARGET_CHAPTER_WORDS,
+    )
+    from sciknow.core.project_type import get_project_type
+
+    with get_session() as session:
+        # Chapter target + which of its four levels fired
+        book_row = session.execute(text("""
+            SELECT book_type, COALESCE(custom_metadata, '{}'::jsonb),
+                   CAST(:cid AS uuid)
+            FROM books WHERE id::text = :bid LIMIT 1
+        """), {"bid": _book_id, "cid": chapter_id}).fetchone()
+        book_type = (book_row[0] if book_row else None) or "scientific_book"
+        book_meta = (book_row[1] if book_row else {}) or {}
+        if isinstance(book_meta, str):
+            try:
+                book_meta = json.loads(book_meta)
+            except Exception:
+                book_meta = {}
+        # Chapter-override check
+        ch_row = session.execute(text(
+            "SELECT target_words FROM book_chapters WHERE id::text = :cid"
+        ), {"cid": chapter_id}).fetchone()
+        chapter_override = (
+            int(ch_row[0]) if ch_row and ch_row[0] and int(ch_row[0]) > 0 else None
+        )
+        if chapter_override:
+            chapter_target, chapter_level = chapter_override, "explicit_chapter_override"
+        elif isinstance(book_meta.get("target_chapter_words"), (int, float)) and book_meta["target_chapter_words"] > 0:
+            chapter_target, chapter_level = int(book_meta["target_chapter_words"]), "book_default"
+        else:
+            try:
+                chapter_target = get_project_type(book_type).default_target_chapter_words
+                chapter_level = "type_default"
+            except Exception:
+                chapter_target, chapter_level = DEFAULT_TARGET_CHAPTER_WORDS, "hardcoded_fallback"
+
+        # Sections
+        sections = _get_chapter_sections_normalized(session, chapter_id)
+        n = max(1, len(sections))
+        chapter_split = _section_target_words(chapter_target, n)
+
+        out_sections = []
+        pt = None
+        try:
+            pt = get_project_type(book_type)
+        except Exception:
+            pt = None
+        wpc_mid = None
+        if pt is not None:
+            wlo, whi = pt.words_per_concept_range
+            wpc_mid = (wlo + whi) // 2
+
+        for s in sections:
+            slug = s.get("slug", "")
+            title = s.get("title", "")
+            override = _get_section_target_words(session, chapter_id, slug)
+            if override is not None:
+                out_sections.append({
+                    "slug": slug, "title": title,
+                    "target": override, "level": "explicit_section_override",
+                    "concepts": None, "wpc_midpoint": wpc_mid,
+                    "explanation": f"Per-section override ({override:,} words).",
+                })
+                continue
+            plan_text = _get_section_plan(session, chapter_id, slug)
+            n_concepts = _count_plan_concepts(plan_text)
+            if n_concepts > 0 and wpc_mid:
+                concept_target = _get_section_concept_density_target(
+                    session, chapter_id, slug, _book_id,
+                )
+                if concept_target:
+                    out_sections.append({
+                        "slug": slug, "title": title,
+                        "target": concept_target, "level": "concept_density",
+                        "concepts": n_concepts, "wpc_midpoint": wpc_mid,
+                        "explanation": (
+                            f"Bottom-up: {n_concepts} concept(s) × {wpc_mid} "
+                            f"words/concept = {concept_target:,} words. Cap 4 "
+                            f"per Cowan 2001 (RESEARCH.md §24)."
+                        ),
+                    })
+                    continue
+            out_sections.append({
+                "slug": slug, "title": title,
+                "target": chapter_split, "level": "chapter_split",
+                "concepts": None, "wpc_midpoint": wpc_mid,
+                "explanation": (
+                    f"Top-down: chapter target {chapter_target:,} ÷ "
+                    f"{n} sections = {chapter_split:,}. Add a section plan "
+                    f"to switch to bottom-up concept-density sizing."
+                ),
+            })
+
+    return JSONResponse({
+        "chapter_target": chapter_target,
+        "chapter_level": chapter_level,
+        "sections": out_sections,
+    })
+
+
 @app.get("/api/book-types")
 async def api_book_types():
     """Phase 54.6.147 — list all registered project types with their
@@ -7930,6 +8060,12 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
                               border-radius: 10px; }}
 .sec-row .sec-target-badge.override {{ color: var(--accent);
                                        border-color: var(--accent); }}
+/* Phase 54.6.149 — bottom-up concept-density resolution got a subtle
+   green tint to distinguish it from manual overrides (accent) and the
+   plain chapter-split fallback (default). Users can see at a glance
+   which sections got sized from their plan. */
+.sec-row .sec-target-badge.concept-density {{ color: var(--success);
+                                               border-color: var(--success); }}
 .sec-row .sec-target-badge .badge-tag {{ font-size: 10px;
                                          font-weight: 400;
                                          color: var(--fg-muted);
@@ -21377,6 +21513,23 @@ function openChapterModal(chId) {{
   }}
   renderSectionEditor();
 
+  // Phase 54.6.149 — fetch the resolved per-section targets so the
+  // sections editor can show "this would target 1,950 words via
+  // concept-density from your plan". Fire-and-forget: we call
+  // renderSectionEditor() again on completion so the extra info lands
+  // without blocking the modal open.
+  window._resolvedTargetsByChapter = window._resolvedTargetsByChapter || {{}};
+  fetch('/api/chapters/' + chId + '/resolved-targets')
+    .then(r => r.ok ? r.json() : null)
+    .then(data => {{
+      if (!data) return;
+      window._resolvedTargetsByChapter[chId] = data;
+      // Only re-render if this modal is still on the same chapter
+      const modal = document.getElementById('chapter-modal');
+      if (modal && modal.dataset.chId === chId) renderSectionEditor();
+    }})
+    .catch(e => console.debug('resolved-targets fetch failed:', e));
+
   switchChapterTab('ch-scope');
   openModal('chapter-modal');
 }}
@@ -21470,20 +21623,48 @@ function renderSectionEditor() {{
     // Phase 32.1 — show the effective target words inline next to the
     // dropdown so the user always sees what budget THIS section will
     // be written to (rather than burying it in the muted slug line).
-    const effectiveTw = (tw && tw > 0) ? tw : perSection;
-    const targetBadgeClass = (tw && tw > 0) ? 'sec-target-badge override' : 'sec-target-badge';
-    const targetBadgeTitle = (tw && tw > 0)
-      ? 'Per-section override (set explicitly)'
-      : 'Auto: chapter target / number of sections';
+    // Phase 54.6.149 — consult the resolver-explanation cache (populated
+    // by openChapterModal) so the badge reflects the ACTUAL level that
+    // would fire at autowrite time, not just "override vs auto split".
+    // Four possible levels: explicit_section_override, concept_density
+    // (plan counted), chapter_split (fallback), pending (cache not
+    // loaded yet).
+    const chIdForResolve = document.getElementById('chapter-modal').dataset.chId;
+    const resolvedCache  = (window._resolvedTargetsByChapter || {{}})[chIdForResolve];
+    const resolvedSec    = resolvedCache && resolvedCache.sections
+      ? resolvedCache.sections.find(x => x.slug === (s.slug || ''))
+      : null;
+    let effectiveTw, badgeLabel, badgeTitle, badgeTag, targetBadgeClass;
+    if (tw && tw > 0) {{
+      effectiveTw = tw;
+      badgeTag = 'override';
+      badgeTitle = 'Per-section override (set explicitly by you)';
+      targetBadgeClass = 'sec-target-badge override';
+    }} else if (resolvedSec && resolvedSec.level === 'concept_density') {{
+      effectiveTw = resolvedSec.target;
+      badgeTag = 'concept-density';
+      badgeTitle = resolvedSec.explanation || 'Bottom-up from section plan';
+      targetBadgeClass = 'sec-target-badge concept-density';
+    }} else if (resolvedSec) {{
+      effectiveTw = resolvedSec.target;
+      badgeTag = 'chapter split';
+      badgeTitle = resolvedSec.explanation || 'Chapter target / num sections';
+      targetBadgeClass = 'sec-target-badge';
+    }} else {{
+      effectiveTw = perSection;
+      badgeTag = 'auto';
+      badgeTitle = 'Loading resolver…';
+      targetBadgeClass = 'sec-target-badge';
+    }}
     html += '    <div class="sec-size-row">';
     html += '      <label>Target:</label>';
-    html += '      <select onchange="updateSectionTargetWords(' + i + ', this.value)" title="Pick a preset word target for this section. Choose Custom to enter an exact number in the box on the right. Auto = chapter target divided evenly across sections.">' + optsHtml + '</select>';
+    html += '      <select onchange="updateSectionTargetWords(' + i + ', this.value)" title="Pick a preset word target for this section. Choose Custom to enter an exact number in the box on the right. Auto = the resolver picks: concept-density (plan × wpc) when a plan exists, else chapter target / num sections.">' + optsHtml + '</select>';
     html += '      <input type="number" class="sec-size-custom" placeholder="words" min="100" step="100" ';
     html += '             value="' + customVal + '" style="' + customStyle + '" ';
     html += '             oninput="updateSectionTargetWordsCustom(' + i + ', this.value)" title="Custom target word count. Visible only when the preset dropdown is set to Custom.">';
-    html += '      <span class="' + targetBadgeClass + '" title="' + targetBadgeTitle + '">';
-    html += '~' + effectiveTw + ' words';
-    html += (tw && tw > 0 ? ' <span class="badge-tag">override</span>' : ' <span class="badge-tag muted">auto</span>');
+    html += '      <span class="' + targetBadgeClass + '" title="' + escapeHtml(badgeTitle) + '">';
+    html += '~' + effectiveTw.toLocaleString() + ' words';
+    html += ' <span class="badge-tag' + (badgeTag === 'auto' || badgeTag === 'chapter split' ? ' muted' : '') + '">' + escapeHtml(badgeTag) + '</span>';
     html += '</span>';
     html += '    </div>';
     // Phase 37 — per-section model override. Free-text input with a
