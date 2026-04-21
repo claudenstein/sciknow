@@ -36,6 +36,59 @@ class PaperMeta:
     source: str = "unknown"
     crossref_raw: dict | None = None
     arxiv_raw: dict | None = None
+    # Phase 54.6.207 — ISO 639-1 code ('en', 'es', 'de', …). Detected
+    # at ingest time via py3langid on ~3000 chars of body text.
+    # Defaults to 'en' so English corpora need no extra wiring.
+    language: str = "en"
+
+
+# Postgres full-text-search dictionary catalogue. Keep in sync with
+# migration 0035's `sk_lang_config()` CASE arms — if we add a
+# language here, the migration function must know about it too, or
+# the new chunks will silently fall back to English FTS.
+_FTS_LANG_MAP = {
+    "en": "english",  "es": "spanish",   "de": "german",
+    "fr": "french",   "pt": "portuguese","it": "italian",
+    "ru": "russian",  "nl": "dutch",     "tr": "turkish",
+    "sv": "swedish",  "no": "norwegian", "da": "danish",
+    "fi": "finnish",  "hu": "hungarian",
+}
+
+
+def lang_to_tsconfig(lang: str | None) -> str:
+    """Resolve an ISO 639-1 code to its Postgres tsvector config name.
+
+    Used by the ingest pipeline to populate ``chunks.tsvector_lang``
+    without round-tripping through the DB-side ``sk_lang_config``
+    helper. Unknown or ``None`` inputs fall back to ``english``.
+    """
+    if not lang:
+        return "english"
+    return _FTS_LANG_MAP.get(lang.lower().strip(), "english")
+
+
+def detect_language(text: str, *, min_chars: int = 200) -> str:
+    """Return a best-guess ISO 639-1 code for ``text``.
+
+    Uses py3langid on the first ~3000 chars (enough signal without
+    pulling the whole paper into memory). When the detector isn't
+    installed, the text is too short, or confidence is low, falls
+    back to ``'en'`` — sciknow's primary corpus is English.
+    """
+    if not text or len(text) < min_chars:
+        return "en"
+    try:
+        import py3langid
+    except Exception:
+        return "en"
+    try:
+        sample = text[:3000]
+        lang, _score = py3langid.classify(sample)
+        if lang and len(lang) == 2 and lang in _FTS_LANG_MAP:
+            return lang
+    except Exception:
+        pass
+    return "en"
 
 
 def extract(pdf_path: Path, markdown_text: str) -> PaperMeta:

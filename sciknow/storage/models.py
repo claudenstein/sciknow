@@ -69,6 +69,12 @@ class Document(Base):
     #     "selected_at": iso-ts,
     #   }
     provenance: Mapped[dict | None] = mapped_column(JSONB)
+    # Phase 54.6.207 — ISO 639-1 language code detected at ingest.
+    # Drives the per-row FTS dictionary selection (see migration 0035
+    # + sciknow.ingestion.metadata.detect_language / lang_to_tsconfig).
+    language: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="en"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -231,6 +237,14 @@ class Chunk(Base):
     # Character offsets in original markdown
     char_start: Mapped[int | None] = mapped_column(Integer)
     char_end: Mapped[int | None] = mapped_column(Integer)
+
+    # Phase 54.6.207 — denormalised Postgres tsvector-config name
+    # ('english', 'spanish', …). Drives the generated search_vector
+    # column so FTS uses the right language dictionary per row. See
+    # migration 0035 + sk_lang_config() SQL helper.
+    tsvector_lang: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="english"
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

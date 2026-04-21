@@ -249,6 +249,14 @@ def ingest(
 
             meta = metadata.extract(pdf_path, result.text)
 
+            # Phase 54.6.207 — detect language from the extracted body
+            # text so the chunker can stamp tsvector_lang per chunk and
+            # FTS uses the right dictionary. Detection runs on a ~3000-
+            # char sample; falls back to 'en' on short text / detector
+            # unavailable / low confidence.
+            from sciknow.ingestion.metadata import detect_language as _detect_lang
+            doc.language = _detect_lang(result.text)
+
             # Delete old metadata row if resuming
             session.query(PaperMetadata).filter_by(document_id=doc_id).delete()
             pm = PaperMetadata(
@@ -443,6 +451,14 @@ def ingest(
 
             raw_chunks = chunker.chunk_document(sections, meta.title or "", meta.year)
 
+            # Phase 54.6.207 — resolve the language detected at stage 2
+            # into its Postgres tsvector-config name (english, spanish,
+            # german, …) and stamp every new chunk with it. The
+            # generated `search_vector` column will tokenise with the
+            # matching dictionary (see migration 0035).
+            from sciknow.ingestion.metadata import lang_to_tsconfig as _lang_cfg
+            chunk_lang_cfg = _lang_cfg(doc.language)
+
             db_chunks: list[Chunk] = []
             for rc in raw_chunks:
                 section_id = db_sections.get(rc.section_index)
@@ -455,6 +471,7 @@ def ingest(
                     content_tokens=rc.content_tokens,
                     char_start=rc.char_start,
                     char_end=rc.char_end,
+                    tsvector_lang=chunk_lang_cfg,
                 )
                 session.add(db_chunk)
                 db_chunks.append(db_chunk)

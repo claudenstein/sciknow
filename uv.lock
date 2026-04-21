@@ -3310,6 +3310,18 @@ wheels = [
 ]
 
 [[package]]
+name = "py3langid"
+version = "0.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/99/43/c3f7a3c5150c56a0ca70c3039e53cc58046698b7ce0913bb8fa86d71abcb/py3langid-0.3.0.tar.gz", hash = "sha256:0a875a031a58aaf9dbda7bb8285fd75e801a7bd276216ffabe037901d4b449ec", size = 752935, upload-time = "2024-06-18T11:31:04.301Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9d/1c/8212ea872d236af0aea37043fb6feeaa9a43449183782b19d342f8ddd343/py3langid-0.3.0-py3-none-any.whl", hash = "sha256:38f022eec31cf9a2bf6f142acb2a9b350fd7d0d5ae7762b1392c6d3567401fd3", size = 746125, upload-time = "2024-06-18T11:30:51.265Z" },
+]
+
+[[package]]
 name = "pyarrow"
 version = "23.0.1"
 source = { registry = "https://pypi.org/simple" }
@@ -4279,6 +4291,7 @@ dependencies = [
     { name = "mineru", extra = ["core"] },
     { name = "ollama" },
     { name = "psycopg2-binary" },
+    { name = "py3langid" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pymupdf" },
@@ -4303,6 +4316,7 @@ requires-dist = [
     { name = "mineru", extras = ["core"], specifier = ">=3.0.9" },
     { name = "ollama", specifier = ">=0.3" },
     { name = "psycopg2-binary", specifier = ">=2.9" },
+    { name = "py3langid", specifier = ">=0.3.0" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pydantic-settings", specifier = ">=2.3" },
     { name = "pymupdf", specifier = ">=1.24" },
