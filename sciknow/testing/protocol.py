@@ -9544,6 +9544,64 @@ def l1_phase54_6_145_finalize_draft_surface() -> None:
     )
 
 
+def l1_phase54_6_158_unfreeze_stale_book_targets() -> None:
+    """Phase 54.6.158 — clear pre-54.6.158 frozen book-level defaults.
+
+    Every book created before Phase 54.6.158 has its creation-time
+    project-type default frozen into ``books.custom_metadata.target_chapter_words``.
+    That value then shadows Level-3 of the resolver (project-type
+    default) forever, even after the default shifts — including the
+    research-grounded Phase 54.6.146 updates. This phase fixes two
+    things:
+
+      (A) book create — only writes target_chapter_words into
+          custom_metadata when the user explicitly passed
+          --target-chapter-words (otherwise leave it unset so
+          Level-3 naturally takes over)
+      (B) book set-target --unset at book level (without --chapter) —
+          previously rejected; now clears custom_metadata.target_chapter_words
+          so existing projects can unfreeze
+
+    Pins both source-level changes so a future refactor can't silently
+    regress to always-writing the default.
+    """
+    import inspect
+    from sciknow.cli import book as book_cli
+
+    # A) book create conditional write
+    create_src = inspect.getsource(book_cli.create)
+    # The pre-54.6.158 pattern was the unconditional `custom_meta[...] = ...`
+    # next to `effective_target = target_chapter_words or pt.default_target_chapter_words`.
+    # Guard against that pattern returning.
+    assert "target_chapter_words is not None" in create_src, (
+        "book create must only write target_chapter_words to "
+        "custom_metadata when the user explicitly passed "
+        "--target-chapter-words (Phase 54.6.158). A silent revert "
+        "re-freezes every new book's default."
+    )
+    assert "or pt.default_target_chapter_words" not in create_src, (
+        "Pre-54.6.158 pattern `target_chapter_words or "
+        "pt.default_target_chapter_words` is forbidden — it defeats "
+        "the whole fix"
+    )
+
+    # B) set-target --unset supports book-level (no --chapter)
+    set_src = inspect.getsource(book_cli.set_target)
+    assert "already inheriting the project-type default" in set_src, (
+        "book set-target --unset without --chapter must report the "
+        "already-unset case cleanly (Phase 54.6.158)"
+    )
+    assert "Cleared book-level target" in set_src, (
+        "book set-target --unset without --chapter must be able to "
+        "drop custom_metadata.target_chapter_words (Phase 54.6.158)"
+    )
+    # Explicit: the old error message is gone
+    assert "--unset without --chapter is not supported" not in set_src, (
+        "Pre-54.6.158 rejection message must be gone — book-level "
+        "--unset is now the supported unfreezer"
+    )
+
+
 def l1_phase54_6_157_section_length_distribution_bench() -> None:
     """Phase 54.6.157 — corpus-grounded section-length IQR benchmark.
 
@@ -11617,6 +11675,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_156_auto_plan_entire_book_button,
     # Phase 54.6.157 — corpus-grounded section-length IQR benchmark
     l1_phase54_6_157_section_length_distribution_bench,
+    # Phase 54.6.158 — unfreeze stale book-level default targets
+    l1_phase54_6_158_unfreeze_stale_book_targets,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness

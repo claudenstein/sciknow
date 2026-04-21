@@ -420,12 +420,21 @@ def create(
             console.print(f"[yellow]Book already exists:[/yellow] {title}")
             raise typer.Exit(1)
 
+        # Phase 54.6.158 — only write target_chapter_words when the
+        # user explicitly passed --target-chapter-words. Pre-54.6.158
+        # this always wrote ``pt.default_target_chapter_words`` into
+        # custom_metadata, which froze the creation-time default and
+        # shadowed the Level-3 fallback forever — including the
+        # research-grounded 54.6.146 updates that bumped
+        # scientific_book from 6400 to 8000 (etc.). Every existing
+        # book now needs `book set-target --unset` to unfreeze; new
+        # books just inherit whichever project-type default is current.
         custom_meta: dict = {}
-        effective_target = target_chapter_words or pt.default_target_chapter_words
-        if effective_target <= 0:
-            console.print("[red]--target-chapter-words must be positive[/red]")
-            raise typer.Exit(1)
-        custom_meta["target_chapter_words"] = effective_target
+        if target_chapter_words is not None:
+            if target_chapter_words <= 0:
+                console.print("[red]--target-chapter-words must be positive[/red]")
+                raise typer.Exit(1)
+            custom_meta["target_chapter_words"] = target_chapter_words
 
         result = session.execute(text("""
             INSERT INTO books (title, description, book_type, custom_metadata)
@@ -639,25 +648,42 @@ def set_target(
             )
             return
 
-        # Book-level default
-        if unset:
-            console.print(
-                "[red]--unset without --chapter is not supported. "
-                "Use `book set-target <title> --words <project-type-default>` "
-                "or run `book types` to see defaults.[/red]"
-            )
-            raise typer.Exit(2)
+        # Book-level default — Phase 54.6.158 now supports --unset
+        # for dropping the custom_metadata.target_chapter_words key so
+        # the Level-3 project-type default takes over. This is the
+        # unfreezer for pre-54.6.158 books that carry a creation-time
+        # default as a stale override (see `book create` changelog).
         if isinstance(meta, str):
             import json as _json
             meta = _json.loads(meta or "{}")
         meta = dict(meta or {})
+        pt = get_project_type(b_type)
+        if unset:
+            if "target_chapter_words" not in meta:
+                console.print(
+                    f"[yellow]No book-level target set on {b_title!r} — "
+                    f"already inheriting the project-type default "
+                    f"({pt.default_target_chapter_words:,} for {b_type}).[/yellow]"
+                )
+                return
+            prior = meta.pop("target_chapter_words", None)
+            session.execute(text(
+                "UPDATE books SET custom_metadata = CAST(:m AS jsonb) "
+                "WHERE id = CAST(:bid AS uuid)"
+            ), {"m": __import__("json").dumps(meta), "bid": book_id})
+            session.commit()
+            console.print(
+                f"[green]✓ Cleared book-level target[/green] for {b_title!r}  "
+                f"[dim](was {int(prior):,}; now inherits project-type default "
+                f"{pt.default_target_chapter_words:,} for {b_type})[/dim]"
+            )
+            return
         meta["target_chapter_words"] = int(words)
         session.execute(text(
             "UPDATE books SET custom_metadata = CAST(:m AS jsonb) "
             "WHERE id = CAST(:bid AS uuid)"
         ), {"m": __import__("json").dumps(meta), "bid": book_id})
         session.commit()
-        pt = get_project_type(b_type)
         console.print(
             f"[green]✓ Set book-level target[/green] for {b_title!r} "
             f"to [bold]{words:,}[/bold] words  "
