@@ -394,6 +394,7 @@ Project planning and release history:
 | Document | Contents |
 |---|---|
 | **[Roadmap](docs/ROADMAP.md)** | Open items by source (QA, research runners-up, hardware-gated, compound-learning layers) |
+| **[Ingestion roadmap](docs/ROADMAP_INGESTION.md)** | 43 research proposals for improving `sciknow refresh` / ingest — by pipeline stage + cross-cutting, priority-ranked |
 | **[Phase log](docs/PHASE_LOG.md)** | Release notes per phase commit, newest first |
 | **[Strategy](docs/STRATEGY.md)** | Long-range direction; why certain trade-offs were chosen |
 | **[Lessons](docs/LESSONS.md)** | Post-mortem + what-not-to-do notes accumulated over phases |

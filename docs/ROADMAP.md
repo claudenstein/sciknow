@@ -232,6 +232,23 @@ per hour of effort.
   `{"command": "uv", "args": ["run", "sciknow", "mcp-serve"]}`.
   Added `mcp` dep.
 
+### Ingestion / enrichment research proposals
+
+Research-track proposals for `sciknow refresh` + `sciknow ingest` —
+discovery, PDF conversion, metadata, chunking, embedding, visuals,
+citations, KG, topics, RAPTOR, wiki compile, and cross-cutting
+observability — live in a dedicated doc so this file stays focused
+on "what's next to ship":
+
+→ [`docs/ROADMAP_INGESTION.md`](./ROADMAP_INGESTION.md)
+
+43 proposals grouped by pipeline stage + cross-cutting concerns, each
+with expected win, cost, and priority verdict (**Ship** / Investigate
+/ Defer / Gated). Section 6 names the five items to land first if
+the user green-lights it. Update it the same way as this doc: move
+shipped proposals into a PHASE_LOG entry, delete from ROADMAP_
+INGESTION.md.
+
 ### Rejected-adjacent items (from the 2026-04-18 audit)
 
 These look similar to Tier 1/2 items but were already addressed or
