@@ -9892,7 +9892,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                  style="flex:1;min-width:200px;padding:6px 10px;"
                  oninput="renderWikiSummaries()"
                  title="Substring match against paper title, authors, or slug. Filters live as you type."/>
-          <label style="font-size:12px;color:var(--fg-muted);">Sort:</label>
+          <label class="u-hint-sm">Sort:</label>
           <select id="wiki-sum-sort" onchange="renderWikiSummaries()" style="padding:4px 8px;"
                   title="How to order the summary list.">
             <option value="year_desc">Year (newest first)</option>
@@ -9901,7 +9901,7 @@ body.task-bar-open {{ padding-top: 40px; }}
             <option value="title_asc">Title A-Z</option>
             <option value="words_desc">Word count</option>
           </select>
-          <span id="wiki-sum-count" style="font-size:11px;color:var(--fg-muted);"></span>
+          <span class="u-hint" id="wiki-sum-count"></span>
         </div>
         <div id="wiki-summaries-list" style="max-height:calc(85vh - 220px);overflow-y:auto;"></div>
       </div>
@@ -9926,14 +9926,14 @@ body.task-bar-open {{ padding-top: 40px; }}
                  style="width:70px;padding:4px 6px;">
           <button class="btn-secondary" onclick="loadWikiVisuals()"
                   title="Fetch visuals matching the current filters.">&#128269; Load</button>
-          <span id="wiki-vis-stats" style="font-size:11px;color:var(--fg-muted);"></span>
+          <span class="u-hint" id="wiki-vis-stats"></span>
         </div>
         <div id="wiki-visuals-list" style="max-height:calc(85vh - 220px);overflow-y:auto;"></div>
       </div>
       <!-- Browse tab -->
       <div class="tab-pane" id="wiki-browse-pane" style="display:none;">
         <div class="field" style="display:flex;gap:8px;align-items:flex-end;">
-          <div style="flex:1;">
+          <div class="u-flex-1">
             <label>Filter by type</label>
             <select id="wiki-type-filter" onchange="loadWikiPages(1)"
                     title="Filter pages by kind: Paper (one per ingested paper), Concept (entity glossary), Synthesis (consensus maps).">
@@ -9977,7 +9977,7 @@ body.task-bar-open {{ padding-top: 40px; }}
               <section id="wiki-annotation-block" class="wiki-extras wiki-annotation-extras">
                 <div class="wiki-extras-head">
                   <h3 class="wiki-extras-h">My take</h3>
-                  <span id="wiki-annotation-ts" class="wiki-facts-kglink" style="color:var(--fg-muted);"></span>
+                  <span id="wiki-annotation-ts" class="wiki-facts-kglink u-muted"></span>
                 </div>
                 <textarea id="wiki-annotation-body"
                           placeholder="Your own notes on this page — disagreements, follow-up questions, how it connects to other work. Saved locally in your project database."
@@ -10163,12 +10163,12 @@ body.task-bar-open {{ padding-top: 40px; }}
                title="Natural-language question. Hybrid retrieval (dense + sparse + FTS) → RRF fusion → reranker → LLM answer. Press Enter to submit.">
       </div>
       <div class="field" style="display:flex;gap:8px;">
-        <div style="flex:1;">
+        <div class="u-flex-1">
           <label>Year from</label>
           <input type="number" id="ask-year-from" placeholder="(optional)"
                  title="Restrict retrieval to papers published in this year or later.">
         </div>
-        <div style="flex:1;">
+        <div class="u-flex-1">
           <label>Year to</label>
           <input type="number" id="ask-year-to" placeholder="(optional)"
                  title="Restrict retrieval to papers published in this year or earlier.">
@@ -10297,7 +10297,7 @@ body.task-bar-open {{ padding-top: 40px; }}
             <input type="number" id="plan-target-words-input" min="0" step="500" placeholder="custom"
                    style="width:120px;padding:6px 8px;font-size:13px;"
                    title="Words per chapter. Leave empty for the default (6000). Zero clears the setting.">
-            <span id="plan-length-status" style="font-size:12px;color:var(--fg-muted);"></span>
+            <span class="u-hint-sm" id="plan-length-status"></span>
           </div>
           <p style="font-size:11px;color:var(--fg-muted);margin-top:6px;">
             Each section gets a proportional share: a 4-section chapter at 6000
@@ -10330,7 +10330,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         </p>
         <div class="field">
           <label>Elicitation method (optional)
-            <span style="font-size:11px;color:var(--fg-muted);">&mdash; steers the LLM through a named cognitive technique.</span>
+            <span class="u-hint">&mdash; steers the LLM through a named cognitive technique.</span>
           </label>
           <select id="plan-outline-method-select" style="width:100%;padding:6px 8px;"
                   title="Optional elicitation method prepended to the outline prompt as a preamble. Steers the LLM through a named cognitive technique (e.g. Tree of Thoughts, First Principles, Peer Review Simulation). See docs/BOOK_ACTIONS.md for the full 24-method catalogue.">
@@ -10339,7 +10339,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         </div>
         <div class="field">
           <label>Model override (optional)
-            <span style="font-size:11px;color:var(--fg-muted);">&mdash; leave empty to use <code>LLM_MODEL</code>.</span>
+            <span class="u-hint">&mdash; leave empty to use <code>LLM_MODEL</code>.</span>
           </label>
           <input type="text" id="plan-outline-model-input" placeholder="(leave empty for default)"
                  style="width:100%;padding:6px 8px;font-family:var(--font-mono);font-size:12px;"
@@ -10350,10 +10350,10 @@ body.task-bar-open {{ padding-top: 40px; }}
                   title="Generate 3 candidate chapter outlines at rising temperatures, score by breadth + section-count variance, pick the winner, density-resize sections, and add to book_chapters. Additive: never touches existing chapters. Mirrors `sciknow book outline`.">&#128214; Generate outline</button>
           <button class="btn-secondary" id="plan-outline-cancel-btn" onclick="cancelOutline()" style="display:none;"
                   title="Cancel the running outline generation. Any chapters already committed stay; the in-flight LLM call is aborted.">Cancel</button>
-          <span id="plan-outline-status" style="font-size:12px;color:var(--fg-muted);"></span>
+          <span class="u-hint-sm" id="plan-outline-status"></span>
         </div>
         <div id="plan-outline-stream" style="display:none;max-height:200px;overflow:auto;font-family:var(--font-mono);font-size:11px;line-height:1.4;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px;white-space:pre-wrap;margin-bottom:12px;"></div>
-        <div id="plan-outline-result" style="font-size:12px;"></div>
+        <div class="u-small" id="plan-outline-result"></div>
       </div>
       <!-- Phase 54.6.66 — Chapters tab (book-wide chapter manager):
            list all chapters with editable title / description /
@@ -10385,7 +10385,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           Sections tab.
         </p>
         <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">
-          <label style="font-size:12px;color:var(--fg-muted);">Chapter:</label>
+          <label class="u-hint-sm">Chapter:</label>
           <select id="plan-sections-chapter-picker"
                   onchange="onPlanSectionsChapterChange(this.value)"
                   style="flex:1;min-width:200px;padding:4px 8px;"
@@ -10411,7 +10411,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                    title="Overwrite existing plans instead of skipping.">
             force overwrite
           </label>
-          <span id="plan-auto-plan-status" style="font-size:11px;color:var(--fg-muted);"></span>
+          <span class="u-hint" id="plan-auto-plan-status"></span>
         </div>
         <div id="plan-chapter-header" style="margin-bottom:14px;font-size:13px;color:var(--fg-muted);"></div>
         <div id="plan-chapter-sections"></div>
@@ -10533,12 +10533,12 @@ body.task-bar-open {{ padding-top: 40px; }}
           <input type="text" id="cat-journal" placeholder="(any)"
                  title="Substring match against the journal/venue name. Useful to e.g. filter 'Nature' papers.">
         </div>
-        <div style="flex:1;">
+        <div class="u-flex-1">
           <label>Year from</label>
           <input type="number" id="cat-year-from"
                  title="Only show papers from this year onward.">
         </div>
-        <div style="flex:1;">
+        <div class="u-flex-1">
           <label>Year to</label>
           <input type="number" id="cat-year-to"
                  title="Only show papers up to and including this year.">
@@ -10589,12 +10589,12 @@ body.task-bar-open {{ padding-top: 40px; }}
                  title="Free-text blurb for the catalog + stats. NOT injected into writer prompts — use the Leitmotiv tab for thesis-level guidance."/>
         </div>
         <div class="field" style="display:flex;gap:8px;align-items:flex-end;">
-          <div style="flex:1;">
+          <div class="u-flex-1">
             <label>Project type</label>
             <select id="bs-book-type" onchange="bsUpdateTypeInfo()"
                     title="Phase 54.6.148 — change the book type. Drives autowrite defaults via the fallback chain (per-section > per-chapter > book custom_metadata > project-type default > hardcoded 6000). Changing the type doesn't touch explicit overrides you've already set; it only shifts the Level-3 fallback."/>
           </div>
-          <div style="flex:1;">
+          <div class="u-flex-1">
             <label>Target words per chapter</label>
             <input type="number" id="bs-target-chapter-words" min="0" step="500"
                    placeholder="(type default)"
@@ -10604,7 +10604,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         <!-- Phase 54.6.148 — same concept-density info panel as the wizard. -->
         <div id="bs-book-type-info"
              style="margin-top:6px;padding:10px 12px;background:var(--toolbar-bg);border:1px solid var(--border);border-radius:6px;font-size:12px;line-height:1.5;color:var(--fg);">
-          <em style="color:var(--fg-muted);">Loading type info…</em>
+          <em class="u-muted">Loading type info…</em>
         </div>
         <p style="font-size:11px;color:var(--fg-muted);margin:8px 0 0;">
           Sections with a bullet plan auto-size bottom-up (concept count × wpc midpoint).
@@ -10641,7 +10641,7 @@ body.task-bar-open {{ padding-top: 40px; }}
              resolver level without leaving the GUI. -->
         <div style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--border);">
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-            <strong style="font-size:12px;">&#128196; Projected length report</strong>
+            <strong class="u-small">&#128196; Projected length report</strong>
             <button class="btn-secondary" onclick="loadBookLengthReportPanel()"
                     style="font-size:11px;padding:2px 8px;"
                     title="Phase 54.6.153/162 — walks every chapter × every section through the resolver chain (per-section override → concept-density → chapter-split) and shows the target + level + explanation per section, plus chapter and book totals. No resolver arithmetic duplication — delegates to the real helpers.">
@@ -10650,7 +10650,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           </div>
           <div id="bs-length-report-panel"
                style="margin-top:6px;font-size:11px;">
-            <em style="color:var(--fg-muted);">Click refresh to compute the whole-book projection…</em>
+            <em class="u-muted">Click refresh to compute the whole-book projection…</em>
           </div>
         </div>
         <!-- Phase 54.6.159 — corpus-grounded section-length panel.
@@ -10659,7 +10659,7 @@ body.task-bar-open {{ padding-top: 40px; }}
              the CLI to see where their corpus sits vs reference. -->
         <div style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--border);">
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-            <strong style="font-size:12px;">&#128202; Corpus section-length distribution</strong>
+            <strong class="u-small">&#128202; Corpus section-length distribution</strong>
             <button class="btn-secondary" onclick="loadSectionLengthPanel()"
                     style="font-size:11px;padding:2px 8px;"
                     title="Phase 54.6.157/159 — walks paper_sections.word_count and shows per-section IQR alongside the RESEARCH.md §24 PubMed reference (N=61,517). Use to check whether your corpus is paper-shaped, monograph-shaped, or mixed — informs whether the project-type default wpc is right for your data.">
@@ -10668,14 +10668,14 @@ body.task-bar-open {{ padding-top: 40px; }}
           </div>
           <div id="bs-section-length-panel"
                style="margin-top:6px;font-size:11px;">
-            <em style="color:var(--fg-muted);">Click refresh to load section-length IQRs…</em>
+            <em class="u-muted">Click refresh to load section-length IQRs…</em>
           </div>
         </div>
         <div id="bs-basics-meta" style="margin-top:10px;font-size:11px;color:var(--fg-muted);"></div>
         <div style="display:flex;gap:8px;align-items:center;margin-top:14px;">
           <button class="btn-primary" onclick="saveBookSettings('basics')"
                   title="Save title / description / target words. Empty fields are left unchanged.">Save Basics</button>
-          <span id="bs-basics-status" style="font-size:12px;color:var(--fg-muted);"></span>
+          <span class="u-hint-sm" id="bs-basics-status"></span>
         </div>
       </div>
 
@@ -10695,7 +10695,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div style="display:flex;gap:8px;align-items:center;margin-top:8px;">
           <button class="btn-primary" onclick="saveBookSettings('leitmotiv')"
                   title="Save the leitmotiv / plan text to the database. Future `write` / `autowrite` calls use the new value immediately.">Save Plan</button>
-          <span id="bs-leitmotiv-status" style="font-size:12px;color:var(--fg-muted);"></span>
+          <span class="u-hint-sm" id="bs-leitmotiv-status"></span>
         </div>
       </div>
 
@@ -10712,7 +10712,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         </p>
         <table style="width:100%;border-collapse:collapse;font-size:12px;">
           <thead>
-            <tr style="border-bottom:1px solid var(--border);">
+            <tr class="u-border-b">
               <th style="text-align:left;padding:6px 8px;">Role</th>
               <th style="text-align:left;padding:6px 8px;">Model</th>
               <th style="text-align:left;padding:6px 8px;">Used by</th>
@@ -10742,7 +10742,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div style="display:flex;gap:8px;align-items:center;margin-top:10px;">
           <button class="btn-primary" onclick="refreshStyleFingerprint()"
                   title="Re-scan drafts marked `final` / `reviewed` / `revised` and rebuild the style fingerprint (median sentence length, citations per 100 words, hedging rate, top transitions). Future autowrite runs pick up the new fingerprint immediately.">Recompute Fingerprint</button>
-          <span id="bs-style-status" style="font-size:12px;color:var(--fg-muted);"></span>
+          <span class="u-hint-sm" id="bs-style-status"></span>
         </div>
       </div>
 
@@ -10799,7 +10799,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         The <em>canonical</em> row stays visible to retrieval; the <em>non-canonical</em> row is hidden (not deleted).
         Click <strong>Undo</strong> to restore a non-canonical row to retrieval.
       </p>
-      <div id="recon-list" style="font-size:12px;">Loading…</div>
+      <div class="u-small" id="recon-list">Loading…</div>
     </div>
   </div>
 </div>
@@ -10814,7 +10814,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button class="modal-close" onclick="closeModal('ai-help-modal')" title="Close the AI Actions Help modal.">&times;</button>
     </div>
     <div class="modal-body" style="font-size:13px;line-height:1.55;">
-      <p style="color:var(--fg-muted);">
+      <p class="u-muted">
         sciknow&rsquo;s book workflow is a pipeline: <strong>plan</strong> the shape of the book,
         then <strong>write</strong> drafts, then <strong>critique</strong> + <strong>fix</strong>.
         Each button below belongs to one of those stages. Every action maps 1:1 to a
@@ -10824,7 +10824,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 
       <h4 style="margin:18px 0 8px;">&#128221; Planning &mdash; shape the book before writing</h4>
       <table style="width:100%;border-collapse:collapse;">
-        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>Outline</strong><br><em style="color:var(--fg-muted);font-size:11px;">Plan modal &rarr; Outline tab</em></td>
+        <tr class="u-border-b"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>Outline</strong><br><em class="u-hint">Plan modal &rarr; Outline tab</em></td>
           <td style="padding:8px;vertical-align:top;">
             Proposes a chapter structure from your paper corpus. Generates 3 candidate outlines
             at rising temperatures, scores each for breadth + section-count variance, picks the
@@ -10833,7 +10833,7 @@ body.task-bar-open {{ padding-top: 40px; }}
             <em>Use when:</em> bootstrapping a new book or expanding the plan.
             <em>Produces:</em> new <code>book_chapters</code> rows. <em>CLI:</em> <code>book outline</code>.
           </td></tr>
-        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;vertical-align:top;"><strong>Leitmotiv (Book plan)</strong><br><em style="color:var(--fg-muted);font-size:11px;">Plan modal &rarr; Book tab</em></td>
+        <tr class="u-border-b"><td style="padding:8px 0;vertical-align:top;"><strong>Leitmotiv (Book plan)</strong><br><em class="u-hint">Plan modal &rarr; Book tab</em></td>
           <td style="padding:8px;vertical-align:top;">
             The 200&ndash;500 word thesis document that gets injected into every <code>write</code> /
             <code>autowrite</code> call so all chapters stay aligned. Edit it by hand, or click
@@ -10845,13 +10845,13 @@ body.task-bar-open {{ padding-top: 40px; }}
 
       <h4 style="margin:18px 0 8px;">&#9998; Writing &mdash; produce draft prose</h4>
       <table style="width:100%;border-collapse:collapse;">
-        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>AI Write</strong></td>
+        <tr class="u-border-b"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>AI Write</strong></td>
           <td style="padding:8px;vertical-align:top;">
             Single-pass draft of the current section. Retrieves sources, writes the prose, stops.
             Fast, but doesn&rsquo;t self-improve. <em>Use when:</em> you want a fresh baseline you&rsquo;ll
             hand-edit. <em>CLI:</em> <code>book write</code>.
           </td></tr>
-        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;vertical-align:top;"><strong>AI Autowrite</strong></td>
+        <tr class="u-border-b"><td style="padding:8px 0;vertical-align:top;"><strong>AI Autowrite</strong></td>
           <td style="padding:8px;vertical-align:top;">
             Full convergence loop: <em>write &rarr; score &rarr; verify claims &rarr; revise &rarr; rescore</em>
             for up to 3 iterations or until overall score hits 0.85. Uses the writer model for
@@ -10859,7 +10859,7 @@ body.task-bar-open {{ padding-top: 40px; }}
             <em>Use when:</em> you want a polished draft, not a starter.
             <em>CLI:</em> <code>book autowrite</code>.
           </td></tr>
-        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;vertical-align:top;"><strong>Edit</strong></td>
+        <tr class="u-border-b"><td style="padding:8px 0;vertical-align:top;"><strong>Edit</strong></td>
           <td style="padding:8px;vertical-align:top;">
             Manual in-browser markdown editor with autosave, KaTeX math, and inline figure
             thumbnails. <em>Use when:</em> humans need to be humans.
@@ -10868,7 +10868,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 
       <h4 style="margin:18px 0 8px;">&#128269; Critique &mdash; find what&rsquo;s wrong with a draft</h4>
       <table style="width:100%;border-collapse:collapse;">
-        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>AI Review</strong></td>
+        <tr class="u-border-b"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>AI Review</strong></td>
           <td style="padding:8px;vertical-align:top;">
             Single-pass critic across 5 dimensions (groundedness, completeness, accuracy,
             coherence, redundancy). Produces structured feedback with quotes + actionable
@@ -10877,34 +10877,34 @@ body.task-bar-open {{ padding-top: 40px; }}
             <em>Different from Outline:</em> Outline builds structure; Review critiques prose.
             Uses <code>BOOK_REVIEW_MODEL</code> (gemma3:27b). <em>CLI:</em> <code>book review</code>.
           </td></tr>
-        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;vertical-align:top;"><strong>Adversarial review</strong></td>
+        <tr class="u-border-b"><td style="padding:8px 0;vertical-align:top;"><strong>Adversarial review</strong></td>
           <td style="padding:8px;vertical-align:top;">
             Harsher critic &mdash; forces <strong>&ge; 10</strong> concrete issues, never graded.
             Doesn&rsquo;t overwrite the normal <code>review_feedback</code>.
             <em>Use when:</em> the standard review feels too gentle.
             <em>CLI:</em> <code>book adversarial-review</code>.
           </td></tr>
-        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;vertical-align:top;"><strong>Edge cases</strong></td>
+        <tr class="u-border-b"><td style="padding:8px 0;vertical-align:top;"><strong>Edge cases</strong></td>
           <td style="padding:8px;vertical-align:top;">
             Exhaustive boundary-condition hunter: walks every scope boundary, counter-case,
             causal alternative, and quantitative limit. Structured JSON output.
             <em>Use when:</em> you need the draft to survive hostile readers.
             <em>CLI:</em> <code>book edge-cases</code>.
           </td></tr>
-        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;vertical-align:top;"><strong>Ensemble Review</strong></td>
+        <tr class="u-border-b"><td style="padding:8px 0;vertical-align:top;"><strong>Ensemble Review</strong></td>
           <td style="padding:8px;vertical-align:top;">
             N independent NeurIPS-rubric reviewers (default 3, T=0.75, rotating neutral/pessimistic/
             optimistic stance) + a meta-reviewer that medians scores and unions findings.
             Costs ~N&times; the single-review. <em>Use when:</em> a single reviewer felt flaky.
             <em>CLI:</em> <code>book ensemble-review</code>.
           </td></tr>
-        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;vertical-align:top;"><strong>Argue (map claim)</strong></td>
+        <tr class="u-border-b"><td style="padding:8px 0;vertical-align:top;"><strong>Argue (map claim)</strong></td>
           <td style="padding:8px;vertical-align:top;">
             For any claim you type, builds a SUPPORTS / CONTRADICTS / NEUTRAL evidence map
             from your corpus. <em>Use when:</em> you want to see how solid a single
             assertion is. <em>CLI:</em> <code>book argue</code>.
           </td></tr>
-        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;vertical-align:top;"><strong>Gaps</strong></td>
+        <tr class="u-border-b"><td style="padding:8px 0;vertical-align:top;"><strong>Gaps</strong></td>
           <td style="padding:8px;vertical-align:top;">
             Identifies topics the book&rsquo;s plan names but the drafts don&rsquo;t cover yet.
             <em>Use when:</em> a chapter feels thin and you&rsquo;re not sure why.
@@ -10914,13 +10914,13 @@ body.task-bar-open {{ padding-top: 40px; }}
 
       <h4 style="margin:18px 0 8px;">&#10003; Verification &mdash; check citations actually support claims</h4>
       <table style="width:100%;border-collapse:collapse;">
-        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>Verify</strong></td>
+        <tr class="u-border-b"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>Verify</strong></td>
           <td style="padding:8px;vertical-align:top;">
             Sentence-level LLM verifier: classifies each <code>[N]</code> claim as SUPPORTED /
             EXTRAPOLATED / MISREPRESENTED / OVERSTATED and returns a groundedness + hedging
             fidelity score. <em>CLI:</em> <code>book verify-citations</code>.
           </td></tr>
-        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;vertical-align:top;"><strong>Verify Draft</strong><br><em style="color:var(--fg-muted);font-size:11px;">claim-atomization</em></td>
+        <tr class="u-border-b"><td style="padding:8px 0;vertical-align:top;"><strong>Verify Draft</strong><br><em class="u-hint">claim-atomization</em></td>
           <td style="padding:8px;vertical-align:top;">
             Splits each sentence into atomic sub-claims (regex first, LLM fallback for compound
             sentences), NLI-scores each sub-claim against source chunks, and surfaces
@@ -10928,7 +10928,7 @@ body.task-bar-open {{ padding-top: 40px; }}
             and part isn&rsquo;t. Catches what the sentence-level verifier misses.
             Read-only. <em>CLI:</em> <code>book verify-draft</code>.
           </td></tr>
-        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;vertical-align:top;"><strong>Align Citations</strong></td>
+        <tr class="u-border-b"><td style="padding:8px 0;vertical-align:top;"><strong>Align Citations</strong></td>
           <td style="padding:8px;vertical-align:top;">
             Post-pass that (conservatively) remaps <code>[N]</code> markers to the chunk that
             actually entails the sentence, when the currently-cited chunk has
@@ -10936,7 +10936,7 @@ body.task-bar-open {{ padding-top: 40px; }}
             <em>Use when:</em> verify reports mismatched citations.
             <em>CLI:</em> <code>book align-citations</code>.
           </td></tr>
-        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;vertical-align:top;"><strong>Insert Citations</strong></td>
+        <tr class="u-border-b"><td style="padding:8px 0;vertical-align:top;"><strong>Insert Citations</strong></td>
           <td style="padding:8px;vertical-align:top;">
             Two-pass LLM adds <code>[N]</code> markers where the prose asserts something
             source-worthy but has no citation. Saves a new draft version.
@@ -10947,7 +10947,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 
       <h4 style="margin:18px 0 8px;">&#9888;&#65039; Fixing &mdash; apply feedback to the draft</h4>
       <table style="width:100%;border-collapse:collapse;">
-        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>AI Revise</strong></td>
+        <tr class="u-border-b"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>AI Revise</strong></td>
           <td style="padding:8px;vertical-align:top;">
             Reads the latest <code>review_feedback</code> saved on the draft and rewrites the
             prose to address it. <em>Requires:</em> a Review (or Autowrite, which reviews
@@ -10958,18 +10958,18 @@ body.task-bar-open {{ padding-top: 40px; }}
 
       <h4 style="margin:18px 0 8px;">&#128202; Diagnostics &mdash; inspect the autowrite trajectory</h4>
       <table style="width:100%;border-collapse:collapse;">
-        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>Scores</strong></td>
+        <tr class="u-border-b"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>Scores</strong></td>
           <td style="padding:8px;vertical-align:top;">
             Shows the 5-dimension score trajectory across autowrite iterations &mdash; which
             scores rose, which plateaued, which triggered revisions. Read-only.
           </td></tr>
-        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;vertical-align:top;"><strong>Bundles</strong></td>
+        <tr class="u-border-b"><td style="padding:8px 0;vertical-align:top;"><strong>Bundles</strong></td>
           <td style="padding:8px;vertical-align:top;">
             Chapter- or book-wide snapshots. Safety net for <em>autowrite-all-sections</em>
             runs &mdash; snapshot before, restore if you hate the result.
             <em>CLI:</em> <code>book snapshot</code> / <code>snapshot-restore</code>.
           </td></tr>
-        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 0;vertical-align:top;"><strong>Chapter reader</strong></td>
+        <tr class="u-border-b"><td style="padding:8px 0;vertical-align:top;"><strong>Chapter reader</strong></td>
           <td style="padding:8px;vertical-align:top;">
             Read-only continuous-scroll view of the whole chapter so you can feel the flow
             without the editor chrome.
@@ -11046,7 +11046,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                title="Substring match against caption + surrounding text. Press Enter to search."/>
         <button class="btn-secondary" onclick="loadVisuals()"
                 title="Apply the current search + filter + order and reload.">&#128269; Search</button>
-        <span id="vis-stats" style="color:var(--fg-muted);font-size:11px;"></span>
+        <span class="u-hint" id="vis-stats"></span>
       </div>
       <div id="vis-results" style="max-height:calc(85vh - 220px);overflow-y:auto;">
         <em>Loading...</em>
@@ -11109,7 +11109,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           <label title="DESTRUCTIVE: wipes every backup in archives/backups/. Confirms first. No recovery.">
             <input type="checkbox" id="backup-purge-all-check"
                    title="Check to wipe EVERY backup. Overrides the days field."> Delete ALL backups</label>
-          <span style="color:var(--fg-muted);">— or —</span>
+          <span class="u-muted">— or —</span>
           <label>Older than
             <input type="number" id="backup-purge-days" min="1" value="30" style="width:70px;padding:4px;"
                    title="Delete backups strictly older than this many days. 30 is a safe starting point."/>
@@ -11252,7 +11252,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           serve</code> against the new project.
         </p>
         <div style="display:flex;gap:10px;align-items:flex-start;">
-          <div style="flex:1;">
+          <div class="u-flex-1">
             <h4 style="font-size:13px;margin:0 0 6px;">Existing projects</h4>
             <div id="sw-project-list" style="font-size:12px;max-height:180px;overflow:auto;border:1px solid var(--border);border-radius:6px;">
               Loading…
@@ -11274,7 +11274,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           </div>
         </div>
         <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;">
-          <span id="sw-project-status" style="font-size:12px;color:var(--fg-muted);"></span>
+          <span class="u-hint-sm" id="sw-project-status"></span>
           <button class="btn-primary" onclick="swGoto('corpus')"
                   title="Advance to Step 2 — feed PDFs into the active project.">Next: Corpus &rarr;</button>
         </div>
@@ -11472,7 +11472,7 @@ body.task-bar-open {{ padding-top: 40px; }}
              length ranges so the user sees what they're committing to. -->
         <div id="sw-book-type-info"
              style="margin-top:6px;padding:10px 12px;background:var(--toolbar-bg);border:1px solid var(--border);border-radius:6px;font-size:12px;line-height:1.5;color:var(--fg);">
-          <em style="color:var(--fg-muted);">Loading type info…</em>
+          <em class="u-muted">Loading type info…</em>
         </div>
         <div class="field" style="margin-top:12px;">
           <label>Description (optional)</label>
@@ -11639,12 +11639,12 @@ body.task-bar-open {{ padding-top: 40px; }}
                  title="Topic to synthesize across. Press Enter to run.">
         </div>
         <div class="field" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
-          <div style="flex:1;"><label>Context-K</label>
+          <div class="u-flex-1"><label>Context-K</label>
             <input type="number" id="tl-synth-k" value="12" min="4" max="30"
                    title="How many reranked chunks to feed the synthesizer. Higher = broader context but longer prompt."></div>
-          <div style="flex:1;"><label>Year from</label><input type="number" id="tl-synth-yfrom"
+          <div class="u-flex-1"><label>Year from</label><input type="number" id="tl-synth-yfrom"
                    title="Lower year bound for retrieval."></div>
-          <div style="flex:1;"><label>Year to</label><input type="number" id="tl-synth-yto"
+          <div class="u-flex-1"><label>Year to</label><input type="number" id="tl-synth-yto"
                    title="Upper year bound for retrieval."></div>
           <div style="flex:2;"><label>Topic cluster filter</label>
             <input type="text" id="tl-synth-topicfilter" placeholder="(any)"
@@ -11732,7 +11732,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                   title="List all active reconciliations; reverse individual mappings.">
             &#128203; Reconciliations
           </button>
-          <span style="color:var(--fg-muted);">
+          <span class="u-muted">
             Cleanup removes already-ingested dupes <em>and</em> the failed-ingest archive. Pending lists papers still waiting on an OA PDF. Retraction sweep flags newly-retracted work.
           </span>
         </div>
@@ -11837,7 +11837,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                     title="Skip preview — run the full pipeline with auto-download using the relevance threshold.">
               &#9889; Auto-download (override)
             </button>
-            <span style="font-size:11px;color:var(--fg-muted);">
+            <span class="u-hint">
               Preview shows the ranked shortlist (RRF signals) and lets you check papers one-by-one.
             </span>
           </div>
@@ -11886,7 +11886,7 @@ body.task-bar-open {{ padding-top: 40px; }}
             </button>
             <button class="btn-secondary" onclick="runAgenticExpand()"
                     title="AUTO mode: LLM decomposes the question → measures coverage per sub-topic → runs expand on gaps → re-plans. Loops automatically until every sub-topic is covered or max rounds reached. Worst case: rounds × gaps × budget papers downloaded WITHOUT user approval (default 3 × 5 × 10 = 150).">&#129504; Start agentic expansion (auto)</button>
-            <span style="color:var(--fg-muted);font-size:11px;">
+            <span class="u-hint">
               Auto streams progress into the log panel. Preview opens an interactive shortlist per round.
             </span>
           </div>
@@ -11899,13 +11899,13 @@ body.task-bar-open {{ padding-top: 40px; }}
               <code>expand-author</code> for each (ORCID-preferred, strict-author). Uses the same relevance + retraction + MMR filters as any other expansion.
             </p>
             <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
-              <div><label style="font-size:11px;" title="Minimum number of papers an author must already have in this corpus to qualify for oeuvre expansion. Lower = more authors, noisier; higher = focus on the highly-represented names.">Min corpus papers
+              <div><label class="u-tiny" title="Minimum number of papers an author must already have in this corpus to qualify for oeuvre expansion. Lower = more authors, noisier; higher = focus on the highly-represented names.">Min corpus papers
                 <input type="number" id="tl-oeu-min" value="3" min="2" max="10" style="width:60px;padding:2px 6px;font-size:12px;"
                        title="Minimum corpus papers for an author to qualify. Default 3."></label></div>
-              <div><label style="font-size:11px;" title="Max new papers fetched per qualifying author, passed as --limit to expand-author.">Per-author limit
+              <div><label class="u-tiny" title="Max new papers fetched per qualifying author, passed as --limit to expand-author.">Per-author limit
                 <input type="number" id="tl-oeu-limit" value="10" min="1" max="50" style="width:60px;padding:2px 6px;font-size:12px;"
                        title="Max new papers per qualifying author. Default 10."></label></div>
-              <div><label style="font-size:11px;" title="Cap on how many authors get processed this run. Prevents an unbounded sweep over the whole corpus.">Max authors
+              <div><label class="u-tiny" title="Cap on how many authors get processed this run. Prevents an unbounded sweep over the whole corpus.">Max authors
                 <input type="number" id="tl-oeu-max" value="10" min="1" max="30" style="width:60px;padding:2px 6px;font-size:12px;"
                        title="Cap on authors processed this run. Default 10, ordered by corpus citation count."></label></div>
               <label style="display:flex;align-items:center;gap:4px;font-size:11px;"
@@ -12013,7 +12013,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                     title="Skip preview — run the full pipeline with the relevance-filter threshold auto-downloading everything above it. Equivalent to `sciknow db expand-author --relevance`.">
               &#9889; Auto-download (override)
             </button>
-            <span style="font-size:11px;color:var(--fg-muted);">
+            <span class="u-hint">
               Preview lets you cherry-pick; Auto uses the relevance threshold.
             </span>
           </div>
@@ -12065,7 +12065,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                     title="Phase 54.6.123 — runs the full cites-me pipeline: crawl → relevance filter → download → ingest.">
               &#127793; Expand now
             </button>
-            <span style="font-size:11px;color:var(--fg-muted);">
+            <span class="u-hint">
               Preview shows the shortlist without downloading. Expand now runs the full pipeline.
             </span>
           </div>
@@ -12095,7 +12095,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
             <button class="btn-primary" onclick="openExpandTopicPreview()"
                     title="Run the topic search, score candidates by relevance, and open the cherry-pick preview.">&#128269; Preview candidates</button>
-            <span style="font-size:11px;color:var(--fg-muted);">
+            <span class="u-hint">
               Results sorted by citation count, then filtered by relevance.
             </span>
           </div>
@@ -12130,7 +12130,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
             <button class="btn-primary" onclick="openExpandCoauthPreview()"
                     title="Build the coauthor shortlist and open the cherry-pick preview. No downloads until you approve rows.">&#128269; Preview candidates</button>
-            <span style="font-size:11px;color:var(--fg-muted);">
+            <span class="u-hint">
               Best with a tight relevance threshold (0.6+) — this method has the noisiest recall.
             </span>
           </div>
@@ -12203,7 +12203,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                  title="Rows previously marked as no-OA or ingest-failed are hidden by default. Uncheck to see them.">
             <input type="checkbox" id="eap-hide-cached" checked onchange="eapRender()"
                    title="Hide rows previously marked as no-OA or ingest-failed. Uncheck to see them.">
-            Hide cached <span id="eap-cached-count" style="color:var(--fg-muted);"></span>
+            Hide cached <span class="u-muted" id="eap-cached-count"></span>
           </label>
           <span id="eap-selected-count" style="margin-left:auto;font-size:12px;color:var(--fg-muted);"></span>
         </div>
@@ -12281,7 +12281,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         email, library). Export lets you hand off a CSV for manual work.
       </div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
-        <label style="font-size:12px;">
+        <label class="u-small">
           Status:
           <select id="pdl-status" onchange="refreshPendingDownloads()"
                   style="font-size:12px;padding:2px 4px;margin-left:4px;"
@@ -12292,7 +12292,7 @@ body.task-bar-open {{ padding-top: 40px; }}
             <option value="all">all</option>
           </select>
         </label>
-        <label style="font-size:12px;">
+        <label class="u-small">
           Source:
           <select id="pdl-source" onchange="refreshPendingDownloads()"
                   style="font-size:12px;padding:2px 4px;margin-left:4px;"
@@ -12309,7 +12309,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         </label>
         <button class="btn-secondary" onclick="refreshPendingDownloads()"
                 title="Re-fetch the pending-downloads list from the server.">Refresh</button>
-        <span id="pdl-count" style="font-size:11px;color:var(--fg-muted);"></span>
+        <span class="u-hint" id="pdl-count"></span>
         <span style="margin-left:auto;"></span>
         <button class="btn-secondary" onclick="pendingSelectAll(true)"
                 title="Check every visible row.">Select all</button>
@@ -12378,7 +12378,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           <input type="text" id="kg-subject" placeholder="(any)" onkeydown="if(event.key==='Enter')loadKg(0)"
                  title="Substring match against the triple's subject. Press Enter to filter.">
         </div>
-        <div style="flex:1;">
+        <div class="u-flex-1">
           <label>Predicate</label>
           <select id="kg-predicate" onchange="loadKg(0)"
                   title="Exact predicate match. The dropdown is populated from triples currently in the database.">
@@ -12619,7 +12619,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                   title="Load the topic map from cache (fast).">Load</button>
           <button class="btn-secondary" onclick="loadTopicMap(true)"
                   title="Re-run UMAP from scratch. Slower — only needed after re-clustering or ingesting new papers.">Refresh UMAP</button>
-          <span id="viz-topic-legend" style="font-size:11px;"></span>
+          <span class="u-tiny" id="viz-topic-legend"></span>
         </div>
         <div id="viz-topic-chart" class="viz-chart"></div>
       </div>
@@ -12892,7 +12892,7 @@ function selectChapter(chGroupEl) {{
 function showChapterEmptyState(chLabel, chId) {{
   document.getElementById('draft-title').textContent = chLabel;
   const subtitle = document.getElementById('draft-subtitle');
-  subtitle.innerHTML = '<span style="color:var(--fg-muted);">No drafts yet &mdash; pick a section type and click Write, or use Autowrite to draft all sections.</span>';
+  subtitle.innerHTML = '<span class="u-muted">No drafts yet &mdash; pick a section type and click Write, or use Autowrite to draft all sections.</span>';
   subtitle.style.display = 'block';
   // Show toolbar
   document.getElementById('toolbar').style.display = 'flex';
@@ -12921,10 +12921,10 @@ function showChapterEmptyState(chLabel, chId) {{
   // Phase 14.3 — show the chapter scope right here in the empty state
   html += '<div class="ch-scope">';
   html += '<div class="ch-scope-row"><span class="ch-scope-label">Scope</span><div class="ch-scope-val">' +
-          (desc ? desc.replace(/</g, '&lt;') : '<em style="color:var(--fg-faint);">No description set. Click Edit chapter scope to add one.</em>') +
+          (desc ? desc.replace(/</g, '&lt;') : '<em class="u-faint">No description set. Click Edit chapter scope to add one.</em>') +
           '</div></div>';
   html += '<div class="ch-scope-row"><span class="ch-scope-label">Topic query</span><div class="ch-scope-val">' +
-          (tq ? '<code>' + tq.replace(/</g, '&lt;') + '</code>' : '<em style="color:var(--fg-faint);">Not set &mdash; the chapter title will be used as the retrieval query.</em>') +
+          (tq ? '<code>' + tq.replace(/</g, '&lt;') + '</code>' : '<em class="u-faint">Not set &mdash; the chapter title will be used as the retrieval query.</em>') +
           '</div></div>';
   // Phase 42 — data-action dispatch (see ACTIONS registry).
   html += '<button class="btn-secondary" style="margin-top:8px;font-size:12px;" data-action="open-chapter-modal" data-chapter-id="' + chId + '" title="Open the Chapter modal to edit this chapter\\'s title, scope, topic query and sections.">&#9881; Edit chapter scope</button>';
@@ -13125,8 +13125,8 @@ function startStream(jobId) {{
       html += '<div style="font-weight:bold;">Chain-of-Verification: ' + score + '</div>';
       if (high.length || med.length) {{
         html += '<div style="font-size:12px;opacity:0.8;">' +
-                '<span style="color:var(--danger);">' + high.length + ' NOT_IN_SOURCES</span> · ' +
-                '<span style="color:var(--warning);">' + med.length + ' DIFFERENT_SCOPE</span></div>';
+                '<span class="u-danger">' + high.length + ' NOT_IN_SOURCES</span> · ' +
+                '<span class="u-warning">' + med.length + ' DIFFERENT_SCOPE</span></div>';
       }}
       html += '</div>';
       body.innerHTML += html;
@@ -16837,7 +16837,7 @@ async function doVerify() {{
           else color = 'var(--danger)';
           html += '<div style="margin:6px 0;padding:6px 10px;border-left:3px solid ' + color + ';background:var(--toolbar-bg);border-radius:4px;">';
           html += '<span style="font-weight:bold;color:' + color + ';">' + c.verdict + '</span> ';
-          html += '<span style="font-size:12px;">' + c.citation + '</span><br>';
+          html += '<span class="u-small">' + c.citation + '</span><br>';
           html += '<span style="font-size:12px;opacity:0.7;">' + (c.text || '').substring(0, 120) + '</span>';
           if (c.reason) html += '<br><span style="font-size:11px;opacity:0.5;">' + c.reason + '</span>';
           html += '</div>';
@@ -16862,7 +16862,7 @@ async function doVerify() {{
     }}
     else if (evt.type === 'error') {{
       status.textContent = 'Error: ' + evt.message;
-      body.innerHTML = '<div style="color:var(--danger);">' + evt.message + '</div>';
+      body.innerHTML = '<div class="u-danger">' + evt.message + '</div>';
       hideStreamPanel();
       source.close(); currentEventSource = null; currentJobId = null;
     }}
@@ -16923,7 +16923,7 @@ async function doInsertCitations() {{
     const evt = JSON.parse(e.data);
     if (evt.type === 'progress') {{
       status.textContent = evt.detail || evt.stage;
-      _append('<div style="color:var(--fg-muted);">' + (evt.detail || evt.stage) + '</div>');
+      _append('<div class="u-muted">' + (evt.detail || evt.stage) + '</div>');
     }} else if (evt.type === 'citation_needs') {{
       summary.innerHTML = '<strong>' + evt.count + '</strong> location(s) flagged for citation';
       status.textContent = 'Retrieving candidates...';
@@ -16931,10 +16931,10 @@ async function doInsertCitations() {{
       _append('<div>#' + (evt.index + 1) + ': ' + evt.n_candidates + ' candidate(s)</div>');
     }} else if (evt.type === 'citation_selected') {{
       const conf = (evt.confidence != null) ? evt.confidence.toFixed(2) : '?';
-      _append('<div style="color:var(--success);">&nbsp;&nbsp;&#10003; #'
+      _append('<div class="u-success">&nbsp;&nbsp;&#10003; #'
         + (evt.index + 1) + ' picked (conf ' + conf + ')</div>');
     }} else if (evt.type === 'citation_skipped') {{
-      _append('<div style="color:var(--fg-muted);">&nbsp;&nbsp;&mdash; #'
+      _append('<div class="u-muted">&nbsp;&nbsp;&mdash; #'
         + (evt.index + 1) + ' skipped (' + (evt.reason || 'no match') + ')</div>');
     }} else if (evt.type === 'citation_inserted') {{
       // Total count emitted right before completed
@@ -16951,7 +16951,7 @@ async function doInsertCitations() {{
       setTimeout(() => hideStreamPanel(), 3500);
     }} else if (evt.type === 'error') {{
       status.textContent = 'Error: ' + evt.message;
-      summary.innerHTML = '<span style="color:var(--danger);">&#10007; ' + evt.message + '</span>';
+      summary.innerHTML = '<span class="u-danger">&#10007; ' + evt.message + '</span>';
       source.close(); currentEventSource = null; currentJobId = null;
     }} else if (evt.type === 'done') {{
       source.close(); currentEventSource = null; currentJobId = null;
@@ -17060,7 +17060,7 @@ async function doEdgeCases() {{
         + '<td style="padding:6px 8px;vertical-align:top;color:var(--fg-muted);">' + _escHtml(f.consequence || '') + '</td>';
       tbody.appendChild(tr);
     }} else if (evt.type === 'completed') {{
-      status.innerHTML = '<span style="color:var(--success);">&#10003; '
+      status.innerHTML = '<span class="u-success">&#10003; '
         + (evt.n_findings || 0) + ' edge case(s) flagged.</span>';
       source.close(); currentEventSource = null; currentJobId = null;
     }} else if (evt.type === 'error') {{
@@ -17099,10 +17099,10 @@ function _runCliActionForDraft(argv, title, startMsg) {{
         out.textContent += evt.text + '\\n';
         out.scrollTop = out.scrollHeight;
       }} else if (evt.type === 'completed') {{
-        status.innerHTML = '<span style="color:var(--success);">\\u2713 Done.</span>';
+        status.innerHTML = '<span class="u-success">\\u2713 Done.</span>';
         source.close(); currentEventSource = null; currentJobId = null;
       }} else if (evt.type === 'error') {{
-        status.innerHTML = '<span style="color:var(--danger);">\\u2717 ' + (evt.message || 'error') + '</span>';
+        status.innerHTML = '<span class="u-danger">\\u2717 ' + (evt.message || 'error') + '</span>';
         source.close(); currentEventSource = null; currentJobId = null;
       }} else if (evt.type === 'done') {{
         source.close(); currentEventSource = null; currentJobId = null;
@@ -17484,7 +17484,7 @@ async function confirmAutowrite() {{
       // Phase 15.1 — incremental save checkpoint reached. Show a brief
       // green note in the log so the user knows their work is persisted
       // and Stop won't lose anything past this point.
-      awLog.innerHTML += '<div class="log-keep" style="font-size:11px;">' +
+      awLog.innerHTML += '<div class="log-keep u-tiny">' +
         '\\u2693 checkpoint saved · ' + (evt.stage || '') + ' · ' +
         (evt.word_count || 0) + ' words</div>';
     }}
@@ -17581,7 +17581,7 @@ async function confirmAutowrite() {{
     }}
     else if (evt.type === 'error') {{
       status.textContent = 'Error: ' + evt.message;
-      awLog.innerHTML += '<div style="color:var(--danger);">' + evt.message + '</div>';
+      awLog.innerHTML += '<div class="u-danger">' + evt.message + '</div>';
       stats.done('error');
       setStreamCursor(awContent, false);
       hideStreamPanel();
@@ -17888,7 +17888,7 @@ async function showScoresPanel() {{
     if (history.length === 0) {{
       body.innerHTML = '<div class="scores-empty">' +
         'No score history persisted on this draft.<br>' +
-        '<span style="font-size:11px;">Only autowrite drafts record convergence trajectories — drafts made with `book write` only have a final state.</span>' +
+        '<span class="u-tiny">Only autowrite drafts record convergence trajectories — drafts made with `book write` only have a final state.</span>' +
         '</div>';
       return;
     }}
@@ -17966,7 +17966,7 @@ async function showScoresPanel() {{
 
     body.innerHTML = html;
   }} catch (e) {{
-    body.innerHTML = '<div class="scores-empty" style="color:var(--danger);">Error loading score history: ' + e.message + '</div>';
+    body.innerHTML = '<div class="scores-empty u-danger">Error loading score history: ' + e.message + '</div>';
   }}
 }}
 
@@ -18296,7 +18296,7 @@ async function doWikiExtractKg() {{
       }}
     }} else if (evt.type === 'completed') {{
       source.close();
-      status.innerHTML = '<span style="color:var(--success);">&#10003; Done — open the Knowledge Graph modal to browse triples.</span>';
+      status.innerHTML = '<span class="u-success">&#10003; Done — open the Knowledge Graph modal to browse triples.</span>';
       runBtn.disabled = false;
     }} else if (evt.type === 'error') {{
       source.close();
@@ -18357,8 +18357,8 @@ async function doWikiConsensus() {{
       status.textContent = 'Error: ' + (evt.message || 'unknown');
       summaryEl.innerHTML =
         '<div style="padding:12px;background:rgba(220,50,50,0.08);border-left:3px solid var(--danger);border-radius:4px;">'
-        + '<strong style="color:var(--danger);">Consensus failed.</strong><br>'
-        + '<span style="font-size:12px;">' + _escHtml(evt.message || '(no details)') + '</span><br>'
+        + '<strong class="u-danger">Consensus failed.</strong><br>'
+        + '<span class="u-small">' + _escHtml(evt.message || '(no details)') + '</span><br>'
         + '<span style="font-size:11px;color:var(--fg-muted);margin-top:6px;display:block;">'
         + 'Common causes: (1) the topic has no wiki pages yet — try `uv run sciknow wiki compile` or a broader topic; '
         + '(2) the LLM returned un-parseable JSON — check the server log for a <code>consensus_map</code> warning.'
@@ -18473,9 +18473,9 @@ async function loadWikiPages(page) {{
     if (!data.pages || data.pages.length === 0) {{
       const msg = data.error
         ? 'API returned an error: <code>' + _escHtml(data.error) + '</code><br>'
-          + '<span style="font-size:11px;">Check the server log.</span>'
+          + '<span class="u-tiny">Check the server log.</span>'
         : 'No wiki pages found.<br>'
-          + '<span style="font-size:11px;">Run <code>uv run sciknow wiki compile</code> to build wiki pages from your corpus.</span>';
+          + '<span class="u-tiny">Run <code>uv run sciknow wiki compile</code> to build wiki pages from your corpus.</span>';
       list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--fg-muted);">'
         + msg + '</div>';
       return;
@@ -18596,7 +18596,7 @@ function renderWikiSummaries() {{
          +  'onmouseover="this.style.background=\\'var(--bg-alt)\\'" '
          +  'onmouseout="this.style.background=\\'transparent\\'">'
          +  '<div style="font-weight:600;margin-bottom:3px;">' + title + '</div>'
-         +  '<div style="font-size:12px;color:var(--fg-muted);">'
+         +  '<div class="u-hint-sm">'
          +  (authors || '<em>unknown authors</em>') + '  ·  '
          +  year + '  ·  ' + words + ' words'
          +  '</div>'
@@ -18870,7 +18870,7 @@ async function openWikiPage(slug) {{
       content.scrollTop = 0;
     }}
   }} catch (e) {{
-    content.innerHTML = '<div style="color:var(--danger);">Error: ' + e.message + '</div>';
+    content.innerHTML = '<div class="u-danger">Error: ' + e.message + '</div>';
   }}
 }}
 
@@ -19706,11 +19706,11 @@ async function openReconciliationsModal() {{
     const d = await res.json();
     const pairs = d.pairs || [];
     if (!pairs.length) {{
-      list.innerHTML = '<em style="color:var(--fg-muted);">No active reconciliations. Run <code>Detect duplicates</code> then <code>Reconcile preprints</code> in the Corpus modal utility row.</em>';
+      list.innerHTML = '<em class="u-muted">No active reconciliations. Run <code>Detect duplicates</code> then <code>Reconcile preprints</code> in the Corpus modal utility row.</em>';
       return;
     }}
     let html = '<table style="width:100%;border-collapse:collapse;">'
-      + '<tr style="border-bottom:1px solid var(--border);"><th style="text-align:left;padding:4px 6px;">Canonical</th>'
+      + '<tr class="u-border-b"><th style="text-align:left;padding:4px 6px;">Canonical</th>'
       + '<th style="text-align:left;padding:4px 6px;">Non-canonical (hidden)</th>'
       + '<th style="padding:4px 6px;">Action</th></tr>';
     for (const p of pairs) {{
@@ -19733,7 +19733,7 @@ async function openReconciliationsModal() {{
       + pairs.length + ' active reconciliation(s).</p>';
     list.innerHTML = html;
   }} catch (exc) {{
-    list.innerHTML = '<em style="color:var(--danger);">Failed: ' + exc + '</em>';
+    list.innerHTML = '<em class="u-danger">Failed: ' + exc + '</em>';
   }}
 }}
 
@@ -19835,9 +19835,9 @@ async function openExpandOeuvrePreview() {{
       const orc = a.orcid ? ` <span style="color:var(--accent);">[ORCID]</span>` : '';
       const cls = a.error ? 'color:var(--danger);' : '';
       return `<span style="display:inline-block;background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);padding:1px 6px;border-radius:3px;margin-right:4px;${{cls}}">`
-        + `${{_escHtml(a.name)}} <span style="color:var(--fg-muted);">(${{a.n_corpus}}c · ${{a.n_candidates}}n)</span>${{orc}}</span>`;
+        + `${{_escHtml(a.name)}} <span class="u-muted">(${{a.n_corpus}}c · ${{a.n_candidates}}n)</span>${{orc}}</span>`;
     }}).join('');
-    const more = authors.length > 8 ? ` <span style="color:var(--fg-muted);">+${{authors.length - 8}} more</span>` : '';
+    const more = authors.length > 8 ? ` <span class="u-muted">+${{authors.length - 8}} more</span>` : '';
     document.getElementById('eap-info').innerHTML =
       `<div style="margin-bottom:6px;">`
       + `Pulled candidates from <strong>${{info.qualifying_authors || 0}}</strong> author(s) with ≥${{info.min_corpus_papers}} corpus papers `
@@ -19932,12 +19932,12 @@ async function openAgenticPreview() {{
     // Coverage table — every sub-topic with green/yellow/red dot.
     const covRows = coverage.map(r => {{
       const dot = r.covered
-        ? '<span style="color:var(--success);">●</span>'
-        : (r.n_papers > 0 ? '<span style="color:var(--warning);">●</span>'
-                          : '<span style="color:var(--danger);">●</span>');
+        ? '<span class="u-success">●</span>'
+        : (r.n_papers > 0 ? '<span class="u-warning">●</span>'
+                          : '<span class="u-danger">●</span>');
       return `<div style="font-size:11px;line-height:1.5;">${{dot}} `
         + `<span title="${{_escHtml(r.sample_titles.join(' • '))}}">${{_escHtml(r.subtopic)}}</span> `
-        + `<span style="color:var(--fg-muted);">— ${{r.n_papers}} paper(s)`
+        + `<span class="u-muted">— ${{r.n_papers}} paper(s)`
         + (r.covered ? ` · covered` : ` · gap`)
         + `</span></div>`;
     }}).join('');
@@ -19945,7 +19945,7 @@ async function openAgenticPreview() {{
     const gapChips = (gaps || []).map(g => {{
       const cls = g.error ? 'color:var(--danger);' : '';
       return `<span style="display:inline-block;background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);padding:1px 6px;border-radius:3px;margin-right:4px;${{cls}}">`
-        + `${{_escHtml(g.subtopic)}} <span style="color:var(--fg-muted);">(${{g.n_candidates}})</span></span>`;
+        + `${{_escHtml(g.subtopic)}} <span class="u-muted">(${{g.n_candidates}})</span></span>`;
     }}).join('');
     document.getElementById('eap-info').innerHTML =
       `<div style="margin-bottom:8px;">`
@@ -19960,7 +19960,7 @@ async function openAgenticPreview() {{
       + `<div style="margin-bottom:8px;">${{covRows}}</div>`
       + `<div style="font-size:11px;color:var(--fg-muted);margin-bottom:4px;"><strong>Per-gap candidate counts:</strong></div>`
       + `<div style="font-size:11px;line-height:1.7;margin-bottom:4px;">${{gapChips}}</div>`
-      + `<div style="font-size:11px;color:var(--fg-muted);">Each row shows its source sub-topic below the title. After downloading, re-click <em>Preview round</em> to advance — the next round will re-measure coverage against the new corpus and propose fresh gaps.</div>`;
+      + `<div class="u-hint">Each row shows its source sub-topic below the title. After downloading, re-click <em>Preview round</em> to advance — the next round will re-measure coverage against the new corpus and propose fresh gaps.</div>`;
     document.getElementById('eap-loading').style.display = 'none';
     document.getElementById('eap-content').style.display = 'block';
     eapRender();
@@ -20013,14 +20013,14 @@ async function runExpandAuthorSearch() {{
     const rows = authors.map((a, i) => {{
       const safe = _escHtml(a.name);
       const orcidBit = a.orcid
-        ? ` <span style="color:var(--fg-muted);">orcid ${{_escHtml(a.orcid)}}</span>`
+        ? ` <span class="u-muted">orcid ${{_escHtml(a.orcid)}}</span>`
         : '';
       return `<div class="eauth-row" data-idx="${{i}}"
         style="padding:6px 10px;cursor:pointer;border-bottom:1px solid var(--border);"
         onmouseenter="this.style.background='var(--accent-light,#eef2ff)';"
         onmouseleave="this.style.background='';">
         <strong>${{safe}}</strong>${{orcidBit}}
-        <div style="color:var(--fg-muted);font-size:11px;">
+        <div class="u-hint">
           ${{a.n_papers}} paper${{a.n_papers === 1 ? '' : 's'}} ·
           ${{a.n_citations}} citation${{a.n_citations === 1 ? '' : 's'}} in corpus
         </div></div>`;
@@ -20194,7 +20194,7 @@ async function openExpandAuthorPreview() {{
         const affil = (a.affiliations || []).slice(0, 2).join(', ');
         const orcid = a.orcid
           ? `<a href="${{_escHtml(a.orcid)}}" target="_blank" onclick="event.stopPropagation();">ORCID</a>`
-          : '<span style="color:var(--fg-muted);">no ORCID</span>';
+          : '<span class="u-muted">no ORCID</span>';
         rows += `<tr data-action="eap-toggle-author" data-sid="${{_escHtml(sid)}}" `
           + `style="cursor:pointer;${{isChecked ? 'background:rgba(80,200,120,0.12);' : ''}}">`
           + `<td style="padding:4px 8px;">`
@@ -20336,7 +20336,7 @@ async function eapRequeryWithSelected() {{
         const affil = (a.affiliations || []).slice(0, 2).join(', ');
         const orcid = a.orcid
           ? `<a href="${{_escHtml(a.orcid)}}" target="_blank" onclick="event.stopPropagation();">ORCID</a>`
-          : '<span style="color:var(--fg-muted);">no ORCID</span>';
+          : '<span class="u-muted">no ORCID</span>';
         rows += `<tr data-action="eap-toggle-author" data-sid="${{_escHtml(sid)}}" `
           + `style="cursor:pointer;${{isChecked ? 'background:rgba(80,200,120,0.12);' : ''}}">`
           + `<td style="padding:4px 8px;">`
@@ -20455,8 +20455,8 @@ async function openExpandCitesPreview() {{
           .map(([k, v]) => _escHtml(k) + ': ' + v).join(' · ');
         document.getElementById('eap-info').innerHTML =
           'Shortlist of <strong>' + (info.total || 0) + '</strong> candidate(s) '
-          + '(<span style="color:var(--success);">' + (info.kept || 0)
-          + ' KEEP</span> · <span style="color:var(--fg-muted);">'
+          + '(<span class="u-success">' + (info.kept || 0)
+          + ' KEEP</span> · <span class="u-muted">'
           + (info.dropped || 0) + ' DROP</span>). '
           + (reasonSummary ? 'Drop reasons: ' + reasonSummary + '.' : '')
           + ' Scores from the RRF-fused ranker (bge-m3 cosine shown below; '
@@ -20667,7 +20667,7 @@ function _renderPendingTable() {{
       + ((r.authors || []).length > 3 ? ` +${{r.authors.length - 3}}` : '');
     const doiUrl = r.doi
       ? `<a href="https://doi.org/${{_escHtml(r.doi)}}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;font-family:ui-monospace,monospace;font-size:10px;">${{_escHtml(r.doi)}}</a>`
-      : '<span style="color:var(--fg-muted);">(no DOI)</span>';
+      : '<span class="u-muted">(no DOI)</span>';
     const actions = `
       <button class="btn-secondary" style="font-size:10px;padding:2px 6px;"
               onclick="pendingRetrySingle('${{_escHtml(r.doi)}}')">&#8635;</button>
@@ -20896,13 +20896,13 @@ function eapRender() {{
   const rows = sorted.map(c => {{
     const checked = _eapSelected.has(c.doi) ? 'checked' : '';
     const scoreText = (c.relevance_score == null)
-      ? '<span style="color:var(--fg-muted);">—</span>'
+      ? '<span class="u-muted">—</span>'
       : c.relevance_score.toFixed(3);
     const authors = (c.authors || []).slice(0, 3).join(', ')
       + ((c.authors || []).length > 3 ? ` +${{c.authors.length - 3}}` : '');
     const doi = c.doi
       ? `<a href="https://doi.org/${{_escHtml(c.doi)}}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;font-family:ui-monospace,monospace;font-size:10px;" onclick="event.stopPropagation();">${{_escHtml(c.doi)}}</a>`
-      : '<span style="color:var(--fg-muted);">(no DOI)</span>';
+      : '<span class="u-muted">(no DOI)</span>';
     // Phase 54.6.51 — alt-source badge: show "+N more" when the row
     // represents a title-dedup group covering multiple DOIs / arXiv IDs.
     const altCount = (c.alternate_dois || []).length + (c.alternate_arxiv_ids || []).length;
@@ -21169,11 +21169,11 @@ async function doToolSearch(mode) {{
       const authors = (h.authors || []).slice(0, 3).map(a => (a.name || '').split(/\\s+/).slice(-1)[0]).filter(Boolean).join(', ');
       const year = h.year ? ' (' + h.year + ')' : '';
       const sec = h.section_type ? '<span style="color:var(--accent);font-size:11px;">[' + h.section_type + ']</span> ' : '';
-      const score = (typeof h.score === 'number') ? ' <span style="color:var(--fg-muted);font-size:11px;">score=' + h.score.toFixed(3) + '</span>' : '';
+      const score = (typeof h.score === 'number') ? ' <span class="u-hint">score=' + h.score.toFixed(3) + '</span>' : '';
       html += '<li style="margin-bottom:10px;">';
       html += sec + '<strong>' + (h.title || '(untitled)').replace(/</g, '&lt;') + '</strong>' + year + score;
-      if (authors) html += '<div style="color:var(--fg-muted);font-size:11px;">' + authors + '</div>';
-      if (h.doi) html += '<div style="font-size:11px;"><a href="https://doi.org/' + h.doi + '" target="_blank" rel="noopener">doi:' + h.doi + '</a></div>';
+      if (authors) html += '<div class="u-hint">' + authors + '</div>';
+      if (h.doi) html += '<div class="u-tiny"><a href="https://doi.org/' + h.doi + '" target="_blank" rel="noopener">doi:' + h.doi + '</a></div>';
       if (h.preview) html += '<div style="color:var(--fg-muted);font-size:12px;margin-top:2px;">' + h.preview.replace(/</g, '&lt;') + '</div>';
       html += '</li>';
     }});
@@ -21260,9 +21260,9 @@ async function loadToolTopics() {{
   const list = document.getElementById('tl-topics-list');
   const papers = document.getElementById('tl-topics-papers');
   const dlist = document.getElementById('tl-domains-list');
-  list.innerHTML = '<span style="color:var(--fg-muted);font-size:12px;">Loading…</span>';
+  list.innerHTML = '<span class="u-hint-sm">Loading…</span>';
   papers.innerHTML = '';
-  if (dlist) dlist.innerHTML = '<span style="color:var(--fg-muted);font-size:11px;">Loading…</span>';
+  if (dlist) dlist.innerHTML = '<span class="u-hint">Loading…</span>';
   try {{
     // Load topics + domains in parallel
     const [topicsRes, domainsRes] = await Promise.all([
@@ -21273,7 +21273,7 @@ async function loadToolTopics() {{
     const domains = (await domainsRes.json()).domains || [];
 
     if (topics.length === 0) {{
-      list.innerHTML = '<span style="color:var(--fg-muted);font-size:12px;">No topic clusters assigned yet. Run <code>sciknow catalog cluster</code> to build them.</span>';
+      list.innerHTML = '<span class="u-hint-sm">No topic clusters assigned yet. Run <code>sciknow catalog cluster</code> to build them.</span>';
     }} else {{
       list.innerHTML = '';
       topics.forEach(t => {{
@@ -21288,7 +21288,7 @@ async function loadToolTopics() {{
 
     if (dlist) {{
       if (!domains.length) {{
-        dlist.innerHTML = '<span style="color:var(--fg-muted);font-size:11px;">No domain tags on this corpus.</span>';
+        dlist.innerHTML = '<span class="u-hint">No domain tags on this corpus.</span>';
       }} else {{
         dlist.innerHTML = '';
         domains.forEach(d => {{
@@ -21322,8 +21322,8 @@ async function loadToolTopicPapers(name) {{
       const year = p.year ? ' (' + p.year + ')' : '';
       const authors = (p.authors || []).slice(0, 3).map(a => (a.name || '').split(/\\s+/).slice(-1)[0]).filter(Boolean).join(', ');
       html += '<li style="margin-bottom:6px;"><strong>' + (p.title || '(untitled)').replace(/</g, '&lt;') + '</strong>' + year;
-      if (authors) html += '<div style="color:var(--fg-muted);font-size:11px;">' + authors + '</div>';
-      if (p.doi) html += '<div style="font-size:11px;"><a href="https://doi.org/' + p.doi + '" target="_blank" rel="noopener">doi:' + p.doi + '</a></div>';
+      if (authors) html += '<div class="u-hint">' + authors + '</div>';
+      if (p.doi) html += '<div class="u-tiny"><a href="https://doi.org/' + p.doi + '" target="_blank" rel="noopener">doi:' + p.doi + '</a></div>';
       html += '</li>';
     }});
     html += '</ol>';
@@ -21359,10 +21359,10 @@ async function runCorpusCliAction(argv, startMsg) {{
       if (evt.type === 'log') {{
         if (logEl) {{ logEl.textContent += evt.text + '\\n'; logEl.scrollTop = logEl.scrollHeight; }}
       }} else if (evt.type === 'completed') {{
-        if (status) status.innerHTML = '<span style="color:var(--success);">\\u2713 Done.</span>';
+        if (status) status.innerHTML = '<span class="u-success">\\u2713 Done.</span>';
         src.close();
       }} else if (evt.type === 'error') {{
-        if (status) status.innerHTML = '<span style="color:var(--danger);">\\u2717 ' + (evt.message || 'error') + '</span>';
+        if (status) status.innerHTML = '<span class="u-danger">\\u2717 ' + (evt.message || 'error') + '</span>';
         src.close();
       }} else if (evt.type === 'done') {{
         src.close();
@@ -21625,7 +21625,7 @@ async function openPlanModal(context) {{
     }}
     if (!data.plan) {{
       document.getElementById('plan-status').innerHTML =
-        '<span style="color:var(--warning);">No book plan set yet.</span> Click <strong>Regenerate with LLM</strong> to draft one.';
+        '<span class="u-warning">No book plan set yet.</span> Click <strong>Regenerate with LLM</strong> to draft one.';
     }} else {{
       document.getElementById('plan-status').textContent =
         data.plan.split(/\\s+/).filter(Boolean).length + ' words in book plan';
@@ -21889,7 +21889,7 @@ async function planModalAutoPlanSections() {{
   const status = document.getElementById('plan-auto-plan-status');
   const force  = document.getElementById('plan-auto-plan-force').checked;
   if (!picker || !picker.value) {{
-    status.innerHTML = '<span style="color:var(--warning);">Pick a chapter first.</span>';
+    status.innerHTML = '<span class="u-warning">Pick a chapter first.</span>';
     return;
   }}
   const chId = picker.value;
@@ -21902,15 +21902,15 @@ async function planModalAutoPlanSections() {{
     }});
     if (!res.ok) {{
       const t = await res.text();
-      status.innerHTML = '<span style="color:var(--danger);">Failed: '
+      status.innerHTML = '<span class="u-danger">Failed: '
                         + _escHtml(t.slice(0, 200)) + '</span>';
       return;
     }}
     const data = await res.json();
-    status.innerHTML = '<span style="color:var(--success);">✓ planned '
+    status.innerHTML = '<span class="u-success">✓ planned '
                      + data.n_planned + ' · skipped '
                      + (data.n_skipped || 0) + '.</span>  '
-                     + '<span style="color:var(--fg-muted);">'
+                     + '<span class="u-muted">'
                      + 'Reloading sections…</span>';
     // Invalidate resolver cache so the Chapter modal (if reopened) shows
     // the new concept-density badges. Then reload this chapter in the
@@ -21920,7 +21920,7 @@ async function planModalAutoPlanSections() {{
     }}
     onPlanSectionsChapterChange(chId);
   }} catch (e) {{
-    status.innerHTML = '<span style="color:var(--danger);">Error: '
+    status.innerHTML = '<span class="u-danger">Error: '
                       + _escHtml(String(e).slice(0, 200)) + '</span>';
   }}
 }}
@@ -21959,7 +21959,7 @@ function populatePlanChapterTab(ch) {{
   const header = document.getElementById('plan-chapter-header');
   if (header) {{
     header.innerHTML = '<strong>Ch.' + ch.num + ': ' + escapeHtml(ch.title) + '</strong>' +
-      (ch.description ? '<br><span style="font-size:12px;">' + escapeHtml(ch.description.substring(0, 200)) + (ch.description.length > 200 ? '\\u2026' : '') + '</span>' : '');
+      (ch.description ? '<br><span class="u-small">' + escapeHtml(ch.description.substring(0, 200)) + (ch.description.length > 200 ? '\\u2026' : '') + '</span>' : '');
   }}
   const list = document.getElementById('plan-chapter-sections');
   if (!list) return;
@@ -22198,7 +22198,7 @@ async function _putPlanSections(cid, sections, statusMsg) {{
     const sd = await sb.json();
     rebuildSidebar(sd.chapters || sd, currentDraftId);
   }} catch (e) {{ /* non-fatal */ }}
-  if (status) status.innerHTML = '<span style="color:var(--success);">✓ Saved</span>';
+  if (status) status.innerHTML = '<span class="u-success">✓ Saved</span>';
 }}
 
 async function savePlanSectionRow(slug) {{
@@ -22327,7 +22327,7 @@ function populatePlanSectionTab(chapterId, sectionSlug) {{
   if (!sec) {{
     const status = document.getElementById('plan-status');
     if (status) {{
-      status.innerHTML = '<span style="color:var(--warning);">This section\\'s slug \\'' +
+      status.innerHTML = '<span class="u-warning">This section\\'s slug \\'' +
         sectionSlug + '\\' isn\\'t in the chapter\\'s sections list. Saving will add it.</span>';
     }}
   }}
@@ -22418,7 +22418,7 @@ async function savePlan() {{
       if (cid) {{ await savePlanChapterRow(cid); }}
     }}
     document.getElementById('plan-status').innerHTML =
-      '<span style="color:var(--success);">Saved all chapters.</span>';
+      '<span class="u-success">Saved all chapters.</span>';
     return;
   }} else if (tab === 'plan-chapter') {{
     return savePlanChapterSections();
@@ -22443,7 +22443,7 @@ async function savePlanBook() {{
     const res = await fetch('/api/book', {{method: 'PUT', body: fd}});
     if (!res.ok) throw new Error('save failed');
     document.getElementById('plan-status').innerHTML =
-      '<span style="color:var(--success);">Saved.</span> ' +
+      '<span class="u-success">Saved.</span> ' +
       plan.split(/\\s+/).filter(Boolean).length + ' words. The new plan will be injected into all future writes.';
     if (title) document.querySelector('.sidebar h2').textContent = title;
     if (tcwRaw !== '') {{
@@ -22507,7 +22507,7 @@ async function savePlanChapterSections() {{
     _editingChapterTargetWords = {{}};
     _editingChapterCustomMode = {{}};
     document.getElementById('plan-status').innerHTML =
-      '<span style="color:var(--success);">Saved ' + updated.length + ' section plans.</span>';
+      '<span class="u-success">Saved ' + updated.length + ' section plans.</span>';
     // Refresh sidebar so plan tooltips update
     const sidebarRes = await fetch('/api/chapters');
     const sd = await sidebarRes.json();
@@ -22575,7 +22575,7 @@ async function savePlanSection() {{
       ch.sections_template = data.sections.map(s => s.slug);
     }}
     document.getElementById('plan-status').innerHTML =
-      '<span style="color:var(--success);">Section plan saved.</span> Will be injected into the next write/autowrite of this section.';
+      '<span class="u-success">Section plan saved.</span> Will be injected into the next write/autowrite of this section.';
     // Refresh sidebar so the tooltip updates
     const sidebarRes = await fetch('/api/chapters');
     const sd = await sidebarRes.json();
@@ -22614,7 +22614,7 @@ async function regeneratePlan() {{
     }} else if (evt.type === 'progress') {{
       status.textContent = evt.detail || evt.stage;
     }} else if (evt.type === 'completed') {{
-      status.innerHTML = '<span style="color:var(--success);">Generated and saved.</span> ' +
+      status.innerHTML = '<span class="u-success">Generated and saved.</span> ' +
         (evt.chars || ta.value.length) + ' chars.';
       stats.done('done');
       source.close(); currentEventSource = null; currentJobId = null;
@@ -22699,7 +22699,7 @@ async function runOutlineFromTab() {{
       status.textContent = evt.detail || evt.stage;
     }} else if (evt.type === 'completed') {{
       source.close(); _outlineSource = null;
-      status.innerHTML = '<span style="color:var(--success);">\\u2713 Outline generated — <strong>'
+      status.innerHTML = '<span class="u-success">\\u2713 Outline generated — <strong>'
         + evt.n_inserted + '</strong> new chapter(s), <strong>'
         + evt.n_skipped + '</strong> skipped (already existed).</span>';
       btn.disabled = false;
@@ -22717,14 +22717,14 @@ async function runOutlineFromTab() {{
         for (const ch of chapters) {{
           const n = (ch.sections || []).length;
           html += '<li><strong>' + (ch.title || 'Untitled') + '</strong>'
-            + ' <span style="color:var(--fg-muted);">&mdash; ' + n + ' section' + (n === 1 ? '' : 's') + '</span></li>';
+            + ' <span class="u-muted">&mdash; ' + n + ' section' + (n === 1 ? '' : 's') + '</span></li>';
         }}
         html += '</ol>';
         result.innerHTML = html;
       }} catch (_) {{}}
     }} else if (evt.type === 'error') {{
       source.close(); _outlineSource = null;
-      status.innerHTML = '<span style="color:var(--danger);">\\u2717 ' + (evt.message || 'error') + '</span>';
+      status.innerHTML = '<span class="u-danger">\\u2717 ' + (evt.message || 'error') + '</span>';
       btn.disabled = false;
       if (cancelBtn) cancelBtn.style.display = 'none';
     }} else if (evt.type === 'done') {{
@@ -23743,7 +23743,7 @@ async function autoPlanChapterSections() {{
     status.innerHTML = '<em>saving pending edits first…</em>';
     await saveChapterInfo();
   }} catch (e) {{
-    status.innerHTML = '<span style="color:var(--danger);">save failed: '
+    status.innerHTML = '<span class="u-danger">save failed: '
                      + _escHtml(String(e).slice(0, 120)) + '</span>';
     return;
   }}
@@ -23756,15 +23756,15 @@ async function autoPlanChapterSections() {{
     }});
     if (!res.ok) {{
       const t = await res.text();
-      status.innerHTML = '<span style="color:var(--danger);">failed: '
+      status.innerHTML = '<span class="u-danger">failed: '
                         + _escHtml(t.slice(0, 200)) + '</span>';
       return;
     }}
     const data = await res.json();
-    status.innerHTML = '<span style="color:var(--success);">✓ planned '
+    status.innerHTML = '<span class="u-success">✓ planned '
                      + data.n_planned + ' section(s), '
                      + (data.n_skipped || 0) + ' skipped.</span> '
-                     + '<span style="color:var(--fg-muted);">'
+                     + '<span class="u-muted">'
                      + '(force overwrite is ' + (force ? 'on' : 'off') + ')</span>';
     // Re-open the modal against the same chapter so the newly-written
     // plans show up in the sections editor. openChapterModal re-loads
@@ -23778,7 +23778,7 @@ async function autoPlanChapterSections() {{
     // to sections so the user sees the new plans.
     setTimeout(() => switchChapterTab('ch-sections'), 100);
   }} catch (e) {{
-    status.innerHTML = '<span style="color:var(--danger);">error: '
+    status.innerHTML = '<span class="u-danger">error: '
                      + _escHtml(String(e).slice(0, 200)) + '</span>';
   }}
 }}
@@ -23832,7 +23832,7 @@ function _renderPlanConceptReadout(el, text) {{
   if (!el) return;
   const n = _countPlanConceptsJS(text || '');
   if (n <= 0) {{
-    el.innerHTML = '<em style="color:var(--fg-muted);">No concepts detected yet — use bullet lines (<code>- concept</code>) or a few substantial sentences to activate concept-density sizing.</em>';
+    el.innerHTML = '<em class="u-muted">No concepts detected yet — use bullet lines (<code>- concept</code>) or a few substantial sentences to activate concept-density sizing.</em>';
     return;
   }}
   let wpcMid = 650;
@@ -23848,7 +23848,7 @@ function _renderPlanConceptReadout(el, text) {{
   const maxConcepts = 4;
   let warn = '';
   if (n > maxConcepts) {{
-    warn = ' <span style="color:var(--warning);">⚠ ' + n +
+    warn = ' <span class="u-warning">⚠ ' + n +
            ' concepts exceeds Cowan 2001 cap of ' + maxConcepts +
            ' — consider splitting.</span>';
   }}
@@ -23869,7 +23869,7 @@ function updatePlanConceptReadout(idx, textarea) {{
   const text = (textarea && textarea.value) || '';
   const n = _countPlanConceptsJS(text);
   if (n <= 0) {{
-    el.innerHTML = '<em style="color:var(--fg-muted);">No concepts detected yet — use bullet lines (<code>- concept</code>) or a few substantial sentences to activate concept-density sizing.</em>';
+    el.innerHTML = '<em class="u-muted">No concepts detected yet — use bullet lines (<code>- concept</code>) or a few substantial sentences to activate concept-density sizing.</em>';
     return;
   }}
   // Pull wpc from the cached project-types registry (window._swBookTypes,
@@ -23892,7 +23892,7 @@ function updatePlanConceptReadout(idx, textarea) {{
   const maxConcepts = 4;
   let warn = '';
   if (n > maxConcepts) {{
-    warn = ' <span style="color:var(--warning);">⚠ ' + n +
+    warn = ' <span class="u-warning">⚠ ' + n +
            ' concepts exceeds Cowan 2001 cap of ' + maxConcepts +
            ' — consider splitting.</span>';
   }}
@@ -23963,7 +23963,7 @@ async function saveChapterInfo() {{
         ch.sections_template = secData.sections.map(s => s.slug);
       }}
     }}
-    status.innerHTML = '<span style="color:var(--success);">Saved.</span>';
+    status.innerHTML = '<span class="u-success">Saved.</span>';
     // Refresh the sidebar so renamed chapters + new sections show up
     const sidebarRes = await fetch('/api/chapters');
     const sd = await sidebarRes.json();
@@ -24048,7 +24048,7 @@ async function showChapterReader() {{
     html += '<div style="margin-bottom:24px;padding:12px 16px;background:var(--toolbar-bg);border-radius:6px;font-size:13px;">';
     html += '<div style="font-weight:600;margin-bottom:6px;color:var(--fg-muted);font-size:11px;text-transform:uppercase;letter-spacing:0.04em;">Sections</div>';
     data.outline.forEach((o, i) => {{
-      html += '<div style="margin:4px 0;"><a href="#reader-section-' + o.slug + '" style="color:var(--accent);text-decoration:none;">' + (i + 1) + '. ' + escapeHtml(o.title) + '</a> <span style="color:var(--fg-muted);font-size:11px;">' + o.words + 'w</span></div>';
+      html += '<div style="margin:4px 0;"><a href="#reader-section-' + o.slug + '" style="color:var(--accent);text-decoration:none;">' + (i + 1) + '. ' + escapeHtml(o.title) + '</a> <span class="u-hint">' + o.words + 'w</span></div>';
     }});
     html += '</div>';
   }}
@@ -24130,18 +24130,18 @@ function bsUpdateTypeInfo() {{
   }}
   panel.innerHTML = `
     <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 12px;">
-      <span style="color:var(--fg-muted);">Description:</span>
+      <span class="u-muted">Description:</span>
       <span>${{_escHtml(t.description)}}</span>
-      <span style="color:var(--fg-muted);">Default chapters:</span>
+      <span class="u-muted">Default chapters:</span>
       <span>${{nchap}} &middot; ${{chap.toLocaleString()}} words each
             ${{t.is_flat ? '<em>(flat IMRaD — one chapter)</em>' : ''}}</span>
-      <span style="color:var(--fg-muted);">Concepts / section:</span>
+      <span class="u-muted">Concepts / section:</span>
       <span>${{clo}}–${{chi}} novel chunks (Cowan 2001)</span>
-      <span style="color:var(--fg-muted);">Words / concept:</span>
+      <span class="u-muted">Words / concept:</span>
       <span>${{wlo}}–${{whi}} (midpoint ${{Math.floor((wlo + whi) / 2)}})</span>
-      <span style="color:var(--fg-muted);">Section at midpoint:</span>
+      <span class="u-muted">Section at midpoint:</span>
       <span>${{slo.toLocaleString()}}–${{shi.toLocaleString()}} words</span>
-      <span style="color:var(--fg-muted);">Typical book total:</span>
+      <span class="u-muted">Typical book total:</span>
       <span>~${{totalLo}}–${{totalHi}} words</span>
     </div>
   `;
@@ -24154,11 +24154,11 @@ function bsUpdateTypeInfo() {{
 async function loadBookLengthReportPanel() {{
   const host = document.getElementById('bs-length-report-panel');
   if (!host) return;
-  host.innerHTML = '<em style="color:var(--fg-muted);">Loading…</em>';
+  host.innerHTML = '<em class="u-muted">Loading…</em>';
   try {{
     const r = await fetch('/api/book/length-report');
     if (!r.ok) {{
-      host.innerHTML = '<span style="color:var(--danger);">Failed: '
+      host.innerHTML = '<span class="u-danger">Failed: '
                       + r.status + '</span>';
       return;
     }}
@@ -24195,7 +24195,7 @@ async function loadBookLengthReportPanel() {{
             + '<strong>Ch.' + c.number + '</strong> '
             + _escHtml(c.title || '')
             + '  ·  <span style="color:var(--accent);">' + (c.total_words || 0).toLocaleString() + '</span> words'
-            + '  <span style="color:var(--fg-muted);">(' + (c.sections ? c.sections.length : 0) + ' sections · target ' + (c.chapter_target || 0).toLocaleString() + ' ' + (c.chapter_level || '') + ')</span>'
+            + '  <span class="u-muted">(' + (c.sections ? c.sections.length : 0) + ' sections · target ' + (c.chapter_target || 0).toLocaleString() + ' ' + (c.chapter_level || '') + ')</span>'
             + '</summary>';
       html += '<table style="width:100%;border-collapse:collapse;margin-left:12px;margin-top:4px;">';
       for (const s of (c.sections || [])) {{
@@ -24212,7 +24212,7 @@ async function loadBookLengthReportPanel() {{
     }}
     host.innerHTML = html;
   }} catch (e) {{
-    host.innerHTML = '<span style="color:var(--danger);">Error: '
+    host.innerHTML = '<span class="u-danger">Error: '
                     + _escHtml(String(e).slice(0, 200)) + '</span>';
   }}
 }}
@@ -24225,17 +24225,17 @@ async function loadBookLengthReportPanel() {{
 async function loadSectionLengthPanel() {{
   const host = document.getElementById('bs-section-length-panel');
   if (!host) return;
-  host.innerHTML = '<em style="color:var(--fg-muted);">Loading…</em>';
+  host.innerHTML = '<em class="u-muted">Loading…</em>';
   try {{
     const r = await fetch('/api/bench/section-lengths');
     if (!r.ok) {{
-      host.innerHTML = '<span style="color:var(--danger);">Failed: '
+      host.innerHTML = '<span class="u-danger">Failed: '
                       + r.status + '</span>';
       return;
     }}
     const d = await r.json();
     if (!d.sections || d.sections.length === 0) {{
-      host.innerHTML = '<em style="color:var(--fg-muted);">'
+      host.innerHTML = '<em class="u-muted">'
                       + 'No section data yet — ingest some papers first.</em>';
       return;
     }}
@@ -24246,7 +24246,7 @@ async function loadSectionLengthPanel() {{
       return 'var(--danger)';
     }};
     let html = '<table style="width:100%;border-collapse:collapse;font-size:11px;">';
-    html += '<thead><tr style="border-bottom:1px solid var(--border);">'
+    html += '<thead><tr class="u-border-b">'
          + '<th style="text-align:left;padding:4px 6px;">Section</th>'
          + '<th style="text-align:right;padding:4px 6px;">n</th>'
          + '<th style="text-align:right;padding:4px 6px;">Median</th>'
@@ -24256,7 +24256,7 @@ async function loadSectionLengthPanel() {{
          + '</tr></thead><tbody>';
     for (const s of d.sections) {{
       const colour = colourFor(s.alignment);
-      html += '<tr style="border-bottom:1px solid var(--border);">'
+      html += '<tr class="u-border-b">'
            + '<td style="padding:4px 6px;font-weight:600;">' + _escHtml(s.section_type) + '</td>'
            + '<td style="padding:4px 6px;text-align:right;color:var(--fg-muted);">' + (s.n || '—') + '</td>'
            + '<td style="padding:4px 6px;text-align:right;">' + ((s.median || 0).toLocaleString()) + 'w</td>'
@@ -24273,7 +24273,7 @@ async function loadSectionLengthPanel() {{
          + 'overlap but median is outside.</p>';
     host.innerHTML = html;
   }} catch (e) {{
-    host.innerHTML = '<span style="color:var(--danger);">Error: '
+    host.innerHTML = '<span class="u-danger">Error: '
                     + _escHtml(String(e).slice(0, 200)) + '</span>';
   }}
 }}
@@ -24299,7 +24299,7 @@ async function autoPlanEntireBook() {{
     bookId = d.id || '';
   }} catch (_) {{}}
   if (!bookId) {{
-    status.innerHTML = '<span style="color:var(--danger);">Failed to resolve current book.</span>';
+    status.innerHTML = '<span class="u-danger">Failed to resolve current book.</span>';
     return;
   }}
 
@@ -24319,7 +24319,7 @@ async function autoPlanEntireBook() {{
     }});
     const d = await res.json();
     if (!res.ok || !d.job_id) {{
-      status.innerHTML = '<span style="color:var(--danger);">Failed: '
+      status.innerHTML = '<span class="u-danger">Failed: '
                        + _escHtml(d.detail || ('status ' + res.status)) + '</span>';
       return;
     }}
@@ -24330,12 +24330,12 @@ async function autoPlanEntireBook() {{
         logEl.textContent += evt.text + '\\n';
         logEl.scrollTop = logEl.scrollHeight;
       }} else if (evt.type === 'completed') {{
-        status.innerHTML = '<span style="color:var(--success);">✓ Done.</span> '
-                         + '<span style="color:var(--fg-muted);">'
+        status.innerHTML = '<span class="u-success">✓ Done.</span> '
+                         + '<span class="u-muted">'
                          + 'Open a chapter to see the new plans + concept-density badges.</span>';
         src.close();
       }} else if (evt.type === 'error') {{
-        status.innerHTML = '<span style="color:var(--danger);">✗ '
+        status.innerHTML = '<span class="u-danger">✗ '
                          + _escHtml(evt.message || 'error') + '</span>';
         src.close();
       }} else if (evt.type === 'done') {{
@@ -24343,11 +24343,11 @@ async function autoPlanEntireBook() {{
       }}
     }};
     src.onerror = function() {{
-      status.innerHTML = '<span style="color:var(--danger);">Connection lost.</span>';
+      status.innerHTML = '<span class="u-danger">Connection lost.</span>';
       src.close();
     }};
   }} catch (e) {{
-    status.innerHTML = '<span style="color:var(--danger);">Error: '
+    status.innerHTML = '<span class="u-danger">Error: '
                      + _escHtml(String(e).slice(0, 200)) + '</span>';
   }}
 }}
@@ -24534,8 +24534,8 @@ async function loadBookSettingsModels() {{
       ['RERANKER_MODEL',         data.reranker_model,         'hybrid search rerank step'],
     ];
     tbody.innerHTML = rows.map(r => {{
-      const val = r[1] || '<em style="color:var(--fg-muted);">(unset — falls back to LLM_MODEL)</em>';
-      return '<tr style="border-bottom:1px solid var(--border);">'
+      const val = r[1] || '<em class="u-muted">(unset — falls back to LLM_MODEL)</em>';
+      return '<tr class="u-border-b">'
         + '<td style="padding:6px 8px;font-family:var(--font-mono);font-size:11px;">' + _escHtml(r[0]) + '</td>'
         + '<td style="padding:6px 8px;font-family:var(--font-mono);font-size:11px;">' + (r[1] ? _escHtml(r[1]) : val) + '</td>'
         + '<td style="padding:6px 8px;color:var(--fg-muted);font-size:11px;">' + _escHtml(r[2]) + '</td>'
@@ -24597,7 +24597,7 @@ function renderStyleFingerprint(fp) {{
   ];
   let html = '<div style="display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;font-size:13px;">';
   rows.forEach(([k, v]) => {{
-    html += '<div style="color:var(--fg-muted);">' + k + '</div>';
+    html += '<div class="u-muted">' + k + '</div>';
     html += '<div><strong>' + (v != null ? v : '—') + '</strong></div>';
   }});
   html += '</div>';
@@ -24637,7 +24637,7 @@ async function saveBookSettings(tab) {{
       status.textContent = 'Save failed: ' + (data.detail || 'unknown');
       return;
     }}
-    status.innerHTML = '<span style="color:var(--success);">Saved.</span>';
+    status.innerHTML = '<span class="u-success">Saved.</span>';
     // Rehydrate meta line — chapter counts may shift if the target changed
     if (tab === 'basics') await loadBookSettings();
   }} catch (exc) {{
@@ -24660,7 +24660,7 @@ async function refreshStyleFingerprint() {{
     if (sampled === 0) {{
       status.textContent = 'No approved drafts yet — mark some as final/reviewed/revised first.';
     }} else {{
-      status.innerHTML = '<span style="color:var(--success);">Updated from ' + sampled + ' draft' + (sampled === 1 ? '' : 's') + '.</span>';
+      status.innerHTML = '<span class="u-success">Updated from ' + sampled + ' draft' + (sampled === 1 ? '' : 's') + '.</span>';
     }}
   }} catch (exc) {{
     status.textContent = 'Refresh failed: ' + exc;
@@ -24712,7 +24712,7 @@ async function doBundleSnapshot(scope) {{
     const extra = scope === 'chapter'
       ? ` (${{data.drafts_included}} section${{data.drafts_included === 1 ? '' : 's'}}, ${{data.total_words}} words)`
       : ` (${{data.chapters_included}} chapter${{data.chapters_included === 1 ? '' : 's'}}, ${{data.total_words}} words)`;
-    status.innerHTML = '<span style="color:var(--success);">Saved &quot;' + (data.name || '').replace(/</g, '&lt;') + '&quot;</span>' + extra;
+    status.innerHTML = '<span class="u-success">Saved &quot;' + (data.name || '').replace(/</g, '&lt;') + '&quot;</span>' + extra;
     nameEl.value = '';
     loadBundleList(scope);
   }} catch (exc) {{
@@ -24724,16 +24724,16 @@ async function loadBundleList(scope) {{
   const list = document.getElementById('sb-' + scope + '-list');
   const target = (scope === 'chapter') ? currentChapterId : '{book_id}';
   if (!target) {{
-    list.innerHTML = '<div style="color:var(--fg-muted);font-size:12px;">Open any section first so a chapter is active.</div>';
+    list.innerHTML = '<div class="u-hint-sm">Open any section first so a chapter is active.</div>';
     return;
   }}
-  list.innerHTML = '<div style="color:var(--fg-muted);font-size:12px;">Loading…</div>';
+  list.innerHTML = '<div class="u-hint-sm">Loading…</div>';
   try {{
     const res = await fetch('/api/snapshots/' + scope + '/' + target);
     const data = await res.json();
     const snaps = data.snapshots || [];
     if (snaps.length === 0) {{
-      list.innerHTML = '<div style="color:var(--fg-muted);font-size:12px;">No ' + scope + ' snapshots yet.</div>';
+      list.innerHTML = '<div class="u-hint-sm">No ' + scope + ' snapshots yet.</div>';
       return;
     }}
     let html = '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
@@ -24741,7 +24741,7 @@ async function loadBundleList(scope) {{
     html += '<th style="padding:6px 4px;">Label</th><th style="padding:6px 4px;">Words</th><th style="padding:6px 4px;">Saved</th><th></th></tr></thead><tbody>';
     snaps.forEach(s => {{
       const created = (s.created_at || '').split('.')[0].replace('T', ' ');
-      html += '<tr style="border-bottom:1px solid var(--border);">';
+      html += '<tr class="u-border-b">';
       html += '<td style="padding:6px 4px;">' + (s.name || '').replace(/</g, '&lt;') + '</td>';
       html += '<td style="padding:6px 4px;color:var(--fg-muted);">' + (s.word_count || 0).toLocaleString() + '</td>';
       html += '<td style="padding:6px 4px;color:var(--fg-muted);font-size:11px;">' + created + '</td>';
@@ -24770,7 +24770,7 @@ async function restoreBundle(snapId, scope) {{
       status.textContent = 'Error: ' + (data.detail || data.error || 'failed');
       return;
     }}
-    status.innerHTML = '<span style="color:var(--success);">Restored ' + data.drafts_created + ' draft' + (data.drafts_created === 1 ? '' : 's') + ' across ' + data.chapters_restored + ' chapter' + (data.chapters_restored === 1 ? '' : 's') + '. Reload to see them.</span>';
+    status.innerHTML = '<span class="u-success">Restored ' + data.drafts_created + ' draft' + (data.drafts_created === 1 ? '' : 's') + ' across ' + data.chapters_restored + ' chapter' + (data.chapters_restored === 1 ? '' : 's') + '. Reload to see them.</span>';
   }} catch (exc) {{
     status.textContent = 'Error: ' + exc;
   }}
@@ -24943,18 +24943,18 @@ function swUpdateTypeInfo() {{
   }}
   panel.innerHTML = `
     <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 12px;">
-      <span style="color:var(--fg-muted);">Description:</span>
+      <span class="u-muted">Description:</span>
       <span>${{_escHtml(t.description)}}</span>
-      <span style="color:var(--fg-muted);">Default chapters:</span>
+      <span class="u-muted">Default chapters:</span>
       <span>${{nchap}} &middot; ${{chap.toLocaleString()}} words each
             ${{t.is_flat ? '<em>(flat IMRaD — one chapter)</em>' : ''}}</span>
-      <span style="color:var(--fg-muted);">Concepts / section:</span>
+      <span class="u-muted">Concepts / section:</span>
       <span>${{clo}}–${{chi}} novel chunks (Cowan 2001)</span>
-      <span style="color:var(--fg-muted);">Words / concept:</span>
+      <span class="u-muted">Words / concept:</span>
       <span>${{wlo}}–${{whi}} (midpoint ${{Math.floor((wlo + whi) / 2)}})</span>
-      <span style="color:var(--fg-muted);">Section at midpoint:</span>
+      <span class="u-muted">Section at midpoint:</span>
       <span>${{slo.toLocaleString()}}–${{shi.toLocaleString()}} words</span>
-      <span style="color:var(--fg-muted);">Typical book total:</span>
+      <span class="u-muted">Typical book total:</span>
       <span>~${{totalLo}}–${{totalHi}} words</span>
     </div>
     <div style="margin-top:6px;color:var(--fg-muted);font-size:11px;">
@@ -25016,7 +25016,7 @@ async function swLoadProjectsForWizard() {{
       return `<div style="padding:6px 10px;border-bottom:1px solid var(--border);
                            display:flex;align-items:center;gap:8px;">
         <span style="color:var(--accent);">${{mark}}</span>
-        <strong style="flex:1;">${{p.slug}}</strong>${{running_mark}}
+        <strong class="u-flex-1">${{p.slug}}</strong>${{running_mark}}
         ${{useBtn}}</div>`;
     }}).join('');
   }} catch (exc) {{
@@ -25176,7 +25176,7 @@ async function swCreateBook() {{
     }});
     const d = await res.json();
     if (!res.ok) {{
-      stat.innerHTML = '<span style="color:var(--danger);">Failed: '
+      stat.innerHTML = '<span class="u-danger">Failed: '
         + (d.detail || res.status) + '</span>';
       return;
     }}
@@ -25184,13 +25184,13 @@ async function swCreateBook() {{
       ? ' &middot; Auto-created chapter 1 with sections: '
         + (d.default_sections || []).join(', ')
       : '';
-    stat.innerHTML = '<span style="color:var(--success);">✓ Created '
+    stat.innerHTML = '<span class="u-success">✓ Created '
       + d.display_name + ' "' + d.title + '"</span>'
       + '<br><code>' + d.book_id.slice(0, 8) + '</code>' + flatNote
       + '<br>Next: restart <code>sciknow book serve "' + d.title
       + '"</code> to open this book in the reader.';
   }} catch (exc) {{
-    stat.innerHTML = '<span style="color:var(--danger);">Failed: ' + exc + '</span>';
+    stat.innerHTML = '<span class="u-danger">Failed: ' + exc + '</span>';
   }}
 }}
 
@@ -25364,7 +25364,7 @@ async function loadVisuals(append) {{
     const items = _visPage.items;
 
     if (!items.length) {{
-      results.innerHTML = '<em style="color:var(--fg-muted);">No visuals found.</em>';
+      results.innerHTML = '<em class="u-muted">No visuals found.</em>';
       if (statsEl) statsEl.textContent = universe ? '0 of ' + universe : '';
       return;
     }}
@@ -25459,7 +25459,7 @@ async function loadVisuals(append) {{
         return '<pre style="max-height:120px;overflow:auto;font-size:11px;padding:6px;background:var(--bg);border-radius:4px;margin:0;">'
           + _escHtml((v.content || '').substring(0, 800)) + '</pre>';
       }}
-      return '<em style="color:var(--fg-muted);font-size:11px;">' + _escHtml((v.content || v.caption || '').substring(0, 200)) + '</em>';
+      return '<em class="u-hint">' + _escHtml((v.content || v.caption || '').substring(0, 200)) + '</em>';
     }};
 
     const kindIcon = (k) => k === 'table' ? '\\uD83D\\uDCCA'
@@ -25484,7 +25484,7 @@ async function loadVisuals(append) {{
         html += '<div style="border:1px solid var(--border);border-radius:6px;padding:8px;background:var(--bg-alt);">'
           + renderPreview(v)
           + '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;gap:4px;">'
-          +   '<strong style="font-size:11px;">' + _escHtml(label.substring(0, 40)) + '</strong>'
+          +   '<strong class="u-tiny">' + _escHtml(label.substring(0, 40)) + '</strong>'
           +   '<button class="btn-secondary" style="font-size:10px;padding:1px 6px;" '
           +     'onclick="insertVisualAtCursor(' + JSON.stringify(JSON.stringify(v)) + ')">Insert</button>'
           + '</div>'
@@ -25518,8 +25518,8 @@ async function loadVisuals(append) {{
     const loadMoreHtml =
       '<div id="vis-loadmore-wrap" style="display:flex;justify-content:center;padding:10px 0;">'
       + (hasMore
-          ? '<button class="btn-secondary" onclick="loadVisuals(true)" style="font-size:12px;" title="Fetch the next page of visuals matching the current filters.">Load more (' + items.length + ' / ' + universe + ')</button>'
-          : '<span style="font-size:11px;color:var(--fg-muted);">End of list (' + items.length + ' / ' + universe + ')</span>')
+          ? '<button class="btn-secondary u-small" onclick="loadVisuals(true)" title="Fetch the next page of visuals matching the current filters.">Load more (' + items.length + ' / ' + universe + ')</button>'
+          : '<span class="u-hint">End of list (' + items.length + ' / ' + universe + ')</span>')
       + '</div>';
 
     results.innerHTML = html + loadMoreHtml;
@@ -25613,7 +25613,7 @@ async function loadVisuals(append) {{
       }}, 200);
     }}
   }} catch (exc) {{
-    results.innerHTML = '<em style="color:var(--danger);">Failed: ' + exc + '</em>';
+    results.innerHTML = '<em class="u-danger">Failed: ' + exc + '</em>';
   }}
 }}
 
@@ -25690,13 +25690,13 @@ async function refreshBackupsList() {{
         + ' (' + mb.toFixed(1) + ' MB, '
         + (last.projects || []).join(', ') + ')';
     }} else {{
-      statusHtml += '<span style="color:var(--warning);">No backups yet.</span>';
+      statusHtml += '<span class="u-warning">No backups yet.</span>';
     }}
     statusHtml += '<br>';
     if (sched) {{
       const human = sched.human || sched.cron_expression || '?';
       statusHtml += '<strong>Schedule:</strong> ' + human
-        + ' <span style="color:var(--fg-muted);font-size:11px;">(cron: ' + sched.cron_expression + ')</span>';
+        + ' <span class="u-hint">(cron: ' + sched.cron_expression + ')</span>';
       if (unschedBtn) unschedBtn.style.display = '';
       // Populate the schedule form with current values
       const freq = sched.frequency || 'daily';
@@ -25713,7 +25713,7 @@ async function refreshBackupsList() {{
       }}
       _updateScheduleFormVisibility();
     }} else {{
-      statusHtml += '<span style="color:var(--fg-muted);">No schedule active.</span>';
+      statusHtml += '<span class="u-muted">No schedule active.</span>';
       if (unschedBtn) unschedBtn.style.display = 'none';
     }}
     status.innerHTML = statusHtml;
@@ -25739,11 +25739,11 @@ async function refreshBackupsList() {{
 
     // List with delete + restore per row
     if (!backups.length) {{
-      list.innerHTML = '<em style="color:var(--fg-muted);">No backups. Click "Run Backup Now".</em>';
+      list.innerHTML = '<em class="u-muted">No backups. Click "Run Backup Now".</em>';
       return;
     }}
     let html = '<table style="width:100%;border-collapse:collapse;font-size:12px;">';
-    html += '<tr style="border-bottom:1px solid var(--border);"><th style="text-align:left;padding:4px;">Date</th><th>Projects</th><th style="text-align:right;">Size</th><th>Sys</th><th>Files</th><th>Actions</th></tr>';
+    html += '<tr class="u-border-b"><th style="text-align:left;padding:4px;">Date</th><th>Projects</th><th style="text-align:right;">Size</th><th>Sys</th><th>Files</th><th>Actions</th></tr>';
     for (let i = backups.length - 1; i >= 0; i--) {{
       const b = backups[i];
       const mb = (b.total_bytes || 0) / 1024 / 1024;
@@ -25757,7 +25757,7 @@ async function refreshBackupsList() {{
           + safeTs + '\\')" title="Restore this backup">\\u21BB</button> '
         + '<button class="btn-secondary" style="font-size:11px;padding:2px 6px;color:var(--danger);border-color:var(--danger);" '
           + 'onclick="deleteBackup(\\'' + safeTs + '\\')" title="Delete this backup">\\u2715</button>';
-      html += '<tr style="border-bottom:1px solid var(--border);">'
+      html += '<tr class="u-border-b">'
         + '<td style="padding:4px;">' + b.timestamp + '</td>'
         + '<td>' + (b.projects || []).join(', ') + '</td>'
         + '<td style="text-align:right;">' + mb.toFixed(1) + ' MB</td>'
@@ -25772,7 +25772,7 @@ async function refreshBackupsList() {{
       + backups.length + ' backup(s), ' + totalMb.toFixed(1) + ' MB total.</div>';
     list.innerHTML = html;
   }} catch (exc) {{
-    document.getElementById('backup-list').innerHTML = '<span style="color:var(--danger);">Failed to load: ' + exc + '</span>';
+    document.getElementById('backup-list').innerHTML = '<span class="u-danger">Failed to load: ' + exc + '</span>';
   }}
 }}
 
@@ -26050,20 +26050,20 @@ async function refreshProjectsList() {{
     const data = await resp.json();
     document.getElementById('proj-running').textContent = data.running_slug || '(unknown)';
     if (!data.projects || data.projects.length === 0) {{
-      wrap.innerHTML = '<em style="color:var(--fg-muted);">No projects yet. Create one below.</em>';
+      wrap.innerHTML = '<em class="u-muted">No projects yet. Create one below.</em>';
       _projMsg('');
       return;
     }}
     const rows = data.projects.map(p => {{
-      const activeMark = p.active ? '<span style="color:var(--accent);font-weight:600;">●</span>' : '<span style="color:var(--fg-faint);">○</span>';
+      const activeMark = p.active ? '<span style="color:var(--accent);font-weight:600;">●</span>' : '<span class="u-faint">○</span>';
       const statusBadge = p.status === 'ok'
-        ? '<span style="color:var(--success);">ok</span>'
-        : '<span style="color:var(--warning);">incomplete</span>';
+        ? '<span class="u-success">ok</span>'
+        : '<span class="u-warning">incomplete</span>';
       const isRunning = p.slug === data.running_slug;
       const useBtn    = p.active ? ''
         : `<button onclick="useProject('${{p.slug}}')" title="Set .active-project to ${{p.slug}}">Use</button>`;
       const destroyBtn = (p.is_default || isRunning) ? ''
-        : `<button onclick="destroyProject('${{p.slug}}')" style="color:var(--danger);" title="Drop DB + collections + data dir">Destroy</button>`;
+        : `<button class="u-danger" onclick="destroyProject('${{p.slug}}')" title="Drop DB + collections + data dir">Destroy</button>`;
       const showBtn = `<button onclick="showProjectDetail('${{p.slug}}')" title="Show this project's stats (paper count, chunk count, embedding model) and migration + venue-config state.">Details</button>`;
       return `<tr>
         <td style="text-align:center;width:30px;">${{activeMark}}</td>
@@ -26106,16 +26106,16 @@ async function showProjectDetail(slug) {{
       : (d.counts_error ? `<div style="color:var(--warning);font-size:11px;">Counts unavailable: ${{d.counts_error}}</div>` : '');
     dest.innerHTML = `<div style="border:1px solid var(--border);border-radius:var(--r-md);padding:10px;background:var(--toolbar-bg);">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-        <strong>${{d.slug}}${{d.is_default ? ' <span style="font-size:11px;color:var(--fg-muted);">(legacy default)</span>' : ''}}</strong>
+        <strong>${{d.slug}}${{d.is_default ? ' <span class="u-hint">(legacy default)</span>' : ''}}</strong>
         <button onclick="document.getElementById('proj-detail').innerHTML=''" title="Close the project details panel.">&times;</button>
       </div>
       <dl style="display:grid;grid-template-columns:140px 1fr;gap:4px 12px;font-size:12px;margin:0;">
-        <dt style="color:var(--fg-muted);">Root</dt><dd style="font-family:var(--font-mono);font-size:11px;">${{d.root}}</dd>
-        <dt style="color:var(--fg-muted);">Data dir</dt><dd style="font-family:var(--font-mono);font-size:11px;">${{d.data_dir}}${{d.data_dir_exists ? '' : ' <span style="color:var(--warning);">(missing)</span>'}}</dd>
-        <dt style="color:var(--fg-muted);">PG database</dt><dd style="font-family:var(--font-mono);font-size:11px;">${{d.pg_database}}${{d.pg_database_exists ? '' : ' <span style="color:var(--warning);">(missing)</span>'}}</dd>
-        <dt style="color:var(--fg-muted);">Qdrant prefix</dt><dd style="font-family:var(--font-mono);font-size:11px;">${{d.qdrant_prefix || '(none)'}}</dd>
-        <dt style="color:var(--fg-muted);">Collections</dt><dd style="font-family:var(--font-mono);font-size:11px;">${{d.papers_collection}}, ${{d.abstracts_collection}}, ${{d.wiki_collection}}</dd>
-        <dt style="color:var(--fg-muted);">Env overlay</dt><dd style="font-family:var(--font-mono);font-size:11px;">${{d.env_overlay_path}}${{d.env_overlay_exists ? '' : ' <span style="color:var(--fg-faint);">(not present)</span>'}}</dd>
+        <dt class="u-muted">Root</dt><dd style="font-family:var(--font-mono);font-size:11px;">${{d.root}}</dd>
+        <dt class="u-muted">Data dir</dt><dd style="font-family:var(--font-mono);font-size:11px;">${{d.data_dir}}${{d.data_dir_exists ? '' : ' <span class="u-warning">(missing)</span>'}}</dd>
+        <dt class="u-muted">PG database</dt><dd style="font-family:var(--font-mono);font-size:11px;">${{d.pg_database}}${{d.pg_database_exists ? '' : ' <span class="u-warning">(missing)</span>'}}</dd>
+        <dt class="u-muted">Qdrant prefix</dt><dd style="font-family:var(--font-mono);font-size:11px;">${{d.qdrant_prefix || '(none)'}}</dd>
+        <dt class="u-muted">Collections</dt><dd style="font-family:var(--font-mono);font-size:11px;">${{d.papers_collection}}, ${{d.abstracts_collection}}, ${{d.wiki_collection}}</dd>
+        <dt class="u-muted">Env overlay</dt><dd style="font-family:var(--font-mono);font-size:11px;">${{d.env_overlay_path}}${{d.env_overlay_exists ? '' : ' <span class="u-faint">(not present)</span>'}}</dd>
       </dl>
       ${{counts}}
     </div>`;
