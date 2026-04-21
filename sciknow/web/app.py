@@ -7517,8 +7517,43 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .main h3 {{ font-size: 19px; line-height: 1.3; }}
 .main h4 {{ font-size: 16px; line-height: 1.35; }}
 .citation {{ color: var(--accent); cursor: pointer; font-weight: 600;
-             text-decoration: none; padding: 0 1px; }}
+             text-decoration: none; padding: 0 1px;
+             font-feature-settings: "tnum"; }}
 .citation:hover {{ background: var(--accent-light); border-radius: 2px; }}
+
+/* ── Phase 54.6.172 — Reader editorial touches + utility classes.
+   Drop cap on the opening paragraph + a small set of utility
+   classes to pick up the most-repeated inline style patterns. */
+#read-view > p:first-of-type::first-letter {{
+  font-family: var(--font-serif);
+  font-size: 3.6em; line-height: 0.88;
+  float: left; margin: 0.04em 0.1em 0 -0.04em;
+  font-weight: 600; color: var(--accent);
+  font-variation-settings: "opsz" 72;
+}}
+
+/* Utility classes — a progressive migration path away from the
+   1,200 inline style="" attrs. Nothing breaks if you don't use
+   them; they exist so new code has a shorter path than inline. */
+.u-muted    {{ color: var(--fg-muted); }}
+.u-faint    {{ color: var(--fg-faint); }}
+.u-danger   {{ color: var(--danger); }}
+.u-success  {{ color: var(--success); }}
+.u-warning  {{ color: var(--warning); }}
+.u-tiny     {{ font-size: 11px; }}
+.u-small    {{ font-size: 12px; }}
+.u-hint     {{ font-size: 11px; color: var(--fg-muted); }}
+.u-hint-sm  {{ font-size: 12px; color: var(--fg-muted); }}
+.u-mono     {{ font-family: var(--font-mono); font-feature-settings: "tnum"; }}
+.u-hidden   {{ display: none; }}
+.u-flex     {{ display: flex; align-items: center; }}
+.u-row      {{ display: flex; align-items: center; gap: 8px; }}
+.u-row-sm   {{ display: flex; align-items: center; gap: 4px; }}
+.u-col      {{ display: flex; flex-direction: column; }}
+.u-flex-1   {{ flex: 1; }}
+.u-border-b {{ border-bottom: 1px solid var(--border); }}
+.u-divider  {{ border-top: 1px dashed var(--border);
+              padding-top: 10px; margin-top: 14px; }}
 
 /* ── Phase 54.6.168 — Monoline icon system.
    Inline SVG sprite at the top of <body> defines <symbol>s;
