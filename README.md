@@ -209,6 +209,11 @@ See [`docs/PROJECTS.md`](docs/PROJECTS.md) for the full design.
 sciknow is active; the [`docs/PHASE_LOG.md`](docs/PHASE_LOG.md) records
 every Phase commit. Most recent batches:
 
+- **54.6.164 (April 2026).** Collapsible reader columns — hide buttons on
+  the left (chapters) and right (sources/review/comments) panes, with
+  edge peek buttons to bring them back. New **Book Settings → View** tab
+  exposes per-browser auto-hide preferences (stored in localStorage),
+  so the reader pane can open full-width on every load.
 - **54.6.134-162 (April 2026).** Two major tracks closed end-to-end:
   **(A) visuals-in-writer** (138-145) — MinerU-extracted figures/tables
   are now first-class citable evidence in autowrite via a 5-signal

@@ -7419,7 +7419,8 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .ch-group.collapsed .ch-progress {{ display: none; }}
 /* Phase 23 — sidebar header collapse/expand-all button. */
 .sidebar-controls {{ padding: 6px var(--sp-4); border-bottom: 1px solid var(--border);
-                    display: flex; justify-content: flex-end; }}
+                    display: flex; justify-content: space-between;
+                    align-items: center; gap: 6px; }}
 .sidebar-toggle-all {{ background: transparent; border: 1px solid var(--border);
                       color: var(--fg-muted); padding: 3px 10px;
                       border-radius: var(--r-sm); cursor: pointer;
@@ -7775,6 +7776,34 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
           padding: 16px; font-size: 13px; background: var(--sidebar-bg); }}
 .panel h3 {{ font-size: 14px; margin: 16px 0 8px; color: var(--accent); }}
 .panel ol {{ padding-left: 20px; }} .panel li {{ margin-bottom: 4px; font-size: 12px; }}
+/* Phase 54.6.164 — collapsible left / right columns. Hide state is a
+   body class so a fixed-position peek button can be a sibling of
+   .app-body and still toggle visibility via the same class. */
+body.sidebar-hidden .sidebar {{ display: none; }}
+body.panel-hidden    .panel   {{ display: none; }}
+.panel-controls {{ display: flex; justify-content: flex-end;
+                   padding-bottom: 8px; margin-bottom: 4px;
+                   border-bottom: 1px solid var(--border); }}
+.col-hide-btn {{ background: transparent; border: 1px solid var(--border);
+                 color: var(--fg-muted); cursor: pointer;
+                 border-radius: var(--r-sm); padding: 3px 8px;
+                 font-size: 11px; font-family: var(--font-sans); line-height: 1;
+                 display: inline-flex; align-items: center; gap: 4px; }}
+.col-hide-btn:hover {{ color: var(--accent); border-color: var(--accent); }}
+.col-peek-btn {{ position: fixed; top: 50%; transform: translateY(-50%);
+                 z-index: 90; background: var(--sidebar-bg);
+                 border: 1px solid var(--border); color: var(--fg-muted);
+                 cursor: pointer; font-size: 14px;
+                 padding: 14px 6px; line-height: 1;
+                 box-shadow: var(--shadow-sm); display: none; }}
+.col-peek-btn:hover {{ color: var(--accent); border-color: var(--accent);
+                       background: var(--accent-light); }}
+.col-peek-sidebar {{ left: 0; border-left: none;
+                     border-radius: 0 var(--r-md) var(--r-md) 0; }}
+.col-peek-panel   {{ right: 0; border-right: none;
+                     border-radius: var(--r-md) 0 0 var(--r-md); }}
+body.sidebar-hidden .col-peek-sidebar {{ display: block; }}
+body.panel-hidden   .col-peek-panel   {{ display: block; }}
 /* Comments */
 .comment {{ padding: 8px; margin: 4px 0; border-left: 3px solid var(--accent);
             background: var(--accent-light); border-radius: 4px; }}
@@ -8741,6 +8770,10 @@ body.task-bar-open {{ padding-top: 40px; }}
        The icon flips from \u25be (down arrow, expanded) to \u25b8
        (right arrow, collapsed) to mirror the per-chapter chevrons. -->
   <div class="sidebar-controls">
+    <button class="col-hide-btn" onclick="toggleColumn('sidebar')"
+            title="Hide the chapters column. A peek button at the left edge brings it back. Auto-hide preference lives in Book Settings → View.">
+      « Hide
+    </button>
     <button class="sidebar-toggle-all" onclick="toggleAllChapters()"
             title="Collapse or expand all chapter sections">
       <span id="toggle-all-icon">\u25bd</span>
@@ -8925,6 +8958,12 @@ body.task-bar-open {{ padding-top: 40px; }}
 
 <!-- Right panel -->
 <aside class="panel">
+  <div class="panel-controls">
+    <button class="col-hide-btn" onclick="toggleColumn('panel')"
+            title="Hide the sources/comments column. A peek button at the right edge brings it back. Auto-hide preference lives in Book Settings → View.">
+      Hide »
+    </button>
+  </div>
   <h3>Sources</h3>
   <div id="panel-sources">{sources_html}</div>
 
@@ -8943,6 +8982,13 @@ body.task-bar-open {{ padding-top: 40px; }}
 </aside>
 
 </div> <!-- /.app-body -->
+
+<!-- Phase 54.6.164 — peek buttons. Visible only when the matching
+     column is hidden (body class `sidebar-hidden` / `panel-hidden`). -->
+<button class="col-peek-btn col-peek-sidebar" onclick="toggleColumn('sidebar')"
+        title="Show the chapters column">»</button>
+<button class="col-peek-btn col-peek-panel" onclick="toggleColumn('panel')"
+        title="Show the sources/comments column">«</button>
 
 <!-- ── Phase 14 modals ─────────────────────────────────────────────────── -->
 
@@ -9667,6 +9713,8 @@ body.task-bar-open {{ padding-top: 40px; }}
               title="Tone, voice, reading level and persona guide used by the writer.">Style</button>
       <button class="tab" data-tab="bs-models" onclick="switchBookSettingsTab('bs-models')"
               title="Per-role model assignments (writer, scorer, verifier, reviewer, extractor). Overrides .env defaults.">Models</button>
+      <button class="tab" data-tab="bs-view" onclick="switchBookSettingsTab('bs-view')"
+              title="Local UI preferences — auto-hide the chapters / comments columns on page load. Stored per browser (localStorage), not per book.">View</button>
     </div>
     <div class="modal-body">
 
@@ -9842,6 +9890,42 @@ body.task-bar-open {{ padding-top: 40px; }}
                   title="Re-scan drafts marked `final` / `reviewed` / `revised` and rebuild the style fingerprint (median sentence length, citations per 100 words, hedging rate, top transitions). Future autowrite runs pick up the new fingerprint immediately.">Recompute Fingerprint</button>
           <span id="bs-style-status" style="font-size:12px;color:var(--fg-muted);"></span>
         </div>
+      </div>
+
+      <!-- Phase 54.6.164 — View tab: local UI preferences. Not persisted
+           to /api/book; stored in localStorage so they follow the
+           browser, not the book. -->
+      <div id="bs-view-pane" style="display:none;">
+        <p style="font-size:11px;color:var(--fg-muted);margin-bottom:12px;">
+          Per-browser UI preferences. Stored in <code>localStorage</code>;
+          not synced to the book or other devices.
+        </p>
+        <div class="field">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+            <input type="checkbox" id="bs-autohide-sidebar" onchange="bsSaveViewPrefs()"
+                   title="When on, the chapters column starts hidden on every page load. You can still toggle it during the session with the « Hide / » peek buttons."/>
+            <span>Auto-hide chapters column on page load</span>
+          </label>
+          <p style="font-size:11px;color:var(--fg-muted);margin:4px 0 0 24px;">
+            Keeps the reader pane wider by default. Click the <code>»</code>
+            peek button on the left edge to bring it back for the session.
+          </p>
+        </div>
+        <div class="field">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+            <input type="checkbox" id="bs-autohide-panel" onchange="bsSaveViewPrefs()"
+                   title="When on, the sources / review / comments column starts hidden on every page load. You can still toggle it during the session with the Hide » / « peek buttons."/>
+            <span>Auto-hide sources/comments column on page load</span>
+          </label>
+          <p style="font-size:11px;color:var(--fg-muted);margin:4px 0 0 24px;">
+            Hides Sources / Review / Comments at load. Click the <code>«</code>
+            peek button on the right edge to bring it back for the session.
+          </p>
+        </div>
+        <p style="font-size:11px;color:var(--fg-muted);margin-top:16px;padding-top:10px;border-top:1px dashed var(--border);">
+          With auto-hide off, the current hidden/shown state is remembered
+          across reloads. With auto-hide on, the column always starts hidden.
+        </p>
       </div>
 
     </div>
@@ -22280,6 +22364,80 @@ function restoreCollapsedChapters() {{
 // Run on initial page load (after the static sidebar HTML is parsed).
 document.addEventListener('DOMContentLoaded', restoreCollapsedChapters);
 
+// Phase 54.6.164 — collapsible left / right columns. Four localStorage
+// keys: two current-state ("…Hidden") + two auto-hide prefs
+// ("autohide…"). On load: if auto-hide is on, start hidden;
+// otherwise restore the last toggled state. Toggling during the
+// session persists the new state only when auto-hide is off, so
+// auto-hide wins at reload without losing session toggles mid-use.
+const _COL_KEYS = {{
+  sidebar: {{ hidden: 'sciknow.ui.sidebarHidden',
+             auto:   'sciknow.ui.autohideSidebar',
+             cls:    'sidebar-hidden' }},
+  panel:   {{ hidden: 'sciknow.ui.panelHidden',
+             auto:   'sciknow.ui.autohidePanel',
+             cls:    'panel-hidden' }},
+}};
+
+function _colPref(which, key) {{
+  const cfg = _COL_KEYS[which];
+  if (!cfg) return false;
+  try {{ return localStorage.getItem(cfg[key]) === '1'; }}
+  catch (e) {{ return false; }}
+}}
+
+function _colSetPref(which, key, val) {{
+  const cfg = _COL_KEYS[which];
+  if (!cfg) return;
+  try {{ localStorage.setItem(cfg[key], val ? '1' : '0'); }}
+  catch (e) {{ /* localStorage unavailable — ignore */ }}
+}}
+
+function toggleColumn(which) {{
+  const cfg = _COL_KEYS[which];
+  if (!cfg) return;
+  const hidden = document.body.classList.toggle(cfg.cls);
+  // Only persist the current-state when auto-hide is OFF — auto-hide
+  // always wins at page load, so persisting the toggle would
+  // leak session-level choices into the reload baseline.
+  if (!_colPref(which, 'auto')) _colSetPref(which, 'hidden', hidden);
+}}
+
+function _applyInitialColumnState() {{
+  Object.keys(_COL_KEYS).forEach(which => {{
+    const cfg = _COL_KEYS[which];
+    const start = _colPref(which, 'auto') || _colPref(which, 'hidden');
+    document.body.classList.toggle(cfg.cls, start);
+  }});
+}}
+
+// Apply before DOMContentLoaded would also work, but the body must
+// exist first — inline script after <body> runs on parse, this is
+// safe since the sidebar/panel elements are rendered below us.
+document.addEventListener('DOMContentLoaded', _applyInitialColumnState);
+
+function bsLoadViewPrefs() {{
+  const s = document.getElementById('bs-autohide-sidebar');
+  const p = document.getElementById('bs-autohide-panel');
+  if (s) s.checked = _colPref('sidebar', 'auto');
+  if (p) p.checked = _colPref('panel', 'auto');
+}}
+
+function bsSaveViewPrefs() {{
+  const s = document.getElementById('bs-autohide-sidebar');
+  const p = document.getElementById('bs-autohide-panel');
+  if (s) {{
+    _colSetPref('sidebar', 'auto', s.checked);
+    // Immediate feedback: turning auto-hide ON hides the column now.
+    // Turning it OFF leaves the current visible state alone.
+    if (s.checked) document.body.classList.add('sidebar-hidden');
+  }}
+  if (p) {{
+    _colSetPref('panel', 'auto', p.checked);
+    if (p.checked) document.body.classList.add('panel-hidden');
+  }}
+}}
+
 // Phase 22 — word target progress bar in the subtitle. Shows
 // "actual/target" plus a coloured bar (warning under 70%, accent
 // 70-100%, success over). Hidden when no target is set.
@@ -23344,11 +23502,12 @@ function switchBookSettingsTab(name) {{
   document.querySelectorAll('#book-settings-modal .tab').forEach(t => {{
     t.classList.toggle('active', t.dataset.tab === name);
   }});
-  ['bs-basics', 'bs-leitmotiv', 'bs-style', 'bs-models'].forEach(n => {{
+  ['bs-basics', 'bs-leitmotiv', 'bs-style', 'bs-models', 'bs-view'].forEach(n => {{
     const pane = document.getElementById(n + '-pane');
     if (pane) pane.style.display = (n === name) ? 'block' : 'none';
   }});
   if (name === 'bs-models') loadBookSettingsModels();
+  if (name === 'bs-view') bsLoadViewPrefs();
 }}
 
 async function loadBookSettingsModels() {{
