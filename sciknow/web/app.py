@@ -9272,6 +9272,150 @@ body.task-bar-open {{ padding-top: 40px; }}
     <line x1="16" y1="13" x2="8" y2="13"/>
     <line x1="16" y1="17" x2="8" y2="17"/>
   </symbol>
+  <!-- Phase 54.6.176 — second sprite batch for the dropdown-menu
+       emoji sweep. Each action gets a distinct icon so the
+       semantic signal the emoji carried is preserved. -->
+  <symbol id="i-save" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+    <polyline points="17 21 17 13 7 13 7 21"/>
+    <polyline points="7 3 7 8 15 8"/>
+  </symbol>
+  <symbol id="i-link" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+  </symbol>
+  <symbol id="i-file-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+    <polyline points="14 2 14 8 20 8"/>
+    <line x1="12" y1="18" x2="12" y2="12"/>
+    <line x1="9" y1="15" x2="15" y2="15"/>
+  </symbol>
+  <symbol id="i-trending-up" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/>
+    <polyline points="17 6 23 6 23 12"/>
+  </symbol>
+  <symbol id="i-scale" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M16 16.5a4 4 0 0 0 8 0c0-3.5-4-7-4-7s-4 3.5-4 7z"/>
+    <path d="M0 16.5a4 4 0 0 0 8 0c0-3.5-4-7-4-7s-4 3.5-4 7z"/>
+    <path d="M7 21h10"/>
+    <path d="M12 3v18"/>
+    <path d="M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2"/>
+  </symbol>
+  <symbol id="i-target" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="10"/>
+    <circle cx="12" cy="12" r="6"/>
+    <circle cx="12" cy="12" r="2"/>
+  </symbol>
+  <symbol id="i-users" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+    <circle cx="9" cy="7" r="4"/>
+    <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+    <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+  </symbol>
+  <symbol id="i-alert-octagon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <polygon points="7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86"/>
+    <line x1="12" y1="8" x2="12" y2="12"/>
+    <line x1="12" y1="16" x2="12.01" y2="16"/>
+  </symbol>
+  <symbol id="i-flask" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M10 2v7.527a2 2 0 0 1-.211.896L4.72 20.55a1 1 0 0 0 .9 1.45h12.76a1 1 0 0 0 .9-1.45l-5.069-10.127A2 2 0 0 1 14 9.527V2"/>
+    <path d="M8.5 2h7"/>
+    <path d="M7 16h10"/>
+  </symbol>
+  <symbol id="i-download" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+    <polyline points="7 10 12 15 17 10"/>
+    <line x1="12" y1="15" x2="12" y2="3"/>
+  </symbol>
+  <symbol id="i-history" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3 3v5h5"/>
+    <path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/>
+    <polyline points="12 7 12 12 16 14"/>
+  </symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+  </symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <polygon points="12 2 2 7 12 12 22 7 12 2"/>
+    <polyline points="2 17 12 22 22 17"/>
+    <polyline points="2 12 12 17 22 12"/>
+  </symbol>
+  <symbol id="i-wrench" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+  </symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="10"/>
+    <line x1="2" y1="12" x2="22" y2="12"/>
+    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+  </symbol>
+  <symbol id="i-image" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+    <circle cx="8.5" cy="8.5" r="1.5"/>
+    <polyline points="21 15 16 10 5 21"/>
+  </symbol>
+  <symbol id="i-clipboard" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
+    <rect x="8" y="2" width="8" height="4" rx="1" ry="1"/>
+  </symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="3 6 5 6 21 6"/>
+    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+  </symbol>
+  <symbol id="i-tag" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/>
+    <line x1="7" y1="7" x2="7.01" y2="7"/>
+  </symbol>
+  <symbol id="i-layout-grid" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3" y="3" width="7" height="7" rx="1"/>
+    <rect x="14" y="3" width="7" height="7" rx="1"/>
+    <rect x="14" y="14" width="7" height="7" rx="1"/>
+    <rect x="3" y="14" width="7" height="7" rx="1"/>
+  </symbol>
+  <symbol id="i-camera" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+    <circle cx="12" cy="13" r="4"/>
+  </symbol>
+  <symbol id="i-archive" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3" y="3" width="18" height="4" rx="1"/>
+    <path d="M5 7v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7"/>
+    <line x1="10" y1="12" x2="14" y2="12"/>
+  </symbol>
+  <symbol id="i-user" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+    <circle cx="12" cy="7" r="4"/>
+  </symbol>
+  <symbol id="i-wand" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M15 4V2M15 16v-2M8 9h2M20 9h2M17.8 11.8L19 13M15 9h0M17.8 6.2L19 5M3 21l9-9M12.2 6.2L11 5"/>
+  </symbol>
+  <symbol id="i-inbox" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/>
+    <path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>
+  </symbol>
 </svg>
 
 <!-- Phase 30 — persistent global task bar.
@@ -9316,15 +9460,15 @@ body.task-bar-open {{ padding-top: 40px; }}
     </button>
     <div class="nav-dropdown-menu" role="menu">
       <button role="menuitem" onclick="showCorkboard()"
-              title="Book-wide corkboard view: every chapter's sections as cards you can drag + reorder.">&#128204; Corkboard</button>
+              title="Book-wide corkboard view: every chapter's sections as cards you can drag + reorder."><svg class="icon"><use href="#i-layout-grid"/></svg> Corkboard</button>
       <button role="menuitem" onclick="showVersions()"
-              title="Per-draft version history. Every save keeps the prior version so you can diff or revert.">&#128344; History</button>
+              title="Per-draft version history. Every save keeps the prior version so you can diff or revert."><svg class="icon"><use href="#i-history"/></svg> History</button>
       <button role="menuitem" onclick="takeSnapshot()"
-              title="Snapshot the whole book's draft state — safety net before a destructive operation like autowrite-all.">&#128248; Snapshot</button>
+              title="Snapshot the whole book's draft state — safety net before a destructive operation like autowrite-all."><svg class="icon"><use href="#i-camera"/></svg> Snapshot</button>
       <button role="menuitem" onclick="openExportModal()"
-              title="Export the book to Markdown, HTML, PDF (WeasyPrint), EPUB (pandoc), LaTeX, DOCX, or BibTeX.">&#128229; Export</button>
+              title="Export the book to Markdown, HTML, PDF (WeasyPrint), EPUB (pandoc), LaTeX, DOCX, or BibTeX."><svg class="icon"><use href="#i-download"/></svg> Export</button>
       <button role="menuitem" onclick="openBookSettings()"
-              title="Per-book settings: title, description, plan (leitmotiv), target chapter length, style fingerprint, per-role model assignments.">&#9881; Settings</button>
+              title="Per-book settings: title, description, plan (leitmotiv), target chapter length, style fingerprint, per-role model assignments."><svg class="icon"><use href="#i-sliders"/></svg> Settings</button>
     </div>
   </div>
   <!-- Explore — corpus query surfaces -->
@@ -9335,13 +9479,13 @@ body.task-bar-open {{ padding-top: 40px; }}
     </button>
     <div class="nav-dropdown-menu" role="menu">
       <button role="menuitem" onclick="openAskModal()"
-              title="Natural-language question against the corpus with grounded citations. Mirrors `sciknow ask question`.">&#128270; Ask Corpus</button>
+              title="Natural-language question against the corpus with grounded citations. Mirrors `sciknow ask question`."><svg class="icon"><use href="#i-search"/></svg> Ask Corpus</button>
       <button role="menuitem" onclick="openWikiModal()"
-              title="Query the pre-compiled wiki summaries (one per paper). Faster than Ask Corpus and returns the summary prose + source paper list.">&#128218; Wiki Query</button>
+              title="Query the pre-compiled wiki summaries (one per paper). Faster than Ask Corpus and returns the summary prose + source paper list."><svg class="icon"><use href="#i-book-open"/></svg> Wiki Query</button>
       <button role="menuitem" onclick="openCatalogModal()"
-              title="Browse every paper in the corpus with filters for year, section type, topic cluster, paper type.">&#128194; Browse Papers</button>
+              title="Browse every paper in the corpus with filters for year, section type, topic cluster, paper type."><svg class="icon"><use href="#i-folder"/></svg> Browse Papers</button>
       <button role="menuitem" onclick="openVisualsModal()"
-              title="Browse every extracted table, equation, figure, chart, and code block. Gallery + list modes with pagination and importance ranking.">&#128202; Visuals (Tables/Figs/Eqs)</button>
+              title="Browse every extracted table, equation, figure, chart, and code block. Gallery + list modes with pagination and importance ranking."><svg class="icon"><use href="#i-image"/></svg> Visuals (Tables/Figs/Eqs)</button>
     </div>
   </div>
   <!-- Phase 54.6.18 — Corpus: every enrich / expand surface lifted
@@ -9355,43 +9499,43 @@ body.task-bar-open {{ padding-top: 40px; }}
     </button>
     <div class="nav-dropdown-menu" role="menu">
       <button role="menuitem" onclick="openCorpusModal('corp-enrich')"
-              title="Fill missing DOIs via Crossref/OpenAlex/arXiv title search + persist OpenAlex extras (concepts/funders/grants/ROR). Mirrors `sciknow db enrich`.">&#128270; Enrich metadata</button>
+              title="Fill missing DOIs via Crossref/OpenAlex/arXiv title search + persist OpenAlex extras (concepts/funders/grants/ROR). Mirrors `sciknow db enrich`."><svg class="icon"><use href="#i-search"/></svg> Enrich metadata</button>
       <button role="menuitem" onclick="openCorpusModal('corp-cites')"
-              title="Outbound reference crawl — follow citations IN your papers to discover new work. RRF + MMR diversity + citation-context signals. Mirrors `sciknow db expand`.">&#127760; Expand (citations)</button>
+              title="Outbound reference crawl — follow citations IN your papers to discover new work. RRF + MMR diversity + citation-context signals. Mirrors `sciknow db expand`."><svg class="icon"><use href="#i-globe"/></svg> Expand (citations)</button>
       <button role="menuitem" onclick="openCorpusModal('corp-author')"
-              title="Fetch every paper by a named author via OpenAlex. Use when you want an author's full bibliography regardless of current citations. Mirrors `sciknow db expand-author`.">&#128100; Expand by author</button>
+              title="Fetch every paper by a named author via OpenAlex. Use when you want an author's full bibliography regardless of current citations. Mirrors `sciknow db expand-author`."><svg class="icon"><use href="#i-user"/></svg> Expand by author</button>
       <button role="menuitem" onclick="openCorpusModal('corp-inbound')"
-              title="Forward-in-time mirror of Expand: find papers that CITE your corpus. Mirrors `sciknow db expand-inbound`.">&#128258; Inbound cites</button>
+              title="Forward-in-time mirror of Expand: find papers that CITE your corpus. Mirrors `sciknow db expand-inbound`."><svg class="icon"><use href="#i-inbox"/></svg> Inbound cites</button>
       <button role="menuitem" onclick="openCorpusModal('corp-topic')"
-              title="OpenAlex free-text topic search ranked by citation count. Good for kickstarting a new project.">&#128269; Topic search</button>
+              title="OpenAlex free-text topic search ranked by citation count. Good for kickstarting a new project."><svg class="icon"><use href="#i-tag"/></svg> Topic search</button>
       <button role="menuitem" onclick="openCorpusModal('corp-coauth')"
-              title="Find people who coauthored with your corpus's authors. Useful for invisible-college expansion.">&#128101; Coauthors</button>
+              title="Find people who coauthored with your corpus's authors. Useful for invisible-college expansion."><svg class="icon"><use href="#i-users"/></svg> Coauthors</button>
       <div style="height:1px;background:var(--border);margin:2px 0;"></div>
       <button role="menuitem" onclick="openCorpusModal('corp-enrich');doToolCorpus('cleanup')"
-              title="Remove already-ingested duplicates from the downloads/ directory AND permanently delete the failed-ingest archive. Frees disk; the main pipeline archive stays intact.">&#129529; Cleanup downloads + failed</button>
+              title="Remove already-ingested duplicates from the downloads/ directory AND permanently delete the failed-ingest archive. Frees disk; the main pipeline archive stays intact."><svg class="icon"><use href="#i-trash"/></svg> Cleanup downloads + failed</button>
       <button role="menuitem" onclick="openPendingDownloadsModal()"
-              title="Papers you selected for download but couldn't be auto-retrieved (no open-access PDF). Retry, mark manually acquired, or export for ILL.">&#128203; Pending downloads</button>
+              title="Papers you selected for download but couldn't be auto-retrieved (no open-access PDF). Retry, mark manually acquired, or export for ILL."><svg class="icon"><use href="#i-clipboard"/></svg> Pending downloads</button>
     </div>
   </div>
   <!-- Visualize — seven views of the corpus (KG + the six Viz tabs) -->
   <div class="nav-dropdown" id="viz-dropdown">
     <button class="nav-btn" onclick="toggleNavDropdown('viz-dropdown', event)"
-            title="Seven visualizations of the corpus">&#128202; Visualize &#9662;</button>
+            title="Seven visualizations of the corpus"><svg class="icon"><use href="#i-layers"/></svg> Visualize <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg></button>
     <div class="nav-dropdown-menu" id="viz-dropdown-menu" role="menu">
       <button role="menuitem" onclick="openKgModal()"
-              title="Knowledge graph of entities + relationships extracted from the corpus (Phase 54.6.50+). Zoomable force layout + table view.">&#128279; Knowledge Graph</button>
+              title="Knowledge graph of entities + relationships extracted from the corpus (Phase 54.6.50+). Zoomable force layout + table view."><svg class="icon"><use href="#i-link"/></svg> Knowledge Graph</button>
       <button role="menuitem" onclick="openVizModal('viz-topic')"
-              title="UMAP 2D projection of every paper's abstract embedding. Colour-coded by topic cluster. Hover to identify.">&#127760; Topic map (UMAP)</button>
+              title="UMAP 2D projection of every paper's abstract embedding. Colour-coded by topic cluster. Hover to identify."><svg class="icon"><use href="#i-globe"/></svg> Topic map (UMAP)</button>
       <button role="menuitem" onclick="openVizModal('viz-sunburst')"
-              title="Hierarchical RAPTOR summary tree as a sunburst: root is the whole corpus, each ring is a coarser summary level. Click a wedge to drill in.">&#127773; RAPTOR sunburst</button>
+              title="Hierarchical RAPTOR summary tree as a sunburst: root is the whole corpus, each ring is a coarser summary level. Click a wedge to drill in."><svg class="icon"><use href="#i-layers"/></svg> RAPTOR sunburst</button>
       <button role="menuitem" onclick="openVizModal('viz-consensus')"
-              title="Consensus landscape: for a topic, show claim-level support/contradict structure across papers.">&#9878;&#65039; Consensus landscape</button>
+              title="Consensus landscape: for a topic, show claim-level support/contradict structure across papers."><svg class="icon"><use href="#i-scale"/></svg> Consensus landscape</button>
       <button role="menuitem" onclick="openVizModal('viz-timeline')"
-              title="Timeline river: paper counts by year, colour-banded by topic cluster. Reveals temporal trends.">&#128200; Timeline river</button>
+              title="Timeline river: paper counts by year, colour-banded by topic cluster. Reveals temporal trends."><svg class="icon"><use href="#i-trending-up"/></svg> Timeline river</button>
       <button role="menuitem" onclick="openVizModal('viz-ego')"
-              title="Ego radial: pick a paper, see its citation neighbourhood as concentric rings (depth-1/2 citers + cited-by).">&#128269; Ego radial</button>
+              title="Ego radial: pick a paper, see its citation neighbourhood as concentric rings (depth-1/2 citers + cited-by)."><svg class="icon"><use href="#i-target"/></svg> Ego radial</button>
       <button role="menuitem" onclick="openVizModal('viz-radar')"
-              title="Gap radar: per-topic coverage vs what the corpus plan says it should cover. Big gaps visible at a glance.">&#128504;&#65039; Gap radar</button>
+              title="Gap radar: per-topic coverage vs what the corpus plan says it should cover. Big gaps visible at a glance."><svg class="icon"><use href="#i-bar-chart"/></svg> Gap radar</button>
     </div>
   </div>
   <!-- Manage — admin + corpus growth -->
@@ -9402,15 +9546,15 @@ body.task-bar-open {{ padding-top: 40px; }}
     </button>
     <div class="nav-dropdown-menu" role="menu">
       <button role="menuitem" onclick="openToolsModal()"
-              title="CLI parity modal: Search / Synthesize / Topics tabs exposing the same commands from the web.">&#128736; Tools &middot; CLI parity</button>
+              title="CLI parity modal: Search / Synthesize / Topics tabs exposing the same commands from the web."><svg class="icon"><use href="#i-wrench"/></svg> Tools &middot; CLI parity</button>
       <button role="menuitem" onclick="openSetupWizard()"
-              title="Five-step guided flow for a fresh project: Project → Corpus → Indices → Expand → Book.">&#128295; Setup Wizard</button>
+              title="Five-step guided flow for a fresh project: Project → Corpus → Indices → Expand → Book."><svg class="icon"><use href="#i-wand"/></svg> Setup Wizard</button>
       <button role="menuitem" onclick="openProjectsModal()"
-              title="List / create / switch projects. Each project has its own PostgreSQL DB, Qdrant collections, and data/ directory."><span id="proj-btn-label">&#128193; Projects</span></button>
+              title="List / create / switch projects. Each project has its own PostgreSQL DB, Qdrant collections, and data/ directory."><span id="proj-btn-label"><svg class="icon"><use href="#i-folder"/></svg> Projects</span></button>
       <div style="height:1px;background:var(--border);margin:2px 0;"></div>
       <button role="menuitem" onclick="openBackupsModal()"
               title="Backup status, schedule, delete, purge. Badge colour: green = fresh (<25h), yellow = aging, red = none or stale (>2d)."
-              >&#128190; Backups <span id="backup-badge" style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-left:4px;vertical-align:middle;"></span></button>
+              ><svg class="icon"><use href="#i-archive"/></svg> Backups <span id="backup-badge" style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-left:4px;vertical-align:middle;"></span></button>
     </div>
   </div>
   <!-- Phase 54.6.170 — Command palette trigger. Discoverability for
@@ -9521,12 +9665,12 @@ body.task-bar-open {{ padding-top: 40px; }}
         <svg class="icon"><use href="#i-shield-check"/></svg> Verify <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
       </button>
       <div class="nav-dropdown-menu" role="menu">
-        <button role="menuitem" onclick="doVerify()" title="Verify citations against sources (Phases 7+11)">&#10003; Verify</button>
-        <button role="menuitem" onclick="doVerifyDraft()" title="Atomize each sentence and NLI-check every sub-claim for mixed-truth failures (54.6.83)">&#129516; Verify Draft (claim-atomization)</button>
-        <button role="menuitem" onclick="doFinalizeDraft()" title="Phase 54.6.145/162 — Level-3 VLM claim-depiction verify on every [Fig. N] marker. Runs the vision-language model on (claim, image) pairs and flags figures whose images don't clearly depict the cited claim. Deferred from the per-iteration autowrite loop (too expensive) — run once before export. Exit code 0 if clean, 1 if any flagged. ~3-10s per marker on CPU; 8-figure chapter ≈ 1-2 min.">&#128190; Finalize Draft (L3 VLM verify)</button>
-        <button role="menuitem" onclick="doAlignCitations()" title="Remap [N] markers to the chunk that actually entails each sentence (54.6.71, conservative)">&#128279; Align Citations</button>
-        <button role="menuitem" onclick="doInsertCitations()" title="Two-pass LLM inserts [N] citation markers where needed; mirrors `sciknow book insert-citations`. Saves a new version.">&#128209; Insert Citations</button>
-        <button role="menuitem" onclick="showScoresPanel()" title="Phase 13 — convergence trajectory for autowrite drafts">&#9783; Scores</button>
+        <button role="menuitem" onclick="doVerify()" title="Verify citations against sources (Phases 7+11)"><svg class="icon"><use href="#i-check"/></svg> Verify</button>
+        <button role="menuitem" onclick="doVerifyDraft()" title="Atomize each sentence and NLI-check every sub-claim for mixed-truth failures (54.6.83)"><svg class="icon"><use href="#i-flask"/></svg> Verify Draft (claim-atomization)</button>
+        <button role="menuitem" onclick="doFinalizeDraft()" title="Phase 54.6.145/162 — Level-3 VLM claim-depiction verify on every [Fig. N] marker. Runs the vision-language model on (claim, image) pairs and flags figures whose images don't clearly depict the cited claim. Deferred from the per-iteration autowrite loop (too expensive) — run once before export. Exit code 0 if clean, 1 if any flagged. ~3-10s per marker on CPU; 8-figure chapter ≈ 1-2 min."><svg class="icon"><use href="#i-save"/></svg> Finalize Draft (L3 VLM verify)</button>
+        <button role="menuitem" onclick="doAlignCitations()" title="Remap [N] markers to the chunk that actually entails each sentence (54.6.71, conservative)"><svg class="icon"><use href="#i-link"/></svg> Align Citations</button>
+        <button role="menuitem" onclick="doInsertCitations()" title="Two-pass LLM inserts [N] citation markers where needed; mirrors `sciknow book insert-citations`. Saves a new version."><svg class="icon"><use href="#i-file-plus"/></svg> Insert Citations</button>
+        <button role="menuitem" onclick="showScoresPanel()" title="Phase 13 — convergence trajectory for autowrite drafts"><svg class="icon"><use href="#i-trending-up"/></svg> Scores</button>
       </div>
     </div>
     <div class="nav-dropdown nav-dropdown-left tb-dropdown" id="critique-tb-dropdown">
@@ -9535,11 +9679,11 @@ body.task-bar-open {{ padding-top: 40px; }}
         <svg class="icon"><use href="#i-brain"/></svg> Critique <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
       </button>
       <div class="nav-dropdown-menu" role="menu">
-        <button role="menuitem" onclick="promptArgue()" title="Map evidence for/against a claim">&#9878;&#65039; Argue (map claim)</button>
-        <button role="menuitem" onclick="doGaps()" title="Analyse gaps in the book">&#128269; Gaps</button>
-        <button role="menuitem" onclick="doAdversarialReview()" title="Cynical critic pass — finds ≥10 concrete issues, never graded. BMAD-inspired. Doesn't overwrite review_feedback.">&#128126; Adversarial review</button>
-        <button role="menuitem" onclick="doEdgeCases()" title="Exhaustive edge-case hunter — walks every scope boundary, counter-case, causal alternative, and quantitative limit. Structured findings.">&#129327; Edge cases</button>
-        <button role="menuitem" onclick="doEnsembleReview()" title="N independent NeurIPS-rubric reviewers (default 3, T=0.75, rotating stance) + meta-fusion. Higher variance reduction but N× cost.">&#128218; Ensemble Review</button>
+        <button role="menuitem" onclick="promptArgue()" title="Map evidence for/against a claim"><svg class="icon"><use href="#i-scale"/></svg> Argue (map claim)</button>
+        <button role="menuitem" onclick="doGaps()" title="Analyse gaps in the book"><svg class="icon"><use href="#i-search"/></svg> Gaps</button>
+        <button role="menuitem" onclick="doAdversarialReview()" title="Cynical critic pass — finds ≥10 concrete issues, never graded. BMAD-inspired. Doesn't overwrite review_feedback."><svg class="icon"><use href="#i-alert-octagon"/></svg> Adversarial review</button>
+        <button role="menuitem" onclick="doEdgeCases()" title="Exhaustive edge-case hunter — walks every scope boundary, counter-case, causal alternative, and quantitative limit. Structured findings."><svg class="icon"><use href="#i-target"/></svg> Edge cases</button>
+        <button role="menuitem" onclick="doEnsembleReview()" title="N independent NeurIPS-rubric reviewers (default 3, T=0.75, rotating stance) + meta-fusion. Higher variance reduction but N× cost."><svg class="icon"><use href="#i-users"/></svg> Ensemble Review</button>
       </div>
     </div>
     <div class="nav-dropdown nav-dropdown-left tb-dropdown" id="extras-tb-dropdown">
@@ -9548,8 +9692,8 @@ body.task-bar-open {{ padding-top: 40px; }}
         <svg class="icon"><use href="#i-package"/></svg> Extras <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
       </button>
       <div class="nav-dropdown-menu" role="menu">
-        <button role="menuitem" onclick="openBundleSnapshots()" title="Snapshot / restore whole chapter or whole book — safety net for autowrite-all">&#128230; Bundles (chapter / book)</button>
-        <button role="menuitem" onclick="showChapterReader()" title="Read entire chapter as continuous scroll">&#128214; Chapter reader</button>
+        <button role="menuitem" onclick="openBundleSnapshots()" title="Snapshot / restore whole chapter or whole book — safety net for autowrite-all"><svg class="icon"><use href="#i-package"/></svg> Bundles (chapter / book)</button>
+        <button role="menuitem" onclick="showChapterReader()" title="Read entire chapter as continuous scroll"><svg class="icon"><use href="#i-book-open"/></svg> Chapter reader</button>
       </div>
     </div>
     <div class="sep"></div>
