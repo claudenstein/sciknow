@@ -907,6 +907,8 @@ def l1_web_rendered_js_is_valid() -> "TestResult":
         chapters_json="[]",
         content_html="<p>test</p>", sources_html="",
         review_html="", comments_html="",
+        # Phase 54.6.178 — routed-views auto-open script slot.
+        auto_open_script="",
     )
     m = _re.search(r"<script>(.*?)</script>", rendered, _re.DOTALL)
     if not m:

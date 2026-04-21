@@ -161,6 +161,8 @@ def rendered_template_static() -> str:
         sources_html="",
         review_html="",
         comments_html="",
+        # Phase 54.6.178 — routed-views auto-open script slot.
+        auto_open_script="",
     )
 
 

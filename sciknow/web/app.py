@@ -623,6 +623,95 @@ async def section(draft_id: str):
     return HTMLResponse(_render_book(book, chapters, drafts, gaps, comments, focus_draft=draft_id))
 
 
+# ── Phase 54.6.178 — routed views ────────────────────────────────────────────
+# Each modal that serves as a standalone "place" (Plan, Settings, Wiki, …)
+# gets its own URL. The page still renders the reader layout — shell +
+# sidebar + main — but the matching modal auto-opens on load, so the URL
+# is shareable and the browser back/forward buttons traverse modal state.
+# This is deeplink-style routing, not a layout swap: the modal floats over
+# the reader as before, but its visibility is now URL-driven.
+
+_ROUTE_MODALS = {
+    "/plan":        "plan-modal",
+    "/settings":    "book-settings-modal",
+    "/wiki":        "wiki-modal",
+    "/bundles":     "bundles-modal",
+    "/tools":       "tools-modal",
+    "/projects":    "projects-modal",
+    "/catalog":     "catalog-modal",
+    "/export":      "export-modal",
+    "/corpus":      "corpus-modal",
+    "/visualize":   "viz-modal",
+    "/kg":          "kg-modal",
+    "/ask":         "ask-modal",
+    "/setup":       "setup-modal",
+    "/backups":     "backups-modal",
+    "/visuals":     "visuals-modal",
+    "/help":        "ai-help-modal",
+}
+
+
+def _routed_view(modal_id: str) -> HTMLResponse:
+    """Render the book page with ``modal_id`` auto-opened on load."""
+    book, chapters, drafts, gaps, comments = _get_book_data()
+    if not book:
+        return HTMLResponse("<h1>Book not found</h1>", status_code=404)
+    html = _render_book(book, chapters, drafts, gaps, comments,
+                        auto_open_modal=modal_id)
+    resp = HTMLResponse(html)
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    return resp
+
+
+@app.get("/plan",      response_class=HTMLResponse)
+async def route_plan():      return _routed_view("plan-modal")
+
+@app.get("/settings",  response_class=HTMLResponse)
+async def route_settings():  return _routed_view("book-settings-modal")
+
+@app.get("/wiki",      response_class=HTMLResponse)
+async def route_wiki():      return _routed_view("wiki-modal")
+
+@app.get("/bundles",   response_class=HTMLResponse)
+async def route_bundles():   return _routed_view("bundles-modal")
+
+@app.get("/tools",     response_class=HTMLResponse)
+async def route_tools():     return _routed_view("tools-modal")
+
+@app.get("/projects",  response_class=HTMLResponse)
+async def route_projects():  return _routed_view("projects-modal")
+
+@app.get("/catalog",   response_class=HTMLResponse)
+async def route_catalog():   return _routed_view("catalog-modal")
+
+@app.get("/export",    response_class=HTMLResponse)
+async def route_export():    return _routed_view("export-modal")
+
+@app.get("/corpus",    response_class=HTMLResponse)
+async def route_corpus():    return _routed_view("corpus-modal")
+
+@app.get("/visualize", response_class=HTMLResponse)
+async def route_visualize(): return _routed_view("viz-modal")
+
+@app.get("/kg",        response_class=HTMLResponse)
+async def route_kg():        return _routed_view("kg-modal")
+
+@app.get("/ask",       response_class=HTMLResponse)
+async def route_ask():       return _routed_view("ask-modal")
+
+@app.get("/setup",     response_class=HTMLResponse)
+async def route_setup():     return _routed_view("setup-modal")
+
+@app.get("/backups",   response_class=HTMLResponse)
+async def route_backups():   return _routed_view("backups-modal")
+
+@app.get("/visuals",   response_class=HTMLResponse)
+async def route_visuals():   return _routed_view("visuals-modal")
+
+@app.get("/help",      response_class=HTMLResponse)
+async def route_help():      return _routed_view("ai-help-modal")
+
+
 @app.post("/comment")
 async def add_comment(
     draft_id: str = Form(...),
@@ -6784,8 +6873,16 @@ async def api_server_shutdown(request: Request):
 # ── HTML rendering helpers ───────────────────────────────────────────────────
 
 def _render_book(book, chapters, drafts, gaps, comments,
-                 focus_draft=None, search_q="", search_results=None):
-    """Render the full book reader as a self-contained HTML page."""
+                 focus_draft=None, search_q="", search_results=None,
+                 auto_open_modal=None):
+    """Render the full book reader as a self-contained HTML page.
+
+    Phase 54.6.178 — ``auto_open_modal`` accepts a modal DOM id
+    (e.g. ``book-settings-modal``); when set, a <script> at the end
+    of <body> opens that modal on DOMContentLoaded. Used by routed
+    views (/settings, /plan, /wiki, …) so a URL deep-links to the
+    matching modal without a layout refactor.
+    """
 
     chapter_drafts = {}
     draft_map = {}
@@ -6964,6 +7061,35 @@ def _render_book(book, chapters, drafts, gaps, comments,
     # already-rendered HTML produced by helpers that escape internally,
     # so they pass through unchanged. Numeric fields are coerced to int
     # so they can't smuggle markup either.
+    # Phase 54.6.178 — routed views. If the caller specified a modal
+    # id (via ``auto_open_modal``), emit a <script> that opens it on
+    # page load. The allowlist guards against injected path segments
+    # landing in a DOM id lookup.
+    auto_open_script = ""
+    _MODAL_ALLOWLIST = {
+        "plan-modal", "book-settings-modal", "wiki-modal",
+        "bundles-modal", "tools-modal", "projects-modal",
+        "catalog-modal", "export-modal", "pending-modal",
+        "corpus-modal", "viz-modal", "kg-modal", "ask-modal",
+        "setup-modal", "backups-modal", "visuals-modal",
+        "reconciliations-modal", "ai-help-modal",
+    }
+    if auto_open_modal in _MODAL_ALLOWLIST:
+        auto_open_script = (
+            '<script>\n'
+            'document.addEventListener("DOMContentLoaded", function () {\n'
+            '  var m = document.getElementById("' + auto_open_modal + '");\n'
+            '  if (m && typeof openModal === "function") {\n'
+            '    setTimeout(function () {\n'
+            '      window._routeNavigating = true;\n'
+            '      try { openModal("' + auto_open_modal + '"); }\n'
+            '      finally { window._routeNavigating = false; }\n'
+            '    }, 30);\n'
+            '  }\n'
+            '});\n'
+            '</script>'
+        )
+
     return TEMPLATE.format(
         _BUILD_TAG=_BUILD_TAG,
         book_title=_esc(book[1] if book else "Untitled"),
@@ -6984,6 +7110,7 @@ def _render_book(book, chapters, drafts, gaps, comments,
         search_q=_esc(search_q or ""),
         search_results_html=_render_search(search_results) if search_results else "",
         chapters_json=chapters_json,
+        auto_open_script=auto_open_script,
     )
 
 
@@ -17759,8 +17886,39 @@ function buildArgueMap(claim, text) {{
 }}
 
 // ── Phase 14: Modal infrastructure ────────────────────────────────────
+// Phase 54.6.178 — routed views. openModal / closeModal now keep the
+// URL in sync with the open modal. Opening a modal id in the route
+// table pushes its path; closing any routed modal pops back to '/'.
+// Browser back/forward navigates the modal stack.
+const _MODAL_ROUTES = {{
+  'plan-modal':          '/plan',
+  'book-settings-modal': '/settings',
+  'wiki-modal':          '/wiki',
+  'bundles-modal':       '/bundles',
+  'tools-modal':         '/tools',
+  'projects-modal':      '/projects',
+  'catalog-modal':       '/catalog',
+  'export-modal':        '/export',
+  'corpus-modal':        '/corpus',
+  'viz-modal':           '/visualize',
+  'kg-modal':            '/kg',
+  'ask-modal':           '/ask',
+  'setup-modal':         '/setup',
+  'backups-modal':       '/backups',
+  'visuals-modal':       '/visuals',
+  'ai-help-modal':       '/help',
+}};
+function _modalSuppressRoute() {{
+  // Allow the auto-open boot handler to open modals without
+  // re-pushing the state it was just navigated to.
+  return window._routeNavigating === true;
+}}
 function openModal(id) {{
   document.getElementById(id).classList.add('open');
+  const path = _MODAL_ROUTES[id];
+  if (path && !_modalSuppressRoute() && window.location.pathname !== path) {{
+    history.pushState({{ modal: id }}, '', path);
+  }}
 }}
 function closeModal(id) {{
   document.getElementById(id).classList.remove('open');
@@ -17773,7 +17931,36 @@ function closeModal(id) {{
       currentJobId = null;
     }}
   }}
+  // If we closed a routed modal and the current URL points at it, pop
+  // the history so the URL returns to the book root.
+  const path = _MODAL_ROUTES[id];
+  if (path && !_modalSuppressRoute() && window.location.pathname === path) {{
+    history.pushState({{}}, '', '/');
+  }}
 }}
+// Browser back/forward — walk the modal stack. If the new URL matches
+// a modal route, open that modal; otherwise close any open modal.
+window.addEventListener('popstate', function () {{
+  window._routeNavigating = true;
+  try {{
+    const path = window.location.pathname;
+    // Close any currently-open modal that doesn't match
+    document.querySelectorAll('.modal-overlay.open').forEach(function (m) {{
+      const id = m.id;
+      if (_MODAL_ROUTES[id] !== path) m.classList.remove('open');
+    }});
+    // Open the matching one, if any
+    for (const id in _MODAL_ROUTES) {{
+      if (_MODAL_ROUTES[id] === path) {{
+        const el = document.getElementById(id);
+        if (el && !el.classList.contains('open')) el.classList.add('open');
+        break;
+      }}
+    }}
+  }} finally {{
+    window._routeNavigating = false;
+  }}
+}});
 // Escape closes any open modal
 // ── Phase 33: keyboard shortcuts ──────────────────────────────────────
 //
@@ -26270,6 +26457,7 @@ async function destroyProject(slug) {{
 }}
 
 </script>
+{auto_open_script}
 </body>
 </html>
 """
