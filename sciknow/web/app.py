@@ -7449,9 +7449,10 @@ html {{ -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
 body {{ font-family: var(--font-sans); color: var(--fg); background: var(--bg);
         display: flex; flex-direction: column; height: 100vh; font-size: 14px; }}
 /* Phase 54.6 — top bar spans the full viewport width above the sidebar+main.
-   Holds app-level navigation (Plan, Settings, Ask, Wiki, KG, Papers, Tools,
-   Setup, Dashboard, Projects) so the per-chapter toolbar stays focused on
-   writing actions. */
+   Superseded by the 54.6.186 consolidated layout — the left group still
+   holds app-level navigation, but the former in-main per-chapter toolbar
+   (Edit + AI + Verify/Critique/Extras) now lives in the right group, so
+   the whole bar is one row. */
 /* Phase 54.6.186 — consolidated topbar. Two groups: left (book nav)
    and right (per-draft actions). The former in-main `.toolbar` div
    lives inside `.topbar__right` — still carries the #toolbar id and
@@ -7986,11 +7987,11 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .btn--block {{ width: 100%; justify-content: center; }}
 .btn--icon {{ padding: 6px; aspect-ratio: 1; }}
 
-/* Action toolbar — grouped sections, modern pills */
-.toolbar {{ display: flex; gap: var(--sp-1); flex-wrap: wrap; margin-bottom: var(--sp-5);
-            padding: var(--sp-2); background: var(--toolbar-bg);
-            border-radius: var(--r-lg); border: 1px solid var(--border);
-            box-shadow: var(--shadow-sm); align-items: center; }}
+/* Per-draft action toolbar. Always nested inside `.topbar` since
+   54.6.186, so chrome (bg / border / shadow / padding) is deferred
+   to the `.topbar .toolbar` override; the base rule just lays out
+   the flex row + shared button behaviour below. */
+.toolbar {{ display: flex; align-items: center; gap: var(--sp-1); }}
 .toolbar .tg {{ display: flex; gap: 2px; padding: 0 4px; }}
 .toolbar button {{
   font-size: 12px; padding: 4px 8px;

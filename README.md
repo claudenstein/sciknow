@@ -209,8 +209,8 @@ See [`docs/PROJECTS.md`](docs/PROJECTS.md) for the full design.
 sciknow is active; the [`docs/PHASE_LOG.md`](docs/PHASE_LOG.md) records
 every Phase commit. Most recent batches:
 
-- **54.6.165-187 (April 2026).** Full web UI redesign — "scholar's
-  editor, not LLM dashboard." 22-commit arc replaces the Tailwind-
+- **54.6.165-191 (April 2026).** Full web UI redesign — "scholar's
+  editor, not LLM dashboard." 27-commit arc replaces the Tailwind-
   starter look with a considered writing environment. **Real
   webfonts** (Inter Tight for chrome, Newsreader with optical sizes
   for the reader body, JetBrains Mono for code), **warm stone
@@ -229,13 +229,15 @@ every Phase commit. Most recent batches:
   (lists / blockquotes / code / tables / figures / scrollbars).
   **Routed views** — 16 URLs (`/plan` `/settings` `/wiki`
   `/projects` …) deep-link to modals; browser back/forward walks
-  the modal stack. **Consolidated topbar** (54.6.186) — book-level
-  nav (Plan / Dashboard / Book / Explore / Corpus / Visualize) on
-  the left, per-draft actions (Edit / AI-cluster / Verify /
-  Critique / Extras / help / ⌘K) on the right, one bar.
-  **Inline-style purge** retired 515 of 1,218 `style="…"`
-  attributes (42%) across 4 mechanical waves into 40 utility
-  classes. All L1 tests green through the arc.
+  the modal stack. **Consolidated single-line topbar** (54.6.186,
+  54.6.190) — book-level nav (Plan / Dashboard / Book / Explore /
+  Corpus / Visualize) on the left, per-draft actions (Edit / AI ▾ /
+  Verify ▾ / Critique ▾ / Extras ▾ / help / ⌘K) on the right, one
+  row, `flex-wrap: nowrap` so it never breaks onto two lines. The
+  four AI verbs (Autowrite / Write / Review / Revise) share one
+  **AI ▾** dropdown (54.6.188). **Inline-style purge** retired 547
+  of 1,218 `style="…"` attributes (45%) across 5 mechanical waves
+  into 47 utility classes. All L1 tests green through the arc.
 - **54.6.164 (April 2026).** Collapsible reader columns — hide buttons on
   the left (chapters) and right (sources/review/comments) panes, with
   edge peek buttons to bring them back. New **Book Settings → View** tab
