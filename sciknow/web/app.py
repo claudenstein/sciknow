@@ -7842,6 +7842,20 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .u-note-xs   {{ font-size: 11px; color: var(--fg-muted); margin-bottom: 6px; }}
 .u-empty     {{ padding: 24px; text-align: center; color: var(--fg-muted); }}
 .u-col-num   {{ flex: 1; min-width: 80px; }}
+.u-col-wide  {{ flex: 1; min-width: 100px; }}
+/* Phase 54.6.187 — purge wave 4 utilities. */
+.u-card      {{ border: 1px solid var(--border); border-radius: 6px; padding: 10px; }}
+.u-th        {{ padding: 6px 8px; text-align: left; white-space: nowrap; }}
+.u-th-wrap   {{ padding: 6px 8px; text-align: left; }}
+.u-label-row {{ display: flex; align-items: center; gap: 4px; font-weight: 400; font-size: 12px; }}
+.u-kv-row    {{ display: flex; align-items: center; gap: 4px; font-size: 12px; }}
+.u-row-mt    {{ display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }}
+.u-row-wrap-end {{ display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }}
+.u-mono-xs   {{ font-family: var(--font-mono); font-size: 11px; }}
+.u-label-xs  {{ font-size: 10px; color: var(--fg-muted); }}
+.u-mb-6      {{ margin-bottom: 6px; }}
+.u-section-h {{ margin: 18px 0 8px; }}
+.u-caption   {{ margin-top: 8px; font-size: 12px; color: var(--fg-muted); }}
 
 /* ── Phase 54.6.168 — Monoline icon system.
    Inline SVG sprite at the top of <body> defines <symbol>s;
@@ -10270,7 +10284,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           summaries (deep mode uses the LLM — slower).
         </div>
         <div class="field u-row-wrap">
-          <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
+          <label class="u-label-row"
                  title="Also run LLM-based contradiction detection across paper summaries. Significantly slower (one LLM call per concept).">
             <input type="checkbox" id="wiki-lint-deep"
                    title="Also run LLM-based contradiction detection. Significantly slower (one LLM call per concept)."> deep (LLM contradiction detection)
@@ -10280,7 +10294,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           <button class="btn-secondary" id="wiki-lint-stop" onclick="stopWikiLint()" style="display:none;"
                   title="Cancel the running lint job.">Stop</button>
         </div>
-        <div id="wiki-lint-status" style="margin-top:8px;font-size:12px;color:var(--fg-muted);"></div>
+        <div class="u-caption" id="wiki-lint-status"></div>
         <div class="u-mt-2" id="wiki-lint-summary"></div>
         <div id="wiki-lint-issues" style="margin-top:10px;max-height:calc(70vh - 160px);overflow:auto;"></div>
         <!-- Phase 54.6.8 — KG backfill utility. If the Knowledge Graph
@@ -10297,7 +10311,7 @@ body.task-bar-open {{ padding-top: 40px; }}
             re-summarizing). Mirrors <code>sciknow wiki extract-kg</code>.
           </div>
           <div class="u-row-wrap">
-            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
+            <label class="u-label-row"
                    title="Re-run KG extraction on every paper, not just those with zero triples. Expensive — use only after changing the extraction prompt or model.">
               <input type="checkbox" id="wiki-extractkg-force"
                      title="Re-run KG extraction on every paper, not just those with zero triples."> force re-extract every paper
@@ -10306,7 +10320,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                     onclick="doWikiExtractKg()"
                     title="One LLM call per orphan paper (or all papers if force is checked) to populate knowledge_graph rows. No re-summarization.">Extract / Backfill KG</button>
           </div>
-          <div id="wiki-extractkg-status" style="margin-top:8px;font-size:12px;color:var(--fg-muted);"></div>
+          <div class="u-caption" id="wiki-extractkg-status"></div>
           <pre id="wiki-extractkg-log" style="display:none;margin-top:6px;max-height:280px;overflow:auto;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:8px;font-size:11px;font-family:ui-monospace,monospace;white-space:pre-wrap;"></pre>
         </div>
       </div>
@@ -10332,7 +10346,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           <button class="btn-secondary" id="wiki-consensus-stop" onclick="stopWikiConsensus()" style="display:none;"
                   title="Cancel the running consensus job.">Stop</button>
         </div>
-        <div id="wiki-consensus-status" style="margin-top:8px;font-size:12px;color:var(--fg-muted);"></div>
+        <div class="u-caption" id="wiki-consensus-status"></div>
         <div id="wiki-consensus-summary" style="margin-top:8px;font-size:13px;"></div>
         <div id="wiki-consensus-claims" style="margin-top:10px;max-height:calc(70vh - 180px);overflow:auto;"></div>
         <div id="wiki-consensus-debated" style="margin-top:10px;"></div>
@@ -10722,7 +10736,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           they keep their old slug until rewritten.
         </p>
         <div id="ch-sections-list"></div>
-        <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
+        <div class="u-row-mt">
           <button class="btn-secondary" onclick="addSection()"
                   title="Append a new empty section to the end of the chapter. You can rename and reorder after adding.">
             &#43; Add section
@@ -11063,7 +11077,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         the terminal does.
       </p>
 
-      <h4 style="margin:18px 0 8px;">&#128221; Planning &mdash; shape the book before writing</h4>
+      <h4 class="u-section-h">&#128221; Planning &mdash; shape the book before writing</h4>
       <table class="u-table-full">
         <tr class="u-border-b"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>Outline</strong><br><em class="u-hint">Plan modal &rarr; Outline tab</em></td>
           <td class="u-td">
@@ -11084,7 +11098,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           </td></tr>
       </table>
 
-      <h4 style="margin:18px 0 8px;">&#9998; Writing &mdash; produce draft prose</h4>
+      <h4 class="u-section-h">&#9998; Writing &mdash; produce draft prose</h4>
       <table class="u-table-full">
         <tr class="u-border-b"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>AI Write</strong></td>
           <td class="u-td">
@@ -11107,7 +11121,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           </td></tr>
       </table>
 
-      <h4 style="margin:18px 0 8px;">&#128269; Critique &mdash; find what&rsquo;s wrong with a draft</h4>
+      <h4 class="u-section-h">&#128269; Critique &mdash; find what&rsquo;s wrong with a draft</h4>
       <table class="u-table-full">
         <tr class="u-border-b"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>AI Review</strong></td>
           <td class="u-td">
@@ -11153,7 +11167,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           </td></tr>
       </table>
 
-      <h4 style="margin:18px 0 8px;">&#10003; Verification &mdash; check citations actually support claims</h4>
+      <h4 class="u-section-h">&#10003; Verification &mdash; check citations actually support claims</h4>
       <table class="u-table-full">
         <tr class="u-border-b"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>Verify</strong></td>
           <td class="u-td">
@@ -11186,7 +11200,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           </td></tr>
       </table>
 
-      <h4 style="margin:18px 0 8px;">&#9888;&#65039; Fixing &mdash; apply feedback to the draft</h4>
+      <h4 class="u-section-h">&#9888;&#65039; Fixing &mdash; apply feedback to the draft</h4>
       <table class="u-table-full">
         <tr class="u-border-b"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>AI Revise</strong></td>
           <td class="u-td">
@@ -11197,7 +11211,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           </td></tr>
       </table>
 
-      <h4 style="margin:18px 0 8px;">&#128202; Diagnostics &mdash; inspect the autowrite trajectory</h4>
+      <h4 class="u-section-h">&#128202; Diagnostics &mdash; inspect the autowrite trajectory</h4>
       <table class="u-table-full">
         <tr class="u-border-b"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>Scores</strong></td>
           <td class="u-td">
@@ -11217,7 +11231,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           </td></tr>
       </table>
 
-      <h4 style="margin:18px 0 8px;">&#128737;&#65039; Typical workflow</h4>
+      <h4 class="u-section-h">&#128737;&#65039; Typical workflow</h4>
       <ol style="margin:0 0 8px 20px;">
         <li><strong>Outline</strong> (Plan modal) &rarr; book has chapters</li>
         <li><strong>AI Autowrite</strong> per section &rarr; first drafts exist, already reviewed + revised once</li>
@@ -11429,10 +11443,10 @@ body.task-bar-open {{ padding-top: 40px; }}
           Mirrors <code>sciknow project venue-block / venue-allow / venue-remove</code>.
         </p>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-          <div style="border:1px solid var(--border);border-radius:6px;padding:10px;">
+          <div class="u-card">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
               <strong style="font-size:12px;color:var(--danger);">Blocklist</strong>
-              <span id="proj-ven-block-count" style="font-size:10px;color:var(--fg-muted);"></span>
+              <span class="u-label-xs" id="proj-ven-block-count"></span>
             </div>
             <div style="display:flex;gap:4px;margin-bottom:6px;">
               <input type="text" id="proj-ven-block-in" placeholder="e.g. scirp"
@@ -11443,10 +11457,10 @@ body.task-bar-open {{ padding-top: 40px; }}
             </div>
             <ul id="proj-ven-block-list" style="list-style:none;margin:0;padding:0;max-height:140px;overflow:auto;font-size:11px;"></ul>
           </div>
-          <div style="border:1px solid var(--border);border-radius:6px;padding:10px;">
+          <div class="u-card">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
               <strong style="font-size:12px;color:var(--success);">Allowlist</strong>
-              <span id="proj-ven-allow-count" style="font-size:10px;color:var(--fg-muted);"></span>
+              <span class="u-label-xs" id="proj-ven-allow-count"></span>
             </div>
             <div style="display:flex;gap:4px;margin-bottom:6px;">
               <input type="text" id="proj-ven-allow-in" placeholder="e.g. frontiers in climate"
@@ -11534,7 +11548,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           Loading corpus status…
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-          <div style="border:1px solid var(--border);border-radius:6px;padding:10px;">
+          <div class="u-card">
             <div style="font-weight:600;font-size:13px;margin-bottom:4px;">&#128190; Upload PDFs</div>
             <p class="u-note">
               Files are staged under
@@ -11553,7 +11567,7 @@ body.task-bar-open {{ padding-top: 40px; }}
             <button class="btn-primary" onclick="swUploadPDFs()"
                     title="Send selected PDFs to the server's uploads_<ts>/ inbox. If 'start ingesting' is checked the pipeline runs next.">Upload</button>
           </div>
-          <div style="border:1px solid var(--border);border-radius:6px;padding:10px;">
+          <div class="u-card">
             <div style="font-weight:600;font-size:13px;margin-bottom:4px;">&#128193; Server directory</div>
             <p class="u-note">
               Path is resolved on the server. Useful when a corpus is
@@ -11564,12 +11578,12 @@ body.task-bar-open {{ padding-top: 40px; }}
                      title="Absolute server-side path to a directory of PDFs. Must be readable by the sciknow process (no remote paths, no ~).">
             </div>
             <div class="field" style="display:flex;gap:10px;flex-wrap:wrap;">
-              <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
+              <label class="u-label-row"
                      title="Walk sub-directories. Uncheck to only ingest PDFs directly in the given folder.">
                 <input type="checkbox" id="sw-ingest-recursive" checked
                        title="Walk sub-directories. Uncheck to only ingest PDFs directly in the given folder."> recursive
               </label>
-              <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
+              <label class="u-label-row"
                      title="Re-ingest PDFs even if their SHA-256 is already in the DB. Use only when you deliberately want to re-run the pipeline.">
                 <input type="checkbox" id="sw-ingest-force"
                        title="Re-ingest PDFs even if their SHA-256 hash is already present in the DB."> force re-ingest
@@ -11602,7 +11616,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           Loading index status…
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
-          <div style="border:1px solid var(--border);border-radius:6px;padding:10px;">
+          <div class="u-card">
             <div style="font-weight:600;font-size:13px;margin-bottom:4px;">&#127918; Topic Clusters</div>
             <p class="u-note">
               BERTopic over abstracts. Fast (seconds). Enables
@@ -11617,7 +11631,7 @@ body.task-bar-open {{ padding-top: 40px; }}
             <button class="btn-primary" onclick="swRunIndex('cluster')"
                     title="Run BERTopic over paper abstracts. Needed before `--topic` filtering or the Topics browser works.">Cluster</button>
           </div>
-          <div style="border:1px solid var(--border);border-radius:6px;padding:10px;">
+          <div class="u-card">
             <div style="font-weight:600;font-size:13px;margin-bottom:4px;">&#127794; RAPTOR tree</div>
             <p class="u-note">
               Hierarchical summaries (UMAP + GMM). Slow (5–30 min).
@@ -11626,7 +11640,7 @@ body.task-bar-open {{ padding-top: 40px; }}
             <button class="btn-primary" onclick="swRunIndex('raptor')"
                     title="Cluster chunks with UMAP+GMM, summarize each cluster and recurse. Enables broad-synthesis retrieval on long queries.">Build RAPTOR</button>
           </div>
-          <div style="border:1px solid var(--border);border-radius:6px;padding:10px;">
+          <div class="u-card">
             <div style="font-weight:600;font-size:13px;margin-bottom:4px;">&#128218; Wiki compile</div>
             <p class="u-note">
               Compile per-paper wiki pages + KG triples. Slow
@@ -11690,7 +11704,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           review (see <code>docs/RESEARCH.md §24</code>) — Cowan 2001's
           3&ndash;4 novel-chunk capacity × genre-appropriate words per concept.
         </p>
-        <div class="field" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
+        <div class="field u-row-wrap-end">
           <div style="flex:3;min-width:220px;">
             <label>Title</label>
             <input type="text" id="sw-book-title" placeholder="e.g. Global Cooling: The Coming Solar Minimum"
@@ -11722,7 +11736,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         </div>
         <button class="btn-primary" onclick="swCreateBook()"
                 title="Create the book + LLM-generate an initial chapter outline. You can reorder / edit chapters afterwards.">Create project</button>
-        <div id="sw-book-status" style="margin-top:8px;font-size:12px;color:var(--fg-muted);"></div>
+        <div class="u-caption" id="sw-book-status"></div>
         <div style="display:flex;gap:8px;justify-content:space-between;margin-top:14px;">
           <button onclick="swGoto('expand')"
                   title="Return to Step 4 (expand).">&larr; Back</button>
@@ -11820,14 +11834,14 @@ body.task-bar-open {{ padding-top: 40px; }}
           Hybrid retrieval (dense + sparse + FTS) with cross-encoder rerank.
           Mirrors <code>sciknow search query</code> and <code>sciknow search similar</code>.
         </p>
-        <div class="field" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
+        <div class="field u-row-wrap-end">
           <div style="flex:3;min-width:220px;">
             <label>Query &nbsp;<span style="color:var(--fg-muted);font-weight:400;">or DOI / title fragment for similar-paper search</span></label>
             <input type="text" id="tl-search-q" placeholder="e.g. sea surface temperature reconstruction"
                    onkeydown="if(event.key==='Enter')doToolSearch('query')"
                    title="Free-text query OR a DOI/title fragment to find similar papers. Press Enter to run.">
           </div>
-          <div style="flex:1;min-width:100px;"><label>Top-K</label>
+          <div class="u-col-wide"><label>Top-K</label>
             <input type="number" id="tl-search-topk" value="10" min="1" max="50"
                    title="How many reranked results to return."></div>
           <div style="flex:1;min-width:90px;"><label>Year from</label>
@@ -11837,7 +11851,7 @@ body.task-bar-open {{ padding-top: 40px; }}
             <input type="number" id="tl-search-yto"
                    title="Restrict retrieval to papers published in this year or earlier."></div>
         </div>
-        <div class="field" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
+        <div class="field u-row-wrap-end">
           <div style="flex:2;min-width:160px;"><label>Section</label>
             <select id="tl-search-section"
                     title="Limit hits to chunks from a specific paper section.">
@@ -11879,7 +11893,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                  onkeydown="if(event.key==='Enter')doToolSynthesize()"
                  title="Topic to synthesize across. Press Enter to run.">
         </div>
-        <div class="field" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
+        <div class="field u-row-wrap-end">
           <div class="u-flex-1"><label>Context-K</label>
             <input type="number" id="tl-synth-k" value="12" min="4" max="30"
                    title="How many reranked chunks to feed the synthesizer. Higher = broader context but longer prompt."></div>
@@ -11994,7 +12008,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         </div>
 
         <!-- Enrich (metadata) panel -->
-        <div id="corp-enrich-pane" style="border:1px solid var(--border);border-radius:6px;padding:10px;">
+        <div class="u-card" id="corp-enrich-pane">
           <div class="u-note-sm">
             Fill missing DOIs via Crossref / OpenAlex / arXiv title search.
             Mirrors <code>sciknow db enrich</code>.
@@ -12006,7 +12020,7 @@ body.task-bar-open {{ padding-top: 40px; }}
             <div class="u-col-num"><label>Threshold</label>
               <input type="number" id="tl-enr-thresh" value="0.85" min="0" max="1" step="0.01"
                      title="Minimum title-similarity score (0–1) to accept a Crossref match. 0.85 is conservative; 0.78 is the 54.6.x dual-signal default when author+year also agree."/></div>
-            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+            <label class="u-label-row">
               <input type="checkbox" id="tl-enr-dry"
                      title="Show what would be updated without writing to the database."> dry-run
             </label>
@@ -12036,20 +12050,20 @@ body.task-bar-open {{ padding-top: 40px; }}
                      title="Cosine similarity floor against the corpus centroid. 0 = use EXPAND_RELEVANCE_THRESHOLD from .env (default 0.55). Raise to require tighter topical match."/></div>
           </div>
           <div class="field" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:4px;">
-            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+            <label class="u-label-row">
               <input type="checkbox" id="tl-exp-dry"
                      title="Run the ranker + preview shortlist without downloading any PDFs. Writes the shortlist TSV to data/downloads/expand_shortlist.tsv."> dry-run
             </label>
-            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+            <label class="u-label-row">
               <input type="checkbox" id="tl-exp-resolve"
                      title="Also resolve title-only references (no DOI in source) via Crossref title-search. Slow (~0.3s per title)."> resolve titles
             </label>
-            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
+            <label class="u-label-row"
                    title="Run the full ingest pipeline (convert → metadata → chunk → embed) on downloaded PDFs. Uncheck to only download into data/downloads without ingesting.">
               <input type="checkbox" id="tl-exp-ingest" checked
                      title="Run the full convert → metadata → chunk → embed pipeline on downloaded PDFs. Uncheck for download-only."> ingest
             </label>
-            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
+            <label class="u-label-row"
                    title="Gate downloads by centroid/anchor cosine threshold. Uncheck to download every ranked candidate regardless of topical similarity.">
               <input type="checkbox" id="tl-exp-relevance" checked
                      title="Gate downloads by centroid/anchor cosine threshold. Uncheck to download every ranked candidate."> relevance filter
@@ -12069,7 +12083,7 @@ body.task-bar-open {{ padding-top: 40px; }}
               </select>
             </div>
           </div>
-          <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
+          <div class="u-row-mt">
             <button class="btn-primary" onclick="openExpandCitesPreview()"
                     title="Build the ranked shortlist and open the preview modal. You can inspect, filter and individually check candidates before downloading.">
               &#128269; Preview candidates
@@ -12110,11 +12124,11 @@ body.task-bar-open {{ padding-top: 40px; }}
             <div class="u-col-num"><label>Cover threshold</label>
               <input type="number" id="tl-ag-threshold" value="3" min="1" max="20"
                      title="Corpus papers required to call a sub-topic 'covered'."></div>
-            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;">
+            <label class="u-label-row">
               <input type="checkbox" id="tl-ag-dry"
                      title="Compute the plan + coverage measurement without downloading. Useful to confirm sub-topic decomposition before burning API calls."> dry-run
             </label>
-            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
+            <label class="u-label-row"
                    title="Phase 54.6.124 — resume from a prior checkpoint. The same question re-uses its state via a slug+hash path at <project>/data/expand/agentic/">
               <input type="checkbox" id="tl-ag-resume"
                      title="Phase 54.6.124 — resume from a prior checkpoint. Same question → same state path at <project>/data/expand/agentic/"> resume
@@ -12139,7 +12153,7 @@ body.task-bar-open {{ padding-top: 40px; }}
               Scan the corpus, find authors with ≥ N papers already present, run
               <code>expand-author</code> for each (ORCID-preferred, strict-author). Uses the same relevance + retraction + MMR filters as any other expansion.
             </p>
-            <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
+            <div class="u-row-wrap-end">
               <div><label class="u-tiny" title="Minimum number of papers an author must already have in this corpus to qualify for oeuvre expansion. Lower = more authors, noisier; higher = focus on the highly-represented names.">Min corpus papers
                 <input type="number" id="tl-oeu-min" value="3" min="2" max="10" style="width:60px;padding:2px 6px;font-size:12px;"
                        title="Minimum corpus papers for an author to qualify. Default 3."></label></div>
@@ -12213,27 +12227,27 @@ body.task-bar-open {{ padding-top: 40px; }}
                      title="Cosine-similarity floor against the corpus centroid or anchor. 0 = use EXPAND_RELEVANCE_THRESHOLD from .env (default 0.55)."></div>
           </div>
           <div class="field" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:4px;">
-            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
+            <label class="u-label-row"
                    title="Filter fetched papers to keep only those where this author is actually on the authorship list (defends against OpenAlex name-collision hits).">
               <input type="checkbox" id="tl-eauth-strict" checked
                      title="Drop fetched papers where the queried author is NOT on the authorship list. Defends against OpenAlex name collisions."> strict author match
             </label>
-            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
+            <label class="u-label-row"
                    title="Skip the interactive disambiguation banner and keep every hit that matches the queried name. Use for truly unambiguous names.">
               <input type="checkbox" id="tl-eauth-all"
                      title="Skip the multi-candidate disambiguation banner and keep every hit matching the queried name. Use only for unambiguous names."> keep all matches (skip disamb.)
             </label>
-            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
+            <label class="u-label-row"
                    title="Gate downloads by centroid/anchor cosine threshold. Uncheck to download every paper by this author regardless of topical similarity.">
               <input type="checkbox" id="tl-eauth-relevance" checked
                      title="Gate downloads by centroid/anchor cosine threshold. Uncheck to download every paper by this author."> relevance filter
             </label>
-            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
+            <label class="u-label-row"
                    title="Run the full convert → metadata → chunk → embed pipeline on downloaded PDFs. Uncheck to download-only into data/downloads/.">
               <input type="checkbox" id="tl-eauth-ingest" checked
                      title="Run the full ingest pipeline on downloaded PDFs. Uncheck for download-only."> ingest
             </label>
-            <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
+            <label class="u-label-row"
                    title="Compute the plan (candidate list + relevance scores) without downloading PDFs.">
               <input type="checkbox" id="tl-eauth-dry"
                      title="Compute the plan (candidate list + relevance scores) without downloading PDFs."> dry-run
@@ -12245,7 +12259,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                    placeholder="(corpus centroid if blank)"
                    title="Free-text anchor for relevance scoring. Leave blank to use the corpus centroid. A focused anchor helps keep the author's off-topic papers out.">
           </div>
-          <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
+          <div class="u-row-mt">
             <button class="btn-primary" onclick="openExpandAuthorPreview()"
                     title="Build the author's candidate shortlist and open the cherry-pick preview. Nothing downloads until you tick rows.">
               &#128269; Preview candidates
@@ -12271,7 +12285,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           <div class="field" style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;">
             <div style="flex:1;min-width:120px;"><label>Per-seed cap</label>
               <input type="number" id="tl-inb-seed" value="30" min="1" title="Max citing-papers fetched per corpus seed. Keeps viral-cited seeds from dominating the shortlist."></div>
-            <div style="flex:1;min-width:100px;"><label>Total limit</label>
+            <div class="u-col-wide"><label>Total limit</label>
               <input type="number" id="tl-inb-total" value="300" min="10"
                      title="Hard cap on the combined candidate pool across all seeds."></div>
           </div>
@@ -12299,7 +12313,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                      title="Ignore the .no_oa_cache + .ingest_failed sidecar files for this batch."> retry failed
             </label>
           </div>
-          <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
+          <div class="u-row-mt">
             <button class="btn-primary" onclick="openExpandInboundPreview()"
                     title="Build the cites-me shortlist and open the preview modal. You can cherry-pick rows before downloading.">&#128269; Preview candidates</button>
             <button class="btn-primary" onclick="runInboundExpand()"
@@ -12326,14 +12340,14 @@ body.task-bar-open {{ padding-top: 40px; }}
                    title="Free-text search over OpenAlex title/abstract/keywords. Press Enter to run the preview.">
           </div>
           <div class="field" style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;">
-            <div style="flex:1;min-width:100px;"><label>Limit</label>
+            <div class="u-col-wide"><label>Limit</label>
               <input type="number" id="tl-top-limit" value="300" min="10"
                      title="How many OpenAlex hits to pull before relevance filtering. Results come back sorted by citation count."></div>
             <div style="flex:3;min-width:200px;"><label>Relevance anchor (defaults to the query itself)</label>
               <input type="text" id="tl-top-relq" placeholder="(query if blank)"
                      title="Override the anchor used for relevance scoring. Leave blank to score against the topic query."></div>
           </div>
-          <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
+          <div class="u-row-mt">
             <button class="btn-primary" onclick="openExpandTopicPreview()"
                     title="Run the topic search, score candidates by relevance, and open the cherry-pick preview.">&#128269; Preview candidates</button>
             <span class="u-hint">
@@ -12351,7 +12365,7 @@ body.task-bar-open {{ padding-top: 40px; }}
             other directly. Mirrors <code>sciknow db expand-coauthors</code>.
           </div>
           <div class="field" style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;">
-            <div style="flex:1;min-width:100px;"><label>Depth</label>
+            <div class="u-col-wide"><label>Depth</label>
               <select id="tl-coa-depth"
                       title="Depth of the coauthor graph walk. 1 = coauthors of corpus papers. 2 = coauthors-of-coauthors (much noisier — use only with a tight relevance threshold).">
                 <option value="1" selected>1 (recommended)</option>
@@ -12359,7 +12373,7 @@ body.task-bar-open {{ padding-top: 40px; }}
               </select></div>
             <div style="flex:1;min-width:120px;"><label>Per-author cap</label>
               <input type="number" id="tl-coa-per" value="8" min="1" title="Max papers per coauthor. Keeps prolific coauthors from swamping the shortlist."></div>
-            <div style="flex:1;min-width:100px;"><label>Total limit</label>
+            <div class="u-col-wide"><label>Total limit</label>
               <input type="number" id="tl-coa-total" value="300" min="10"
                      title="Hard cap on the combined candidate pool across all coauthors."></div>
           </div>
@@ -12368,7 +12382,7 @@ body.task-bar-open {{ padding-top: 40px; }}
             <input type="text" id="tl-coa-relq" placeholder="(corpus centroid if blank)"
                    title="Free-text anchor for relevance scoring. Leave blank to use the corpus centroid. For coauthor snowballing a focused anchor is strongly recommended.">
           </div>
-          <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
+          <div class="u-row-mt">
             <button class="btn-primary" onclick="openExpandCoauthPreview()"
                     title="Build the coauthor shortlist and open the cherry-pick preview. No downloads until you approve rows.">&#128269; Preview candidates</button>
             <span class="u-hint">
@@ -12418,7 +12432,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                   title="Check every row in the current filtered view.">Select all</button>
           <button class="btn-secondary" onclick="eapSelectAll(false)"
                   title="Uncheck every row.">Select none</button>
-          <label style="font-size:12px;display:flex;align-items:center;gap:4px;">
+          <label class="u-kv-row">
             Select where score &ge;
             <input type="number" id="eap-threshold" value="0.55" min="0" max="1" step="0.05"
                    style="width:70px;font-size:12px;padding:2px 4px;"
@@ -12427,7 +12441,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                     style="font-size:11px;padding:2px 8px;"
                     title="Check every row whose relevance score is at or above the threshold.">Apply</button>
           </label>
-          <label style="font-size:12px;display:flex;align-items:center;gap:4px;">
+          <label class="u-kv-row">
             Sort:
             <select id="eap-sort" onchange="eapRender()"
                     style="font-size:12px;padding:2px 4px;"
@@ -12440,7 +12454,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           <!-- Phase 54.6.52 — hide previously-cached failures so the
                user doesn't waste selections on DOIs the pipeline will
                silently skip. Count filled in by eapRender. -->
-          <label style="font-size:12px;display:flex;align-items:center;gap:4px;"
+          <label class="u-kv-row"
                  title="Rows previously marked as no-OA or ingest-failed are hidden by default. Uncheck to see them.">
             <input type="checkbox" id="eap-hide-cached" checked onchange="eapRender()"
                    title="Hide rows previously marked as no-OA or ingest-failed. Uncheck to see them.">
@@ -12458,24 +12472,24 @@ body.task-bar-open {{ padding-top: 40px; }}
                          onchange="eapSelectAll(this.checked)"
                          title="Select or deselect every row in the current filtered view.">
                 </th>
-                <th style="padding:6px 8px;text-align:left;">Title</th>
-                <th style="padding:6px 8px;text-align:left;white-space:nowrap;">Authors</th>
-                <th style="padding:6px 8px;text-align:left;white-space:nowrap;">Year</th>
-                <th style="padding:6px 8px;text-align:left;white-space:nowrap;">Score</th>
-                <th style="padding:6px 8px;text-align:left;white-space:nowrap;" title="Phase 54.6.115 — ± marks feed future expand rounds via anchor-vector bias">Feedback</th>
+                <th class="u-th-wrap">Title</th>
+                <th class="u-th">Authors</th>
+                <th class="u-th">Year</th>
+                <th class="u-th">Score</th>
+                <th class="u-th" title="Phase 54.6.115 — ± marks feed future expand rounds via anchor-vector bias">Feedback</th>
               </tr>
             </thead>
             <tbody id="eap-tbody"></tbody>
           </table>
         </div>
         <div style="display:flex;gap:8px;align-items:center;margin-top:12px;flex-wrap:wrap;">
-          <label style="font-size:12px;display:flex;align-items:center;gap:4px;">
+          <label class="u-kv-row">
             Workers:
             <input type="number" id="eap-workers" value="0" min="0"
                    style="width:60px;font-size:12px;padding:2px 4px;"
                    title="0 = INGEST_WORKERS from .env">
           </label>
-          <label style="font-size:12px;display:flex;align-items:center;gap:4px;"
+          <label class="u-kv-row"
                  title="Run the full ingest pipeline (convert → metadata → chunk → embed) on the selected PDFs right after they download. Uncheck for download-only.">
             <input type="checkbox" id="eap-ingest" checked
                    title="Run the full ingest pipeline on downloaded PDFs. Uncheck for download-only."> ingest after download
@@ -12485,7 +12499,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                normal path doesn't re-probe dead-ends, but one-click
                recovery after a new source lands or the user cleans up
                a broken PDF. -->
-          <label style="font-size:12px;display:flex;align-items:center;gap:4px;"
+          <label class="u-kv-row"
                  title="Ignore the .no_oa_cache + .ingest_failed sidecar files for this batch. Use after adding a new OA source (HAL/Zenodo in 54.6.51) or fixing a broken PDF converter.">
             <input type="checkbox" id="eap-retry-failed"
                    title="Ignore the .no_oa_cache + .ingest_failed sidecars for this batch. Use after adding a new OA source or fixing a broken PDF converter."> retry previously-failed
@@ -12496,7 +12510,7 @@ body.task-bar-open {{ padding-top: 40px; }}
             &#128229; Download selected
           </button>
         </div>
-        <div id="eap-status" style="margin-top:8px;font-size:12px;color:var(--fg-muted);"></div>
+        <div class="u-caption" id="eap-status"></div>
         <pre id="eap-log" style="margin-top:6px;max-height:260px;overflow:auto;background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);border-radius:4px;padding:8px;font-size:11px;font-family:ui-monospace,monospace;white-space:pre-wrap;display:none;"></pre>
       </div>
     </div>
@@ -12573,13 +12587,13 @@ body.task-bar-open {{ padding-top: 40px; }}
                 <input type="checkbox" id="pdl-header-cb" onchange="pendingSelectAll(this.checked)"
                        title="Select or deselect every visible row.">
               </th>
-              <th style="padding:6px 8px;text-align:left;">Title / DOI</th>
-              <th style="padding:6px 8px;text-align:left;white-space:nowrap;">Authors</th>
-              <th style="padding:6px 8px;text-align:left;white-space:nowrap;">Year</th>
-              <th style="padding:6px 8px;text-align:left;white-space:nowrap;">Source</th>
-              <th style="padding:6px 8px;text-align:left;white-space:nowrap;">Tries</th>
-              <th style="padding:6px 8px;text-align:left;white-space:nowrap;">Last reason</th>
-              <th style="padding:6px 8px;text-align:left;white-space:nowrap;">Actions</th>
+              <th class="u-th-wrap">Title / DOI</th>
+              <th class="u-th">Authors</th>
+              <th class="u-th">Year</th>
+              <th class="u-th">Source</th>
+              <th class="u-th">Tries</th>
+              <th class="u-th">Last reason</th>
+              <th class="u-th">Actions</th>
             </tr>
           </thead>
           <tbody id="pdl-tbody">
@@ -12587,7 +12601,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           </tbody>
         </table>
       </div>
-      <div id="pdl-retry-status" style="margin-top:8px;font-size:12px;color:var(--fg-muted);"></div>
+      <div class="u-caption" id="pdl-retry-status"></div>
       <pre id="pdl-retry-log" style="display:none;margin-top:6px;max-height:240px;overflow:auto;background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);border-radius:4px;padding:8px;font-size:11px;font-family:ui-monospace,monospace;white-space:pre-wrap;"></pre>
     </div>
   </div>
@@ -12871,7 +12885,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           level summaries, outer rings = children. Click a slice to zoom in,
           click the centre to zoom back out.
         </div>
-        <button class="btn-secondary" onclick="loadSunburst()" style="margin-bottom:6px;"
+        <button class="btn-secondary u-mb-6" onclick="loadSunburst()"
                 title="Build the RAPTOR sunburst from the server. Requires `catalog raptor build` to have been run.">Load</button>
         <div id="viz-sunburst-chart" class="viz-chart"></div>
       </div>
@@ -12901,7 +12915,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           The "history of the field" view. Drag the mini-map below the
           axis to zoom into a specific era.
         </div>
-        <button class="btn-secondary" onclick="loadTimeline()" style="margin-bottom:6px;"
+        <button class="btn-secondary u-mb-6" onclick="loadTimeline()"
                 title="Build the stacked timeline chart (cluster × year).">Load</button>
         <div id="viz-timeline-chart" class="viz-chart"></div>
       </div>
@@ -12933,7 +12947,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           results / discussion / conclusion / related_work); values
           are penalised by any open gap naming the section.
         </div>
-        <button class="btn-secondary" onclick="loadGapRadar()" style="margin-bottom:6px;"
+        <button class="btn-secondary u-mb-6" onclick="loadGapRadar()"
                 title="Compute the per-chapter section-coverage radar. Requires `book gaps` to have been run.">Load</button>
         <div id="viz-radar-chart" class="viz-chart"></div>
       </div>
@@ -17277,10 +17291,10 @@ async function doEdgeCases() {{
   body.innerHTML = '<h3 style="margin-bottom:10px;">&#129327; Edge-case hunter</h3>'
     + '<table id="ec-table" style="width:100%;border-collapse:collapse;font-size:13px;">'
     + '<thead style="background:var(--toolbar-bg);"><tr>'
-    + '<th style="padding:6px 8px;text-align:left;">Sev</th>'
-    + '<th style="padding:6px 8px;text-align:left;">Location</th>'
-    + '<th style="padding:6px 8px;text-align:left;">Unhandled condition</th>'
-    + '<th style="padding:6px 8px;text-align:left;">If triggered, the claim…</th>'
+    + '<th class="u-th-wrap">Sev</th>'
+    + '<th class="u-th-wrap">Location</th>'
+    + '<th class="u-th-wrap">Unhandled condition</th>'
+    + '<th class="u-th-wrap">If triggered, the claim…</th>'
     + '</tr></thead><tbody></tbody></table>';
   const tbody = body.querySelector('#ec-table tbody');
   const sevColor = {{high:'var(--danger)', medium:'var(--warning)', low:'var(--fg-muted)'}};
@@ -18545,7 +18559,7 @@ function _renderWikiLintIssues(bySeverity) {{
       const kind = i.type_ || i.kind || 'issue';
       html += '<div style="padding:6px 8px;margin-top:4px;border-left:3px solid '
         + colors[sev] + ';background:var(--toolbar-bg);border-radius:4px;font-size:12px;">'
-        + '<code style="font-size:10px;color:var(--fg-muted);">' + _escHtml(kind) + '</code> '
+        + '<code class="u-label-xs">' + _escHtml(kind) + '</code> '
         + _escHtml(i.detail || i.message || JSON.stringify(i)) + '</div>';
     }}
     html += '</div>';
@@ -20018,12 +20032,12 @@ async function openReconciliationsModal() {{
     for (const p of pairs) {{
       html += '<tr style="border-bottom:1px solid var(--border);vertical-align:top;">'
         + '<td style="padding:6px;"><strong>' + _escHtml(p.canonical_id.slice(0, 8)) + '</strong>'
-          + ' <span style="font-size:10px;color:var(--fg-muted);">'
+          + ' <span class="u-label-xs">'
           + _escHtml(String(p.canonical_year || '')) + ' · ' + _escHtml(p.canonical_journal || '') + '</span>'
           + '<br>' + _escHtml((p.canonical_title || '').substring(0, 100))
           + '<br><span style="font-family:var(--font-mono);font-size:10px;color:var(--fg-muted);">' + _escHtml(p.canonical_doi || '') + '</span></td>'
         + '<td style="padding:6px;"><strong>' + _escHtml(p.non_canonical_id.slice(0, 8)) + '</strong>'
-          + ' <span style="font-size:10px;color:var(--fg-muted);">' + _escHtml(String(p.non_canonical_year || '')) + '</span>'
+          + ' <span class="u-label-xs">' + _escHtml(String(p.non_canonical_year || '')) + '</span>'
           + '<br>' + _escHtml((p.non_canonical_title || '').substring(0, 100))
           + '<br><span style="font-family:var(--font-mono);font-size:10px;color:var(--fg-muted);">' + _escHtml(p.non_canonical_doi || '') + '</span></td>'
         + '<td style="padding:6px;"><button onclick="undoReconciliation(\\'' + p.non_canonical_id + '\\')" '
@@ -20141,7 +20155,7 @@ async function openExpandOeuvrePreview() {{
     }}).join('');
     const more = authors.length > 8 ? ` <span class="u-muted">+${{authors.length - 8}} more</span>` : '';
     document.getElementById('eap-info').innerHTML =
-      `<div style="margin-bottom:6px;">`
+      `<div class="u-mb-6">`
       + `Pulled candidates from <strong>${{info.qualifying_authors || 0}}</strong> author(s) with ≥${{info.min_corpus_papers}} corpus papers `
       + `(per-author cap ${{info.per_author_limit}}). `
       + `<strong>${{info.merged_candidates || 0}}</strong> unique paper(s) after dedup `
@@ -20522,7 +20536,7 @@ async function openExpandAuthorPreview() {{
         + `<div style="margin-top:8px;display:flex;gap:8px;align-items:center;">`
         + `<button class="btn-primary" onclick="eapRequeryWithSelected()" style="font-size:11px;padding:4px 10px;" title="Re-run the search pinned to the ticked author IDs only. Defeats OpenAlex name-collision disambiguation.">`
         + `&#128269; Re-query with <span id="eap-sel-count">${{numSelected}}</span> selected</button>`
-        + `<span style="font-size:10px;color:var(--fg-muted);">`
+        + `<span class="u-label-xs">`
         + `Click rows to toggle. Re-query runs preview scoped to the ticked author IDs only.`
         + `</span></div></div>`;
       document.getElementById('eap-info').innerHTML += banner;
@@ -21623,7 +21637,7 @@ async function loadToolTopicPapers(name) {{
     list.forEach(p => {{
       const year = p.year ? ' (' + p.year + ')' : '';
       const authors = (p.authors || []).slice(0, 3).map(a => (a.name || '').split(/\\s+/).slice(-1)[0]).filter(Boolean).join(', ');
-      html += '<li style="margin-bottom:6px;"><strong>' + (p.title || '(untitled)').replace(/</g, '&lt;') + '</strong>' + year;
+      html += '<li class="u-mb-6"><strong>' + (p.title || '(untitled)').replace(/</g, '&lt;') + '</strong>' + year;
       if (authors) html += '<div class="u-hint">' + authors + '</div>';
       if (p.doi) html += '<div class="u-tiny"><a href="https://doi.org/' + p.doi + '" target="_blank" rel="noopener">doi:' + p.doi + '</a></div>';
       html += '</li>';
@@ -22016,8 +22030,8 @@ function populatePlanChaptersTab() {{
     const cid = ch.id;
     const isFirst = (i === 0);
     const isLast = (i === chapters.length - 1);
-    html += '<div class="plan-ch-row" data-cid="' + cid + '" '
-         +  'style="border:1px solid var(--border);border-radius:6px;padding:10px;">'
+    html += '<div class="plan-ch-row u-card" data-cid="' + cid + '" '
+         +  '>'
          +  '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">'
          +  '<span style="font-weight:700;font-size:12px;color:var(--fg-muted);'
          +  'min-width:45px;">Ch.' + (ch.num || '?') + '</span>'
@@ -24477,7 +24491,7 @@ async function loadBookLengthReportPanel() {{
         hist[s.level] = (hist[s.level] || 0) + 1;
       }}
     }}
-    let html = '<div style="margin-bottom:6px;">'
+    let html = '<div class="u-mb-6">'
              + '<strong>' + (d.total_words || 0).toLocaleString() + '</strong> projected words'
              + '  ·  ' + (d.n_chapters || 0) + ' chapter(s)'
              + '  ·  ' + (d.n_sections || 0) + ' section(s)'
@@ -26302,7 +26316,7 @@ async function refreshVenueConfig() {{
       ulEl.innerHTML = items.map(p => {{
         const enc = _escHtml(p);
         return '<li style="display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px dotted var(--border);">'
-          + '<code style="font-family:var(--font-mono);font-size:11px;">' + enc + '</code>'
+          + '<code class="u-mono-xs">' + enc + '</code>'
           + '<button onclick="removeVenuePattern(\\'' + kind + '\\', ' + JSON.stringify(p) + ')" '
             + 'style="background:none;border:none;color:var(--fg-muted);cursor:pointer;font-size:13px;padding:0 4px;" '
             + 'title="remove">\\u00d7</button>'
@@ -26419,12 +26433,12 @@ async function showProjectDetail(slug) {{
         <button onclick="document.getElementById('proj-detail').innerHTML=''" title="Close the project details panel.">&times;</button>
       </div>
       <dl style="display:grid;grid-template-columns:140px 1fr;gap:4px 12px;font-size:12px;margin:0;">
-        <dt class="u-muted">Root</dt><dd style="font-family:var(--font-mono);font-size:11px;">${{d.root}}</dd>
-        <dt class="u-muted">Data dir</dt><dd style="font-family:var(--font-mono);font-size:11px;">${{d.data_dir}}${{d.data_dir_exists ? '' : ' <span class="u-warning">(missing)</span>'}}</dd>
-        <dt class="u-muted">PG database</dt><dd style="font-family:var(--font-mono);font-size:11px;">${{d.pg_database}}${{d.pg_database_exists ? '' : ' <span class="u-warning">(missing)</span>'}}</dd>
-        <dt class="u-muted">Qdrant prefix</dt><dd style="font-family:var(--font-mono);font-size:11px;">${{d.qdrant_prefix || '(none)'}}</dd>
-        <dt class="u-muted">Collections</dt><dd style="font-family:var(--font-mono);font-size:11px;">${{d.papers_collection}}, ${{d.abstracts_collection}}, ${{d.wiki_collection}}</dd>
-        <dt class="u-muted">Env overlay</dt><dd style="font-family:var(--font-mono);font-size:11px;">${{d.env_overlay_path}}${{d.env_overlay_exists ? '' : ' <span class="u-faint">(not present)</span>'}}</dd>
+        <dt class="u-muted">Root</dt><dd class="u-mono-xs">${{d.root}}</dd>
+        <dt class="u-muted">Data dir</dt><dd class="u-mono-xs">${{d.data_dir}}${{d.data_dir_exists ? '' : ' <span class="u-warning">(missing)</span>'}}</dd>
+        <dt class="u-muted">PG database</dt><dd class="u-mono-xs">${{d.pg_database}}${{d.pg_database_exists ? '' : ' <span class="u-warning">(missing)</span>'}}</dd>
+        <dt class="u-muted">Qdrant prefix</dt><dd class="u-mono-xs">${{d.qdrant_prefix || '(none)'}}</dd>
+        <dt class="u-muted">Collections</dt><dd class="u-mono-xs">${{d.papers_collection}}, ${{d.abstracts_collection}}, ${{d.wiki_collection}}</dd>
+        <dt class="u-muted">Env overlay</dt><dd class="u-mono-xs">${{d.env_overlay_path}}${{d.env_overlay_exists ? '' : ' <span class="u-faint">(not present)</span>'}}</dd>
       </dl>
       ${{counts}}
     </div>`;
