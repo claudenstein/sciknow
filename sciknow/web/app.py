@@ -7856,6 +7856,13 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .u-mb-6      {{ margin-bottom: 6px; }}
 .u-section-h {{ margin: 18px 0 8px; }}
 .u-caption   {{ margin-top: 8px; font-size: 12px; color: var(--fg-muted); }}
+/* Phase 54.6.189 — purge wave 5 utilities. */
+.u-ml-auto   {{ margin-left: auto; }}
+.u-pill-xs   {{ font-size: 11px; padding: 2px 8px; }}
+.u-label-strong {{ font-weight: 600; font-size: 13px; margin-bottom: 4px; }}
+.u-cell-sm   {{ text-align: left; padding: 4px 6px; }}
+.u-mb-m      {{ margin-bottom: 10px; }}
+.u-dim       {{ opacity: 0.5; }}
 
 /* ── Phase 54.6.168 — Monoline icon system.
    Inline SVG sprite at the top of <body> defines <symbol>s;
@@ -10654,7 +10661,7 @@ body.task-bar-open {{ padding-top: 40px; }}
     <div class="modal-footer" style="flex-wrap:wrap;gap:6px;">
       <button class="btn-secondary" onclick="closeModal('plan-modal')"
               title="Dismiss the Plan modal. Unsaved edits to any tab are discarded.">Close</button>
-      <button class="btn-secondary" onclick="regeneratePlan()" id="plan-regen-btn" style="margin-left:auto;"
+      <button class="btn-secondary u-ml-auto" onclick="regeneratePlan()" id="plan-regen-btn"
               title="LLM-regenerate the Book plan (leitmotiv) from current chapters + paper corpus. Visible only on the Book tab.">&#9889; Regenerate with LLM</button>
       <button class="btn-primary" onclick="savePlan()"
               title="Persist changes on the currently-visible tab (Book / Chapters / Sections) to the database. Outline-tab changes are committed inline when you click Generate outline.">Save</button>
@@ -10845,7 +10852,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           See <code>docs/RESEARCH.md §24</code> for the research behind these ranges.
         </p>
         <!-- Phase 54.6.156 — book-wide auto-plan wrapper for the 54.6.154 CLI. -->
-        <div style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--border);">
+        <div class="u-divider">
           <div class="u-row-wrap">
             <button class="btn-secondary" onclick="autoPlanEntireBook()"
                     title="Phase 54.6.156 — iterate every chapter × every empty section and ask LLM_FAST_MODEL for a 3-4 bullet concept plan per section. Uses the same generator as the Chapter modal's per-chapter button (54.6.155) but scoped to the whole book. Cost: ~5-10s per empty section (typical book ≈ 4-8 min). Streams progress into a log panel. Skips sections that already have a plan unless 'Force overwrite' is ticked. Activates the Phase-54.6.146 concept-density resolver across the book in one click.">
@@ -10871,11 +10878,10 @@ body.task-bar-open {{ padding-top: 40px; }}
              `sciknow book length-report` (54.6.153). Lets users see the
              whole book's per-chapter + per-section projected target +
              resolver level without leaving the GUI. -->
-        <div style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--border);">
+        <div class="u-divider">
           <div class="u-row-wrap">
             <strong class="u-small">&#128196; Projected length report</strong>
-            <button class="btn-secondary" onclick="loadBookLengthReportPanel()"
-                    style="font-size:11px;padding:2px 8px;"
+            <button class="btn-secondary u-pill-xs" onclick="loadBookLengthReportPanel()"
                     title="Phase 54.6.153/162 — walks every chapter × every section through the resolver chain (per-section override → concept-density → chapter-split) and shows the target + level + explanation per section, plus chapter and book totals. No resolver arithmetic duplication — delegates to the real helpers.">
               refresh
             </button>
@@ -10889,11 +10895,10 @@ body.task-bar-open {{ padding-top: 40px; }}
              Surfaces the 54.6.157 bench data (per-section IQRs with
              §24 alignment tags) inline so users don't need to run
              the CLI to see where their corpus sits vs reference. -->
-        <div style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--border);">
+        <div class="u-divider">
           <div class="u-row-wrap">
             <strong class="u-small">&#128202; Corpus section-length distribution</strong>
-            <button class="btn-secondary" onclick="loadSectionLengthPanel()"
-                    style="font-size:11px;padding:2px 8px;"
+            <button class="btn-secondary u-pill-xs" onclick="loadSectionLengthPanel()"
                     title="Phase 54.6.157/159 — walks paper_sections.word_count and shows per-section IQR alongside the RESEARCH.md §24 PubMed reference (N=61,517). Use to check whether your corpus is paper-shaped, monograph-shaped, or mixed — informs whether the project-type default wpc is right for your data.">
               refresh
             </button>
@@ -11429,7 +11434,7 @@ body.task-bar-open {{ padding-top: 40px; }}
               <input type="text" id="proj-ven-block-in" placeholder="e.g. scirp"
                      style="flex:1;padding:4px 6px;font-size:11px;" onkeydown="if(event.key==='Enter')addVenuePattern('block')"
                      title="Substring (or regex with ^/$) to block. Matched against candidate publisher / host-organization / source names.">
-              <button class="btn-secondary" style="font-size:11px;padding:2px 8px;" onclick="addVenuePattern('block')"
+              <button class="btn-secondary u-pill-xs" onclick="addVenuePattern('block')"
                       title="Add this pattern to the project's blocklist.">+</button>
             </div>
             <ul id="proj-ven-block-list" style="list-style:none;margin:0;padding:0;max-height:140px;overflow:auto;font-size:11px;"></ul>
@@ -11443,7 +11448,7 @@ body.task-bar-open {{ padding-top: 40px; }}
               <input type="text" id="proj-ven-allow-in" placeholder="e.g. frontiers in climate"
                      style="flex:1;padding:4px 6px;font-size:11px;" onkeydown="if(event.key==='Enter')addVenuePattern('allow')"
                      title="Substring (or regex) to ALWAYS allow — wins over both the built-in predatory pattern set and the blocklist.">
-              <button class="btn-secondary" style="font-size:11px;padding:2px 8px;" onclick="addVenuePattern('allow')"
+              <button class="btn-secondary u-pill-xs" onclick="addVenuePattern('allow')"
                       title="Add this pattern to the project's allowlist.">+</button>
             </div>
             <ul id="proj-ven-allow-list" style="list-style:none;margin:0;padding:0;max-height:140px;overflow:auto;font-size:11px;"></ul>
@@ -11526,7 +11531,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
           <div class="u-card">
-            <div style="font-weight:600;font-size:13px;margin-bottom:4px;">&#128190; Upload PDFs</div>
+            <div class="u-label-strong">&#128190; Upload PDFs</div>
             <p class="u-note">
               Files are staged under
               <code>{{data_dir}}/inbox/uploads_&lt;ts&gt;/</code> and then
@@ -11545,7 +11550,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                     title="Send selected PDFs to the server's uploads_<ts>/ inbox. If 'start ingesting' is checked the pipeline runs next.">Upload</button>
           </div>
           <div class="u-card">
-            <div style="font-weight:600;font-size:13px;margin-bottom:4px;">&#128193; Server directory</div>
+            <div class="u-label-strong">&#128193; Server directory</div>
             <p class="u-note">
               Path is resolved on the server. Useful when a corpus is
               already on disk (or over a network mount).
@@ -11594,7 +11599,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
           <div class="u-card">
-            <div style="font-weight:600;font-size:13px;margin-bottom:4px;">&#127918; Topic Clusters</div>
+            <div class="u-label-strong">&#127918; Topic Clusters</div>
             <p class="u-note">
               BERTopic over abstracts. Fast (seconds). Enables
               <code>--topic</code> filtering in retrieval + the Topics
@@ -11609,7 +11614,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                     title="Run BERTopic over paper abstracts. Needed before `--topic` filtering or the Topics browser works.">Cluster</button>
           </div>
           <div class="u-card">
-            <div style="font-weight:600;font-size:13px;margin-bottom:4px;">&#127794; RAPTOR tree</div>
+            <div class="u-label-strong">&#127794; RAPTOR tree</div>
             <p class="u-note">
               Hierarchical summaries (UMAP + GMM). Slow (5–30 min).
               Enables broad-synthesis retrieval.
@@ -11618,7 +11623,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                     title="Cluster chunks with UMAP+GMM, summarize each cluster and recurse. Enables broad-synthesis retrieval on long queries.">Build RAPTOR</button>
           </div>
           <div class="u-card">
-            <div style="font-weight:600;font-size:13px;margin-bottom:4px;">&#128218; Wiki compile</div>
+            <div class="u-label-strong">&#128218; Wiki compile</div>
             <p class="u-note">
               Compile per-paper wiki pages + KG triples. Slow
               (LLM-bound, ~1 min per paper).
@@ -11968,7 +11973,7 @@ body.task-bar-open {{ padding-top: 40px; }}
             Cleanup removes already-ingested dupes <em>and</em> the failed-ingest archive. Pending lists papers still waiting on an OA PDF. Retraction sweep flags newly-retracted work.
           </span>
         </div>
-        <div class="tabs" style="margin-bottom:10px;">
+        <div class="tabs u-mb-m">
           <button class="tab active" data-ctab="corp-enrich" onclick="switchCorpusTab('corp-enrich')"
                   title="Fill missing DOIs via Crossref/OpenAlex/arXiv title-search and persist OpenAlex concepts/funders/grants/ROR. No new papers downloaded.">&#128270; Enrich</button>
           <button class="tab" data-ctab="corp-cites" onclick="switchCorpusTab('corp-cites')"
@@ -12124,7 +12129,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           </div>
 
           <!-- Phase 54.6.116 (Tier 2 #4) — author oeuvre completion -->
-          <div style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--border);">
+          <div class="u-divider">
             <h5 style="margin:0 0 6px;font-size:12px;">&#128100; Author oeuvre completion</h5>
             <p style="font-size:11px;color:var(--fg-muted);margin:0 0 8px;line-height:1.4;">
               Scan the corpus, find authors with ≥ N papers already present, run
@@ -12414,8 +12419,7 @@ body.task-bar-open {{ padding-top: 40px; }}
             <input type="number" id="eap-threshold" value="0.55" min="0" max="1" step="0.05"
                    style="width:70px;font-size:12px;padding:2px 4px;"
                    title="bge-m3 cosine similarity threshold (0–1). 0.55 is a reasonable floor; raise for a tighter shortlist, lower to see more."/>
-            <button class="btn-secondary" onclick="eapSelectByThreshold()"
-                    style="font-size:11px;padding:2px 8px;"
+            <button class="btn-secondary u-pill-xs" onclick="eapSelectByThreshold()"
                     title="Check every row whose relevance score is at or above the threshold.">Apply</button>
           </label>
           <label class="u-kv-row">
@@ -12481,8 +12485,8 @@ body.task-bar-open {{ padding-top: 40px; }}
             <input type="checkbox" id="eap-retry-failed"
                    title="Ignore the .no_oa_cache + .ingest_failed sidecars for this batch. Use after adding a new OA source or fixing a broken PDF converter."> retry previously-failed
           </label>
-          <button class="btn-primary" id="eap-download-btn"
-                  onclick="eapDownloadSelected()" style="margin-left:auto;"
+          <button class="btn-primary u-ml-auto" id="eap-download-btn"
+                  onclick="eapDownloadSelected()"
                   title="Download the checked rows (OA cascade: Unpaywall / S2 / EuropePMC / arXiv / HAL / Zenodo). Rows with no OA fallback go to the Pending Downloads queue.">
             &#128229; Download selected
           </button>
@@ -12542,7 +12546,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         <button class="btn-secondary" onclick="refreshPendingDownloads()"
                 title="Re-fetch the pending-downloads list from the server.">Refresh</button>
         <span class="u-hint" id="pdl-count"></span>
-        <span style="margin-left:auto;"></span>
+        <span class="u-ml-auto"></span>
         <button class="btn-secondary" onclick="pendingSelectAll(true)"
                 title="Check every visible row.">Select all</button>
         <button class="btn-secondary" onclick="pendingSelectAll(false)"
@@ -16550,7 +16554,7 @@ async function showDashboard() {{
       g => g.type === 'topic' || g.type === 'evidence'
     ).length;
     const autoBtn = (openExpandable > 0)
-      ? '<button class="btn-primary" style="margin-left:auto;" '
+      ? '<button class="btn-primary u-ml-auto" '
         + 'onclick="openAutoExpandPreview()" '
         + 'title="Query OpenAlex once per open topic/evidence gap; merge + rank candidates so you can cherry-pick which to ingest. Mirrors `sciknow book auto-expand`.">'
         + '&#128269; Auto-expand from these gaps</button>'
@@ -16605,7 +16609,7 @@ function writeForCell(chapterId, sectionType) {{
   // Hide dashboard, show section view
   document.getElementById('dashboard-view').style.display = 'none';
   document.getElementById('read-view').style.display = 'block';
-  document.getElementById('read-view').innerHTML = '<p style="opacity:0.5;">Starting write...</p>';
+  document.getElementById('read-view').innerHTML = '<p class="u-dim">Starting write...</p>';
   document.getElementById('draft-subtitle').style.display = 'block';
   document.getElementById('toolbar').style.display = 'flex';
   doWrite();
@@ -16717,7 +16721,7 @@ async function showVersions() {{
   const timeline = document.getElementById('version-timeline');
   const diffView = document.getElementById('diff-view');
   panel.style.display = 'block';
-  diffView.innerHTML = '<p style="opacity:0.5;">Select two versions to compare.</p>';
+  diffView.innerHTML = '<p class="u-dim">Select two versions to compare.</p>';
   selectedVersions = [];
 
   let html = '';
@@ -16747,7 +16751,7 @@ async function selectVersion(vid) {{
   if (selectedVersions.length === 2) {{
     // Show diff
     const diffView = document.getElementById('diff-view');
-    diffView.innerHTML = '<p style="opacity:0.5;">Loading diff...</p>';
+    diffView.innerHTML = '<p class="u-dim">Loading diff...</p>';
     const res = await fetch('/api/diff/' + selectedVersions[0] + '/' + selectedVersions[1]);
     const data = await res.json();
     diffView.innerHTML = data.diff_html;
@@ -17217,7 +17221,7 @@ async function doAdversarialReview() {{
   currentEventSource = source;
   const body = document.getElementById('stream-body');
   const status = document.getElementById('stream-status');
-  body.innerHTML = '<h3 style="margin-bottom:10px;">&#128126; Adversarial review</h3>'
+  body.innerHTML = '<h3 class="u-mb-m">&#128126; Adversarial review</h3>'
     + '<div id="adv-output" style="font-family:-apple-system,sans-serif;font-size:14px;line-height:1.5;"></div>';
   const out = document.getElementById('adv-output');
   let buf = '';
@@ -17265,7 +17269,7 @@ async function doEdgeCases() {{
   currentEventSource = source;
   const body = document.getElementById('stream-body');
   const status = document.getElementById('stream-status');
-  body.innerHTML = '<h3 style="margin-bottom:10px;">&#129327; Edge-case hunter</h3>'
+  body.innerHTML = '<h3 class="u-mb-m">&#129327; Edge-case hunter</h3>'
     + '<table id="ec-table" style="width:100%;border-collapse:collapse;font-size:13px;">'
     + '<thead style="background:var(--toolbar-bg);"><tr>'
     + '<th class="u-th-wrap">Sev</th>'
@@ -17313,7 +17317,7 @@ function _runCliActionForDraft(argv, title, startMsg) {{
   if (!currentDraftId) {{ showEmptyHint('No draft selected.'); return; }}
   showStreamPanel(startMsg);
   const body = document.getElementById('stream-body');
-  body.innerHTML = '<h3 style="margin-bottom:10px;">' + title + '</h3>'
+  body.innerHTML = '<h3 class="u-mb-m">' + title + '</h3>'
     + '<pre id="cli-action-out" style="white-space:pre-wrap;font-family:var(--font-mono);font-size:12px;line-height:1.45;"></pre>';
   const out = document.getElementById('cli-action-out');
   const status = document.getElementById('stream-status');
@@ -20003,8 +20007,8 @@ async function openReconciliationsModal() {{
       return;
     }}
     let html = '<table class="u-table-full">'
-      + '<tr class="u-border-b"><th style="text-align:left;padding:4px 6px;">Canonical</th>'
-      + '<th style="text-align:left;padding:4px 6px;">Non-canonical (hidden)</th>'
+      + '<tr class="u-border-b"><th class="u-cell-sm">Canonical</th>'
+      + '<th class="u-cell-sm">Non-canonical (hidden)</th>'
       + '<th style="padding:4px 6px;">Action</th></tr>';
     for (const p of pairs) {{
       html += '<tr style="border-bottom:1px solid var(--border);vertical-align:top;">'
@@ -21463,7 +21467,7 @@ async function doToolSearch(mode) {{
       const year = h.year ? ' (' + h.year + ')' : '';
       const sec = h.section_type ? '<span style="color:var(--accent);font-size:11px;">[' + h.section_type + ']</span> ' : '';
       const score = (typeof h.score === 'number') ? ' <span class="u-hint">score=' + h.score.toFixed(3) + '</span>' : '';
-      html += '<li style="margin-bottom:10px;">';
+      html += '<li class="u-mb-m">';
       html += sec + '<strong>' + (h.title || '(untitled)').replace(/</g, '&lt;') + '</strong>' + year + score;
       if (authors) html += '<div class="u-hint">' + authors + '</div>';
       if (h.doi) html += '<div class="u-tiny"><a href="https://doi.org/' + h.doi + '" target="_blank" rel="noopener">doi:' + h.doi + '</a></div>';
@@ -24540,12 +24544,12 @@ async function loadSectionLengthPanel() {{
     }};
     let html = '<table style="width:100%;border-collapse:collapse;font-size:11px;">';
     html += '<thead><tr class="u-border-b">'
-         + '<th style="text-align:left;padding:4px 6px;">Section</th>'
+         + '<th class="u-cell-sm">Section</th>'
          + '<th style="text-align:right;padding:4px 6px;">n</th>'
          + '<th style="text-align:right;padding:4px 6px;">Median</th>'
          + '<th style="text-align:right;padding:4px 6px;">IQR</th>'
-         + '<th style="text-align:left;padding:4px 6px;">§24 Ref</th>'
-         + '<th style="text-align:left;padding:4px 6px;">Alignment</th>'
+         + '<th class="u-cell-sm">§24 Ref</th>'
+         + '<th class="u-cell-sm">Alignment</th>'
          + '</tr></thead><tbody>';
     for (const s of d.sections) {{
       const colour = colourFor(s.alignment);
@@ -25115,7 +25119,7 @@ async function showSnapshots() {{
   }});
   html += '</div>';
   timeline.innerHTML = html;
-  diffView.innerHTML = '<p style="opacity:0.5;">Click "Diff" to compare a snapshot with current content.</p>';
+  diffView.innerHTML = '<p class="u-dim">Click "Diff" to compare a snapshot with current content.</p>';
 }}
 
 async function diffSnapshot(snapId) {{
