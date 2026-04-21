@@ -8062,6 +8062,29 @@ body.sidebar-rail .sidebar-rail-btn {{ color: var(--accent); border-color: var(-
 .u-fg-ink    {{ color: #111; }}
 .u-vat       {{ vertical-align: top; }}
 .u-w-70      {{ width: 70px; }}
+.u-w-60      {{ width: 60px; }}
+.u-my-2      {{ margin: 8px 0; }}
+.u-my-1      {{ margin: 4px 0; }}
+.u-mt-4      {{ margin-top: 16px; }}
+.u-mb-14     {{ margin-bottom: 14px; }}
+.u-pt-3      {{ padding-top: 12px; }}
+.u-pt-6      {{ padding-top: 6px; }}
+.u-py-1      {{ padding: 4px 0; }}
+.u-p-0       {{ padding: 0; }}
+.u-p-20      {{ padding: 20px; }}
+.u-p-4       {{ padding: 16px; }}
+.u-italic    {{ font-style: italic; }}
+.u-serif     {{ font-family: var(--font-serif); }}
+.u-sys       {{ font-family: -apple-system, sans-serif; }}
+.u-list-none {{ list-style: none; }}
+.u-ls-sm     {{ letter-spacing: 0.04em; }}
+.u-dim-7     {{ opacity: 0.7; }}
+.u-lh-1-6    {{ line-height: 1.6; }}
+.u-lh-145    {{ line-height: 1.45; }}
+.u-r-8       {{ border-radius: 8px; }}
+.u-border-l-warn {{ border-left: 3px solid var(--warning); }}
+.u-mh-6      {{ margin: 0 0 6px; }}
+.u-heading-section {{ margin: 24px 0 12px; }}
 
 /* Phase 54.6.195 — loading skeleton primitives. Applies a pulsing
    gradient to any element; use .skeleton alone for a block, or
@@ -9950,7 +9973,7 @@ body.task-bar-open {{ padding-top: 40px; }}
      the very top of the body so it survives all SPA navigation
      (loadSection, showDashboard, showCorkboard, etc) and never gets
      overwritten by innerHTML rebuilds of the main content area. -->
-<div id="task-bar" class="task-bar" style="display:none;">
+<div id="task-bar" class="task-bar u-hidden">
   <span class="tb-dot" id="tb-dot"></span>
   <span class="tb-task" id="tb-task">…</span>
   <span class="tb-sep">·</span>
@@ -9961,12 +9984,12 @@ body.task-bar-open {{ padding-top: 40px; }}
   <span class="tb-stat"><strong id="tb-tps">0.0</strong>&nbsp;tok/s</span>
   <span class="tb-sep">·</span>
   <span class="tb-stat" id="tb-elapsed">0s</span>
-  <span class="tb-stat tb-eta" id="tb-eta" style="display:none;">
+  <span class="tb-stat tb-eta u-hidden" id="tb-eta">
     <span class="tb-sep">·</span>ETA <strong id="tb-eta-val">?</strong>
   </span>
   <span class="tb-spacer"></span>
   <button class="tb-stop" id="tb-stop" onclick="stopGlobalJob()" title="Stop the running task"><svg class="icon icon--sm"><use href="#i-stop-square"/></svg> Stop</button>
-  <button class="tb-dismiss" id="tb-dismiss" onclick="dismissTaskBar()" title="Dismiss" style="display:none;">&times;</button>
+  <button class="tb-dismiss u-hidden" id="tb-dismiss" onclick="dismissTaskBar()" title="Dismiss">&times;</button>
 </div>
 
 <!-- Phase 54.6.186 — consolidated topbar. Left: book-level nav
@@ -10155,7 +10178,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div id="sidebar-sections">
     {sidebar_html}
   </div>
-  <div class="ch-add-form" id="ch-add-form" style="display:none;">
+  <div class="ch-add-form u-hidden" id="ch-add-form">
     <input type="text" id="ch-add-title" placeholder="New chapter title..."
            title="Title for the new chapter. A slug is auto-generated from the title."/>
     <button onclick="addChapter()"
@@ -10181,7 +10204,7 @@ body.task-bar-open {{ padding-top: 40px; }}
     Version <span id="draft-version">{active_version}</span> &middot;
     <span id="draft-words">{active_words}</span> words
     <!-- Phase 22 — word target progress (shown only when a target is set) -->
-    <span class="word-target" id="word-target" style="display:none;">
+    <span class="word-target u-hidden" id="word-target">
       <span id="word-target-text"></span>
       <span class="word-target-bar"><span class="word-target-fill" id="word-target-fill"></span></span>
     </span>
@@ -10219,7 +10242,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   </div>
 
   <!-- Dashboard (hidden by default, shown via JS) -->
-  <div id="dashboard-view" style="display:none;"></div>
+  <div class="u-hidden" id="dashboard-view"></div>
 
   <!-- Streaming output panel -->
   <div class="stream-panel" id="stream-panel">
@@ -10235,7 +10258,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 
   <div id="read-view">{content_html}</div>
 
-  <div id="edit-view" style="display:none;">
+  <div class="u-hidden" id="edit-view">
     <div class="editor-toolbar">
       <button onclick="edInsert('**','**')" title="Bold"><b>B</b></button>
       <button onclick="edInsert('*','*')" title="Italic"><i>I</i></button>
@@ -10263,7 +10286,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   </div>
 
   <!-- Argument map container -->
-  <div id="argue-map-view" style="display:none;"></div>
+  <div class="u-hidden" id="argue-map-view"></div>
 </main>
 
 <!-- Right panel -->
@@ -10327,7 +10350,7 @@ body.task-bar-open {{ padding-top: 40px; }}
      toolbar + nav + settings action with fuzzy match. Always in the
      DOM so the shortcut works on every page (Read, Dashboard,
      Chapter Reader, …). -->
-<div class="cmdk" id="cmdk" style="display:none;" role="dialog" aria-label="Command palette">
+<div class="cmdk u-hidden" id="cmdk" role="dialog" aria-label="Command palette">
   <div class="cmdk-scrim" onclick="closeCmdK()"></div>
   <div class="cmdk-box">
     <input class="cmdk-input" id="cmdk-input" type="text"
@@ -10381,10 +10404,10 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div class="u-note-sm" id="wiki-status"></div>
         <div class="modal-stream" id="wiki-stream"></div>
         <div id="wiki-stream-stats" class="stream-stats"></div>
-        <div class="modal-sources" id="wiki-sources" style="display:none;"></div>
+        <div class="modal-sources u-hidden" id="wiki-sources"></div>
       </div>
       <!-- Phase 54.6.61 — Summaries tab: dedicated paper-summary browser. -->
-      <div class="tab-pane" id="wiki-summaries-pane" style="display:none;">
+      <div class="tab-pane u-hidden" id="wiki-summaries-pane">
         <div class="u-flex-raw u-gap-10 u-ai-center u-wrap u-mb-m">
           <input type="text" id="wiki-sum-search" placeholder="Filter by title or author…"
                  style="flex:1;min-width:200px;padding:6px 10px;"
@@ -10405,7 +10428,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       </div>
       <!-- Phase 54.6.61 — Visuals tab: figures / equations / tables / code,
            with actual image rendering for figures via /api/visuals/image. -->
-      <div class="tab-pane" id="wiki-visuals-pane" style="display:none;">
+      <div class="tab-pane u-hidden" id="wiki-visuals-pane">
         <div class="u-row-wrap-mb">
           <select class="u-pill-md" id="wiki-vis-kind" onchange="loadWikiVisuals()"
                   title="Which visual kind to show. Figures/charts render as thumbnails; equations as KaTeX; tables as HTML; code in a pre block.">
@@ -10428,7 +10451,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div id="wiki-visuals-list" style="max-height:calc(85vh - 220px);overflow-y:auto;"></div>
       </div>
       <!-- Browse tab -->
-      <div class="tab-pane" id="wiki-browse-pane" style="display:none;">
+      <div class="tab-pane u-hidden" id="wiki-browse-pane">
         <div class="field u-row-end">
           <div class="u-flex-1">
             <label>Filter by type</label>
@@ -10442,7 +10465,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         </div>
         <div class="u-mt-3" id="wiki-browse-list"></div>
         <!-- Detail view (hidden until a page is opened) -->
-        <div id="wiki-page-detail" style="display:none;">
+        <div class="u-hidden" id="wiki-page-detail">
           <div class="wiki-detail-toolbar">
             <button class="btn-secondary" onclick="closeWikiPageDetail()"
                     title="Return to the wiki page list.">&larr; Back to list</button>
@@ -10450,7 +10473,7 @@ body.task-bar-open {{ padding-top: 40px; }}
             <kbd class="wiki-kbd-hint">Press <kbd>Ctrl</kbd>+<kbd>K</kbd> to jump to any page</kbd>
           </div>
           <div id="wiki-page-meta" style="font-size:11px;color:var(--fg-muted);margin:8px 0 12px 0;"></div>
-          <div id="wiki-stale-banner" class="wiki-stale-banner" style="display:none;">
+          <div id="wiki-stale-banner" class="wiki-stale-banner u-hidden">
             &#9888;&#65039; This page is flagged as stale — run
             <code>sciknow wiki compile --rewrite-stale</code>
             to refresh it from the current sources.
@@ -10460,7 +10483,7 @@ body.task-bar-open {{ padding-top: 40px; }}
             <div>
               <div id="wiki-page-content" class="wiki-page-content"></div>
               <!-- Phase 54.4 — "Facts from the corpus" on concept pages -->
-              <section id="wiki-facts-block" class="wiki-extras" style="display:none;">
+              <section id="wiki-facts-block" class="wiki-extras u-hidden">
                 <div class="wiki-extras-head">
                   <h3 class="wiki-extras-h">Facts from the corpus</h3>
                   <a id="wiki-facts-kg-link" class="wiki-facts-kglink"
@@ -10504,13 +10527,13 @@ body.task-bar-open {{ padding-top: 40px; }}
                 </form>
                 <div id="wiki-ask-status" class="wiki-ask-status"></div>
                 <div id="wiki-ask-stream" class="wiki-ask-stream"></div>
-                <div id="wiki-ask-sources" class="wiki-ask-sources" style="display:none;"></div>
+                <div id="wiki-ask-sources" class="wiki-ask-sources u-hidden"></div>
               </section>
-              <section id="wiki-related-block" class="wiki-extras" style="display:none;">
+              <section id="wiki-related-block" class="wiki-extras u-hidden">
                 <h3 class="wiki-extras-h">Related pages</h3>
                 <ol id="wiki-related-list" class="wiki-compact-list"></ol>
               </section>
-              <section id="wiki-backlinks-block" class="wiki-extras" style="display:none;">
+              <section id="wiki-backlinks-block" class="wiki-extras u-hidden">
                 <h3 class="wiki-extras-h">Referenced by</h3>
                 <ol id="wiki-backlinks-list" class="wiki-compact-list"></ol>
               </section>
@@ -10519,7 +10542,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         </div>
       </div>
       <!-- Phase 54.6.2 — Lint tab: surfaces `sciknow wiki lint` in the GUI. -->
-      <div class="tab-pane" id="wiki-lint-pane" style="display:none;">
+      <div class="tab-pane u-hidden" id="wiki-lint-pane">
         <div class="u-note-sm">
           Check wiki health: broken links, stale pages, orphaned concepts,
           missing summaries, and optionally contradictions across paper
@@ -10533,7 +10556,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           </label>
           <button class="btn-primary" id="wiki-lint-run" onclick="doWikiLint()"
                   title="Scan the wiki for broken links, stale pages, orphan concepts and missing KG triples.">Run Lint</button>
-          <button class="btn-secondary" id="wiki-lint-stop" onclick="stopWikiLint()" style="display:none;"
+          <button class="btn-secondary u-hidden" id="wiki-lint-stop" onclick="stopWikiLint()"
                   title="Cancel the running lint job.">Stop</button>
         </div>
         <div class="u-caption" id="wiki-lint-status"></div>
@@ -10567,7 +10590,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         </div>
       </div>
       <!-- Phase 54.6.2 — Consensus tab: surfaces `sciknow wiki consensus` in the GUI. -->
-      <div class="tab-pane" id="wiki-consensus-pane" style="display:none;">
+      <div class="tab-pane u-hidden" id="wiki-consensus-pane">
         <div class="u-note-sm">
           Map the agreement landscape for a topic. Uses the knowledge graph
           plus paper summaries to classify claims as strong / moderate /
@@ -10585,7 +10608,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div class="u-row-gap-sm">
           <button class="btn-primary" id="wiki-consensus-run" onclick="doWikiConsensus()"
                   title="Build the consensus map and save it as a synthesis page under /synthesis/.">Map Consensus</button>
-          <button class="btn-secondary" id="wiki-consensus-stop" onclick="stopWikiConsensus()" style="display:none;"
+          <button class="btn-secondary u-hidden" id="wiki-consensus-stop" onclick="stopWikiConsensus()"
                   title="Cancel the running consensus job.">Stop</button>
         </div>
         <div class="u-caption" id="wiki-consensus-status"></div>
@@ -10628,7 +10651,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 </div>
 
 <!-- Phase 54 — Ctrl-K wiki command palette (quick-jump by fuzzy title) -->
-<div class="modal-overlay" id="wiki-palette" onclick="if(event.target===this)closeWikiPalette()" style="display:none;">
+<div class="modal-overlay u-hidden" id="wiki-palette" onclick="if(event.target===this)closeWikiPalette()">
   <div class="modal wiki-palette-modal">
     <input type="text" id="wiki-palette-input"
            placeholder="Jump to wiki page… (type to filter)"
@@ -10679,7 +10702,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       <div class="u-note-sm" id="ask-status"></div>
       <div class="modal-stream" id="ask-stream"></div>
       <div id="ask-stream-stats" class="stream-stats"></div>
-      <div class="modal-sources" id="ask-sources" style="display:none;"></div>
+      <div class="modal-sources u-hidden" id="ask-sources"></div>
     </div>
   </div>
 </div>
@@ -10705,7 +10728,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                title="Early-stop threshold on the scorer's `overall` dimension. Autowrite stops as soon as it hits this, before exhausting Max iterations. 0.85 is conservative; 0.8 is faster, 0.9 requires very clean drafts."/>
         <span class="u-note-ml">Stop iterating when overall &ge; this</span>
       </div>
-      <div id="aw-config-mode-section" style="display:none;margin-top:16px;">
+      <div class="u-mt-4" id="aw-config-mode-section">
         <label>Existing drafts</label>
         <p id="aw-config-mode-info" style="font-size:12px;color:var(--fg-muted);margin:4px 0 10px;"></p>
         <div class="u-flex-raw u-gap-2 u-wrap">
@@ -10808,7 +10831,7 @@ body.task-bar-open {{ padding-top: 40px; }}
            into its own pane so the user has a clear home for chapter
            STRUCTURE generation (distinct from Book's leitmotiv and
            from per-draft Review). Mirrors `sciknow book outline`. -->
-      <div class="tab-pane" id="plan-outline-pane" style="display:none;">
+      <div class="tab-pane u-hidden" id="plan-outline-pane">
         <p class="u-note-lg">
           <strong>Outline</strong> proposes a chapter structure for the book from your paper
           corpus. The LLM generates 3 candidate outlines (temperature-diversified),
@@ -10818,7 +10841,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           and drafts are never touched &mdash; new chapters are appended with fresh
           numbers. Run again to re-roll when the first pass isn&rsquo;t right.
         </p>
-        <p style="font-size:11px;color:var(--fg-muted);background:var(--bg-alt);padding:8px 10px;border-radius:6px;margin-bottom:14px;">
+        <p class="u-tiny u-muted u-bg-alt-raw u-p-8-10 u-r-md u-mb-14">
           <strong>Outline vs Review:</strong>
           <em>Outline</em> plans the book&rsquo;s chapter/section structure from the corpus (no drafts needed).
           <em>Review</em> (in the draft toolbar) critiques the prose in a single existing draft
@@ -10844,7 +10867,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div class="u-flex-raw u-gap-2 u-ai-center u-mb-3 u-wrap">
           <button class="btn-primary" id="plan-outline-run-btn" onclick="runOutlineFromTab()"
                   title="Generate 3 candidate chapter outlines at rising temperatures, score by breadth + section-count variance, pick the winner, density-resize sections, and add to book_chapters. Additive: never touches existing chapters. Mirrors `sciknow book outline`.">&#128214; Generate outline</button>
-          <button class="btn-secondary" id="plan-outline-cancel-btn" onclick="cancelOutline()" style="display:none;"
+          <button class="btn-secondary u-hidden" id="plan-outline-cancel-btn" onclick="cancelOutline()"
                   title="Cancel the running outline generation. Any chapters already committed stay; the in-flight LLM call is aborted.">Cancel</button>
           <span class="u-hint-sm" id="plan-outline-status"></span>
         </div>
@@ -10856,7 +10879,7 @@ body.task-bar-open {{ padding-top: 40px; }}
            topic_query, ↑/↓ reorder, delete, and an Add-chapter row.
            Uses existing /api/chapters, /api/chapters/{{id}},
            /api/chapters/reorder, DELETE /api/chapters/{{id}}. -->
-      <div class="tab-pane" id="plan-chapters-pane" style="display:none;">
+      <div class="tab-pane u-hidden" id="plan-chapters-pane">
         <p class="u-note-lg">
           Book-wide chapter plan: every chapter&rsquo;s title, description, and
           retrieval query. Reorder with &uarr; / &darr;. Delete unlinks the
@@ -10873,7 +10896,7 @@ body.task-bar-open {{ padding-top: 40px; }}
            chapter picker at the top so the user can switch between
            chapters without closing the modal. Each section row stays
            inline-editable (plan + target_words). -->
-      <div class="tab-pane" id="plan-chapter-pane" style="display:none;">
+      <div class="tab-pane u-hidden" id="plan-chapter-pane">
         <p class="u-note-lg">
           Per-chapter section plans: pick a chapter, then edit each
           section&rsquo;s plan and target word count. To rename / reorder /
@@ -10909,7 +10932,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           </label>
           <span class="u-hint" id="plan-auto-plan-status"></span>
         </div>
-        <div id="plan-chapter-header" style="margin-bottom:14px;font-size:13px;color:var(--fg-muted);"></div>
+        <div class="u-mb-14 u-md u-muted" id="plan-chapter-header"></div>
         <div id="plan-chapter-sections"></div>
       </div>
       <div class="u-note-sm" id="plan-status"></div>
@@ -11172,7 +11195,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       </div>
 
       <!-- Leitmotiv tab (the book plan) -->
-      <div id="bs-leitmotiv-pane" style="display:none;">
+      <div class="u-hidden" id="bs-leitmotiv-pane">
         <p class="u-note">
           The book's thesis / scope document (200&ndash;500 words). Injected into
           every writer prompt so chapter sections stay aligned with the overall
@@ -11195,7 +11218,7 @@ body.task-bar-open {{ padding-top: 40px; }}
            model assignments for this project. Pulls from /api/settings/models
            so the user sees which LLM is being used for what, and where it's
            configured (.env, config default, or per-role override). -->
-      <div id="bs-models-pane" style="display:none;">
+      <div class="u-hidden" id="bs-models-pane">
         <p class="u-note-mb-3">
           Current model assignments. Edit these in the project's <code>.env</code> file
           (see <a href="https://github.com/claudenstein/sciknow/blob/main/docs/BOOK_ACTIONS.md" target="_blank">BOOK_ACTIONS.md</a>
@@ -11222,7 +11245,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       </div>
 
       <!-- Style tab -->
-      <div id="bs-style-pane" style="display:none;">
+      <div class="u-hidden" id="bs-style-pane">
         <p class="u-note-mb-m">
           Style fingerprint extracted from drafts marked
           <em>final</em> / <em>reviewed</em> / <em>revised</em> (Phase 32.10 / Layer 5).
@@ -11241,7 +11264,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       <!-- Phase 54.6.164 — View tab: local UI preferences. Not persisted
            to /api/book; stored in localStorage so they follow the
            browser, not the book. -->
-      <div id="bs-view-pane" style="display:none;">
+      <div class="u-hidden" id="bs-view-pane">
         <p class="u-note-mb-3">
           Per-browser UI preferences. Stored in <code>localStorage</code>;
           not synced to the book or other devices.
@@ -11571,7 +11594,7 @@ body.task-bar-open {{ padding-top: 40px; }}
               <option value="weekly">Weekly</option>
             </select>
           </label>
-          <label id="backup-sched-weekday-label" style="display:none;">Day:
+          <label class="u-hidden" id="backup-sched-weekday-label">Day:
             <select class="u-pad-xs" id="backup-sched-weekday"
                     title="Day of the week to run the backup. Only applies when Frequency = Weekly.">
               <option value="0">Sun</option><option value="1">Mon</option>
@@ -11581,16 +11604,16 @@ body.task-bar-open {{ padding-top: 40px; }}
             </select>
           </label>
           <label id="backup-sched-hour-label">Hour:
-            <input type="number" id="backup-sched-hour" min="0" max="23" value="3" style="width:60px;padding:4px;"
+            <input class="u-w-60 u-pad-xs" type="number" id="backup-sched-hour" min="0" max="23" value="3"
                    title="Hour of the day (0–23) when the backup fires. Defaults to 03:00 — usually off-hours."/>
           </label>
           <label>Minute:
-            <input type="number" id="backup-sched-minute" min="0" max="59" value="0" style="width:60px;padding:4px;"
+            <input class="u-w-60 u-pad-xs" type="number" id="backup-sched-minute" min="0" max="59" value="0"
                    title="Minute past the hour. Hourly mode uses this alone (e.g. `:15` = every hour at quarter past)."/>
           </label>
           <button class="btn-primary" onclick="enableBackupSchedule()"
                   title="Install the crontab entry. Overwrites any existing sciknow-auto-backup line.">Save schedule</button>
-          <button class="btn-secondary" id="backup-unschedule-btn" onclick="disableBackupSchedule()" style="display:none;"
+          <button class="btn-secondary u-hidden" id="backup-unschedule-btn" onclick="disableBackupSchedule()"
                   title="Remove the crontab entry. Existing backups are NOT deleted.">Disable</button>
         </div>
       </details>
@@ -11665,7 +11688,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           </div>
         </div>
       </div>
-      <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:8px;">
+      <div class="u-border-t u-pt-3 u-mt-2">
         <h4 class="u-md u-mb-2">Create new project</h4>
         <p class="u-note">
           Creates an empty project (DB + collections + dir + migrations). For the one-shot
@@ -11684,7 +11707,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 
       <!-- Phase 54.6.112 (Tier 1 #5) — Venue block/allow lists for
            db expand. JSON lives at <project>/venue_config.json. -->
-      <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:14px;">
+      <div class="u-border-t u-pt-3 u-mt-14">
         <h4 class="u-md u-mb-6">&#128683; Venues — block / allow lists</h4>
         <p class="u-note">
           Per-project substring patterns matched against candidate papers' publisher / host-organization / source names during
@@ -11756,13 +11779,13 @@ body.task-bar-open {{ padding-top: 40px; }}
         </p>
         <div class="u-flex-raw u-gap-10 u-ai-start">
           <div class="u-flex-1">
-            <h4 style="font-size:13px;margin:0 0 6px;">Existing projects</h4>
+            <h4 class="u-md u-mh-6">Existing projects</h4>
             <div id="sw-project-list" style="font-size:12px;max-height:180px;overflow:auto;border:1px solid var(--border);border-radius:6px;">
               Loading…
             </div>
           </div>
           <div style="flex:1;border-left:1px solid var(--border);padding-left:12px;">
-            <h4 style="font-size:13px;margin:0 0 6px;">Create new</h4>
+            <h4 class="u-md u-mh-6">Create new</h4>
             <div class="field">
               <label>Slug</label>
               <input type="text" id="sw-new-slug" placeholder="global-cooling"
@@ -12033,7 +12056,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       </div>
 
       <!-- Book scope -->
-      <div id="sb-book-pane" style="display:none;">
+      <div class="u-hidden" id="sb-book-pane">
         <p class="u-note-mb-m">
           Snapshot every draft across every chapter in this book.
           Restore walks each chapter bundle and creates new draft versions per section.
@@ -12123,12 +12146,12 @@ body.task-bar-open {{ padding-top: 40px; }}
                   title="Run the hybrid search. Streams results inline.">Search</button>
           <button onclick="doToolSearch('similar')" title="Find papers with a similar abstract to the one you typed (DOI or title fragment)">Similar</button>
         </div>
-        <div id="tl-search-status" style="font-size:12px;color:var(--fg-muted);margin:4px 0;"></div>
+        <div class="u-small u-muted u-my-1" id="tl-search-status"></div>
         <div class="u-mt-2" id="tl-search-results"></div>
       </div>
 
       <!-- Synthesize tab (sciknow ask synthesize) -->
-      <div id="tl-synth-pane" style="display:none;">
+      <div class="u-hidden" id="tl-synth-pane">
         <p class="u-note">
           Multi-paper synthesis on a topic &mdash; biases the prompt toward
           consensus, methods and open questions. Mirrors <code>sciknow ask synthesize</code>.
@@ -12157,11 +12180,11 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div class="u-note-sm" id="tl-synth-status"></div>
         <div class="modal-stream" id="tl-synth-stream"></div>
         <div id="tl-synth-stats" class="stream-stats"></div>
-        <div class="modal-sources" id="tl-synth-sources" style="display:none;"></div>
+        <div class="modal-sources u-hidden" id="tl-synth-sources"></div>
       </div>
 
       <!-- Topics tab (sciknow catalog topics + Phase 46.E domain tags) -->
-      <div id="tl-topics-pane" style="display:none;">
+      <div class="u-hidden" id="tl-topics-pane">
         <div class="u-flex-raw u-gap-3 u-ai-start">
           <div class="u-flex-2">
             <p class="u-note">
@@ -12200,7 +12223,7 @@ body.task-bar-open {{ padding-top: 40px; }}
     </div>
     <div class="modal-body">
       <!-- Corpus tab (Phase 46.E + 54.6.4 — expand/enrich/cleanup) -->
-      <div id="tl-corpus-pane" style="display:none;">
+      <div class="u-hidden" id="tl-corpus-pane">
         <p class="u-note-mb-3">
           Grow and enrich the paper corpus from the browser. Pick one of
           the modes below. All are long-running; the log streams at the
@@ -12357,8 +12380,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           </div>
           <div class="field">
             <label>Research question</label>
-            <textarea id="tl-ag-question" rows="3"
-                      style="width:100%;padding:8px;font-size:13px;line-height:1.45;"
+            <textarea class="u-w-full u-p-2 u-md u-lh-145" id="tl-ag-question" rows="3"
                       placeholder="e.g. What is the current best estimate of equilibrium climate sensitivity, and how confident are we?"></textarea>
           </div>
           <div class="field u-flex-raw u-gap-2 u-ai-end u-wrap u-mt-1">
@@ -12395,7 +12417,7 @@ body.task-bar-open {{ padding-top: 40px; }}
 
           <!-- Phase 54.6.116 (Tier 2 #4) — author oeuvre completion -->
           <div class="u-divider">
-            <h5 style="margin:0 0 6px;font-size:12px;">&#128100; Author oeuvre completion</h5>
+            <h5 class="u-mh-6 u-small">&#128100; Author oeuvre completion</h5>
             <p style="font-size:11px;color:var(--fg-muted);margin:0 0 8px;line-height:1.4;">
               Scan the corpus, find authors with ≥ N papers already present, run
               <code>expand-author</code> for each (ORCID-preferred, strict-author). Uses the same relevance + retraction + MMR filters as any other expansion.
@@ -12665,13 +12687,13 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button class="modal-close" onclick="closeModal('candidates-preview-modal')" title="Close the Candidates Preview modal.">&times;</button>
     </div>
     <div class="modal-body">
-      <div id="eap-loading" style="display:none;padding:20px;text-align:center;color:var(--fg-muted);">
+      <div class="u-p-20 u-text-center u-muted" id="eap-loading">
         <div class="u-lg" id="eap-loading-msg">Searching&hellip;</div>
         <div class="u-tiny u-mt-1 u-muted" id="eap-loading-sub"></div>
         <pre id="eap-loading-log" style="display:none;margin-top:10px;max-height:240px;overflow:auto;background:var(--bg-alt,#f8f8f8);border:1px solid var(--border);border-radius:4px;padding:8px;font-size:11px;font-family:ui-monospace,monospace;white-space:pre-wrap;text-align:left;"></pre>
       </div>
       <div id="eap-error" style="display:none;padding:10px;background:var(--danger-bg,#fee);color:var(--danger,#c53030);border:1px solid var(--danger,#c53030);border-radius:4px;margin-bottom:10px;"></div>
-      <div id="eap-content" style="display:none;">
+      <div class="u-hidden" id="eap-content">
         <div class="u-small u-muted u-mb-m u-p-2 u-bg-alt u-r-sm" id="eap-info"></div>
         <div class="u-row-wrap-mb">
           <button class="btn-secondary" onclick="eapSelectAll(true)"
@@ -12728,8 +12750,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div class="u-flex-raw u-gap-2 u-ai-center u-mt-3 u-wrap">
           <label class="u-kv-row">
             Workers:
-            <input type="number" id="eap-workers" value="0" min="0"
-                   style="width:60px;font-size:12px;padding:2px 4px;"
+            <input class="u-w-60 u-small u-p-2-4" type="number" id="eap-workers" value="0" min="0"
                    title="0 = INGEST_WORKERS from .env">
           </label>
           <label class="u-kv-row"
@@ -12891,7 +12912,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         <button class="btn-primary" onclick="loadKg(0)"
                 title="Apply the three filters and reload the graph + table.">Filter</button>
       </div>
-      <div id="kg-status" style="font-size:11px;color:var(--fg-muted);margin:8px 0;"></div>
+      <div class="u-tiny u-muted u-my-2" id="kg-status"></div>
       <!-- Graph tab pane (default) -->
       <div class="u-block" id="kg-graph-pane">
         <div class="kg-controls">
@@ -13122,7 +13143,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div id="viz-topic-chart" class="viz-chart"></div>
       </div>
       <!-- RAPTOR sunburst -->
-      <div id="viz-sunburst-pane" class="viz-pane" style="display:none;">
+      <div id="viz-sunburst-pane" class="viz-pane u-hidden">
         <div class="u-note-xs">
           Sunburst of the RAPTOR cluster hierarchy. Inner ring = highest-
           level summaries, outer rings = children. Click a slice to zoom in,
@@ -13133,7 +13154,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div id="viz-sunburst-chart" class="viz-chart"></div>
       </div>
       <!-- Consensus landscape -->
-      <div id="viz-consensus-pane" class="viz-pane" style="display:none;">
+      <div id="viz-consensus-pane" class="viz-pane u-hidden">
         <div class="u-note-xs">
           Every claim in the corpus for this topic, plotted on
           (# supporting) × (# contradicting) axes. Colour =
@@ -13151,7 +13172,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div id="viz-consensus-chart" class="viz-chart"></div>
       </div>
       <!-- Timeline river -->
-      <div id="viz-timeline-pane" class="viz-pane" style="display:none;">
+      <div id="viz-timeline-pane" class="viz-pane u-hidden">
         <div class="u-note-xs">
           Stacked-area of papers per year, coloured by BERTopic cluster.
           The "history of the field" view. Drag the mini-map below the
@@ -13162,7 +13183,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div id="viz-timeline-chart" class="viz-chart"></div>
       </div>
       <!-- Ego radial -->
-      <div id="viz-ego-pane" class="viz-pane" style="display:none;">
+      <div id="viz-ego-pane" class="viz-pane u-hidden">
         <div class="u-note-xs">
           Pick a paper, see its top-K nearest papers arranged on a
           polar plot. Radius = cosine distance (closer → centre);
@@ -13180,7 +13201,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div id="viz-ego-chart" class="viz-chart"></div>
       </div>
       <!-- Gap radar -->
-      <div id="viz-radar-pane" class="viz-pane" style="display:none;">
+      <div id="viz-radar-pane" class="viz-pane u-hidden">
         <div class="u-note-xs">
           Per-chapter section coverage for this book. Each polygon is
           one chapter over six canonical axes (intro / methods /
@@ -13203,7 +13224,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button class="modal-close" onclick="closeModal('export-modal')" title="Close the Export modal.">&times;</button>
     </div>
     <div class="modal-body">
-      <p style="font-size:12px;color:var(--fg-muted);margin-bottom:14px;">
+      <p class="u-small u-muted u-mb-14">
         <strong>PDF</strong> is rendered server-side via weasyprint &mdash; ready for
         printing or sharing. <strong>HTML</strong> is the same content with print-friendly
         CSS, useful as a fallback or for editing in another tool.
@@ -13432,7 +13453,7 @@ function showChapterEmptyState(chLabel, chId) {{
     html += '<button class="section-chip' + active + '" data-action="set-section-type" data-sec-type="' + s + '" title="Switch the active draft to this section type. Each section gets its own draft + section-specific writer prompt.">' + s.replace(/_/g, ' ') + '</button>';
   }});
   html += '</div>';
-  html += '<p style="margin-top:16px;font-size:12px;color:var(--fg-muted);">Tip: you can also explore the corpus without writing anything &mdash; use <strong>Ask Corpus</strong>, <strong>Wiki Query</strong>, or <strong>Browse Papers</strong>. The book&#39;s overall <strong>&#128221; Plan</strong> is also editable from the toolbar.</p>';
+  html += '<p class="u-mt-4 u-small u-muted">Tip: you can also explore the corpus without writing anything &mdash; use <strong>Ask Corpus</strong>, <strong>Wiki Query</strong>, or <strong>Browse Papers</strong>. The book&#39;s overall <strong>&#128221; Plan</strong> is also editable from the toolbar.</p>';
   html += '</div>';
   document.getElementById('read-view').innerHTML = html;
   document.getElementById('read-view').style.display = 'block';
@@ -13648,7 +13669,7 @@ function startStream(jobId) {{
     }}
     else if (evt.type === 'checkpoint') {{
       // Phase 15.1 — incremental save reached. Briefly note in the body.
-      body.innerHTML += '<div style="font-size:11px;color:var(--success);padding:4px 0;">' +
+      body.innerHTML += '<div class="u-tiny u-success u-py-1">' +
         '\\u2693 checkpoint saved · ' + (evt.stage || '') + ' · ' +
         (evt.word_count || 0) + ' words</div>';
     }}
@@ -13665,7 +13686,7 @@ function startStream(jobId) {{
     }}
     else if (evt.type === 'error') {{
       status.textContent = 'Error: ' + evt.message;
-      body.innerHTML += '<div style="color:var(--danger);margin:8px 0;">' + evt.message + '</div>';
+      body.innerHTML += '<div class="u-danger u-my-2">' + evt.message + '</div>';
       stats.done('error');
       setStreamCursor(body, false);
       hideStreamPanel();
@@ -13680,7 +13701,7 @@ function startStream(jobId) {{
       // pure progress events.
       const delta = (evt.new_target || 0) - (evt.base_target || 0);
       const deltaStr = (delta >= 0 ? '+' : '') + delta.toLocaleString();
-      body.innerHTML += '<div style="font-size:11px;color:var(--accent);padding:4px 0;" '
+      body.innerHTML += '<div class="u-tiny u-accent u-py-1" '
         + 'title="' + _escHtml(evt.explanation || '') + '">'
         + '&#9876; density widener: ' + (evt.n_chunks || 0) + ' chunks · '
         + 'target ' + (evt.base_target || 0).toLocaleString() + ' &rarr; '
@@ -13692,7 +13713,7 @@ function startStream(jobId) {{
       // ceiling). Soft warning, non-blocking: autowrite still runs at
       // the requested target, but the user sees that the section is
       // above the comfort band.
-      body.innerHTML += '<div style="font-size:11px;color:var(--warning);padding:4px 0;" '
+      body.innerHTML += '<div class="u-tiny u-warning u-py-1" '
         + 'title="' + _escHtml(evt.explanation || '') + '">'
         + '&#9888;&#65039; section length: '
         + (evt.target || 0).toLocaleString() + ' words exceeds the '
@@ -13869,8 +13890,8 @@ function startGlobalJob(jobId, opts) {{
   }};
 
   // Show buttons in their starting state
-  document.getElementById('tb-stop').style.display = '';
-  document.getElementById('tb-dismiss').style.display = 'none';
+  document.getElementById('tb-stop').classList.remove('u-hidden');
+  document.getElementById('tb-dismiss').classList.add('u-hidden');
 
   _renderTaskBar();
 
@@ -13890,8 +13911,8 @@ function _finishGlobalJob(state, autoDismissMs) {{
   _globalJob.state = state;
   _renderTaskBar();
   // Show the dismiss button instead of the stop button
-  document.getElementById('tb-stop').style.display = 'none';
-  document.getElementById('tb-dismiss').style.display = '';
+  document.getElementById('tb-stop').classList.add('u-hidden');
+  document.getElementById('tb-dismiss').classList.remove('u-hidden');
   // Auto-dismiss after the grace period (0 = wait for user)
   if (autoDismissMs > 0) {{
     setTimeout(() => {{
@@ -16685,7 +16706,7 @@ async function showDashboard() {{
     return Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm';
   }};
   if ((tc.total_jobs || 0) > 0) {{
-    html += '<h3 style="margin:24px 0 12px;font-size:14px;font-weight:600;color:var(--fg-muted);text-transform:uppercase;letter-spacing:0.04em;">Total Compute</h3>';
+    html += '<h3 class="u-heading-section u-lg u-semibold u-muted u-upper u-ls-sm">Total Compute</h3>';
     html += '<div class="stat-grid">';
     html += '<div class="stat-tile"><div class="num">' + fmtTokens(tc.total_tokens) + '</div><div class="lbl">Total Tokens</div></div>';
     html += '<div class="stat-tile"><div class="num">' + fmtSecs(tc.total_seconds) + '</div><div class="lbl">Total Time</div></div>';
@@ -16710,7 +16731,7 @@ async function showDashboard() {{
   // Shows cumulative token usage + time spent across all completed runs.
   const aw = data.autowrite_stats || {{}};
   if (aw.total_runs > 0) {{
-    html += '<h3 style="margin:24px 0 12px;font-size:14px;font-weight:600;color:var(--fg-muted);text-transform:uppercase;letter-spacing:0.04em;">Autowrite Effort</h3>';
+    html += '<h3 class="u-heading-section u-lg u-semibold u-muted u-upper u-ls-sm">Autowrite Effort</h3>';
     html += '<div class="stat-grid">';
     html += '<div class="stat-tile"><div class="num">' + (aw.total_runs || 0) + '</div><div class="lbl">Runs</div></div>';
     const tokStr = (aw.total_tokens || 0) >= 1000
@@ -16729,7 +16750,7 @@ async function showDashboard() {{
 
   // Phase 14 — Corpus stats panel (mirrors `db stats` + RAPTOR + topics)
   if (corpusStats) {{
-    html += '<h3 style="margin:24px 0 12px;font-size:14px;font-weight:600;color:var(--fg-muted);text-transform:uppercase;letter-spacing:0.04em;">Corpus</h3>';
+    html += '<h3 class="u-heading-section u-lg u-semibold u-muted u-upper u-ls-sm">Corpus</h3>';
     html += '<div class="stat-grid">';
     html += '<div class="stat-tile"><div class="num">' + (corpusStats.n_documents || 0).toLocaleString() + '</div><div class="lbl">Documents</div>';
     if (corpusStats.n_completed != null) {{
@@ -17308,7 +17329,7 @@ async function doVerify() {{
       status.textContent = 'Groundedness: ' + grStr + '  ·  Hedging fidelity: ' + hfStr;
 
       // Show results in stream body
-      let html = '<div style="font-family:-apple-system,sans-serif;">';
+      let html = '<div class="u-sys">';
       html += '<div style="font-size:18px;font-weight:bold;margin-bottom:12px;">Groundedness: ' +
         '<span style="color:' + (vd.groundedness_score >= 0.8 ? 'var(--success)' : vd.groundedness_score >= 0.6 ? 'var(--warning)' : 'var(--danger)') + '">' +
         grStr + '</span>' +
@@ -17329,7 +17350,7 @@ async function doVerify() {{
           html += '<div style="margin:6px 0;padding:6px 10px;border-left:3px solid ' + color + ';background:var(--toolbar-bg);border-radius:4px;">';
           html += '<span style="font-weight:bold;color:' + color + ';">' + c.verdict + '</span> ';
           html += '<span class="u-small">' + c.citation + '</span><br>';
-          html += '<span style="font-size:12px;opacity:0.7;">' + (c.text || '').substring(0, 120) + '</span>';
+          html += '<span class="u-small u-dim-7">' + (c.text || '').substring(0, 120) + '</span>';
           if (c.reason) html += '<br><span class="u-tiny u-dim">' + c.reason + '</span>';
           html += '</div>';
         }});
@@ -17338,7 +17359,7 @@ async function doVerify() {{
       if (vd.unsupported_claims && vd.unsupported_claims.length > 0) {{
         html += '<div class="u-mt-3 u-bold u-danger">Unsupported Claims:</div>';
         vd.unsupported_claims.forEach(u => {{
-          html += '<div style="font-size:12px;color:var(--danger);margin:4px 0;">- ' + u.substring(0, 120) + '</div>';
+          html += '<div class="u-small u-danger u-my-1">- ' + u.substring(0, 120) + '</div>';
         }});
       }}
       html += '</div>';
@@ -17476,7 +17497,7 @@ async function doAdversarialReview() {{
   const body = document.getElementById('stream-body');
   const status = document.getElementById('stream-status');
   body.innerHTML = '<h3 class="u-mb-m">&#128126; Adversarial review</h3>'
-    + '<div id="adv-output" style="font-family:-apple-system,sans-serif;font-size:14px;line-height:1.5;"></div>';
+    + '<div class="u-sys u-lg u-lh-1-5" id="adv-output"></div>';
   const out = document.getElementById('adv-output');
   let buf = '';
   source.onmessage = function(e) {{
@@ -17546,7 +17567,7 @@ async function doEdgeCases() {{
         '<td class="u-p-6-8 u-vat"><span style="color:'
           + sevColor[sev] + ';font-weight:bold;font-size:11px;text-transform:uppercase;">'
           + sev + '</span></td>'
-        + '<td style="padding:6px 8px;vertical-align:top;font-style:italic;">' + _escHtml(f.location || '') + '</td>'
+        + '<td class="u-p-6-8 u-vat u-italic">' + _escHtml(f.location || '') + '</td>'
         + '<td class="u-p-6-8 u-vat">' + _escHtml(f.trigger || '') + '</td>'
         + '<td class="u-p-6-8 u-vat u-muted">' + _escHtml(f.consequence || '') + '</td>';
       tbody.appendChild(tr);
@@ -17572,7 +17593,7 @@ function _runCliActionForDraft(argv, title, startMsg) {{
   showStreamPanel(startMsg);
   const body = document.getElementById('stream-body');
   body.innerHTML = '<h3 class="u-mb-m">' + title + '</h3>'
-    + '<pre id="cli-action-out" style="white-space:pre-wrap;font-family:var(--font-mono);font-size:12px;line-height:1.45;"></pre>';
+    + '<pre class="u-pre u-mono u-small u-lh-145" id="cli-action-out"></pre>';
   const out = document.getElementById('cli-action-out');
   const status = document.getElementById('stream-status');
   fetch('/api/cli-stream', {{
@@ -17984,7 +18005,7 @@ async function confirmAutowrite() {{
       const vd = evt.data || {{}};
       const grStr = (vd.groundedness_score != null) ? vd.groundedness_score.toFixed(2) : '?';
       const hfStr = (vd.hedging_fidelity_score != null) ? vd.hedging_fidelity_score.toFixed(2) : '?';
-      awLog.innerHTML += '<div style="opacity:0.7;font-size:11px;">verify: gr=' + grStr + ' · hf=' + hfStr + '</div>';
+      awLog.innerHTML += '<div class="u-dim-7 u-tiny">verify: gr=' + grStr + ' · hf=' + hfStr + '</div>';
     }}
     else if (evt.type === 'iteration_start') {{
       awContent.innerHTML = '';
@@ -18027,13 +18048,13 @@ async function confirmAutowrite() {{
     }}
     // Phase 20 — multi-section autowrite envelope events
     else if (evt.type === 'chapter_autowrite_start') {{
-      awLog.innerHTML += '<div style="font-weight:bold;border-top:1px solid var(--border);padding-top:6px;margin-top:6px;">' +
+      awLog.innerHTML += '<div class="u-bold u-border-t u-pt-6 u-mt-6">' +
         '\\u270e Chapter autowrite: ' + evt.n_sections + ' sections' +
         (evt.rebuild ? ' (rebuild mode)' : '') + '</div>';
     }}
     else if (evt.type === 'section_start') {{
       const skip = evt.skipped ? ' [SKIPPED — already drafted]' : '';
-      awLog.innerHTML += '<div style="font-weight:600;color:var(--accent);border-top:1px solid var(--border);padding-top:6px;margin-top:6px;">' +
+      awLog.innerHTML += '<div class="u-semibold u-accent u-border-t u-pt-6 u-mt-6">' +
         '\\u25b6 Section ' + evt.index + '/' + evt.total + ': ' + evt.title + skip + '</div>';
       status.textContent = 'Section ' + evt.index + '/' + evt.total + ': ' + evt.title +
         (evt.skipped ? ' (skipping)' : '');
@@ -18057,7 +18078,7 @@ async function confirmAutowrite() {{
       status.textContent = 'Chapter done: ' + evt.n_completed + '/' + evt.n_total +
         ' written, ' + evt.n_skipped + ' skipped' +
         (evt.n_failed > 0 ? ', ' + evt.n_failed + ' failed' : '');
-      awLog.innerHTML += '<div class="log-keep" style="font-weight:bold;border-top:1px solid var(--border);padding-top:6px;margin-top:6px;">' +
+      awLog.innerHTML += '<div class="log-keep u-bold u-border-t u-pt-6 u-mt-6">' +
         '\\u2713 Chapter complete: ' + evt.n_completed + ' written, ' +
         evt.n_skipped + ' skipped, ' + evt.n_failed + ' failed</div>';
       stats.done('done');
@@ -18967,7 +18988,7 @@ function _renderConsensus(data, summaryEl, claimsEl, debatedEl) {{
   }};
   const claims = data.claims || [];
   if (claims.length) {{
-    let html = '<div style="font-size:11px;font-weight:bold;color:var(--fg-muted);margin:8px 0;">CLAIMS</div>';
+    let html = '<div class="u-tiny u-bold u-muted u-my-2">CLAIMS</div>';
     for (const c of claims) {{
       const level = (c.consensus_level || 'unknown').toLowerCase();
       const color = colorOf[level] || 'var(--fg-muted)';
@@ -19220,7 +19241,7 @@ async function loadWikiVisuals() {{
     }}
   }} catch (e) {{ /* non-fatal */ }}
 
-  list.innerHTML = '<div style="padding:16px;color:var(--fg-muted);">Loading ' + kind + 's…</div>';
+  list.innerHTML = '<div class="u-p-4 u-muted">Loading ' + kind + 's…</div>';
 
   const params = new URLSearchParams({{kind: kind, limit: String(limit)}});
   if (query) params.set('query', query);
@@ -19293,7 +19314,7 @@ function renderWikiVisuals(items, kind) {{
            +  '<div style="font-weight:600;margin-bottom:2px;">' + fn + '</div>'
            +  (caption ? '<div style="color:var(--fg-muted);line-height:1.35;max-height:3.6em;overflow:hidden;">' + caption + '</div>' : '')
            +  (ai ? '<div style="color:var(--fg);line-height:1.4;margin-top:4px;padding:4px 6px;background:var(--bg-alt,#f5f5f5);border-radius:4px;font-size:10.5px;max-height:7em;overflow:hidden;" title="' + _escHtml(v.ai_caption || '') + '"><strong style="color:var(--accent,dodgerblue);">AI:</strong> ' + ai + '</div>' : '')
-           +  '<div style="color:var(--fg-muted);margin-top:4px;font-style:italic;">' + paper + year + '</div>'
+           +  '<div class="u-muted u-mt-1 u-italic">' + paper + year + '</div>'
            +  '</div>'
            +  '</div>';
     }}
@@ -19331,8 +19352,8 @@ function renderWikiVisuals(items, kind) {{
            + 'border-radius:4px;padding:8px;font-size:11px;">'
            + _escHtml(v.content || '') + '</pre>';
     }}
-    html += '<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:10px;">'
-         +  '<div style="font-size:11px;color:var(--fg-muted);margin-bottom:4px;font-style:italic;">'
+    html += '<div class="u-border u-r-8 u-p-10 u-mb-m">'
+         +  '<div class="u-tiny u-muted u-mb-1 u-italic">'
          +  paper + '</div>'
          +  (caption ? '<div class="u-small u-mb-6">' + caption + '</div>' : '')
          +  body
@@ -21213,7 +21234,7 @@ async function refreshPendingDownloads() {{
   const url = '/api/pending-downloads?status=' + encodeURIComponent(status)
             + (source ? '&source=' + encodeURIComponent(source) : '');
   const tbody = document.getElementById('pdl-tbody');
-  tbody.innerHTML = '<tr><td colspan="8" style="padding:20px;text-align:center;color:var(--fg-muted);">Loading…</td></tr>';
+  tbody.innerHTML = '<tr><td class="u-p-20 u-text-center u-muted" colspan="8">Loading…</td></tr>';
   try {{
     const res = await fetch(url);
     if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -21223,7 +21244,7 @@ async function refreshPendingDownloads() {{
     document.getElementById('pdl-count').textContent = data.count + ' row(s)';
     _renderPendingTable();
   }} catch (exc) {{
-    tbody.innerHTML = '<tr><td colspan="8" style="padding:16px;color:var(--danger);">Failed: '
+    tbody.innerHTML = '<tr><td class="u-p-4 u-danger" colspan="8">Failed: '
       + _escHtml(exc.message) + '</td></tr>';
   }}
 }}
@@ -21231,7 +21252,7 @@ async function refreshPendingDownloads() {{
 function _renderPendingTable() {{
   const tbody = document.getElementById('pdl-tbody');
   if (!_pdlRows.length) {{
-    tbody.innerHTML = '<tr><td colspan="8" style="padding:20px;text-align:center;color:var(--fg-muted);">'
+    tbody.innerHTML = '<tr><td class="u-p-20 u-text-center u-muted" colspan="8">'
       + 'No rows for the current filter.</td></tr>';
     _pdlUpdateHeaderCb();
     return;
@@ -22889,10 +22910,10 @@ function populatePlanSectionTab(chapterId, sectionSlug) {{
   }}
   if (customInput) {{
     if (tw && !presets.includes(tw)) {{
-      customInput.style.display = '';
+      customInput.classList.remove('u-hidden');
       customInput.value = String(tw);
     }} else {{
-      customInput.style.display = 'none';
+      customInput.classList.add('u-hidden');
       customInput.value = '';
     }}
   }}
@@ -22931,11 +22952,11 @@ function updatePlanSectionTargetWords(value) {{
   const customInput = document.getElementById('plan-section-target-custom');
   if (value === '' || value === 'auto') {{
     _editingPlanSectionTargetWords = null;
-    if (customInput) {{ customInput.style.display = 'none'; customInput.value = ''; }}
+    if (customInput) {{ customInput.classList.add('u-hidden'); customInput.value = ''; }}
   }} else if (value === 'custom') {{
     if (!_editingPlanSectionTargetWords) _editingPlanSectionTargetWords = 1500;
     if (customInput) {{
-      customInput.style.display = '';
+      customInput.classList.remove('u-hidden');
       customInput.value = String(_editingPlanSectionTargetWords);
       customInput.focus();
       customInput.select();
@@ -22943,7 +22964,7 @@ function updatePlanSectionTargetWords(value) {{
   }} else {{
     const n = parseInt(value, 10);
     _editingPlanSectionTargetWords = isNaN(n) ? null : n;
-    if (customInput) {{ customInput.style.display = 'none'; customInput.value = ''; }}
+    if (customInput) {{ customInput.classList.add('u-hidden'); customInput.value = ''; }}
   }}
   // Re-fetch num sections from the active chapter for the badge.
   const ch = chaptersData.find(c => c.id === _planContext.chapterId);
@@ -23236,7 +23257,7 @@ async function runOutlineFromTab() {{
   )) return;
 
   btn.disabled = true;
-  if (cancelBtn) cancelBtn.style.display = '';
+  if (cancelBtn) cancelBtn.classList.remove('u-hidden');
   result.innerHTML = '';
   stream.style.display = 'block';
   stream.textContent = '';
@@ -23254,7 +23275,7 @@ async function runOutlineFromTab() {{
   }} catch (exc) {{
     status.textContent = 'Request failed: ' + exc.message;
     btn.disabled = false;
-    if (cancelBtn) cancelBtn.style.display = 'none';
+    if (cancelBtn) cancelBtn.classList.add('u-hidden');
     return;
   }}
   const data = await res.json();
@@ -23278,7 +23299,7 @@ async function runOutlineFromTab() {{
         + evt.n_inserted + '</strong> new chapter(s), <strong>'
         + evt.n_skipped + '</strong> skipped (already existed).</span>';
       btn.disabled = false;
-      if (cancelBtn) cancelBtn.style.display = 'none';
+      if (cancelBtn) cancelBtn.classList.add('u-hidden');
       // Pull fresh chapter list so both sidebar AND the inline result
       // preview reflect what just landed.
       try {{
@@ -23301,11 +23322,11 @@ async function runOutlineFromTab() {{
       source.close(); _outlineSource = null;
       status.innerHTML = '<span class="u-danger">\\u2717 ' + (evt.message || 'error') + '</span>';
       btn.disabled = false;
-      if (cancelBtn) cancelBtn.style.display = 'none';
+      if (cancelBtn) cancelBtn.classList.add('u-hidden');
     }} else if (evt.type === 'done') {{
       source.close(); _outlineSource = null;
       btn.disabled = false;
-      if (cancelBtn) cancelBtn.style.display = 'none';
+      if (cancelBtn) cancelBtn.classList.add('u-hidden');
     }}
   }};
 }}
@@ -23316,7 +23337,7 @@ function cancelOutline() {{
   const cancelBtn = document.getElementById('plan-outline-cancel-btn');
   const status = document.getElementById('plan-outline-status');
   if (btn) btn.disabled = false;
-  if (cancelBtn) cancelBtn.style.display = 'none';
+  if (cancelBtn) cancelBtn.classList.add('u-hidden');
   if (status) status.textContent = 'Cancelled (stream disconnected — any chapters already committed stay).';
 }}
 
@@ -24572,7 +24593,7 @@ async function showCorkboard() {{
   const res = await fetch('/api/corkboard');
   const data = await res.json();
 
-  let html = '<div style="font-family:-apple-system,sans-serif;">';
+  let html = '<div class="u-sys">';
   html += '<h2>Corkboard</h2>';
   html += '<p class="u-small u-dim u-mb-3">Click a card to navigate. Color = status.</p>';
   html += '<div class="corkboard">';
@@ -24638,9 +24659,9 @@ async function showChapterReader() {{
   // jump straight to any section.
   if (data.outline && data.outline.length > 0) {{
     html += '<div style="margin-bottom:24px;padding:12px 16px;background:var(--toolbar-bg);border-radius:6px;font-size:13px;">';
-    html += '<div style="font-weight:600;margin-bottom:6px;color:var(--fg-muted);font-size:11px;text-transform:uppercase;letter-spacing:0.04em;">Sections</div>';
+    html += '<div class="u-semibold u-mb-6 u-muted u-tiny u-upper u-ls-sm">Sections</div>';
     data.outline.forEach((o, i) => {{
-      html += '<div style="margin:4px 0;"><a href="#reader-section-' + o.slug + '" style="color:var(--accent);text-decoration:none;">' + (i + 1) + '. ' + escapeHtml(o.title) + '</a> <span class="u-hint">' + o.words + 'w</span></div>';
+      html += '<div class="u-my-1"><a href="#reader-section-' + o.slug + '" style="color:var(--accent);text-decoration:none;">' + (i + 1) + '. ' + escapeHtml(o.title) + '</a> <span class="u-hint">' + o.words + 'w</span></div>';
     }});
     html += '</div>';
   }}
@@ -25434,7 +25455,7 @@ async function diffSnapshot(snapId) {{
   const diffRes = await fetch('/api/diff/' + 'snapshot' + '/' + currentDraftId);
   // Fallback: show snapshot content with note
   html = '<div class="u-mb-2 u-bold">Snapshot content:</div>';
-  html += '<div style="opacity:0.7;white-space:pre-wrap;">' + snapData.content.substring(0, 5000).replace(/</g, '&lt;') + '</div>';
+  html += '<div class="u-dim-7 u-pre">' + snapData.content.substring(0, 5000).replace(/</g, '&lt;') + '</div>';
   document.getElementById('diff-view').innerHTML = html;
 }}
 
@@ -26294,7 +26315,7 @@ async function refreshBackupsList() {{
       const human = sched.human || sched.cron_expression || '?';
       statusHtml += '<strong>Schedule:</strong> ' + human
         + ' <span class="u-hint">(cron: ' + sched.cron_expression + ')</span>';
-      if (unschedBtn) unschedBtn.style.display = '';
+      if (unschedBtn) unschedBtn.classList.remove('u-hidden');
       // Populate the schedule form with current values
       const freq = sched.frequency || 'daily';
       const freqEl = document.getElementById('backup-sched-freq');
@@ -26311,7 +26332,7 @@ async function refreshBackupsList() {{
       _updateScheduleFormVisibility();
     }} else {{
       statusHtml += '<span class="u-muted">No schedule active.</span>';
-      if (unschedBtn) unschedBtn.style.display = 'none';
+      if (unschedBtn) unschedBtn.classList.add('u-hidden');
     }}
     status.innerHTML = statusHtml;
 
@@ -26584,7 +26605,7 @@ async function refreshVenueConfig() {{
     const render = (items, ulEl, kind) => {{
       if (!ulEl) return;
       if (!items.length) {{
-        ulEl.innerHTML = '<li style="color:var(--fg-muted);padding:4px 0;">(empty)</li>';
+        ulEl.innerHTML = '<li class="u-muted u-py-1">(empty)</li>';
         return;
       }}
       ulEl.innerHTML = items.map(p => {{
