@@ -7790,9 +7790,30 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .u-row-sm   {{ display: flex; align-items: center; gap: 4px; }}
 .u-col      {{ display: flex; flex-direction: column; }}
 .u-flex-1   {{ flex: 1; }}
+.u-flex-2   {{ flex: 2; }}
 .u-border-b {{ border-bottom: 1px solid var(--border); }}
 .u-divider  {{ border-top: 1px dashed var(--border);
               padding-top: 10px; margin-top: 14px; }}
+/* Phase 54.6.181 — purge wave 2 utilities. Row layouts + table
+   cell padding + common spacing shortcuts. */
+.u-row-wrap {{ display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }}
+.u-row-end  {{ display: flex; gap: 8px; align-items: flex-end; }}
+.u-row-start {{ display: flex; gap: 8px; align-items: flex-start; }}
+.u-text-center {{ text-align: center; }}
+.u-text-right  {{ text-align: right; }}
+.u-mt-1     {{ margin-top: 4px; }}
+.u-mt-2     {{ margin-top: 8px; }}
+.u-mt-3     {{ margin-top: 12px; }}
+.u-mb-1     {{ margin-bottom: 4px; }}
+.u-mb-2     {{ margin-bottom: 8px; }}
+.u-mb-3     {{ margin-bottom: 12px; }}
+.u-w-full   {{ width: 100%; }}
+.u-table-full {{ width: 100%; border-collapse: collapse; }}
+.u-td       {{ padding: 8px; vertical-align: top; }}
+.u-td-thin  {{ padding: 8px 0; vertical-align: top; }}
+.u-pill     {{ padding: 2px 8px; }}
+.u-pill-md  {{ padding: 4px 8px; }}
+.u-pill-lg  {{ padding: 6px 8px; }}
 
 /* ── Phase 54.6.168 — Monoline icon system.
    Inline SVG sprite at the top of <body> defines <symbol>s;
@@ -9930,7 +9951,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       <div class="editor-preview" id="edit-preview"
            title="Live-rendered preview of the markdown source."></div>
     </div>
-    <div style="margin-top:8px;">
+    <div class="u-mt-2">
       <button class="edit-btn" onclick="edSave()"
               title="Save immediately. The autosave also fires every 5s.">Save</button>
       <button class="edit-btn" style="background:var(--danger);" onclick="toggleEdit()"
@@ -10067,7 +10088,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                  oninput="renderWikiSummaries()"
                  title="Substring match against paper title, authors, or slug. Filters live as you type."/>
           <label class="u-hint-sm">Sort:</label>
-          <select id="wiki-sum-sort" onchange="renderWikiSummaries()" style="padding:4px 8px;"
+          <select class="u-pill-md" id="wiki-sum-sort" onchange="renderWikiSummaries()"
                   title="How to order the summary list.">
             <option value="year_desc">Year (newest first)</option>
             <option value="year_asc">Year (oldest first)</option>
@@ -10083,7 +10104,7 @@ body.task-bar-open {{ padding-top: 40px; }}
            with actual image rendering for figures via /api/visuals/image. -->
       <div class="tab-pane" id="wiki-visuals-pane" style="display:none;">
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
-          <select id="wiki-vis-kind" onchange="loadWikiVisuals()" style="padding:4px 8px;"
+          <select class="u-pill-md" id="wiki-vis-kind" onchange="loadWikiVisuals()"
                   title="Which visual kind to show. Figures/charts render as thumbnails; equations as KaTeX; tables as HTML; code in a pre block.">
             <option value="figure">Figures (thumbnails)</option>
             <option value="chart">Charts (thumbnails)</option>
@@ -10106,7 +10127,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       </div>
       <!-- Browse tab -->
       <div class="tab-pane" id="wiki-browse-pane" style="display:none;">
-        <div class="field" style="display:flex;gap:8px;align-items:flex-end;">
+        <div class="field u-row-end">
           <div class="u-flex-1">
             <label>Filter by type</label>
             <select id="wiki-type-filter" onchange="loadWikiPages(1)"
@@ -10117,7 +10138,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           <button class="btn-secondary" onclick="loadWikiPages(1)"
                   title="Re-fetch the wiki page list from the server.">Refresh</button>
         </div>
-        <div id="wiki-browse-list" style="margin-top:12px;"></div>
+        <div class="u-mt-3" id="wiki-browse-list"></div>
         <!-- Detail view (hidden until a page is opened) -->
         <div id="wiki-page-detail" style="display:none;">
           <div class="wiki-detail-toolbar">
@@ -10202,7 +10223,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           missing summaries, and optionally contradictions across paper
           summaries (deep mode uses the LLM — slower).
         </div>
-        <div class="field" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <div class="field u-row-wrap">
           <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
                  title="Also run LLM-based contradiction detection across paper summaries. Significantly slower (one LLM call per concept).">
             <input type="checkbox" id="wiki-lint-deep"
@@ -10214,7 +10235,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                   title="Cancel the running lint job.">Stop</button>
         </div>
         <div id="wiki-lint-status" style="margin-top:8px;font-size:12px;color:var(--fg-muted);"></div>
-        <div id="wiki-lint-summary" style="margin-top:8px;"></div>
+        <div class="u-mt-2" id="wiki-lint-summary"></div>
         <div id="wiki-lint-issues" style="margin-top:10px;max-height:calc(70vh - 160px);overflow:auto;"></div>
         <!-- Phase 54.6.8 — KG backfill utility. If the Knowledge Graph
              modal is empty for your corpus, this is the fix: older wiki
@@ -10229,7 +10250,7 @@ body.task-bar-open {{ padding-top: 40px; }}
             extraction step. Runs one LLM call per orphan paper (no
             re-summarizing). Mirrors <code>sciknow wiki extract-kg</code>.
           </div>
-          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <div class="u-row-wrap">
             <label style="display:flex;align-items:center;gap:4px;font-weight:400;font-size:12px;"
                    title="Re-run KG extraction on every paper, not just those with zero triples. Expensive — use only after changing the extraction prompt or model.">
               <input type="checkbox" id="wiki-extractkg-force"
@@ -10461,7 +10482,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         </div>
         <div class="field">
           <label>Target chapter length &mdash; autowrite &amp; write aim for this many words per chapter</label>
-          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <div class="u-row-wrap">
             <button type="button" class="btn-secondary" onclick="setLengthPreset(3000)"
                     title="3000 words per chapter — blog-post length. About 750 words per section in a 4-section chapter.">Short &middot; 3000</button>
             <button type="button" class="btn-secondary" onclick="setLengthPreset(6000)"
@@ -10542,7 +10563,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           moves to the <strong>Sections</strong> tab.
         </p>
         <div id="plan-chapters-list" style="display:flex;flex-direction:column;gap:10px;"></div>
-        <div style="margin-top:12px;">
+        <div class="u-mt-3">
           <button class="btn-secondary" onclick="addPlanChapter()"
                   title="Append a new empty chapter to the book at the next chapter number.">+ Add chapter</button>
         </div>
@@ -10696,13 +10717,13 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button class="modal-close" onclick="closeModal('catalog-modal')" title="Close the Browse Papers modal.">&times;</button>
     </div>
     <div class="modal-body">
-      <div class="field" style="display:flex;gap:8px;align-items:flex-end;">
-        <div style="flex:2;">
+      <div class="field u-row-end">
+        <div class="u-flex-2">
           <label>Author</label>
           <input type="text" id="cat-author" placeholder="(any)"
                  title="Substring match against the authors field. Partial names are fine (e.g. 'Lockwood' will match 'M. Lockwood').">
         </div>
-        <div style="flex:2;">
+        <div class="u-flex-2">
           <label>Journal</label>
           <input type="text" id="cat-journal" placeholder="(any)"
                  title="Substring match against the journal/venue name. Useful to e.g. filter 'Nature' papers.">
@@ -10720,7 +10741,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         <button class="btn-primary" onclick="loadCatalog(1)"
                 title="Apply the filter and reload the paper list from page 1.">Filter</button>
       </div>
-      <div id="catalog-results" style="margin-top:12px;"></div>
+      <div class="u-mt-3" id="catalog-results"></div>
     </div>
   </div>
 </div>
@@ -10762,7 +10783,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           <input type="text" id="bs-description" placeholder="One-line blurb shown in catalog / stats"
                  title="Free-text blurb for the catalog + stats. NOT injected into writer prompts — use the Leitmotiv tab for thesis-level guidance."/>
         </div>
-        <div class="field" style="display:flex;gap:8px;align-items:flex-end;">
+        <div class="field u-row-end">
           <div class="u-flex-1">
             <label>Project type</label>
             <select id="bs-book-type" onchange="bsUpdateTypeInfo()"
@@ -10788,7 +10809,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         </p>
         <!-- Phase 54.6.156 — book-wide auto-plan wrapper for the 54.6.154 CLI. -->
         <div style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--border);">
-          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <div class="u-row-wrap">
             <button class="btn-secondary" onclick="autoPlanEntireBook()"
                     title="Phase 54.6.156 — iterate every chapter × every empty section and ask LLM_FAST_MODEL for a 3-4 bullet concept plan per section. Uses the same generator as the Chapter modal's per-chapter button (54.6.155) but scoped to the whole book. Cost: ~5-10s per empty section (typical book ≈ 4-8 min). Streams progress into a log panel. Skips sections that already have a plan unless 'Force overwrite' is ticked. Activates the Phase-54.6.146 concept-density resolver across the book in one click.">
               &#129504; Auto-plan entire book
@@ -10814,7 +10835,7 @@ body.task-bar-open {{ padding-top: 40px; }}
              whole book's per-chapter + per-section projected target +
              resolver level without leaving the GUI. -->
         <div style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--border);">
-          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <div class="u-row-wrap">
             <strong class="u-small">&#128196; Projected length report</strong>
             <button class="btn-secondary" onclick="loadBookLengthReportPanel()"
                     style="font-size:11px;padding:2px 8px;"
@@ -10832,7 +10853,7 @@ body.task-bar-open {{ padding-top: 40px; }}
              §24 alignment tags) inline so users don't need to run
              the CLI to see where their corpus sits vs reference. -->
         <div style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--border);">
-          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <div class="u-row-wrap">
             <strong class="u-small">&#128202; Corpus section-length distribution</strong>
             <button class="btn-secondary" onclick="loadSectionLengthPanel()"
                     style="font-size:11px;padding:2px 8px;"
@@ -10997,9 +11018,9 @@ body.task-bar-open {{ padding-top: 40px; }}
       </p>
 
       <h4 style="margin:18px 0 8px;">&#128221; Planning &mdash; shape the book before writing</h4>
-      <table style="width:100%;border-collapse:collapse;">
+      <table class="u-table-full">
         <tr class="u-border-b"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>Outline</strong><br><em class="u-hint">Plan modal &rarr; Outline tab</em></td>
-          <td style="padding:8px;vertical-align:top;">
+          <td class="u-td">
             Proposes a chapter structure from your paper corpus. Generates 3 candidate outlines
             at rising temperatures, scores each for breadth + section-count variance, picks the
             winner, then density-resizes each chapter&rsquo;s section list by counting corpus
@@ -11007,8 +11028,8 @@ body.task-bar-open {{ padding-top: 40px; }}
             <em>Use when:</em> bootstrapping a new book or expanding the plan.
             <em>Produces:</em> new <code>book_chapters</code> rows. <em>CLI:</em> <code>book outline</code>.
           </td></tr>
-        <tr class="u-border-b"><td style="padding:8px 0;vertical-align:top;"><strong>Leitmotiv (Book plan)</strong><br><em class="u-hint">Plan modal &rarr; Book tab</em></td>
-          <td style="padding:8px;vertical-align:top;">
+        <tr class="u-border-b"><td class="u-td-thin"><strong>Leitmotiv (Book plan)</strong><br><em class="u-hint">Plan modal &rarr; Book tab</em></td>
+          <td class="u-td">
             The 200&ndash;500 word thesis document that gets injected into every <code>write</code> /
             <code>autowrite</code> call so all chapters stay aligned. Edit it by hand, or click
             <em>Regenerate with LLM</em>.
@@ -11018,32 +11039,32 @@ body.task-bar-open {{ padding-top: 40px; }}
       </table>
 
       <h4 style="margin:18px 0 8px;">&#9998; Writing &mdash; produce draft prose</h4>
-      <table style="width:100%;border-collapse:collapse;">
+      <table class="u-table-full">
         <tr class="u-border-b"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>AI Write</strong></td>
-          <td style="padding:8px;vertical-align:top;">
+          <td class="u-td">
             Single-pass draft of the current section. Retrieves sources, writes the prose, stops.
             Fast, but doesn&rsquo;t self-improve. <em>Use when:</em> you want a fresh baseline you&rsquo;ll
             hand-edit. <em>CLI:</em> <code>book write</code>.
           </td></tr>
-        <tr class="u-border-b"><td style="padding:8px 0;vertical-align:top;"><strong>AI Autowrite</strong></td>
-          <td style="padding:8px;vertical-align:top;">
+        <tr class="u-border-b"><td class="u-td-thin"><strong>AI Autowrite</strong></td>
+          <td class="u-td">
             Full convergence loop: <em>write &rarr; score &rarr; verify claims &rarr; revise &rarr; rescore</em>
             for up to 3 iterations or until overall score hits 0.85. Uses the writer model for
             prose and <code>AUTOWRITE_SCORER_MODEL</code> (gemopus4) for discrimination.
             <em>Use when:</em> you want a polished draft, not a starter.
             <em>CLI:</em> <code>book autowrite</code>.
           </td></tr>
-        <tr class="u-border-b"><td style="padding:8px 0;vertical-align:top;"><strong>Edit</strong></td>
-          <td style="padding:8px;vertical-align:top;">
+        <tr class="u-border-b"><td class="u-td-thin"><strong>Edit</strong></td>
+          <td class="u-td">
             Manual in-browser markdown editor with autosave, KaTeX math, and inline figure
             thumbnails. <em>Use when:</em> humans need to be humans.
           </td></tr>
       </table>
 
       <h4 style="margin:18px 0 8px;">&#128269; Critique &mdash; find what&rsquo;s wrong with a draft</h4>
-      <table style="width:100%;border-collapse:collapse;">
+      <table class="u-table-full">
         <tr class="u-border-b"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>AI Review</strong></td>
-          <td style="padding:8px;vertical-align:top;">
+          <td class="u-td">
             Single-pass critic across 5 dimensions (groundedness, completeness, accuracy,
             coherence, redundancy). Produces structured feedback with quotes + actionable
             suggestions. Writes to <code>drafts.review_feedback</code>.
@@ -11051,35 +11072,35 @@ body.task-bar-open {{ padding-top: 40px; }}
             <em>Different from Outline:</em> Outline builds structure; Review critiques prose.
             Uses <code>BOOK_REVIEW_MODEL</code> (gemma3:27b). <em>CLI:</em> <code>book review</code>.
           </td></tr>
-        <tr class="u-border-b"><td style="padding:8px 0;vertical-align:top;"><strong>Adversarial review</strong></td>
-          <td style="padding:8px;vertical-align:top;">
+        <tr class="u-border-b"><td class="u-td-thin"><strong>Adversarial review</strong></td>
+          <td class="u-td">
             Harsher critic &mdash; forces <strong>&ge; 10</strong> concrete issues, never graded.
             Doesn&rsquo;t overwrite the normal <code>review_feedback</code>.
             <em>Use when:</em> the standard review feels too gentle.
             <em>CLI:</em> <code>book adversarial-review</code>.
           </td></tr>
-        <tr class="u-border-b"><td style="padding:8px 0;vertical-align:top;"><strong>Edge cases</strong></td>
-          <td style="padding:8px;vertical-align:top;">
+        <tr class="u-border-b"><td class="u-td-thin"><strong>Edge cases</strong></td>
+          <td class="u-td">
             Exhaustive boundary-condition hunter: walks every scope boundary, counter-case,
             causal alternative, and quantitative limit. Structured JSON output.
             <em>Use when:</em> you need the draft to survive hostile readers.
             <em>CLI:</em> <code>book edge-cases</code>.
           </td></tr>
-        <tr class="u-border-b"><td style="padding:8px 0;vertical-align:top;"><strong>Ensemble Review</strong></td>
-          <td style="padding:8px;vertical-align:top;">
+        <tr class="u-border-b"><td class="u-td-thin"><strong>Ensemble Review</strong></td>
+          <td class="u-td">
             N independent NeurIPS-rubric reviewers (default 3, T=0.75, rotating neutral/pessimistic/
             optimistic stance) + a meta-reviewer that medians scores and unions findings.
             Costs ~N&times; the single-review. <em>Use when:</em> a single reviewer felt flaky.
             <em>CLI:</em> <code>book ensemble-review</code>.
           </td></tr>
-        <tr class="u-border-b"><td style="padding:8px 0;vertical-align:top;"><strong>Argue (map claim)</strong></td>
-          <td style="padding:8px;vertical-align:top;">
+        <tr class="u-border-b"><td class="u-td-thin"><strong>Argue (map claim)</strong></td>
+          <td class="u-td">
             For any claim you type, builds a SUPPORTS / CONTRADICTS / NEUTRAL evidence map
             from your corpus. <em>Use when:</em> you want to see how solid a single
             assertion is. <em>CLI:</em> <code>book argue</code>.
           </td></tr>
-        <tr class="u-border-b"><td style="padding:8px 0;vertical-align:top;"><strong>Gaps</strong></td>
-          <td style="padding:8px;vertical-align:top;">
+        <tr class="u-border-b"><td class="u-td-thin"><strong>Gaps</strong></td>
+          <td class="u-td">
             Identifies topics the book&rsquo;s plan names but the drafts don&rsquo;t cover yet.
             <em>Use when:</em> a chapter feels thin and you&rsquo;re not sure why.
             <em>CLI:</em> <code>book gaps</code>.
@@ -11087,31 +11108,31 @@ body.task-bar-open {{ padding-top: 40px; }}
       </table>
 
       <h4 style="margin:18px 0 8px;">&#10003; Verification &mdash; check citations actually support claims</h4>
-      <table style="width:100%;border-collapse:collapse;">
+      <table class="u-table-full">
         <tr class="u-border-b"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>Verify</strong></td>
-          <td style="padding:8px;vertical-align:top;">
+          <td class="u-td">
             Sentence-level LLM verifier: classifies each <code>[N]</code> claim as SUPPORTED /
             EXTRAPOLATED / MISREPRESENTED / OVERSTATED and returns a groundedness + hedging
             fidelity score. <em>CLI:</em> <code>book verify-citations</code>.
           </td></tr>
-        <tr class="u-border-b"><td style="padding:8px 0;vertical-align:top;"><strong>Verify Draft</strong><br><em class="u-hint">claim-atomization</em></td>
-          <td style="padding:8px;vertical-align:top;">
+        <tr class="u-border-b"><td class="u-td-thin"><strong>Verify Draft</strong><br><em class="u-hint">claim-atomization</em></td>
+          <td class="u-td">
             Splits each sentence into atomic sub-claims (regex first, LLM fallback for compound
             sentences), NLI-scores each sub-claim against source chunks, and surfaces
             <strong>mixed-truth</strong> sentences &mdash; where part of the sentence is supported
             and part isn&rsquo;t. Catches what the sentence-level verifier misses.
             Read-only. <em>CLI:</em> <code>book verify-draft</code>.
           </td></tr>
-        <tr class="u-border-b"><td style="padding:8px 0;vertical-align:top;"><strong>Align Citations</strong></td>
-          <td style="padding:8px;vertical-align:top;">
+        <tr class="u-border-b"><td class="u-td-thin"><strong>Align Citations</strong></td>
+          <td class="u-td">
             Post-pass that (conservatively) remaps <code>[N]</code> markers to the chunk that
             actually entails the sentence, when the currently-cited chunk has
             entailment &lt; 0.5 AND the top chunk beats it by &ge; 0.15.
             <em>Use when:</em> verify reports mismatched citations.
             <em>CLI:</em> <code>book align-citations</code>.
           </td></tr>
-        <tr class="u-border-b"><td style="padding:8px 0;vertical-align:top;"><strong>Insert Citations</strong></td>
-          <td style="padding:8px;vertical-align:top;">
+        <tr class="u-border-b"><td class="u-td-thin"><strong>Insert Citations</strong></td>
+          <td class="u-td">
             Two-pass LLM adds <code>[N]</code> markers where the prose asserts something
             source-worthy but has no citation. Saves a new draft version.
             <em>Use when:</em> hand-written prose is missing its citation layer.
@@ -11120,9 +11141,9 @@ body.task-bar-open {{ padding-top: 40px; }}
       </table>
 
       <h4 style="margin:18px 0 8px;">&#9888;&#65039; Fixing &mdash; apply feedback to the draft</h4>
-      <table style="width:100%;border-collapse:collapse;">
+      <table class="u-table-full">
         <tr class="u-border-b"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>AI Revise</strong></td>
-          <td style="padding:8px;vertical-align:top;">
+          <td class="u-td">
             Reads the latest <code>review_feedback</code> saved on the draft and rewrites the
             prose to address it. <em>Requires:</em> a Review (or Autowrite, which reviews
             internally) has been run first. <em>Use when:</em> you&rsquo;re happy with the
@@ -11131,20 +11152,20 @@ body.task-bar-open {{ padding-top: 40px; }}
       </table>
 
       <h4 style="margin:18px 0 8px;">&#128202; Diagnostics &mdash; inspect the autowrite trajectory</h4>
-      <table style="width:100%;border-collapse:collapse;">
+      <table class="u-table-full">
         <tr class="u-border-b"><td style="padding:8px 0;width:170px;vertical-align:top;"><strong>Scores</strong></td>
-          <td style="padding:8px;vertical-align:top;">
+          <td class="u-td">
             Shows the 5-dimension score trajectory across autowrite iterations &mdash; which
             scores rose, which plateaued, which triggered revisions. Read-only.
           </td></tr>
-        <tr class="u-border-b"><td style="padding:8px 0;vertical-align:top;"><strong>Bundles</strong></td>
-          <td style="padding:8px;vertical-align:top;">
+        <tr class="u-border-b"><td class="u-td-thin"><strong>Bundles</strong></td>
+          <td class="u-td">
             Chapter- or book-wide snapshots. Safety net for <em>autowrite-all-sections</em>
             runs &mdash; snapshot before, restore if you hate the result.
             <em>CLI:</em> <code>book snapshot</code> / <code>snapshot-restore</code>.
           </td></tr>
-        <tr class="u-border-b"><td style="padding:8px 0;vertical-align:top;"><strong>Chapter reader</strong></td>
-          <td style="padding:8px;vertical-align:top;">
+        <tr class="u-border-b"><td class="u-td-thin"><strong>Chapter reader</strong></td>
+          <td class="u-td">
             Read-only continuous-scroll view of the whole chapter so you can feel the flow
             without the editor chrome.
           </td></tr>
@@ -11189,13 +11210,13 @@ body.task-bar-open {{ padding-top: 40px; }}
       <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center;">
         <label style="font-size:11px;display:flex;align-items:center;gap:4px;">
           Mode:
-          <select id="vis-mode" onchange="loadVisuals()" style="padding:4px 8px;"
+          <select class="u-pill-md" id="vis-mode" onchange="loadVisuals()"
                   title="Gallery = CSS grid of thumbnails (figures + charts). List = all kinds in a row layout (equations / tables / code render inline, images get real thumbnails).">
             <option value="gallery" selected>Gallery (figures + charts)</option>
             <option value="list">List (all kinds)</option>
           </select>
         </label>
-        <select id="vis-kind-filter" onchange="loadVisuals()" style="padding:4px 8px;"
+        <select class="u-pill-md" id="vis-kind-filter" onchange="loadVisuals()"
                 title="Narrow to a single visual kind. In Gallery mode, non-image kinds widen the card grid to 340px columns.">
           <option value="">All types</option>
           <option value="figure">Figures</option>
@@ -11648,7 +11669,7 @@ body.task-bar-open {{ padding-top: 40px; }}
              style="margin-top:6px;padding:10px 12px;background:var(--toolbar-bg);border:1px solid var(--border);border-radius:6px;font-size:12px;line-height:1.5;color:var(--fg);">
           <em class="u-muted">Loading type info…</em>
         </div>
-        <div class="field" style="margin-top:12px;">
+        <div class="field u-mt-3">
           <label>Description (optional)</label>
           <input type="text" id="sw-book-desc" placeholder="One-line blurb."
                  title="Short description shown in the catalog.">
@@ -11691,8 +11712,8 @@ body.task-bar-open {{ padding-top: 40px; }}
           gets a NEW draft version, so existing drafts stay put as an undo path.
           Best used before firing <code>autowrite</code> on a whole chapter.
         </p>
-        <div class="field" style="display:flex;gap:8px;align-items:flex-end;">
-          <div style="flex:2;">
+        <div class="field u-row-end">
+          <div class="u-flex-2">
             <label>Snapshot label (optional)</label>
             <input type="text" id="sb-chapter-name" placeholder="(auto: chapter title + timestamp)"
                    title="Optional human label for this snapshot. Leave blank to auto-generate from chapter title + timestamp.">
@@ -11711,8 +11732,8 @@ body.task-bar-open {{ padding-top: 40px; }}
           Restore walks each chapter bundle and creates new draft versions per section.
           Slow on big books &mdash; prefer a chapter snapshot when you only need scope for one chapter.
         </p>
-        <div class="field" style="display:flex;gap:8px;align-items:flex-end;">
-          <div style="flex:2;">
+        <div class="field u-row-end">
+          <div class="u-flex-2">
             <label>Snapshot label (optional)</label>
             <input type="text" id="sb-book-name" placeholder="(auto: book title + timestamp)"
                    title="Optional human label for this snapshot. Leave blank to auto-generate.">
@@ -11796,7 +11817,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           <button onclick="doToolSearch('similar')" title="Find papers with a similar abstract to the one you typed (DOI or title fragment)">Similar</button>
         </div>
         <div id="tl-search-status" style="font-size:12px;color:var(--fg-muted);margin:4px 0;"></div>
-        <div id="tl-search-results" style="margin-top:8px;"></div>
+        <div class="u-mt-2" id="tl-search-results"></div>
       </div>
 
       <!-- Synthesize tab (sciknow ask synthesize) -->
@@ -11820,7 +11841,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                    title="Lower year bound for retrieval."></div>
           <div class="u-flex-1"><label>Year to</label><input type="number" id="tl-synth-yto"
                    title="Upper year bound for retrieval."></div>
-          <div style="flex:2;"><label>Topic cluster filter</label>
+          <div class="u-flex-2"><label>Topic cluster filter</label>
             <input type="text" id="tl-synth-topicfilter" placeholder="(any)"
                    title="Restrict the synthesis to papers whose BERTopic cluster label matches (substring)."></div>
           <button class="btn-primary" onclick="doToolSynthesize()"
@@ -11835,7 +11856,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       <!-- Topics tab (sciknow catalog topics + Phase 46.E domain tags) -->
       <div id="tl-topics-pane" style="display:none;">
         <div style="display:flex;gap:12px;align-items:flex-start;">
-          <div style="flex:2;">
+          <div class="u-flex-2">
             <p style="font-size:11px;color:var(--fg-muted);margin-bottom:8px;">
               <strong>Topic clusters</strong> (from <code>sciknow catalog cluster</code>).
               Click a cluster to see its papers. Ranked by paper count.
@@ -11944,7 +11965,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                      title="Show what would be updated without writing to the database."> dry-run
             </label>
           </div>
-          <button class="btn-primary" style="margin-top:8px;" onclick="doToolCorpus('enrich')"
+          <button class="btn-primary u-mt-2" onclick="doToolCorpus('enrich')"
                   title="Run `db enrich`: Crossref/OpenAlex/arXiv title search to fill missing DOIs + persist OpenAlex concepts/funders/grants/ROR. Streams logs into the console below.">Run Enrich</button>
         </div>
 
@@ -11994,7 +12015,7 @@ body.task-bar-open {{ padding-top: 40px; }}
               <input type="text" id="tl-exp-relq" placeholder="(corpus centroid if blank)"
                      title="Free-text anchor for relevance scoring. Leave blank to use the corpus centroid (avg of all paper embeddings). A sharp query tightens results; a broad corpus benefits from a focused anchor.">
             </div>
-            <div style="flex:2;">
+            <div class="u-flex-2">
               <label>Anchor from topic</label>
               <select id="tl-exp-relq-topic" onchange="if(this.value){{document.getElementById('tl-exp-relq').value=this.value;}}"
                       title="Shortcut: pick one of your catalog topic clusters and its label will be copied into the anchor textbox on the left.">
@@ -12107,7 +12128,7 @@ body.task-bar-open {{ padding-top: 40px; }}
             corpus) then paper count, so the most-authoritative names
             surface first.
           </div>
-          <div class="field" style="display:flex;gap:8px;align-items:flex-end;">
+          <div class="field u-row-end">
             <div style="flex:3;">
               <label>Search author</label>
               <input type="text" id="tl-eauth-q"
@@ -12116,7 +12137,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                      onkeydown="if(event.key==='Enter'){{event.preventDefault();onExpandAuthorSearchInput(event);}}"
                      title="Search OpenAlex authors by name. Results are ranked by citations within THIS corpus, then by overall paper count. Click a row to select.">
             </div>
-            <div style="flex:2;">
+            <div class="u-flex-2">
               <label>ORCID (optional)</label>
               <input type="text" id="tl-eauth-orcid" placeholder="0000-0000-0000-0000"
                      title="Pin to a specific ORCID iD — use when two authors share a name. Overrides name-search disambiguation.">
@@ -12172,7 +12193,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                      title="Compute the plan (candidate list + relevance scores) without downloading PDFs."> dry-run
             </label>
           </div>
-          <div class="field" style="margin-top:4px;">
+          <div class="field u-mt-1">
             <label>Relevance anchor query (optional)</label>
             <input type="text" id="tl-eauth-relq"
                    placeholder="(corpus centroid if blank)"
@@ -12208,7 +12229,7 @@ body.task-bar-open {{ padding-top: 40px; }}
               <input type="number" id="tl-inb-total" value="300" min="10"
                      title="Hard cap on the combined candidate pool across all seeds."></div>
           </div>
-          <div class="field" style="margin-top:4px;">
+          <div class="field u-mt-1">
             <label>Relevance anchor query (optional)</label>
             <input type="text" id="tl-inb-relq" placeholder="(corpus centroid if blank)"
                    title="Free-text anchor for relevance scoring. Leave blank to use the corpus centroid (avg of all paper embeddings).">
@@ -12296,7 +12317,7 @@ body.task-bar-open {{ padding-top: 40px; }}
               <input type="number" id="tl-coa-total" value="300" min="10"
                      title="Hard cap on the combined candidate pool across all coauthors."></div>
           </div>
-          <div class="field" style="margin-top:4px;">
+          <div class="field u-mt-1">
             <label>Relevance anchor query (optional)</label>
             <input type="text" id="tl-coa-relq" placeholder="(corpus centroid if blank)"
                    title="Free-text anchor for relevance scoring. Leave blank to use the corpus centroid. For coauthor snowballing a focused anchor is strongly recommended.">
@@ -12546,8 +12567,8 @@ body.task-bar-open {{ padding-top: 40px; }}
         or document id. <strong>Graph</strong> shows up to 100 triples as nodes
         and edges; <strong>Table</strong> is searchable and shows up to 200.
       </p>
-      <div class="field" style="display:flex;gap:8px;align-items:flex-end;">
-        <div style="flex:2;">
+      <div class="field u-row-end">
+        <div class="u-flex-2">
           <label>Subject contains</label>
           <input type="text" id="kg-subject" placeholder="(any)" onkeydown="if(event.key==='Enter')loadKg(0)"
                  title="Substring match against the triple's subject. Press Enter to filter.">
@@ -12559,7 +12580,7 @@ body.task-bar-open {{ padding-top: 40px; }}
             <option value="">(any)</option>
           </select>
         </div>
-        <div style="flex:2;">
+        <div class="u-flex-2">
           <label>Object contains</label>
           <input type="text" id="kg-object" placeholder="(any)" onkeydown="if(event.key==='Enter')loadKg(0)"
                  title="Substring match against the triple's object. Press Enter to filter.">
@@ -18470,7 +18491,7 @@ function _renderWikiLintIssues(bySeverity) {{
   for (const sev of order) {{
     const issues = bySeverity[sev] || [];
     if (!issues.length) continue;
-    html += '<div style="margin-top:8px;"><div style="font-weight:bold;color:'
+    html += '<div class="u-mt-2"><div style="font-weight:bold;color:'
       + colors[sev] + ';font-size:11px;letter-spacing:0.05em;">' + labels[sev]
       + ' (' + issues.length + ')</div>';
     for (const i of issues) {{
@@ -18637,7 +18658,7 @@ function _renderConsensus(data, summaryEl, claimsEl, debatedEl) {{
         + '<span style="font-weight:bold;color:' + color + ';text-transform:uppercase;font-size:10px;letter-spacing:0.05em;">'
         + _escHtml(level) + '</span>'
         + '<span style="color:var(--fg-muted);font-size:10px;">' + _escHtml(trend) + '</span>'
-        + '<div style="margin-top:4px;">' + _escHtml(c.claim || '') + '</div>';
+        + '<div class="u-mt-1">' + _escHtml(c.claim || '') + '</div>';
       if (sup.length) {{
         html += '<div style="margin-top:4px;color:var(--success);font-size:11px;">Supports ('
           + sup.length + '): ' + sup.slice(0, 4).map(_escHtml).join(', ')
@@ -19943,7 +19964,7 @@ async function openReconciliationsModal() {{
       list.innerHTML = '<em class="u-muted">No active reconciliations. Run <code>Detect duplicates</code> then <code>Reconcile preprints</code> in the Corpus modal utility row.</em>';
       return;
     }}
-    let html = '<table style="width:100%;border-collapse:collapse;">'
+    let html = '<table class="u-table-full">'
       + '<tr class="u-border-b"><th style="text-align:left;padding:4px 6px;">Canonical</th>'
       + '<th style="text-align:left;padding:4px 6px;">Non-canonical (hidden)</th>'
       + '<th style="padding:4px 6px;">Action</th></tr>';
@@ -20182,7 +20203,7 @@ async function openAgenticPreview() {{
         + `${{_escHtml(g.subtopic)}} <span class="u-muted">(${{g.n_candidates}})</span></span>`;
     }}).join('');
     document.getElementById('eap-info').innerHTML =
-      `<div style="margin-bottom:8px;">`
+      `<div class="u-mb-2">`
       + `LLM decomposed into <strong>${{subtopics.length}}</strong> sub-topic(s); `
       + `<strong>${{gaps.length}}</strong> gap(s) under the ≥${{info.doc_threshold}}-paper threshold. `
       + `Pulled <strong>${{info.merged_candidates || 0}}</strong> candidate(s) via the `
@@ -20191,7 +20212,7 @@ async function openAgenticPreview() {{
       + `<span style="color:var(--success);font-size:11px;">✓ same ranker auto-mode uses</span>`
       + `</div>`
       + `<div style="font-size:11px;color:var(--fg-muted);margin-bottom:6px;"><strong>Coverage snapshot:</strong></div>`
-      + `<div style="margin-bottom:8px;">${{covRows}}</div>`
+      + `<div class="u-mb-2">${{covRows}}</div>`
       + `<div style="font-size:11px;color:var(--fg-muted);margin-bottom:4px;"><strong>Per-gap candidate counts:</strong></div>`
       + `<div style="font-size:11px;line-height:1.7;margin-bottom:4px;">${{gapChips}}</div>`
       + `<div class="u-hint">Each row shows its source sub-topic below the title. After downloading, re-click <em>Preview round</em> to advance — the next round will re-measure coverage against the new corpus and propose fresh gaps.</div>`;
@@ -20431,12 +20452,12 @@ async function openExpandAuthorPreview() {{
           : '<span class="u-muted">no ORCID</span>';
         rows += `<tr data-action="eap-toggle-author" data-sid="${{_escHtml(sid)}}" `
           + `style="cursor:pointer;${{isChecked ? 'background:rgba(80,200,120,0.12);' : ''}}">`
-          + `<td style="padding:4px 8px;">`
+          + `<td class="u-pill-md">`
           + `<input type="checkbox" class="eap-author-cb" data-sid="${{_escHtml(sid)}}" ${{isChecked ? 'checked' : ''}} title="Pin this author ID. Re-query will scope the search to only the ticked authors — defeats OpenAlex name-collision disambiguation."></td>`
-          + `<td style="padding:2px 8px;"><strong>${{_escHtml(a.display_name || '')}}</strong></td>`
+          + `<td class="u-pill"><strong>${{_escHtml(a.display_name || '')}}</strong></td>`
           + `<td style="padding:2px 8px;text-align:right;">${{a.works_count || 0}}w</td>`
           + `<td style="padding:2px 8px;font-size:10px;color:var(--fg-muted);">${{_escHtml(affil)}}</td>`
-          + `<td style="padding:2px 8px;">${{orcid}}</td></tr>`;
+          + `<td class="u-pill">${{orcid}}</td></tr>`;
       }}
       const numSelected = _eapAuthorSelection.size;
       const banner = `<div style="margin-top:8px;padding:10px;background:rgba(255,200,80,0.12);border-left:3px solid var(--warning);border-radius:4px;font-size:12px;">`
@@ -20446,10 +20467,10 @@ async function openExpandAuthorPreview() {{
         + `<table style="margin-top:6px;border-collapse:collapse;font-size:11px;width:100%;">`
         + `<thead><tr style="border-bottom:1px solid var(--border);text-align:left;">`
         + `<th style="padding:2px 8px;width:24px;"></th>`
-        + `<th style="padding:2px 8px;">Name</th>`
+        + `<th class="u-pill">Name</th>`
         + `<th style="padding:2px 8px;text-align:right;">Works</th>`
-        + `<th style="padding:2px 8px;">Affiliation</th>`
-        + `<th style="padding:2px 8px;">ID</th></tr></thead>`
+        + `<th class="u-pill">Affiliation</th>`
+        + `<th class="u-pill">ID</th></tr></thead>`
         + `<tbody>${{rows}}</tbody></table>`
         + `<div style="margin-top:8px;display:flex;gap:8px;align-items:center;">`
         + `<button class="btn-primary" onclick="eapRequeryWithSelected()" style="font-size:11px;padding:4px 10px;" title="Re-run the search pinned to the ticked author IDs only. Defeats OpenAlex name-collision disambiguation.">`
@@ -20573,12 +20594,12 @@ async function eapRequeryWithSelected() {{
           : '<span class="u-muted">no ORCID</span>';
         rows += `<tr data-action="eap-toggle-author" data-sid="${{_escHtml(sid)}}" `
           + `style="cursor:pointer;${{isChecked ? 'background:rgba(80,200,120,0.12);' : ''}}">`
-          + `<td style="padding:4px 8px;">`
+          + `<td class="u-pill-md">`
           + `<input type="checkbox" class="eap-author-cb" data-sid="${{_escHtml(sid)}}" ${{isChecked ? 'checked' : ''}} title="Pin this author ID. Re-query will scope the search to only the ticked authors — defeats OpenAlex name-collision disambiguation."></td>`
-          + `<td style="padding:2px 8px;"><strong>${{_escHtml(a.display_name || '')}}</strong></td>`
+          + `<td class="u-pill"><strong>${{_escHtml(a.display_name || '')}}</strong></td>`
           + `<td style="padding:2px 8px;text-align:right;">${{a.works_count || 0}}w</td>`
           + `<td style="padding:2px 8px;font-size:10px;color:var(--fg-muted);">${{_escHtml(affil)}}</td>`
-          + `<td style="padding:2px 8px;">${{orcid}}</td></tr>`;
+          + `<td class="u-pill">${{orcid}}</td></tr>`;
       }}
       const numSelected = _eapAuthorSelection.size;
       const banner = `<div style="margin-top:8px;padding:10px;background:rgba(255,200,80,0.12);border-left:3px solid var(--warning);border-radius:4px;font-size:12px;">`
@@ -20587,10 +20608,10 @@ async function eapRequeryWithSelected() {{
         + `<table style="margin-top:6px;border-collapse:collapse;font-size:11px;width:100%;">`
         + `<thead><tr style="border-bottom:1px solid var(--border);text-align:left;">`
         + `<th style="padding:2px 8px;width:24px;"></th>`
-        + `<th style="padding:2px 8px;">Name</th>`
+        + `<th class="u-pill">Name</th>`
         + `<th style="padding:2px 8px;text-align:right;">Works</th>`
-        + `<th style="padding:2px 8px;">Affiliation</th>`
-        + `<th style="padding:2px 8px;">ID</th></tr></thead>`
+        + `<th class="u-pill">Affiliation</th>`
+        + `<th class="u-pill">ID</th></tr></thead>`
         + `<tbody>${{rows}}</tbody></table>`
         + `<div style="margin-top:8px;display:flex;gap:8px;align-items:center;">`
         + `<button class="btn-primary" onclick="eapRequeryWithSelected()" style="font-size:11px;padding:4px 10px;" title="Re-run the search pinned to the ticked author IDs only. Defeats OpenAlex name-collision disambiguation.">`
@@ -20913,8 +20934,8 @@ function _renderPendingTable() {{
               title="Abandon">&#215;</button>
     `;
     return `<tr data-doi="${{_escHtml(r.doi)}}" style="border-top:1px solid var(--border);">
-      <td style="padding:6px 8px;"><input type="checkbox" class="pdl-row-cb" data-doi="${{_escHtml(r.doi)}}" ${{checked}} title="Select this row for bulk Retry / Mark-done / Abandon / Export."></td>
-      <td style="padding:6px 8px;">
+      <td class="u-pill-lg"><input type="checkbox" class="pdl-row-cb" data-doi="${{_escHtml(r.doi)}}" ${{checked}} title="Select this row for bulk Retry / Mark-done / Abandon / Export."></td>
+      <td class="u-pill-lg">
         <div style="font-weight:500;">${{_escHtml(r.title || '(untitled)')}}</div>
         <div style="font-size:10px;margin-top:2px;">${{doiUrl}}</div>
       </td>
@@ -21163,9 +21184,9 @@ function eapRender() {{
       sourceBadge = `<div style="font-size:10px;margin-top:2px;color:var(--accent);">&#129504; sub-topic: <strong>${{_escHtml(c._agentic_subtopic)}}</strong></div>`;
     }}
     return `<tr style="${{rowStyle}}" data-doi="${{_escHtml(c.doi || '')}}">
-      <td style="padding:6px 8px;"><input type="checkbox" class="eap-row-cb" ${{checked}}
+      <td class="u-pill-lg"><input type="checkbox" class="eap-row-cb" ${{checked}}
            data-doi="${{_escHtml(c.doi || '')}}" onclick="event.stopPropagation();"></td>
-      <td style="padding:6px 8px;">
+      <td class="u-pill-lg">
         <div style="font-weight:500;">${{_escHtml(c.title || '(untitled)')}}</div>
         <div style="font-size:10px;margin-top:2px;">${{doi}}${{altBadge}}${{cachedBadge}}</div>
         ${{sourceBadge}}
@@ -21956,12 +21977,12 @@ function populatePlanChaptersTab() {{
          +  '<input type="text" class="plan-ch-title" value="' + escapeHtml(ch.title || '')
          +  '" placeholder="Chapter title" '
          +  'style="flex:1;padding:4px 8px;font-weight:600;">'
-         +  '<button class="btn-secondary" title="Move up" '
+         +  '<button class="btn-secondary u-pill" title="Move up" '
          +  'onclick="movePlanChapter(\\'' + cid + '\\', -1)" '
-         +  (isFirst ? 'disabled' : '') + ' style="padding:2px 8px;">&uarr;</button>'
-         +  '<button class="btn-secondary" title="Move down" '
+         +  (isFirst ? 'disabled' : '') + '>&uarr;</button>'
+         +  '<button class="btn-secondary u-pill" title="Move down" '
          +  'onclick="movePlanChapter(\\'' + cid + '\\', 1)" '
-         +  (isLast ? 'disabled' : '') + ' style="padding:2px 8px;">&darr;</button>'
+         +  (isLast ? 'disabled' : '') + '>&darr;</button>'
          +  '<button class="btn-secondary" title="Save row" '
          +  'onclick="savePlanChapterRow(\\'' + cid + '\\')" '
          +  'style="padding:2px 10px;">Save</button>'
@@ -22267,12 +22288,12 @@ function populatePlanChapterTab(ch) {{
             'value="' + escapeHtml(liveTitle) + '" placeholder="Section title" ' +
             'oninput="updatePlanChapterTitle(\\'' + s.slug + '\\', this.value)" ' +
             'style="flex:1;padding:4px 8px;font-weight:600;font-size:13px;">';
-    html += '      <button class="btn-secondary" title="Move up" ' +
+    html += '      <button class="btn-secondary u-pill" title="Move up" ' +
             'onclick="movePlanSection(\\'' + s.slug + '\\', -1)" ' +
-            (isFirst ? 'disabled' : '') + ' style="padding:2px 8px;">&uarr;</button>';
-    html += '      <button class="btn-secondary" title="Move down" ' +
+            (isFirst ? 'disabled' : '') + '>&uarr;</button>';
+    html += '      <button class="btn-secondary u-pill" title="Move down" ' +
             'onclick="movePlanSection(\\'' + s.slug + '\\', 1)" ' +
-            (isLast ? 'disabled' : '') + ' style="padding:2px 8px;">&darr;</button>';
+            (isLast ? 'disabled' : '') + '>&darr;</button>';
     html += '      <button class="btn-secondary" title="Save this row" ' +
             'onclick="savePlanSectionRow(\\'' + s.slug + '\\')" ' +
             'style="padding:2px 10px;">Save</button>';
@@ -22302,7 +22323,7 @@ function populatePlanChapterTab(ch) {{
     html += '</div>';
   }});
   // Phase 54.6.67 — + Add section button below the list.
-  html += '<div style="margin-top:12px;">'
+  html += '<div class="u-mt-3">'
        +  '<button class="btn-secondary" onclick="addPlanSection()" title="Append a new empty section to the end of this chapter. You can rename and reorder after adding.">+ Add section</button>'
        +  '</div>';
   list.innerHTML = html;
@@ -24424,7 +24445,7 @@ async function loadBookLengthReportPanel() {{
             + histBits.join('  ·  ') + '</div>';
     }}
     for (const c of (d.chapters || [])) {{
-      html += '<details style="margin-bottom:4px;">'
+      html += '<details class="u-mb-1">'
             + '<summary style="cursor:pointer;padding:3px 0;">'
             + '<strong>Ch.' + c.number + '</strong> '
             + _escHtml(c.title || '')
@@ -25657,7 +25678,7 @@ async function loadVisuals(append) {{
           +      'style="font-size:17px;line-height:1.55;text-align:center;overflow-x:auto;min-height:30px;">'
           +      _escHtml(truncated) /* fallback text if KaTeX unavailable */
           + '</div>'
-          + '<details style="margin-top:8px;">'
+          + '<details class="u-mt-2">'
           +   '<summary style="font-size:10px;color:var(--fg-muted);cursor:pointer;user-select:none;">LaTeX source</summary>'
           +   '<pre style="font-family:var(--font-mono);font-size:11px;margin:6px 0 0;padding:6px 8px;background:var(--bg);border-radius:4px;white-space:pre-wrap;word-break:break-word;">'
           +   _escHtml(raw)
@@ -25977,7 +25998,7 @@ async function refreshBackupsList() {{
       return;
     }}
     let html = '<table style="width:100%;border-collapse:collapse;font-size:12px;">';
-    html += '<tr class="u-border-b"><th style="text-align:left;padding:4px;">Date</th><th>Projects</th><th style="text-align:right;">Size</th><th>Sys</th><th>Files</th><th>Actions</th></tr>';
+    html += '<tr class="u-border-b"><th style="text-align:left;padding:4px;">Date</th><th>Projects</th><th class="u-text-right">Size</th><th>Sys</th><th>Files</th><th>Actions</th></tr>';
     for (let i = backups.length - 1; i >= 0; i--) {{
       const b = backups[i];
       const mb = (b.total_bytes || 0) / 1024 / 1024;
@@ -25994,8 +26015,8 @@ async function refreshBackupsList() {{
       html += '<tr class="u-border-b">'
         + '<td style="padding:4px;">' + b.timestamp + '</td>'
         + '<td>' + (b.projects || []).join(', ') + '</td>'
-        + '<td style="text-align:right;">' + mb.toFixed(1) + ' MB</td>'
-        + '<td style="text-align:center;">' + (b.system_bundle ? '\\u2713' : '\\u2014') + '</td>'
+        + '<td class="u-text-right">' + mb.toFixed(1) + ' MB</td>'
+        + '<td class="u-text-center">' + (b.system_bundle ? '\\u2713' : '\\u2014') + '</td>'
         + '<td>' + dlLinks + '</td>'
         + '<td>' + actions + '</td>'
         + '</tr>';
@@ -26402,7 +26423,7 @@ function renderProjectSwitchBanner(newSlug, runningSlug) {{
     + '</strong>. DB / Qdrant clients can&rsquo;t hot-swap, so you need to '
     + 'restart the server to work on the new project.'
     + '</div>'
-    + '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">'
+    + '<div class="u-row-wrap">'
     + '<button class="btn-primary" onclick="shutdownServer()" '
     + 'title="Graceful shutdown — your terminal will return to $, ready for the re-run command below">'
     + '&#9211; Stop this server</button>'
