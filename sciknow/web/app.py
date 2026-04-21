@@ -7308,8 +7308,12 @@ body {{ font-family: var(--font-sans); color: var(--fg); background: var(--bg);
            gap: 2px; padding: 6px 16px; min-height: 44px;
            background: var(--toolbar-bg); border-bottom: 1px solid var(--border);
            flex-shrink: 0; flex-wrap: wrap; }}
-.topbar .topbar-brand {{ font-size: 13px; font-weight: 700; letter-spacing: -0.01em;
-                         color: var(--fg-muted); margin-right: auto; padding-left: 4px; }}
+.topbar .topbar-brand {{
+  font-family: var(--font-serif); font-size: 15px;
+  font-weight: 600; letter-spacing: -0.015em;
+  color: var(--fg); margin-right: auto; padding-left: 6px;
+  font-variation-settings: "opsz" 18;
+}}
 .topbar .nav-btn {{
   font-size: 12px; padding: 5px 10px;
   background: transparent; color: var(--fg);
@@ -7322,21 +7326,41 @@ body {{ font-family: var(--font-sans); color: var(--fg); background: var(--bg);
 .topbar .nav-btn:active {{ transform: translateY(0.5px); }}
 .app-body {{ display: flex; flex: 1; overflow: hidden; min-height: 0; }}
 button, input, textarea, select {{ font-family: inherit; color: inherit; }}
-/* Sidebar */
+/* Sidebar — Phase 54.6.169 sidebar polish.
+   Book title picks up the Newsreader serif so the chapters column
+   echoes the reader masthead. Chapter titles become smaller, more
+   spaced, and lose the shouting all-caps. Active section gets a
+   softer accent-light fill with a proper border-left flag. */
 .sidebar {{ width: 280px; background: var(--sidebar-bg); border-right: 1px solid var(--border);
-            overflow-y: auto; flex-shrink: 0; padding: var(--sp-4) 0;
+            overflow-y: auto; flex-shrink: 0; padding: var(--sp-3) 0;
             display: flex; flex-direction: column; }}
-.sidebar h2 {{ padding: var(--sp-2) var(--sp-4) var(--sp-3); font-size: 15px;
-              font-weight: 600; color: var(--fg); letter-spacing: -0.01em; }}
-.ch-group {{ margin-bottom: var(--sp-2); }}
-.ch-title {{ padding: var(--sp-2) var(--sp-4) var(--sp-1); font-weight: 600; font-size: 11px;
-             text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-muted); }}
-.sec-link {{ display: block; padding: 6px var(--sp-4) 6px 28px; text-decoration: none;
-             color: var(--fg); font-size: 13px; border-left: 2px solid transparent; cursor: pointer;
-             transition: background .12s ease; position: relative; }}
+.sidebar h2 {{
+  padding: var(--sp-3) var(--sp-4) var(--sp-4);
+  font-family: var(--font-serif); font-size: 19px;
+  font-weight: 600; color: var(--fg);
+  letter-spacing: -0.015em; line-height: 1.2;
+  font-variation-settings: "opsz" 24;
+}}
+.ch-group {{ margin-bottom: var(--sp-3); }}
+.ch-title {{
+  padding: var(--sp-2) var(--sp-4) 4px;
+  font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--fg-faint);
+}}
+.sec-link {{
+  display: block; padding: 5px var(--sp-4) 5px 28px;
+  text-decoration: none; color: var(--fg); font-size: 13px;
+  border-left: 2px solid transparent;
+  cursor: pointer; position: relative;
+  transition: background var(--t-fast), color var(--t-fast);
+}}
 .sec-link:hover {{ background: var(--toolbar-bg); }}
-.sec-link.active {{ border-left-color: var(--accent); background: var(--accent-light);
-                   color: var(--accent); font-weight: 600; }}
+.sec-link.active {{
+  border-left-color: var(--accent);
+  background: var(--accent-light);
+  color: var(--accent); font-weight: 600;
+}}
 .sec-link .meta {{ font-size: 11px; color: var(--fg-faint); margin-left: 6px; }}
 .sec-link.empty {{ color: var(--fg-faint); font-style: italic; }}
 /* Phase 21 — section status dots in the sidebar. A small coloured circle
