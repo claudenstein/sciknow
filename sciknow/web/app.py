@@ -7956,6 +7956,34 @@ body.sidebar-rail .sidebar-rail-btn {{ color: var(--accent); border-color: var(-
 .u-cell-sm   {{ text-align: left; padding: 4px 6px; }}
 .u-mb-m      {{ margin-bottom: 10px; }}
 .u-dim       {{ opacity: 0.5; }}
+/* Phase 54.6.195 — loading skeleton primitives. Applies a pulsing
+   gradient to any element; use .skeleton alone for a block, or
+   .skeleton-row / .skeleton-line / .skeleton-pill for common
+   shapes. Replaces "Loading…" text with a visual placeholder that
+   hints at the shape of the content about to render. */
+@keyframes skeletonPulse {{
+  0%   {{ background-position: -200% 0; }}
+  100% {{ background-position: 200% 0; }}
+}}
+.skeleton {{
+  display: block; border-radius: var(--r-sm);
+  background: linear-gradient(90deg,
+              var(--toolbar-bg) 0%,
+              var(--border) 50%,
+              var(--toolbar-bg) 100%);
+  background-size: 200% 100%;
+  animation: skeletonPulse 1.4s ease-in-out infinite;
+  color: transparent; user-select: none;
+}}
+.skeleton-line  {{ height: 0.9em; margin-bottom: 0.5em; }}
+.skeleton-line:last-child {{ margin-bottom: 0; }}
+.skeleton-line--short  {{ max-width: 60%; }}
+.skeleton-line--xshort {{ max-width: 35%; }}
+.skeleton-row   {{ display: flex; gap: 8px; align-items: center;
+                  margin-bottom: 8px; }}
+.skeleton-pill  {{ height: 20px; width: 56px; border-radius: 999px; }}
+.skeleton-card  {{ padding: 14px; border: 1px solid var(--border);
+                  border-radius: var(--r-md); margin-bottom: 10px; }}
 
 /* ── Phase 54.6.168 — Monoline icon system.
    Inline SVG sprite at the top of <body> defines <symbol>s;
@@ -11520,7 +11548,20 @@ body.task-bar-open {{ padding-top: 40px; }}
         <span id="proj-msg" style="font-size:12px;color:var(--fg-muted);flex:1;"></span>
       </div>
       <div id="projects-list-wrap" style="margin-bottom:16px;">
-        <div id="projects-list" style="font-size:13px;">Loading…</div>
+        <div id="projects-list" class="u-small">
+          <div class="skeleton-card">
+            <div class="skeleton skeleton-line"></div>
+            <div class="skeleton skeleton-line skeleton-line--short"></div>
+          </div>
+          <div class="skeleton-card">
+            <div class="skeleton skeleton-line"></div>
+            <div class="skeleton skeleton-line skeleton-line--short"></div>
+          </div>
+          <div class="skeleton-card">
+            <div class="skeleton skeleton-line"></div>
+            <div class="skeleton skeleton-line skeleton-line--short"></div>
+          </div>
+        </div>
       </div>
       <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:8px;">
         <h4 style="font-size:13px;margin-bottom:8px;">Create new project</h4>
@@ -12703,7 +12744,9 @@ body.task-bar-open {{ padding-top: 40px; }}
             </tr>
           </thead>
           <tbody id="pdl-tbody">
-            <tr><td colspan="8" style="padding:20px;text-align:center;color:var(--fg-muted);">Loading…</td></tr>
+            <tr><td colspan="8" class="u-td"><div class="skeleton skeleton-line"></div></td></tr>
+            <tr><td colspan="8" class="u-td"><div class="skeleton skeleton-line"></div></td></tr>
+            <tr><td colspan="8" class="u-td"><div class="skeleton skeleton-line"></div></td></tr>
           </tbody>
         </table>
       </div>
