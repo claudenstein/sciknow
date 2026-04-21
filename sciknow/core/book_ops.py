@@ -3229,6 +3229,265 @@ def run_argue_stream(
 DEFAULT_SECTIONS = ["overview", "key_evidence", "current_understanding", "open_questions", "summary"]
 
 
+# ── Phase 54.6.142 — visual-citation verification + scoring helpers ──
+
+# Regex for `[Fig. N]` / `[Figure N]` / `[Table N]` / `[Eq. N]` markers the
+# writer emits. Matches only bracketed forms (unambiguous citation intent)
+# rather than bare body-text references ("Fig. 3 shows ...") so we don't
+# accidentally flag references to the source paper's internal figures.
+_FIG_MARKER_RE = re.compile(
+    r"\[\s*(?P<kind>Fig(?:ure)?|Tab(?:le)?|Eq(?:uation)?)\s*\.?\s*"
+    r"(?P<num>\d+)(?:\s*[a-z])?\s*\]",
+    re.IGNORECASE,
+)
+
+
+def _extract_figure_refs(draft: str) -> list[tuple[str, int, str]]:
+    """Find every `[Fig. N]`-style citation marker in the draft.
+
+    Returns a list of (kind_family, num, raw_match) tuples where
+    ``kind_family`` is normalized to ``"figure"``/``"table"``/``"equation"``.
+    Duplicates preserved so callers can count citations.
+    """
+    out: list[tuple[str, int, str]] = []
+    for m in _FIG_MARKER_RE.finditer(draft or ""):
+        kind_raw = m.group("kind").lower()
+        if kind_raw.startswith("fig"):
+            kind = "figure"
+        elif kind_raw.startswith("tab"):
+            kind = "table"
+        elif kind_raw.startswith("eq"):
+            kind = "equation"
+        else:
+            continue
+        try:
+            num = int(m.group("num"))
+        except (TypeError, ValueError):
+            continue
+        out.append((kind, num, m.group(0)))
+    return out
+
+
+def _verify_figure_refs(draft: str, ranked_visuals: list) -> dict:
+    """Phase 54.6.142 verify — Level 1 + Level 2.
+
+    **Level 1 (mandatory)**: every `[Fig. N]` marker in the draft must
+    map to a visual whose ``figure_num`` extracts to the same number
+    and whose kind matches the marker family. Hallucinated markers are
+    caught here — the writer made up a figure ID that isn't in the
+    ranker's surfaced candidates.
+
+    **Level 2 (default, cheap)**: for resolved markers, run the
+    cross-encoder reranker on ``(surrounding_sentence, ai_caption)``
+    and record an entailment score. Below ``entailment_floor``
+    (default 0.15 — same threshold the 54.6.134 coverage check uses)
+    the caption doesn't clearly support the sentence, which usually
+    means the writer picked the wrong figure from the shortlist.
+
+    **Level 3 (VLM faithfulness) is deliberately NOT run here.** It
+    belongs in a future `book finalize-draft` pre-export pass where
+    the wall-time cost is justified; calling it on every autowrite
+    iteration burns VLM compute on text that's about to be rewritten.
+
+    Returns a dict:
+        {
+          "n_markers": int,
+          "n_hallucinated": int,          # L1 failures
+          "n_low_entailment": int,        # L2 failures
+          "hallucinated_markers": [str],  # the raw `[Fig. N]` strings
+          "low_entailment_markers": [{"marker": str, "score": float}, ...],
+          "entailment_scores": [float],   # one per resolved marker
+          "resolved_ratio": float,        # n_resolved / n_markers
+        }
+    """
+    from sciknow.core.visuals_mentions import _parse_figure_number, _kind_matches
+
+    markers = _extract_figure_refs(draft)
+    if not markers:
+        return {
+            "n_markers": 0,
+            "n_hallucinated": 0,
+            "n_low_entailment": 0,
+            "hallucinated_markers": [],
+            "low_entailment_markers": [],
+            "entailment_scores": [],
+            "resolved_ratio": 1.0,
+        }
+
+    # Build (num, kind) → visual lookup from the ranker's surfaced set.
+    # The writer only ever sees what the ranker surfaced, so the match
+    # space is `ranked_visuals`, not the full corpus.
+    by_key: dict[tuple[str, int], object] = {}
+    for rv in ranked_visuals or []:
+        fn = _parse_figure_number(getattr(rv, "figure_num", "") or "")
+        if fn is None:
+            continue
+        # Normalise the visual's kind to the same family buckets
+        vk = (getattr(rv, "kind", "") or "").lower()
+        if vk in ("figure", "chart", "image"):
+            family = "figure"
+        elif vk == "table":
+            family = "table"
+        elif vk == "equation":
+            family = "equation"
+        else:
+            continue
+        by_key[(family, fn)] = rv
+
+    hallucinated: list[str] = []
+    low_ent: list[dict] = []
+    ent_scores: list[float] = []
+
+    resolved_pairs: list[tuple[str, object]] = []   # (sentence, RankedVisual)
+    resolved_raw_markers: list[str] = []
+    for kind, num, raw in markers:
+        rv = by_key.get((kind, num))
+        if rv is None:
+            hallucinated.append(raw)
+            continue
+        # Pull the containing sentence for the L2 reranker pair
+        sent = _sentence_for_marker(draft, raw)
+        if sent:
+            resolved_pairs.append((sent, rv))
+            resolved_raw_markers.append(raw)
+
+    # Level 2: cross-encoder on (sentence, caption) pairs. One batch.
+    if resolved_pairs:
+        try:
+            from sciknow.retrieval import reranker as _rr
+
+            class _P:
+                def __init__(self, text):
+                    self.content_preview = text
+                    self.rrf_score = 0.0
+
+            # We rerank each sentence against its OWN caption — which is
+            # different from the ranker's top-K pattern. Run one rerank
+            # per (sent, cap) pair and read rrf_score off the wrapper.
+            for sent, rv in resolved_pairs:
+                cap = (getattr(rv, "ai_caption", "") or "").strip()
+                if not cap:
+                    ent_scores.append(0.0)
+                    continue
+                wrap = _P(cap)
+                scored = _rr.rerank(sent, [wrap], top_k=1)
+                sc = float(scored[0].rrf_score) if scored else 0.0
+                ent_scores.append(sc)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("figure-ref L2 verify reranker failed: %s", exc)
+            ent_scores = [0.0] * len(resolved_pairs)
+
+        entailment_floor = 0.15
+        for raw, sc in zip(resolved_raw_markers, ent_scores):
+            if sc < entailment_floor:
+                low_ent.append({"marker": raw, "score": round(sc, 3)})
+
+    return {
+        "n_markers": len(markers),
+        "n_hallucinated": len(hallucinated),
+        "n_low_entailment": len(low_ent),
+        "hallucinated_markers": hallucinated,
+        "low_entailment_markers": low_ent,
+        "entailment_scores": [round(s, 3) for s in ent_scores],
+        "resolved_ratio": round(
+            (len(markers) - len(hallucinated)) / max(len(markers), 1), 3,
+        ),
+    }
+
+
+def _sentence_for_marker(draft: str, raw_marker: str) -> str:
+    """Return the sentence in ``draft`` that contains ``raw_marker``.
+
+    Used as the (query, caption) pair input for the Level-2 reranker.
+    Falls back to a 240-char window around the marker if sentence
+    splitting doesn't find a clean boundary.
+    """
+    if not draft or not raw_marker:
+        return ""
+    idx = draft.find(raw_marker)
+    if idx < 0:
+        return ""
+    # Walk back to the previous sentence boundary
+    start = max(
+        draft.rfind(". ", 0, idx),
+        draft.rfind("? ", 0, idx),
+        draft.rfind("! ", 0, idx),
+        draft.rfind("\n", 0, idx),
+    )
+    start = start + 2 if start >= 0 else max(0, idx - 120)
+    # Walk forward to the next boundary
+    end_candidates = [
+        draft.find(". ", idx + len(raw_marker)),
+        draft.find("? ", idx + len(raw_marker)),
+        draft.find("! ", idx + len(raw_marker)),
+        draft.find("\n", idx + len(raw_marker)),
+    ]
+    ends = [e for e in end_candidates if e > idx]
+    end = min(ends) + 1 if ends else min(len(draft), idx + 120)
+    return draft[start:end].strip()
+
+
+def _score_visual_citation(
+    draft: str,
+    ranked_visuals: list,
+    verify_result: dict | None = None,
+) -> float:
+    """Mechanical scorer for the `visual_citation` dimension.
+
+    Philosophy (docs/RESEARCH.md §7.X + the three-Q decision from the
+    Q1 discussion): visuals are FREE for word count, but the scorer
+    evaluates whether the writer used them appropriately. The score
+    is a composite of three sub-signals:
+
+      1. *No-hallucination*: every `[Fig. N]` marker must resolve.
+         Hallucinated markers → hard 0.0 (the draft is broken).
+      2. *Use-when-appropriate*: when the ranker surfaced at least one
+         visual with composite_score ≥ 0.80 (likely high-quality match
+         for some claim), the draft should contain ≥1 figure marker.
+         Zero markers when good candidates existed → 0.5 (a miss but
+         not a break; the draft may still be good prose).
+      3. *Don't-over-cite*: if the count of markers exceeds the count
+         of high-quality ranked candidates × 1.5, mild penalty.
+
+    Returns 1.0 when nothing is wrong (including the trivial case of
+    no surfaced visuals, which is an honest "no visual was relevant").
+    """
+    markers = _extract_figure_refs(draft)
+    n_markers = len(markers)
+
+    # Level-1 hallucination check dominates
+    if verify_result and verify_result.get("n_hallucinated", 0) > 0:
+        return 0.0
+
+    # Count high-quality ranker candidates (those worth citing)
+    n_high_quality = sum(
+        1 for rv in (ranked_visuals or [])
+        if getattr(rv, "composite_score", 0.0) >= 0.80
+    )
+
+    if n_high_quality == 0:
+        # No high-quality visuals were available; neutral score
+        return 1.0
+
+    if n_markers == 0:
+        # Good visuals were available but the writer didn't use any.
+        # Signals a missed opportunity without being a hard failure.
+        return 0.5
+
+    # Over-citation guard: more figure citations than realistic
+    if n_markers > n_high_quality * 1.5 and n_markers >= 3:
+        return 0.7
+
+    # Factor in L2 entailment: average of resolved markers' scores,
+    # clamped to [0.5, 1.0] so a moderate match still reads as "used".
+    ent_scores = (verify_result or {}).get("entailment_scores", [])
+    if ent_scores:
+        mean_ent = sum(ent_scores) / len(ent_scores)
+        return max(0.5, min(1.0, 0.7 + 0.3 * mean_ent))
+
+    return 1.0
+
+
 def _score_draft_inner(draft_content, section_type, topic, results, model=None):
     """Score a draft against provided results. Returns scores_dict.
 
@@ -3462,6 +3721,7 @@ def autowrite_section_stream(
     cove_threshold: float = 0.85,
     target_words: int | None = None,
     resume_from_draft_id: str | None = None,
+    include_visuals: bool = False,   # Phase 54.6.142
 ) -> Iterator[Event]:
     """Full convergence loop for one section: write -> score -> revise -> re-score.
 
@@ -3500,6 +3760,7 @@ def autowrite_section_stream(
             use_step_back=use_step_back, use_cove=use_cove,
             cove_threshold=cove_threshold, target_words=target_words,
             resume_from_draft_id=resume_from_draft_id,
+            include_visuals=include_visuals,
         )
     finally:
         log.close()
@@ -3521,6 +3782,7 @@ def _autowrite_section_body(
     cove_threshold: float = 0.85,
     target_words: int | None = None,
     resume_from_draft_id: str | None = None,
+    include_visuals: bool = False,   # Phase 54.6.142
 ) -> Iterator[Event]:
     """Phase 24 — the actual autowrite implementation, extracted from
     autowrite_section_stream so the public function can wrap it in a
@@ -3863,6 +4125,34 @@ def _autowrite_section_body(
     except Exception:
         pass  # visuals table may not exist — fail-soft
 
+    # Phase 54.6.142 — opt-in visuals-in-writer integration. Runs the
+    # 5-signal ranker (Phase 54.6.139) on the writing query using the
+    # already-retrieved chunks' document_ids as `cited_doc_ids`, renders
+    # a writer-facing block via format_visuals_prompt_block, and lets
+    # write_section_v2 splice it into the user prompt while the paired
+    # `visual_citation_block` rhetorically-gated instruction (Option D
+    # from docs/RESEARCH.md §7.X) lands in the system prompt.
+    ranked_visuals_for_writer: list = []
+    visuals_prompt_block_text: str | None = None
+    if include_visuals and results:
+        try:
+            cited_doc_ids = list({getattr(r, "document_id", "") for r in results
+                                  if getattr(r, "document_id", "")})
+            ranked_visuals_for_writer = _retrieve_visuals(
+                topic or "",
+                cited_doc_ids=cited_doc_ids,
+                section_type=section_type,
+                top_k=5,
+            )
+            if ranked_visuals_for_writer:
+                visuals_prompt_block_text = rag_prompts.format_visuals_prompt_block(
+                    ranked_visuals_for_writer,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("autowrite visuals retrieval failed (continuing without): %s", exc)
+            ranked_visuals_for_writer = []
+            visuals_prompt_block_text = None
+
     if resume_content is None:
         system, user = rag_prompts.write_section_v2(
             section_type, topic, results,
@@ -3873,10 +4163,15 @@ def _autowrite_section_body(
             lessons=relevant_lessons,
             style_fingerprint_block=style_fingerprint_block,
             visuals=section_visuals,
+            visuals_prompt_block=visuals_prompt_block_text,
+        )
+        n_visuals_msg = (
+            f", {len(ranked_visuals_for_writer)} ranked figures"
+            if ranked_visuals_for_writer else ""
         )
         yield {"type": "progress", "stage": "writing",
                "detail": f"Generating initial draft (~{effective_target_words} words, "
-                         f"{len(section_visuals)} visuals)..."}
+                         f"{len(section_visuals)} legacy visuals{n_visuals_msg})..."}
     else:
         # Resume mode — fast-path past the writing phase. The score
         # loop below will pick up `content` and run iterations on it.
@@ -4123,6 +4418,47 @@ def _autowrite_section_body(
                                 scores["revision_instruction"] = hint
             except Exception as exc:
                 logger.warning("plan_coverage skipped: %s", exc)
+
+        # Phase 54.6.142 — visual-citation verify (L1 + L2) + score.
+        # Only runs when include_visuals was on AND the writer had a
+        # shortlist to cite from. Hallucinated markers force scores
+        # ["visual_citation"] = 0 and become the weakest-dim candidate
+        # for the next revision iteration.
+        fig_verify: dict | None = None
+        if include_visuals and ranked_visuals_for_writer:
+            try:
+                fig_verify = _verify_figure_refs(content, ranked_visuals_for_writer)
+                vc_score = _score_visual_citation(
+                    content, ranked_visuals_for_writer, fig_verify,
+                )
+                scores["visual_citation"] = vc_score
+                log.event(
+                    "visual_citation",
+                    score=round(vc_score, 3),
+                    n_markers=fig_verify["n_markers"],
+                    n_hallucinated=fig_verify["n_hallucinated"],
+                    n_low_entailment=fig_verify["n_low_entailment"],
+                )
+                yield {"type": "visual_citation", "data": {
+                    "score": round(vc_score, 3),
+                    **{k: v for k, v in fig_verify.items()
+                       if k in ("n_markers", "n_hallucinated", "n_low_entailment")},
+                }}
+                # Hallucinated markers are a hard failure — force a
+                # revise with a targeted instruction even if the other
+                # dimensions scored high.
+                if fig_verify["n_hallucinated"] > 0:
+                    scores["weakest_dimension"] = "visual_citation"
+                    bad = ", ".join(fig_verify["hallucinated_markers"][:5])
+                    scores["revision_instruction"] = (
+                        f"Remove or replace these hallucinated figure "
+                        f"citations that do not resolve to any surfaced "
+                        f"visual: {bad}. Either cite a figure from the "
+                        f"provided shortlist or drop the inline reference "
+                        f"and keep the claim as text."
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("visual_citation scoring skipped: %s", exc)
 
         # Fix 1: Run claim verification as part of scoring
         log.stage("verifying", iteration=iteration + 1)

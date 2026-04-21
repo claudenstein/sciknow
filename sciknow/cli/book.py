@@ -2221,6 +2221,21 @@ def autowrite(
             "scoring dimension in the autowrite loop."
         ),
     ),
+    include_visuals: bool = typer.Option(
+        False, "--include-visuals",
+        help=(
+            "Phase 54.6.142 — run the 5-signal visuals ranker on each "
+            "section's topic and offer the writer a shortlist of "
+            "figures/tables it may cite as `[Fig. N]`. Adds a "
+            "`visual_citation` scoring dimension (mechanically computed: "
+            "0.0 on any hallucinated marker, 1.0 on correct use, 0.5 "
+            "when good candidates were available but none were cited). "
+            "Level-1 + Level-2 verify run per iteration. Level-3 VLM "
+            "claim-depiction verification is deferred to a future "
+            "`book finalize-draft` pre-export pass. Default off — "
+            "existing workflows are untouched."
+        ),
+    ),
 ):
     """
     Autonomous write → review → revise convergence loop (inspired by Karpathy's autoresearch).
@@ -2399,6 +2414,7 @@ def autowrite(
             auto_expand=auto_expand,
             target_words=target_words,
             resume_from_draft_id=resume_draft_id,
+            include_visuals=include_visuals,
         )
 
         # Live dashboard state

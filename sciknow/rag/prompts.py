@@ -872,7 +872,8 @@ atmospheric branch …").
 {section_plan_section}
 {discourse_relation_section}
 {book_plan_section}
-{prior_summaries_section}"""
+{prior_summaries_section}
+{visual_citation_section}"""
 
 WRITE_V2_USER = """\
 Literature passages:
@@ -898,6 +899,7 @@ def write_section_v2(
     lessons: list[str] | None = None,
     style_fingerprint_block: str | None = None,
     visuals: list[dict] | None = None,
+    visuals_prompt_block: str | None = None,   # Phase 54.6.142
 ) -> tuple[str, str]:
     # Phase 32.7 — Layer 1 episodic memory. `lessons` is a list of 1-3
     # sentence concrete reflections distilled from past autowrite runs
@@ -1075,6 +1077,53 @@ def write_section_v2(
             f"worth noting\" or \"this raises the question\".\n"
         )
 
+    # Phase 54.6.142 — rhetorically-gated figure-citation instruction.
+    # Only activated when a visuals prompt block is present (i.e. the
+    # autowrite caller turned on include_visuals and the ranker surfaced
+    # candidates). Option D from docs/RESEARCH.md §7.X: the writer cites
+    # `[Fig. N]` only when a claim is directly *depicted* in the figure,
+    # prefers text citations for background/synthesis. This distinction
+    # matches how scientific writing actually works — figures show
+    # trends/relationships/schematics, text attributes claims to sources.
+    visual_citation_block = ""
+    if visuals_prompt_block and visuals_prompt_block.strip():
+        visual_citation_block = (
+            "\nVisual citation guidance (IMPORTANT — rhetorically gated):\n"
+            "- A shortlist of available figures / tables / equations appears "
+            "in the user message under '─── Available figures / tables ───'. "
+            "Each entry carries a `[Fig. N]` (or `[Table N]` / `[Eq. N]`) "
+            "tag ready to copy inline.\n"
+            "- Cite `[Fig. N]` ONLY when your claim is directly *depicted* "
+            "in the figure — i.e. the figure shows the trend, the "
+            "relationship, the schematic, or the data you are asserting. "
+            "Do NOT cite a figure merely because it appears on the "
+            "shortlist or to inflate visual usage.\n"
+            "- For background, attribution, and synthesis claims, prefer "
+            "standard text citations `[N]`. A figure is the wrong tool "
+            "when you are saying \"Smith et al. argued X\"; it is the "
+            "right tool when you are saying \"temperature rose 1.5°C "
+            "between 1950 and 2020 (as shown in [Fig. 3])\".\n"
+            "- You may also cite `[N]` and `[Fig. N]` together when a "
+            "text citation establishes the source and the figure shows "
+            "the specific claim: `[3] reports this pattern (see [Fig. 3])`.\n"
+            "- If no shortlisted figure matches your claim, do not cite "
+            "one. Missing a good figure is far less costly than citing "
+            "a figure that does not actually depict the claim.\n"
+        )
+
+    # Phase 54.6.142 — if the caller supplied a pre-rendered visuals
+    # prompt block (from sciknow.rag.prompts.format_visuals_prompt_block
+    # on RankedVisual objects from the 54.6.139 ranker), it supersedes
+    # the legacy Phase-21.e _format_visuals_context path. This keeps
+    # the old signature usable for any caller still passing raw dicts.
+    visuals_block_str = (
+        visuals_prompt_block
+        if (visuals_prompt_block and visuals_prompt_block.strip())
+        else _format_visuals_context(visuals)
+    )
+    if visuals_block_str and not visuals_block_str.endswith("\n\n"):
+        visuals_block_str = visuals_block_str.rstrip() + "\n\n"
+
     return (
         WRITE_V2_SYSTEM.format(
             length_target_section=length_block,
@@ -1084,10 +1133,11 @@ def write_section_v2(
             discourse_relation_section=discourse_block,
             book_plan_section=plan_block,
             prior_summaries_section=summaries_block,
+            visual_citation_section=visual_citation_block,
         ),
         WRITE_V2_USER.format(
             context=format_context(results),
-            visuals_context=_format_visuals_context(visuals),
+            visuals_context=visuals_block_str,
             section=section,
             topic=topic,
         ),

@@ -9460,6 +9460,139 @@ def l1_phase54_6_56_refresh_ingests_downloads_and_failed() -> None:
         )
 
 
+def l1_phase54_6_142_autowrite_visuals_wiring() -> None:
+    """Phase 54.6.142 — end-to-end autowrite visuals wiring.
+
+    Pins the four integration points that deliver the user's three
+    design decisions (Q1/Q2/Q3) into the autowrite loop:
+
+    Q1: visuals free for word count; new `visual_citation` dimension
+         scored mechanically (not via LLM) — pin the scorer helper
+         exists and returns values in [0, 1] on the documented cases.
+    Q2: L1 (resolution) + L2 (entailment) verify active per iteration;
+         L3 (VLM faithfulness) deliberately absent here — pin the
+         helper's doc string references that deferral so a future
+         contributor doesn't add an expensive VLM call into the
+         iteration loop thinking they're improving quality.
+    Q3: rhetorically-gated `[Fig. N]` instruction present in the
+         writer's system prompt when a visuals block is passed —
+         pin the string fragment that encodes "cite only when
+         directly depicted".
+
+    Also pins the `include_visuals` kwarg on every call-chain hop so
+    the CLI flag actually reaches the writer.
+    """
+    import inspect
+    from sciknow.core import book_ops
+    from sciknow.rag import prompts
+
+    # ─ Q1: visual_citation scoring dimension ────────────────
+    assert hasattr(book_ops, "_score_visual_citation"), (
+        "book_ops._score_visual_citation missing (Phase 54.6.142)"
+    )
+    assert hasattr(book_ops, "_verify_figure_refs"), (
+        "book_ops._verify_figure_refs missing (Phase 54.6.142)"
+    )
+    assert hasattr(book_ops, "_extract_figure_refs"), (
+        "book_ops._extract_figure_refs missing (Phase 54.6.142)"
+    )
+
+    # Extractor must catch the bracketed citation markers the prompt
+    # asks the writer to emit, and ONLY those (not bare body-text refs).
+    refs = book_ops._extract_figure_refs(
+        "The trend is clear [Fig. 3]. But Fig. 5 in the source paper "
+        "is unrelated. See [Table 2a] as well."
+    )
+    kinds_nums = [(k, n) for k, n, _ in refs]
+    assert ("figure", 3) in kinds_nums, "[Fig. 3] must be extracted"
+    assert ("table", 2)  in kinds_nums, "[Table 2a] must be extracted as table 2"
+    assert ("figure", 5) not in kinds_nums, (
+        "bare body-text 'Fig. 5' (no brackets) must NOT be extracted "
+        "as a writer citation"
+    )
+
+    # Scorer returns 1.0 when no visuals were surfaced (trivially ok).
+    score_noop = book_ops._score_visual_citation(
+        "some draft", ranked_visuals=[], verify_result=None,
+    )
+    assert score_noop == 1.0, (
+        "no-surfaced-visuals → visual_citation = 1.0 (neutral). "
+        f"Got {score_noop}."
+    )
+
+    # Scorer returns 0.0 on hallucinated markers (hard failure).
+    score_halluc = book_ops._score_visual_citation(
+        "Draft with bad [Fig. 99]", ranked_visuals=[],
+        verify_result={"n_hallucinated": 1, "n_markers": 1,
+                       "n_low_entailment": 0, "entailment_scores": []},
+    )
+    assert score_halluc == 0.0, (
+        "hallucinated marker → visual_citation = 0.0. "
+        f"Got {score_halluc}."
+    )
+
+    # ─ Q2: L3 deliberately NOT in the iteration loop ────────
+    verify_src = inspect.getsource(book_ops._verify_figure_refs)
+    assert "Level 3" in verify_src and ("finalize-draft" in verify_src
+                                         or "pre-export" in verify_src), (
+        "_verify_figure_refs docstring must mention Level 3 is "
+        "deferred to a finalize-draft / pre-export pass. If a future "
+        "phase inlines VLM verification into the per-iteration loop, "
+        "update this invariant and the docstring together."
+    )
+    # And the actual implementation must NOT call a VLM in this version
+    assert "ollama" not in verify_src.lower() or "do NOT" in verify_src, (
+        "_verify_figure_refs must not issue VLM calls per iteration "
+        "(Q2 decision: L3 for final draft only, not active loop)"
+    )
+
+    # ─ Q3: rhetorically-gated instruction ───────────────────
+    # Build a prompt with a non-empty visuals block and check the
+    # system prompt picks up the "directly depicted" gate.
+    system, user = prompts.write_section_v2(
+        section="results", topic="test", results=[],
+        visuals_prompt_block="stub non-empty content",
+    )
+    assert "directly" in system.lower() and "depicted" in system.lower(), (
+        "system prompt must include the 'directly depicted' gating "
+        "language when visuals_prompt_block is provided (Q3 = Option D)"
+    )
+    assert "[Fig. N]" in system, (
+        "system prompt must reference the [Fig. N] marker syntax"
+    )
+    # And crucially: when NO visuals block is passed, the gating
+    # instruction must NOT appear (otherwise it confuses writers
+    # who weren't given a shortlist).
+    system_no_vis, _ = prompts.write_section_v2(
+        section="results", topic="test", results=[],
+        visuals_prompt_block=None,
+    )
+    assert "directly depicted" not in system_no_vis.lower(), (
+        "when no visuals block is provided, the figure-citation "
+        "guidance must not appear — the writer has nothing to cite"
+    )
+
+    # ─ Call-chain plumbing ──────────────────────────────────
+    # include_visuals must be a kwarg on every hop
+    for fn in (book_ops.autowrite_section_stream, book_ops._autowrite_section_body):
+        sig = inspect.signature(fn)
+        assert "include_visuals" in sig.parameters, (
+            f"{fn.__name__} must accept include_visuals kwarg (Phase 54.6.142)"
+        )
+        assert sig.parameters["include_visuals"].default is False, (
+            f"{fn.__name__}.include_visuals must default to False — "
+            f"the whole phase shipped as opt-in to keep existing "
+            f"workflows zero-risk"
+        )
+
+    # write_section_v2 must accept visuals_prompt_block
+    sig = inspect.signature(prompts.write_section_v2)
+    assert "visuals_prompt_block" in sig.parameters, (
+        "prompts.write_section_v2 must accept visuals_prompt_block "
+        "(the writer-side channel for format_visuals_prompt_block output)"
+    )
+
+
 def l1_phase54_6_141_writer_visuals_helpers_surface() -> None:
     """Phase 54.6.141 — writer-side visuals helpers ready for autowrite wiring.
 
@@ -10181,6 +10314,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_140_visuals_eval_surface,
     # Phase 54.6.141 — writer-side visuals helpers ready for autowrite wiring
     l1_phase54_6_141_writer_visuals_helpers_surface,
+    # Phase 54.6.142 — autowrite visuals wiring end-to-end (Q1/Q2/Q3 pinned)
+    l1_phase54_6_142_autowrite_visuals_wiring,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness
