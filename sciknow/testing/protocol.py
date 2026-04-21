@@ -9544,6 +9544,64 @@ def l1_phase54_6_145_finalize_draft_surface() -> None:
     )
 
 
+def l1_phase54_6_159_section_length_panel() -> None:
+    """Phase 54.6.159 — Book Settings UI panel for 54.6.157 bench data.
+
+    Surfaces the per-section-type IQR + §24 alignment tags in the GUI
+    so users don't need to run the CLI bench. Pins the three layers:
+
+      (A) GET /api/bench/section-lengths returns parsed JSON rows
+      (B) Endpoint delegates to b_corpus_section_length_distribution
+          (no duplicate SQL; the 54.6.157 L1 tests still pin that
+          function's §24 reference IQRs)
+      (C) Template/JS has the loader + panel host + colour coding
+    """
+    import inspect
+    from sciknow.testing.helpers import get_test_client, web_app_full_source
+    from sciknow.web import app as web_app
+    client = get_test_client()
+
+    # A) Endpoint returns structured per-section rows
+    r = client.get("/api/bench/section-lengths")
+    assert r.status_code == 200, r.status_code
+    data = r.json()
+    assert "sections" in data, (
+        "GET /api/bench/section-lengths must return {sections: [...]}"
+    )
+    # On a live corpus there should be ≥1 row; on an empty DB the test
+    # just validates the shape is correct.
+    for row in data["sections"]:
+        assert "section_type" in row and "iqr" in row, (
+            f"section row missing required keys: {row}"
+        )
+
+    # B) Delegates to the 54.6.157 bench function
+    handler_src = inspect.getsource(web_app.api_bench_section_lengths)
+    assert "b_corpus_section_length_distribution" in handler_src, (
+        "Endpoint must delegate to the 54.6.157 bench function — no "
+        "duplicate SQL (drift protection)"
+    )
+
+    # C) Template + JS wiring
+    src = web_app_full_source()
+    assert 'id="bs-section-length-panel"' in src, (
+        "Book Settings Basics tab must have the section-length panel "
+        "host (id=bs-section-length-panel) for 54.6.159"
+    )
+    assert "function loadSectionLengthPanel" in src, (
+        "loadSectionLengthPanel JS function missing"
+    )
+    assert "'/api/bench/section-lengths'" in src, (
+        "JS must fetch the new endpoint"
+    )
+    # Colour coding mirrors the alignment tags from 54.6.157 so a
+    # refactor that changes either side catches
+    assert "aligned" in src and "shorter-skewed" in src, (
+        "JS must colour-code by alignment tag; these strings come from "
+        "the 54.6.157 bench note parser"
+    )
+
+
 def l1_phase54_6_158_unfreeze_stale_book_targets() -> None:
     """Phase 54.6.158 — clear pre-54.6.158 frozen book-level defaults.
 
@@ -11677,6 +11735,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_157_section_length_distribution_bench,
     # Phase 54.6.158 — unfreeze stale book-level default targets
     l1_phase54_6_158_unfreeze_stale_book_targets,
+    # Phase 54.6.159 — Book Settings section-length UI panel
+    l1_phase54_6_159_section_length_panel,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness

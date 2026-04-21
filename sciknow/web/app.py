@@ -6092,6 +6092,54 @@ async def api_chapter_resolved_targets(chapter_id: str):
     })
 
 
+@app.get("/api/bench/section-lengths")
+async def api_bench_section_lengths():
+    """Phase 54.6.159 — surface the 54.6.157 section-length IQR bench
+    data in the web UI. Runs the same bench function so the numbers
+    stay in sync (no duplicate SQL); returns the per-section rows as
+    JSON with the alignment tag parsed out of the bench note for easy
+    rendering.
+    """
+    from sciknow.testing.bench import b_corpus_section_length_distribution
+    try:
+        metrics = list(b_corpus_section_length_distribution())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("section-length bench failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    rows = []
+    # The bench emits "iqr_<section_type>" metrics with a dotted note.
+    # Parse the note into structured fields so the UI doesn't have to
+    # re-implement the text parsing.
+    for m in metrics:
+        st = m.name.removeprefix("iqr_")
+        note = m.note or ""
+        # Note shape: "n=640 · median=630w · ref IQR 400-760 → aligned"
+        parts = [p.strip() for p in note.split("·")]
+        data: dict = {"section_type": st, "iqr": str(m.value), "unit": m.unit}
+        for p in parts:
+            if p.startswith("n="):
+                try:
+                    data["n"] = int(p[2:])
+                except ValueError:
+                    pass
+            elif p.startswith("median="):
+                try:
+                    data["median"] = int(p[len("median="):].rstrip("w"))
+                except ValueError:
+                    pass
+            elif p.startswith("ref IQR"):
+                # "ref IQR 400-760 → aligned"
+                try:
+                    ref_part, tag = p.split("→")
+                    data["ref_iqr"] = ref_part.removeprefix("ref IQR").strip()
+                    data["alignment"] = tag.strip()
+                except ValueError:
+                    pass
+        rows.append(data)
+    return JSONResponse({"sections": rows})
+
+
 @app.get("/api/book-types")
 async def api_book_types():
     """Phase 54.6.147 — list all registered project types with their
@@ -9641,6 +9689,24 @@ body.task-bar-open {{ padding-top: 40px; }}
           <div id="bs-plan-book-status" style="margin-top:6px;font-size:11px;color:var(--fg-muted);"></div>
           <pre id="bs-plan-book-log"
                style="display:none;margin-top:6px;max-height:220px;overflow:auto;padding:8px;background:var(--toolbar-bg);border:1px solid var(--border);border-radius:4px;font-size:10px;font-family:ui-monospace,monospace;line-height:1.3;white-space:pre-wrap;"></pre>
+        </div>
+        <!-- Phase 54.6.159 — corpus-grounded section-length panel.
+             Surfaces the 54.6.157 bench data (per-section IQRs with
+             §24 alignment tags) inline so users don't need to run
+             the CLI to see where their corpus sits vs reference. -->
+        <div style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--border);">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <strong style="font-size:12px;">&#128202; Corpus section-length distribution</strong>
+            <button class="btn-secondary" onclick="loadSectionLengthPanel()"
+                    style="font-size:11px;padding:2px 8px;"
+                    title="Phase 54.6.157/159 — walks paper_sections.word_count and shows per-section IQR alongside the RESEARCH.md §24 PubMed reference (N=61,517). Use to check whether your corpus is paper-shaped, monograph-shaped, or mixed — informs whether the project-type default wpc is right for your data.">
+              refresh
+            </button>
+          </div>
+          <div id="bs-section-length-panel"
+               style="margin-top:6px;font-size:11px;">
+            <em style="color:var(--fg-muted);">Click refresh to load section-length IQRs…</em>
+          </div>
         </div>
         <div id="bs-basics-meta" style="margin-top:10px;font-size:11px;color:var(--fg-muted);"></div>
         <div style="display:flex;gap:8px;align-items:center;margin-top:14px;">
@@ -22878,6 +22944,67 @@ function bsUpdateTypeInfo() {{
       <span>~${{totalLo}}–${{totalHi}} words</span>
     </div>
   `;
+}}
+
+// Phase 54.6.159 — populate the Book Settings "Corpus section-length
+// distribution" panel. Wraps GET /api/bench/section-lengths, which
+// delegates to the 54.6.157 bench function. Alignment tags are
+// colour-coded: aligned=green, shorter/longer-skewed=warning,
+// below/above-range=danger.
+async function loadSectionLengthPanel() {{
+  const host = document.getElementById('bs-section-length-panel');
+  if (!host) return;
+  host.innerHTML = '<em style="color:var(--fg-muted);">Loading…</em>';
+  try {{
+    const r = await fetch('/api/bench/section-lengths');
+    if (!r.ok) {{
+      host.innerHTML = '<span style="color:var(--danger);">Failed: '
+                      + r.status + '</span>';
+      return;
+    }}
+    const d = await r.json();
+    if (!d.sections || d.sections.length === 0) {{
+      host.innerHTML = '<em style="color:var(--fg-muted);">'
+                      + 'No section data yet — ingest some papers first.</em>';
+      return;
+    }}
+    const colourFor = (tag) => {{
+      if (!tag) return 'var(--fg-muted)';
+      if (tag === 'aligned') return 'var(--success)';
+      if (tag === 'shorter-skewed' || tag === 'longer-skewed') return 'var(--warning)';
+      return 'var(--danger)';
+    }};
+    let html = '<table style="width:100%;border-collapse:collapse;font-size:11px;">';
+    html += '<thead><tr style="border-bottom:1px solid var(--border);">'
+         + '<th style="text-align:left;padding:4px 6px;">Section</th>'
+         + '<th style="text-align:right;padding:4px 6px;">n</th>'
+         + '<th style="text-align:right;padding:4px 6px;">Median</th>'
+         + '<th style="text-align:right;padding:4px 6px;">IQR</th>'
+         + '<th style="text-align:left;padding:4px 6px;">§24 Ref</th>'
+         + '<th style="text-align:left;padding:4px 6px;">Alignment</th>'
+         + '</tr></thead><tbody>';
+    for (const s of d.sections) {{
+      const colour = colourFor(s.alignment);
+      html += '<tr style="border-bottom:1px solid var(--border);">'
+           + '<td style="padding:4px 6px;font-weight:600;">' + _escHtml(s.section_type) + '</td>'
+           + '<td style="padding:4px 6px;text-align:right;color:var(--fg-muted);">' + (s.n || '—') + '</td>'
+           + '<td style="padding:4px 6px;text-align:right;">' + ((s.median || 0).toLocaleString()) + 'w</td>'
+           + '<td style="padding:4px 6px;text-align:right;font-family:ui-monospace,monospace;">' + _escHtml(s.iqr || '—') + '</td>'
+           + '<td style="padding:4px 6px;color:var(--fg-muted);">' + _escHtml(s.ref_iqr || '—') + '</td>'
+           + '<td style="padding:4px 6px;color:' + colour + ';">' + _escHtml(s.alignment || '—') + '</td>'
+           + '</tr>';
+    }}
+    html += '</tbody></table>';
+    html += '<p style="margin-top:6px;color:var(--fg-muted);">'
+         + 'IQR = interquartile range. Reference IQRs are PubMed N=61,517 per '
+         + '<code>RESEARCH.md §24</code>. <em>aligned</em> = corpus median '
+         + 'sits inside the reference IQR; <em>shorter/longer-skewed</em> = '
+         + 'overlap but median is outside.</p>';
+    host.innerHTML = html;
+  }} catch (e) {{
+    host.innerHTML = '<span style="color:var(--danger);">Error: '
+                    + _escHtml(String(e).slice(0, 200)) + '</span>';
+  }}
 }}
 
 // Phase 54.6.156 — book-wide auto-plan wrapper. Streams
