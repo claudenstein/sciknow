@@ -7942,6 +7942,44 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .tg-label {{ font-size: 10px; font-weight: 600; color: var(--fg-faint);
              text-transform: uppercase; letter-spacing: 0.06em; padding: 0 6px;
              align-self: center; }}
+
+/* ── Phase 54.6.179 — AI cluster.
+   Segmented pill grouping Autowrite / Write / Review / Revise so
+   they read as one workflow. Quiet "AI" chip on the left labels
+   the group without leaning on per-button prefixes. */
+.ai-cluster {{
+  display: inline-flex; align-items: stretch;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}}
+.ai-cluster__label {{
+  display: inline-flex; align-items: center;
+  padding: 0 10px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.12em;
+  color: var(--fg-faint);
+  background: var(--toolbar-bg);
+  border-right: 1px solid var(--border);
+  user-select: none;
+}}
+.ai-cluster button {{
+  border: none;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  padding: 6px 12px;
+  box-shadow: none;
+}}
+.ai-cluster button:last-child {{ border-right: none; }}
+.ai-cluster button:hover {{
+  background: var(--toolbar-bg);
+  border-color: var(--border);
+  box-shadow: none;
+}}
+.ai-cluster button:focus-visible {{ outline-offset: -2px; }}
 /* Modal infrastructure */
 .modal-overlay {{ display: none; position: fixed; inset: 0; background: var(--modal-overlay);
                   backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
@@ -8055,7 +8093,26 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
                              padding: 7px 10px; cursor: pointer;
                              color: var(--fg); border-radius: var(--r-sm);
                              display: flex; gap: 6px; align-items: center; }}
-.nav-dropdown-menu button:hover {{ background: var(--accent-light); }}
+.nav-dropdown-menu button:hover {{ background: var(--accent-light); color: var(--accent); }}
+/* Phase 54.6.180 — unified "More" menu. Wider than the old
+   single-purpose dropdowns; uses group labels to split the
+   former Book / Explore / Corpus / Visualize / Manage menus
+   into one readable list. */
+.nav-dropdown-menu--wide {{
+  min-width: 280px; max-height: min(70vh, 720px);
+  overflow-y: auto;
+}}
+.nav-group-label {{
+  padding: 8px 10px 4px;
+  font-family: var(--font-sans); font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--fg-faint);
+}}
+.nav-group-label:first-child {{ padding-top: 4px; }}
+.nav-group-sep {{
+  height: 1px; background: var(--border);
+  margin: 6px 4px 0;
+}}
 /* Optional — a subset of modals (detailed wiki pages, big tables)
    may want to be user-resizable. Opt-in via `class="modal resizable"`
    — the handle sits in the bottom-right corner. */
@@ -9543,6 +9600,12 @@ body.task-bar-open {{ padding-top: 40px; }}
     <polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/>
     <path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>
   </symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="3"  y1="6"  x2="21" y2="6"/>
+    <line x1="3"  y1="12" x2="21" y2="12"/>
+    <line x1="3"  y1="18" x2="21" y2="18"/>
+  </symbol>
 </svg>
 
 <!-- Phase 30 — persistent global task bar.
@@ -9579,13 +9642,18 @@ body.task-bar-open {{ padding-top: 40px; }}
        data-exploration view. -->
   <button class="nav-btn" onclick="openPlanModal()" title="View / edit / regenerate the book plan (the leitmotiv)"><svg class="icon"><use href="#i-file-text"/></svg> Plan</button>
   <button class="nav-btn" onclick="showDashboard()" title="Book dashboard with stats + heatmap"><svg class="icon"><use href="#i-bar-chart"/></svg> Dashboard</button>
-  <!-- Book — state + output surfaces for the current book -->
-  <div class="nav-dropdown" id="book-dropdown">
-    <button class="nav-btn" onclick="toggleNavDropdown('book-dropdown', event)"
-            title="Book-level surfaces: visual browse, history, snapshots, export, settings">
-      <svg class="icon"><use href="#i-book-open"/></svg> Book <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
+  <!-- Phase 54.6.180 — unified "More" menu. Collapses the former 5
+       dropdowns (Book / Explore / Corpus / Visualize / Manage) into
+       one menu with grouped sections. Plan + Dashboard stay as direct
+       buttons; ⌘K is the power-user path. Every item here is also
+       reachable via the palette. -->
+  <div class="nav-dropdown" id="more-dropdown">
+    <button class="nav-btn" onclick="toggleNavDropdown('more-dropdown', event)"
+            title="Every destination — organised by section. Power users: press ⌘K / Ctrl+K.">
+      <svg class="icon"><use href="#i-menu"/></svg> More <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
     </button>
-    <div class="nav-dropdown-menu" role="menu">
+    <div class="nav-dropdown-menu nav-dropdown-menu--wide" role="menu">
+      <div class="nav-group-label">Book</div>
       <button role="menuitem" onclick="showCorkboard()"
               title="Book-wide corkboard view: every chapter's sections as cards you can drag + reorder."><svg class="icon"><use href="#i-layout-grid"/></svg> Corkboard</button>
       <button role="menuitem" onclick="showVersions()"
@@ -9596,15 +9664,9 @@ body.task-bar-open {{ padding-top: 40px; }}
               title="Export the book to Markdown, HTML, PDF (WeasyPrint), EPUB (pandoc), LaTeX, DOCX, or BibTeX."><svg class="icon"><use href="#i-download"/></svg> Export</button>
       <button role="menuitem" onclick="openBookSettings()"
               title="Per-book settings: title, description, plan (leitmotiv), target chapter length, style fingerprint, per-role model assignments."><svg class="icon"><use href="#i-sliders"/></svg> Settings</button>
-    </div>
-  </div>
-  <!-- Explore — corpus query surfaces -->
-  <div class="nav-dropdown" id="explore-dropdown">
-    <button class="nav-btn" onclick="toggleNavDropdown('explore-dropdown', event)"
-            title="Query the corpus: RAG, compiled wiki, paper catalog">
-      <svg class="icon"><use href="#i-search"/></svg> Explore <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
-    </button>
-    <div class="nav-dropdown-menu" role="menu">
+
+      <div class="nav-group-sep"></div>
+      <div class="nav-group-label">Explore</div>
       <button role="menuitem" onclick="openAskModal()"
               title="Natural-language question against the corpus with grounded citations. Mirrors `sciknow ask question`."><svg class="icon"><use href="#i-search"/></svg> Ask Corpus</button>
       <button role="menuitem" onclick="openWikiModal()"
@@ -9613,18 +9675,9 @@ body.task-bar-open {{ padding-top: 40px; }}
               title="Browse every paper in the corpus with filters for year, section type, topic cluster, paper type."><svg class="icon"><use href="#i-folder"/></svg> Browse Papers</button>
       <button role="menuitem" onclick="openVisualsModal()"
               title="Browse every extracted table, equation, figure, chart, and code block. Gallery + list modes with pagination and importance ranking."><svg class="icon"><use href="#i-image"/></svg> Visuals (Tables/Figs/Eqs)</button>
-    </div>
-  </div>
-  <!-- Phase 54.6.18 — Corpus: every enrich / expand surface lifted
-       out of the old Tools→Corpus tab. 6 expand vectors + enrich +
-       two utilities. Each link opens the standalone Corpus modal on
-       the right sub-tab (or runs the utility directly). -->
-  <div class="nav-dropdown" id="corpus-dropdown">
-    <button class="nav-btn" onclick="toggleNavDropdown('corpus-dropdown', event)"
-            title="Grow and enrich the corpus: enrich metadata + five expand vectors + cleanup + pending">
-      <svg class="icon"><use href="#i-sprout"/></svg> Corpus <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
-    </button>
-    <div class="nav-dropdown-menu" role="menu">
+
+      <div class="nav-group-sep"></div>
+      <div class="nav-group-label">Corpus</div>
       <button role="menuitem" onclick="openCorpusModal('corp-enrich')"
               title="Fill missing DOIs via Crossref/OpenAlex/arXiv title search + persist OpenAlex extras (concepts/funders/grants/ROR). Mirrors `sciknow db enrich`."><svg class="icon"><use href="#i-search"/></svg> Enrich metadata</button>
       <button role="menuitem" onclick="openCorpusModal('corp-cites')"
@@ -9637,18 +9690,13 @@ body.task-bar-open {{ padding-top: 40px; }}
               title="OpenAlex free-text topic search ranked by citation count. Good for kickstarting a new project."><svg class="icon"><use href="#i-tag"/></svg> Topic search</button>
       <button role="menuitem" onclick="openCorpusModal('corp-coauth')"
               title="Find people who coauthored with your corpus's authors. Useful for invisible-college expansion."><svg class="icon"><use href="#i-users"/></svg> Coauthors</button>
-      <div style="height:1px;background:var(--border);margin:2px 0;"></div>
       <button role="menuitem" onclick="openCorpusModal('corp-enrich');doToolCorpus('cleanup')"
               title="Remove already-ingested duplicates from the downloads/ directory AND permanently delete the failed-ingest archive. Frees disk; the main pipeline archive stays intact."><svg class="icon"><use href="#i-trash"/></svg> Cleanup downloads + failed</button>
       <button role="menuitem" onclick="openPendingDownloadsModal()"
               title="Papers you selected for download but couldn't be auto-retrieved (no open-access PDF). Retry, mark manually acquired, or export for ILL."><svg class="icon"><use href="#i-clipboard"/></svg> Pending downloads</button>
-    </div>
-  </div>
-  <!-- Visualize — seven views of the corpus (KG + the six Viz tabs) -->
-  <div class="nav-dropdown" id="viz-dropdown">
-    <button class="nav-btn" onclick="toggleNavDropdown('viz-dropdown', event)"
-            title="Seven visualizations of the corpus"><svg class="icon"><use href="#i-layers"/></svg> Visualize <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg></button>
-    <div class="nav-dropdown-menu" id="viz-dropdown-menu" role="menu">
+
+      <div class="nav-group-sep"></div>
+      <div class="nav-group-label">Visualize</div>
       <button role="menuitem" onclick="openKgModal()"
               title="Knowledge graph of entities + relationships extracted from the corpus (Phase 54.6.50+). Zoomable force layout + table view."><svg class="icon"><use href="#i-link"/></svg> Knowledge Graph</button>
       <button role="menuitem" onclick="openVizModal('viz-topic')"
@@ -9663,22 +9711,15 @@ body.task-bar-open {{ padding-top: 40px; }}
               title="Ego radial: pick a paper, see its citation neighbourhood as concentric rings (depth-1/2 citers + cited-by)."><svg class="icon"><use href="#i-target"/></svg> Ego radial</button>
       <button role="menuitem" onclick="openVizModal('viz-radar')"
               title="Gap radar: per-topic coverage vs what the corpus plan says it should cover. Big gaps visible at a glance."><svg class="icon"><use href="#i-bar-chart"/></svg> Gap radar</button>
-    </div>
-  </div>
-  <!-- Manage — admin + corpus growth -->
-  <div class="nav-dropdown" id="manage-dropdown">
-    <button class="nav-btn" onclick="toggleNavDropdown('manage-dropdown', event)"
-            title="Tools, setup, projects">
-      <svg class="icon"><use href="#i-sliders"/></svg> Manage <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
-    </button>
-    <div class="nav-dropdown-menu" role="menu">
+
+      <div class="nav-group-sep"></div>
+      <div class="nav-group-label">Manage</div>
       <button role="menuitem" onclick="openToolsModal()"
               title="CLI parity modal: Search / Synthesize / Topics tabs exposing the same commands from the web."><svg class="icon"><use href="#i-wrench"/></svg> Tools &middot; CLI parity</button>
       <button role="menuitem" onclick="openSetupWizard()"
               title="Five-step guided flow for a fresh project: Project → Corpus → Indices → Expand → Book."><svg class="icon"><use href="#i-wand"/></svg> Setup Wizard</button>
       <button role="menuitem" onclick="openProjectsModal()"
               title="List / create / switch projects. Each project has its own PostgreSQL DB, Qdrant collections, and data/ directory."><span id="proj-btn-label"><svg class="icon"><use href="#i-folder"/></svg> Projects</span></button>
-      <div style="height:1px;background:var(--border);margin:2px 0;"></div>
       <button role="menuitem" onclick="openBackupsModal()"
               title="Backup status, schedule, delete, purge. Badge colour: green = fresh (<25h), yellow = aging, red = none or stale (>2d)."
               ><svg class="icon"><use href="#i-archive"/></svg> Backups <span id="backup-badge" style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-left:4px;vertical-align:middle;"></span></button>
@@ -9778,12 +9819,18 @@ body.task-bar-open {{ padding-top: 40px; }}
            🔎 Verify  — provenance / scoring passes
            🧠 Critique — evidence mapping + critic skills
            📦 Extras   — whole-chapter snapshots + continuous read -->
-    <div class="tg">
-      <button class="primary" onclick="toggleEdit()" title="Manually edit the draft content (in-browser markdown editor with autosave)"><svg class="icon"><use href="#i-edit"/></svg> Edit</button>
-      <button onclick="doAutowrite()" title="Autonomous AI write → review → revise loop"><svg class="icon"><use href="#i-zap"/></svg> AI Autowrite</button>
-      <button onclick="doWrite()" title="AI drafts this section from scratch (single pass)"><svg class="icon"><use href="#i-feather"/></svg> AI Write</button>
-      <button onclick="doReview()" title="AI critic pass on this section"><svg class="icon"><use href="#i-message-square"/></svg> AI Review</button>
-      <button onclick="doRevise()" title="AI revises based on review feedback"><svg class="icon"><use href="#i-refresh-cw"/></svg> AI Revise</button>
+    <!-- Phase 54.6.179 — AI cluster. Edit stands alone as a manual
+         action; the 4 AI verbs share a segmented-pill container so
+         they read as one "AI workflow." The "AI " prefix drops off
+         each label because the container itself signals the group. -->
+    <button class="primary" onclick="toggleEdit()" title="Manually edit the draft content (in-browser markdown editor with autosave)"><svg class="icon"><use href="#i-edit"/></svg> Edit</button>
+    <div class="sep"></div>
+    <div class="ai-cluster" role="group" aria-label="AI actions">
+      <span class="ai-cluster__label" aria-hidden="true">AI</span>
+      <button onclick="doAutowrite()" title="Autonomous AI write → review → revise loop"><svg class="icon"><use href="#i-zap"/></svg> Autowrite</button>
+      <button onclick="doWrite()" title="AI drafts this section from scratch (single pass)"><svg class="icon"><use href="#i-feather"/></svg> Write</button>
+      <button onclick="doReview()" title="AI critic pass on this section"><svg class="icon"><use href="#i-message-square"/></svg> Review</button>
+      <button onclick="doRevise()" title="AI revises based on review feedback"><svg class="icon"><use href="#i-refresh-cw"/></svg> Revise</button>
     </div>
     <div class="sep"></div>
     <div class="nav-dropdown nav-dropdown-left tb-dropdown" id="verify-tb-dropdown">

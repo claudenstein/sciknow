@@ -4980,8 +4980,13 @@ def l1_phase36_tools_panel() -> None:
     assert 'id="tl-corpus-pane"' in src, (
         "tl-corpus-pane must still exist (moved into corpus-modal)"
     )
-    assert 'id="corpus-dropdown"' in src, (
-        "top-bar Corpus dropdown (#corpus-dropdown) missing"
+    # Phase 54.6.180 — the former 5 topbar dropdowns (Book / Explore /
+    # Corpus / Visualize / Manage) were collapsed into one "More"
+    # dropdown with grouped sections. The Corpus items are now entries
+    # inside #more-dropdown rather than a separate #corpus-dropdown.
+    assert 'id="more-dropdown"' in src, (
+        "topbar unified More dropdown (#more-dropdown) missing — "
+        "Phase 54.6.180 collapsed the 5 former topbar menus"
     )
     # Top-bar dropdown entries for the 6 expand sub-tabs + cleanup + pending
     for subtab in ("corp-enrich", "corp-cites", "corp-author",
