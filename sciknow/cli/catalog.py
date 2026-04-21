@@ -991,6 +991,23 @@ def raptor_build(
                                   help="Cluster but do not summarise or upsert. Reports cluster sizes only."),
     model: str | None = typer.Option(None, "--model",
                                       help="LLM for cluster summarisation. Defaults to LLM_FAST_MODEL."),
+    verify: bool = typer.Option(
+        False, "--verify",
+        help="Phase 54.6.208 — after each cluster summary is "
+             "generated, claim-atomize it and NLI-check each sub-claim "
+             "against a sample of its constituent chunks. Attaches "
+             "verification_score / n_sub_claims / n_supported to the "
+             "summary node's payload; flags (warning log) any summary "
+             "where <50%% of sub-claims are supported. Adds ~0.5-2s "
+             "per cluster (NLI-only; no extra LLM calls). Off by "
+             "default so refresh runs stay fast.",
+    ),
+    verify_sample_cap: int = typer.Option(
+        20, "--verify-sample-cap",
+        help="Per FActScore methodology, 10-20 source samples is "
+             "sufficient to detect systematic unfaithfulness. Only "
+             "used when --verify is set.",
+    ),
 ):
     """
     Build the RAPTOR hierarchical retrieval tree on top of the existing chunk index.
@@ -1056,6 +1073,8 @@ def raptor_build(
                 model=model,
                 rebuild=rebuild,
                 dry_run=dry_run,
+                verify_summaries=verify,
+                verify_sample_cap=verify_sample_cap,
             ):
                 t = ev.get("type")
 

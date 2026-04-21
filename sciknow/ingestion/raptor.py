@@ -31,6 +31,7 @@ import logging
 import re
 import time
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Iterator
 from uuid import uuid4
 
@@ -396,6 +397,8 @@ def _build_level(
     min_cluster_size: int,
     model: str | None,
     dry_run: bool,
+    verify_summaries: bool = False,
+    verify_sample_cap: int = 20,
 ) -> Iterator[Event]:
     """Build one level of the RAPTOR tree from the points at `parent_level`.
 
@@ -522,6 +525,71 @@ def _build_level(
                    "label": label, "reason": "empty summary"}
             continue
 
+        # Phase 54.6.208 — roadmap 3.9.1: verify the summary is
+        # actually supported by its constituent chunks. Uses the
+        # existing Phase 54.6.83 claim-atomization + NLI pipeline.
+        # Capped at verify_sample_cap constituents so a 500-chunk
+        # cluster doesn't drag on for minutes; per FActScore
+        # methodology, 10-20 source samples is sufficient to detect
+        # systematic unfaithfulness.
+        verification_score: float | None = None
+        n_sub_claims_checked = 0
+        n_supported = 0
+        if verify_summaries:
+            try:
+                from sciknow.core.claim_atomize import verify_draft
+                import random as _rand
+                sample_ids = cluster_ids[:]
+                if len(sample_ids) > verify_sample_cap:
+                    sample_ids = _rand.sample(sample_ids, verify_sample_cap)
+                source_texts = []
+                for cid in sample_ids:
+                    # L1 sources: leaf chunk content (from chunk_texts)
+                    # L2+ sources: child-summary text (from payloads)
+                    t = chunk_texts.get(cid)
+                    if not t:
+                        p = payloads.get(cid) or {}
+                        t = p.get("summary_text") or p.get("content_preview")
+                    if t:
+                        source_texts.append(str(t))
+                if source_texts:
+                    v = verify_draft(
+                        summary,
+                        source_texts,
+                        model=model,
+                        allow_llm_atomize=False,  # heuristic only in ingest
+                    )
+                    verification_score = v.mean_entailment
+                    n_sub_claims_checked = v.n_sub_claims
+                    n_supported = v.n_supported
+                    yield {
+                        "type": "cluster_verified",
+                        "level": target_level,
+                        "label": label,
+                        "mean_entailment": verification_score,
+                        "n_supported": n_supported,
+                        "n_sub_claims": n_sub_claims_checked,
+                        "mixed_truth_count": v.mixed_truth_count,
+                    }
+                    # Flag summaries where <50% of sub-claims entailed.
+                    if n_sub_claims_checked > 0 and (
+                        n_supported / n_sub_claims_checked < 0.5
+                    ):
+                        logger.warning(
+                            "RAPTOR L%d summary low-faithfulness: "
+                            "%d/%d sub-claims supported (mean_entail=%.2f) — "
+                            "cluster=%s, sample_size=%d. Summary kept but "
+                            "flagged for review via payload.verification_score.",
+                            target_level, n_supported, n_sub_claims_checked,
+                            verification_score, label, len(source_texts),
+                        )
+            except Exception as exc:
+                logger.warning(
+                    "RAPTOR summary verification failed at level %d cluster %s: %s — "
+                    "proceeding without a score (summary still persisted).",
+                    target_level, label, exc,
+                )
+
         # Build the payload for the new summary node. Aggregate metadata
         # from the children so the node carries useful filter info.
         doc_ids: set[str] = set()
@@ -565,6 +633,18 @@ def _build_level(
             "content_preview": summary[:200],
             # Mark for citation_boost: empty document_id excludes from boost.
             "document_id": "",
+            # Phase 54.6.208 — faithfulness audit fields. When
+            # verify_summaries=False at build time these stay None/0;
+            # retrieval code that wants to filter "only high-
+            # faithfulness summaries" can predicate on
+            # verification_score >= threshold. The run that populated
+            # them is identifiable via verification_run_at.
+            "verification_score": verification_score,
+            "verification_n_sub_claims": n_sub_claims_checked,
+            "verification_n_supported": n_supported,
+            "verification_run_at": (
+                datetime.now(timezone.utc).isoformat() if verify_summaries else None
+            ),
         }
 
         try:
@@ -590,6 +670,8 @@ def build_raptor_tree(
     model: str | None = None,
     rebuild: bool = False,
     dry_run: bool = False,
+    verify_summaries: bool = False,
+    verify_sample_cap: int = 20,
 ) -> Iterator[Event]:
     """
     Build the RAPTOR tree on top of the existing chunk index.
@@ -662,6 +744,8 @@ def build_raptor_tree(
                 min_cluster_size=min_cluster_size,
                 model=model,
                 dry_run=dry_run,
+                verify_summaries=verify_summaries,
+                verify_sample_cap=verify_sample_cap,
             ):
                 yield ev
                 if ev.get("type") == "level_done":
