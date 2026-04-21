@@ -666,6 +666,129 @@ def set_target(
         )
 
 
+# ── length-report (Phase 54.6.153) ─────────────────────────────────────────────
+
+@app.command(name="length-report")
+def length_report(
+    book_title: Annotated[str, typer.Argument(
+        help="Book title or ID fragment.",
+    )],
+    output_json: bool = typer.Option(
+        False, "--json",
+        help="Emit machine-readable JSON instead of the Rich table. "
+             "Useful for piping into jq or another script.",
+    ),
+):
+    """Phase 54.6.153 — whole-book projected length report.
+
+    Walks every chapter × every section, runs the same resolver chain
+    autowrite uses (explicit override → concept-density → chapter-split),
+    and prints a table showing per-section target + level, chapter
+    totals, and the whole-book total. Answers "how long is my book
+    going to be?" before you start autowriting.
+
+    Notes:
+
+    - Targets shown are the pre-widener values. The Phase 54.6.150
+      retrieval-density widener would normally nudge ±wpc_range based
+      on actual retrieved-chunk counts, but firing retrieval for every
+      section just to preview targets is too expensive. Final
+      autowrite-time targets are typically within ±50% of what this
+      reports.
+    - Section levels:
+        `override`        — per-section target_words set explicitly
+        `concept_density` — bottom-up from section plan (54.6.146)
+        `chapter_split`   — top-down chapter target ÷ num sections
+
+    Examples:
+
+      sciknow book length-report "Global Cooling"
+      sciknow book length-report "Global Cooling" --json | jq .total_words
+    """
+    from rich.table import Table as _RT
+    from rich import box as _rbox
+    from sqlalchemy import text
+    from sciknow.core.length_report import walk_book_lengths
+    from sciknow.storage.db import get_session
+
+    # Resolve book
+    with get_session() as session:
+        row = session.execute(text("""
+            SELECT id::text, title FROM books
+            WHERE title ILIKE :q OR id::text LIKE :q
+            ORDER BY updated_at DESC LIMIT 1
+        """), {"q": f"%{book_title}%"}).fetchone()
+    if not row:
+        console.print(f"[red]No book matches {book_title!r}[/red]")
+        raise typer.Exit(1)
+    book_id, resolved_title = row
+
+    try:
+        report = walk_book_lengths(book_id)
+    except Exception as exc:
+        console.print(f"[red]length-report failed: {exc}[/red]")
+        raise typer.Exit(2)
+
+    if output_json:
+        import json as _json
+        console.print_json(_json.dumps(report.to_dict()))
+        return
+
+    # Rich table: sections nested under chapters, with running totals
+    console.print(
+        f"\n[bold]{report.title}[/bold]  ·  type: [cyan]{report.book_type}[/cyan]  ·  "
+        f"{report.n_chapters} chapter(s), {report.n_sections} section(s)\n"
+    )
+
+    for ch in report.chapters:
+        ch_pct = 100.0 * ch.total_words / max(1, report.total_words)
+        console.print(
+            f"[bold]Ch.{ch.number}[/bold] {ch.title!r}  ·  "
+            f"chapter target [cyan]{ch.chapter_target:,}[/cyan] "
+            f"[dim]({ch.chapter_level})[/dim]  ·  "
+            f"section sum [yellow]{ch.total_words:,}[/yellow] words "
+            f"[dim]({ch_pct:.1f}% of book)[/dim]"
+        )
+        t = _RT(box=_rbox.MINIMAL, show_header=True, pad_edge=False,
+                show_lines=False)
+        t.add_column("  §", width=4, style="dim")
+        t.add_column("Title", overflow="fold")
+        t.add_column("Target", justify="right", width=9)
+        t.add_column("Level", style="dim")
+        t.add_column("Notes", style="dim", overflow="fold")
+        for s in ch.sections:
+            level_colour = {
+                "explicit_section_override": "[green]override[/green]",
+                "concept_density":           "[cyan]concept-density[/cyan]",
+                "chapter_split":             "[dim]chapter-split[/dim]",
+            }.get(s.level, s.level)
+            t.add_row(
+                f"  {s.slug[:20]}",
+                s.title[:40],
+                f"{s.target:,}",
+                level_colour,
+                s.explanation[:60],
+            )
+        console.print(t)
+        console.print("")
+
+    # Footer summary
+    hist = report.level_histogram()
+    bits = []
+    for lvl, count in hist.items():
+        bits.append(f"{count} {lvl}")
+    hist_str = "  ·  ".join(bits) if bits else "(no sections)"
+    console.print(
+        f"[bold]Book total:[/bold] [yellow]{report.total_words:,}[/yellow] words across "
+        f"{report.n_chapters} chapter(s) and {report.n_sections} section(s)"
+    )
+    console.print(f"[dim]Section levels: {hist_str}[/dim]")
+    console.print(
+        "[dim]Pre-widener values. Phase 54.6.150 retrieval-density widener "
+        "adjusts ±wpc_range at autowrite time based on retrieved-chunk count.[/dim]"
+    )
+
+
 # ── list ───────────────────────────────────────────────────────────────────────
 
 @app.command(name="list")

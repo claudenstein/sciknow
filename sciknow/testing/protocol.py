@@ -9544,6 +9544,83 @@ def l1_phase54_6_145_finalize_draft_surface() -> None:
     )
 
 
+def l1_phase54_6_153_length_report_surface() -> None:
+    """Phase 54.6.153 — ``sciknow book length-report`` + walk_book_lengths().
+
+    Pins the whole-book projected-length reporter:
+      (A) core.length_report module + walk_book_lengths function
+      (B) BookLengthReport dataclass carries the fields the CLI reads
+          (level_histogram, total_words, chapters, etc.)
+      (C) `book length-report` CLI registered with --json flag
+      (D) Handler imports walk_book_lengths (no logic duplication —
+          this is the same "call the real helpers" invariant we use
+          for the 54.6.149 resolved-targets endpoint)
+      (E) core module calls the five canonical resolver helpers
+          (catches drift from autowrite's actual behaviour)
+    """
+    import inspect
+    from sciknow.core import length_report as lr
+    from sciknow.cli import book as book_cli
+
+    # A) Module surface
+    assert hasattr(lr, "walk_book_lengths")
+    assert hasattr(lr, "BookLengthReport")
+    assert hasattr(lr, "ChapterEntry")
+    assert hasattr(lr, "SectionEntry")
+
+    # B) BookLengthReport has the fields the CLI renders
+    rep_fields = {f.name for f in lr.BookLengthReport.__dataclass_fields__.values()}
+    for req in ("book_id", "title", "book_type", "chapters"):
+        assert req in rep_fields, f"BookLengthReport.{req} missing"
+    # Aggregations must exist as properties
+    for prop in ("total_words", "n_chapters", "n_sections", "level_histogram"):
+        assert hasattr(lr.BookLengthReport, prop), (
+            f"BookLengthReport.{prop} must be accessible — the CLI "
+            f"footer reads it"
+        )
+
+    # C) CLI registered with --json flag
+    cmd_names = {cmd.name for cmd in book_cli.app.registered_commands}
+    assert "length-report" in cmd_names, (
+        "`sciknow book length-report` command missing (Phase 54.6.153)"
+    )
+    sig = inspect.signature(book_cli.length_report)
+    assert "book_title" in sig.parameters
+    assert "output_json" in sig.parameters
+
+    # D) CLI delegates to walk_book_lengths — no duplicate walker logic
+    cli_src = inspect.getsource(book_cli.length_report)
+    assert "walk_book_lengths" in cli_src, (
+        "CLI must delegate to walk_book_lengths — no inline walker "
+        "(drift from autowrite's resolver is the risk this guards)"
+    )
+
+    # E) Core walker invokes the five canonical resolver helpers
+    core_src = inspect.getsource(lr.walk_book_lengths)
+    for fn in (
+        "_get_section_target_words",
+        "_get_section_concept_density_target",
+        "_section_target_words",
+        "_count_plan_concepts",
+        "get_project_type",
+    ):
+        assert fn in core_src, (
+            f"walk_book_lengths must call {fn} to stay in sync with "
+            f"autowrite's resolver chain"
+        )
+    # All three section-level strings must appear so the JSON shape
+    # is stable for downstream scripting
+    for level in (
+        "explicit_section_override",
+        "concept_density",
+        "chapter_split",
+    ):
+        assert level in core_src, (
+            f"walk_book_lengths must emit the '{level}' level string "
+            f"(documented JSON contract)"
+        )
+
+
 def l1_phase54_6_152_live_plan_concept_readout() -> None:
     """Phase 54.6.152 — live concept-density readout on the plan textarea.
 
@@ -11183,6 +11260,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_151_section_length_ceiling_and_widener_ui,
     # Phase 54.6.152 — live concept-count + target readout on plan textarea
     l1_phase54_6_152_live_plan_concept_readout,
+    # Phase 54.6.153 — whole-book length-report CLI + core walker
+    l1_phase54_6_153_length_report_surface,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness
