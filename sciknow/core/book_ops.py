@@ -311,16 +311,126 @@ def _get_section_plan(session, chapter_id: str, section_slug: str) -> str:
     return ""
 
 
+_CONCEPT_BULLET_RE = re.compile(
+    r"^\s*(?:[-*•‣]|\d+\s*[.\)])\s+.{3,}",
+    re.MULTILINE,
+)
+
+
+def _count_plan_concepts(plan_text: str) -> int:
+    """Phase 54.6.146 — estimate how many novel concepts a section plan
+    introduces.
+
+    Counts bullet-like lines (lines starting with ``-``, ``*``, ``•``,
+    ``1.``, ``2)``, etc. with at least 3 chars of substance after). If
+    there are no bullet markers at all, falls back to counting non-empty
+    paragraph-like lines ≥ 20 chars, capped at 6 (beyond 6 we're
+    probably looking at prose, not a concept list).
+
+    This is the atom of the bottom-up resolver (see RESEARCH.md §24):
+    section target = n_concepts × words_per_concept.
+    """
+    if not plan_text or not plan_text.strip():
+        return 0
+    n = len(_CONCEPT_BULLET_RE.findall(plan_text))
+    if n > 0:
+        return n
+    # Fallback: line-based heuristic for plans written as prose
+    lines = [ln.strip() for ln in plan_text.splitlines() if len(ln.strip()) >= 20]
+    return min(len(lines), 6)
+
+
+def _get_section_concept_density_target(
+    session,
+    chapter_id: str,
+    section_slug: str,
+    book_id: str,
+) -> int | None:
+    """Phase 54.6.146 Level-0 resolver — bottom-up concept-density sizing.
+
+    When a section has a plan (bullet list of concepts), compute its
+    target word count as ``n_concepts × words_per_concept_midpoint``,
+    where both factors are declarative: concept count comes from the
+    plan text, wpc midpoint comes from the project type
+    (``ProjectType.words_per_concept_range``).
+
+    Returns ``None`` when there is no plan or no bullets, signalling
+    the caller should fall through to the chapter-split fallback.
+
+    Per docs/RESEARCH.md §24, Cowan 2001's capacity bound is 3-4 novel
+    chunks; Guideline 1 says sections should cap at that. The user
+    chose option (b) soft warning on >4 concepts (Q3 of the
+    2026-04-20 concept-density discussion): we log a one-line
+    educational note when that ceiling is exceeded but still return
+    the requested target, letting the writer/author override cognitive-
+    load guidance when they know their reader.
+    """
+    plan_text = _get_section_plan(session, chapter_id, section_slug)
+    if not plan_text or not plan_text.strip():
+        return None
+    n = _count_plan_concepts(plan_text)
+    if n <= 0:
+        return None
+
+    # Pull the project type — same resolver-chain pattern as
+    # _get_book_length_target Level 3.
+    try:
+        from sqlalchemy import text as _sql
+        row = session.execute(_sql(
+            "SELECT book_type FROM books WHERE id::text = :bid LIMIT 1"
+        ), {"bid": book_id}).fetchone()
+        book_type = row[0] if row else None
+    except Exception:
+        book_type = None
+
+    try:
+        from sciknow.core.project_type import get_project_type
+        pt = get_project_type(book_type)
+        lo, hi = pt.words_per_concept_range
+        # Midpoint — retrieval-density-aware widening is RESEARCH.md §24
+        # guideline 4 future work and lives outside this path.
+        wpc_mid = int((lo + hi) / 2)
+    except Exception as exc:
+        logger.debug("project_type wpc lookup failed: %s", exc)
+        return None
+
+    target = max(400, n * wpc_mid)  # 400 floor matches _section_target_words
+
+    # Soft warning on cognitive-load ceiling exceeded (user option 3b
+    # from the 2026-04-20 discussion). We emit this as a logger.info
+    # rather than a visible yield event because autowrite hits this
+    # per-section × per-iteration — a GUI warning would flood the
+    # stream. The log is actionable offline for anyone auditing the
+    # run.
+    max_recommended = 4
+    try:
+        from sciknow.core.project_type import get_project_type as _gpt
+        pt_hi = _gpt(book_type).concepts_per_section_range[1]
+        max_recommended = max(max_recommended, pt_hi)
+    except Exception:
+        pass
+    if n > max_recommended:
+        logger.info(
+            "Phase 54.6.146 — section %r in chapter %s has %d concepts in "
+            "its plan (soft ceiling is %d per Cowan 2001 novel-chunk "
+            "capacity; see RESEARCH.md §24). Targeting %d words — consider "
+            "splitting the section for better reader absorption.",
+            section_slug, chapter_id, n, max_recommended, target,
+        )
+    return target
+
+
 def _get_section_target_words(
     session, chapter_id: str, section_slug: str,
 ) -> int | None:
     """Phase 29 — return the per-section target_words override, or None
     if no override is set on this section.
 
-    The autowrite/write target resolution is now a 3-level priority:
+    The autowrite/write target resolution is now a 4-level priority:
         1. caller arg (--target-words / target_words form field)
         2. per-section meta override (this function)
-        3. derived from chapter target / num_sections (default)
+        3. concept-density (Phase 54.6.146 — if section has a plan)
+        4. derived from chapter target / num_sections (default)
 
     None at this level means "fall through to level 3". The GUI's
     section dropdown writes this field via the existing
@@ -2711,10 +2821,20 @@ def write_section_stream(
             if section_override is not None:
                 effective_target_words = section_override
             else:
-                # Phase 54.6.143 — pass chapter_id so per-chapter override fires
-                chapter_target = _get_book_length_target(session, book_id, chapter_id=ch_id)
-                num_sections = _get_chapter_num_sections(session, ch_id)
-                effective_target_words = _section_target_words(chapter_target, num_sections)
+                # Phase 54.6.146 — Level 0 concept-density: when the
+                # section has a plan with N bullets, target = N × wpc
+                # from the project type. Bottom-up sizing; chapter/book
+                # length emerges from section lengths per RESEARCH.md §24.
+                concept_target = _get_section_concept_density_target(
+                    session, ch_id, section_type, book_id,
+                )
+                if concept_target is not None:
+                    effective_target_words = concept_target
+                else:
+                    # Phase 54.6.143 — pass chapter_id so per-chapter override fires
+                    chapter_target = _get_book_length_target(session, book_id, chapter_id=ch_id)
+                    num_sections = _get_chapter_num_sections(session, ch_id)
+                    effective_target_words = _section_target_words(chapter_target, num_sections)
 
         # Phase 18 — pull the per-section plan if the user has set one
         # via the chapter modal's Sections tab. Empty string is fine —
@@ -3969,10 +4089,20 @@ def _autowrite_section_body(
             if section_override is not None:
                 effective_target_words = section_override
             else:
-                # Phase 54.6.143 — pass chapter_id so per-chapter override fires
-                chapter_target = _get_book_length_target(session, book_id, chapter_id=ch_id)
-                num_sections = _get_chapter_num_sections(session, ch_id)
-                effective_target_words = _section_target_words(chapter_target, num_sections)
+                # Phase 54.6.146 — Level 0 concept-density: when the
+                # section has a plan with N bullets, target = N × wpc
+                # from the project type. Bottom-up sizing; chapter/book
+                # length emerges from section lengths per RESEARCH.md §24.
+                concept_target = _get_section_concept_density_target(
+                    session, ch_id, section_type, book_id,
+                )
+                if concept_target is not None:
+                    effective_target_words = concept_target
+                else:
+                    # Phase 54.6.143 — pass chapter_id so per-chapter override fires
+                    chapter_target = _get_book_length_target(session, book_id, chapter_id=ch_id)
+                    num_sections = _get_chapter_num_sections(session, ch_id)
+                    effective_target_words = _section_target_words(chapter_target, num_sections)
         section_plan = _get_section_plan(session, ch_id, section_type)
 
         # Phase 37 — per-section model override. Applied only when no

@@ -9544,6 +9544,125 @@ def l1_phase54_6_145_finalize_draft_surface() -> None:
     )
 
 
+def l1_phase54_6_146_concept_density_resolver() -> None:
+    """Phase 54.6.146 — Level-0 concept-density resolver + new ProjectType fields.
+
+    Guards the bottom-up sizing path that fires when a section has a
+    plan with bulleted concepts. Target = n_concepts × wpc_midpoint.
+    Documented in docs/RESEARCH.md §24 — replaces the folklore "Miller
+    7±2 → 7 concepts per section" with Cowan's 3-4 novel-chunk bound.
+
+    Pins:
+      (A) every ProjectType has `concepts_per_section_range` and
+          `words_per_concept_range`, in the 3-4 / 200-1000 band families
+          called out by research
+      (B) _count_plan_concepts handles bullet, numbered, and
+          prose-fallback formats
+      (C) _get_section_concept_density_target returns None on empty
+          plans (so Level 0 falls through), an int on planned sections
+      (D) both autowrite-body resolver paths invoke the Level-0 helper
+          ABOVE the chapter-split fallback
+      (E) the soft ceiling warning text references Cowan and RESEARCH.md
+          §24 so the logged message is auditable and educational
+    """
+    import inspect
+    from sciknow.core import project_type as pt_mod
+    from sciknow.core import book_ops
+
+    # A) New ProjectType fields present on every registered type
+    for slug, pt in pt_mod.PROJECT_TYPES.items():
+        assert hasattr(pt, "concepts_per_section_range"), (
+            f"{slug}: concepts_per_section_range missing (Phase 54.6.146)"
+        )
+        assert hasattr(pt, "words_per_concept_range"), (
+            f"{slug}: words_per_concept_range missing (Phase 54.6.146)"
+        )
+        lo, hi = pt.concepts_per_section_range
+        assert 1 <= lo <= hi <= 8, (
+            f"{slug}: concepts_per_section_range must fit 1-8 novel chunks "
+            f"(Cowan 2001 expert-chunk ceiling is ~7). Got {pt.concepts_per_section_range}."
+        )
+        wlo, whi = pt.words_per_concept_range
+        assert 100 <= wlo <= whi <= 1500, (
+            f"{slug}: words_per_concept_range must be in a plausible prose "
+            f"band (100-1500). Got {pt.words_per_concept_range}."
+        )
+
+    # B) Bullet counter handles the three formats
+    assert hasattr(book_ops, "_count_plan_concepts"), (
+        "_count_plan_concepts missing (Phase 54.6.146)"
+    )
+    assert book_ops._count_plan_concepts("") == 0
+    assert book_ops._count_plan_concepts(None) == 0   # type: ignore[arg-type]
+    # Dash bullets
+    assert book_ops._count_plan_concepts(
+        "- first concept\n- second concept\n- third concept"
+    ) == 3
+    # Numbered bullets
+    assert book_ops._count_plan_concepts(
+        "1. first concept\n2. second concept"
+    ) == 2
+    # Mixed markers
+    assert book_ops._count_plan_concepts(
+        "* bullet one\n- bullet two\n• bullet three"
+    ) == 3
+    # Prose fallback: 4 substantial non-empty lines → returns up to 6
+    prose_plan = (
+        "The opening establishes the historical context.\n"
+        "A survey of the current empirical evidence follows.\n"
+        "Competing mechanistic explanations are compared.\n"
+        "Open research questions are identified for discussion.\n"
+    )
+    assert 1 <= book_ops._count_plan_concepts(prose_plan) <= 6
+
+    # C) Resolver surface
+    assert hasattr(book_ops, "_get_section_concept_density_target"), (
+        "_get_section_concept_density_target missing (Phase 54.6.146)"
+    )
+    sig = inspect.signature(book_ops._get_section_concept_density_target)
+    for param in ("chapter_id", "section_slug", "book_id"):
+        assert param in sig.parameters, (
+            f"_get_section_concept_density_target missing param {param!r}"
+        )
+
+    # D) Both autowrite resolver sites invoke the Level-0 helper ABOVE
+    # the chapter-split fallback. A refactor that reorders the levels
+    # silently changes section sizing without crashing anything.
+    body_src = inspect.getsource(book_ops._autowrite_section_body)
+    assert "_get_section_concept_density_target" in body_src, (
+        "_autowrite_section_body must call _get_section_concept_density_target "
+        "after per-section override and before chapter-split fallback"
+    )
+    # Ordering: section_override check must precede concept density; concept
+    # density must precede chapter fallback (_get_book_length_target call).
+    override_pos = body_src.find("_get_section_target_words")
+    concept_pos  = body_src.find("_get_section_concept_density_target")
+    fallback_pos = body_src.find("_get_book_length_target")
+    assert 0 <= override_pos < concept_pos < fallback_pos, (
+        "resolver level ordering broken. Expected: per-section override "
+        "→ concept density → chapter split. "
+        f"Got positions: override={override_pos}, concept={concept_pos}, "
+        f"fallback={fallback_pos}"
+    )
+
+    # Also check the other autowrite flow (write_section_stream path)
+    write_src = inspect.getsource(book_ops.write_section_stream)
+    if "_get_section_target_words" in write_src:
+        assert "_get_section_concept_density_target" in write_src, (
+            "write_section_stream must use the same 4-level chain as "
+            "autowrite; concept-density path is missing there"
+        )
+
+    # E) Soft-ceiling warning references Cowan + RESEARCH.md
+    helper_src = inspect.getsource(book_ops._get_section_concept_density_target)
+    assert "Cowan" in helper_src or "§24" in helper_src or "RESEARCH.md" in helper_src, (
+        "Soft-ceiling warning must reference its source (Cowan 2001 / "
+        "RESEARCH.md §24) so the log line is auditable and educational. "
+        "Missing citation = a future maintainer changes the threshold "
+        "without knowing why it's 4."
+    )
+
+
 def l1_phase54_6_144_autowrite_include_visuals_web_wiring() -> None:
     """Phase 54.6.144 — web-app checkbox for autowrite --include-visuals.
 
@@ -9629,26 +9748,41 @@ def l1_phase54_6_143_length_target_defaults() -> None:
     from sciknow.core import project_type as pt_mod
     from sciknow.core import book_ops
 
-    # A) New project types registered with documented defaults
-    assert "textbook" in pt_mod.PROJECT_TYPES, (
-        "textbook project type missing (Phase 54.6.143)"
+    # A) Research-grounded project types registered with research-grounded
+    # defaults (updated in Phase 54.6.146 — the 54.6.143 values were
+    # approximate and got a taxonomy rename documented in RESEARCH.md §24).
+    for required_slug in (
+        "scientific_book", "scientific_paper", "review_article",
+        "popular_science", "instructional_textbook", "academic_monograph",
+    ):
+        assert required_slug in pt_mod.PROJECT_TYPES, (
+            f"{required_slug} project type missing (Phase 54.6.146)"
+        )
+    # Exact defaults pin the 54.6.146 band midpoints. A silent drift
+    # here would ship wrong targets, not a crash.
+    defaults = {
+        "scientific_paper":       4000,
+        "review_article":         5000,
+        "scientific_book":        8000,    # trade-science midpoint
+        "popular_science":        6500,    # 5k-8k band midpoint
+        "instructional_textbook": 4500,    # 3k-6k band midpoint
+        "academic_monograph":    15000,    # 8k-15k band top (was "textbook" in 54.6.143)
+    }
+    for slug, expected in defaults.items():
+        got = pt_mod.get_project_type(slug).default_target_chapter_words
+        assert got == expected, (
+            f"{slug} default_target_chapter_words must be {expected}, got {got}. "
+            f"Numbers come from RESEARCH.md §24 research-grounded bands."
+        )
+    # 54.6.143's `textbook` slug was renamed to `academic_monograph` per
+    # the RESEARCH.md §24 taxonomy correction (Bishop PRML, Goodfellow DL
+    # are monographs, not intro textbooks). Guard against a revert.
+    assert "textbook" not in pt_mod.PROJECT_TYPES, (
+        "`textbook` slug was intentionally renamed to `academic_monograph` "
+        "in Phase 54.6.146 — RESEARCH.md §24 shows those are distinct "
+        "categories. The new `instructional_textbook` slug fills the "
+        "intro-textbook band (3k-6k)."
     )
-    assert "review_article" in pt_mod.PROJECT_TYPES, (
-        "review_article project type missing (Phase 54.6.143)"
-    )
-    tb = pt_mod.get_project_type("textbook")
-    assert tb.default_target_chapter_words == 15000, (
-        f"textbook default_target_chapter_words must be 15000, got "
-        f"{tb.default_target_chapter_words}. Matches literature norm for "
-        f"intro textbook chapters (Bishop PRML, Goodfellow DL)."
-    )
-    rv = pt_mod.get_project_type("review_article")
-    assert rv.default_target_chapter_words == 4350, (
-        f"review_article default must be 4350, got {rv.default_target_chapter_words}"
-    )
-    # Existing types unchanged (back-compat invariant)
-    assert pt_mod.get_project_type("scientific_book").default_target_chapter_words == 6400
-    assert pt_mod.get_project_type("scientific_paper").default_target_chapter_words == 4000
 
     # B) Resolver signature takes chapter_id (Level 1 of the fallback chain)
     sig = inspect.signature(book_ops._get_book_length_target)
@@ -10551,6 +10685,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_144_autowrite_include_visuals_web_wiring,
     # Phase 54.6.145 — `book finalize-draft` L3 VLM verify surface
     l1_phase54_6_145_finalize_draft_surface,
+    # Phase 54.6.146 — concept-density resolver + new ProjectType fields
+    l1_phase54_6_146_concept_density_resolver,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness
