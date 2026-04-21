@@ -138,6 +138,16 @@ def refresh(
         help="Skip wiki compile (the hours-long LLM step)."),
     dry_run: bool = typer.Option(False, "--dry-run",
         help="Print the steps that would run without executing them."),
+    budget_time: str = typer.Option(
+        None, "--budget-time",
+        help="Phase 54.6.206 — soft wall-clock budget. Checked between "
+             "steps; when exceeded, refresh finishes the current step "
+             "and exits gracefully (non-zero) so scheduled overnight "
+             "runs have a known cutoff. Accepts s/m/h suffix or plain "
+             "seconds: --budget-time=6h, --budget-time=30m, "
+             "--budget-time=3600. Already-completed steps remain "
+             "idempotent; re-running picks up the unfinished plan.",
+    ),
 ):
     """Re-run the full post-ingest pipeline after adding new papers.
 
@@ -296,6 +306,33 @@ def refresh(
         console.print(f"  [dim]→[/dim] {label}")
     console.print()
 
+    # Phase 54.6.206 — parse --budget-time into seconds. Done BEFORE
+    # the dry-run early return so a malformed value is caught in the
+    # preview pass, not only on the real execution.
+    budget_seconds: float | None = None
+    if budget_time:
+        try:
+            bt = budget_time.strip().lower()
+            if bt.endswith("h"):
+                budget_seconds = float(bt[:-1]) * 3600
+            elif bt.endswith("m"):
+                budget_seconds = float(bt[:-1]) * 60
+            elif bt.endswith("s"):
+                budget_seconds = float(bt[:-1])
+            else:
+                budget_seconds = float(bt)
+        except ValueError:
+            console.print(
+                f"[red]Invalid --budget-time:[/red] {budget_time!r} — "
+                "expected a number with optional s/m/h suffix "
+                "(e.g. 6h, 30m, 3600)."
+            )
+            raise typer.Exit(2)
+        console.print(
+            f"[dim]Budget: {budget_seconds:.0f}s "
+            f"(~{budget_seconds / 3600:.1f}h). Checked between steps.[/dim]"
+        )
+
     if dry_run:
         console.print("[dim]Dry run — nothing executed.[/dim]")
         return
@@ -303,7 +340,27 @@ def refresh(
     t_total = time.monotonic()
     n_done = 0
     n_failed = 0
+    n_budget_skipped = 0
     for label, argv, optional in steps:
+        # Budget gate runs BEFORE the step, not after, so the user
+        # always gets a clean "stopped before X" message rather than
+        # "already ran X and then realised the budget was blown."
+        if budget_seconds is not None:
+            elapsed_so_far = time.monotonic() - t_total
+            if elapsed_so_far >= budget_seconds:
+                remaining_steps = len(steps) - n_done - n_failed
+                console.print(
+                    f"[yellow]⏱ Budget exceeded "
+                    f"({elapsed_so_far:.0f}s ≥ {budget_seconds:.0f}s) — "
+                    f"stopping before: {label}.[/yellow]"
+                )
+                console.print(
+                    f"[dim]Skipped {remaining_steps} remaining step(s). "
+                    f"Re-run `sciknow refresh` any time — completed steps "
+                    f"are idempotent; only the unfinished work replays.[/dim]"
+                )
+                n_budget_skipped = remaining_steps
+                break
         ok = _run_step(label, argv, optional=optional)
         if ok:
             n_done += 1
@@ -325,6 +382,15 @@ def refresh(
     else:
         t_str = f"{elapsed:.1f}s"
     console.print(Rule())
+    if n_budget_skipped:
+        console.print(
+            f"[bold yellow]⏱ Refresh stopped at budget:[/bold yellow] "
+            f"{n_done}/{len(steps)} step(s) completed in {t_str}, "
+            f"{n_budget_skipped} skipped. Re-run to continue."
+        )
+        # Distinct non-zero exit for cron/scripts so "budget hit"
+        # is distinguishable from "fully completed" and "hard-failed".
+        raise typer.Exit(3)
     console.print(
         f"[bold green]✓ Refresh complete:[/bold green] "
         f"{n_done}/{len(steps)} step(s) in {t_str}"
