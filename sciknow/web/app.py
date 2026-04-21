@@ -8085,6 +8085,31 @@ body.sidebar-rail .sidebar-rail-btn {{ color: var(--accent); border-color: var(-
 .u-border-l-warn {{ border-left: 3px solid var(--warning); }}
 .u-mh-6      {{ margin: 0 0 6px; }}
 .u-heading-section {{ margin: 24px 0 12px; }}
+/* Phase 54.6.202 — remaining atoms + combos for the final purge. */
+.u-bg-danger {{ background: var(--danger); }}
+.u-fw-5      {{ font-weight: 500; }}
+.u-pl-20     {{ padding-left: 20px; }}
+.u-p-2-10    {{ padding: 2px 10px; }}
+.u-dim-3     {{ opacity: 0.3; }}
+.u-cursor-default {{ cursor: default; }}
+.u-sticky    {{ position: sticky; }}
+.u-top-0     {{ top: 0; }}
+.u-z-1       {{ z-index: 1; }}
+.u-modal-scroll {{ max-height: calc(85vh - 220px); overflow-y: auto; }}
+.u-sticky-top {{ position: sticky; top: 0; z-index: 1; }}
+.u-col-90    {{ flex: 1; min-width: 90px; }}
+.u-col-160   {{ flex: 2; min-width: 160px; }}
+.u-col-220   {{ flex: 3; min-width: 220px; }}
+.u-indent-sm {{ font-size: 11px; color: var(--fg-muted); margin: 2px 0 0 4px; }}
+.u-indent-24 {{ font-size: 11px; color: var(--fg-muted); margin: 4px 0 0 24px; }}
+.u-note-top  {{ font-size: 11px; color: var(--fg-muted); margin: 8px 0 0; }}
+.u-grid-kv   {{ display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; }}
+.u-pill-sq   {{ padding: 2px 8px; width: 24px; }}
+.u-w-24      {{ width: 24px; }}
+.u-w-32-th   {{ width: 32px; padding: 6px 8px; text-align: left; }}
+.u-inline-block {{ display: inline-block; }}
+.u-no-underline {{ text-decoration: none; }}
+.u-r-12      {{ border-radius: 12px; }}
 
 /* Phase 54.6.195 — loading skeleton primitives. Applies a pulsing
    gradient to any element; use .skeleton alone for a block, or
@@ -10223,7 +10248,7 @@ body.task-bar-open {{ padding-top: 40px; }}
            title="Title for the new chapter. A slug is auto-generated from the title."/>
     <button onclick="addChapter()"
             title="Create a new empty chapter at the end of the book. Sections can be added via the Plan modal's Chapters tab.">Add Chapter</button>
-    <button onclick="document.getElementById('ch-add-form').style.display='none'" style="background:var(--danger);"
+    <button class="u-bg-danger" onclick="document.getElementById('ch-add-form').style.display='none'"
             title="Close without creating a chapter.">Cancel</button>
   </div>
   <div style="padding: 4px 16px;">
@@ -10320,7 +10345,7 @@ body.task-bar-open {{ padding-top: 40px; }}
     <div class="u-mt-2">
       <button class="edit-btn" onclick="edSave()"
               title="Save immediately. The autosave also fires every 5s.">Save</button>
-      <button class="edit-btn" style="background:var(--danger);" onclick="toggleEdit()"
+      <button class="edit-btn u-bg-danger" onclick="toggleEdit()"
               title="Close the editor. Unsaved changes are lost — the autosave is your safety net.">Cancel</button>
     </div>
   </div>
@@ -10464,7 +10489,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           </select>
           <span class="u-hint" id="wiki-sum-count"></span>
         </div>
-        <div id="wiki-summaries-list" style="max-height:calc(85vh - 220px);overflow-y:auto;"></div>
+        <div class="u-modal-scroll" id="wiki-summaries-list"></div>
       </div>
       <!-- Phase 54.6.61 — Visuals tab: figures / equations / tables / code,
            with actual image rendering for figures via /api/visuals/image. -->
@@ -10488,7 +10513,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                   title="Fetch visuals matching the current filters.">&#128269; Load</button>
           <span class="u-hint" id="wiki-vis-stats"></span>
         </div>
-        <div id="wiki-visuals-list" style="max-height:calc(85vh - 220px);overflow-y:auto;"></div>
+        <div class="u-modal-scroll" id="wiki-visuals-list"></div>
       </div>
       <!-- Browse tab -->
       <div class="tab-pane u-hidden" id="wiki-browse-pane">
@@ -11165,7 +11190,7 @@ body.task-bar-open {{ padding-top: 40px; }}
              style="margin-top:6px;padding:10px 12px;background:var(--toolbar-bg);border:1px solid var(--border);border-radius:6px;font-size:12px;line-height:1.5;color:var(--fg);">
           <em class="u-muted">Loading type info…</em>
         </div>
-        <p style="font-size:11px;color:var(--fg-muted);margin:8px 0 0;">
+        <p class="u-note-top">
           Sections with a bullet plan auto-size bottom-up (concept count × wpc midpoint).
           Sections without a plan fall back to chapter target ÷ section count.
           Override per section in the Chapter modal's Sections tab.
@@ -11315,7 +11340,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                    title="When on, the chapters column starts hidden on every page load. You can still toggle it during the session with the « Hide / » peek buttons."/>
             <span>Auto-hide chapters column on page load</span>
           </label>
-          <p style="font-size:11px;color:var(--fg-muted);margin:4px 0 0 24px;">
+          <p class="u-indent-24">
             Keeps the reader pane wider by default. Click the <code>»</code>
             peek button on the left edge to bring it back for the session.
           </p>
@@ -11326,7 +11351,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                    title="When on, the sources / review / comments column starts hidden on every page load. You can still toggle it during the session with the Hide » / « peek buttons."/>
             <span>Auto-hide sources/comments column on page load</span>
           </label>
-          <p style="font-size:11px;color:var(--fg-muted);margin:4px 0 0 24px;">
+          <p class="u-indent-24">
             Hides Sources / Review / Comments at load. Click the <code>«</code>
             peek button on the right edge to bring it back for the session.
           </p>
@@ -11603,7 +11628,7 @@ body.task-bar-open {{ padding-top: 40px; }}
                 title="Apply the current search + filter + order and reload.">&#128269; Search</button>
         <span class="u-hint" id="vis-stats"></span>
       </div>
-      <div id="vis-results" style="max-height:calc(85vh - 220px);overflow-y:auto;">
+      <div class="u-modal-scroll" id="vis-results">
         <em>Loading...</em>
       </div>
     </div>
@@ -11673,7 +11698,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           <button class="btn-secondary" onclick="purgeBackups()" style="color:var(--danger);border-color:var(--danger);"
                   title="Apply the selected purge rule. Confirms first and cannot be undone — archives/backups/* files are deleted from disk.">Purge now</button>
         </div>
-        <p style="font-size:11px;color:var(--fg-muted);margin:8px 0 0;">
+        <p class="u-note-top">
           Auto-age retention on every run is controlled by <code>BACKUP_RETAIN_DAYS</code> in <code>.env</code>
           (0 = disabled). Count-based retention is <code>BACKUP_RETAIN_COUNT</code> (default 7).
         </p>
@@ -12015,7 +12040,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           3&ndash;4 novel-chunk capacity × genre-appropriate words per concept.
         </p>
         <div class="field u-row-wrap-end">
-          <div style="flex:3;min-width:220px;">
+          <div class="u-col-220">
             <label>Title</label>
             <input type="text" id="sw-book-title" placeholder="e.g. Global Cooling: The Coming Solar Minimum"
                    title="Full book title. Used in sidebar, browser tab, and PDF/epub exports.">
@@ -12145,7 +12170,7 @@ body.task-bar-open {{ padding-top: 40px; }}
           Mirrors <code>sciknow search query</code> and <code>sciknow search similar</code>.
         </p>
         <div class="field u-row-wrap-end">
-          <div style="flex:3;min-width:220px;">
+          <div class="u-col-220">
             <label>Query &nbsp;<span style="color:var(--fg-muted);font-weight:400;">or DOI / title fragment for similar-paper search</span></label>
             <input type="text" id="tl-search-q" placeholder="e.g. sea surface temperature reconstruction"
                    onkeydown="if(event.key==='Enter')doToolSearch('query')"
@@ -12154,15 +12179,15 @@ body.task-bar-open {{ padding-top: 40px; }}
           <div class="u-col-wide"><label>Top-K</label>
             <input type="number" id="tl-search-topk" value="10" min="1" max="50"
                    title="How many reranked results to return."></div>
-          <div style="flex:1;min-width:90px;"><label>Year from</label>
+          <div class="u-col-90"><label>Year from</label>
             <input type="number" id="tl-search-yfrom"
                    title="Restrict retrieval to papers published in this year or later."></div>
-          <div style="flex:1;min-width:90px;"><label>Year to</label>
+          <div class="u-col-90"><label>Year to</label>
             <input type="number" id="tl-search-yto"
                    title="Restrict retrieval to papers published in this year or earlier."></div>
         </div>
         <div class="field u-row-wrap-end">
-          <div style="flex:2;min-width:160px;"><label>Section</label>
+          <div class="u-col-160"><label>Section</label>
             <select id="tl-search-section"
                     title="Limit hits to chunks from a specific paper section.">
               <option value="">(any)</option>
@@ -12173,7 +12198,7 @@ body.task-bar-open {{ padding-top: 40px; }}
               <option value="discussion">discussion</option>
               <option value="conclusion">conclusion</option>
             </select></div>
-          <div style="flex:2;min-width:160px;"><label>Topic cluster</label>
+          <div class="u-col-160"><label>Topic cluster</label>
             <input type="text" id="tl-search-topic" placeholder="(any)"
                    title="Filter by BERTopic cluster label (substring match). Requires `catalog cluster` to have been run."></div>
           <div style="flex:1;min-width:100px;display:flex;align-items:center;">
@@ -12770,9 +12795,9 @@ body.task-bar-open {{ padding-top: 40px; }}
         <div id="eap-table-wrap"
              style="max-height:360px;overflow:auto;border:1px solid var(--border);border-radius:4px;">
           <table class="u-table-full-sm" id="eap-table">
-            <thead style="background:var(--bg-alt,#f8f8f8);position:sticky;top:0;z-index:1;">
+            <thead class="u-bg-alt u-sticky-top">
               <tr>
-                <th style="width:32px;padding:6px 8px;text-align:left;">
+                <th class="u-w-32-th">
                   <input type="checkbox" id="eap-header-cb"
                          onchange="eapSelectAll(this.checked)"
                          title="Select or deselect every row in the current filtered view.">
@@ -12883,9 +12908,9 @@ body.task-bar-open {{ padding-top: 40px; }}
       </div>
       <div style="max-height:60vh;overflow:auto;border:1px solid var(--border);border-radius:4px;">
         <table class="u-table-full-sm" id="pdl-table">
-          <thead style="background:var(--bg-alt,#f8f8f8);position:sticky;top:0;z-index:1;">
+          <thead class="u-bg-alt u-sticky-top">
             <tr>
-              <th style="width:32px;padding:6px 8px;text-align:left;">
+              <th class="u-w-32-th">
                 <input type="checkbox" id="pdl-header-cb" onchange="pendingSelectAll(this.checked)"
                        title="Select or deselect every visible row.">
               </th>
@@ -20862,7 +20887,7 @@ async function openExpandAuthorPreview() {{
         + `All ticked rows will be merged on re-query.`
         + `<table class="u-mt-6 u-bcollapse u-tiny u-w-full">`
         + `<thead><tr class="u-border-b">`
-        + `<th style="padding:2px 8px;width:24px;"></th>`
+        + `<th class="u-pill-sq"></th>`
         + `<th class="u-pill">Name</th>`
         + `<th class="u-pill-right">Works</th>`
         + `<th class="u-pill">Affiliation</th>`
@@ -21003,7 +21028,7 @@ async function eapRequeryWithSelected() {{
         + `Adjust selection and re-query if needed.`
         + `<table class="u-mt-6 u-bcollapse u-tiny u-w-full">`
         + `<thead><tr class="u-border-b">`
-        + `<th style="padding:2px 8px;width:24px;"></th>`
+        + `<th class="u-pill-sq"></th>`
         + `<th class="u-pill">Name</th>`
         + `<th class="u-pill-right">Works</th>`
         + `<th class="u-pill">Affiliation</th>`
@@ -21317,7 +21342,7 @@ function _renderPendingTable() {{
     const authors = (r.authors || []).slice(0, 3).join(', ')
       + ((r.authors || []).length > 3 ? ` +${{r.authors.length - 3}}` : '');
     const doiUrl = r.doi
-      ? `<a href="https://doi.org/${{_escHtml(r.doi)}}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;font-family:ui-monospace,monospace;font-size:10px;">${{_escHtml(r.doi)}}</a>`
+      ? `<a class="u-accent u-no-underline u-mono-sys u-xxs" href="https://doi.org/${{_escHtml(r.doi)}}" target="_blank" rel="noopener">${{_escHtml(r.doi)}}</a>`
       : '<span class="u-muted">(no DOI)</span>';
     const actions = `
       <button class="btn-secondary u-chip-xs"
@@ -21332,7 +21357,7 @@ function _renderPendingTable() {{
     return `<tr class="u-border-t" data-doi="${{_escHtml(r.doi)}}">
       <td class="u-pill-lg"><input type="checkbox" class="pdl-row-cb" data-doi="${{_escHtml(r.doi)}}" ${{checked}} title="Select this row for bulk Retry / Mark-done / Abandon / Export."></td>
       <td class="u-pill-lg">
-        <div style="font-weight:500;">${{_escHtml(r.title || '(untitled)')}}</div>
+        <div class="u-fw-5">${{_escHtml(r.title || '(untitled)')}}</div>
         <div class="u-xxs u-mt-2px">${{doiUrl}}</div>
       </td>
       <td class="u-cell-muted">${{_escHtml(authors)}}</td>
@@ -21552,7 +21577,7 @@ function eapRender() {{
     const authors = (c.authors || []).slice(0, 3).join(', ')
       + ((c.authors || []).length > 3 ? ` +${{c.authors.length - 3}}` : '');
     const doi = c.doi
-      ? `<a href="https://doi.org/${{_escHtml(c.doi)}}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;font-family:ui-monospace,monospace;font-size:10px;" onclick="event.stopPropagation();">${{_escHtml(c.doi)}}</a>`
+      ? `<a class="u-accent u-no-underline u-mono-sys u-xxs" href="https://doi.org/${{_escHtml(c.doi)}}" target="_blank" rel="noopener" onclick="event.stopPropagation();">${{_escHtml(c.doi)}}</a>`
       : '<span class="u-muted">(no DOI)</span>';
     // Phase 54.6.51 — alt-source badge: show "+N more" when the row
     // represents a title-dedup group covering multiple DOIs / arXiv IDs.
@@ -21583,7 +21608,7 @@ function eapRender() {{
       <td class="u-pill-lg"><input type="checkbox" class="eap-row-cb" ${{checked}}
            data-doi="${{_escHtml(c.doi || '')}}" onclick="event.stopPropagation();"></td>
       <td class="u-pill-lg">
-        <div style="font-weight:500;">${{_escHtml(c.title || '(untitled)')}}</div>
+        <div class="u-fw-5">${{_escHtml(c.title || '(untitled)')}}</div>
         <div class="u-xxs u-mt-2px">${{doi}}${{altBadge}}${{cachedBadge}}</div>
         ${{sourceBadge}}
       </td>
@@ -21815,7 +21840,7 @@ async function doToolSearch(mode) {{
     status.textContent = (mode === 'similar'
       ? 'Similar to: ' + ((data.query || {{}}).title || q)
       : hits.length + ' result' + (hits.length === 1 ? '' : 's'));
-    let html = '<ol class="tl-search-list" style="padding-left:20px;">';
+    let html = '<ol class="tl-search-list u-pl-20">';
     hits.forEach(h => {{
       const authors = (h.authors || []).slice(0, 3).map(a => (a.name || '').split(/\\s+/).slice(-1)[0]).filter(Boolean).join(', ');
       const year = h.year ? ' (' + h.year + ')' : '';
@@ -21968,7 +21993,7 @@ async function loadToolTopicPapers(name) {{
       return;
     }}
     let html = '<h4 style="margin:4px 0 8px;">' + name.replace(/</g, '&lt;') + ' &mdash; ' + list.length + ' papers</h4>';
-    html += '<ol style="padding-left:20px;">';
+    html += '<ol class="u-pl-20">';
     list.forEach(p => {{
       const year = p.year ? ' (' + p.year + ')' : '';
       const authors = (p.authors || []).slice(0, 3).map(a => (a.name || '').split(/\\s+/).slice(-1)[0]).filter(Boolean).join(', ');
@@ -22379,12 +22404,12 @@ function populatePlanChaptersTab() {{
          +  '<button class="btn-secondary u-pill" title="Move down" '
          +  'onclick="movePlanChapter(\\'' + cid + '\\', 1)" '
          +  (isLast ? 'disabled' : '') + '>&darr;</button>'
-         +  '<button class="btn-secondary" title="Save row" '
+         +  '<button class="btn-secondary u-p-2-10" title="Save row" '
          +  'onclick="savePlanChapterRow(\\'' + cid + '\\')" '
-         +  'style="padding:2px 10px;">Save</button>'
-         +  '<button class="btn-secondary" title="Delete chapter" '
+         +  '>Save</button>'
+         +  '<button class="btn-secondary u-pill u-danger" title="Delete chapter" '
          +  'onclick="deletePlanChapter(\\'' + cid + '\\')" '
-         +  'style="padding:2px 8px;color:var(--danger,#c00);">&times;</button>'
+         +  '>&times;</button>'
          +  '</div>'
          +  '<textarea class="plan-ch-desc u-w-full u-pill-md u-mb-6 u-small" rows="2" '
          +  'placeholder="Short description (1-2 sentences)" '
@@ -22690,12 +22715,12 @@ function populatePlanChapterTab(ch) {{
     html += '      <button class="btn-secondary u-pill" title="Move down" ' +
             'onclick="movePlanSection(\\'' + s.slug + '\\', 1)" ' +
             (isLast ? 'disabled' : '') + '>&darr;</button>';
-    html += '      <button class="btn-secondary" title="Save this row" ' +
+    html += '      <button class="btn-secondary u-p-2-10" title="Save this row" ' +
             'onclick="savePlanSectionRow(\\'' + s.slug + '\\')" ' +
-            'style="padding:2px 10px;">Save</button>';
-    html += '      <button class="btn-secondary" title="Delete section" ' +
+            '>Save</button>';
+    html += '      <button class="btn-secondary u-pill u-danger" title="Delete section" ' +
             'onclick="deletePlanSection(\\'' + s.slug + '\\')" ' +
-            'style="padding:2px 8px;color:var(--danger,#c00);">&times;</button>';
+            '>&times;</button>';
     html += '    </div>';
     // Phase 54.6.163 — live concept-count readout wired into the
     // Plans-modal textareas (previously only present in the
@@ -22704,8 +22729,8 @@ function populatePlanChapterTab(ch) {{
     html += '    <textarea data-plan-slug="' + s.slug + '" placeholder="Section plan — what THIS section must cover (bullet one concept per line for concept-density sizing)" ' +
             'oninput="updatePlanChapterSection(\\'' + s.slug + '\\', this.value); updatePlanConceptReadoutBySlug(\\'' + s.slug + '\\', this);">' +
             escapeHtml(s.plan || '') + '</textarea>';
-    html += '    <div id="plan-readout-slug-' + s.slug + '" class="plan-concept-readout" '
-         + 'style="font-size:11px;color:var(--fg-muted);margin:2px 0 0 4px;"></div>';
+    html += '    <div id="plan-readout-slug-' + s.slug + '" class="plan-concept-readout u-indent-sm" '
+         + '></div>';
     html += '    <div class="sec-size-row">';
     html += '      <label>Target:</label>';
     html += '      <select onchange="updatePlanChapterTargetWords(\\'' + s.slug + '\\', this.value)" title="Pick a preset word target for this section. Choose Custom to enter an exact number in the box on the right.">' + optsHtml + '</select>';
@@ -23364,7 +23389,7 @@ async function runOutlineFromTab() {{
         rebuildSidebar(chapters, currentDraftId);
         // Inline preview of the chapters now in the book.
         let html = '<h4 style="margin:12px 0 6px;">Current chapters</h4>';
-        html += '<ol style="margin:0;padding-left:20px;">';
+        html += '<ol class="u-m-0 u-pl-20">';
         for (const ch of chapters) {{
           const n = (ch.sections || []).length;
           html += '<li><strong>' + (ch.title || 'Untitled') + '</strong>'
@@ -23582,8 +23607,8 @@ function renderSectionEditor() {{
     html += '<div class="sec-row" data-idx="' + i + '">';
     html += '  <div class="sec-handle">';
     // Phase 42 — data-action dispatch. delta is a signed int in dataset.
-    html += '    <button data-action="move-section" data-section-index="' + i + '" data-delta="-1" title="Move up"' + (i === 0 ? ' disabled style="opacity:0.3;cursor:default;"' : '') + '>&uarr;</button>';
-    html += '    <button data-action="move-section" data-section-index="' + i + '" data-delta="1" title="Move down"' + (i === _editingSections.length - 1 ? ' disabled style="opacity:0.3;cursor:default;"' : '') + '>&darr;</button>';
+    html += '    <button class="u-dim-3 u-cursor-default" data-action="move-section" data-section-index="' + i + '" data-delta="-1" title="Move up"' + (i === 0 ? ' disabled' : '') + '>&uarr;</button>';
+    html += '    <button class="u-dim-3 u-cursor-default" data-action="move-section" data-section-index="' + i + '" data-delta="1" title="Move down"' + (i === _editingSections.length - 1 ? ' disabled' : '') + '>&darr;</button>';
     html += '  </div>';
     html += '  <div class="sec-fields">';
     html += '    <input type="text" placeholder="Section title (e.g. The 11-Year Solar Cycle)" ';
@@ -23600,8 +23625,8 @@ function renderSectionEditor() {{
     html += '              title="Write the plan as a bullet list (`- concept`, `* concept`, or `1. concept`). Bullet count drives the concept-density resolver: target_words = N × wpc_midpoint. Ceiling 4 per Cowan 2001 — above that, split the section.">' + escapeHtml(s.plan) + '</textarea>';
     // Live concept-count readout. Rendered below the textarea, populated
     // + refreshed on every keystroke via updatePlanConceptReadout().
-    html += '    <div id="plan-readout-' + i + '" class="plan-concept-readout" '
-           + 'style="font-size:11px;color:var(--fg-muted);margin:2px 0 0 4px;"></div>';
+    html += '    <div id="plan-readout-' + i + '" class="plan-concept-readout u-indent-sm" '
+           + '></div>';
     // Phase 29 — size dropdown row, just below the plan textarea.
     // Phase 32.1 — show the effective target words inline next to the
     // dropdown so the user always sees what budget THIS section will
@@ -24665,7 +24690,7 @@ async function showCorkboard() {{
     if (c.summary) {{
       html += '<div class="cc-summary">' + c.summary + '</div>';
     }} else {{
-      html += '<div class="cc-summary" style="opacity:0.3;">' + (c.draft_id ? 'No summary' : 'Not started') + '</div>';
+      html += '<div class="cc-summary u-dim-3">' + (c.draft_id ? 'No summary' : 'Not started') + '</div>';
     }}
     html += '<div class="cc-footer">';
     if (c.draft_id) html += 'v' + c.version + ' \\u00b7 ' + c.words + 'w';
@@ -24716,7 +24741,7 @@ async function showChapterReader() {{
     html += '<div style="margin-bottom:24px;padding:12px 16px;background:var(--toolbar-bg);border-radius:6px;font-size:13px;">';
     html += '<div class="u-semibold u-mb-6 u-muted u-tiny u-upper u-ls-sm">Sections</div>';
     data.outline.forEach((o, i) => {{
-      html += '<div class="u-my-1"><a href="#reader-section-' + o.slug + '" style="color:var(--accent);text-decoration:none;">' + (i + 1) + '. ' + escapeHtml(o.title) + '</a> <span class="u-hint">' + o.words + 'w</span></div>';
+      html += '<div class="u-my-1"><a class="u-accent u-no-underline" href="#reader-section-' + o.slug + '">' + (i + 1) + '. ' + escapeHtml(o.title) + '</a> <span class="u-hint">' + o.words + 'w</span></div>';
     }});
     html += '</div>';
   }}
@@ -24796,7 +24821,7 @@ function bsUpdateTypeInfo() {{
     tcwInput.placeholder = `(type default: ${{chap.toLocaleString()}})`;
   }}
   panel.innerHTML = `
-    <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 12px;">
+    <div class="u-grid-kv">
       <span class="u-muted">Description:</span>
       <span>${{_escHtml(t.description)}}</span>
       <span class="u-muted">Default chapters:</span>
@@ -25197,21 +25222,28 @@ async function loadBookSettingsModels() {{
   try {{
     const r = await fetch('/api/settings/models');
     const data = await r.json();
+    // Phase 54.6.203 — fourth column names the per-role fallback so
+    // "(unset)" isn't misleading. VISUALS_CAPTION_MODEL and
+    // MINERU_VLM_MODEL don't fall back to LLM_MODEL; they have their
+    // own code-level defaults (qwen2.5vl:32b + the MinerU pipeline
+    // VLM). BOOK_REVIEW / AUTOWRITE_SCORER DO fall back to LLM_MODEL.
     const rows = [
-      ['LLM_MODEL',              data.llm_model,              'book write · autowrite writer · ask · wiki compile · extract-kg'],
-      ['LLM_FAST_MODEL',         data.llm_fast_model,         'book outline · classify-papers · paraphrase-equations · RAPTOR · metadata fallback'],
-      ['BOOK_REVIEW_MODEL',      data.book_review_model,      'book review (5-dim critic)'],
-      ['AUTOWRITE_SCORER_MODEL', data.autowrite_scorer_model, 'autowrite score + rescore (not verify/cove)'],
-      ['VISUALS_CAPTION_MODEL',  data.visuals_caption_model,  'db caption-visuals (figures + charts)'],
-      ['MINERU_VLM_MODEL',       data.mineru_vlm_model,       'PDF parse only when PDF_CONVERTER_BACKEND=mineru-vlm-pro'],
-      ['EMBEDDING_MODEL',        data.embedding_model,        'chunk embedding (dense + sparse)'],
-      ['RERANKER_MODEL',         data.reranker_model,         'hybrid search rerank step'],
+      ['LLM_MODEL',              data.llm_model,              'book write · autowrite writer · ask · wiki compile · extract-kg', null],
+      ['LLM_FAST_MODEL',         data.llm_fast_model,         'book outline · classify-papers · paraphrase-equations · RAPTOR · metadata fallback', 'LLM_MODEL'],
+      ['BOOK_REVIEW_MODEL',      data.book_review_model,      'book review (5-dim critic)', 'LLM_MODEL'],
+      ['AUTOWRITE_SCORER_MODEL', data.autowrite_scorer_model, 'autowrite score + rescore (not verify/cove)', 'LLM_MODEL'],
+      ['VISUALS_CAPTION_MODEL',  data.visuals_caption_model,  'db caption-visuals (figures + charts) — 54.6.74 VLM-sweep winner', 'qwen2.5vl:32b (code default)'],
+      ['MINERU_VLM_MODEL',       data.mineru_vlm_model,       'PDF parse only when PDF_CONVERTER_BACKEND=mineru-vlm-pro', 'opendatalab/MinerU2.5-Pro-2604-1.2B (code default)'],
+      ['EMBEDDING_MODEL',        data.embedding_model,        'chunk embedding (dense + sparse)', null],
+      ['RERANKER_MODEL',         data.reranker_model,         'hybrid search rerank step', null],
     ];
     tbody.innerHTML = rows.map(r => {{
-      const val = r[1] || '<em class="u-muted">(unset — falls back to LLM_MODEL)</em>';
+      const fallback = r[3]
+        ? '<em class="u-muted">(unset — falls back to ' + _escHtml(r[3]) + ')</em>'
+        : '<em class="u-muted">(required)</em>';
       return '<tr class="u-border-b">'
         + '<td class="u-pill-lg u-mono u-tiny">' + _escHtml(r[0]) + '</td>'
-        + '<td class="u-pill-lg u-mono u-tiny">' + (r[1] ? _escHtml(r[1]) : val) + '</td>'
+        + '<td class="u-pill-lg u-mono u-tiny">' + (r[1] ? _escHtml(r[1]) : fallback) + '</td>'
         + '<td class="u-pill-lg u-muted u-tiny">' + _escHtml(r[2]) + '</td>'
         + '</tr>';
     }}).join('');
@@ -25616,7 +25648,7 @@ function swUpdateTypeInfo() {{
     targetInput.placeholder = `(type default: ${{chap.toLocaleString()}})`;
   }}
   panel.innerHTML = `
-    <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 12px;">
+    <div class="u-grid-kv">
       <span class="u-muted">Description:</span>
       <span>${{_escHtml(t.description)}}</span>
       <span class="u-muted">Default chapters:</span>
