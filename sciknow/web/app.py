@@ -7204,81 +7204,94 @@ TEMPLATE = """\
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{book_title} — SciKnow [{_BUILD_TAG}]</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&family=JetBrains+Mono:wght@400;500;600&display=swap">
 <style>
-/* ── Phase 14 — Web reader v2 design system ───────────────────────────────
-   Modern indigo accent, refined neutrals, hairline borders, polished
-   dark mode. UI uses Inter / system sans; draft body keeps Georgia for
-   reading. */
+/* ── Phase 54.6.165 — Scholar's editor design system ──────────────────────
+   A considered writing environment, not a dashboard. Warm stone neutrals
+   on an ivory paper canvas, deep teal accent used sparingly, real
+   webfonts (Inter Tight for chrome, Newsreader with optical sizes for
+   the reader body, JetBrains Mono for code). The reader pane is the
+   product; everything else recedes. */
 :root {{
-  /* Surfaces */
-  --bg: #ffffff;
+  /* Surfaces — warm stone, not slate */
+  --bg: #fcfbf7;              /* ivory paper */
   --bg-elevated: #ffffff;
-  --sidebar-bg: #fafafa;
-  --toolbar-bg: #f7f8fa;
-  --code-bg: #f4f4f6;
-  --modal-overlay: rgba(15, 23, 42, 0.45);
-  /* Text */
-  --fg: #0f172a;
-  --fg-muted: #64748b;
-  --fg-faint: #94a3b8;
+  --sidebar-bg: #f5f4ef;      /* warm chrome */
+  --toolbar-bg: #f0ede5;      /* slightly deeper chrome */
+  --code-bg: #efece3;
+  --modal-overlay: rgba(28, 25, 23, 0.42);
+  /* Text — stone, not slate */
+  --fg: #1c1917;              /* stone-900 */
+  --fg-muted: #57534e;        /* stone-600 */
+  --fg-faint: #a8a29e;        /* stone-400 */
   /* Borders & accents */
-  --border: #e5e7eb;
-  --border-strong: #d1d5db;
-  --accent: #4f46e5;          /* indigo-600 */
-  --accent-hover: #4338ca;    /* indigo-700 */
-  --accent-light: #eef2ff;    /* indigo-50 */
+  --border: #e7e5e0;          /* stone-200 warm */
+  --border-strong: #d6d3ce;   /* stone-300 warm */
+  --accent: #0f5d5e;          /* deep teal — scholarly, not indigo */
+  --accent-hover: #0a4242;
+  --accent-light: #e6f2f1;
   --accent-fg: #ffffff;
-  /* Semantic */
-  --success: #059669;         /* emerald-600 */
-  --success-light: #d1fae5;
-  --warning: #d97706;         /* amber-600 */
-  --warning-light: #fef3c7;
-  --danger: #e11d48;          /* rose-600 */
-  --danger-light: #ffe4e6;
-  --info: #0284c7;            /* sky-600 */
-  /* Spacing scale */
+  /* Semantic — desaturated so they carry info, not attention */
+  --success: #3f6d4e;         /* forest */
+  --success-light: #dfe9de;
+  --warning: #9a6414;         /* ochre */
+  --warning-light: #f3e7cf;
+  --danger: #a23934;          /* oxblood */
+  --danger-light: #f4dedd;
+  --info: #2f5e7a;            /* muted steel */
+  /* Spacing scale — adds optical 2px and wide 48/64 */
+  --sp-0: 2px;
   --sp-1: 4px;
   --sp-2: 8px;
   --sp-3: 12px;
   --sp-4: 16px;
   --sp-5: 24px;
   --sp-6: 32px;
+  --sp-7: 48px;
+  --sp-8: 64px;
   /* Radius */
   --r-sm: 4px;
   --r-md: 6px;
   --r-lg: 10px;
   --r-xl: 14px;
-  /* Shadows */
-  --shadow-sm: 0 1px 2px rgba(15,23,42,0.04);
-  --shadow-md: 0 4px 12px rgba(15,23,42,0.08);
-  --shadow-lg: 0 12px 32px rgba(15,23,42,0.14);
+  /* Shadows — warm ink, not blue-slate */
+  --shadow-sm: 0 1px 2px rgba(28,25,23,0.05);
+  --shadow-md: 0 4px 12px rgba(28,25,23,0.08);
+  --shadow-lg: 0 12px 32px rgba(28,25,23,0.14);
+  /* Motion — one fast, one slow. No sprawl. */
+  --t-fast: 120ms ease;
+  --t-slow: 220ms ease;
   /* Type */
-  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  --font-serif: 'Georgia', 'Times New Roman', serif;
-  --font-mono: ui-monospace, 'SF Mono', Menlo, Monaco, Consolas, monospace;
+  --font-sans: 'Inter Tight', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-serif: 'Newsreader', 'Charter', 'Iowan Old Style', Georgia, serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Monaco, Consolas, monospace;
+  /* Reader column — paper-like, not dashboard-wide */
+  --reader-max: 720px;
 }}
 [data-theme="dark"] {{
-  --bg: #0b1120;              /* slate-950ish */
-  --bg-elevated: #111827;
-  --sidebar-bg: #0f172a;      /* slate-900 */
-  --toolbar-bg: #131c2d;
-  --code-bg: #1e293b;
+  --bg: #1c1917;              /* stone-900 — warm dark */
+  --bg-elevated: #292524;     /* stone-800 */
+  --sidebar-bg: #1c1917;
+  --toolbar-bg: #262320;
+  --code-bg: #2a2623;
   --modal-overlay: rgba(0, 0, 0, 0.65);
-  --fg: #e2e8f0;              /* slate-200 */
-  --fg-muted: #94a3b8;
-  --fg-faint: #64748b;
-  --border: #1f2937;          /* gray-800 */
-  --border-strong: #374151;
-  --accent: #818cf8;          /* indigo-400 */
-  --accent-hover: #a5b4fc;
-  --accent-light: #1e1b4b;    /* indigo-950 */
-  --success: #10b981;
-  --success-light: #064e3b;
-  --warning: #f59e0b;
-  --warning-light: #78350f;
-  --danger: #f43f5e;
-  --danger-light: #4c0519;
-  --info: #38bdf8;
+  --fg: #f5f4ef;              /* warm light */
+  --fg-muted: #a8a29e;        /* stone-400 */
+  --fg-faint: #78716c;        /* stone-500 */
+  --border: #3a3632;          /* stone-700 warm */
+  --border-strong: #57534e;
+  --accent: #5eead4;          /* teal-300 lifted for dark canvas */
+  --accent-hover: #99f6e4;
+  --accent-light: #134e4a;    /* teal-900 */
+  --success: #7db58a;
+  --success-light: #1e3a2a;
+  --warning: #d4a15a;
+  --warning-light: #3a2a10;
+  --danger: #d77770;
+  --danger-light: #3d1a17;
+  --info: #7fb0c8;
   --shadow-sm: 0 1px 2px rgba(0,0,0,0.30);
   --shadow-md: 0 4px 12px rgba(0,0,0,0.40);
   --shadow-lg: 0 16px 40px rgba(0,0,0,0.55);
@@ -7451,17 +7464,31 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
                     border-radius: 2px; transition: width .3s ease; }}
 .word-target-fill.over {{ background: var(--success); }}
 .word-target-fill.under {{ background: var(--warning); }}
-/* Main */
-.main {{ flex: 1; overflow-y: auto; padding: var(--sp-6) 48px; max-width: 980px; }}
-.main h1 {{ font-size: 28px; font-weight: 700; letter-spacing: -0.02em;
-            margin-bottom: var(--sp-1); color: var(--fg); }}
-.main .subtitle {{ font-size: 13px; color: var(--fg-muted); margin-bottom: var(--sp-3);
-                   display: flex; align-items: center; gap: var(--sp-2); }}
-.main p {{ font-family: var(--font-serif); font-size: 16px; line-height: 1.78;
-           margin-bottom: var(--sp-3); text-align: justify; color: var(--fg); }}
-.main h2,.main h3,.main h4 {{ margin: var(--sp-5) 0 var(--sp-3); font-weight: 700;
-                              letter-spacing: -0.01em; color: var(--fg); }}
-.main h2 {{ font-size: 22px; }} .main h3 {{ font-size: 18px; }} .main h4 {{ font-size: 15px; }}
+/* Main — reader canvas. Paper-like column on ivory; optical padding;
+   Newsreader body with the optical-size axis doing the hinting. */
+.main {{ flex: 1; overflow-y: auto; padding: var(--sp-7) var(--sp-8);
+         max-width: calc(var(--reader-max) + var(--sp-8) * 2);
+         margin: 0 auto; background: var(--bg); }}
+.main h1 {{ font-family: var(--font-serif); font-size: 36px; font-weight: 600;
+            letter-spacing: -0.015em; line-height: 1.15;
+            margin-bottom: var(--sp-2); color: var(--fg);
+            font-variation-settings: "opsz" 48; }}
+.main .subtitle {{ font-size: 12px; color: var(--fg-muted);
+                   margin-bottom: var(--sp-5); padding-bottom: var(--sp-3);
+                   border-bottom: 1px solid var(--border);
+                   display: flex; align-items: center; gap: var(--sp-2);
+                   font-feature-settings: "tnum"; }}
+.main p {{ font-family: var(--font-serif); font-size: 17px; line-height: 1.72;
+           margin-bottom: var(--sp-4); text-align: left; color: var(--fg);
+           font-variation-settings: "opsz" 17;
+           hanging-punctuation: first last; }}
+.main h2,.main h3,.main h4 {{ font-family: var(--font-serif);
+                              margin: var(--sp-6) 0 var(--sp-3); font-weight: 600;
+                              letter-spacing: -0.01em; color: var(--fg);
+                              font-variation-settings: "opsz" 32; }}
+.main h2 {{ font-size: 24px; line-height: 1.25; }}
+.main h3 {{ font-size: 19px; line-height: 1.3; }}
+.main h4 {{ font-size: 16px; line-height: 1.35; }}
 .citation {{ color: var(--accent); cursor: pointer; font-weight: 600;
              text-decoration: none; padding: 0 1px; }}
 .citation:hover {{ background: var(--accent-light); border-radius: 2px; }}
