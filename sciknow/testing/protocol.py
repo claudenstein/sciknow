@@ -3639,8 +3639,16 @@ def l1_phase31_edit_button_in_toolbar() -> None:
     src = inspect.getsource(web_app)
 
     # The Edit button now appears in the toolbar's primary group
-    # alongside the AI buttons
-    assert ">&#9998; Edit</button>" in src, (
+    # alongside the AI buttons. Phase 54.6.168 replaced the leading
+    # pencil emoji (&#9998;) with the <svg class="icon"><use
+    # href="#i-edit"/></svg> monoline sprite, so this check accepts
+    # either representation — the semantic content is: a primary
+    # button whose onclick is toggleEdit() with an "Edit" label.
+    has_edit_btn = (
+        ">&#9998; Edit</button>" in src
+        or 'href="#i-edit"/></svg> Edit</button>' in src
+    )
+    assert has_edit_btn, (
         "Edit button missing from primary toolbar"
     )
     # The AI buttons are relabeled

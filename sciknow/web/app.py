@@ -7496,6 +7496,23 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
              text-decoration: none; padding: 0 1px; }}
 .citation:hover {{ background: var(--accent-light); border-radius: 2px; }}
 
+/* ── Phase 54.6.168 — Monoline icon system.
+   Inline SVG sprite at the top of <body> defines <symbol>s;
+   .icon + <use href="#i-…"/> renders them in buttons. Lucide-
+   inspired, 24x24 viewBox, 1.75 stroke, currentColor so the icon
+   adopts the button's text colour. Retires the emoji in the
+   toolbar / peek / hide / task-bar hero surfaces. Dropdown-menu
+   items and modal-header emoji are a future pass. */
+.icon {{
+  width: 14px; height: 14px;
+  display: inline-block; flex-shrink: 0;
+  vertical-align: -0.15em;
+  fill: none;
+}}
+.icon--sm {{ width: 12px; height: 12px; }}
+.icon--lg {{ width: 18px; height: 18px; vertical-align: -0.2em; }}
+.icon--xl {{ width: 22px; height: 22px; vertical-align: -0.25em; }}
+
 /* ── Phase 54.6.166 — Unified button system.
    One foundation, five variants, four sizes. Every button-ish class
    inherits consistent typography, focus ring, transitions, and radii
@@ -8008,6 +8025,7 @@ body.panel-hidden    .panel   {{ display: none; }}
   gap: 4px;
 }}
 .col-hide-btn:hover {{ color: var(--accent); border-color: var(--accent); }}
+.col-hide-btn--icon {{ padding: 3px 6px; justify-content: center; }}
 .col-peek-btn {{
   position: fixed; top: 50%; transform: translateY(-50%);
   z-index: 90; background: var(--sidebar-bg);
@@ -8848,6 +8866,86 @@ body.task-bar-open {{ padding-top: 40px; }}
 </head>
 <body>
 
+<!-- Phase 54.6.168 — Monoline icon sprite. Lucide-inspired paths;
+     stroke attributes set per-symbol so each <use> inherits currentColor
+     + stroke sizing through the symbol itself. Hidden via
+     position:absolute + size:0 so it never enters layout. -->
+<svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true"
+     style="position:absolute;width:0;height:0;overflow:hidden">
+  <symbol id="i-edit" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 20h9"/>
+    <path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/>
+  </symbol>
+  <symbol id="i-zap" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+  </symbol>
+  <symbol id="i-feather" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z"/>
+    <line x1="16" y1="8" x2="2" y2="22"/>
+    <line x1="17.5" y1="15" x2="9" y2="15"/>
+  </symbol>
+  <symbol id="i-message-square" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+  </symbol>
+  <symbol id="i-refresh-cw" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="23 4 23 10 17 10"/>
+    <polyline points="1 20 1 14 7 14"/>
+    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+  </symbol>
+  <symbol id="i-shield-check" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/>
+    <path d="M9 12l2 2 4-4"/>
+  </symbol>
+  <symbol id="i-brain" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18z"/>
+    <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18z"/>
+  </symbol>
+  <symbol id="i-package" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M16.5 9.4L7.55 4.24"/>
+    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+    <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+    <line x1="12" y1="22.08" x2="12" y2="12"/>
+  </symbol>
+  <symbol id="i-help-circle" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="10"/>
+    <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
+    <line x1="12" y1="17" x2="12.01" y2="17"/>
+  </symbol>
+  <symbol id="i-chevron-down" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="6 9 12 15 18 9"/>
+  </symbol>
+  <symbol id="i-chevron-left" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="15 18 9 12 15 6"/>
+  </symbol>
+  <symbol id="i-chevron-right" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="9 18 15 12 9 6"/>
+  </symbol>
+  <symbol id="i-stop-square" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+    <rect x="6" y="6" width="12" height="12" rx="1.5"/>
+  </symbol>
+  <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="20 6 9 17 4 12"/>
+  </symbol>
+  <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="18" y1="6" x2="6" y2="18"/>
+    <line x1="6" y1="6" x2="18" y2="18"/>
+  </symbol>
+</svg>
+
 <!-- Phase 30 — persistent global task bar.
      Hidden by default; shown when startGlobalJob() runs. Lives at
      the very top of the body so it survives all SPA navigation
@@ -8868,7 +8966,7 @@ body.task-bar-open {{ padding-top: 40px; }}
     <span class="tb-sep">·</span>ETA <strong id="tb-eta-val">?</strong>
   </span>
   <span class="tb-spacer"></span>
-  <button class="tb-stop" id="tb-stop" onclick="stopGlobalJob()" title="Stop the running task">&#9632; Stop</button>
+  <button class="tb-stop" id="tb-stop" onclick="stopGlobalJob()" title="Stop the running task"><svg class="icon icon--sm"><use href="#i-stop-square"/></svg> Stop</button>
   <button class="tb-dismiss" id="tb-dismiss" onclick="dismissTaskBar()" title="Dismiss" style="display:none;">&times;</button>
 </div>
 
@@ -9007,7 +9105,7 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div class="sidebar-controls">
     <button class="col-hide-btn" onclick="toggleColumn('sidebar')"
             title="Hide the chapters column. A peek button at the left edge brings it back. Auto-hide preference lives in Book Settings → View.">
-      « Hide
+      <svg class="icon icon--sm"><use href="#i-chevron-left"/></svg> Hide
     </button>
     <button class="sidebar-toggle-all" onclick="toggleAllChapters()"
             title="Collapse or expand all chapter sections">
@@ -9075,17 +9173,17 @@ body.task-bar-open {{ padding-top: 40px; }}
            🧠 Critique — evidence mapping + critic skills
            📦 Extras   — whole-chapter snapshots + continuous read -->
     <div class="tg">
-      <button class="primary" onclick="toggleEdit()" title="Manually edit the draft content (in-browser markdown editor with autosave)">&#9998; Edit</button>
-      <button onclick="doAutowrite()" title="Autonomous AI write → review → revise loop">&#9889; AI Autowrite</button>
-      <button onclick="doWrite()" title="AI drafts this section from scratch (single pass)">AI Write</button>
-      <button onclick="doReview()" title="AI critic pass on this section">AI Review</button>
-      <button onclick="doRevise()" title="AI revises based on review feedback">AI Revise</button>
+      <button class="primary" onclick="toggleEdit()" title="Manually edit the draft content (in-browser markdown editor with autosave)"><svg class="icon"><use href="#i-edit"/></svg> Edit</button>
+      <button onclick="doAutowrite()" title="Autonomous AI write → review → revise loop"><svg class="icon"><use href="#i-zap"/></svg> AI Autowrite</button>
+      <button onclick="doWrite()" title="AI drafts this section from scratch (single pass)"><svg class="icon"><use href="#i-feather"/></svg> AI Write</button>
+      <button onclick="doReview()" title="AI critic pass on this section"><svg class="icon"><use href="#i-message-square"/></svg> AI Review</button>
+      <button onclick="doRevise()" title="AI revises based on review feedback"><svg class="icon"><use href="#i-refresh-cw"/></svg> AI Revise</button>
     </div>
     <div class="sep"></div>
     <div class="nav-dropdown nav-dropdown-left tb-dropdown" id="verify-tb-dropdown">
       <button onclick="toggleNavDropdown('verify-tb-dropdown', event)"
               title="Verify citations, insert [N] markers, view autowrite score history">
-        &#128270; Verify &#9662;
+        <svg class="icon"><use href="#i-shield-check"/></svg> Verify <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
       </button>
       <div class="nav-dropdown-menu" role="menu">
         <button role="menuitem" onclick="doVerify()" title="Verify citations against sources (Phases 7+11)">&#10003; Verify</button>
@@ -9099,7 +9197,7 @@ body.task-bar-open {{ padding-top: 40px; }}
     <div class="nav-dropdown nav-dropdown-left tb-dropdown" id="critique-tb-dropdown">
       <button onclick="toggleNavDropdown('critique-tb-dropdown', event)"
               title="Evidence mapping + BMAD-inspired critic skills">
-        &#129504; Critique &#9662;
+        <svg class="icon"><use href="#i-brain"/></svg> Critique <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
       </button>
       <div class="nav-dropdown-menu" role="menu">
         <button role="menuitem" onclick="promptArgue()" title="Map evidence for/against a claim">&#9878;&#65039; Argue (map claim)</button>
@@ -9112,7 +9210,7 @@ body.task-bar-open {{ padding-top: 40px; }}
     <div class="nav-dropdown nav-dropdown-left tb-dropdown" id="extras-tb-dropdown">
       <button onclick="toggleNavDropdown('extras-tb-dropdown', event)"
               title="Chapter-scoped snapshots + continuous read">
-        &#128230; Extras &#9662;
+        <svg class="icon"><use href="#i-package"/></svg> Extras <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
       </button>
       <div class="nav-dropdown-menu" role="menu">
         <button role="menuitem" onclick="openBundleSnapshots()" title="Snapshot / restore whole chapter or whole book — safety net for autowrite-all">&#128230; Bundles (chapter / book)</button>
@@ -9120,7 +9218,7 @@ body.task-bar-open {{ padding-top: 40px; }}
       </div>
     </div>
     <div class="sep"></div>
-    <button onclick="openAIActionsHelp()" title="What does each AI action do? Quick reference." style="font-weight:600;">?</button>
+    <button onclick="openAIActionsHelp()" title="What does each AI action do? Quick reference." aria-label="AI actions help"><svg class="icon"><use href="#i-help-circle"/></svg></button>
   </div>
 
   <!-- Phase 13 — Score history panel (collapsible, lazy-loaded) -->
@@ -9208,9 +9306,10 @@ body.task-bar-open {{ padding-top: 40px; }}
               data-ctx="comments" onclick="switchContextTab('comments')"
               title="Per-draft comments. Supports resolve + Markdown.">Comments</button>
     </div>
-    <button class="col-hide-btn" onclick="toggleColumn('panel')"
-            title="Hide this column. A peek button at the right edge brings it back. Auto-hide preference lives in Book Settings → View.">
-      »
+    <button class="col-hide-btn col-hide-btn--icon" onclick="toggleColumn('panel')"
+            title="Hide this column. A peek button at the right edge brings it back. Auto-hide preference lives in Book Settings → View."
+            aria-label="Hide column">
+      <svg class="icon icon--sm"><use href="#i-chevron-right"/></svg>
     </button>
   </div>
 
@@ -9239,9 +9338,13 @@ body.task-bar-open {{ padding-top: 40px; }}
 <!-- Phase 54.6.164 — peek buttons. Visible only when the matching
      column is hidden (body class `sidebar-hidden` / `panel-hidden`). -->
 <button class="col-peek-btn col-peek-sidebar" onclick="toggleColumn('sidebar')"
-        title="Show the chapters column">»</button>
+        title="Show the chapters column" aria-label="Show chapters column">
+  <svg class="icon"><use href="#i-chevron-right"/></svg>
+</button>
 <button class="col-peek-btn col-peek-panel" onclick="toggleColumn('panel')"
-        title="Show the sources/comments column">«</button>
+        title="Show the sources/comments column" aria-label="Show sources/comments column">
+  <svg class="icon"><use href="#i-chevron-left"/></svg>
+</button>
 
 <!-- ── Phase 14 modals ─────────────────────────────────────────────────── -->
 
