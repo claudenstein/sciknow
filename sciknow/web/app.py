@@ -7130,18 +7130,19 @@ def _render_sidebar(items, active_id):
         ch_id = _esc(str(ch["id"]))
         ch_num = int(ch["num"]) if ch["num"] is not None else 0
         ch_title = _esc(ch["title"] or "")
-        out += f'<div class="ch-group" data-ch-id="{ch_id}">'
+        out += f'<div class="ch-group" data-ch-id="{ch_id}" data-ch-num="{ch_num}">'
         # Phase 14.2 — chapter title is clickable to SELECT the chapter.
         # Phase 23 — chevron at the start toggles collapse/expand of
         # the chapter's sections (event.stopPropagation so it doesn't
         # also fire selectChapter). Persistence + restore on page load
         # is handled by JS via localStorage.
         out += (
-            f'<div class="ch-title clickable" onclick="selectChapter(this.parentElement)">'
+            f'<div class="ch-title clickable" data-ch-num="{ch_num}" '
+            f'onclick="selectChapter(this.parentElement)">'
             f'<button class="ch-toggle" '
             f'onclick="event.stopPropagation();toggleChapter(this.closest(&quot;.ch-group&quot;))" '
             f'title="Collapse or expand sections">\u25be</button>'
-            f'Ch.{ch_num}: {ch_title}'
+            f'<span class="ch-title-text">Ch.{ch_num}: {ch_title}</span>'
             f'<span class="ch-actions">'
             f'<button onclick="event.stopPropagation();deleteChapter(this.closest(&quot;.ch-group&quot;).dataset.chId)" title="Delete chapter">\u2717</button>'
             f'</span></div>'
@@ -7538,6 +7539,86 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 }}
 .sec-link .meta {{ font-size: 11px; color: var(--fg-faint); margin-left: 6px; }}
 .sec-link.empty {{ color: var(--fg-faint); font-style: italic; }}
+
+/* ── Phase 54.6.194 — sidebar rail mode.
+   A compact ~64px chapter navigator. Shows chapter numbers as
+   vertical labels (Ch.1 / Ch.2 / …) with the status-dot row
+   beneath each, hiding titles and section labels. Clicking a
+   chapter label still selects it; clicking a section dot still
+   navigates to that section. Title attrs preserve hover tooltips
+   so users can still see full names on hover. Toggle with the
+   new rail button in sidebar-controls; persists in localStorage
+   as `sciknow.ui.sidebarRail`. */
+body.sidebar-rail .sidebar {{
+  width: 64px; min-width: 64px;
+  padding: var(--sp-2) 0;
+  transition: width var(--t-fast);
+}}
+body.sidebar-rail .sidebar h2,
+body.sidebar-rail .sidebar .search-bar,
+body.sidebar-rail .sidebar .sidebar-controls .sidebar-toggle-all,
+body.sidebar-rail .sidebar .ch-add-form,
+body.sidebar-rail .sidebar .ch-title .ch-title-text,
+body.sidebar-rail .sidebar .ch-title .ch-actions,
+body.sidebar-rail .sidebar .ch-toggle,
+body.sidebar-rail .sidebar .job-indicator,
+body.sidebar-rail .sidebar .sec-link .meta,
+body.sidebar-rail .sidebar .sec-link .sec-orphan-delete,
+body.sidebar-rail .sidebar .sec-link .sec-orphan-adopt,
+body.sidebar-rail .sidebar .sec-delete-btn {{
+  display: none !important;
+}}
+body.sidebar-rail .sidebar > div[onclick*="showDashboard"],
+body.sidebar-rail .sidebar > div[style*="padding: 4px 16px"] {{
+  display: none !important;  /* Add-chapter toggle + gaps-count link */
+}}
+body.sidebar-rail .sidebar .sidebar-controls {{
+  justify-content: center; padding: 4px;
+}}
+body.sidebar-rail .ch-group {{ margin-bottom: var(--sp-2); }}
+body.sidebar-rail .ch-title {{
+  padding: 6px 0 4px;
+  text-align: center;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  transition: background var(--t-fast), color var(--t-fast);
+}}
+body.sidebar-rail .ch-title::before {{
+  content: "Ch." attr(data-ch-num);
+  display: block;
+  font-family: var(--font-mono); font-size: 11px;
+  font-weight: 600; color: var(--fg-muted);
+  letter-spacing: 0.02em; text-transform: none;
+}}
+body.sidebar-rail .ch-group.selected .ch-title::before {{ color: var(--accent); }}
+body.sidebar-rail .ch-title:hover::before {{ color: var(--accent); }}
+body.sidebar-rail .ch-progress {{ display: none; }}
+body.sidebar-rail .sec-link {{
+  padding: 3px 0;
+  text-align: center;
+  font-size: 0;  /* hide label text */
+  border-left: none;
+}}
+body.sidebar-rail .sec-link.active {{
+  background: var(--accent-light);
+  border-left: none;
+}}
+body.sidebar-rail .sec-link .sec-status-dot {{
+  display: block; margin: 0 auto;
+  width: 8px; height: 8px;
+}}
+body.sidebar-rail .sec-link.active .sec-status-dot {{
+  outline: 2px solid var(--accent); outline-offset: 1px;
+}}
+/* Rail toggle button — small icon button in sidebar-controls. */
+.sidebar-rail-btn {{
+  font-size: 11px; padding: 3px 6px;
+  background: transparent; color: var(--fg-muted);
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  justify-content: center;
+}}
+.sidebar-rail-btn:hover {{ color: var(--accent); border-color: var(--accent); }}
+body.sidebar-rail .sidebar-rail-btn {{ color: var(--accent); border-color: var(--accent); }}
 /* Phase 21 — section status dots in the sidebar. A small coloured circle
    to the LEFT of the section title indicates whether that template slot
    has a draft yet. Empty = grey, drafted = amber, orphan = red. */
@@ -7907,7 +7988,7 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .edit-btn, .stop-btn, .resolve-btn,
 .task-bar .tb-stop, .task-bar .tb-dismiss,
 .aw-mode-btn, .toolbar button, .topbar .nav-btn,
-.sidebar-toggle-all, .col-hide-btn, .col-peek-btn,
+.sidebar-toggle-all, .sidebar-rail-btn, .col-hide-btn, .col-peek-btn,
 .modal-close {{
   font-family: var(--font-sans);
   font-weight: 500;
@@ -9706,6 +9787,11 @@ body.task-bar-open {{ padding-top: 40px; }}
           stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
     <path d="M3 9.5 12 2l9 7.5V20a2 2 0 0 1-2 2h-4v-7h-6v7H5a2 2 0 0 1-2-2z"/>
   </symbol>
+  <symbol id="i-sidebar" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3" y="3" width="18" height="18" rx="2"/>
+    <line x1="9" y1="3" x2="9" y2="21"/>
+  </symbol>
   <symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor"
           stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
     <circle cx="12" cy="12" r="4"/>
@@ -9916,6 +10002,14 @@ body.task-bar-open {{ padding-top: 40px; }}
     <button class="col-hide-btn" onclick="toggleColumn('sidebar')"
             title="Hide the chapters column. A peek button at the left edge brings it back. Auto-hide preference lives in Book Settings → View.">
       <svg class="icon icon--sm"><use href="#i-chevron-left"/></svg> Hide
+    </button>
+    <!-- Phase 54.6.194 — rail toggle. Cycles between full (280 px
+         with titles) and rail (~64 px with chapter numbers +
+         status dots). Independent of Hide. -->
+    <button class="sidebar-rail-btn" onclick="toggleSidebarRail()"
+            title="Toggle rail mode (compact chapter navigator). Shows chapter numbers and section status dots only; hover any chapter to see its full title."
+            aria-label="Toggle sidebar rail mode">
+      <svg class="icon icon--sm"><use href="#i-sidebar"/></svg>
     </button>
     <button class="sidebar-toggle-all" onclick="toggleAllChapters()"
             title="Collapse or expand all chapter sections">
@@ -23565,6 +23659,24 @@ function restoreCollapsedChapters() {{
 
 // Run on initial page load (after the static sidebar HTML is parsed).
 document.addEventListener('DOMContentLoaded', restoreCollapsedChapters);
+
+// Phase 54.6.194 — sidebar rail mode. Toggleable compact sidebar
+// (~64 px) showing chapter numbers + status dots only. Persists in
+// localStorage; applied to <body> so CSS rules under body.sidebar-rail
+// pick it up. Independent of the Hide column state (54.6.164).
+const _SIDEBAR_RAIL_KEY = 'sciknow.ui.sidebarRail';
+function toggleSidebarRail() {{
+  const on = document.body.classList.toggle('sidebar-rail');
+  try {{ localStorage.setItem(_SIDEBAR_RAIL_KEY, on ? '1' : '0'); }} catch (e) {{}}
+}}
+function _restoreSidebarRail() {{
+  try {{
+    if (localStorage.getItem(_SIDEBAR_RAIL_KEY) === '1') {{
+      document.body.classList.add('sidebar-rail');
+    }}
+  }} catch (e) {{}}
+}}
+document.addEventListener('DOMContentLoaded', _restoreSidebarRail);
 
 // Phase 54.6.164 — collapsible left / right columns. Four localStorage
 // keys: two current-state ("…Hidden") + two auto-hide prefs
