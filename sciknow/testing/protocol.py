@@ -9544,6 +9544,86 @@ def l1_phase54_6_145_finalize_draft_surface() -> None:
     )
 
 
+def l1_phase54_6_152_live_plan_concept_readout() -> None:
+    """Phase 54.6.152 — live concept-density readout on the plan textarea.
+
+    As the user types a section plan in the Chapter modal, a readout
+    below the textarea shows "3 concepts × 650 wpc = ~1,950 words"
+    live. Cowan-cap warning fires inline when the bullet count
+    exceeds 4. Closes the concept-density visibility loop — user
+    can now SEE the resolver's reasoning before running autowrite.
+
+    Pins:
+      (A) client-side bullet regex mirrors the server-side
+          _CONCEPT_BULLET_RE shape (if they drift, the readout lies)
+      (B) textarea carries data-section-idx + oninput calls both
+          updateSection (persists) and updatePlanConceptReadout
+          (updates readout)
+      (C) readout <div> has the correct id pattern plan-readout-<idx>
+      (D) initial render triggers the readout so users see it before
+          typing, not just after
+      (E) Cowan cap warning text cites Cowan 2001 so the threshold is
+          auditable
+    """
+    from sciknow.testing.helpers import web_app_full_source
+    src = web_app_full_source()
+
+    # A) Bullet regex shape mirrors server's _CONCEPT_BULLET_RE
+    # (server uses ``^\\s*(?:[-*•‣]|\\d+\\s*[.\\)])\\s+.{3,}`` with
+    # re.MULTILINE; client equivalent must accept the same formats)
+    assert "_PLAN_BULLET_RE" in src, (
+        "_PLAN_BULLET_RE missing — server's _CONCEPT_BULLET_RE has no "
+        "client mirror so the readout will lie about bullet count"
+    )
+    # Must accept dash, asterisk, bullet, numbered-dot, numbered-paren
+    for marker in ("[-*", "•", "[.\\\\)]"):
+        assert marker in src, (
+            f"_PLAN_BULLET_RE must match {marker!r}-style markers "
+            f"(spec from core.book_ops._CONCEPT_BULLET_RE)"
+        )
+
+    # B) textarea has the right attrs + dual-call oninput
+    assert "data-section-idx=" in src, (
+        "plan textarea must carry data-section-idx for the readout "
+        "refresher loop to find it"
+    )
+    assert "updatePlanConceptReadout(" in src, (
+        "plan textarea oninput must call updatePlanConceptReadout "
+        "in addition to updateSection"
+    )
+    # The user's updateSection call (persists the plan into
+    # _editingSections) must still fire — readout is additive.
+    # Raw string — the template file contains literal `\\'plan\\'`
+    # (double-backslash in the Python source → single-backslash in
+    # the rendered JS).
+    assert r"updateSection(' + i + ', \\'plan\\'" in src, (
+        "Phase 54.6.152 must not break the existing updateSection "
+        "persistence on plan-textarea oninput"
+    )
+
+    # C) Readout container id pattern
+    assert "'plan-readout-' + i" in src or "plan-readout-' + i" in src, (
+        "readout div must carry id='plan-readout-<idx>' so the JS "
+        "updater can find it without fragile tree-walking"
+    )
+
+    # D) Initial render populates the readouts (not just on keystroke)
+    # renderSectionEditor's tail must iterate the plan textareas
+    assert "textarea[data-section-idx]" in src, (
+        "renderSectionEditor must populate the readouts on initial "
+        "render so users see '0 concepts detected yet' hint before "
+        "they type. Without this, the readout would stay empty until "
+        "the first keystroke."
+    )
+
+    # E) Cowan citation in the cap warning — pins the threshold origin
+    assert "Cowan 2001" in src, (
+        "Cowan 2001 cap warning missing from _countPlanConceptsJS / "
+        "updatePlanConceptReadout. The backend log cites Cowan 2001; "
+        "the UI should too so the threshold is auditable."
+    )
+
+
 def l1_phase54_6_151_section_length_ceiling_and_widener_ui() -> None:
     """Phase 54.6.151 — concept-density visibility polish.
 
@@ -11101,6 +11181,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_150_retrieval_density_widener,
     # Phase 54.6.151 — section-length ceiling + widener UI surfacing
     l1_phase54_6_151_section_length_ceiling_and_widener_ui,
+    # Phase 54.6.152 — live concept-count + target readout on plan textarea
+    l1_phase54_6_152_live_plan_concept_readout,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness

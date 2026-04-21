@@ -21558,6 +21558,26 @@ function openChapterModal(chId) {{
     }})
     .catch(e => console.debug('resolved-targets fetch failed:', e));
 
+  // Phase 54.6.152 — ensure the live plan readout has the right wpc
+  // per project type. Populate cache lazily on first modal open so
+  // the user doesn't need to visit Book Settings first.
+  if (!window._currentBookType || !window._swBookTypes) {{
+    Promise.all([
+      fetch('/api/book').then(r => r.json()).catch(() => ({{}})),
+      (window._swBookTypes ? Promise.resolve(null) : swLoadBookTypes()),
+    ]).then(([bookData]) => {{
+      if (bookData && bookData.book_type) {{
+        window._currentBookType = bookData.book_type;
+      }}
+      // Refresh the plan readouts with the now-correct wpc midpoint
+      const tas = document.querySelectorAll('#ch-sections-list textarea[data-section-idx]');
+      tas.forEach(ta => {{
+        const idx = parseInt(ta.dataset.sectionIdx, 10);
+        if (!isNaN(idx)) updatePlanConceptReadout(idx, ta);
+      }});
+    }}).catch(e => console.debug('book-type cache warm failed:', e));
+  }}
+
   switchChapterTab('ch-scope');
   openModal('chapter-modal');
 }}
@@ -21645,8 +21665,20 @@ function renderSectionEditor() {{
     html += '  <div class="sec-fields">';
     html += '    <input type="text" placeholder="Section title (e.g. The 11-Year Solar Cycle)" ';
     html += '           value="' + escapeHtml(s.title) + '" oninput="updateSectionTitle(' + i + ', this.value)">';
-    html += '    <textarea placeholder="Section plan — what THIS section must cover (a few sentences)" ';
-    html += '              oninput="updateSection(' + i + ', \\'plan\\', this.value)">' + escapeHtml(s.plan) + '</textarea>';
+    // Phase 54.6.152 — live concept-count + target readout next to
+    // the plan textarea. Updates as the user types so the concept-
+    // density resolver's output is visible immediately, not just
+    // after a modal-level re-fetch. Soft warning fires when bullet
+    // count exceeds Cowan's 4-chunk ceiling (consistent with the
+    // backend log-line in _get_section_concept_density_target).
+    html += '    <textarea placeholder="Section plan — what THIS section must cover (a few sentences, or bullet one concept per line)" ';
+    html += '              data-section-idx="' + i + '" ';
+    html += '              oninput="updateSection(' + i + ', \\'plan\\', this.value); updatePlanConceptReadout(' + i + ', this);"';
+    html += '              title="Write the plan as a bullet list (`- concept`, `* concept`, or `1. concept`). Bullet count drives the concept-density resolver: target_words = N × wpc_midpoint. Ceiling 4 per Cowan 2001 — above that, split the section.">' + escapeHtml(s.plan) + '</textarea>';
+    // Live concept-count readout. Rendered below the textarea, populated
+    // + refreshed on every keystroke via updatePlanConceptReadout().
+    html += '    <div id="plan-readout-' + i + '" class="plan-concept-readout" '
+           + 'style="font-size:11px;color:var(--fg-muted);margin:2px 0 0 4px;"></div>';
     // Phase 29 — size dropdown row, just below the plan textarea.
     // Phase 32.1 — show the effective target words inline next to the
     // dropdown so the user always sees what budget THIS section will
@@ -21730,6 +21762,15 @@ function renderSectionEditor() {{
     .forEach(m => {{ html += '<option value="' + m + '">'; }});
   html += '</datalist>';
   list.innerHTML = html;
+  // Phase 54.6.152 — populate the live readouts on initial render so
+  // users see "3 concepts → ~1,950 words" without having to type
+  // first. Also runs after every re-render so edits to existing
+  // sections stay in sync.
+  const _planTAs = list.querySelectorAll('textarea[data-section-idx]');
+  _planTAs.forEach(ta => {{
+    const idx = parseInt(ta.dataset.sectionIdx, 10);
+    if (!isNaN(idx)) updatePlanConceptReadout(idx, ta);
+  }});
 }}
 
 // Phase 29/31 — handle the size dropdown selection. "" → Auto
@@ -22363,6 +22404,61 @@ function updateSection(idx, field, value) {{
   _editingSections[idx][field] = value;
 }}
 
+// Phase 54.6.152 — live concept-count + target readout for the plan
+// textarea. Client-side mirror of core.book_ops._count_plan_concepts
+// + _get_section_concept_density_target so the user sees the resolver's
+// output as they type. Soft warning when bullet count exceeds 4
+// (Cowan 2001 novel-chunk capacity; consistent with the backend log
+// in _get_section_concept_density_target).
+const _PLAN_BULLET_RE = /^\\s*(?:[-*•‣]|\\d+\\s*[.\\)])\\s+.{{3,}}/gm;
+
+function _countPlanConceptsJS(text) {{
+  if (!text || !text.trim()) return 0;
+  const m = text.match(_PLAN_BULLET_RE) || [];
+  if (m.length > 0) return m.length;
+  // Prose fallback: substantial lines >= 20 chars, capped at 6
+  const lines = text.split('\\n').filter(ln => ln.trim().length >= 20);
+  return Math.min(lines.length, 6);
+}}
+
+function updatePlanConceptReadout(idx, textarea) {{
+  const el = document.getElementById('plan-readout-' + idx);
+  if (!el) return;
+  const text = (textarea && textarea.value) || '';
+  const n = _countPlanConceptsJS(text);
+  if (n <= 0) {{
+    el.innerHTML = '<em style="color:var(--fg-muted);">No concepts detected yet — use bullet lines (<code>- concept</code>) or a few substantial sentences to activate concept-density sizing.</em>';
+    return;
+  }}
+  // Pull wpc from the cached project-types registry (window._swBookTypes,
+  // populated by swLoadBookTypes on wizard open / book-settings open).
+  // Fall back to a sensible midpoint if the cache isn't warm yet.
+  let wpcMid = 650;
+  const bookType = (window._currentBookType || 'scientific_book');
+  if (window._swBookTypes) {{
+    const t = window._swBookTypes.find(x => x.slug === bookType);
+    if (t && t.words_per_concept_range) {{
+      const [lo, hi] = t.words_per_concept_range;
+      wpcMid = Math.floor((lo + hi) / 2);
+    }}
+  }}
+  const target = Math.max(400, n * wpcMid);
+  // Ceiling check — Cowan's 3-4 novel-chunk cap. Expert-type carve-outs
+  // (academic_monograph goes to 5) are server-side only; the client
+  // warns at 4 uniformly to match the universal default. Over-ceilings
+  // stay non-blocking — matches the backend's soft-warning policy.
+  const maxConcepts = 4;
+  let warn = '';
+  if (n > maxConcepts) {{
+    warn = ' <span style="color:var(--warning);">⚠ ' + n +
+           ' concepts exceeds Cowan 2001 cap of ' + maxConcepts +
+           ' — consider splitting.</span>';
+  }}
+  el.innerHTML = '<strong>' + n + '</strong> concept' + (n === 1 ? '' : 's') +
+                 ' × ' + wpcMid + ' wpc = <strong>~' + target.toLocaleString() + '</strong> words' +
+                 warn;
+}}
+
 // Phase 37 — per-section model override input handler.  Blank string
 // clears the override so the section falls back to the caller-provided
 // model / global default. Trim, store; do NOT re-render (user is
@@ -22664,6 +22760,10 @@ async function loadBookSettings() {{
       typeSel.value = data.book_type;
       bsUpdateTypeInfo();
     }}
+    // Phase 54.6.152 — cache the book_type so the chapter-modal plan
+    // textarea's live concept-density readout knows the correct wpc
+    // range to use (per project type).
+    if (data.book_type) window._currentBookType = data.book_type;
     // Basics meta — chapter / draft / gaps counts come through the
     // same endpoint, so surface them as a read-only summary.
     const meta = document.getElementById('bs-basics-meta');
