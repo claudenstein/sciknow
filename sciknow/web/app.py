@@ -7456,20 +7456,25 @@ body {{ font-family: var(--font-sans); color: var(--fg); background: var(--bg);
    and right (per-draft actions). The former in-main `.toolbar` div
    lives inside `.topbar__right` — still carries the #toolbar id and
    the `.toolbar button` cascade — but its container chrome resets so
-   the whole row reads as one continuous bar. */
+   the whole row reads as one continuous bar.
+   Phase 54.6.190 — single-line layout: flex-wrap nowrap on the bar
+   and both groups, tighter padding + gap. Items overflow off-screen
+   on ultra-narrow viewports rather than wrapping onto a second row. */
 .topbar {{
   display: flex; align-items: center;
-  justify-content: space-between; flex-wrap: wrap;
-  gap: 8px; padding: 6px 16px; min-height: 44px;
+  justify-content: space-between; flex-wrap: nowrap;
+  gap: 6px; padding: 4px 12px; min-height: 40px;
   background: var(--toolbar-bg); border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }}
 .topbar__left, .topbar__right {{
-  display: flex; align-items: center; gap: 2px; flex-wrap: wrap;
+  display: flex; align-items: center;
+  gap: 1px; flex-wrap: nowrap;
 }}
 .topbar .toolbar {{
   background: transparent; border: none; box-shadow: none;
   padding: 0; margin: 0; border-radius: 0;
+  flex-wrap: nowrap;
 }}
 .topbar .topbar-brand {{
   font-family: var(--font-serif); font-size: 15px;
@@ -7478,7 +7483,7 @@ body {{ font-family: var(--font-sans); color: var(--fg); background: var(--bg);
   font-variation-settings: "opsz" 18;
 }}
 .topbar .nav-btn {{
-  font-size: 12px; padding: 5px 10px;
+  font-size: 12px; padding: 4px 8px;
   background: transparent; color: var(--fg);
   border: 1px solid transparent;
 }}
@@ -7988,7 +7993,7 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
             box-shadow: var(--shadow-sm); align-items: center; }}
 .toolbar .tg {{ display: flex; gap: 2px; padding: 0 4px; }}
 .toolbar button {{
-  font-size: 12px; padding: 5px 10px;
+  font-size: 12px; padding: 4px 8px;
   background: transparent; color: var(--fg);
   border: 1px solid transparent;
 }}
@@ -9401,8 +9406,8 @@ body.task-bar-open {{ padding-top: 40px; }}
   border-radius: 3px; color: var(--fg);
 }}
 .cmdk-trigger {{
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 5px 10px; font-size: 11px;
+  display: inline-flex; align-items: center;
+  padding: 3px 6px; font-size: 11px;
   font-family: var(--font-mono); color: var(--fg-muted);
   background: var(--bg-elevated); border: 1px solid var(--border);
   border-radius: var(--r-md); cursor: pointer;
@@ -9410,10 +9415,11 @@ body.task-bar-open {{ padding-top: 40px; }}
 }}
 .cmdk-trigger:hover {{ border-color: var(--accent); color: var(--accent); }}
 .cmdk-trigger kbd {{
-  display: inline-block; padding: 0 4px;
+  display: inline-block; padding: 1px 5px;
   font-family: var(--font-mono); font-size: 10px;
   background: var(--toolbar-bg); border: 1px solid var(--border);
   border-radius: 3px; color: var(--fg-muted);
+  letter-spacing: 0.02em;
 }}
 </style>
 </head>
@@ -9859,9 +9865,9 @@ body.task-bar-open {{ padding-top: 40px; }}
     </div>
     <button onclick="openAIActionsHelp()" title="What does each AI action do? Quick reference." aria-label="AI actions help"><svg class="icon"><use href="#i-help-circle"/></svg></button>
     <button class="cmdk-trigger" onclick="openCmdK()"
-            title="Open the command palette (Ctrl/⌘ + K). Jump to any action, setting, or panel by name.">
-      <svg class="icon icon--sm"><use href="#i-help-circle"/></svg>
-      Commands <kbd>⌘K</kbd>
+            title="Commands · open the palette (⌘K / Ctrl+K). Jump to any action, setting, or panel by name."
+            aria-label="Open command palette">
+      <kbd>⌘K</kbd>
     </button>
   </div>
 </header>
