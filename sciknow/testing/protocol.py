@@ -4964,9 +4964,17 @@ def l1_phase36_tools_panel() -> None:
     # stderr merged into stdout so Rich progress bars surface in the log
     assert "STDOUT" in spawn_src
 
-    # 8) Tools button is wired to the Tools modal
-    assert 'onclick="openToolsModal()"' in src, (
-        "Tools button not wired into the top-bar button tray"
+    # 8) Tools modal is reachable. Phase 54.6.186 retired the Manage
+    # topbar dropdown that used to host a direct Tools button; Tools
+    # is now ⌘K-only ("Tools" entry in _CMDK_COMMANDS + the
+    # openToolsModal function still registered on window). The
+    # openToolsModal function must still exist so the palette can
+    # call it; an older commit also kept the modal itself.
+    assert 'function openToolsModal(' in src or 'async function openToolsModal(' in src, (
+        "openToolsModal handler retired — Tools modal is unreachable"
+    )
+    assert "'openToolsModal'" in src or '"openToolsModal"' in src, (
+        "openToolsModal not registered in the ⌘K command palette"
     )
     # 9) Tools modal has the 3 remaining tabs (Corpus was extracted in 54.6.18)
     for tab in ("tl-search", "tl-synth", "tl-topics"):
@@ -4980,13 +4988,12 @@ def l1_phase36_tools_panel() -> None:
     assert 'id="tl-corpus-pane"' in src, (
         "tl-corpus-pane must still exist (moved into corpus-modal)"
     )
-    # Phase 54.6.180 — the former 5 topbar dropdowns (Book / Explore /
-    # Corpus / Visualize / Manage) were collapsed into one "More"
-    # dropdown with grouped sections. The Corpus items are now entries
-    # inside #more-dropdown rather than a separate #corpus-dropdown.
-    assert 'id="more-dropdown"' in src, (
-        "topbar unified More dropdown (#more-dropdown) missing — "
-        "Phase 54.6.180 collapsed the 5 former topbar menus"
+    # Phase 54.6.186 — the topbar exposes 4 dropdowns again (Book /
+    # Explore / Corpus / Visualize) after the brief 54.6.180 "More"
+    # consolidation. Manage items are ⌘K-only.
+    assert 'id="corpus-dropdown"' in src, (
+        "topbar Corpus dropdown (#corpus-dropdown) missing — "
+        "Phase 54.6.186 restored the 4 original named menus"
     )
     # Top-bar dropdown entries for the 6 expand sub-tabs + cleanup + pending
     for subtab in ("corp-enrich", "corp-cites", "corp-author",

@@ -7452,10 +7452,25 @@ body {{ font-family: var(--font-sans); color: var(--fg); background: var(--bg);
    Holds app-level navigation (Plan, Settings, Ask, Wiki, KG, Papers, Tools,
    Setup, Dashboard, Projects) so the per-chapter toolbar stays focused on
    writing actions. */
-.topbar {{ display: flex; align-items: center; justify-content: flex-end;
-           gap: 2px; padding: 6px 16px; min-height: 44px;
-           background: var(--toolbar-bg); border-bottom: 1px solid var(--border);
-           flex-shrink: 0; flex-wrap: wrap; }}
+/* Phase 54.6.186 — consolidated topbar. Two groups: left (book nav)
+   and right (per-draft actions). The former in-main `.toolbar` div
+   lives inside `.topbar__right` — still carries the #toolbar id and
+   the `.toolbar button` cascade — but its container chrome resets so
+   the whole row reads as one continuous bar. */
+.topbar {{
+  display: flex; align-items: center;
+  justify-content: space-between; flex-wrap: wrap;
+  gap: 8px; padding: 6px 16px; min-height: 44px;
+  background: var(--toolbar-bg); border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}}
+.topbar__left, .topbar__right {{
+  display: flex; align-items: center; gap: 2px; flex-wrap: wrap;
+}}
+.topbar .toolbar {{
+  background: transparent; border: none; box-shadow: none;
+  padding: 0; margin: 0; border-radius: 0;
+}}
 .topbar .topbar-brand {{
   font-family: var(--font-serif); font-size: 15px;
   font-weight: 600; letter-spacing: -0.015em;
@@ -9728,106 +9743,129 @@ body.task-bar-open {{ padding-top: 40px; }}
   <button class="tb-dismiss" id="tb-dismiss" onclick="dismissTaskBar()" title="Dismiss" style="display:none;">&times;</button>
 </div>
 
-<!-- Phase 54.6 — full-width top bar with app-level navigation (right-aligned icon + text buttons).
-     The per-chapter writing toolbar stays inside <main> so it scrolls with the draft. -->
+<!-- Phase 54.6.186 — consolidated topbar. Left: book-level nav
+     (Plan / Dashboard + 4 dropdowns). Right: per-draft actions (was
+     the old in-main `.toolbar`). One bar, one menu surface, pinned
+     at the top so writing actions stay in reach while the draft
+     scrolls. Manage items (Projects / Backups / Tools / Setup
+     Wizard) are ⌘K-only — rare enough not to merit topbar real
+     estate. -->
 <header class="topbar" id="topbar">
-  <!-- Phase 54.6.16 — consolidated top bar. Plan + Dashboard stay as
-       high-frequency direct buttons. Everything else lives in one of
-       four dropdowns: Book / Explore / Visualize / Manage. The
-       Knowledge Graph moves under Visualize since it's the seventh
-       data-exploration view. -->
-  <button class="nav-btn" onclick="openPlanModal()" title="View / edit / regenerate the book plan (the leitmotiv)"><svg class="icon"><use href="#i-file-text"/></svg> Plan</button>
-  <button class="nav-btn" onclick="showDashboard()" title="Book dashboard with stats + heatmap"><svg class="icon"><use href="#i-bar-chart"/></svg> Dashboard</button>
-  <!-- Phase 54.6.180 — unified "More" menu. Collapses the former 5
-       dropdowns (Book / Explore / Corpus / Visualize / Manage) into
-       one menu with grouped sections. Plan + Dashboard stay as direct
-       buttons; ⌘K is the power-user path. Every item here is also
-       reachable via the palette. -->
-  <div class="nav-dropdown" id="more-dropdown">
-    <button class="nav-btn" onclick="toggleNavDropdown('more-dropdown', event)"
-            title="Every destination — organised by section. Power users: press ⌘K / Ctrl+K.">
-      <svg class="icon"><use href="#i-menu"/></svg> More <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
-    </button>
-    <div class="nav-dropdown-menu nav-dropdown-menu--wide" role="menu">
-      <div class="nav-group-label">Book</div>
-      <button role="menuitem" onclick="showCorkboard()"
-              title="Book-wide corkboard view: every chapter's sections as cards you can drag + reorder."><svg class="icon"><use href="#i-layout-grid"/></svg> Corkboard</button>
-      <button role="menuitem" onclick="showVersions()"
-              title="Per-draft version history. Every save keeps the prior version so you can diff or revert."><svg class="icon"><use href="#i-history"/></svg> History</button>
-      <button role="menuitem" onclick="takeSnapshot()"
-              title="Snapshot the whole book's draft state — safety net before a destructive operation like autowrite-all."><svg class="icon"><use href="#i-camera"/></svg> Snapshot</button>
-      <button role="menuitem" onclick="openExportModal()"
-              title="Export the book to Markdown, HTML, PDF (WeasyPrint), EPUB (pandoc), LaTeX, DOCX, or BibTeX."><svg class="icon"><use href="#i-download"/></svg> Export</button>
-      <button role="menuitem" onclick="openBookSettings()"
-              title="Per-book settings: title, description, plan (leitmotiv), target chapter length, style fingerprint, per-role model assignments."><svg class="icon"><use href="#i-sliders"/></svg> Settings</button>
-
-      <div class="nav-group-sep"></div>
-      <div class="nav-group-label">Explore</div>
-      <button role="menuitem" onclick="openAskModal()"
-              title="Natural-language question against the corpus with grounded citations. Mirrors `sciknow ask question`."><svg class="icon"><use href="#i-search"/></svg> Ask Corpus</button>
-      <button role="menuitem" onclick="openWikiModal()"
-              title="Query the pre-compiled wiki summaries (one per paper). Faster than Ask Corpus and returns the summary prose + source paper list."><svg class="icon"><use href="#i-book-open"/></svg> Wiki Query</button>
-      <button role="menuitem" onclick="openCatalogModal()"
-              title="Browse every paper in the corpus with filters for year, section type, topic cluster, paper type."><svg class="icon"><use href="#i-folder"/></svg> Browse Papers</button>
-      <button role="menuitem" onclick="openVisualsModal()"
-              title="Browse every extracted table, equation, figure, chart, and code block. Gallery + list modes with pagination and importance ranking."><svg class="icon"><use href="#i-image"/></svg> Visuals (Tables/Figs/Eqs)</button>
-
-      <div class="nav-group-sep"></div>
-      <div class="nav-group-label">Corpus</div>
-      <button role="menuitem" onclick="openCorpusModal('corp-enrich')"
-              title="Fill missing DOIs via Crossref/OpenAlex/arXiv title search + persist OpenAlex extras (concepts/funders/grants/ROR). Mirrors `sciknow db enrich`."><svg class="icon"><use href="#i-search"/></svg> Enrich metadata</button>
-      <button role="menuitem" onclick="openCorpusModal('corp-cites')"
-              title="Outbound reference crawl — follow citations IN your papers to discover new work. RRF + MMR diversity + citation-context signals. Mirrors `sciknow db expand`."><svg class="icon"><use href="#i-globe"/></svg> Expand (citations)</button>
-      <button role="menuitem" onclick="openCorpusModal('corp-author')"
-              title="Fetch every paper by a named author via OpenAlex. Use when you want an author's full bibliography regardless of current citations. Mirrors `sciknow db expand-author`."><svg class="icon"><use href="#i-user"/></svg> Expand by author</button>
-      <button role="menuitem" onclick="openCorpusModal('corp-inbound')"
-              title="Forward-in-time mirror of Expand: find papers that CITE your corpus. Mirrors `sciknow db expand-inbound`."><svg class="icon"><use href="#i-inbox"/></svg> Inbound cites</button>
-      <button role="menuitem" onclick="openCorpusModal('corp-topic')"
-              title="OpenAlex free-text topic search ranked by citation count. Good for kickstarting a new project."><svg class="icon"><use href="#i-tag"/></svg> Topic search</button>
-      <button role="menuitem" onclick="openCorpusModal('corp-coauth')"
-              title="Find people who coauthored with your corpus's authors. Useful for invisible-college expansion."><svg class="icon"><use href="#i-users"/></svg> Coauthors</button>
-      <button role="menuitem" onclick="openCorpusModal('corp-enrich');doToolCorpus('cleanup')"
-              title="Remove already-ingested duplicates from the downloads/ directory AND permanently delete the failed-ingest archive. Frees disk; the main pipeline archive stays intact."><svg class="icon"><use href="#i-trash"/></svg> Cleanup downloads + failed</button>
-      <button role="menuitem" onclick="openPendingDownloadsModal()"
-              title="Papers you selected for download but couldn't be auto-retrieved (no open-access PDF). Retry, mark manually acquired, or export for ILL."><svg class="icon"><use href="#i-clipboard"/></svg> Pending downloads</button>
-
-      <div class="nav-group-sep"></div>
-      <div class="nav-group-label">Visualize</div>
-      <button role="menuitem" onclick="openKgModal()"
-              title="Knowledge graph of entities + relationships extracted from the corpus (Phase 54.6.50+). Zoomable force layout + table view."><svg class="icon"><use href="#i-link"/></svg> Knowledge Graph</button>
-      <button role="menuitem" onclick="openVizModal('viz-topic')"
-              title="UMAP 2D projection of every paper's abstract embedding. Colour-coded by topic cluster. Hover to identify."><svg class="icon"><use href="#i-globe"/></svg> Topic map (UMAP)</button>
-      <button role="menuitem" onclick="openVizModal('viz-sunburst')"
-              title="Hierarchical RAPTOR summary tree as a sunburst: root is the whole corpus, each ring is a coarser summary level. Click a wedge to drill in."><svg class="icon"><use href="#i-layers"/></svg> RAPTOR sunburst</button>
-      <button role="menuitem" onclick="openVizModal('viz-consensus')"
-              title="Consensus landscape: for a topic, show claim-level support/contradict structure across papers."><svg class="icon"><use href="#i-scale"/></svg> Consensus landscape</button>
-      <button role="menuitem" onclick="openVizModal('viz-timeline')"
-              title="Timeline river: paper counts by year, colour-banded by topic cluster. Reveals temporal trends."><svg class="icon"><use href="#i-trending-up"/></svg> Timeline river</button>
-      <button role="menuitem" onclick="openVizModal('viz-ego')"
-              title="Ego radial: pick a paper, see its citation neighbourhood as concentric rings (depth-1/2 citers + cited-by)."><svg class="icon"><use href="#i-target"/></svg> Ego radial</button>
-      <button role="menuitem" onclick="openVizModal('viz-radar')"
-              title="Gap radar: per-topic coverage vs what the corpus plan says it should cover. Big gaps visible at a glance."><svg class="icon"><use href="#i-bar-chart"/></svg> Gap radar</button>
-
-      <div class="nav-group-sep"></div>
-      <div class="nav-group-label">Manage</div>
-      <button role="menuitem" onclick="openToolsModal()"
-              title="CLI parity modal: Search / Synthesize / Topics tabs exposing the same commands from the web."><svg class="icon"><use href="#i-wrench"/></svg> Tools &middot; CLI parity</button>
-      <button role="menuitem" onclick="openSetupWizard()"
-              title="Five-step guided flow for a fresh project: Project → Corpus → Indices → Expand → Book."><svg class="icon"><use href="#i-wand"/></svg> Setup Wizard</button>
-      <button role="menuitem" onclick="openProjectsModal()"
-              title="List / create / switch projects. Each project has its own PostgreSQL DB, Qdrant collections, and data/ directory."><span id="proj-btn-label"><svg class="icon"><use href="#i-folder"/></svg> Projects</span></button>
-      <button role="menuitem" onclick="openBackupsModal()"
-              title="Backup status, schedule, delete, purge. Badge colour: green = fresh (<25h), yellow = aging, red = none or stale (>2d)."
-              ><svg class="icon"><use href="#i-archive"/></svg> Backups <span id="backup-badge" style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-left:4px;vertical-align:middle;"></span></button>
+  <div class="topbar__left">
+    <button class="nav-btn" onclick="openPlanModal()" title="View / edit / regenerate the book plan (the leitmotiv)"><svg class="icon"><use href="#i-file-text"/></svg> Plan</button>
+    <button class="nav-btn" onclick="showDashboard()" title="Book dashboard with stats + heatmap"><svg class="icon"><use href="#i-bar-chart"/></svg> Dashboard</button>
+    <div class="nav-dropdown" id="book-dropdown">
+      <button class="nav-btn" onclick="toggleNavDropdown('book-dropdown', event)"
+              title="Book-level surfaces: visual browse, history, snapshots, export, settings">
+        <svg class="icon"><use href="#i-book-open"/></svg> Book <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
+      </button>
+      <div class="nav-dropdown-menu" role="menu">
+        <button role="menuitem" onclick="showCorkboard()" title="Book-wide corkboard view: every chapter's sections as cards you can drag + reorder."><svg class="icon"><use href="#i-layout-grid"/></svg> Corkboard</button>
+        <button role="menuitem" onclick="showVersions()" title="Per-draft version history. Every save keeps the prior version so you can diff or revert."><svg class="icon"><use href="#i-history"/></svg> History</button>
+        <button role="menuitem" onclick="takeSnapshot()" title="Snapshot the whole book's draft state — safety net before a destructive operation like autowrite-all."><svg class="icon"><use href="#i-camera"/></svg> Snapshot</button>
+        <button role="menuitem" onclick="openExportModal()" title="Export the book to Markdown, HTML, PDF (WeasyPrint), EPUB (pandoc), LaTeX, DOCX, or BibTeX."><svg class="icon"><use href="#i-download"/></svg> Export</button>
+        <button role="menuitem" onclick="openBookSettings()" title="Per-book settings: title, description, plan (leitmotiv), target chapter length, style fingerprint, per-role model assignments."><svg class="icon"><use href="#i-sliders"/></svg> Settings</button>
+      </div>
+    </div>
+    <div class="nav-dropdown" id="explore-dropdown">
+      <button class="nav-btn" onclick="toggleNavDropdown('explore-dropdown', event)"
+              title="Query the corpus: RAG, compiled wiki, paper catalog">
+        <svg class="icon"><use href="#i-search"/></svg> Explore <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
+      </button>
+      <div class="nav-dropdown-menu" role="menu">
+        <button role="menuitem" onclick="openAskModal()" title="Natural-language question against the corpus with grounded citations. Mirrors `sciknow ask question`."><svg class="icon"><use href="#i-search"/></svg> Ask Corpus</button>
+        <button role="menuitem" onclick="openWikiModal()" title="Query the pre-compiled wiki summaries (one per paper). Faster than Ask Corpus and returns the summary prose + source paper list."><svg class="icon"><use href="#i-book-open"/></svg> Wiki Query</button>
+        <button role="menuitem" onclick="openCatalogModal()" title="Browse every paper in the corpus with filters for year, section type, topic cluster, paper type."><svg class="icon"><use href="#i-folder"/></svg> Browse Papers</button>
+        <button role="menuitem" onclick="openVisualsModal()" title="Browse every extracted table, equation, figure, chart, and code block. Gallery + list modes with pagination and importance ranking."><svg class="icon"><use href="#i-image"/></svg> Visuals (Tables/Figs/Eqs)</button>
+      </div>
+    </div>
+    <div class="nav-dropdown" id="corpus-dropdown">
+      <button class="nav-btn" onclick="toggleNavDropdown('corpus-dropdown', event)"
+              title="Grow and enrich the corpus: enrich metadata + five expand vectors + cleanup + pending">
+        <svg class="icon"><use href="#i-sprout"/></svg> Corpus <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
+      </button>
+      <div class="nav-dropdown-menu" role="menu">
+        <button role="menuitem" onclick="openCorpusModal('corp-enrich')" title="Fill missing DOIs via Crossref/OpenAlex/arXiv title search + persist OpenAlex extras (concepts/funders/grants/ROR). Mirrors `sciknow db enrich`."><svg class="icon"><use href="#i-search"/></svg> Enrich metadata</button>
+        <button role="menuitem" onclick="openCorpusModal('corp-cites')" title="Outbound reference crawl — follow citations IN your papers to discover new work. RRF + MMR diversity + citation-context signals. Mirrors `sciknow db expand`."><svg class="icon"><use href="#i-globe"/></svg> Expand (citations)</button>
+        <button role="menuitem" onclick="openCorpusModal('corp-author')" title="Fetch every paper by a named author via OpenAlex. Use when you want an author's full bibliography regardless of current citations. Mirrors `sciknow db expand-author`."><svg class="icon"><use href="#i-user"/></svg> Expand by author</button>
+        <button role="menuitem" onclick="openCorpusModal('corp-inbound')" title="Forward-in-time mirror of Expand: find papers that CITE your corpus. Mirrors `sciknow db expand-inbound`."><svg class="icon"><use href="#i-inbox"/></svg> Inbound cites</button>
+        <button role="menuitem" onclick="openCorpusModal('corp-topic')" title="OpenAlex free-text topic search ranked by citation count. Good for kickstarting a new project."><svg class="icon"><use href="#i-tag"/></svg> Topic search</button>
+        <button role="menuitem" onclick="openCorpusModal('corp-coauth')" title="Find people who coauthored with your corpus's authors. Useful for invisible-college expansion."><svg class="icon"><use href="#i-users"/></svg> Coauthors</button>
+        <div class="u-border-b" style="height:1px;margin:2px 0;"></div>
+        <button role="menuitem" onclick="openCorpusModal('corp-enrich');doToolCorpus('cleanup')" title="Remove already-ingested duplicates from the downloads/ directory AND permanently delete the failed-ingest archive. Frees disk; the main pipeline archive stays intact."><svg class="icon"><use href="#i-trash"/></svg> Cleanup downloads + failed</button>
+        <button role="menuitem" onclick="openPendingDownloadsModal()" title="Papers you selected for download but couldn't be auto-retrieved (no open-access PDF). Retry, mark manually acquired, or export for ILL."><svg class="icon"><use href="#i-clipboard"/></svg> Pending downloads</button>
+      </div>
+    </div>
+    <div class="nav-dropdown" id="viz-dropdown">
+      <button class="nav-btn" onclick="toggleNavDropdown('viz-dropdown', event)"
+              title="Seven visualizations of the corpus"><svg class="icon"><use href="#i-layers"/></svg> Visualize <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg></button>
+      <div class="nav-dropdown-menu" id="viz-dropdown-menu" role="menu">
+        <button role="menuitem" onclick="openKgModal()" title="Knowledge graph of entities + relationships extracted from the corpus (Phase 54.6.50+). Zoomable force layout + table view."><svg class="icon"><use href="#i-link"/></svg> Knowledge Graph</button>
+        <button role="menuitem" onclick="openVizModal('viz-topic')" title="UMAP 2D projection of every paper's abstract embedding. Colour-coded by topic cluster. Hover to identify."><svg class="icon"><use href="#i-globe"/></svg> Topic map (UMAP)</button>
+        <button role="menuitem" onclick="openVizModal('viz-sunburst')" title="Hierarchical RAPTOR summary tree as a sunburst: root is the whole corpus, each ring is a coarser summary level. Click a wedge to drill in."><svg class="icon"><use href="#i-layers"/></svg> RAPTOR sunburst</button>
+        <button role="menuitem" onclick="openVizModal('viz-consensus')" title="Consensus landscape: for a topic, show claim-level support/contradict structure across papers."><svg class="icon"><use href="#i-scale"/></svg> Consensus landscape</button>
+        <button role="menuitem" onclick="openVizModal('viz-timeline')" title="Timeline river: paper counts by year, colour-banded by topic cluster. Reveals temporal trends."><svg class="icon"><use href="#i-trending-up"/></svg> Timeline river</button>
+        <button role="menuitem" onclick="openVizModal('viz-ego')" title="Ego radial: pick a paper, see its citation neighbourhood as concentric rings (depth-1/2 citers + cited-by)."><svg class="icon"><use href="#i-target"/></svg> Ego radial</button>
+        <button role="menuitem" onclick="openVizModal('viz-radar')" title="Gap radar: per-topic coverage vs what the corpus plan says it should cover. Big gaps visible at a glance."><svg class="icon"><use href="#i-bar-chart"/></svg> Gap radar</button>
+      </div>
     </div>
   </div>
-  <!-- Phase 54.6.170 — Command palette trigger. Discoverability for
-       the ⌘K shortcut. Clicking opens the same palette. -->
-  <button class="cmdk-trigger" onclick="openCmdK()"
-          title="Open the command palette (Ctrl/⌘ + K). Jump to any action, setting, or panel by name.">
-    <svg class="icon icon--sm"><use href="#i-help-circle"/></svg>
-    Commands <kbd>⌘K</kbd>
-  </button>
+  <!-- Per-draft actions (lifted from the former in-main `.toolbar`). -->
+  <div class="topbar__right toolbar" id="toolbar">
+    <button class="primary" onclick="toggleEdit()" title="Manually edit the draft content (in-browser markdown editor with autosave)"><svg class="icon"><use href="#i-edit"/></svg> Edit</button>
+    <div class="sep"></div>
+    <div class="ai-cluster" role="group" aria-label="AI actions">
+      <span class="ai-cluster__label" aria-hidden="true">AI</span>
+      <button onclick="doAutowrite()" title="Autonomous AI write → review → revise loop"><svg class="icon"><use href="#i-zap"/></svg> Autowrite</button>
+      <button onclick="doWrite()" title="AI drafts this section from scratch (single pass)"><svg class="icon"><use href="#i-feather"/></svg> Write</button>
+      <button onclick="doReview()" title="AI critic pass on this section"><svg class="icon"><use href="#i-message-square"/></svg> Review</button>
+      <button onclick="doRevise()" title="AI revises based on review feedback"><svg class="icon"><use href="#i-refresh-cw"/></svg> Revise</button>
+    </div>
+    <div class="sep"></div>
+    <div class="nav-dropdown nav-dropdown-left tb-dropdown" id="verify-tb-dropdown">
+      <button onclick="toggleNavDropdown('verify-tb-dropdown', event)"
+              title="Verify citations, insert [N] markers, view autowrite score history">
+        <svg class="icon"><use href="#i-shield-check"/></svg> Verify <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
+      </button>
+      <div class="nav-dropdown-menu" role="menu">
+        <button role="menuitem" onclick="doVerify()" title="Verify citations against sources (Phases 7+11)"><svg class="icon"><use href="#i-check"/></svg> Verify</button>
+        <button role="menuitem" onclick="doVerifyDraft()" title="Atomize each sentence and NLI-check every sub-claim for mixed-truth failures (54.6.83)"><svg class="icon"><use href="#i-flask"/></svg> Verify Draft (claim-atomization)</button>
+        <button role="menuitem" onclick="doFinalizeDraft()" title="Phase 54.6.145/162 — Level-3 VLM claim-depiction verify on every [Fig. N] marker. Runs the vision-language model on (claim, image) pairs and flags figures whose images don't clearly depict the cited claim. Deferred from the per-iteration autowrite loop (too expensive) — run once before export. Exit code 0 if clean, 1 if any flagged. ~3-10s per marker on CPU; 8-figure chapter ≈ 1-2 min."><svg class="icon"><use href="#i-save"/></svg> Finalize Draft (L3 VLM verify)</button>
+        <button role="menuitem" onclick="doAlignCitations()" title="Remap [N] markers to the chunk that actually entails each sentence (54.6.71, conservative)"><svg class="icon"><use href="#i-link"/></svg> Align Citations</button>
+        <button role="menuitem" onclick="doInsertCitations()" title="Two-pass LLM inserts [N] citation markers where needed; mirrors `sciknow book insert-citations`. Saves a new version."><svg class="icon"><use href="#i-file-plus"/></svg> Insert Citations</button>
+        <button role="menuitem" onclick="showScoresPanel()" title="Phase 13 — convergence trajectory for autowrite drafts"><svg class="icon"><use href="#i-trending-up"/></svg> Scores</button>
+      </div>
+    </div>
+    <div class="nav-dropdown nav-dropdown-left tb-dropdown" id="critique-tb-dropdown">
+      <button onclick="toggleNavDropdown('critique-tb-dropdown', event)"
+              title="Evidence mapping + BMAD-inspired critic skills">
+        <svg class="icon"><use href="#i-brain"/></svg> Critique <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
+      </button>
+      <div class="nav-dropdown-menu" role="menu">
+        <button role="menuitem" onclick="promptArgue()" title="Map evidence for/against a claim"><svg class="icon"><use href="#i-scale"/></svg> Argue (map claim)</button>
+        <button role="menuitem" onclick="doGaps()" title="Analyse gaps in the book"><svg class="icon"><use href="#i-search"/></svg> Gaps</button>
+        <button role="menuitem" onclick="doAdversarialReview()" title="Cynical critic pass — finds ≥10 concrete issues, never graded. BMAD-inspired. Doesn't overwrite review_feedback."><svg class="icon"><use href="#i-alert-octagon"/></svg> Adversarial review</button>
+        <button role="menuitem" onclick="doEdgeCases()" title="Exhaustive edge-case hunter — walks every scope boundary, counter-case, causal alternative, and quantitative limit. Structured findings."><svg class="icon"><use href="#i-target"/></svg> Edge cases</button>
+        <button role="menuitem" onclick="doEnsembleReview()" title="N independent NeurIPS-rubric reviewers (default 3, T=0.75, rotating stance) + meta-fusion. Higher variance reduction but N× cost."><svg class="icon"><use href="#i-users"/></svg> Ensemble Review</button>
+      </div>
+    </div>
+    <div class="nav-dropdown nav-dropdown-left tb-dropdown" id="extras-tb-dropdown">
+      <button onclick="toggleNavDropdown('extras-tb-dropdown', event)"
+              title="Chapter-scoped snapshots + continuous read">
+        <svg class="icon"><use href="#i-package"/></svg> Extras <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
+      </button>
+      <div class="nav-dropdown-menu" role="menu">
+        <button role="menuitem" onclick="openBundleSnapshots()" title="Snapshot / restore whole chapter or whole book — safety net for autowrite-all"><svg class="icon"><use href="#i-package"/></svg> Bundles (chapter / book)</button>
+        <button role="menuitem" onclick="showChapterReader()" title="Read entire chapter as continuous scroll"><svg class="icon"><use href="#i-book-open"/></svg> Chapter reader</button>
+      </div>
+    </div>
+    <button onclick="openAIActionsHelp()" title="What does each AI action do? Quick reference." aria-label="AI actions help"><svg class="icon"><use href="#i-help-circle"/></svg></button>
+    <button class="cmdk-trigger" onclick="openCmdK()"
+            title="Open the command palette (Ctrl/⌘ + K). Jump to any action, setting, or panel by name.">
+      <svg class="icon icon--sm"><use href="#i-help-circle"/></svg>
+      Commands <kbd>⌘K</kbd>
+    </button>
+  </div>
 </header>
 
 <div class="app-body">
@@ -9902,73 +9940,6 @@ body.task-bar-open {{ padding-top: 40px; }}
     </select>
   </div>
 
-  <!-- Action Toolbar — Phase 14 v2 grouped layout
-       Phase 31 — split AI actions from manual editing so the user
-       can find the inline editor without hunting for the small
-       edit-btn in the subtitle. -->
-  <div class="toolbar" id="toolbar">
-    <!-- Phase 54.6.17 — per-chapter toolbar regrouped. The core write
-         loop (Edit / Autowrite / Write / Review / Revise) stays flat
-         as five direct buttons — users hit these every few minutes.
-         The other three groups collapse into dropdowns so the
-         toolbar stays one row wide even on ~1400px screens:
-           🔎 Verify  — provenance / scoring passes
-           🧠 Critique — evidence mapping + critic skills
-           📦 Extras   — whole-chapter snapshots + continuous read -->
-    <!-- Phase 54.6.179 — AI cluster. Edit stands alone as a manual
-         action; the 4 AI verbs share a segmented-pill container so
-         they read as one "AI workflow." The "AI " prefix drops off
-         each label because the container itself signals the group. -->
-    <button class="primary" onclick="toggleEdit()" title="Manually edit the draft content (in-browser markdown editor with autosave)"><svg class="icon"><use href="#i-edit"/></svg> Edit</button>
-    <div class="sep"></div>
-    <div class="ai-cluster" role="group" aria-label="AI actions">
-      <span class="ai-cluster__label" aria-hidden="true">AI</span>
-      <button onclick="doAutowrite()" title="Autonomous AI write → review → revise loop"><svg class="icon"><use href="#i-zap"/></svg> Autowrite</button>
-      <button onclick="doWrite()" title="AI drafts this section from scratch (single pass)"><svg class="icon"><use href="#i-feather"/></svg> Write</button>
-      <button onclick="doReview()" title="AI critic pass on this section"><svg class="icon"><use href="#i-message-square"/></svg> Review</button>
-      <button onclick="doRevise()" title="AI revises based on review feedback"><svg class="icon"><use href="#i-refresh-cw"/></svg> Revise</button>
-    </div>
-    <div class="sep"></div>
-    <div class="nav-dropdown nav-dropdown-left tb-dropdown" id="verify-tb-dropdown">
-      <button onclick="toggleNavDropdown('verify-tb-dropdown', event)"
-              title="Verify citations, insert [N] markers, view autowrite score history">
-        <svg class="icon"><use href="#i-shield-check"/></svg> Verify <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
-      </button>
-      <div class="nav-dropdown-menu" role="menu">
-        <button role="menuitem" onclick="doVerify()" title="Verify citations against sources (Phases 7+11)"><svg class="icon"><use href="#i-check"/></svg> Verify</button>
-        <button role="menuitem" onclick="doVerifyDraft()" title="Atomize each sentence and NLI-check every sub-claim for mixed-truth failures (54.6.83)"><svg class="icon"><use href="#i-flask"/></svg> Verify Draft (claim-atomization)</button>
-        <button role="menuitem" onclick="doFinalizeDraft()" title="Phase 54.6.145/162 — Level-3 VLM claim-depiction verify on every [Fig. N] marker. Runs the vision-language model on (claim, image) pairs and flags figures whose images don't clearly depict the cited claim. Deferred from the per-iteration autowrite loop (too expensive) — run once before export. Exit code 0 if clean, 1 if any flagged. ~3-10s per marker on CPU; 8-figure chapter ≈ 1-2 min."><svg class="icon"><use href="#i-save"/></svg> Finalize Draft (L3 VLM verify)</button>
-        <button role="menuitem" onclick="doAlignCitations()" title="Remap [N] markers to the chunk that actually entails each sentence (54.6.71, conservative)"><svg class="icon"><use href="#i-link"/></svg> Align Citations</button>
-        <button role="menuitem" onclick="doInsertCitations()" title="Two-pass LLM inserts [N] citation markers where needed; mirrors `sciknow book insert-citations`. Saves a new version."><svg class="icon"><use href="#i-file-plus"/></svg> Insert Citations</button>
-        <button role="menuitem" onclick="showScoresPanel()" title="Phase 13 — convergence trajectory for autowrite drafts"><svg class="icon"><use href="#i-trending-up"/></svg> Scores</button>
-      </div>
-    </div>
-    <div class="nav-dropdown nav-dropdown-left tb-dropdown" id="critique-tb-dropdown">
-      <button onclick="toggleNavDropdown('critique-tb-dropdown', event)"
-              title="Evidence mapping + BMAD-inspired critic skills">
-        <svg class="icon"><use href="#i-brain"/></svg> Critique <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
-      </button>
-      <div class="nav-dropdown-menu" role="menu">
-        <button role="menuitem" onclick="promptArgue()" title="Map evidence for/against a claim"><svg class="icon"><use href="#i-scale"/></svg> Argue (map claim)</button>
-        <button role="menuitem" onclick="doGaps()" title="Analyse gaps in the book"><svg class="icon"><use href="#i-search"/></svg> Gaps</button>
-        <button role="menuitem" onclick="doAdversarialReview()" title="Cynical critic pass — finds ≥10 concrete issues, never graded. BMAD-inspired. Doesn't overwrite review_feedback."><svg class="icon"><use href="#i-alert-octagon"/></svg> Adversarial review</button>
-        <button role="menuitem" onclick="doEdgeCases()" title="Exhaustive edge-case hunter — walks every scope boundary, counter-case, causal alternative, and quantitative limit. Structured findings."><svg class="icon"><use href="#i-target"/></svg> Edge cases</button>
-        <button role="menuitem" onclick="doEnsembleReview()" title="N independent NeurIPS-rubric reviewers (default 3, T=0.75, rotating stance) + meta-fusion. Higher variance reduction but N× cost."><svg class="icon"><use href="#i-users"/></svg> Ensemble Review</button>
-      </div>
-    </div>
-    <div class="nav-dropdown nav-dropdown-left tb-dropdown" id="extras-tb-dropdown">
-      <button onclick="toggleNavDropdown('extras-tb-dropdown', event)"
-              title="Chapter-scoped snapshots + continuous read">
-        <svg class="icon"><use href="#i-package"/></svg> Extras <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
-      </button>
-      <div class="nav-dropdown-menu" role="menu">
-        <button role="menuitem" onclick="openBundleSnapshots()" title="Snapshot / restore whole chapter or whole book — safety net for autowrite-all"><svg class="icon"><use href="#i-package"/></svg> Bundles (chapter / book)</button>
-        <button role="menuitem" onclick="showChapterReader()" title="Read entire chapter as continuous scroll"><svg class="icon"><use href="#i-book-open"/></svg> Chapter reader</button>
-      </div>
-    </div>
-    <div class="sep"></div>
-    <button onclick="openAIActionsHelp()" title="What does each AI action do? Quick reference." aria-label="AI actions help"><svg class="icon"><use href="#i-help-circle"/></svg></button>
-  </div>
 
   <!-- Phase 13 — Score history panel (collapsible, lazy-loaded) -->
   <div class="scores-panel" id="scores-panel">
@@ -24718,9 +24689,16 @@ const _CMDK_COMMANDS = [
   {{ id: 'wiki',           label: 'Open Compiled Knowledge Wiki',    fn: 'openWikiModal',  group: 'navigate' }},
   {{ id: 'ask',            label: 'Ask the Corpus (RAG)',            fn: 'openAskModal',   group: 'navigate' }},
   // Settings
-  {{ id: 'book-settings',  label: 'Book Settings',                   fn: 'openBookSettings', group: 'settings' }},
-  {{ id: 'projects',       label: 'Projects',                        fn: 'openProjectsModal', group: 'settings' }},
-  {{ id: 'help',           label: 'AI actions help',                 fn: 'openAIActionsHelp', group: 'settings' }},
+  {{ id: 'book-settings',  label: 'Book Settings',                   fn: 'openBookSettings',   group: 'settings' }},
+  {{ id: 'projects',       label: 'Projects',                        fn: 'openProjectsModal',  group: 'settings' }},
+  {{ id: 'tools',          label: 'Tools · CLI parity',              fn: 'openToolsModal',     group: 'settings' }},
+  {{ id: 'setup',          label: 'Setup Wizard',                    fn: 'openSetupWizard',    group: 'settings' }},
+  {{ id: 'backups',        label: 'Backups',                         fn: 'openBackupsModal',   group: 'settings' }},
+  {{ id: 'export',         label: 'Export book',                     fn: 'openExportModal',    group: 'settings' }},
+  {{ id: 'catalog',        label: 'Browse Papers',                   fn: 'openCatalogModal',   group: 'navigate' }},
+  {{ id: 'visuals',        label: 'Visuals (Tables/Figs/Eqs)',       fn: 'openVisualsModal',   group: 'navigate' }},
+  {{ id: 'corkboard',      label: 'Corkboard',                       fn: 'showCorkboard',      group: 'navigate' }},
+  {{ id: 'help',           label: 'AI actions help',                 fn: 'openAIActionsHelp',  group: 'settings' }},
 ];
 let _cmdkSelected = 0;
 let _cmdkFiltered = [];
