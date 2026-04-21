@@ -7271,30 +7271,35 @@ TEMPLATE = """\
   --reader-max: 720px;
 }}
 [data-theme="dark"] {{
-  --bg: #1c1917;              /* stone-900 — warm dark */
-  --bg-elevated: #292524;     /* stone-800 */
-  --sidebar-bg: #1c1917;
-  --toolbar-bg: #262320;
-  --code-bg: #2a2623;
-  --modal-overlay: rgba(0, 0, 0, 0.65);
-  --fg: #f5f4ef;              /* warm light */
-  --fg-muted: #a8a29e;        /* stone-400 */
-  --fg-faint: #78716c;        /* stone-500 */
-  --border: #3a3632;          /* stone-700 warm */
-  --border-strong: #57534e;
-  --accent: #5eead4;          /* teal-300 lifted for dark canvas */
+  /* Phase 54.6.175 — pitch-black dark. Reader canvas is #000000
+     (OLED-friendly, maximum contrast with the warm-white fg);
+     sidebar + topbar lift by a single shade so they stay
+     distinguishable but read as near-void. Accent teal shifts a
+     touch brighter so it pops against pure black. */
+  --bg: #000000;              /* pitch */
+  --bg-elevated: #0d0d0d;     /* modals, cards — barely lifted */
+  --sidebar-bg: #070707;      /* sidebar + topbar */
+  --toolbar-bg: #0a0a0a;
+  --code-bg: #111111;
+  --modal-overlay: rgba(0, 0, 0, 0.78);
+  --fg: #f5f4ef;              /* warm white */
+  --fg-muted: #a8a29e;
+  --fg-faint: #6b6561;
+  --border: #1f1f1f;
+  --border-strong: #333333;
+  --accent: #5eead4;          /* teal-300 — bright on pitch */
   --accent-hover: #99f6e4;
-  --accent-light: #134e4a;    /* teal-900 */
+  --accent-light: #0a2e2c;    /* very dark teal — legible as "on" state */
   --success: #7db58a;
-  --success-light: #1e3a2a;
+  --success-light: #0b2416;
   --warning: #d4a15a;
-  --warning-light: #3a2a10;
+  --warning-light: #2a1d08;
   --danger: #d77770;
-  --danger-light: #3d1a17;
+  --danger-light: #2b0f0d;
   --info: #7fb0c8;
-  --shadow-sm: 0 1px 2px rgba(0,0,0,0.30);
-  --shadow-md: 0 4px 12px rgba(0,0,0,0.40);
-  --shadow-lg: 0 16px 40px rgba(0,0,0,0.55);
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.55);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.65);
+  --shadow-lg: 0 16px 40px rgba(0,0,0,0.80);
 }}
 * {{ margin:0; padding:0; box-sizing:border-box; }}
 html {{ -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }}
