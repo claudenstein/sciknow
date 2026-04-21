@@ -664,6 +664,103 @@ The six techniques above made claims — "three complementary signals", "maximum
 
 ---
 
+## 24. Concept-density length sizing (research brief, 2026-04-20)
+
+### Abstract
+
+The four guidelines initially proposed for concept-density length targeting are a mix of defensible heuristic, garbled folklore, and one bit of creative speculation. Cowan's reassessment has retired the "7±2 concepts per section" rule in favor of **3–4 truly novel chunks**; the "1500–2500 words per concept" number is **not in Mayer** and appears to be a post-hoc extrapolation; the "20 min at 250 wpm ≈ 5000 words" number is closer to 5,000–7,000 if you use Brysbaert's (2019) meta-analytic WPM, but digital reading adds a real comprehension penalty (Delgado et al., 2018, g = −0.21) that argues for slightly shorter sections on screen; and the retrieval-density proxy is a reasonable engineering heuristic with no literature to appeal to. Most importantly, the **bottom-up "size the section around its concepts and let the chapter emerge"** intuition has strong support from backward-design pedagogy (Wiggins & McTighe) and Kosslyn's (2020) chunking principle, and there is no empirical literature advocating for top-down chapter-length targets as a pedagogical primitive. That makes concept-density sizing a defensible research contribution, not a quirky re-invention.
+
+### Per-guideline grades
+
+**Guideline 1 — Miller's 7±2 → ~7 concepts per section. Grade: D.** Miller (1956) was explicitly a rhetorical device, and Miller himself told Cowan by email that the "7" was "a hooking together of a rehearsed initial segment with a final segment" — not pure capacity (Baddeley, 2015, PMC4486516). Cowan (2001, *BBS* 24:87–114) reanalyzed the literature and pinned true focus-of-attention capacity at **3–4 chunks** for adults, with ~3 when attention must hold an ensemble simultaneously. Luck & Vogel (1997, *Nature* 390:279) gave the canonical visual-WM evidence for 4. The 2024 Morra et al. meta-analytic modeling (*Journal of Cognition*, doi:10.5334/joc.387) found that apparent "7" results arise when subjects have presentation time to chunk strategically; pure capacity is 4. For technical prose — where each "concept" is often a *new* domain-specific chunk the reader hasn't compressed into long-term memory — **the operational upper bound is 3–4 novel concepts per section, not 7**. This is the biggest correction the brief makes.
+
+**Guideline 2 — Mayer's "1500–2500 words per major concept". Grade: F.** This number is not in the *Cambridge Handbook of Multimedia Learning* (3rd ed., Mayer & Fiorella, 2021). The segmenting principle in Mayer (Chapter 11 of the 3rd ed.) is framed as "learner-paced segments rather than continuous units"; the empirical examples in Mayer's own lab are **one-to-two-sentence segments with ~8–10 seconds of animation**, not thousand-word prose blocks. No effect size for segmenting in word-count units has been published — effect sizes in multimedia learning are reported for comparisons of segmented vs. continuous, not for absolute segment length. The "1500–2500 words per concept" figure appears to be a conflation of reading-speed heuristics with Mayer's principle, and should be retired. If you want to keep a words-per-concept rule, it needs a different justification (see recommendations below).
+
+**Guideline 3 — 20 min × 250 wpm = 5,000 words. Grade: C.** The WPM number is close but slightly low. Brysbaert's (2019, *Journal of Memory and Language*, doi:10.1016/j.jml.2019.104047) meta-analysis of 190 studies (N=18,573) gives **238 wpm for English non-fiction**, with IQR roughly 175–300 wpm. The 20-minute figure is inherited from Nielsen Norman Group ergonomics work and has no strong 2020s empirical update — Gloria Mark's (2023) 47-second within-screen attention span is about task-switching, not deep reading, and shouldn't be applied to a reader who has chosen to read long-form. Wikipedia's own guideline ("10,000 words ≈ 30–40 min, close to reader attention span"; `Wikipedia:Article size`, 2024 revision) tacitly endorses a 250–330 wpm estimate. The bigger unknown is the **print-vs-screen comprehension penalty**: Delgado et al. (2018, *Educational Research Review* 25:23–38, g = −0.21) and the 2024 update find a small but reliable screen-inferiority effect for **expository text**, larger under time pressure, larger with scrollable layouts. For a digital scientific writing assistant, **5,000 words is an outer bound for a single section**, and practical sections should sit well below it — closer to **2,000–3,000 for sustained comprehension**.
+
+**Guideline 4 — Retrieval-density proxy (>25 chunks → grow, <10 → shrink). Grade: B as engineering, N/A as science.** There is no literature on this. The closest analogues are (a) the review-article convention of "~25 references per 1,000 words" (Nature *Reviews* article format guide) and (b) the information-retrieval observation that evidence pool size correlates with topic breadth. Both support the **direction** of the heuristic (more evidence → more words to cover it) but neither gives specific 10/25 cutpoints. Defensible as a pragmatic sizing signal — label it "honest novel engineering" rather than cloaking it in cognitive-science authority. To validate it: grade a corpus of human-written sections on completeness, log their retrieved-chunk counts, and fit a curve.
+
+### Literature: what's defensible vs folklore
+
+**Defensible.**
+
+- **Chunking, not chunk counting.** Kosslyn's (2020) *Active Learning Online* gives the most directly usable pedagogical advice: organize content into "three or four distinct chunks" per unit, with transitions or active processing between. Sweller's cognitive load theory agrees that the intrinsic-load limit is set by element interactivity, not by raw word count — so sizing by the number of interacting novel elements (a "concept") is the right primitive.
+- **Backward design.** Wiggins & McTighe (*Understanding by Design*, 2nd ed., 2005) explicitly argues for a bottom-up sizing logic via their three-circle model: the inner circle (enduring understandings), middle (important knowledge), outer (familiar context). You size the unit by how many enduring understandings it needs to establish, not by a target page count. This is exactly the pedagogy supporting the intuition.
+- **Scientific prose norms are reference data, not prescriptions.** A 2021 analysis of 61,517 PubMed-indexed papers gives real distributions (see table below) — introduction median 553 words (IQR 401–762), results median 992 (IQR 609–1,662), discussion median 1,115 (IQR 824–1,480). These are floors to anchor against, not ceilings.
+- **Digital reading is modestly worse for expository text.** Delgado 2018 (g = −0.21), replicated in narrative-text-only meta-analyses finding no penalty (Clinton 2022, doi:10.1080/15213269.2022.2070216). The penalty is real for scientific writing specifically.
+- **Expertise inflates effective chunk capacity.** Gobet & Clarkson (2004, *Memory*, "Chunks in expert memory: Evidence for the magical number four…or is it two?") shows domain experts compress domain-relevant patterns into larger chunks. Implication: a section written for experts can pack more *apparent* concepts because the experts have templates. This matters for sciknow — the sweet spot depends on the target reader's prior knowledge.
+
+**Folklore, or at least unsupported in the form it's usually cited.**
+
+- **"Miller's 7±2 chunks per paragraph/section."** Widely repeated (e.g. `lawsofux.com/millers-law`), not supported. Use 3–4 novel concepts.
+- **"1500–2500 words per concept."** No primary source. Closest thing is a rough backward-computation from "a chapter of 5,000 words covers ~3 major concepts" that circulates in textbook-authoring blogs without citation.
+- **"250 wpm reading speed"** — it's 238, and varies by 2× across individuals.
+- **"Chapters should be ~5,000 words because readers fatigue."** Self-help chapter-length advice is not pedagogy. Academic monograph chapters are commonly 9,000–15,000 words (Manuscript Works, 2022) and readers manage them fine, because chapter is not the unit of sustained reading attention — *section* is.
+- **"Long-form is dead because smartphones."** Mark's 47-second number is within-task switching; Pew 2016 and podcast completion data (75% on 22-minute shows) show that chosen long-form sustains attention fine. The collapse is in *unchosen* content.
+
+### Concrete recommendations
+
+Synthesis of primary-source numbers, annotated by grade of support:
+
+| Unit | Low | High | Source / confidence |
+|---|---|---|---|
+| Novel concepts per section | 3 | 4 | Cowan 2001; Luck & Vogel 1997; Morra 2024. **High confidence**, for novel material. |
+| Concepts per section when reader is expert | 5 | 7 | Gobet & Clarkson 2004 (chunk templates). Medium confidence. |
+| Words per section, single concept, pedagogical | 400 | 900 | Derived: PubMed intro median 553, Wikipedia sub-section norm ~500–1000. Medium. |
+| Words per section, 3–4 concepts, technical | 1,200 | 2,500 | Conservative product of above × chunk count. Medium. |
+| Section upper bound (digital, expository) | — | 3,000 | Delgado 2018 screen penalty grows with length + scroll. Medium. |
+| Section hard ceiling (any medium) | — | 5,000 | Brysbaert 238 wpm × 20 min attention; Wikipedia ≥8,000-word split threshold scaled down for sub-section. Medium. |
+| Instructional textbook chapter | 3,000 | 6,000 | Self-help / instructional norm (3,000–5,000 per Automateed 2025); pedagogy texts ~2,000 per rereading studies. Low-medium. |
+| Advanced-textbook / monograph chapter | 8,000 | 15,000 | Manuscript Works 2022; MW Editing. High. (Bishop PRML, Goodfellow DL fit here.) |
+| Research-paper Introduction | 400 | 760 | IQR of 61,517 PubMed papers. **High**. |
+| Research-paper Results | 610 | 1,660 | Same dataset. **High**. |
+| Research-paper Discussion | 820 | 1,480 | Same dataset. **High**. |
+| Review article (whole) | 4,000 | 8,000 | Nature *Review* format guide; multiple journals. High. |
+| Nature review main text | 5,000 | 6,000 | Nature review format guide. High. |
+| Monograph (humanities/social sci) | 80,000 | 110,000 | Cambridge *Open Access and the Humanities* Ch. 4. High. |
+| Wikipedia "should consider splitting" | 8,000 | — | `Wikipedia:Article_size` 2024. High. |
+| References per 1,000 words (review) | 20 | 30 | Nature review format guide (~25/1k). High. |
+
+**Two rules worth shipping:**
+
+1. **Atomic unit = *concept-section* of 3–4 novel chunks → 900–2,500 words.** Default 1,500 words per section. Expand to 2,500 only if retrieval density justifies it (guideline 4); shrink to 900 if only one concept.
+2. **Chapters = sum of sections, with a soft warning above 6,000 words and a hard warning above 10,000.** Don't target chapter length; derive it. Warn if the distribution of section lengths within a chapter is bimodal or if any single section exceeds 3,000 words.
+
+### Gaps and where sciknow could contribute
+
+Genuine research gaps:
+
+1. **Corpus-grounded concept→word regression.** Nobody has published a regression of "words required to explain concept X to audience Y at quality Z" using a large scientific corpus. sciknow has the retrieval infrastructure to measure this. Experiment: segment the ingested corpus into canonical sections, count propositional idea density (Brown et al. 2008, `BRM.40.2.540` gives an automatic POS-based measure), and regress against section length. Generates empirically-grounded per-concept word counts for the corpus's domain — publishable on its own.
+2. **Retrieval-density proxy validation.** Guideline 4 is novel. If it holds up empirically, it's a contribution.
+3. **Bottom-up vs top-down authoring A/B.** No one in the educational-technology literature has tested bottom-up section-first vs top-down chapter-first generation for LLM-assisted scientific writing. sciknow's autowrite pipeline is the ideal testbed.
+4. **Chunking in LLM-assisted writing specifically.** Mayer's segmenting principle was validated with human learners and animations. Whether "keep each generated section to ≤4 concepts" improves human-rated quality, grounding, and retention of the generated output is an open question. A short paper waiting to be written.
+
+Existing tools do not do concept-density sizing. Scrivener, Manuskript, Plottr are structural outliners that track word counts and let you re-order sections — no cognitive-load model. Overleaf is a LaTeX editor; Quire is a publishing toolchain. **The concept-density sizing framework would be genuinely novel in the authoring-tools space.**
+
+### References
+
+- Baddeley, A. (2015). "George Miller's Magical Number of Immediate Memory in Retrospect." *Perspectives on Psychological Science* 10:1–7. (PMC4486516)
+- Brown, C., Snodgrass, T., Kemper, S. J., Herman, R., & Covington, M. A. (2008). "Automatic measurement of propositional idea density from part-of-speech tagging." *Behavior Research Methods* 40(2):540–545. (doi:10.3758/BRM.40.2.540)
+- Brysbaert, M. (2019). "How many words do we read per minute? A review and meta-analysis of reading rate." *Journal of Memory and Language* 109:104047. (doi:10.1016/j.jml.2019.104047)
+- Clinton-Lisell, V. (2022). "No Negative Effects of Reading on Screen on Comprehension of Narrative Texts Compared to Print: A Meta-analysis." *Media Psychology*. (doi:10.1080/15213269.2022.2070216)
+- Cowan, N. (2001). "The magical number 4 in short-term memory: A reconsideration of mental storage capacity." *Behavioral and Brain Sciences* 24(1):87–114. (PMID:11515286)
+- Cowan, N. (2010). "The Magical Mystery Four: How Is Working Memory Capacity Limited, and Why?" *Current Directions in Psychological Science* 19(1):51–57.
+- Delgado, P., Vargas, C., Ackerman, R., & Salmerón, L. (2018). "Don't throw away your printed books: A meta-analysis on the effects of reading media on reading comprehension." *Educational Research Review* 25:23–38. (doi:10.1016/j.edurev.2018.09.003)
+- Gobet, F., & Clarkson, G. (2004). "Chunks in expert memory: Evidence for the magical number four…or is it two?" *Memory* 12(6):732–747. (PMID:15724362)
+- Kosslyn, S. M. (2020). *Active Learning Online: Five Principles that Make Online Courses Come Alive*. Alinea Learning. (ISBN 978-1735810706)
+- Luck, S. J., & Vogel, E. K. (1997). "The capacity of visual working memory for features and conjunctions." *Nature* 390(6657):279–281.
+- Mark, G. (2023). *Attention Span: A Groundbreaking Way to Restore Balance, Happiness and Productivity*. Hanover Square Press.
+- Mayer, R. E., & Fiorella, L. (Eds.) (2021). *The Cambridge Handbook of Multimedia Learning* (3rd ed.). Cambridge University Press. See especially Ch. 11 (Segmenting, Pretraining, Modality) and Ch. 19 (Principles for Managing Essential Processing).
+- Miller, G. A. (1956). "The magical number seven, plus or minus two: Some limits on our capacity for processing information." *Psychological Review* 63(2):81–97.
+- Morra, S., et al. (2024). "Modelling Working Memory Capacity: Is the Magical Number Four, Seven, or Does it Depend on What You Are Counting?" *Journal of Cognition*. (doi:10.5334/joc.387; PMC11259112)
+- Nature Portfolio (2024). *Article format guide: Review, Technical*.
+- Sweller, J. (2020). "Cognitive Load Theory and Educational Technology." *Educational Technology Research and Development* 68:1–16.
+- Wiggins, G., & McTighe, J. (2005). *Understanding by Design* (2nd ed.). ASCD.
+- Wikipedia (2024). "Wikipedia:Article size." `en.wikipedia.org/wiki/Wikipedia:Article_size`
+- quantifyinghealth.com (2021). Analyses of 61,517–61,519 PubMed Central papers for Introduction/Methods/Results/Discussion section lengths.
+
+---
+
 ## Planned (Researched, Implementation Pending)
 
 The roadmap items from the 2026-04 lit sweep are now all shipped (Phases 7–12). Track A measurement landed in Phase 13. Phase 44 added empirical validation of those claims. Future research notes will accumulate here as they're identified.
