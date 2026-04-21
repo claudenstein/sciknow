@@ -9460,6 +9460,90 @@ def l1_phase54_6_56_refresh_ingests_downloads_and_failed() -> None:
         )
 
 
+def l1_phase54_6_145_finalize_draft_surface() -> None:
+    """Phase 54.6.145 — `book finalize-draft` L3 VLM verify surface.
+
+    Pins the module + CLI for the L3 claim-depiction verifier that
+    runs once before export (per the Q2 tiered-verify decision: L1+L2
+    in the autowrite loop, L3 here). Cheap L1 — doesn't call the VLM,
+    just guards the shape of the public API so a refactor can't
+    silently drop the `book finalize-draft` command or its exit-code
+    contract (used by CI / scripted export gates).
+    """
+    import inspect
+    from sciknow.core import finalize_draft as fd
+    from sciknow.cli import book as book_cli
+
+    # A) Module surface
+    assert hasattr(fd, "verify_draft_figures_l3"), (
+        "core.finalize_draft.verify_draft_figures_l3 missing (Phase 54.6.145)"
+    )
+    assert hasattr(fd, "FigureVerdict"), (
+        "core.finalize_draft.FigureVerdict dataclass missing"
+    )
+    assert hasattr(fd, "FinalizeReport"), (
+        "core.finalize_draft.FinalizeReport dataclass missing"
+    )
+    assert hasattr(fd, "L3_VERIFY_SYSTEM"), (
+        "L3_VERIFY_SYSTEM prompt template missing — the prompt is "
+        "load-bearing for the 0-10 score output format"
+    )
+
+    # B) Prompt rubric references the 0-10 scale + JSON contract
+    assert "0-10" in fd.L3_VERIFY_SYSTEM, (
+        "L3_VERIFY_SYSTEM must document the 0-10 rubric (the parser "
+        "and flag_threshold both depend on it)"
+    )
+    assert '"score"' in fd.L3_VERIFY_SYSTEM and '"justification"' in fd.L3_VERIFY_SYSTEM, (
+        "L3_VERIFY_SYSTEM must require a JSON object with score + "
+        "justification — the parser reads both"
+    )
+
+    # C) FigureVerdict carries the fields the CLI table renders
+    required_fields = {
+        "marker", "kind", "num", "resolved",
+        "visual_id", "figure_num", "document_id", "asset_path",
+        "claim_sentence", "vlm_score", "vlm_justification", "passes",
+    }
+    got_fields = {f.name for f in fd.FigureVerdict.__dataclass_fields__.values()}
+    missing = required_fields - got_fields
+    assert not missing, (
+        f"FigureVerdict missing fields the finalize-draft table renders: {missing}"
+    )
+
+    # D) FinalizeReport has pass_rate property + the n_* counters
+    rep = fd.FinalizeReport(
+        draft_id="x", n_markers=10, n_resolved=9, n_passing=7, n_flagged=3,
+    )
+    assert rep.pass_rate == 0.7, (
+        f"FinalizeReport.pass_rate must compute n_passing/n_markers; got {rep.pass_rate}"
+    )
+
+    # E) CLI command registered with the expected flags
+    cmd_names = {cmd.name for cmd in book_cli.app.registered_commands}
+    assert "finalize-draft" in cmd_names, (
+        "`sciknow book finalize-draft` command missing (Phase 54.6.145)"
+    )
+    # The finalize_draft callable exists in the CLI module
+    assert hasattr(book_cli, "finalize_draft"), (
+        "cli.book.finalize_draft function missing"
+    )
+    sig = inspect.signature(book_cli.finalize_draft)
+    for param in ("draft_id", "vlm_model", "flag_threshold", "output"):
+        assert param in sig.parameters, (
+            f"`book finalize-draft` must take `{param}` (Phase 54.6.145)"
+        )
+
+    # F) Exit-code contract referenced in docstring — CI / scripts rely
+    # on non-zero exit when any marker is flagged.
+    ds = book_cli.finalize_draft.__doc__ or ""
+    assert "Exit code" in ds or "exit code" in ds.lower(), (
+        "finalize-draft docstring must document the exit-code contract "
+        "(0 on clean, non-zero on any flagged) so scripted gates can "
+        "rely on it"
+    )
+
+
 def l1_phase54_6_144_autowrite_include_visuals_web_wiring() -> None:
     """Phase 54.6.144 — web-app checkbox for autowrite --include-visuals.
 
@@ -10465,6 +10549,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_143_length_target_defaults,
     # Phase 54.6.144 — web-app checkbox for autowrite --include-visuals
     l1_phase54_6_144_autowrite_include_visuals_web_wiring,
+    # Phase 54.6.145 — `book finalize-draft` L3 VLM verify surface
+    l1_phase54_6_145_finalize_draft_surface,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness

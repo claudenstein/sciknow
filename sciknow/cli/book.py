@@ -1271,6 +1271,142 @@ def insert_citations(
     _consume_events(gen, console)
 
 
+# ── finalize-draft (Phase 54.6.145 — L3 VLM verify pre-export) ──────────────────
+
+@app.command(name="finalize-draft")
+def finalize_draft(
+    draft_id: Annotated[str, typer.Argument(help="Draft ID (first 8+ chars).")],
+    vlm_model: str = typer.Option(
+        None, "--vlm-model",
+        help="VLM to use. Defaults to settings.visuals_caption_model "
+             "(the same model the caption-visuals pipeline uses).",
+    ),
+    flag_threshold: int = typer.Option(
+        4, "--flag-threshold",
+        help="VLM scores below this trigger a flag (0-10 scale). "
+             "Default 4 — the 5-6 band is 'consistent but not clearly "
+             "demonstrated'; below 4 is 'topically wrong or unrelated'.",
+    ),
+    output: Path | None = typer.Option(
+        None, "--output", "-o",
+        help="Write the full JSON report to this file in addition to "
+             "the console table.",
+    ),
+):
+    """Phase 54.6.145 — L3 claim-depiction verification for a final draft.
+
+    Per the Q2 design decision (see PHASE_LOG 54.6.142), L3 verification
+    runs a vision-language model on every ``[Fig. N]`` marker in the
+    draft, checking whether the cited image actually **depicts** the
+    claim. It's too expensive for every autowrite iteration (3-10s per
+    marker × N markers × M iterations) so it lives here — run once
+    before export when the draft is stable.
+
+    Exit code 0 if every marker passes, 1 if any are flagged. The per-
+    marker table shows the claim sentence, the VLM's 0-10 score, and
+    its one-sentence justification so you can decide: replace the
+    figure, drop the citation, or keep it.
+
+    Tables and equations are L3-skipped (no raster image to show the
+    VLM) — they trust the L2 entailment check that ran during
+    autowrite.
+
+    Examples:
+
+      sciknow book finalize-draft 3f2a1b4c
+      sciknow book finalize-draft 3f2a1b4c --flag-threshold 6
+      sciknow book finalize-draft 3f2a1b4c --vlm-model minicpm-v:8b
+      sciknow book finalize-draft 3f2a1b4c -o finalize.json
+    """
+    import json as _json
+    from rich.table import Table as _RT
+    from sciknow.core.finalize_draft import verify_draft_figures_l3
+
+    try:
+        report = verify_draft_figures_l3(
+            draft_id=draft_id,
+            vlm_model=vlm_model,
+            flag_threshold=flag_threshold,
+            on_progress=lambda i, total, marker: console.print(
+                f"  [dim][{i}/{total}][/dim] verifying {marker}…"
+            ),
+        )
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]finalize-draft failed:[/red] {exc}")
+        raise typer.Exit(3)
+
+    if report.n_markers == 0:
+        console.print(
+            "[yellow]No `[Fig. N]` / `[Table N]` / `[Eq. N]` markers "
+            "found in the draft.[/yellow] Nothing to verify."
+        )
+        raise typer.Exit(0)
+
+    # Results table
+    table = _RT(
+        title=f"L3 verify · draft {report.draft_id[:12]}… · "
+              f"model {report.vlm_model} · {report.elapsed_s:.1f}s",
+        show_lines=False, expand=True,
+    )
+    table.add_column("Marker", style="bold", width=12)
+    table.add_column("Kind", width=8)
+    table.add_column("Resolved", width=9)
+    table.add_column("Score", justify="right", width=6)
+    table.add_column("Verdict", width=8)
+    table.add_column("Justification / claim", overflow="fold")
+
+    for v in report.verdicts:
+        if not v.resolved:
+            verdict = "[red]HALLUC[/red]"
+            score_s = "—"
+            justif = f"Marker doesn't resolve to any visual. Claim: \"{v.claim_sentence[:140]}…\""
+        elif v.vlm_score is None:
+            verdict = "[yellow]SKIP[/yellow]"
+            score_s = "—"
+            justif = v.vlm_justification or ""
+        else:
+            verdict = ("[green]PASS[/green]" if v.passes
+                       else "[red]FLAG[/red]")
+            score_s = f"{v.vlm_score}/10"
+            justif = v.vlm_justification or ""
+        table.add_row(
+            v.marker, v.kind, "●" if v.resolved else "○",
+            score_s, verdict, justif,
+        )
+    console.print(table)
+
+    # Summary
+    console.print(
+        f"\n[bold]{report.n_passing}/{report.n_markers} pass[/bold]"
+        + (f"  ·  [red]{report.n_flagged} flagged[/red]"
+           if report.n_flagged else "")
+        + f"  ·  L1 resolved: {report.n_resolved}/{report.n_markers}"
+        + f"  ·  pass rate {report.pass_rate:.1%}"
+    )
+
+    if output:
+        serialised = {
+            "draft_id": report.draft_id,
+            "vlm_model": report.vlm_model,
+            "flag_threshold": flag_threshold,
+            "n_markers": report.n_markers,
+            "n_resolved": report.n_resolved,
+            "n_passing": report.n_passing,
+            "n_flagged": report.n_flagged,
+            "pass_rate": report.pass_rate,
+            "elapsed_s": report.elapsed_s,
+            "verdicts": [v.__dict__ for v in report.verdicts],
+        }
+        output.write_text(_json.dumps(serialised, indent=2))
+        console.print(f"[dim]Full JSON report written to[/dim] {output}")
+
+    # Non-zero exit so CI / scripts can gate export on clean verify
+    raise typer.Exit(0 if report.n_flagged == 0 else 1)
+
+
 # ── verify-citations (Phase 46.B — external citation verification) ──────────────
 
 @app.command(name="verify-citations")
