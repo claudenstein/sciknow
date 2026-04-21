@@ -135,11 +135,86 @@ SCIENTIFIC_PAPER = ProjectType(
 )
 
 
+# Phase 54.6.143 — textbook-length project type.
+# A textbook chapter is substantially longer than a monograph chapter
+# (Bishop PRML ~18k, Goodfellow DL ~16k, typical introductory textbook
+# 10k–20k). Sections are larger to match: methods/examples blocks in
+# a textbook expand to full worked examples rather than terse prose.
+# This type is a parallel option to scientific_book rather than a
+# replacement, so existing projects don't change behavior.
+TEXTBOOK = ProjectType(
+    slug="textbook",
+    display_name="Textbook",
+    description="Pedagogical book with chapters. Longer chapters, "
+                "worked-example sections, more concept density.",
+    is_flat=False,
+    default_sections=(
+        SectionTemplate("introduction",        "Introduction",         1500),
+        SectionTemplate("background",          "Background",           3000),
+        SectionTemplate("main_concept",        "Main Concept",         4000),
+        SectionTemplate("worked_examples",     "Worked Examples",      3500),
+        SectionTemplate("current_understanding","Current Understanding",2000),
+        SectionTemplate("exercises_summary",   "Exercises & Summary",  1000),
+    ),
+    default_chapter_count=12,
+    # 1500+3000+4000+3500+2000+1000 = 15000 (matches literature norm)
+    default_target_chapter_words=15000,
+    writer_hints=(
+        "long_form",
+        "pedagogical_voice",
+        "worked_examples",
+        "concept_density",
+    ),
+    flags={
+        "allow_citations": True,
+        "require_abstract": False,
+        "cli_export_defaults": {"format": "markdown"},
+    },
+)
+
+
+# Phase 54.6.143 — review-article length project type.
+# Short-form literature review / single-topic survey. Much tighter
+# targets than a book: total ~15k–30k words across 5–10 sections,
+# no chapters in the usual sense. We still model it as a single-
+# chapter project so the existing sections machinery reuses cleanly.
+REVIEW_ARTICLE = ProjectType(
+    slug="review_article",
+    display_name="Review Article",
+    description="Short-form literature review. Single document, "
+                "5–10 thematic sections, tight word budgets.",
+    is_flat=True,
+    default_sections=(
+        SectionTemplate("abstract",           "Abstract",         250, required=True),
+        SectionTemplate("introduction",       "Introduction",     700),
+        SectionTemplate("historical_context", "Historical Context", 900),
+        SectionTemplate("current_state",      "Current State",    1200),
+        SectionTemplate("open_questions",     "Open Questions",    900),
+        SectionTemplate("conclusion",         "Conclusion",        400),
+    ),
+    default_chapter_count=1,
+    # 250+700+900+1200+900+400 = 4350 (review-article typical body)
+    default_target_chapter_words=4350,
+    writer_hints=(
+        "concise_scientific_voice",
+        "synthesis_over_exposition",
+        "inline_citations_required",
+    ),
+    flags={
+        "allow_citations": True,
+        "require_abstract": True,
+        "cli_export_defaults": {"format": "markdown"},
+    },
+)
+
+
 # Central registry. Extend here + add a default_sections tuple to ship
 # a new type. No schema change required.
 PROJECT_TYPES: dict[str, ProjectType] = {
-    SCIENTIFIC_BOOK.slug:  SCIENTIFIC_BOOK,
-    SCIENTIFIC_PAPER.slug: SCIENTIFIC_PAPER,
+    SCIENTIFIC_BOOK.slug:   SCIENTIFIC_BOOK,
+    SCIENTIFIC_PAPER.slug:  SCIENTIFIC_PAPER,
+    TEXTBOOK.slug:          TEXTBOOK,
+    REVIEW_ARTICLE.slug:    REVIEW_ARTICLE,
 }
 
 # The slug we store for pre-Phase-45 rows (server_default on the column).

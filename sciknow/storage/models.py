@@ -332,6 +332,11 @@ class BookChapter(Base):
     topic_query: Mapped[str | None] = mapped_column(Text)
     topic_cluster: Mapped[str | None] = mapped_column(Text)
     sections: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")
+    # Phase 54.6.143 — per-chapter length override. NULL = fall through to
+    # book-level target_chapter_words (or project-type default). Set this
+    # when one chapter in the book needs a different target than the
+    # others (e.g. a dense methods chapter vs a narrative intro).
+    target_words: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

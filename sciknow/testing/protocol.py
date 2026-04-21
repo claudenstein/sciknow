@@ -9460,6 +9460,89 @@ def l1_phase54_6_56_refresh_ingests_downloads_and_failed() -> None:
         )
 
 
+def l1_phase54_6_143_length_target_defaults() -> None:
+    """Phase 54.6.143 — book-type-aware defaults + per-chapter override.
+
+    Pins the two user-greenlit improvements to the length-targeting
+    system:
+
+      (A) new project types `textbook` (15,000 words/chapter) and
+          `review_article` (4,350) appear in the registry with the
+          correct default_target_chapter_words
+      (B) `_get_book_length_target` honours chapter_id for the new
+          per-chapter override level, and falls back through project
+          type rather than the hardcoded 6000 when nothing book-level
+          is set
+
+    Guards against silent regressions in the fallback chain — a
+    refactor that reorders the levels would break autowrite sizing
+    in ways the user won't notice until a chapter comes out the wrong
+    length.
+    """
+    import inspect
+    from sciknow.core import project_type as pt_mod
+    from sciknow.core import book_ops
+
+    # A) New project types registered with documented defaults
+    assert "textbook" in pt_mod.PROJECT_TYPES, (
+        "textbook project type missing (Phase 54.6.143)"
+    )
+    assert "review_article" in pt_mod.PROJECT_TYPES, (
+        "review_article project type missing (Phase 54.6.143)"
+    )
+    tb = pt_mod.get_project_type("textbook")
+    assert tb.default_target_chapter_words == 15000, (
+        f"textbook default_target_chapter_words must be 15000, got "
+        f"{tb.default_target_chapter_words}. Matches literature norm for "
+        f"intro textbook chapters (Bishop PRML, Goodfellow DL)."
+    )
+    rv = pt_mod.get_project_type("review_article")
+    assert rv.default_target_chapter_words == 4350, (
+        f"review_article default must be 4350, got {rv.default_target_chapter_words}"
+    )
+    # Existing types unchanged (back-compat invariant)
+    assert pt_mod.get_project_type("scientific_book").default_target_chapter_words == 6400
+    assert pt_mod.get_project_type("scientific_paper").default_target_chapter_words == 4000
+
+    # B) Resolver signature takes chapter_id (Level 1 of the fallback chain)
+    sig = inspect.signature(book_ops._get_book_length_target)
+    assert "chapter_id" in sig.parameters, (
+        "_get_book_length_target must accept chapter_id for per-chapter override"
+    )
+    assert sig.parameters["chapter_id"].default is None, (
+        "chapter_id must default to None so existing callers don't break"
+    )
+
+    # C) Resolver source references all four fallback levels
+    src = inspect.getsource(book_ops._get_book_length_target)
+    assert "book_chapters" in src and "target_words" in src, (
+        "_get_book_length_target must read book_chapters.target_words as "
+        "Level 1 of the fallback chain (per-chapter override)"
+    )
+    assert "custom_metadata" in src and "target_chapter_words" in src, (
+        "Level 2 (book custom_metadata) must still be honoured"
+    )
+    assert "project_type" in src.lower() or "get_project_type" in src, (
+        "Level 3 (project-type default) must come from get_project_type"
+    )
+    assert "DEFAULT_TARGET_CHAPTER_WORDS" in src, (
+        "Level 4 hardcoded fallback must still exist as the last resort"
+    )
+
+    # D) BookChapter model has the new column (migration 0034)
+    from sciknow.storage import models as _m
+    assert hasattr(_m.BookChapter, "target_words"), (
+        "BookChapter.target_words missing (migration 0034)"
+    )
+
+    # E) `book set-target` CLI command is registered
+    from sciknow.cli import book as book_cli
+    cmd_names = {cmd.name for cmd in book_cli.app.registered_commands}
+    assert "set-target" in cmd_names, (
+        "`sciknow book set-target` command missing (Phase 54.6.143)"
+    )
+
+
 def l1_phase54_6_142_autowrite_visuals_wiring() -> None:
     """Phase 54.6.142 — end-to-end autowrite visuals wiring.
 
@@ -10316,6 +10399,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_141_writer_visuals_helpers_surface,
     # Phase 54.6.142 — autowrite visuals wiring end-to-end (Q1/Q2/Q3 pinned)
     l1_phase54_6_142_autowrite_visuals_wiring,
+    # Phase 54.6.143 — book-type-aware length defaults + per-chapter override
+    l1_phase54_6_143_length_target_defaults,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness

@@ -52,35 +52,80 @@ DEFAULT_TARGET_CHAPTER_WORDS = 6000
 LENGTH_PRIORITY_THRESHOLD = 0.7
 
 
-def _get_book_length_target(session, book_id: str) -> int:
-    """Read books.custom_metadata.target_chapter_words, fall back to default.
+def _get_book_length_target(session, book_id: str, chapter_id: str | None = None) -> int:
+    """Resolve the effective chapter target for this book.
 
-    Phase 17. Returns an int number of words. Safe to call on any book —
-    a missing column, missing key, or non-int value all fall through to
-    DEFAULT_TARGET_CHAPTER_WORDS.
+    Phase 17 — base behaviour: prefer ``books.custom_metadata.target_chapter_words``
+    when set.
+    Phase 54.6.143 — adds two new levels to the fallback chain so the
+    target matches the actual project shape rather than a one-size-fits-all
+    6000:
+
+        1. per-chapter override (``book_chapters.target_words``)
+                                   — if ``chapter_id`` is supplied and set
+        2. book-level custom_metadata.target_chapter_words
+                                   — user-chosen book-wide target
+        3. project_type's default_target_chapter_words
+                                   — type-appropriate default (6400 scientific_book,
+                                     4000 scientific_paper, 15000 textbook,
+                                     4350 review_article)
+        4. hardcoded ``DEFAULT_TARGET_CHAPTER_WORDS`` (6000)
+                                   — last-ditch for unknown book_types /
+                                     missing rows
+
+    All levels are defensive: a malformed / missing value at any level
+    falls through to the next, never raises.
     """
     from sqlalchemy import text
+
+    # Level 1 — per-chapter override
+    if chapter_id:
+        try:
+            row = session.execute(text("""
+                SELECT target_words FROM book_chapters
+                WHERE id::text = :cid LIMIT 1
+            """), {"cid": chapter_id}).fetchone()
+            if row and row[0]:
+                tw = int(row[0])
+                if tw > 0:
+                    return tw
+        except Exception as exc:
+            logger.debug("per-chapter target_words lookup failed: %s", exc)
+
+    # Levels 2 + 3 — need to read the book row once
     try:
         row = session.execute(text("""
-            SELECT custom_metadata FROM books WHERE id::text = :bid LIMIT 1
+            SELECT custom_metadata, book_type FROM books WHERE id::text = :bid LIMIT 1
         """), {"bid": book_id}).fetchone()
     except Exception:
         return DEFAULT_TARGET_CHAPTER_WORDS
     if not row:
         return DEFAULT_TARGET_CHAPTER_WORDS
-    meta = row[0] or {}
+
+    meta, book_type = row[0] or {}, row[1]
     if isinstance(meta, str):
         try:
             meta = json.loads(meta)
         except Exception:
-            return DEFAULT_TARGET_CHAPTER_WORDS
+            meta = {}
     val = meta.get("target_chapter_words") if isinstance(meta, dict) else None
     try:
         n = int(val)
         if n > 0:
-            return n
+            return n        # Level 2 hit
     except (TypeError, ValueError):
         pass
+
+    # Level 3 — project-type default
+    try:
+        from sciknow.core.project_type import get_project_type
+        pt = get_project_type(book_type)
+        if pt.default_target_chapter_words > 0:
+            return int(pt.default_target_chapter_words)
+    except Exception as exc:
+        logger.debug("project_type default lookup failed: %s", exc)
+
+    # Level 4 — hardcoded last resort
     return DEFAULT_TARGET_CHAPTER_WORDS
 
 
@@ -2666,7 +2711,8 @@ def write_section_stream(
             if section_override is not None:
                 effective_target_words = section_override
             else:
-                chapter_target = _get_book_length_target(session, book_id)
+                # Phase 54.6.143 — pass chapter_id so per-chapter override fires
+                chapter_target = _get_book_length_target(session, book_id, chapter_id=ch_id)
                 num_sections = _get_chapter_num_sections(session, ch_id)
                 effective_target_words = _section_target_words(chapter_target, num_sections)
 
@@ -3923,7 +3969,8 @@ def _autowrite_section_body(
             if section_override is not None:
                 effective_target_words = section_override
             else:
-                chapter_target = _get_book_length_target(session, book_id)
+                # Phase 54.6.143 — pass chapter_id so per-chapter override fires
+                chapter_target = _get_book_length_target(session, book_id, chapter_id=ch_id)
                 num_sections = _get_chapter_num_sections(session, ch_id)
                 effective_target_words = _section_target_words(chapter_target, num_sections)
         section_plan = _get_section_plan(session, ch_id, section_type)

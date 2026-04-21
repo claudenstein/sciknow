@@ -504,6 +504,140 @@ def types():
     console.print(table)
 
 
+# ── set-target (Phase 54.6.143) ────────────────────────────────────────────────
+
+@app.command(name="set-target")
+def set_target(
+    book_title: Annotated[str, typer.Argument(help="Book title or ID fragment.")],
+    words: int = typer.Option(
+        None, "--words", "-w",
+        help="Target words for a chapter. Omit with --unset to clear.",
+    ),
+    chapter: str = typer.Option(
+        None, "--chapter", "-c",
+        help=(
+            "Chapter number or title fragment. When set, only this chapter's "
+            "target is changed. When omitted, the book-level default "
+            "(applies to every chapter without its own override) is changed."
+        ),
+    ),
+    unset: bool = typer.Option(
+        False, "--unset",
+        help="Clear the target back to the inherited default. Requires "
+             "--chapter (use the book's book_type default for the whole book).",
+    ),
+):
+    """Phase 54.6.143 — set the chapter-level word target.
+
+    Resolution during autowrite (highest → lowest priority):
+
+      1. ``--target-words`` passed to ``book autowrite``
+      2. per-section override (chapter modal's Sections tab)
+      3. ``book_chapters.target_words``       (this command, per-chapter)
+      4. ``books.custom_metadata.target_chapter_words`` (this command, book-wide)
+      5. ``project_type.default_target_chapter_words`` (from ``book types``)
+      6. hardcoded 6000 fallback
+
+    Examples:
+
+      # Set every chapter of a textbook to 15000 words
+      sciknow book set-target "Intro ML Textbook" --words 15000
+
+      # Override just chapter 3 to 8000 words (dense methods chapter)
+      sciknow book set-target "Intro ML Textbook" --chapter 3 --words 8000
+
+      # Clear the per-chapter override, let chapter 3 inherit again
+      sciknow book set-target "Intro ML Textbook" --chapter 3 --unset
+    """
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+    from sciknow.core.project_type import get_project_type
+
+    if unset and words is not None:
+        console.print("[red]--unset and --words are mutually exclusive.[/red]")
+        raise typer.Exit(2)
+    if not unset and (words is None or words <= 0):
+        console.print("[red]--words must be a positive integer (or use --unset).[/red]")
+        raise typer.Exit(2)
+
+    with get_session() as session:
+        # Resolve book
+        row = session.execute(text("""
+            SELECT id::text, title, book_type, COALESCE(custom_metadata, '{}'::jsonb)
+            FROM books WHERE title ILIKE :q OR id::text LIKE :q
+            ORDER BY updated_at DESC LIMIT 1
+        """), {"q": f"%{book_title}%"}).fetchone()
+        if not row:
+            console.print(f"[red]No book matches {book_title!r}[/red]")
+            raise typer.Exit(1)
+        book_id, b_title, b_type, meta = row[0], row[1], row[2], row[3]
+
+        if chapter:
+            ch_row = session.execute(text("""
+                SELECT id::text, number, title FROM book_chapters
+                WHERE book_id = CAST(:bid AS uuid)
+                  AND (CAST(number AS text) = :q OR title ILIKE :qt)
+                ORDER BY number LIMIT 1
+            """), {"bid": book_id, "q": chapter.strip(),
+                   "qt": f"%{chapter.strip()}%"}).fetchone()
+            if not ch_row:
+                console.print(
+                    f"[red]No chapter matches {chapter!r} in {b_title!r}[/red]"
+                )
+                raise typer.Exit(1)
+            ch_id, ch_num, ch_title = ch_row
+            if unset:
+                session.execute(text(
+                    "UPDATE book_chapters SET target_words = NULL "
+                    "WHERE id = CAST(:cid AS uuid)"
+                ), {"cid": ch_id})
+                session.commit()
+                console.print(
+                    f"[green]✓ Cleared per-chapter target[/green] for "
+                    f"Ch.{ch_num} {ch_title!r} — will inherit from book."
+                )
+                return
+            session.execute(text(
+                "UPDATE book_chapters SET target_words = :w "
+                "WHERE id = CAST(:cid AS uuid)"
+            ), {"w": int(words), "cid": ch_id})
+            session.commit()
+            pt = get_project_type(b_type)
+            console.print(
+                f"[green]✓ Set[/green] Ch.{ch_num} {ch_title!r} "
+                f"target to [bold]{words:,}[/bold] words  "
+                f"[dim](book default: {pt.default_target_chapter_words:,}, "
+                f"book type: {b_type})[/dim]"
+            )
+            return
+
+        # Book-level default
+        if unset:
+            console.print(
+                "[red]--unset without --chapter is not supported. "
+                "Use `book set-target <title> --words <project-type-default>` "
+                "or run `book types` to see defaults.[/red]"
+            )
+            raise typer.Exit(2)
+        if isinstance(meta, str):
+            import json as _json
+            meta = _json.loads(meta or "{}")
+        meta = dict(meta or {})
+        meta["target_chapter_words"] = int(words)
+        session.execute(text(
+            "UPDATE books SET custom_metadata = CAST(:m AS jsonb) "
+            "WHERE id = CAST(:bid AS uuid)"
+        ), {"m": __import__("json").dumps(meta), "bid": book_id})
+        session.commit()
+        pt = get_project_type(b_type)
+        console.print(
+            f"[green]✓ Set book-level target[/green] for {b_title!r} "
+            f"to [bold]{words:,}[/bold] words  "
+            f"[dim](project-type default: {pt.default_target_chapter_words:,}, "
+            f"book type: {b_type})[/dim]"
+        )
+
+
 # ── list ───────────────────────────────────────────────────────────────────────
 
 @app.command(name="list")
