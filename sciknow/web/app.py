@@ -7017,24 +7017,27 @@ def _render_book(book, chapters, drafts, gaps, comments,
             active_title = book[1] if book else "Untitled book"
             active_html = (
                 '<div class="empty-state">'
+                '<svg class="empty-state__icon"><use href="#i-feather"/></svg>'
                 '<h3>Welcome to your book</h3>'
                 f'<p>This book has <strong>{len(chapters)} chapters</strong> outlined and '
                 '<strong>0 drafts</strong>. To start writing, click any chapter title in the sidebar '
                 '(it will highlight) and then use the toolbar above. The fastest path to a first draft '
-                'is to click the <strong>&#9889; Autowrite</strong> button after selecting a chapter '
-                '&mdash; it will run the full write &rarr; review &rarr; revise convergence loop.</p>'
+                'is <strong>AI Autowrite</strong> &mdash; it runs the full write &rarr; review &rarr; '
+                'revise convergence loop on the selected chapter.</p>'
                 '<p>You can also explore the corpus without writing anything: '
-                '<strong>&#128270; Ask Corpus</strong>, <strong>&#128218; Wiki Query</strong>, '
-                'and <strong>&#128194; Browse Papers</strong> all work without an active draft.</p>'
-                '<p style="font-size:12px;color:var(--fg-faint);">Tip: each chapter in the sidebar now '
-                'has a <span style="color:var(--accent);">&#9998; Start writing</span> shortcut '
-                'that selects the chapter and immediately drafts an overview.</p>'
+                '<strong>Ask Corpus</strong>, <strong>Wiki Query</strong>, and '
+                '<strong>Browse Papers</strong> all work without an active draft. Press '
+                '<kbd>&#8984;K</kbd> / <kbd>Ctrl+K</kbd> to jump to any of them.</p>'
+                '<p class="empty-state__tip">Each chapter in the sidebar has a '
+                '<span class="u-accent">Start writing</span> shortcut that selects the '
+                'chapter and immediately drafts an overview.</p>'
                 '</div>'
             )
         else:
             active_title = book[1] if book else "Untitled book"
             active_html = (
                 '<div class="empty-state">'
+                '<svg class="empty-state__icon"><use href="#i-book-open"/></svg>'
                 '<h3>This book has no chapters yet</h3>'
                 '<p>Run <code>uv run sciknow book outline "your topic" "Book Title"</code> '
                 'in your terminal to generate a chapter outline from the literature, '
@@ -7776,6 +7779,7 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
    them; they exist so new code has a shorter path than inline. */
 .u-muted    {{ color: var(--fg-muted); }}
 .u-faint    {{ color: var(--fg-faint); }}
+.u-accent   {{ color: var(--accent); }}
 .u-danger   {{ color: var(--danger); }}
 .u-success  {{ color: var(--success); }}
 .u-warning  {{ color: var(--warning); }}
@@ -8303,12 +8307,48 @@ button, input, textarea, select {{ font-family: inherit; color: inherit; }}
 .sec-link.sec-empty-cta {{ color: var(--accent); font-style: normal; cursor: pointer;
                            font-weight: 500; opacity: 0.85; }}
 .sec-link.sec-empty-cta:hover {{ background: var(--accent-light); opacity: 1; }}
-.empty-state {{ padding: var(--sp-6) var(--sp-5); border: 1px dashed var(--border-strong);
-                border-radius: var(--r-xl); background: var(--toolbar-bg); margin-top: var(--sp-3); }}
-.empty-state h3 {{ font-size: 18px; font-weight: 600; margin-bottom: var(--sp-3);
-                  color: var(--fg); }}
-.empty-state p {{ font-family: var(--font-sans); font-size: 14px; line-height: 1.6;
-                 color: var(--fg-muted); margin-bottom: var(--sp-3); text-align: left; }}
+/* Phase 54.6.185 — empty-state polish. Lead icon, Newsreader
+   masthead, warmer paper-card background — reads as a considered
+   opener rather than a "nothing here" stub. */
+.empty-state {{
+  padding: var(--sp-7) var(--sp-6);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-sm);
+  margin-top: var(--sp-4);
+}}
+.empty-state__icon {{
+  width: 36px; height: 36px; display: block;
+  color: var(--accent); margin-bottom: var(--sp-3);
+}}
+.empty-state h3 {{
+  font-family: var(--font-serif); font-size: 22px; font-weight: 600;
+  letter-spacing: -0.01em; line-height: 1.2;
+  color: var(--fg); margin-bottom: var(--sp-3);
+  font-variation-settings: "opsz" 28;
+}}
+.empty-state p {{
+  font-family: var(--font-sans); font-size: 14px; line-height: 1.65;
+  color: var(--fg-muted); margin-bottom: var(--sp-3); text-align: left;
+}}
+.empty-state__tip {{
+  font-size: 12px; color: var(--fg-faint);
+  margin-top: var(--sp-4); padding-top: var(--sp-3);
+  border-top: 1px dashed var(--border);
+}}
+.empty-state kbd {{
+  display: inline-block; padding: 1px 5px;
+  font-family: var(--font-mono); font-size: 11px;
+  background: var(--toolbar-bg); border: 1px solid var(--border);
+  border-radius: 3px; color: var(--fg);
+  margin: 0 2px;
+}}
+.empty-state code {{
+  font-family: var(--font-mono); font-size: 12px;
+  padding: 1px 6px; background: var(--code-bg);
+  border-radius: var(--r-sm);
+}}
 .empty-section-picker {{ display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-top: var(--sp-4); }}
 .section-chip {{ font-size: 12px; padding: 6px 14px; border: 1px solid var(--border);
                 background: var(--bg); color: var(--fg); border-radius: 999px;
