@@ -420,6 +420,63 @@ def _get_section_concept_density_target(
     return target
 
 
+def _adjust_target_for_retrieval_density(
+    base_target: int,
+    n_concepts: int,
+    n_chunks_retrieved: int,
+    wpc_range: tuple[int, int],
+    *,
+    chunks_low: int = 10,
+    chunks_high: int = 25,
+) -> tuple[int, float, str]:
+    """Phase 54.6.150 — RESEARCH.md §24 guideline 4.
+
+    When section-level concept-density resolved a target at the wpc
+    midpoint (``_get_section_concept_density_target``), push the wpc
+    toward the high end when retrieval returned many chunks (evidence-
+    rich topic needs more exposition) or the low end when retrieval
+    returned few (topic is narrow, don't pad). This is honest novel
+    engineering: graded B in the §24 research brief because there is
+    no prior literature validating the specific 10/25 cutpoints or
+    the linear-lerp shape. The adjustment is always-on but bounded
+    (wpc can never exceed the project-type range), so the worst case
+    is mild mis-sizing, never a runaway.
+
+    Returns ``(new_target, lerp_factor, explanation)``. When
+    ``n_concepts <= 0`` or the range is degenerate, returns the base
+    target unchanged with a "no-op" explanation so callers can log
+    the non-event without special-casing.
+
+    Validation experiment (future work, RESEARCH.md §24 §gaps): grade
+    a corpus of human-written sections on completeness vs their
+    retrieved-chunk count and fit the actual curve. Ship the
+    mechanism first; validate later.
+    """
+    if n_concepts <= 0:
+        return base_target, 0.5, "no-op (no concepts in plan)"
+    wpc_lo, wpc_hi = wpc_range
+    if wpc_hi <= wpc_lo:
+        return base_target, 0.5, "no-op (degenerate wpc range)"
+    if chunks_high <= chunks_low:
+        return base_target, 0.5, "no-op (degenerate chunk cutpoints)"
+
+    if n_chunks_retrieved <= chunks_low:
+        lerp = 0.0
+    elif n_chunks_retrieved >= chunks_high:
+        lerp = 1.0
+    else:
+        lerp = (n_chunks_retrieved - chunks_low) / (chunks_high - chunks_low)
+
+    wpc_new = int(wpc_lo + lerp * (wpc_hi - wpc_lo))
+    new_target = max(400, n_concepts * wpc_new)
+    explanation = (
+        f"retrieval density: {n_chunks_retrieved} chunks in [{chunks_low}, "
+        f"{chunks_high}] → wpc {wpc_new} (lerp={lerp:.2f}); "
+        f"target {base_target:,} → {new_target:,} words"
+    )
+    return new_target, lerp, explanation
+
+
 def _get_section_target_words(
     session, chapter_id: str, section_slug: str,
 ) -> int | None:
@@ -4151,6 +4208,63 @@ def _autowrite_section_body(
         return
 
     log.event("retrieval_done", n_results=len(results), n_sources=len(sources))
+
+    # Phase 54.6.150 — retrieval-density widener (RESEARCH.md §24 §4).
+    # When the section's target came from concept-density (section had
+    # a plan with N bullets × wpc_midpoint), adjust wpc based on the
+    # retrieved chunk count: more chunks → more words needed to cover
+    # the evidence, fewer → don't pad. Lerp within the project type's
+    # wpc_range so the adjustment is bounded. No-op when the target
+    # came from an explicit override or the top-down chapter split
+    # (honest signal only when the bottom-up path fired in the first
+    # place).
+    if target_words is None and resume_content is None:
+        try:
+            from sqlalchemy import text as _sql
+            from sciknow.core.project_type import get_project_type
+            with get_session() as _s:
+                _plan = _get_section_plan(_s, ch_id, section_type)
+                _override = _get_section_target_words(_s, ch_id, section_type)
+                _bt_row = _s.execute(_sql(
+                    "SELECT book_type FROM books WHERE id::text = :b LIMIT 1"
+                ), {"b": book_id}).fetchone()
+            _n_concepts = _count_plan_concepts(_plan)
+            _book_type = (_bt_row[0] if _bt_row else None) or None
+            # Only widen when the concept-density path resolved the target
+            # (override absent AND plan present).
+            if _override is None and _n_concepts > 0:
+                _pt = get_project_type(_book_type)
+                _new_target, _lerp, _explain = _adjust_target_for_retrieval_density(
+                    effective_target_words,
+                    _n_concepts,
+                    len(results),
+                    _pt.words_per_concept_range,
+                )
+                if _new_target != effective_target_words:
+                    log.event(
+                        "retrieval_density_adjust",
+                        base=effective_target_words,
+                        new=_new_target,
+                        n_chunks=len(results),
+                        n_concepts=_n_concepts,
+                        lerp=round(_lerp, 3),
+                    )
+                    yield {
+                        "type": "retrieval_density_adjust",
+                        "base_target": effective_target_words,
+                        "new_target": _new_target,
+                        "n_chunks": len(results),
+                        "n_concepts": _n_concepts,
+                        "lerp": round(_lerp, 3),
+                        "explanation": _explain,
+                    }
+                    logger.info(
+                        "Phase 54.6.150 — %s/%s: %s",
+                        str(ch_id)[:8], section_type, _explain,
+                    )
+                    effective_target_words = _new_target
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("retrieval_density_adjust skipped: %s", exc)
 
     # Phase 32.6 — Compound learning Layer 0: open the autowrite_runs row
     # NOW (after retrieval succeeded) and persist the retrieval set with

@@ -9544,6 +9544,95 @@ def l1_phase54_6_145_finalize_draft_surface() -> None:
     )
 
 
+def l1_phase54_6_150_retrieval_density_widener() -> None:
+    """Phase 54.6.150 — retrieval-density widener (RESEARCH.md §24 §4).
+
+    Honest novel engineering graded B in the research brief: when
+    concept-density resolved a section target, adjust the wpc within
+    the project-type range based on retrieved-chunk count. Always-on
+    but bounded (can't exceed range), so worst case is mild mis-sizing.
+
+    Pins the mechanics end-to-end:
+      (A) helper exists + follows the documented lerp shape
+      (B) helper is imported + called from _autowrite_section_body
+          AFTER retrieval (so len(results) is available) but BEFORE
+          the writer prompt (so target goes through adjusted)
+      (C) only fires when concept-density was the path that resolved
+          the target (override absent AND plan present) — otherwise
+          the "widen" signal is meaningless
+      (D) emits the telemetry event + log line so the adjustment is
+          auditable offline
+    """
+    import inspect
+    from sciknow.core import book_ops
+
+    # A) Helper present with documented behaviour
+    assert hasattr(book_ops, "_adjust_target_for_retrieval_density"), (
+        "core.book_ops._adjust_target_for_retrieval_density missing (Phase 54.6.150)"
+    )
+    fn = book_ops._adjust_target_for_retrieval_density
+
+    # Lerp endpoints (low chunks → wpc_lo; high chunks → wpc_hi; midpoint)
+    base, n_conc, rng = 1950, 3, (500, 800)
+    t_lo, lerp_lo, _ = fn(base, n_conc, 5,  rng)
+    t_hi, lerp_hi, _ = fn(base, n_conc, 30, rng)
+    t_md, lerp_md, _ = fn(base, n_conc, 17, rng)  # between cutpoints
+    assert lerp_lo == 0.0 and t_lo == n_conc * rng[0], (
+        f"at or below chunks_low, lerp must be 0 and target = n × wpc_lo. "
+        f"Got lerp={lerp_lo}, target={t_lo}"
+    )
+    assert lerp_hi == 1.0 and t_hi == n_conc * rng[1], (
+        f"at or above chunks_high, lerp must be 1 and target = n × wpc_hi. "
+        f"Got lerp={lerp_hi}, target={t_hi}"
+    )
+    assert 0.0 < lerp_md < 1.0, (
+        f"between cutpoints, lerp must be strictly interior. Got {lerp_md}"
+    )
+
+    # Edge cases → no-op
+    t, _, exp = fn(1000, 0, 20, rng)
+    assert t == 1000 and "no-op" in exp, "zero concepts must be no-op"
+    t, _, exp = fn(1000, 3, 20, (500, 500))
+    assert t == 1000 and "no-op" in exp, "degenerate wpc range must be no-op"
+
+    # Floor guards against absurdly small outputs
+    t, _, _ = fn(100, 1, 5, (50, 800))
+    assert t >= 400, (
+        f"new target must be floored at 400 (mirrors _section_target_words). "
+        f"Got {t}"
+    )
+
+    # B) Helper is actually invoked from _autowrite_section_body after
+    # retrieval. Source-grep pins the wiring — a refactor that drops
+    # the helper call silently disables the widener.
+    body_src = inspect.getsource(book_ops._autowrite_section_body)
+    assert "_adjust_target_for_retrieval_density" in body_src, (
+        "_autowrite_section_body must call _adjust_target_for_retrieval_density "
+        "(Phase 54.6.150) after retrieval"
+    )
+    # Ordering: retrieval must complete before the widener runs
+    retrieve_pos = body_src.find("_retrieve_with_step_back")
+    widen_pos    = body_src.find("_adjust_target_for_retrieval_density")
+    assert 0 <= retrieve_pos < widen_pos, (
+        "widener must run AFTER retrieval — the adjustment needs len(results). "
+        f"Got retrieve={retrieve_pos}, widen={widen_pos}"
+    )
+
+    # C) Source references the gate conditions (override absent AND plan
+    # present). A refactor that drops either check would fire the widener
+    # on top-down sections where the "density" signal is noise.
+    assert "_override is None" in body_src and "_n_concepts > 0" in body_src, (
+        "widener must only fire when concept-density resolved the target — "
+        "override must be absent AND plan must have concepts"
+    )
+
+    # D) Telemetry: event type + log line are emitted
+    assert "retrieval_density_adjust" in body_src, (
+        "widener must yield a `retrieval_density_adjust` event so the UI "
+        "and log show the adjustment"
+    )
+
+
 def l1_phase54_6_149_resolved_targets_endpoint() -> None:
     """Phase 54.6.149 — per-section resolver explanation surfaces in Chapter modal.
 
@@ -10935,6 +11024,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_148_book_settings_type_picker,
     # Phase 54.6.149 — per-section resolver explanation endpoint + badges
     l1_phase54_6_149_resolved_targets_endpoint,
+    # Phase 54.6.150 — retrieval-density widener (RESEARCH.md §24 §4)
+    l1_phase54_6_150_retrieval_density_widener,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness
