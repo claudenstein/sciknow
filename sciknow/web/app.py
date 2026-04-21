@@ -8886,6 +8886,80 @@ body.task-bar-open {{ padding-top: 40px; }}
 .status-select {{ font-size: 11px; padding: 2px 6px; border: 1px solid var(--border);
                    border-radius: 4px; background: var(--bg); color: var(--fg); cursor: pointer;
                    margin-left: 8px; }}
+/* ── Phase 54.6.170 — Command palette (⌘K). Keyboard-driven jump
+   to every toolbar + nav action. Open: Cmd/Ctrl+K. Navigate: ↑↓.
+   Run: Enter. Close: Esc or click outside. */
+.cmdk {{ position: fixed; inset: 0; z-index: 2000; }}
+.cmdk-scrim {{
+  position: absolute; inset: 0;
+  background: var(--modal-overlay);
+  backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+}}
+.cmdk-box {{
+  position: relative; margin: 12vh auto 0;
+  width: min(640px, 92vw);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  display: flex; flex-direction: column;
+  animation: slideUp 0.18s ease;
+}}
+.cmdk-input {{
+  width: 100%; padding: 14px 20px;
+  font-family: var(--font-sans); font-size: 15px;
+  background: transparent; color: var(--fg);
+  border: none; outline: none;
+  border-bottom: 1px solid var(--border);
+}}
+.cmdk-input::placeholder {{ color: var(--fg-faint); }}
+.cmdk-list {{ max-height: 52vh; overflow-y: auto; padding: 6px; }}
+.cmdk-item {{
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; border-radius: var(--r-md);
+  cursor: pointer; color: var(--fg);
+  transition: background var(--t-fast), color var(--t-fast);
+}}
+.cmdk-item:hover, .cmdk-item.is-selected {{
+  background: var(--accent-light); color: var(--accent);
+}}
+.cmdk-item .cmdk-label {{ font-size: 13px; font-weight: 500; flex: 1; }}
+.cmdk-item .cmdk-desc {{
+  font-size: 11px; color: var(--fg-muted);
+  font-family: var(--font-mono); margin-left: 8px; flex-shrink: 0;
+  text-transform: uppercase; letter-spacing: 0.04em;
+}}
+.cmdk-item.is-selected .cmdk-desc {{ color: var(--accent); opacity: 0.75; }}
+.cmdk-empty {{ padding: 24px; text-align: center;
+              color: var(--fg-faint); font-size: 12px; }}
+.cmdk-hint {{
+  display: flex; gap: 14px; padding: 8px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--sidebar-bg);
+  font-size: 11px; color: var(--fg-muted);
+}}
+.cmdk-hint kbd {{
+  display: inline-block; padding: 1px 5px; margin-right: 4px;
+  font-family: var(--font-mono); font-size: 10px;
+  background: var(--bg-elevated); border: 1px solid var(--border);
+  border-radius: 3px; color: var(--fg);
+}}
+.cmdk-trigger {{
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 10px; font-size: 11px;
+  font-family: var(--font-mono); color: var(--fg-muted);
+  background: var(--bg-elevated); border: 1px solid var(--border);
+  border-radius: var(--r-md); cursor: pointer;
+  transition: border-color var(--t-fast), color var(--t-fast);
+}}
+.cmdk-trigger:hover {{ border-color: var(--accent); color: var(--accent); }}
+.cmdk-trigger kbd {{
+  display: inline-block; padding: 0 4px;
+  font-family: var(--font-mono); font-size: 10px;
+  background: var(--toolbar-bg); border: 1px solid var(--border);
+  border-radius: 3px; color: var(--fg-muted);
+}}
 </style>
 </head>
 <body>
@@ -9109,6 +9183,13 @@ body.task-bar-open {{ padding-top: 40px; }}
               >&#128190; Backups <span id="backup-badge" style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-left:4px;vertical-align:middle;"></span></button>
     </div>
   </div>
+  <!-- Phase 54.6.170 — Command palette trigger. Discoverability for
+       the ⌘K shortcut. Clicking opens the same palette. -->
+  <button class="cmdk-trigger" onclick="openCmdK()"
+          title="Open the command palette (Ctrl/⌘ + K). Jump to any action, setting, or panel by name.">
+    <svg class="icon icon--sm"><use href="#i-help-circle"/></svg>
+    Commands <kbd>⌘K</kbd>
+  </button>
 </header>
 
 <div class="app-body">
@@ -9369,6 +9450,25 @@ body.task-bar-open {{ padding-top: 40px; }}
         title="Show the sources/comments column" aria-label="Show sources/comments column">
   <svg class="icon"><use href="#i-chevron-left"/></svg>
 </button>
+
+<!-- Phase 54.6.170 — Command palette. Cmd/Ctrl+K opens; lists every
+     toolbar + nav + settings action with fuzzy match. Always in the
+     DOM so the shortcut works on every page (Read, Dashboard,
+     Chapter Reader, …). -->
+<div class="cmdk" id="cmdk" style="display:none;" role="dialog" aria-label="Command palette">
+  <div class="cmdk-scrim" onclick="closeCmdK()"></div>
+  <div class="cmdk-box">
+    <input class="cmdk-input" id="cmdk-input" type="text"
+           placeholder="Jump to an action, a setting, or a panel…"
+           autocomplete="off" spellcheck="false" aria-label="Search commands"/>
+    <div class="cmdk-list" id="cmdk-list" role="listbox"></div>
+    <div class="cmdk-hint">
+      <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+      <span><kbd>↵</kbd> run</span>
+      <span><kbd>Esc</kbd> close</span>
+    </div>
+  </div>
+</div>
 
 <!-- ── Phase 14 modals ─────────────────────────────────────────────────── -->
 
@@ -23877,6 +23977,132 @@ async function autoPlanEntireBook() {{
                      + _escHtml(String(e).slice(0, 200)) + '</span>';
   }}
 }}
+
+// Phase 54.6.170 — Command palette. Cmd/Ctrl+K opens a modal input
+// and filters a registry of actions. Arrow keys move the highlight;
+// Enter runs; Esc closes. Each command resolves its action by
+// invoking a global function by name — so the palette naturally
+// tracks refactors and never calls a stale function reference that
+// cached at definition time.
+const _CMDK_COMMANDS = [
+  // Write
+  {{ id: 'edit',           label: 'Edit (toggle markdown editor)',   fn: 'toggleEdit',     group: 'write' }},
+  {{ id: 'autowrite',      label: 'AI Autowrite (write > review > revise loop)', fn: 'doAutowrite', group: 'write' }},
+  {{ id: 'write',          label: 'AI Write (single-pass draft)',    fn: 'doWrite',        group: 'write' }},
+  {{ id: 'review',         label: 'AI Review (critic pass)',         fn: 'doReview',       group: 'write' }},
+  {{ id: 'revise',         label: 'AI Revise (apply review feedback)', fn: 'doRevise',     group: 'write' }},
+  // Verify
+  {{ id: 'verify',         label: 'Verify citations',                fn: 'doVerify',       group: 'verify' }},
+  {{ id: 'verify-draft',   label: 'Verify draft (claim atomization)', fn: 'doVerifyDraft', group: 'verify' }},
+  {{ id: 'finalize-draft', label: 'Finalize draft (L3 VLM)',         fn: 'doFinalizeDraft', group: 'verify' }},
+  {{ id: 'align-cites',    label: 'Align citations',                 fn: 'doAlignCitations', group: 'verify' }},
+  {{ id: 'insert-cites',   label: 'Insert citations',                fn: 'doInsertCitations', group: 'verify' }},
+  {{ id: 'scores',         label: 'Convergence scores panel',        fn: 'showScoresPanel', group: 'verify' }},
+  // Critique
+  {{ id: 'argue',          label: 'Argue (map claim)',               fn: 'promptArgue',    group: 'critique' }},
+  {{ id: 'gaps',           label: 'Find gaps',                       fn: 'doGaps',         group: 'critique' }},
+  {{ id: 'adversarial',    label: 'Adversarial review',              fn: 'doAdversarialReview', group: 'critique' }},
+  {{ id: 'edge-cases',     label: 'Edge cases',                      fn: 'doEdgeCases',    group: 'critique' }},
+  {{ id: 'ensemble',       label: 'Ensemble review',                 fn: 'doEnsembleReview', group: 'critique' }},
+  // Extras
+  {{ id: 'bundles',        label: 'Bundles / snapshots',             fn: 'openBundleSnapshots', group: 'extras' }},
+  {{ id: 'chapter-reader', label: 'Chapter reader',                  fn: 'showChapterReader', group: 'extras' }},
+  // Navigate
+  {{ id: 'plan',           label: 'Open Plan',                       fn: 'openPlanModal',  group: 'navigate' }},
+  {{ id: 'dashboard',      label: 'Open Dashboard',                  fn: 'showDashboard',  group: 'navigate' }},
+  {{ id: 'wiki',           label: 'Open Compiled Knowledge Wiki',    fn: 'openWikiModal',  group: 'navigate' }},
+  {{ id: 'ask',            label: 'Ask the Corpus (RAG)',            fn: 'openAskModal',   group: 'navigate' }},
+  // Settings
+  {{ id: 'book-settings',  label: 'Book Settings',                   fn: 'openBookSettings', group: 'settings' }},
+  {{ id: 'projects',       label: 'Projects',                        fn: 'openProjectsModal', group: 'settings' }},
+  {{ id: 'help',           label: 'AI actions help',                 fn: 'openAIActionsHelp', group: 'settings' }},
+];
+let _cmdkSelected = 0;
+let _cmdkFiltered = [];
+
+function openCmdK() {{
+  const cmdk = document.getElementById('cmdk');
+  if (!cmdk) return;
+  cmdk.style.display = 'block';
+  const input = document.getElementById('cmdk-input');
+  input.value = '';
+  _cmdkRenderList('');
+  setTimeout(function () {{ input.focus(); }}, 10);
+}}
+function closeCmdK() {{
+  const cmdk = document.getElementById('cmdk');
+  if (cmdk) cmdk.style.display = 'none';
+}}
+function _cmdkMatch(cmd, q) {{
+  if (!q) return true;
+  const hay = (cmd.label + ' ' + cmd.group).toLowerCase();
+  // Subsequence match — all query chars appear in order. Cheap &
+  // forgiving: "aw" matches "AI Autowrite" via a-w.
+  let i = 0;
+  for (const c of hay) {{
+    if (c === q[i]) i++;
+    if (i === q.length) return true;
+  }}
+  return false;
+}}
+function _cmdkRenderList(q) {{
+  q = (q || '').trim().toLowerCase();
+  _cmdkFiltered = _CMDK_COMMANDS.filter(c => _cmdkMatch(c, q));
+  _cmdkSelected = 0;
+  const list = document.getElementById('cmdk-list');
+  if (!list) return;
+  if (_cmdkFiltered.length === 0) {{
+    list.innerHTML = '<div class="cmdk-empty">No commands match.</div>';
+    return;
+  }}
+  list.innerHTML = _cmdkFiltered.map(function (c, i) {{
+    return '<div class="cmdk-item' + (i === 0 ? ' is-selected' : '')
+      + '" data-idx="' + i + '" onclick="_cmdkRun(' + i + ')">'
+      + '<span class="cmdk-label">' + _escHtml(c.label) + '</span>'
+      + '<span class="cmdk-desc">' + _escHtml(c.group) + '</span>'
+      + '</div>';
+  }}).join('');
+}}
+function _cmdkMove(delta) {{
+  if (_cmdkFiltered.length === 0) return;
+  _cmdkSelected = (_cmdkSelected + delta + _cmdkFiltered.length) % _cmdkFiltered.length;
+  document.querySelectorAll('.cmdk-item').forEach(function (el, i) {{
+    el.classList.toggle('is-selected', i === _cmdkSelected);
+    if (i === _cmdkSelected) el.scrollIntoView({{ block: 'nearest' }});
+  }});
+}}
+function _cmdkRun(idx) {{
+  const cmd = _cmdkFiltered[typeof idx === 'number' ? idx : _cmdkSelected];
+  if (!cmd) return;
+  closeCmdK();
+  // Resolve the function by name at call time — so the palette
+  // never holds a stale reference across SPA navigation.
+  setTimeout(function () {{
+    try {{
+      const f = window[cmd.fn];
+      if (typeof f === 'function') f();
+      else console.warn('[cmdk] function not found:', cmd.fn);
+    }} catch (e) {{ console.error('[cmdk] action error:', e); }}
+  }}, 10);
+}}
+document.addEventListener('keydown', function (e) {{
+  const open = document.getElementById('cmdk') && document.getElementById('cmdk').style.display === 'block';
+  // Open anywhere with Cmd/Ctrl+K — don't swallow if a text input
+  // is focused UNLESS the palette itself is already open.
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {{
+    e.preventDefault();
+    if (open) closeCmdK(); else openCmdK();
+    return;
+  }}
+  if (!open) return;
+  if (e.key === 'Escape')    {{ e.preventDefault(); closeCmdK(); return; }}
+  if (e.key === 'ArrowDown') {{ e.preventDefault(); _cmdkMove(1);  return; }}
+  if (e.key === 'ArrowUp')   {{ e.preventDefault(); _cmdkMove(-1); return; }}
+  if (e.key === 'Enter')     {{ e.preventDefault(); _cmdkRun();    return; }}
+}});
+document.addEventListener('input', function (e) {{
+  if (e.target && e.target.id === 'cmdk-input') _cmdkRenderList(e.target.value);
+}});
 
 // Phase 54.6.167 — context rail tab switcher. One of sources / review
 // / comments is visible at a time; last choice is remembered in
