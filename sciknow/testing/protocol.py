@@ -9544,6 +9544,74 @@ def l1_phase54_6_145_finalize_draft_surface() -> None:
     )
 
 
+def l1_phase54_6_161_autowrite_ab_surface() -> None:
+    """Phase 54.6.161 — autowrite bottom-up vs top-down A/B harness.
+
+    RESEARCH.md §24 §gaps #3 — the experimental infra for comparing
+    concept-density-resolved writing against the chapter-split
+    fallback. Source-level pins only (actual run costs ~10-30 min per
+    chapter so it doesn't belong in L1).
+
+    Pins:
+      (A) core module + public API (run_ab, ABReport, SectionTrial)
+      (B) Uses a try/finally pattern for the plan-cleared condition
+          so the A/B never permanently destroys a section's plan
+          (data-loss guard)
+      (C) CLI registered with expected flags
+      (D) Delta verdict threshold documented (caller has to interpret)
+      (E) Output JSONL path matches bench convention so multiple runs
+          can be compared
+    """
+    import inspect
+    from sciknow.testing import autowrite_ab as ab
+    from sciknow.cli import main as main_cli
+
+    # A) Public surface
+    for name in ("run_ab", "ABReport", "SectionTrial"):
+        assert hasattr(ab, name), f"autowrite_ab.{name} missing"
+
+    sig = inspect.signature(ab.run_ab)
+    for p in ("chapter_id", "model", "max_iter", "only_planned"):
+        assert p in sig.parameters, f"run_ab missing param {p!r}"
+
+    # B) Plan-cleared temp context uses try/finally — data-loss guard
+    ctx_src = inspect.getsource(ab._with_plan_temporarily_cleared)
+    assert "try:" in ctx_src and "finally:" in ctx_src, (
+        "_with_plan_temporarily_cleared MUST use try/finally so that "
+        "a crash mid-run can't permanently destroy the user's plan. "
+        "Without this, a Stop signal during the top-down autowrite "
+        "leaves the section unplanned forever."
+    )
+    assert "original_plan" in ctx_src, (
+        "helper must capture the original plan text for restoration"
+    )
+
+    # C) CLI registered with expected flags
+    cmd_names = {cmd.name for cmd in main_cli.app.registered_commands}
+    assert "bench-autowrite-ab" in cmd_names, (
+        "`sciknow bench-autowrite-ab` CLI missing (Phase 54.6.161)"
+    )
+    sig_c = inspect.signature(main_cli.bench_autowrite_ab_cmd)
+    for p in ("chapter_id", "model", "max_iter",
+              "include_unplanned", "output_json", "tag"):
+        assert p in sig_c.parameters, (
+            f"bench-autowrite-ab missing flag {p!r}"
+        )
+
+    # D) Threshold documented in CLI output — callers shouldn't over-
+    # interpret tiny deltas
+    cli_src = inspect.getsource(main_cli.bench_autowrite_ab_cmd)
+    assert "|Δ| > 0.03" in cli_src or "verdicts require" in cli_src, (
+        "CLI must document the verdict threshold so users don't read "
+        "sub-variance deltas as real signal"
+    )
+
+    # E) Output JSONL matches bench-dir convention
+    assert "autowrite_ab-" in cli_src, (
+        "CLI must persist to autowrite_ab-<ts>.jsonl in {data_dir}/bench/"
+    )
+
+
 def l1_phase54_6_160_idea_density_regression_surface() -> None:
     """Phase 54.6.160 — Brown 2008 idea-density regression surface.
 
@@ -11817,6 +11885,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_159_section_length_panel,
     # Phase 54.6.160 — Brown 2008 idea-density regression surface
     l1_phase54_6_160_idea_density_regression_surface,
+    # Phase 54.6.161 — autowrite bottom-up vs top-down A/B harness
+    l1_phase54_6_161_autowrite_ab_surface,
     # Phase 54.6.61 — wiki summaries/visuals tabs + figure image endpoint
     l1_phase54_6_61_wiki_summaries_and_visuals_surface,
     # Phase 54.6.69 — retrieval-quality benchmark harness

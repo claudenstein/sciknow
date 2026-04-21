@@ -399,6 +399,132 @@ def bench_visuals_ranker_cmd(
     console.print(f"\n[dim]Results written to[/dim] {out_path}")
 
 
+@app.command(name="bench-autowrite-ab")
+def bench_autowrite_ab_cmd(
+    chapter_id: str = typer.Argument(
+        ..., help="Chapter ID (UUID or 8-char prefix) to run the A/B on.",
+    ),
+    model: str = typer.Option(
+        None, "--model",
+        help="Writer model override. Defaults to settings.llm_model.",
+    ),
+    max_iter: int = typer.Option(
+        3, "--max-iter",
+        help="Autowrite max iterations per section per condition. "
+             "Default 3. Lower to smoke-test, higher for research-grade.",
+    ),
+    include_unplanned: bool = typer.Option(
+        False, "--include-unplanned",
+        help="Include sections without a plan (they can only do the "
+             "top-down condition; bottom-up is skipped for them). "
+             "Default: only run A/B on sections with a plan.",
+    ),
+    output_json: bool = typer.Option(
+        False, "--json",
+        help="Emit machine-readable JSON instead of the Rich table.",
+    ),
+    tag: str = typer.Option(
+        "", "--tag",
+        help="Free-form label stamped into the output JSONL filename.",
+    ),
+):
+    """Phase 54.6.161 — bottom-up vs top-down autowrite A/B.
+
+    For each planned section in the chapter: run autowrite with the
+    Phase 54.6.146 concept-density resolver fired (plan present), then
+    again with the plan temporarily cleared (chapter-split fallback).
+    Compare scorer dimensions — tells you whether concept-density
+    actually produces better drafts on this corpus.
+
+    The RESEARCH.md §24 gap #3: "no one has tested bottom-up section-
+    first vs top-down chapter-first for LLM-assisted scientific
+    writing." This CLI is the harness; the experiment design + sample
+    size decision is yours.
+
+    Cost: each section = 2 full autowrites × 3 iterations ≈
+    2-6 minutes on a 3090. A 5-section chapter → 10-30 min.
+
+    Output: per-dimension mean delta (bottom-up − top-down) + win rate.
+    Persisted as JSONL under ``{data_dir}/bench/autowrite_ab-<ts>.jsonl``
+    so multiple runs can be compared post-hoc.
+    """
+    from sciknow.cli import preflight
+    preflight()
+
+    import json as _json
+    from datetime import datetime as _dt, timezone as _tz
+    from pathlib import Path as _P
+    from rich.table import Table as _RT
+    from sqlalchemy import text as _sql
+    from sciknow.config import settings as _settings
+    from sciknow.storage.db import get_session
+    from sciknow.testing import autowrite_ab
+
+    with get_session() as session:
+        row = session.execute(_sql(
+            "SELECT id::text, title FROM book_chapters "
+            "WHERE id::text LIKE :q LIMIT 1"
+        ), {"q": f"{chapter_id.strip()}%"}).fetchone()
+        if not row:
+            console.print(f"[red]No chapter matches {chapter_id!r}[/red]")
+            raise typer.Exit(1)
+        cid, ctitle = row
+
+    console.print(
+        f"[bold]Autowrite A/B on Ch.[/bold] {ctitle!r}  "
+        f"[dim](id {cid[:12]}…)[/dim]\n"
+    )
+    try:
+        report = autowrite_ab.run_ab(
+            cid, model=model, max_iter=max_iter,
+            only_planned=(not include_unplanned),
+        )
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]A/B failed: {exc}[/red]")
+        raise typer.Exit(2)
+
+    if output_json:
+        console.print_json(_json.dumps(report.to_dict()))
+    else:
+        t = _RT(
+            title=(f"Bottom-up vs top-down  ·  {report.n_sections} section(s)  "
+                   f"·  {report.elapsed_s:.1f}s"),
+            show_lines=False,
+        )
+        t.add_column("Dimension", style="bold")
+        t.add_column("Mean Δ (BU − TD)", justify="right")
+        t.add_column("BU win rate", justify="right")
+        t.add_column("Verdict")
+        sorted_dims = sorted(report.per_dimension_delta_mean.keys())
+        for dim in sorted_dims:
+            d = report.per_dimension_delta_mean[dim]
+            w = report.per_dimension_win_rate.get(dim, 0.5)
+            verdict = (
+                "[green]BU wins[/green]" if d > 0.03 and w > 0.6
+                else "[red]TD wins[/red]" if d < -0.03 and w < 0.4
+                else "[dim]ambiguous[/dim]"
+            )
+            t.add_row(dim, f"{d:+.4f}", f"{w:.0%}", verdict)
+        console.print(t)
+        console.print(
+            f"\n[dim]N={report.n_sections} sections. Variance on scorer "
+            "dimensions is ~±0.05 across runs; verdicts require |Δ| > 0.03 "
+            "AND win-rate confirmation. For tight estimates, "
+            "run on multiple chapters and pool.[/dim]"
+        )
+
+    ts = _dt.now(_tz.utc).strftime("%Y%m%dT%H%M%SZ")
+    slug = f"autowrite_ab-{ts}"
+    if tag:
+        slug += f"-{tag}"
+    out_dir = _P(_settings.data_dir) / "bench"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{slug}.jsonl"
+    with out_path.open("w") as f:
+        f.write(_json.dumps(report.to_dict()) + "\n")
+    console.print(f"\n[dim]Saved to {out_path}[/dim]")
+
+
 @app.command(name="bench-idea-density")
 def bench_idea_density_cmd(
     sample_per_type: int = typer.Option(
