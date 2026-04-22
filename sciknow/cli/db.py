@@ -1323,10 +1323,11 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     # ── Colour palette (btop-inspired, works on dark + light terms) ──
     # 54.6.233: dim text → green4 (muted green so status indicators
     # in bright_green still stand out).
-    # 54.6.234: panel borders → green. Box lines sit between the
-    # bright_green status markers and the green4 dim text in
-    # brightness, so the panel frames read as distinct structure
-    # rather than bleeding into the content.
+    # 54.6.234: panel borders → green.
+    # 54.6.235: borders → bright_green (more vivid ANSI terminal
+    # green) + box style HEAVY → ROUNDED (single-line with rounded
+    # corners — half the vertical noise of HEAVY's double-line
+    # look, matches the btop aesthetic).
     C_TITLE = "bold cyan"
     C_DIM = "green4"
     C_OK = "bright_green"
@@ -1334,8 +1335,8 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     C_ERR = "bright_red"
     C_ACCENT = "bright_cyan"
     C_VALUE = "bold white"
-    C_BORDER = "green"
-    BOX = _box.HEAVY
+    C_BORDER = "bright_green"
+    BOX = _box.ROUNDED
 
     # ── Safe accessors ──────────────────────────────────────────────
     proj = snap.get("project") or {}
@@ -1359,6 +1360,8 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     host = snap.get("host") or {}
     stuck = snap.get("stuck_job") or {}
     mq = snap.get("meta_quality") or {}
+    year_hist = snap.get("year_histogram") or []
+    embed_cov = snap.get("embeddings_coverage") or {}
 
     # ── Small helpers ───────────────────────────────────────────────
 
@@ -1611,6 +1614,23 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
             Text("retracted", style=C_DIM),
             Text(str(mq["retracted"]), style=C_ERR),
         )
+    # Phase 54.6.235 — embeddings coverage (silent drift detector)
+    if embed_cov.get("total"):
+        total = embed_cov["total"]
+        embedded = embed_cov["embedded"]
+        missing = embed_cov["missing"]
+        pct = embed_cov["pct"]
+        colour = (
+            C_OK if pct >= 99 else
+            C_WARN if pct >= 95 else C_ERR
+        )
+        lbl = f"{embedded:,}/{total:,} ({pct:.1f}%)"
+        if missing:
+            lbl += f"  ✗{missing:,} miss"
+        corpus_tbl.add_row(
+            Text("embeddings", style=C_DIM),
+            Text(lbl, style=colour),
+        )
 
     corpus_panel = Panel(
         corpus_tbl, title="[bold]corpus · ingest · quality[/bold]",
@@ -1769,7 +1789,19 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
                 f"[{C_ACCENT}]{display}[/{C_ACCENT}] "
                 + " ".join(fields)
             )
-            row.add_row(label_rendered, f"{c['points_count']:,}")
+            # Phase 54.6.235 — show points count + disk estimate.
+            points_str = f"{c['points_count']:,}"
+            disk_mb = c.get("estimated_disk_mb", 0) or 0
+            if disk_mb:
+                disk_str = (
+                    f" [{C_DIM}]~{disk_mb / 1024:.1f}G[/{C_DIM}]"
+                    if disk_mb >= 1024 else
+                    f" [{C_DIM}]~{disk_mb}M[/{C_DIM}]"
+                )
+                points_col = Text.from_markup(points_str + disk_str)
+            else:
+                points_col = points_str
+            row.add_row(label_rendered, points_col)
             right_tbl.add_row(row)
 
     # Backends
@@ -1787,8 +1819,43 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
             row.add_row(Text(nm, style=colour), f"{b['n']:,}")
             right_tbl.add_row(row)
 
+    # Phase 54.6.235 — top-5 topic clusters with mini bars. Uses the
+    # panel's empty real estate to surface content composition at a
+    # glance, bar width scaled to the largest cluster in the set.
+    clusters = snap.get("topic_clusters") or []
+    if clusters:
+        right_tbl.add_row("")
+        right_tbl.add_row(Text("top topics", style=C_DIM))
+        max_n = max(c["n"] for c in clusters[:5]) or 1
+        for c in clusters[:5]:
+            row = Table.grid(padding=(0, 1), expand=True)
+            row.add_column(ratio=2)
+            row.add_column(ratio=3)
+            row.add_column(justify="right", width=5, style=C_VALUE)
+            name = (c["name"] or "(unnamed)")[:22]
+            row.add_row(
+                Text(name, style=C_ACCENT),
+                _bar(c["n"], max_n, width=12,
+                     palette=(C_OK, C_OK, C_OK)),  # monochrome — same colour, heat n/a here
+                f"{c['n']}",
+            )
+            right_tbl.add_row(row)
+
+    # Year distribution sparkline — corpus age profile in one line.
+    if year_hist:
+        counts = [y["n"] for y in year_hist]
+        if any(counts):
+            first = year_hist[0]["year"]
+            last = year_hist[-1]["year"]
+            right_tbl.add_row("")
+            right_tbl.add_row(
+                Text(f"papers by year {first}→{last}", style=C_DIM)
+            )
+            right_tbl.add_row(_sparkline(counts))
+
     right_panel = Panel(
-        right_tbl, title="[bold]qdrant · backends[/bold]",
+        right_tbl,
+        title="[bold]qdrant · backends · topics · years[/bold]",
         title_align="left",
         border_style=C_BORDER, box=BOX, padding=(0, 1),
     )
@@ -1913,10 +1980,10 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     layout = Layout()
     layout.split_column(
         Layout(header_panel, name="header", size=3),
-        # 54.6.234 — bumped 18→22 to carry host load + content
-        # quality strip without clipping. Activity stays ratio=1
-        # so it still absorbs extra height on tall terminals.
-        Layout(name="top", size=22),
+        # 54.6.234 → 22 (host load + quality strip); 54.6.235 → 24
+        # to carry the embeddings-coverage row + topic clusters +
+        # year sparkline without clipping on narrower terms.
+        Layout(name="top", size=24),
         Layout(timing_panel, name="timing", size=14),
         Layout(activity_panel, name="activity", ratio=1,
                minimum_size=8),

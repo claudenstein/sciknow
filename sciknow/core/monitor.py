@@ -233,6 +233,79 @@ def _pipeline_throughput(session, days: int = 14) -> list[dict]:
     ]
 
 
+def _year_histogram(session, since_year: int = 1980) -> list[dict]:
+    """Phase 54.6.235 — papers-per-year from `since_year` through now.
+    Zero-filled year-by-year so the sparkline shows continuity."""
+    from sqlalchemy import text
+    try:
+        rows = session.execute(text("""
+            SELECT year, COUNT(*) FROM paper_metadata
+            WHERE year IS NOT NULL AND year >= :since
+            GROUP BY year ORDER BY year
+        """), {"since": since_year}).fetchall()
+        raw = {int(r[0]): int(r[1]) for r in rows}
+        # Find the actual year range in the data so we don't
+        # always pad to 2026 on a corpus that stops at 2010.
+        if not raw:
+            return []
+        max_year = max(raw.keys())
+        out: list[dict] = []
+        for y in range(since_year, max_year + 1):
+            out.append({"year": y, "n": raw.get(y, 0)})
+        return out
+    except Exception:
+        return []
+
+
+def _embeddings_coverage(session) -> dict:
+    """Phase 54.6.235 — catch the drift where chunks exist in
+    PostgreSQL but never got an embedding point in Qdrant.
+    Should always be ~0 on a healthy install; any positive number
+    is a strong signal something silently broke."""
+    from sqlalchemy import text
+    out = {"total": 0, "embedded": 0, "missing": 0, "pct": 0.0}
+    try:
+        total = int(session.execute(text(
+            "SELECT COUNT(*) FROM chunks"
+        )).scalar() or 0)
+        embedded = int(session.execute(text(
+            "SELECT COUNT(*) FROM chunks "
+            "WHERE qdrant_point_id IS NOT NULL"
+        )).scalar() or 0)
+        out["total"] = total
+        out["embedded"] = embedded
+        out["missing"] = total - embedded
+        out["pct"] = (embedded / total * 100) if total else 0.0
+    except Exception:
+        pass
+    return out
+
+
+def _qdrant_disk_estimate(collection_info: dict,
+                           default_dim: int = 1024) -> int:
+    """Cheap disk-footprint estimate for a Qdrant collection in MB.
+
+    Rough formula: points × named_vector_count × dim × 4 bytes
+    (float32). Multi-vector (colbert) collections multiply by
+    ~150 tokens per point. Excludes payload + HNSW graph overhead
+    (add ~30% in real life); shown as "~X MB" to cue the reader.
+    """
+    points = collection_info.get("points_count", 0) or 0
+    vectors = collection_info.get("vectors") or []
+    bytes_total = 0
+    for v in vectors:
+        # ColBERT multi-vector: each point stores ~150 token vecs.
+        per_point = default_dim * 4
+        if v == "colbert":
+            per_point *= 150
+        bytes_total += points * per_point
+    # Sparse vectors are small (~100 non-zeros × 8 bytes) — include
+    # as a token contribution rather than ignoring.
+    for _ in collection_info.get("sparse_vectors") or []:
+        bytes_total += points * 100 * 8
+    return bytes_total // (1024 * 1024)
+
+
 def _host_load() -> dict:
     """Phase 54.6.234 — system RAM + load average from /proc.
 
@@ -733,16 +806,20 @@ def _qdrant_collections() -> list[dict]:
                 sparse_names = (
                     list(sparse.keys()) if isinstance(sparse, dict) else []
                 )
-                out.append({
+                entry = {
                     "name": col.name,
                     "points_count": _safe_int(info.points_count or 0),
                     "vectors": vec_names,
                     "sparse_vectors": sparse_names,
-                })
+                }
+                # Phase 54.6.235 — cheap on-disk estimate in MB.
+                entry["estimated_disk_mb"] = _qdrant_disk_estimate(entry)
+                out.append(entry)
             except Exception:
                 out.append({
                     "name": col.name, "points_count": 0,
                     "vectors": [], "sparse_vectors": [],
+                    "estimated_disk_mb": 0,
                 })
         return out
     except Exception as exc:
@@ -806,6 +883,9 @@ def collect_monitor_snapshot(
         # Phase 54.6.234 — host load + stuck-job + content quality
         stuck_job = _stuck_job(session)
         meta_quality = _metadata_quality(session)
+        # Phase 54.6.235 — year histogram + embeddings coverage
+        year_hist = _year_histogram(session)
+        embed_cov = _embeddings_coverage(session)
 
     return {
         "project": project,
@@ -830,6 +910,9 @@ def collect_monitor_snapshot(
         "host": _host_load(),
         "stuck_job": stuck_job,
         "meta_quality": meta_quality,
+        # 54.6.235 additions
+        "year_histogram": year_hist,
+        "embeddings_coverage": embed_cov,
         "llm": {
             "usage_last_days": llm_usage,
             "usage_window_days": llm_usage_days,
