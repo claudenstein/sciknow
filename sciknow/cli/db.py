@@ -1321,8 +1321,12 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     from rich.align import Align
 
     # ── Colour palette (btop-inspired, works on dark + light terms) ──
+    # 54.6.233: every-dim-text-in-green pass. Labels, secondary info,
+    # and sparkline baselines use `green4` (named Rich shade: muted
+    # enough to act as "dim" without clashing with the bright_green
+    # reserved for healthy status indicators).
     C_TITLE = "bold cyan"
-    C_DIM = "grey50"
+    C_DIM = "green4"
     C_OK = "bright_green"
     C_WARN = "yellow"
     C_ERR = "bright_red"
