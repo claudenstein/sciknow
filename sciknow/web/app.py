@@ -5876,6 +5876,25 @@ async def api_stats():
     return JSONResponse(out)
 
 
+@app.get("/api/monitor")
+async def api_monitor(days: int = 14):
+    """Phase 54.6.230 — unified monitor snapshot for the web reader.
+
+    One endpoint, one dict — same shape as ``sciknow db monitor
+    --json`` because both call ``core.monitor.collect_monitor_
+    snapshot``. The web "System Monitor" modal polls this every
+    5s. Read-only; safe during active ingestion.
+
+    Shape documented in ``sciknow/core/monitor.py``.
+    """
+    from sciknow.core.monitor import collect_monitor_snapshot
+    snap = collect_monitor_snapshot(
+        throughput_days=max(1, int(days)),
+        llm_usage_days=max(1, int(days)),
+    )
+    return JSONResponse(snap)
+
+
 @app.get("/api/stream/{job_id}")
 async def stream_job(job_id: str):
     """SSE endpoint — streams events from a running job."""
@@ -12145,6 +12164,40 @@ body.task-bar-open {{ padding-top: 40px; }}
 </div>
 
 <!-- Phase 36 — Tools Modal: CLI-parity panel (search / synthesize / topics / corpus) -->
+<!-- Phase 54.6.230 — System monitor modal (unified CLI parity) -->
+<div class="modal-overlay" id="monitor-modal" onclick="if(event.target===this)closeModal('monitor-modal')">
+  <div class="modal wide">
+    <div class="modal-header">
+      <h3><svg class="icon icon--lg"><use href="#i-sliders"/></svg> System Monitor</h3>
+      <div style="flex:1;"></div>
+      <span id="monitor-last-updated" style="color:var(--fg-muted);font-size:0.85em;margin-right:12px;"></span>
+      <label style="color:var(--fg-muted);font-size:0.85em;margin-right:12px;"
+             title="Seconds between auto-refresh polls. Set to 0 to stop polling; click Refresh to force a manual update.">
+        Poll <input type="number" id="monitor-poll-seconds" value="5" min="0" max="600"
+                    style="width:60px;margin-left:4px;" onchange="restartMonitorPoll()">s
+      </label>
+      <button class="btn btn--sm" onclick="refreshMonitor()"
+              title="Force an immediate refresh of every panel.">Refresh</button>
+      <button class="modal-close" onclick="closeModal('monitor-modal'); stopMonitorPoll();"
+              title="Close the monitor. Stops the poll.">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div id="monitor-content" style="font-size:0.92em;">
+        <p class="u-note" style="text-align:center;padding:2em;">
+          Loading system state…
+        </p>
+      </div>
+      <p class="u-note" style="margin-top:1em;color:var(--fg-muted);">
+        Mirrors <code>sciknow db monitor</code>. Same data source
+        (<code>core.monitor.collect_monitor_snapshot</code>) feeds both
+        CLI and GUI; the endpoint is <code>GET /api/monitor</code> if
+        you want to pipe into another tool. Read-only — safe to leave
+        open during active ingestion.
+      </p>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="tools-modal" onclick="if(event.target===this)closeModal('tools-modal')">
   <div class="modal wide">
     <div class="modal-header">
@@ -20319,6 +20372,216 @@ function openToolsModal() {{
   setTimeout(() => document.getElementById('tl-search-q').focus(), 100);
 }}
 
+// ── Phase 54.6.230 — System Monitor modal ───────────────────────────
+//
+// Polls /api/monitor on an interval while the modal is open; reuses
+// the same snapshot dict the CLI's `sciknow db monitor` renders, so
+// any changes to one side automatically flow through. Interval is
+// stopped on close + on "Poll = 0s". Not SSE by design — pipeline
+// stats don't change fast enough to justify a streaming connection,
+// and /api/monitor is cheap (all SELECTs + small external reads).
+let _monitorInterval = null;
+
+function openMonitorModal() {{
+  openModal('monitor-modal');
+  refreshMonitor();
+  restartMonitorPoll();
+}}
+function stopMonitorPoll() {{
+  if (_monitorInterval) {{
+    clearInterval(_monitorInterval);
+    _monitorInterval = null;
+  }}
+}}
+function restartMonitorPoll() {{
+  stopMonitorPoll();
+  const secs = parseInt(
+    (document.getElementById('monitor-poll-seconds') || {{}}).value || '0', 10
+  );
+  if (secs > 0) {{
+    _monitorInterval = setInterval(refreshMonitor, secs * 1000);
+  }}
+}}
+function refreshMonitor() {{
+  fetch('/api/monitor?days=14')
+    .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+    .then(renderMonitor)
+    .catch(err => {{
+      const target = document.getElementById('monitor-content');
+      if (target) {{
+        target.innerHTML = '<p class="u-note" style="color:var(--fg-danger, #c00);">'
+          + 'Monitor fetch failed: ' + String(err) + '</p>';
+      }}
+    }});
+}}
+
+function _escHTML(s) {{
+  if (s === null || s === undefined) return '—';
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}}
+
+function _fmtMs(v) {{
+  if (v === null || v === undefined) return '—';
+  if (v >= 60000) return (v / 60000).toFixed(1) + 'm';
+  if (v >= 1000) return (v / 1000).toFixed(1) + 's';
+  return Math.round(v) + 'ms';
+}}
+
+function _fmtNum(n) {{
+  return (n || 0).toLocaleString();
+}}
+
+function renderMonitor(snap) {{
+  const target = document.getElementById('monitor-content');
+  if (!target || !snap) return;
+
+  const project = snap.project || {{}};
+  const corpus = snap.corpus || {{}};
+  const gpus = snap.gpu || [];
+  const loaded = ((snap.llm || {{}}).loaded_models) || [];
+  const qcolls = snap.qdrant || [];
+  const backends = snap.converter_backends || [];
+  const timing = ((snap.pipeline || {{}}).stage_timing) || [];
+  const fails = ((snap.pipeline || {{}}).stage_failures) || [];
+  const activity = ((snap.pipeline || {{}}).recent_activity) || [];
+  const clusters = snap.topic_clusters || [];
+  const llmUsage = ((snap.llm || {{}}).usage_last_days) || [];
+
+  const sections = [];
+
+  // Header/meta
+  sections.push('<div style="display:flex;gap:2em;flex-wrap:wrap;margin-bottom:1em;">'
+    + '<div><strong>Project</strong>: ' + _escHTML(project.slug || '—') + '</div>'
+    + '<div><strong>DB</strong>: ' + _escHTML(project.pg_database || '—') + '</div>'
+    + '<div><strong>Last refresh</strong>: <code>' + _escHTML(snap.last_refresh || 'never') + '</code></div>'
+    + '</div>');
+
+  // Corpus + GPU + loaded models in a row
+  const corpusCells = [
+    ['Docs (done/total)', _fmtNum(corpus.documents_complete) + ' / ' + _fmtNum(corpus.documents_total)],
+    ['Chunks', _fmtNum(corpus.chunks)], ['Citations', _fmtNum(corpus.citations)],
+    ['Visuals', _fmtNum(corpus.visuals)], ['KG triples', _fmtNum(corpus.kg_triples)],
+    ['Wiki pages', _fmtNum(corpus.wiki_pages)], ['Institutions', _fmtNum(corpus.institutions)],
+  ];
+  sections.push('<h4>Corpus</h4><table class="stats-table" style="width:100%;">'
+    + '<tr>' + corpusCells.map(c => '<th>' + _escHTML(c[0]) + '</th>').join('') + '</tr>'
+    + '<tr>' + corpusCells.map(c => '<td>' + _escHTML(c[1]) + '</td>').join('') + '</tr>'
+    + '</table>');
+
+  // GPU
+  if (gpus.length) {{
+    let html = '<h4>GPU</h4><table class="stats-table" style="width:100%;">'
+      + '<tr><th>#</th><th>Name</th><th>VRAM</th><th>Util</th><th>Temp</th></tr>';
+    for (const g of gpus) {{
+      const vpct = g.memory_total_mb ? (g.memory_used_mb / g.memory_total_mb * 100).toFixed(0) : '0';
+      html += '<tr><td>' + g.index + '</td><td>' + _escHTML(g.name)
+        + '</td><td>' + _fmtNum(g.memory_used_mb) + ' / ' + _fmtNum(g.memory_total_mb) + ' MB (' + vpct + '%)'
+        + '</td><td>' + g.utilization_pct + '%</td><td>' + (g.temperature_c || '?') + '°C</td></tr>';
+    }}
+    html += '</table>';
+    sections.push(html);
+  }}
+
+  // Ollama loaded models
+  if (loaded.length) {{
+    let html = '<h4>Ollama — loaded models</h4><table class="stats-table" style="width:100%;">'
+      + '<tr><th>Model</th><th>VRAM</th><th>Expires</th></tr>';
+    for (const m of loaded) {{
+      html += '<tr><td>' + _escHTML(m.name) + '</td><td>' + _fmtNum(m.vram_mb) + ' MB</td><td>'
+        + _escHTML(m.expires_at || '—') + '</td></tr>';
+    }}
+    html += '</table>';
+    sections.push(html);
+  }} else {{
+    sections.push('<p class="u-note">Ollama: no models resident right now.</p>');
+  }}
+
+  // Qdrant collections
+  if (qcolls.length) {{
+    let html = '<h4>Qdrant collections</h4><table class="stats-table" style="width:100%;">'
+      + '<tr><th>Collection</th><th>Points</th><th>Vector fields</th></tr>';
+    for (const c of qcolls) {{
+      const fields = (c.vectors || []).concat((c.sparse_vectors || []).map(s => 'sparse:' + s));
+      html += '<tr><td>' + _escHTML(c.name) + '</td><td>' + _fmtNum(c.points_count)
+        + '</td><td>' + _escHTML(fields.join(', ')) + '</td></tr>';
+    }}
+    html += '</table>';
+    sections.push(html);
+  }}
+
+  // Converter backends
+  if (backends.length) {{
+    let html = '<h4>Converter backends</h4><table class="stats-table" style="width:100%;">'
+      + '<tr><th>Backend</th><th>Papers</th></tr>';
+    for (const b of backends) {{
+      html += '<tr><td>' + _escHTML(b.backend) + '</td><td>' + _fmtNum(b.n) + '</td></tr>';
+    }}
+    html += '</table>';
+    sections.push(html);
+  }}
+
+  // Pipeline timing
+  if (timing.length) {{
+    let html = '<h4>Pipeline stage timing (completed jobs)</h4>'
+      + '<table class="stats-table" style="width:100%;">'
+      + '<tr><th>Stage</th><th>N</th><th>p50</th><th>p95</th><th>mean</th></tr>';
+    for (const row of timing) {{
+      html += '<tr><td>' + _escHTML(row.stage) + '</td><td>' + _fmtNum(row.n)
+        + '</td><td>' + _fmtMs(row.p50_ms) + '</td><td>' + _fmtMs(row.p95_ms)
+        + '</td><td>' + _fmtMs(row.mean_ms) + '</td></tr>';
+    }}
+    html += '</table>';
+    sections.push(html);
+  }}
+
+  // Failures
+  const anyFail = fails.some(f => f.failed > 0);
+  if (anyFail) {{
+    let html = '<h4>Stage failures</h4><table class="stats-table" style="width:100%;">'
+      + '<tr><th>Stage</th><th>Failed</th><th>Total</th><th>Rate</th></tr>';
+    for (const f of fails) {{
+      if (!f.failed) continue;
+      const rate = (f.failure_rate * 100).toFixed(1);
+      html += '<tr><td>' + _escHTML(f.stage) + '</td><td>' + _fmtNum(f.failed)
+        + '</td><td>' + _fmtNum(f.total) + '</td><td>' + rate + '%</td></tr>';
+    }}
+    html += '</table>';
+    sections.push(html);
+  }}
+
+  // LLM usage
+  if (llmUsage.length) {{
+    let html = '<h4>LLM usage (last window)</h4><table class="stats-table" style="width:100%;">'
+      + '<tr><th>Operation</th><th>Model</th><th>Tokens</th><th>Seconds</th><th>Calls</th></tr>';
+    for (const l of llmUsage) {{
+      html += '<tr><td>' + _escHTML(l.operation) + '</td><td>' + _escHTML(l.model)
+        + '</td><td>' + _fmtNum(l.tokens) + '</td><td>' + Math.round(l.seconds || 0)
+        + 's</td><td>' + _fmtNum(l.calls) + '</td></tr>';
+    }}
+    html += '</table>';
+    sections.push(html);
+  }}
+
+  // Recent activity
+  if (activity.length) {{
+    let html = '<h4>Recent activity</h4><table class="stats-table" style="width:100%;">'
+      + '<tr><th>When</th><th>Stage</th><th>Status</th><th>Duration</th><th>Doc</th></tr>';
+    for (const a of activity) {{
+      const when = (a.created_at || '').split('T')[1] || '';
+      html += '<tr><td>' + _escHTML(when.slice(0, 8)) + '</td><td>' + _escHTML(a.stage)
+        + '</td><td>' + _escHTML(a.status) + '</td><td>' + _fmtMs(a.duration_ms)
+        + '</td><td><code>' + _escHTML((a.doc_id || '').slice(0, 8)) + '</code></td></tr>';
+    }}
+    html += '</table>';
+    sections.push(html);
+  }}
+
+  target.innerHTML = sections.join('');
+  const ts = document.getElementById('monitor-last-updated');
+  if (ts) ts.textContent = 'Updated ' + new Date().toLocaleTimeString();
+}}
+
 function switchToolsTab(name) {{
   // Only flip the TOP-level Tools tabs (not any inner Corpus-subtabs,
   // which carry data-ctab instead of data-tab so they don't collide).
@@ -25088,6 +25351,7 @@ const _CMDK_COMMANDS = [
   {{ id: 'catalog',        label: 'Browse Papers',                   fn: 'openCatalogModal',   group: 'navigate' }},
   {{ id: 'visuals',        label: 'Visuals (Tables/Figs/Eqs)',       fn: 'openVisualsModal',   group: 'navigate' }},
   {{ id: 'corkboard',      label: 'Corkboard',                       fn: 'showCorkboard',      group: 'navigate' }},
+  {{ id: 'monitor',        label: 'System Monitor (live pipeline + GPU + models)', fn: 'openMonitorModal', group: 'navigate' }},
   {{ id: 'help',           label: 'AI actions help',                 fn: 'openAIActionsHelp',  group: 'settings' }},
 ];
 let _cmdkSelected = 0;

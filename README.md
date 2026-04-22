@@ -172,6 +172,26 @@ steps (currently `wiki compile`) to papers ingested after that point —
 a 5,000-paper corpus drops from minutes of prep to seconds when only
 a dozen papers are new.
 
+### Live monitor
+
+`sciknow db monitor` gives a unified snapshot of corpus counts,
+ingestion pipeline timing (p50/p95 per stage), failure rates,
+Qdrant collection shapes, GPU state, currently-loaded Ollama
+models, LLM usage, and the last-refresh marker — all in one
+Rich-rendered view (54.6.230).
+
+```bash
+uv run sciknow db monitor              # one shot
+uv run sciknow db monitor --watch 5    # live view, refresh every 5s
+uv run sciknow db monitor --json       # JSON for scripting
+```
+
+In the web reader, the same data is exposed at `GET /api/monitor`
+(schema identical to `--json`) and rendered inside a "System Monitor"
+modal that polls every 5s — open via ⌘K → `monitor`. CLI and GUI
+share the aggregator (`sciknow.core.monitor.collect_monitor_snapshot`),
+so they can never drift out of sync.
+
 Once the web reader is up, the top bar gives you:
 
 | Action | What to click |

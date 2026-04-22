@@ -385,8 +385,15 @@ def _load_bench_snapshot(path_or_name: str) -> dict:
     candidates = [Path(path_or_name)]
     snap_dir = get_active_project().data_dir / "bench" / "snapshots"
     candidates.append(snap_dir / path_or_name)
-    # Also allow passing just the SHA (partial match on filename prefix)
-    if snap_dir.exists():
+    # Allow passing just a SHA / filename prefix (partial match). We
+    # ONLY do this when path_or_name is a bare name (no path
+    # separators) — otherwise `snap_dir.glob(abs_path + "*.json")`
+    # crashes on "Non-relative patterns are unsupported" because
+    # abs_path starts with "/". This was the latent bug caught by
+    # the 54.6.224 bench-diff L1 regression after Phase 54.6.230
+    # brought the test surface back online.
+    if (snap_dir.exists() and "/" not in path_or_name
+            and not Path(path_or_name).is_absolute()):
         for p in snap_dir.glob(f"{path_or_name}*.json"):
             candidates.append(p)
 

@@ -1186,6 +1186,319 @@ def failures(
 
 
 @app.command()
+def monitor(
+    days: int = typer.Option(
+        14, "--days",
+        help="Trailing window for throughput + LLM usage panels.",
+    ),
+    watch: int = typer.Option(
+        0, "--watch",
+        help="If >0, re-render every N seconds until Ctrl+C. "
+             "Useful during active ingestion ('watch mode').",
+    ),
+    json_out: bool = typer.Option(
+        False, "--json",
+        help="Emit machine-readable JSON instead of Rich panels. "
+             "Shape matches /api/monitor so scripts can consume "
+             "either source interchangeably.",
+    ),
+):
+    """Phase 54.6.230 — unified live monitor.
+
+    One top-level view that composes everything:
+
+      * Project + corpus counts (documents / chunks / citations /
+        visuals / KG triples / wiki pages / institutions).
+      * Converter backend distribution (key migration signal
+        post-VLM-Pro — every complete row should flip to
+        `mineru-vlm-pro-vllm`).
+      * Ingestion stage timing (p50 / p95 / mean), failure rate,
+        trailing throughput.
+      * Qdrant collection sizes + per-collection vector fields
+        (catches "is ColBERT actually populated on abstracts?").
+      * GPU state (memory + utilization + temperature, one row per
+        GPU) from nvidia-smi.
+      * Currently loaded Ollama models via `ollama ps` (with VRAM
+        + keep-alive expiry per model).
+      * Topic clusters + ingest sources + recent activity feed +
+        LLM usage last N days.
+      * Last successful `sciknow refresh` timestamp from the
+        54.6.210 `.last_refresh` marker.
+
+    Same data source (`collect_monitor_snapshot`) feeds the
+    ``/api/monitor`` endpoint in the web reader, so CLI and GUI
+    always agree.
+
+    Examples:
+
+      sciknow db monitor                    # one shot
+      sciknow db monitor --watch 5          # live view, re-render every 5s
+      sciknow db monitor --json | jq .      # scripted pipelines
+    """
+    from sciknow.cli import preflight
+    preflight(qdrant=False)
+
+    import json as _json
+    import time as _time
+    from sciknow.core.monitor import collect_monitor_snapshot
+
+    def _render(snap: dict) -> None:
+        """Render one snapshot as Rich panels. Safe to call in a loop."""
+        from rich import box as _box
+        from rich.table import Table
+        from rich.panel import Panel
+
+        proj = snap.get("project") or {}
+        corpus = snap.get("corpus") or {}
+        gpus = snap.get("gpu") or []
+        loaded = snap.get("llm", {}).get("loaded_models") or []
+        qcolls = snap.get("qdrant") or []
+        backends = snap.get("converter_backends") or []
+        timing = snap.get("pipeline", {}).get("stage_timing") or []
+        fails = snap.get("pipeline", {}).get("stage_failures") or []
+        activity = snap.get("pipeline", {}).get("recent_activity") or []
+
+        # Header
+        slug = proj.get("slug") or "(no active project)"
+        last_r = snap.get("last_refresh") or "never"
+        console.print()
+        console.print(
+            f"[bold]sciknow monitor[/bold] · project "
+            f"[cyan]{slug}[/cyan] · last refresh [dim]{last_r}[/dim] "
+            f"· [dim]{snap.get('snapshotted_at', '')}[/dim]"
+        )
+
+        # ── Corpus panel ─────────────────────────────────────────
+        t1 = Table(
+            title="Corpus", box=_box.SIMPLE_HEAD, show_header=False,
+            expand=True,
+        )
+        t1.add_column("Metric", style="bold")
+        t1.add_column("Value", justify="right", style="cyan")
+        t1.add_row("Documents (total)", str(corpus.get("documents_total", 0)))
+        t1.add_row(
+            "Documents (complete)",
+            f"{corpus.get('documents_complete', 0)} "
+            f"({(corpus.get('documents_complete', 0) / max(corpus.get('documents_total', 1), 1) * 100):.0f}%)",
+        )
+        t1.add_row("Chunks", str(corpus.get("chunks", 0)))
+        t1.add_row("Citations", str(corpus.get("citations", 0)))
+        t1.add_row("Visuals", str(corpus.get("visuals", 0)))
+        t1.add_row("KG triples", str(corpus.get("kg_triples", 0)))
+        t1.add_row("Wiki pages", str(corpus.get("wiki_pages", 0)))
+        t1.add_row("Institutions", str(corpus.get("institutions", 0)))
+        console.print(t1)
+
+        # ── GPU + Ollama + Qdrant side-by-side-ish ───────────────
+        if gpus:
+            t_gpu = Table(title="GPU", box=_box.SIMPLE_HEAD, expand=True)
+            t_gpu.add_column("#")
+            t_gpu.add_column("Name", ratio=3)
+            t_gpu.add_column("VRAM", justify="right")
+            t_gpu.add_column("Util", justify="right")
+            t_gpu.add_column("Temp", justify="right")
+            for g in gpus:
+                vram_pct = (g["memory_used_mb"] / max(
+                    g["memory_total_mb"], 1)
+                ) * 100
+                vram_colour = (
+                    "red" if vram_pct > 95 else
+                    "yellow" if vram_pct > 85 else "cyan"
+                )
+                t_gpu.add_row(
+                    str(g["index"]), g["name"],
+                    f"[{vram_colour}]"
+                    f"{g['memory_used_mb']:,}/{g['memory_total_mb']:,} MB"
+                    f"[/{vram_colour}] ({vram_pct:.0f}%)",
+                    f"{g['utilization_pct']}%",
+                    f"{g.get('temperature_c', '?')}°C",
+                )
+            console.print(t_gpu)
+
+        if loaded:
+            t_llm = Table(
+                title="Ollama — loaded models",
+                box=_box.SIMPLE_HEAD, expand=True,
+            )
+            t_llm.add_column("Model", ratio=3)
+            t_llm.add_column("VRAM", justify="right")
+            t_llm.add_column("Expires", justify="right", style="dim")
+            for m in loaded:
+                t_llm.add_row(
+                    m.get("name", "?"),
+                    f"{m.get('vram_mb', 0):,} MB",
+                    m.get("expires_at") or "—",
+                )
+            console.print(t_llm)
+        else:
+            console.print(
+                "[dim]Ollama: no models resident right now.[/dim]"
+            )
+
+        if qcolls:
+            t_qd = Table(
+                title="Qdrant collections",
+                box=_box.SIMPLE_HEAD, expand=True,
+            )
+            t_qd.add_column("Collection", ratio=3)
+            t_qd.add_column("Points", justify="right", style="cyan")
+            t_qd.add_column("Vector fields", ratio=3, style="dim")
+            for c in qcolls:
+                vec_str = ", ".join(c.get("vectors", []) or [])
+                sparse_str = ", ".join(
+                    f"sparse:{s}" for s in c.get("sparse_vectors") or []
+                )
+                all_fields = " · ".join(
+                    x for x in (vec_str, sparse_str) if x
+                )
+                t_qd.add_row(
+                    c["name"], f"{c['points_count']:,}", all_fields or "—",
+                )
+            console.print(t_qd)
+
+        # ── Converter backend distribution ───────────────────────
+        if backends:
+            t_back = Table(
+                title="Converter backends (key migration signal)",
+                box=_box.SIMPLE_HEAD, expand=True,
+            )
+            t_back.add_column("Backend", ratio=3)
+            t_back.add_column("Papers", justify="right", style="cyan")
+            for b in backends:
+                name = b["backend"]
+                colour = "cyan"
+                if name and name.startswith("mineru-vlm-pro"):
+                    colour = "green"
+                elif name == "mineru-pipeline":
+                    colour = "yellow"
+                t_back.add_row(
+                    f"[{colour}]{name}[/{colour}]", str(b["n"])
+                )
+            console.print(t_back)
+
+        # ── Pipeline timing + failures ──────────────────────────
+        if timing:
+            t_time = Table(
+                title="Pipeline stage timing (completed jobs)",
+                box=_box.SIMPLE_HEAD, expand=True,
+            )
+            t_time.add_column("Stage", ratio=3)
+            t_time.add_column("N", justify="right", style="cyan")
+            t_time.add_column("p50", justify="right")
+            t_time.add_column("p95", justify="right")
+            t_time.add_column("mean", justify="right", style="dim")
+
+            def _fmt_ms(v):
+                if v is None:
+                    return "—"
+                if v >= 60_000:
+                    return f"{v / 60000:.1f}m"
+                if v >= 1000:
+                    return f"{v / 1000:.1f}s"
+                return f"{v:.0f}ms"
+
+            for row in timing:
+                t_time.add_row(
+                    row["stage"], str(row["n"]),
+                    _fmt_ms(row.get("p50_ms")),
+                    _fmt_ms(row.get("p95_ms")),
+                    _fmt_ms(row.get("mean_ms")),
+                )
+            console.print(t_time)
+
+        if any(f["failed"] for f in fails):
+            t_fail = Table(
+                title="Stage failures",
+                box=_box.SIMPLE_HEAD, expand=True,
+            )
+            t_fail.add_column("Stage", ratio=3)
+            t_fail.add_column("Failed", justify="right")
+            t_fail.add_column("Total", justify="right", style="dim")
+            t_fail.add_column("Rate", justify="right")
+            for f in fails:
+                rate = (f["failed"] / f["total"] * 100) if f["total"] else 0.0
+                colour = "dim" if f["failed"] == 0 else (
+                    "yellow" if rate < 5 else "red"
+                )
+                t_fail.add_row(
+                    f"[{colour}]{f['stage']}[/{colour}]",
+                    str(f["failed"]), str(f["total"]),
+                    f"[{colour}]{rate:.1f}%[/{colour}]",
+                )
+            console.print(t_fail)
+            console.print(
+                "[dim]Drill into top error classes with "
+                "`sciknow db failures --stage <name>`.[/dim]"
+            )
+
+        # ── Recent activity feed ─────────────────────────────────
+        if activity:
+            t_act = Table(
+                title=f"Recent activity (last {len(activity)} jobs)",
+                box=_box.SIMPLE_HEAD, expand=True,
+            )
+            t_act.add_column("When", ratio=3, style="dim")
+            t_act.add_column("Stage", ratio=2)
+            t_act.add_column("Status", ratio=1)
+            t_act.add_column("Duration", justify="right", width=10)
+            t_act.add_column("Doc", ratio=2, style="dim")
+            for a in activity:
+                status = a["status"] or "?"
+                scolour = (
+                    "green" if status in ("completed", "ok") else
+                    "red" if status == "failed" else "yellow"
+                )
+                ts = a["created_at"] or ""
+                dur = a.get("duration_ms")
+                dur_s = (
+                    f"{dur / 1000:.1f}s" if dur is not None else "—"
+                )
+                t_act.add_row(
+                    ts.split("T")[-1][:8] if ts else "?",
+                    a["stage"] or "?",
+                    f"[{scolour}]{status}[/{scolour}]",
+                    dur_s,
+                    (a["doc_id"] or "")[:8],
+                )
+            console.print(t_act)
+
+    # Main entry
+    if json_out and watch:
+        console.print(
+            "[red]--json and --watch together don't make sense "
+            "(--json emits a single snapshot and exits).[/red]"
+        )
+        raise typer.Exit(2)
+
+    if json_out:
+        snap = collect_monitor_snapshot(throughput_days=days,
+                                         llm_usage_days=days)
+        console.print(_json.dumps(snap, indent=2, default=str))
+        return
+
+    if watch > 0:
+        try:
+            while True:
+                snap = collect_monitor_snapshot(
+                    throughput_days=days, llm_usage_days=days,
+                )
+                console.clear()
+                _render(snap)
+                console.print(
+                    f"[dim]Re-rendering every {watch}s. Ctrl+C to stop.[/dim]"
+                )
+                _time.sleep(watch)
+        except KeyboardInterrupt:
+            console.print("\n[dim]Monitor stopped.[/dim]")
+            return
+
+    snap = collect_monitor_snapshot(
+        throughput_days=days, llm_usage_days=days,
+    )
+    _render(snap)
+
+
+@app.command()
 def dashboard(
     days: int = typer.Option(
         30, "--days",
