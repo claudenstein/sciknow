@@ -1368,6 +1368,11 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     raptor = snap.get("raptor_shape") or {}
     dupe_hashes = snap.get("duplicate_hashes", 0) or 0
     bench_fresh = snap.get("bench_freshness") or {}
+    # 54.6.237 — trend batch
+    growth = snap.get("corpus_growth") or {}
+    book_act = snap.get("book_activity") or {}
+    bench_delta = snap.get("bench_quality_delta") or {}
+    gpu_trend = snap.get("gpu_trend") or {}
 
     # ── Small helpers ───────────────────────────────────────────────
 
@@ -1665,6 +1670,19 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
         corpus_tbl.add_row(
             Text("dupe hashes", style=C_DIM),
             Text(str(dupe_hashes), style=dupe_colour),
+        )
+
+    # Phase 54.6.237 — corpus growth rate: compact "+N /24h · +M /7d"
+    # line. Shows only when 7d > 0 (keeps rows quiet on a dormant
+    # install).
+    if growth.get("last_7d", 0) > 0:
+        corpus_tbl.add_row(
+            Text("growth", style=C_DIM),
+            Text(
+                f"+{growth['last_24h']:,} /24h  "
+                f"+{growth['last_7d']:,} /7d",
+                style=C_OK,
+            ),
         )
 
     corpus_panel = Panel(
@@ -2061,6 +2079,79 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
         rline.append(f"  {levels_str}", style=C_DIM)
         footer_lines.append(rline)
 
+    # Phase 54.6.237 — active book activity summary (when any book
+    # exists in the DB). Compact: title, chapter completion, word count.
+    if book_act.get("title"):
+        chapters_total = book_act.get("chapters_total", 0) or 0
+        chapters_done = book_act.get("chapters_drafted", 0) or 0
+        words = book_act.get("total_words", 0) or 0
+        bline = Text()
+        bline.append("book     ", style=C_DIM)
+        bline.append(
+            (book_act["title"] or "")[:40], style=C_ACCENT,
+        )
+        bline.append(
+            f"  {chapters_done}/{chapters_total} ch drafted",
+            style=C_DIM,
+        )
+        bline.append(f"  {words:,}w", style=C_VALUE)
+        footer_lines.append(bline)
+
+    # Phase 54.6.237 — bench quality delta from the two newest
+    # snapshots. Highlights top regression + top improvement if any.
+    if bench_delta.get("have_pair") and bench_delta.get("total_metrics"):
+        def _fmt_pct(p):
+            return f"{p:+.1f}%" if p >= 0 else f"{p:.1f}%"
+
+        bline = Text()
+        bline.append("bench Δ  ", style=C_DIM)
+        bline.append(
+            f"{bench_delta.get('old_sha') or '?'[:7]} → "
+            f"{bench_delta.get('new_sha') or '?'[:7]}",
+            style=C_DIM,
+        )
+        best = (bench_delta.get("best") or [])
+        worst = (bench_delta.get("worst") or [])
+        if best:
+            b = best[0]
+            # Truncate metric name for readability
+            name = b["metric"].split(":", 1)[-1][:22]
+            bline.append(f"  ↑{name} ", style=C_DIM)
+            bline.append(_fmt_pct(b["delta_pct"]), style=C_OK)
+        if worst and worst[0]["delta_pct"] < -0.1:
+            w = worst[0]
+            name = w["metric"].split(":", 1)[-1][:22]
+            bline.append(f"  ↓{name} ", style=C_DIM)
+            bline.append(_fmt_pct(w["delta_pct"]), style=C_ERR)
+        footer_lines.append(bline)
+
+    # Phase 54.6.237 — GPU temp + util trend sparklines. Only render
+    # once the ring buffer has at least 3 samples, so fresh starts
+    # don't show a single-dot line.
+    temp_samples = gpu_trend.get("temp_samples") or []
+    util_samples = gpu_trend.get("util_samples") or []
+    if len(temp_samples) >= 3:
+        # Temp on its own scale (55-85°C usable), util on 0-100
+        t_line = Table.grid(padding=(0, 1), expand=True)
+        t_line.add_column(width=9, style=C_DIM)
+        t_line.add_column(ratio=1)
+        t_line.add_column(justify="right", width=6, style=C_DIM)
+        t_line.add_row(
+            "gpu temp", _sparkline(temp_samples),
+            f"{temp_samples[-1]}°C",
+        )
+        footer_lines.append(t_line)
+        if len(util_samples) >= 3:
+            u_line = Table.grid(padding=(0, 1), expand=True)
+            u_line.add_column(width=9, style=C_DIM)
+            u_line.add_column(ratio=1)
+            u_line.add_column(justify="right", width=6, style=C_DIM)
+            u_line.add_row(
+                "gpu util", _sparkline(util_samples),
+                f"{util_samples[-1]}%",
+            )
+            footer_lines.append(u_line)
+
     if footer_lines:
         timing_tbl.add_row("", "", "", "", "")
         for line in footer_lines:
@@ -2117,11 +2208,12 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     layout.split_column(
         Layout(header_panel, name="header", size=3),
         # 54.6.234 → 22 (host load + quality strip); 54.6.235 → 24
-        # (embeds + topics + year sparkline); 54.6.236 → 26 (adds
-        # dupe-hash row + model-assignments block). Activity is
-        # still ratio=1 so tall terminals absorb the growth.
-        Layout(name="top", size=26),
-        Layout(timing_panel, name="timing", size=16),
+        # (embeds + topics + year sparkline); 54.6.236 → 26 (dupe-
+        # hash row + models); 54.6.237 → 28 (growth line + room for
+        # GPU trend sparklines + book activity footer). Activity is
+        # still ratio=1 so tall terminals absorb any further growth.
+        Layout(name="top", size=28),
+        Layout(timing_panel, name="timing", size=18),
         Layout(activity_panel, name="activity", ratio=1,
                minimum_size=8),
     )

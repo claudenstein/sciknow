@@ -66,6 +66,33 @@ def _safe_int(v: Any) -> int:
         return 0
 
 
+def _safe_db(session, fn, *args, default=None, **kwargs):
+    """Phase 54.6.237 — run a DB helper inside a savepoint.
+
+    Each monitor sub-aggregator may hit a table that doesn't exist
+    on fresh installs (`raptor_nodes` is the canonical example).
+    Postgres aborts the outer transaction on any SQL error, and
+    every subsequent SELECT returns "current transaction is
+    aborted, commands ignored" until a ROLLBACK. That silent
+    poisoning used to empty every aggregator below the first
+    failing one.
+
+    Wrapping each call in `session.begin_nested()` creates a
+    savepoint; on failure we roll back just to the savepoint,
+    leaving the outer transaction intact. Returned value on error
+    is `default` (typically the helper's own "empty" return).
+    """
+    try:
+        with session.begin_nested():
+            return fn(session, *args, **kwargs)
+    except Exception:
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        return default
+
+
 def _project_info() -> dict[str, Any]:
     try:
         from sciknow.core.project import get_active_project
@@ -231,6 +258,270 @@ def _pipeline_throughput(session, days: int = 14) -> list[dict]:
         }
         for r in rows
     ]
+
+
+def _corpus_growth_rate(session) -> dict:
+    """Phase 54.6.237 — per-week corpus growth sparkline (last 14 weeks)
+    + recent-ingest totals (last 24h, 7d, 30d).
+
+    Sparkline counts documents by `created_at` bucketed weekly.
+    Recent totals help the header read "42 docs this week" at a
+    glance.
+    """
+    from sqlalchemy import text
+    out = {
+        "weekly_sparkline": [], "weeks_back": 14,
+        "last_24h": 0, "last_7d": 0, "last_30d": 0,
+    }
+    try:
+        # Weekly buckets via date_trunc — zero-filled via generate_series
+        rows = session.execute(text("""
+            WITH series AS (
+                SELECT generate_series(
+                    date_trunc('week', NOW()) - INTERVAL '13 weeks',
+                    date_trunc('week', NOW()),
+                    INTERVAL '1 week'
+                ) AS week
+            )
+            SELECT s.week,
+                   COALESCE(COUNT(d.id), 0)
+            FROM series s
+            LEFT JOIN documents d
+              ON date_trunc('week', d.created_at) = s.week
+            GROUP BY s.week
+            ORDER BY s.week
+        """)).fetchall()
+        out["weekly_sparkline"] = [int(r[1] or 0) for r in rows]
+
+        row24 = session.execute(text("""
+            SELECT COUNT(*) FROM documents
+            WHERE created_at >= NOW() - INTERVAL '24 hours'
+        """)).fetchone()
+        out["last_24h"] = int(row24[0] or 0)
+
+        row7 = session.execute(text("""
+            SELECT COUNT(*) FROM documents
+            WHERE created_at >= NOW() - INTERVAL '7 days'
+        """)).fetchone()
+        out["last_7d"] = int(row7[0] or 0)
+
+        row30 = session.execute(text("""
+            SELECT COUNT(*) FROM documents
+            WHERE created_at >= NOW() - INTERVAL '30 days'
+        """)).fetchone()
+        out["last_30d"] = int(row30[0] or 0)
+    except Exception:
+        pass
+    return out
+
+
+def _book_activity(session) -> dict:
+    """Phase 54.6.237 — most-recently-updated book with chapter
+    completion + word count. Silent when no books exist.
+
+    "Completion" = chapters with at least one draft row /
+    chapters total. Word count sums the latest-version draft per
+    (chapter, section_type) tuple across all chapters.
+    """
+    from sqlalchemy import text
+    out = {
+        "title": None, "book_id": None, "book_type": None,
+        "chapters_total": 0, "chapters_drafted": 0,
+        "total_words": 0, "last_updated": None,
+    }
+    try:
+        row = session.execute(text("""
+            SELECT b.id::text, b.title, b.book_type, b.updated_at
+            FROM books b
+            ORDER BY b.updated_at DESC NULLS LAST
+            LIMIT 1
+        """)).fetchone()
+        if not row:
+            return out
+        out["book_id"] = row[0]
+        out["title"] = row[1]
+        out["book_type"] = row[2]
+        out["last_updated"] = (
+            row[3].isoformat() if row[3] else None
+        )
+
+        out["chapters_total"] = int(session.execute(text("""
+            SELECT COUNT(*) FROM book_chapters
+            WHERE book_id = CAST(:bid AS uuid)
+        """), {"bid": out["book_id"]}).scalar() or 0)
+
+        out["chapters_drafted"] = int(session.execute(text("""
+            SELECT COUNT(DISTINCT chapter_id)
+            FROM drafts
+            WHERE chapter_id IN (
+                SELECT id FROM book_chapters
+                WHERE book_id = CAST(:bid AS uuid)
+            )
+        """), {"bid": out["book_id"]}).scalar() or 0)
+
+        # Sum latest-version draft words per (chapter, section_type).
+        # Using a window-function variant keeps this one query.
+        rows = session.execute(text("""
+            WITH latest AS (
+                SELECT chapter_id, section_type, word_count,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY chapter_id, section_type
+                           ORDER BY version DESC
+                       ) AS rn
+                FROM drafts
+                WHERE chapter_id IN (
+                    SELECT id FROM book_chapters
+                    WHERE book_id = CAST(:bid AS uuid)
+                )
+            )
+            SELECT COALESCE(SUM(word_count), 0)
+            FROM latest WHERE rn = 1
+        """), {"bid": out["book_id"]}).fetchone()
+        out["total_words"] = int(rows[0] or 0)
+    except Exception:
+        pass
+    return out
+
+
+def _bench_quality_delta() -> dict:
+    """Phase 54.6.237 — diff the two newest bench snapshots.
+
+    Reads bench/snapshots/*.json sorted by mtime, picks the two
+    newest, and computes per-metric Δ on every ok result that
+    yields a numeric value. Surfaces the aggregate MRR / NDCG /
+    recall shifts that the dashboard can show as "retrieval
+    quality flat / up / down since last snapshot".
+
+    Silent (empty result) when <2 snapshots exist. Cached for 60s
+    in-process to avoid re-reading JSON every tick.
+    """
+    from sciknow.core.project import get_active_project
+    try:
+        active = get_active_project()
+        snap_dir = active.data_dir / "bench" / "snapshots"
+    except Exception:
+        return {"have_pair": False}
+    return _bench_quality_delta_for_dir(snap_dir)
+
+
+_BENCH_DELTA_CACHE: dict = {}
+_BENCH_DELTA_TTL = 60.0
+
+
+def _bench_quality_delta_for_dir(snap_dir: Path) -> dict:
+    import time as _time
+    if not snap_dir.exists():
+        return {"have_pair": False}
+    key = str(snap_dir)
+    now = _time.time()
+    cached = _BENCH_DELTA_CACHE.get(key)
+    if cached and (now - cached[0]) < _BENCH_DELTA_TTL:
+        return cached[1]
+
+    try:
+        snaps = sorted(
+            snap_dir.glob("*.json"),
+            key=lambda p: p.stat().st_mtime, reverse=True,
+        )
+    except Exception:
+        snaps = []
+    if len(snaps) < 2:
+        result = {"have_pair": False, "count": len(snaps)}
+        _BENCH_DELTA_CACHE[key] = (now, result)
+        return result
+
+    def _load(p):
+        try:
+            return json.loads(p.read_text())
+        except Exception:
+            return None
+
+    new_snap = _load(snaps[0])
+    old_snap = _load(snaps[1])
+    if not new_snap or not old_snap:
+        result = {"have_pair": False, "count": len(snaps)}
+        _BENCH_DELTA_CACHE[key] = (now, result)
+        return result
+
+    def _index(snap: dict) -> dict[str, float]:
+        idx = {}
+        for r in snap.get("results") or []:
+            if r.get("status") != "ok":
+                continue
+            fn = r.get("name") or ""
+            for m in r.get("metrics") or []:
+                v = m.get("value")
+                if isinstance(v, (int, float)):
+                    idx[f"{fn}:{m.get('name')}"] = float(v)
+        return idx
+
+    old_idx = _index(old_snap)
+    new_idx = _index(new_snap)
+    deltas = []
+    for k in set(old_idx) & set(new_idx):
+        old_v = old_idx[k]
+        new_v = new_idx[k]
+        if old_v == 0:
+            continue
+        pct = (new_v - old_v) / abs(old_v) * 100
+        deltas.append({
+            "metric": k,
+            "old": old_v,
+            "new": new_v,
+            "delta_pct": pct,
+        })
+    # Surface top movers in each direction
+    deltas.sort(key=lambda d: d["delta_pct"])
+    worst = deltas[:3]
+    deltas.sort(key=lambda d: d["delta_pct"], reverse=True)
+    best = deltas[:3]
+
+    result = {
+        "have_pair": True,
+        "count": len(snaps),
+        "new_sha": (new_snap.get("git") or {}).get("sha"),
+        "old_sha": (old_snap.get("git") or {}).get("sha"),
+        "new_ts": new_snap.get("snapshotted_at"),
+        "old_ts": old_snap.get("snapshotted_at"),
+        "best": best,
+        "worst": worst,
+        "total_metrics": len(deltas),
+    }
+    _BENCH_DELTA_CACHE[key] = (now, result)
+    return result
+
+
+# Phase 54.6.237 — GPU temp/util trend ring buffer. Module-level so
+# it persists across snapshot calls within one Python process
+# (watch mode populates it over time). Cross-process state is a
+# non-goal; each render session builds its own history.
+_GPU_TREND_MAX = 60
+_GPU_TREND: list[dict] = []
+
+
+def _record_gpu_sample(gpus: list[dict]) -> None:
+    """Append a timestamped sample of the primary GPU's temp +
+    util to the in-process ring buffer. Called automatically by
+    collect_monitor_snapshot — not intended for external use."""
+    if not gpus:
+        return
+    import time as _time
+    g = gpus[0]
+    _GPU_TREND.append({
+        "t": _time.time(),
+        "temp": int(g.get("temperature_c") or 0),
+        "util": int(g.get("utilization_pct") or 0),
+    })
+    if len(_GPU_TREND) > _GPU_TREND_MAX:
+        del _GPU_TREND[:-_GPU_TREND_MAX]
+
+
+def _gpu_trend_snapshot() -> dict:
+    return {
+        "temp_samples": [s["temp"] for s in _GPU_TREND],
+        "util_samples": [s["util"] for s in _GPU_TREND],
+        "sample_count": len(_GPU_TREND),
+    }
 
 
 def _model_assignments() -> dict:
@@ -1076,35 +1367,68 @@ def collect_monitor_snapshot(
     data_dir = project.get("data_dir")
 
     with get_session() as session:
-        corpus = _corpus_counts(session)
-        ingest_sources = _ingest_sources(session)
-        converter_backends = _converter_backends(session)
-        topic_clusters = _topic_clusters(
-            session, limit=topic_clusters_limit
+        # Each helper runs inside a savepoint via _safe_db — a
+        # SQL failure in one (e.g. querying a missing table like
+        # raptor_nodes on a fresh install) doesn't poison the
+        # outer transaction for the others.
+        corpus = _safe_db(session, _corpus_counts, default={})
+        ingest_sources = _safe_db(session, _ingest_sources, default=[])
+        converter_backends = _safe_db(
+            session, _converter_backends, default=[]
         )
-        stage_timing = _pipeline_timing(session)
-        stage_failures = _pipeline_failures(session)
-        throughput = _pipeline_throughput(session, days=throughput_days)
-        activity = _recent_activity(session, limit=activity_limit)
-        llm_usage = _llm_usage(session, days=llm_usage_days)
-        # Phase 54.6.232 — operational additions
-        rates = _ingest_rates_and_eta(session)
-        queue_states = _ingest_queue_states(session)
-        pending_downloads = _pending_downloads_count(session)
-        hourly_throughput = _hourly_throughput(session, hours=24)
-        pg_db_size_mb = _pg_database_size_mb(session)
-        top_failures = _top_failure_classes(session)
-        # Phase 54.6.234 — host load + stuck-job + content quality
-        stuck_job = _stuck_job(session)
-        meta_quality = _metadata_quality(session)
-        # Phase 54.6.235 — year histogram + embeddings coverage
-        year_hist = _year_histogram(session)
-        embed_cov = _embeddings_coverage(session)
-        # Phase 54.6.236 — config + coverage + cost + tree shape
-        cost_totals = _llm_cost_totals(session)
-        visuals_cov = _visuals_coverage(session)
-        raptor_shape = _raptor_tree_shape(session)
-        dupe_hashes = _duplicate_hashes(session)
+        topic_clusters = _safe_db(
+            session, _topic_clusters,
+            limit=topic_clusters_limit, default=[],
+        )
+        stage_timing = _safe_db(session, _pipeline_timing, default=[])
+        stage_failures = _safe_db(session, _pipeline_failures, default=[])
+        throughput = _safe_db(
+            session, _pipeline_throughput,
+            days=throughput_days, default=[],
+        )
+        activity = _safe_db(
+            session, _recent_activity,
+            limit=activity_limit, default=[],
+        )
+        llm_usage = _safe_db(
+            session, _llm_usage, days=llm_usage_days, default=[],
+        )
+        # 54.6.232 — operational additions
+        rates = _safe_db(session, _ingest_rates_and_eta, default={})
+        queue_states = _safe_db(session, _ingest_queue_states, default={})
+        pending_downloads = _safe_db(
+            session, _pending_downloads_count, default=0,
+        )
+        hourly_throughput = _safe_db(
+            session, _hourly_throughput, hours=24, default=[],
+        )
+        pg_db_size_mb = _safe_db(
+            session, _pg_database_size_mb, default=0,
+        )
+        top_failures = _safe_db(
+            session, _top_failure_classes, default=[],
+        )
+        # 54.6.234 — host load + stuck-job + content quality
+        stuck_job = _safe_db(session, _stuck_job, default={})
+        meta_quality = _safe_db(session, _metadata_quality, default={})
+        # 54.6.235 — year histogram + embeddings coverage
+        year_hist = _safe_db(session, _year_histogram, default=[])
+        embed_cov = _safe_db(session, _embeddings_coverage, default={})
+        # 54.6.236 — config + coverage + cost + tree shape
+        cost_totals = _safe_db(session, _llm_cost_totals, default={})
+        visuals_cov = _safe_db(session, _visuals_coverage, default={})
+        raptor_shape = _safe_db(session, _raptor_tree_shape, default={})
+        dupe_hashes = _safe_db(session, _duplicate_hashes, default=0)
+        # 54.6.237 — trend batch
+        growth = _safe_db(session, _corpus_growth_rate, default={})
+        book_act = _safe_db(session, _book_activity, default={})
+
+    # GPU sample recording happens here, outside the session ctx,
+    # so the ring buffer gets one tick per snapshot call. CLI
+    # watch mode populates over time; web server holds its own
+    # rolling buffer per worker.
+    gpu_info = _gpu_info()
+    _record_gpu_sample(gpu_info)
 
     return {
         "project": project,
@@ -1141,13 +1465,18 @@ def collect_monitor_snapshot(
         "bench_freshness": _bench_freshness(
             Path(data_dir) if data_dir else None
         ),
+        # 54.6.237 additions
+        "corpus_growth": growth,
+        "book_activity": book_act,
+        "bench_quality_delta": _bench_quality_delta(),
         "llm": {
             "usage_last_days": llm_usage,
             "usage_window_days": llm_usage_days,
             "loaded_models": _ollama_loaded_models(),
         },
         "qdrant": _qdrant_collections(),
-        "gpu": _gpu_info(),
+        "gpu": gpu_info,
+        "gpu_trend": _gpu_trend_snapshot(),
         "storage": {
             "disk": _disk_usage(Path(data_dir) if data_dir else None),
             "pg_database_mb": pg_db_size_mb,
