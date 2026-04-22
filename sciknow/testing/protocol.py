@@ -11853,6 +11853,114 @@ def l1_phase54_6_134_agentic_coverage_uses_reranker() -> None:
     )
 
 
+def l1_phase54_6_212_vlm_pro_default_dispatch() -> None:
+    """Phase 54.6.212 (roadmap 3.1.6 Phase 2) — VLM-Pro default + fallback.
+
+    Phase 2 flips the dispatch narrative from "pipeline first, VLM-Pro
+    opt-in" to "VLM-Pro first, pipeline fallback". This L1 pins:
+
+      A) `mineru_vlm_backend` default is "vllm" — the whole point of
+         the migration is the throughput win, and MinerU's internal
+         "auto" would otherwise pick transformers silently on boxes
+         without the vllm extras.
+      B) `convert()` tries VLM-Pro BEFORE pipeline when
+         backend_setting == "auto" — structural source-order check
+         so a refactor can't silently restore the old ordering.
+      C) The `auto` branch has a fallback path that catches
+         `_vlm_extras_missing` so VLM-less installs don't break.
+      D) `_warn_mineru_pipeline_deprecated` exists and is invoked
+         when `backend_setting == "mineru"` — ensures the user
+         sees the deprecation notice.
+      E) CLAUDE.md narrative flipped to name VLM-Pro as the primary.
+    """
+    import inspect as _inspect
+    from pathlib import Path
+
+    from sciknow.config import settings
+    from sciknow.ingestion import pdf_converter as conv_mod
+
+    # A) vllm default
+    assert settings.mineru_vlm_backend == "vllm", (
+        f"mineru_vlm_backend default must be 'vllm' post-54.6.212, "
+        f"got {settings.mineru_vlm_backend!r}"
+    )
+
+    # B) VLM-Pro tried before pipeline in "auto" branch
+    convert_src = _inspect.getsource(conv_mod.convert)
+    auto_vlm_pos = convert_src.find(
+        '    if backend_setting == "auto":\n'
+        "        try:\n"
+        "            return _convert_mineru("
+    )
+    auto_pipeline_pos = convert_src.find(
+        '    if backend_setting in ("auto", "mineru"):'
+    )
+    assert auto_vlm_pos != -1, (
+        "convert() must have a dedicated `if backend_setting == 'auto'` "
+        "branch that tries VLM-Pro first — post-54.6.212 ordering"
+    )
+    assert auto_pipeline_pos != -1, (
+        "convert() must retain the auto/mineru pipeline branch as fallback"
+    )
+    assert auto_vlm_pos < auto_pipeline_pos, (
+        "VLM-Pro auto branch must come BEFORE the pipeline branch — "
+        "otherwise `auto` would pin pipeline mode as it did pre-54.6.212"
+    )
+
+    # C) Fallback helper exists + is used
+    assert hasattr(conv_mod, "_vlm_extras_missing"), (
+        "pdf_converter._vlm_extras_missing missing — required for "
+        "silent-fallback behaviour on VLM-less installs"
+    )
+    assert "_vlm_extras_missing" in convert_src, (
+        "convert() must consult _vlm_extras_missing to tell missing-deps "
+        "apart from genuine convert errors in the auto branch"
+    )
+
+    # D) Deprecation warning wired up
+    assert hasattr(conv_mod, "_warn_mineru_pipeline_deprecated"), (
+        "pdf_converter._warn_mineru_pipeline_deprecated missing"
+    )
+    assert "_warn_mineru_pipeline_deprecated" in convert_src, (
+        "convert() must call _warn_mineru_pipeline_deprecated when "
+        "backend_setting == 'mineru' to surface the 54.6.212 deprecation"
+    )
+
+    # Behavioural check: call the warning function twice, assert it
+    # only fires once per process (one-shot guard).
+    import warnings as _warnings
+    conv_mod._MINERU_DEPRECATION_WARNED = False  # reset for the test
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        conv_mod._warn_mineru_pipeline_deprecated()
+        conv_mod._warn_mineru_pipeline_deprecated()
+    dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+    assert len(dep_warnings) == 1, (
+        f"deprecation warning must be one-shot per process "
+        f"(Phase 54.6.212), got {len(dep_warnings)} emissions"
+    )
+    assert "pipeline backend" in str(dep_warnings[0].message).lower() or \
+           "pipeline" in str(dep_warnings[0].message).lower(), (
+        "deprecation message should name the pipeline backend"
+    )
+
+    # E) docs/INGESTION.md narrative flip. Checks the tracked doc
+    # (not gitignored CLAUDE.md) so the contract is enforceable in
+    # fresh clones.
+    ingestion_md = Path(__file__).resolve().parents[2] / "docs" / "INGESTION.md"
+    assert ingestion_md.exists(), "docs/INGESTION.md missing"
+    ingestion_content = ingestion_md.read_text(encoding="utf-8")
+    assert "primary backend post-54.6.212" in ingestion_content, (
+        "docs/INGESTION.md Stage 1 must name VLM-Pro as the primary "
+        "backend post-54.6.212 — otherwise new readers get the "
+        "pre-migration mental model"
+    )
+    assert "deprecated as a pinned backend" in ingestion_content.lower(), (
+        "docs/INGESTION.md Stage 1 must flag MinerU pipeline as "
+        "deprecated when pinned explicitly"
+    )
+
+
 def l1_phase54_6_211_converter_provenance_surface() -> None:
     """Phase 54.6.211 (roadmap 3.1.6 Phase 1) — converter provenance stamp.
 
@@ -12367,6 +12475,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_210_refresh_since_incremental_surface,
     # Phase 54.6.211 — roadmap 3.1.6 Phase 1: converter provenance stamp
     l1_phase54_6_211_converter_provenance_surface,
+    # Phase 54.6.212 — roadmap 3.1.6 Phase 2: auto-dispatch flip + deprecation
+    l1_phase54_6_212_vlm_pro_default_dispatch,
 ]
 
 L2_TESTS: list[Callable] = [

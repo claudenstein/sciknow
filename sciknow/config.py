@@ -128,9 +128,16 @@ class Settings(BaseSettings):
     #                       pipeline on CPU.
     #   "marker"          — datalab-to/marker (legacy fallback)
     #
-    # Phase 21: MinerU 2.5-Pro is opt-in because (a) the 1.2B VLM model has
-    # only been on HuggingFace for hours and (b) it requires extra deps
-    # (vllm or transformers). Default stays at the proven pipeline backend.
+    # Phase 21: MinerU 2.5-Pro was initially opt-in because the 1.2B VLM
+    # model was brand-new and required extra deps (vllm or transformers).
+    # Phase 54.6.212 (roadmap 3.1.6 Phase 2): default flipped — "auto"
+    # now dispatches VLM-Pro → pipeline → Marker JSON → Marker markdown
+    # (premium-first fallback chain). The VLM-Pro attempt is silently
+    # skipped if `mineru[vllm]` / `mineru[transformers]` extras aren't
+    # installed, so existing installations without VLM deps continue
+    # working under the pipeline fallback. Setting this to `mineru`
+    # explicitly pins the deprecated pipeline backend (emits a
+    # one-shot deprecation warning).
     pdf_converter_backend: str = "auto"
 
     # Phase 21 — explicit override for the VLM model name when running
@@ -150,9 +157,12 @@ class Settings(BaseSettings):
     #                    transformers on a 3090; requires `mineru[vllm]`
     #                    extras + a vllm-compatible CUDA stack).
     # Only consulted when pdf_converter_backend = "mineru-vlm-pro" or
-    # when "auto" dispatch routes to VLM-Pro. Phase 2 of the 3.1.6
-    # migration flips both defaults together.
-    mineru_vlm_backend: str = "auto"
+    # when "auto" dispatch routes to VLM-Pro. Phase 54.6.212 flips
+    # the default to `vllm` — the whole point of the migration is
+    # to get the throughput win, and "auto" inside MinerU picks vllm
+    # whenever it's installed anyway, so making this explicit is
+    # clearer + surfaces a proper error if vllm fails to import.
+    mineru_vlm_backend: str = "vllm"
 
     # Ingestion
     # Chunks per bge-m3 batch. Default 32 is safe on a 24GB GPU when the LLM is

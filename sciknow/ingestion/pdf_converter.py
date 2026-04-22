@@ -568,27 +568,77 @@ def _convert_marker_markdown(pdf_path: Path, output_dir: Path) -> ConversionResu
     )
 
 
+_MINERU_DEPRECATION_WARNED: bool = False
+
+
+def _warn_mineru_pipeline_deprecated() -> None:
+    """One-shot deprecation warning for PDF_CONVERTER_BACKEND=mineru.
+
+    Phase 54.6.212 (roadmap 3.1.6 Phase 2) flipped the default to
+    VLM-Pro; the pipeline-mode backend is retained as fallback only.
+    Users who explicitly pinned `PDF_CONVERTER_BACKEND=mineru` get
+    one warning per process so the signal isn't buried in verbose
+    ingest output, but every run surfaces it once.
+    """
+    global _MINERU_DEPRECATION_WARNED
+    if _MINERU_DEPRECATION_WARNED:
+        return
+    _MINERU_DEPRECATION_WARNED = True
+    import warnings
+    warnings.warn(
+        "PDF_CONVERTER_BACKEND=mineru pins the deprecated pipeline "
+        "backend (54.6.212, roadmap 3.1.6). OmniDocBench v1.6 scores: "
+        "pipeline 86.2 vs VLM-Pro 95.69. Drop the setting to use "
+        "`auto` (premium-first fallback chain: VLM-Pro → pipeline → "
+        "Marker) or set `mineru-vlm-pro` for VLM-Pro only.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
+
+def _vlm_extras_missing(exc: BaseException) -> bool:
+    """True if the exception indicates mineru[vlm]/[vllm] extras are
+    not installed. Used by auto-dispatch to silently fall through to
+    pipeline mode on installs without the VLM dependencies, while
+    still propagating genuine per-PDF conversion errors."""
+    if isinstance(exc, (ImportError, ModuleNotFoundError)):
+        return True
+    msg = str(exc).lower()
+    return "missing dependencies" in msg or "mineru[vlm]" in msg
+
+
 def convert(pdf_path: Path, output_dir: Path) -> ConversionResult:
     """
     Convert a PDF to structured output. Dispatches based on
-    settings.pdf_converter_backend and falls back through the chain on failure.
+    settings.pdf_converter_backend.
 
     Backends:
-      - "mineru"          : MinerU pipeline only (raises on failure)
-      - "mineru-vlm-pro"  : MinerU 2.5-Pro VLM (raises on failure;
-                            requires `mineru[vlm]` extras + GPU)
-      - "marker"          : Marker JSON → Marker markdown (legacy)
-      - "auto"            : MinerU pipeline → Marker JSON → Marker markdown
-                            (default; SAFE — does NOT try VLM since the
-                             extras may not be installed)
+      - "auto"            : **default post-54.6.212.** Premium-first
+                            fallback chain: VLM-Pro → pipeline →
+                            Marker JSON → Marker markdown. VLM-Pro
+                            is silently skipped if `mineru[vllm]` /
+                            `mineru[transformers]` extras aren't
+                            installed (install detection via
+                            `_vlm_extras_missing`), so existing
+                            installations keep working under
+                            pipeline while new ones automatically
+                            pick up the quality bump.
+      - "mineru-vlm-pro"  : MinerU 2.5-Pro VLM only (raises on
+                            failure; requires the VLM extras +
+                            GPU). Use to verify VLM-Pro is healthy.
+      - "mineru"          : **DEPRECATED** (54.6.212) — pipeline
+                            MinerU only (raises on failure). Emits
+                            a one-shot DeprecationWarning. Retained
+                            as fallback within "auto" but no longer
+                            a recommended pin.
+      - "marker"          : Marker JSON → Marker markdown (legacy,
+                            handy for pure scans).
 
-    Phase 21: "auto" intentionally does NOT try the VLM backend automatically
-    because (a) it needs heavy `vllm` or `transformers` extras and (b) we
-    don't want a silent fallback to corrupt batch ingestion. Set
-    PDF_CONVERTER_BACKEND=mineru-vlm-pro explicitly to opt in.
-
-    Always returns a ConversionResult with `.backend` set to the backend that
-    actually produced the result, and `.text` populated for metadata extraction.
+    Always returns a ConversionResult with `.backend` set to the
+    backend that actually produced the result, `.converter_mode` set
+    to the finer variant (pipeline / vlm-pro-vllm / vlm-pro-
+    transformers / vlm-auto / marker-json / marker-md), and `.text`
+    populated for metadata extraction.
     """
     from sciknow.config import settings
 
@@ -596,7 +646,7 @@ def convert(pdf_path: Path, output_dir: Path) -> ConversionResult:
     vlm_model_name = getattr(settings, "mineru_vlm_model", None)
     errors: list[str] = []
 
-    # ---- 0. MinerU 2.5-Pro VLM (explicit opt-in only) ----
+    # ---- 0. MinerU 2.5-Pro VLM (explicit opt-in) ----
     if backend_setting == "mineru-vlm-pro":
         try:
             return _convert_mineru(
@@ -608,8 +658,31 @@ def convert(pdf_path: Path, output_dir: Path) -> ConversionResult:
             # backend, the user opted in to Pro for a reason.
             raise ConversionError(f"MinerU 2.5-Pro VLM: {exc}") from exc
 
-    # ---- 1. MinerU pipeline (primary in "auto" and "mineru") ----
+    # ---- 1. MinerU 2.5-Pro VLM (primary in "auto" post-54.6.212) ----
+    if backend_setting == "auto":
+        try:
+            return _convert_mineru(
+                pdf_path, output_dir,
+                use_vlm_pro=True, vlm_model_name=vlm_model_name,
+            )
+        except Exception as exc:
+            if _vlm_extras_missing(exc):
+                # Silent fall-through — install doesn't have the VLM
+                # deps yet; pipeline mode can still handle this PDF.
+                # We do NOT log an error here because this is the
+                # expected path on boxes where the user hasn't run
+                # `uv add 'mineru[vllm]'` yet.
+                errors.append(f"VLM-Pro: extras not installed ({exc})")
+            else:
+                # Genuine convert error (OOM, malformed PDF, model
+                # download failure). Log and fall through to pipeline
+                # since auto mode promises a fallback chain.
+                errors.append(f"VLM-Pro: {exc}")
+
+    # ---- 2. MinerU pipeline (fallback in "auto"; pinned in "mineru") ----
     if backend_setting in ("auto", "mineru"):
+        if backend_setting == "mineru":
+            _warn_mineru_pipeline_deprecated()
         try:
             return _convert_mineru(pdf_path, output_dir, use_vlm_pro=False)
         except Exception as exc:
@@ -619,14 +692,14 @@ def convert(pdf_path: Path, output_dir: Path) -> ConversionResult:
                 # Explicit MinerU-only mode: do not fall back.
                 raise ConversionError(msg) from exc
 
-    # ---- 2. Marker JSON (primary in "marker", fallback in "auto") ----
+    # ---- 3. Marker JSON (primary in "marker", fallback in "auto") ----
     if backend_setting in ("auto", "marker"):
         try:
             return _convert_marker_json(pdf_path, output_dir)
         except Exception as exc:
             errors.append(f"Marker JSON: {exc}")
 
-    # ---- 3. Marker markdown (last resort for "auto" and "marker") ----
+    # ---- 4. Marker markdown (last resort for "auto" and "marker") ----
     if backend_setting in ("auto", "marker"):
         try:
             return _convert_marker_markdown(pdf_path, output_dir)
