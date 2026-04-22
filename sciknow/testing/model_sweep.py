@@ -79,23 +79,21 @@ CANDIDATE_MODELS: list[str] = [
     "qwen2.5:32b-instruct-q4_K_M",            # former extract-kg baseline
     "qwen3:30b-a3b-instruct-2507-q4_K_M",     # current compile + extract-kg
     "qwen3.5:27b",                            # former book baseline (thinking)
+    "qwen3.6:27b-dense",                      # 54.6.240 new dense candidate
     "qwen3.6:35b-a3b-q4_K_M",                 # thinking variant
     "qwen3.6:35b-a3b-ud-q4_K_S",              # unsloth UD quant (thinking)
     "supergemma4:26b-uncensored-q4_K_M",      # gemma4 dense community tune
     "supergemma4:31b-abliterated-q4_K_M",     # broken output (for reference)
 ]
 
-# Fixed test paper prefixes (8-char document_id prefix). The first is
-# math-heavy (LaTeX equations, known pathological for thinking models);
-# the second is descriptive prose. Sweep runs against the FIRST one
-# only to keep runtime sane — add more via --paper if you want.
+# Fixed test paper prefixes (8-char document_id prefix). Replaced
+# post-54.6.210 re-ingest (DB reset invalidated the old doc_ids).
+# Sweep runs against the FIRST one only to keep runtime sane.
 CANDIDATE_PAPERS: list[str] = [
-    # Phase 54.6.85 — three-paper panel, one per content archetype.
-    # Variance between papers is the biggest noise source in per-model
-    # metrics; averaging three papers shrinks CI bounds by ~√3.
-    "4092d6ad",  # Nature Controls the CO2 Increase II — math-heavy, LaTeX-dense
-    "631fd2ea",  # Sun Reversed Decades-long Weakening Trend — descriptive prose
-    "858170b4",  # Decadal Changes of Earth's OLR — chart-heavy quantitative
+    # Phase 54.6.240 — refreshed for the VLM-Pro-era corpus.
+    "2b7a96c0",  # historic datasets open solar flux — descriptive prose, 75 chunks
+    "0a325b78",  # Carrington Events — rich abstract + body
+    "b76e2c8a",  # ION-CAGE — numerical model, equations
 ]
 
 # ════════════════════════════════════════════════════════════════════════
@@ -280,10 +278,24 @@ def _load_paper(prefix: str) -> PaperCtx:
         f"[{r[0]}]\n{(r[1] or '')[:3000]}" for r in secs
     )[:12000]
     source_text = "\n".join((r[1] or "") for r in secs)
-    # Handle NULL authors / year safely
-    authors_str = authors if isinstance(authors, str) else ", ".join(authors or [])
-    kw_str  = keywords if isinstance(keywords, str) else ", ".join(keywords or [])
-    dom_str = domains  if isinstance(domains, str)  else ", ".join(domains  or [])
+    # Handle NULL authors / year safely. Authors is JSONB list of
+    # dicts {name, orcid, affiliation} — extract `name` before joining.
+    def _stringify(v):
+        if isinstance(v, str):
+            return v
+        if not v:
+            return ""
+        out = []
+        for item in v:
+            if isinstance(item, str):
+                out.append(item)
+            elif isinstance(item, dict):
+                out.append(str(item.get("name") or ""))
+        return ", ".join(x for x in out if x)
+
+    authors_str = _stringify(authors)
+    kw_str = _stringify(keywords)
+    dom_str = _stringify(domains)
     return PaperCtx(
         doc_id=doc_id, title=title or "Untitled",
         authors=authors_str or "Unknown",
