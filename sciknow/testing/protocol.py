@@ -11853,6 +11853,93 @@ def l1_phase54_6_134_agentic_coverage_uses_reranker() -> None:
     )
 
 
+def l1_phase54_6_227_colbert_abstracts_phase1() -> None:
+    """Phase 54.6.227 (roadmap 3.4.3 Phase 1) — ColBERT wiring in embedder.
+
+    Phase 1 adds the infrastructure (setting, collection config,
+    embed-time persistence + guard). Phase 2 wires the retrieval
+    rerank path. L1 checks Phase 1 substrate only:
+
+      A) `enable_colbert_abstracts` setting exposed, default False
+         (opt-in experiment).
+      B) qdrant.init_collections reads the setting and adds a
+         `colbert` multivector field to the abstracts config when
+         True.
+      C) MultiVectorConfig + MAX_SIM comparator are imported from
+         qdrant_client (a refactor that drops them would silently
+         break colbert retrieval later).
+      D) embedder.embed_abstract gates colbert output on the
+         setting and has a collection-introspection guard
+         (`_abstracts_collection_has_colbert`) that prevents crashes
+         when setting is True but the collection was created
+         pre-flip.
+      E) Embedder also asks bge-m3 for colbert_vecs only when the
+         setting is True — matters for throughput (colbert tokens
+         are computed alongside dense+sparse but returning them
+         has nonzero cost on long abstracts).
+    """
+    import inspect as _inspect
+
+    from sciknow.config import settings
+    from sciknow.storage import qdrant as qdrant_mod
+    from sciknow.ingestion import embedder as emb_mod
+
+    # A) setting exposed + default False
+    assert hasattr(settings, "enable_colbert_abstracts")
+    # Default must be False so existing installs don't start
+    # allocating disk space they didn't budget for.
+    from sciknow.config import Settings
+    assert Settings.model_fields["enable_colbert_abstracts"].default is False, (
+        "enable_colbert_abstracts default must be False for the "
+        "opt-in experiment — see roadmap 3.4.3"
+    )
+
+    # B) init_collections references the setting + a colbert entry
+    init_src = _inspect.getsource(qdrant_mod.init_collections)
+    assert "enable_colbert_abstracts" in init_src, (
+        "init_collections must consult settings.enable_colbert_abstracts"
+    )
+    assert '"colbert"' in init_src, (
+        "init_collections must add a `colbert` vector field to the "
+        "abstracts collection when the setting is True"
+    )
+    assert "MultiVectorConfig" in init_src, (
+        "init_collections must use MultiVectorConfig for the colbert "
+        "slot — a plain VectorParams without it would be single-vector"
+    )
+
+    # C) Qdrant client imports present
+    assert "MultiVectorConfig" in _inspect.getsource(qdrant_mod), (
+        "qdrant_client.MultiVectorConfig must be imported"
+    )
+    assert "MultiVectorComparator" in _inspect.getsource(qdrant_mod), (
+        "qdrant_client.MultiVectorComparator must be imported "
+        "(MAX_SIM is the late-interaction aggregation)"
+    )
+
+    # D) embed_abstract guards
+    emb_src = _inspect.getsource(emb_mod.embed_abstract)
+    assert "enable_colbert_abstracts" in emb_src, (
+        "embed_abstract must gate colbert output on the setting"
+    )
+    assert "_abstracts_collection_has_colbert" in emb_src, (
+        "embed_abstract must consult the per-process collection-"
+        "config cache — protects against the config-drift case "
+        "where the setting is True but the collection is pre-flip"
+    )
+    assert hasattr(emb_mod, "_abstracts_collection_has_colbert")
+    assert hasattr(emb_mod, "_warn_colbert_slot_missing_once")
+
+    # E) Embedder forwards `want_colbert` to bge-m3's
+    # return_colbert_vecs argument — the gating variable, not a
+    # literal False.
+    assert "return_colbert_vecs=want_colbert" in emb_src, (
+        "embed_abstract must pass `want_colbert` to bge-m3's "
+        "return_colbert_vecs arg — hard-coding False short-circuits "
+        "the whole Phase 1 wiring"
+    )
+
+
 def l1_phase54_6_226_caption_bench_cli_surface() -> None:
     """Phase 54.6.226 (roadmap 3.5.1) — caption quality audit CLI.
 
@@ -13707,6 +13794,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_225_refresh_includes_link_mentions,
     # Phase 54.6.226 — roadmap 3.5.1: caption quality bench CLI
     l1_phase54_6_226_caption_bench_cli_surface,
+    # Phase 54.6.227 — roadmap 3.4.3 Phase 1: ColBERT on abstracts
+    l1_phase54_6_227_colbert_abstracts_phase1,
 ]
 
 L2_TESTS: list[Callable] = [

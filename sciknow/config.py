@@ -126,6 +126,19 @@ class Settings(BaseSettings):
     # just without that source).
     core_api_key: str | None = None
 
+    # Phase 54.6.227 (roadmap 3.4.3 Phase 1) — enable ColBERT late-
+    # interaction vectors on the abstracts collection. bge-m3
+    # produces colbert tokens in the same forward pass as dense +
+    # sparse, so the extra compute at embed time is ~0; the
+    # tradeoff is storage: one abstract produces ~150 token vectors
+    # × 1024 dim ≈ 600 kB, so a 1k-abstract corpus balloons by ~600
+    # MB on the abstracts collection. Default False — opt-in per the
+    # roadmap's "cheap experiment" framing. When True, the abstracts
+    # collection is created with a `colbert` multi-vector field and
+    # `embed_abstract()` populates it. Existing pre-flip abstracts
+    # stay dense-only until re-embedded.
+    enable_colbert_abstracts: bool = False
+
     # PDF converter backend.
     #
     # Values:

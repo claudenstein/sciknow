@@ -24,6 +24,8 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
     HnswConfigDiff,
+    MultiVectorComparator,
+    MultiVectorConfig,
     OptimizersConfigDiff,
     PayloadSchemaType,
     QuantizationSearchParams,
@@ -210,15 +212,35 @@ def init_collections(client: QdrantClient | None = None) -> None:
             client.create_payload_index(papers_coll, field, schema)
 
     if abstracts_coll not in existing:
+        # Phase 54.6.227 (roadmap 3.4.3 Phase 1) — optional ColBERT
+        # late-interaction vectors on the abstracts collection.
+        # Enabled via settings.enable_colbert_abstracts (default
+        # False so existing installs stay dense+sparse-only). Stored
+        # on disk because colbert multi-vectors are ~600 kB per
+        # abstract and would balloon RAM for a multi-thousand-paper
+        # corpus; ef/m stay default because MAX_SIM late-interaction
+        # reranks top-k candidates the dense vector already
+        # surfaced, so HNSW quality on the colbert graph isn't load-
+        # bearing.
+        abstracts_vec_cfg: dict = {
+            "dense": VectorParams(
+                size=settings.embedding_dim,
+                distance=Distance.COSINE,
+                on_disk=False,
+            ),
+        }
+        if settings.enable_colbert_abstracts:
+            abstracts_vec_cfg["colbert"] = VectorParams(
+                size=settings.embedding_dim,
+                distance=Distance.COSINE,
+                on_disk=True,
+                multivector_config=MultiVectorConfig(
+                    comparator=MultiVectorComparator.MAX_SIM,
+                ),
+            )
         client.create_collection(
             collection_name=abstracts_coll,
-            vectors_config={
-                "dense": VectorParams(
-                    size=settings.embedding_dim,
-                    distance=Distance.COSINE,
-                    on_disk=False,
-                )
-            },
+            vectors_config=abstracts_vec_cfg,
             sparse_vectors_config={
                 "sparse": SparseVectorParams(),
             },

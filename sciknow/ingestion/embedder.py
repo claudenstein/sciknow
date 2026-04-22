@@ -270,19 +270,47 @@ def embed_abstract(
     payload_base: dict,
     qdrant_client: QdrantClient,
 ) -> UUID | None:
-    """Embed the paper abstract into the 'abstracts' collection."""
+    """Embed the paper abstract into the 'abstracts' collection.
+
+    Phase 54.6.227 (roadmap 3.4.3 Phase 1) — when
+    ``settings.enable_colbert_abstracts`` is True, also requests
+    ColBERT token vectors from bge-m3 and writes them to the
+    ``colbert`` multi-vector field on the point. The field has to
+    be declared on the collection at creation time (see
+    ``qdrant.init_collections``) — embedding into a collection that
+    was created pre-flip with this setting True is a no-op on the
+    colbert slot and only the dense + sparse halves populate.
+    """
     if not abstract_text.strip():
         return None
 
+    from sciknow.config import settings as _s
+
     model = _get_model()
+    want_colbert = bool(_s.enable_colbert_abstracts)
     output = model.encode(
         [abstract_text],
         batch_size=1,
         max_length=8192,
         return_dense=True,
         return_sparse=True,
-        return_colbert_vecs=False,
+        return_colbert_vecs=want_colbert,
     )
+
+    vec_payload: dict = {
+        "dense": output["dense_vecs"][0].tolist(),
+        "sparse": _to_sparse(output["lexical_weights"][0]),
+    }
+    if want_colbert:
+        # bge-m3 returns colbert vecs as a list of np.ndarrays, one
+        # per token. Qdrant multi-vector expects list[list[float]].
+        colbert_vecs = output.get("colbert_vecs") or []
+        if colbert_vecs and len(colbert_vecs) > 0:
+            first = colbert_vecs[0]
+            if _abstracts_collection_has_colbert(qdrant_client):
+                vec_payload["colbert"] = [v.tolist() for v in first]
+            else:
+                _warn_colbert_slot_missing_once()
 
     point_id = uuid4()
     qdrant_client.upsert(
@@ -290,10 +318,7 @@ def embed_abstract(
         points=[
             PointStruct(
                 id=str(point_id),
-                vector={
-                    "dense": output["dense_vecs"][0].tolist(),
-                    "sparse": _to_sparse(output["lexical_weights"][0]),
-                },
+                vector=vec_payload,
                 payload={
                     **payload_base,
                     "document_id": str(document_id),
@@ -303,3 +328,50 @@ def embed_abstract(
         ],
     )
     return point_id
+
+
+# Phase 54.6.227 (roadmap 3.4.3 Phase 1) — guard against the
+# config-drift case where `enable_colbert_abstracts=True` but the
+# collection was created pre-flip (dense+sparse only). Without this
+# the upsert would crash per-embed with "unknown vector name
+# 'colbert'". The check caches its result per-process so we pay one
+# get_collection() call at startup, not per embed. Users who flip
+# the setting on an existing install see one warning and then clean
+# dense+sparse embeds until they reset the abstracts collection.
+_COLBERT_SLOT_CACHE: dict[str, bool] = {}
+_COLBERT_WARNED: bool = False
+
+
+def _abstracts_collection_has_colbert(qdrant_client: QdrantClient) -> bool:
+    """True when the abstracts collection carries a `colbert` named
+    vector. Cached per-process, refreshed on `db init` since that
+    recreates the collection."""
+    key = ABSTRACTS_COLLECTION
+    if key in _COLBERT_SLOT_CACHE:
+        return _COLBERT_SLOT_CACHE[key]
+    try:
+        info = qdrant_client.get_collection(key)
+        vectors = info.config.params.vectors or {}
+        has = "colbert" in vectors
+    except Exception:
+        has = False
+    _COLBERT_SLOT_CACHE[key] = has
+    return has
+
+
+def _warn_colbert_slot_missing_once() -> None:
+    global _COLBERT_WARNED
+    if _COLBERT_WARNED:
+        return
+    _COLBERT_WARNED = True
+    import warnings
+    warnings.warn(
+        "ENABLE_COLBERT_ABSTRACTS=True but the abstracts Qdrant "
+        "collection was created without a `colbert` multi-vector "
+        "slot. New embeds will be dense+sparse only. To enable "
+        "colbert: `sciknow db reset` + `sciknow db init` (destructive "
+        "— recreates every collection) or delete just the abstracts "
+        "collection manually and re-run `db init`.",
+        UserWarning,
+        stacklevel=2,
+    )

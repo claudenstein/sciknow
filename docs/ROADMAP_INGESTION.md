@@ -787,7 +787,7 @@ Scoring: **Impact** (H/M/L) × **Effort** (H/M/L) → **Verdict**.
 | 3.0.1 | Expand OA resolver set (Europe PMC + CORE + OSF) | C | H | M | **Shipped 54.6.216 + 54.6.217** | OSF Preprints (54.6.216) + CORE (54.6.217) + Europe PMC (54.6.51) + HAL + Zenodo. Closed |
 | 3.1.1 | Routed converter backend (heuristic gate) | S, Q | H | M | **Superseded by 3.1.6** | See §3.1.1 detail + §3.1.6 rationale |
 | 3.3.1 | Semantic chunking within section | Q | M | M | **Next Review** | Unblocked by 3.1.6 merged-paragraph output. Benchmark vs current MRR before committing |
-| 3.4.3 | ColBERT late-interaction on abstracts collection | Q | M | M | **Next Review** | Cheap pilot; storage cost is the gate; independent of 3.1.6 |
+| 3.4.3 | ColBERT late-interaction on abstracts collection | Q | M | M | **Phase 1 shipped 54.6.227** | Infrastructure (setting + collection config + embed-time persistence + guard); Phase 2 wires retrieval rerank |
 | 3.6.1 | Citation-purpose classification | Q | M | M | **Next Review** | Port ACL-ARC / SciCite classifier; independent of 3.1.6 |
 | 3.5.1 | Caption quality audit + retry pass | Q, O | M | L | **Shipped 54.6.226** | `sciknow db caption-bench` — three-axis rubric (accuracy / hallucination / usefulness), LLM text judge or human, JSONL per run. Third member of bench harness trio |
 | 3.8.1 | Hierarchical BERTopic clusters | C, Q | M | L | **Investigate** | Check: does hierarchy reveal genuine sub-topics or over-split? |
