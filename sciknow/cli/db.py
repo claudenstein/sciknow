@@ -1373,6 +1373,8 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     book_act = snap.get("book_activity") or {}
     bench_delta = snap.get("bench_quality_delta") or {}
     gpu_trend = snap.get("gpu_trend") or {}
+    # 54.6.238 — cross-process pulses
+    refresh_pulse = snap.get("refresh_pulse") or None
 
     # ── Small helpers ───────────────────────────────────────────────
 
@@ -1480,6 +1482,44 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
             f"{stuck.get('pending_docs', 0)} pending",
             style=C_ERR,
         )
+    # Phase 54.6.238 — live refresh progress banner. When the pulse
+    # is fresh, the header gets a "refresh step X/Y: <label> · Ne"
+    # line so the user sees which step is running AND how long it's
+    # taken. Stale pulse → show with a red STALE tag (refresh process
+    # died but didn't clear the file).
+    if refresh_pulse:
+        step_idx = refresh_pulse.get("step_idx", 0)
+        step_total = refresh_pulse.get("step_total", 0)
+        label = (refresh_pulse.get("step_label") or "")[:32]
+        step_elapsed = refresh_pulse.get("step_elapsed_s", 0) or 0
+        elapsed = refresh_pulse.get("elapsed_s", 0) or 0
+        budget = refresh_pulse.get("budget_s")
+
+        def _fmt_s(s):
+            if s >= 3600:
+                return f"{s / 3600:.1f}h"
+            if s >= 60:
+                return f"{s / 60:.1f}m"
+            return f"{s:.0f}s"
+
+        header_text.append("   ", style=C_DIM)
+        if refresh_pulse.get("is_stale"):
+            header_text.append("refresh STALE ", style=C_ERR)
+        else:
+            header_text.append("refresh ", style=C_ACCENT)
+        header_text.append(
+            f"{step_idx}/{step_total} {label}  "
+            f"step {_fmt_s(step_elapsed)}  total {_fmt_s(elapsed)}",
+            style=C_VALUE,
+        )
+        if budget:
+            pct = (elapsed / budget) * 100
+            bc = C_WARN if pct > 80 else C_DIM
+            header_text.append(
+                f"  / budget {_fmt_s(budget)} ({pct:.0f}%)",
+                style=bc,
+            )
+
     # Phase 54.6.236 — bench freshness indicator. Shows a compact
     # "bench Nd" marker, green when fresh (< 7d), yellow 7-14d, red
     # > 14d. Silent when no snapshots exist (clean installs).

@@ -5886,12 +5886,45 @@ async def api_monitor(days: int = 14):
     5s. Read-only; safe during active ingestion.
 
     Shape documented in ``sciknow/core/monitor.py``.
+
+    Phase 54.6.238 — the web-process in-memory ``_jobs`` dict and
+    the refresh pulse file are both added to the snapshot here so
+    the modal can render live LLM-job + refresh progress without
+    opening extra endpoints.
     """
+    import time as _time
     from sciknow.core.monitor import collect_monitor_snapshot
+    from sciknow.core.project import get_active_project
+    from sciknow.core.pulse import read_pulse
     snap = collect_monitor_snapshot(
         throughput_days=max(1, int(days)),
         llm_usage_days=max(1, int(days)),
     )
+    # Active web jobs — same process, direct read of _jobs dict.
+    active: list[dict] = []
+    now = _time.time()
+    with _job_lock:
+        for jid, j in _jobs.items():
+            if j.get("status") not in ("running", "starting"):
+                continue
+            started = j.get("started_at") or now
+            active.append({
+                "id": jid[:8],
+                "type": j.get("task_desc") or j.get("job_type") or "?",
+                "model": j.get("model_name") or None,
+                "tokens": j.get("tokens", 0),
+                "elapsed_s": max(0, now - started),
+                "target_words": j.get("target_words"),
+            })
+    snap["active_jobs"] = active
+    # Refresh pulse — cross-process signal from `sciknow refresh`.
+    try:
+        active_project = get_active_project()
+        snap["refresh_pulse"] = read_pulse(
+            active_project.data_dir, "refresh",
+        )
+    except Exception:
+        snap["refresh_pulse"] = None
     return JSONResponse(snap)
 
 

@@ -811,6 +811,17 @@ def _qdrant_disk_estimate(collection_info: dict,
     return bytes_total // (1024 * 1024)
 
 
+def _read_refresh_pulse(data_dir: Path | None) -> dict | None:
+    """Phase 54.6.238 — read the `sciknow refresh` pulse file.
+    Returns None when no refresh is in flight or the pulse is
+    ancient (`core.pulse` handles the staleness cutoff)."""
+    try:
+        from sciknow.core.pulse import read_pulse
+        return read_pulse(data_dir, "refresh")
+    except Exception:
+        return None
+
+
 def _host_load() -> dict:
     """Phase 54.6.234 — system RAM + load average from /proc.
 
@@ -1469,6 +1480,13 @@ def collect_monitor_snapshot(
         "corpus_growth": growth,
         "book_activity": book_act,
         "bench_quality_delta": _bench_quality_delta(),
+        # 54.6.238 — cross-process pulse from `sciknow refresh`.
+        # Web process also overrides `active_jobs` at endpoint time;
+        # from the CLI it stays an empty list.
+        "refresh_pulse": _read_refresh_pulse(
+            Path(data_dir) if data_dir else None
+        ),
+        "active_jobs": [],
         "llm": {
             "usage_last_days": llm_usage,
             "usage_window_days": llm_usage_days,

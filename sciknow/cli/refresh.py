@@ -463,11 +463,33 @@ def refresh(
         console.print("[dim]Dry run — nothing executed.[/dim]")
         return
 
+    # Phase 54.6.238 — write a pulse file the monitor can read to
+    # render live refresh progress. Best-effort; never blocks.
+    from sciknow.core.pulse import write_pulse, clear_pulse
+
+    def _pulse(step_idx: int, label: str, step_t0: float | None):
+        write_pulse(active.data_dir, "refresh", {
+            "step_idx": step_idx,
+            "step_total": len(steps),
+            "step_label": label,
+            "elapsed_s": time.monotonic() - t_total,
+            "step_elapsed_s": (
+                (time.monotonic() - step_t0) if step_t0 else 0
+            ),
+            "budget_s": budget_seconds,
+            "done": n_done,
+            "failed": n_failed,
+        })
+
     t_total = time.monotonic()
     n_done = 0
     n_failed = 0
     n_budget_skipped = 0
+    step_idx = 0
     for label, argv, optional in steps:
+        step_idx += 1
+        step_t0 = time.monotonic()
+        _pulse(step_idx, label, step_t0)
         # Budget gate runs BEFORE the step, not after, so the user
         # always gets a clean "stopped before X" message rather than
         # "already ran X and then realised the budget was blown."
@@ -523,6 +545,8 @@ def refresh(
     # every planned step ran; optional warnings don't invalidate the
     # window.
     _write_last_refresh(active.data_dir)
+    # Phase 54.6.238 — refresh completed cleanly; drop the pulse.
+    clear_pulse(active.data_dir, "refresh")
     console.print(
         f"[bold green]✓ Refresh complete:[/bold green] "
         f"{n_done}/{len(steps)} step(s) in {t_str}"
