@@ -1362,6 +1362,12 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     mq = snap.get("meta_quality") or {}
     year_hist = snap.get("year_histogram") or []
     embed_cov = snap.get("embeddings_coverage") or {}
+    models = snap.get("model_assignments") or {}
+    cost = snap.get("cost_totals") or {}
+    vcov = snap.get("visuals_coverage") or {}
+    raptor = snap.get("raptor_shape") or {}
+    dupe_hashes = snap.get("duplicate_hashes", 0) or 0
+    bench_fresh = snap.get("bench_freshness") or {}
 
     # ── Small helpers ───────────────────────────────────────────────
 
@@ -1469,6 +1475,25 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
             f"{stuck.get('pending_docs', 0)} pending",
             style=C_ERR,
         )
+    # Phase 54.6.236 — bench freshness indicator. Shows a compact
+    # "bench Nd" marker, green when fresh (< 7d), yellow 7-14d, red
+    # > 14d. Silent when no snapshots exist (clean installs).
+    bf_age = bench_fresh.get("newest_age_days")
+    if bf_age is not None:
+        if bf_age < 1:
+            bf_colour = C_OK
+            bf_str = f"bench {int(bf_age * 24)}h"
+        elif bf_age < 7:
+            bf_colour = C_OK
+            bf_str = f"bench {bf_age:.0f}d"
+        elif bf_age < 14:
+            bf_colour = C_WARN
+            bf_str = f"bench {bf_age:.0f}d STALE"
+        else:
+            bf_colour = C_ERR
+            bf_str = f"bench {bf_age:.0f}d STALE"
+        header_text.append(f"  ·  ", style=C_DIM)
+        header_text.append(bf_str, style=bf_colour)
     header_panel = Panel(
         Align.left(header_text, vertical="middle"),
         border_style=C_BORDER, box=BOX, padding=(0, 1),
@@ -1632,6 +1657,16 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
             Text(lbl, style=colour),
         )
 
+    # Phase 54.6.236 — file-hash duplicate detector. Should always
+    # be 0 (UNIQUE constraint on documents.file_hash), but loud if
+    # it ever isn't because that implies a schema-drift bug.
+    if corpus.get("documents_complete", 0) > 0:
+        dupe_colour = C_OK if dupe_hashes == 0 else C_ERR
+        corpus_tbl.add_row(
+            Text("dupe hashes", style=C_DIM),
+            Text(str(dupe_hashes), style=dupe_colour),
+        )
+
     corpus_panel = Panel(
         corpus_tbl, title="[bold]corpus · ingest · quality[/bold]",
         title_align="left",
@@ -1752,6 +1787,34 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     pg_row.add_column(justify="right", style=C_VALUE)
     pg_row.add_row("pg db", _fmt_mb(pg_mb))
     gpu_tbl.add_row(pg_row)
+
+    # Phase 54.6.236 — model assignments per role. Surfaces the
+    # .env-configured mapping ("which LLM is autowrite using right
+    # now?"). Compact two-col: role → model (trimmed to 28 chars).
+    if models:
+        gpu_tbl.add_row("")
+        gpu_tbl.add_row(Text("models", style=C_DIM))
+        rows_to_show = [
+            ("llm", models.get("llm_main")),
+            ("fast", models.get("llm_fast") if
+                     models.get("llm_fast") != models.get("llm_main")
+                     else None),
+            ("vlm-pro", models.get("mineru_vlm_model")),
+            ("embedder", models.get("embedder")),
+            ("reranker", models.get("reranker")),
+        ]
+        for role, name in rows_to_show:
+            if not name:
+                continue
+            display = str(name)
+            # Drop `BAAI/` / `opendatalab/` org prefixes for width
+            if "/" in display:
+                display = display.split("/", 1)[1]
+            row = Table.grid(padding=0, expand=True)
+            row.add_column(width=9, style=C_DIM)
+            row.add_column(ratio=1, style=C_ACCENT, overflow="fold")
+            row.add_row(role, display[:32])
+            gpu_tbl.add_row(row)
 
     gpu_panel = Panel(
         gpu_tbl, title="[bold]gpu · models · storage[/bold]",
@@ -1932,6 +1995,79 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
             )
             timing_tbl.add_row("", "", err_row, "", "")
 
+    # Phase 54.6.236 — system summary footer bundling
+    # cost + visuals coverage + RAPTOR shape. Uses empty space in
+    # the pipeline panel rather than adding a new layout row.
+    footer_lines: list[Text] = []
+
+    if cost.get("calls"):
+        days = cost.get("window_days", 30)
+        line = Text()
+        line.append(f"llm {days}d  ", style=C_DIM)
+        line.append(f"{cost['tokens']:,}t", style=C_VALUE)
+        line.append(f" / {cost['seconds']:.0f}s", style=C_DIM)
+        line.append(f" / {cost['calls']:,} calls", style=C_DIM)
+        line.append(f" across {cost['models']} model(s)", style=C_DIM)
+        footer_lines.append(line)
+
+    if vcov.get("figures_total") or vcov.get("charts_total") \
+            or vcov.get("equations_total") or vcov.get("tables_total"):
+        def _cov_frag(label: str, done: int, total: int) -> Text:
+            if total == 0:
+                return Text("")
+            pct = (done / total * 100) if total else 0
+            colour = (
+                C_OK if pct >= 95 else
+                C_WARN if pct >= 50 else C_DIM
+            )
+            t = Text()
+            t.append(f"{label} ", style=C_DIM)
+            t.append(f"{done}/{total}", style=colour)
+            t.append(f" ({pct:.0f}%)  ", style=C_DIM)
+            return t
+
+        cov_line = Text()
+        cov_line.append("visuals  ", style=C_DIM)
+        cov_line += _cov_frag(
+            "figs capt", vcov["figures_captioned"], vcov["figures_total"]
+        )
+        cov_line += _cov_frag(
+            "charts capt", vcov["charts_captioned"],
+            vcov["charts_total"],
+        )
+        cov_line += _cov_frag(
+            "eqs parap", vcov["equations_paraphrased"],
+            vcov["equations_total"],
+        )
+        cov_line += _cov_frag(
+            "tbls parsed", vcov["tables_parsed"], vcov["tables_total"]
+        )
+        if vcov.get("mentions_total_eligible"):
+            cov_line += _cov_frag(
+                "mentions", vcov["mentions_linked"],
+                vcov["mentions_total_eligible"],
+            )
+        footer_lines.append(cov_line)
+
+    if raptor.get("has_tree"):
+        rline = Text()
+        rline.append("raptor   ", style=C_DIM)
+        rline.append(
+            f"{raptor['total_nodes']} nodes", style=C_VALUE,
+        )
+        levels_str = " · ".join(
+            f"L{l['level']}:{l['n']}" for l in raptor["levels"]
+        )
+        rline.append(f"  {levels_str}", style=C_DIM)
+        footer_lines.append(rline)
+
+    if footer_lines:
+        timing_tbl.add_row("", "", "", "", "")
+        for line in footer_lines:
+            # Render in the "bar" column of the timing table — it's
+            # the widest, so the footer lines wrap cleanly.
+            timing_tbl.add_row("", "", line, "", "")
+
     timing_panel = Panel(
         timing_tbl,
         title="[bold]pipeline stages[/bold] "
@@ -1981,10 +2117,11 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     layout.split_column(
         Layout(header_panel, name="header", size=3),
         # 54.6.234 → 22 (host load + quality strip); 54.6.235 → 24
-        # to carry the embeddings-coverage row + topic clusters +
-        # year sparkline without clipping on narrower terms.
-        Layout(name="top", size=24),
-        Layout(timing_panel, name="timing", size=14),
+        # (embeds + topics + year sparkline); 54.6.236 → 26 (adds
+        # dupe-hash row + model-assignments block). Activity is
+        # still ratio=1 so tall terminals absorb the growth.
+        Layout(name="top", size=26),
+        Layout(timing_panel, name="timing", size=16),
         Layout(activity_panel, name="activity", ratio=1,
                minimum_size=8),
     )

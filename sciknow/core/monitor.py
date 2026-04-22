@@ -233,6 +233,220 @@ def _pipeline_throughput(session, days: int = 14) -> list[dict]:
     ]
 
 
+def _model_assignments() -> dict:
+    """Phase 54.6.236 — which LLM each stage uses.
+
+    Reads from `Settings` (no DB hit). Surfaces the model-per-task
+    mapping that the user configures via .env — useful for "wait,
+    which model is autowrite using right now?" moments.
+    """
+    try:
+        from sciknow.config import settings
+        return {
+            "llm_main": settings.llm_model or None,
+            "llm_fast": settings.llm_fast_model or None,
+            "caption_vlm": (
+                getattr(settings, "caption_vlm_model", None)
+                or getattr(settings, "vlm_model", None)
+            ),
+            "embedder": settings.embedding_model or None,
+            "reranker": (
+                getattr(settings, "reranker_model", None)
+            ),
+            "pdf_backend": getattr(settings, "pdf_converter_backend", None),
+            "mineru_vlm_backend": getattr(
+                settings, "mineru_vlm_backend", None
+            ),
+            "mineru_vlm_model": getattr(settings, "mineru_vlm_model", None),
+        }
+    except Exception:
+        return {}
+
+
+def _llm_cost_totals(session, days: int = 30) -> dict:
+    """Phase 54.6.236 — trailing LLM spend summary.
+
+    Returns total tokens, total seconds, and distinct model count
+    from `llm_usage_log` in the trailing window. Doesn't apply a
+    dollar rate (that depends on the deployment; ours runs local
+    Ollama, so tokens are "cost in GPU-time" not "cost in $").
+    """
+    from sqlalchemy import text
+    from datetime import datetime, timedelta, timezone
+    out = {
+        "tokens": 0, "seconds": 0.0, "calls": 0, "models": 0,
+        "window_days": days,
+    }
+    since_iso = (
+        datetime.now(timezone.utc) - timedelta(days=days)
+    ).isoformat()
+    try:
+        row = session.execute(text("""
+            SELECT COALESCE(SUM(tokens), 0),
+                   COALESCE(SUM(duration_seconds), 0),
+                   COUNT(*),
+                   COUNT(DISTINCT model_name)
+            FROM llm_usage_log
+            WHERE started_at >= CAST(:since AS timestamptz)
+        """), {"since": since_iso}).fetchone()
+        if row:
+            out["tokens"] = int(row[0] or 0)
+            out["seconds"] = float(row[1] or 0.0)
+            out["calls"] = int(row[2] or 0)
+            out["models"] = int(row[3] or 0)
+    except Exception:
+        pass
+    return out
+
+
+def _visuals_coverage(session) -> dict:
+    """Phase 54.6.236 — per-stage coverage on the visuals pipeline.
+
+    Answers "did caption-visuals actually run on all the figures?
+    did paraphrase-equations cover them all? which tables are still
+    unparsed?" — the kind of thing the refresh command is supposed
+    to handle idempotently, but worth monitoring because a stage
+    that silently skipped work would otherwise go unnoticed.
+    """
+    from sqlalchemy import text
+    out: dict = {
+        "figures_total": 0, "figures_captioned": 0,
+        "charts_total": 0, "charts_captioned": 0,
+        "equations_total": 0, "equations_paraphrased": 0,
+        "tables_total": 0, "tables_parsed": 0,
+        "mentions_linked": 0, "mentions_total_eligible": 0,
+    }
+    try:
+        rows = session.execute(text("""
+            SELECT kind,
+                   COUNT(*),
+                   SUM(CASE WHEN ai_caption IS NOT NULL
+                             AND length(ai_caption) >= 20
+                            THEN 1 ELSE 0 END)
+            FROM visuals
+            GROUP BY kind
+        """)).fetchall()
+        for r in rows:
+            kind = r[0]
+            total = int(r[1] or 0)
+            captioned = int(r[2] or 0)
+            if kind == "figure":
+                out["figures_total"] = total
+                out["figures_captioned"] = captioned
+            elif kind == "chart":
+                out["charts_total"] = total
+                out["charts_captioned"] = captioned
+            elif kind == "equation":
+                out["equations_total"] = total
+                # For equations, "paraphrased" = ai_caption populated.
+                out["equations_paraphrased"] = captioned
+            elif kind == "table":
+                out["tables_total"] = total
+    except Exception:
+        pass
+    # table_summary is the 54.6.106 parse-tables signal; different
+    # column than ai_caption.
+    try:
+        out["tables_parsed"] = int(session.execute(text("""
+            SELECT COUNT(*) FROM visuals
+            WHERE kind = 'table'
+              AND table_summary IS NOT NULL
+              AND length(table_summary) >= 20
+        """)).scalar() or 0)
+    except Exception:
+        pass
+    # Mention-paragraph linkage — 54.6.138
+    try:
+        total_eligible = int(session.execute(text("""
+            SELECT COUNT(*) FROM visuals
+            WHERE figure_num IS NOT NULL
+        """)).scalar() or 0)
+        linked = int(session.execute(text("""
+            SELECT COUNT(*) FROM visuals
+            WHERE figure_num IS NOT NULL
+              AND mention_paragraphs IS NOT NULL
+        """)).scalar() or 0)
+        out["mentions_total_eligible"] = total_eligible
+        out["mentions_linked"] = linked
+    except Exception:
+        pass
+    return out
+
+
+def _raptor_tree_shape(session) -> dict:
+    """Phase 54.6.236 — shape of the RAPTOR hierarchical tree.
+
+    Queries the topic_clusters/raptor_nodes tables if they exist;
+    gracefully returns {} on schema drift."""
+    from sqlalchemy import text
+    out: dict = {"total_nodes": 0, "levels": [], "has_tree": False}
+    try:
+        # Levels breakdown — the table name in sciknow is
+        # `raptor_nodes` (54.6.70-era). Each node carries a `level`.
+        rows = session.execute(text("""
+            SELECT level, COUNT(*) FROM raptor_nodes
+            GROUP BY level ORDER BY level
+        """)).fetchall()
+        if rows:
+            out["has_tree"] = True
+            out["levels"] = [
+                {"level": int(r[0]), "n": int(r[1])} for r in rows
+            ]
+            out["total_nodes"] = sum(l["n"] for l in out["levels"])
+    except Exception:
+        pass
+    return out
+
+
+def _duplicate_hashes(session) -> int:
+    """Phase 54.6.236 — count of file_hash collisions in documents.
+
+    Should always be 0 on a healthy install (file_hash has a UNIQUE
+    constraint, so collisions shouldn't be able to persist), but
+    worth tracking as a belt-and-braces drift detector that catches
+    schema migration bugs."""
+    from sqlalchemy import text
+    try:
+        return int(session.execute(text("""
+            SELECT COALESCE(SUM(c - 1), 0) FROM (
+                SELECT COUNT(*) AS c FROM documents
+                GROUP BY file_hash HAVING COUNT(*) > 1
+            ) t
+        """)).scalar() or 0)
+    except Exception:
+        return 0
+
+
+def _bench_freshness(data_dir: Path | None) -> dict:
+    """Phase 54.6.236 — age of the newest bench-snapshot.
+
+    Reads the bench/snapshots/ directory (populated by
+    `sciknow bench-snapshot`, shipped in 54.6.224) and reports
+    age-in-days of the most recent file. Lets the dashboard show
+    "last bench 2d ago" and flag stale baselines (>14d) in red —
+    a signal that a regression might have crept in since the last
+    measurement.
+    """
+    import time as _time
+    out = {"newest_age_days": None, "count": 0}
+    if not data_dir:
+        return out
+    snap_dir = Path(data_dir) / "bench" / "snapshots"
+    if not snap_dir.exists():
+        return out
+    try:
+        snaps = list(snap_dir.glob("*.json"))
+        if not snaps:
+            return out
+        out["count"] = len(snaps)
+        newest_mtime = max(p.stat().st_mtime for p in snaps)
+        age_s = _time.time() - newest_mtime
+        out["newest_age_days"] = age_s / 86400
+    except Exception:
+        pass
+    return out
+
+
 def _year_histogram(session, since_year: int = 1980) -> list[dict]:
     """Phase 54.6.235 — papers-per-year from `since_year` through now.
     Zero-filled year-by-year so the sparkline shows continuity."""
@@ -886,6 +1100,11 @@ def collect_monitor_snapshot(
         # Phase 54.6.235 — year histogram + embeddings coverage
         year_hist = _year_histogram(session)
         embed_cov = _embeddings_coverage(session)
+        # Phase 54.6.236 — config + coverage + cost + tree shape
+        cost_totals = _llm_cost_totals(session)
+        visuals_cov = _visuals_coverage(session)
+        raptor_shape = _raptor_tree_shape(session)
+        dupe_hashes = _duplicate_hashes(session)
 
     return {
         "project": project,
@@ -913,6 +1132,15 @@ def collect_monitor_snapshot(
         # 54.6.235 additions
         "year_histogram": year_hist,
         "embeddings_coverage": embed_cov,
+        # 54.6.236 additions
+        "model_assignments": _model_assignments(),
+        "cost_totals": cost_totals,
+        "visuals_coverage": visuals_cov,
+        "raptor_shape": raptor_shape,
+        "duplicate_hashes": dupe_hashes,
+        "bench_freshness": _bench_freshness(
+            Path(data_dir) if data_dir else None
+        ),
         "llm": {
             "usage_last_days": llm_usage,
             "usage_window_days": llm_usage_days,
