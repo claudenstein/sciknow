@@ -11853,6 +11853,64 @@ def l1_phase54_6_134_agentic_coverage_uses_reranker() -> None:
     )
 
 
+def l1_phase54_6_216_osf_preprints_resolver_wired() -> None:
+    """Phase 54.6.216 (roadmap 3.0.1 partial) — OSF Preprints resolver.
+
+    A net-new OA source that covers EarthArXiv / bioRxiv / medRxiv /
+    SocArXiv / PsyArXiv through one unified OSF v2 API endpoint. The
+    roadmap entry specifically called out EarthArXiv as the gap that
+    would have saved ~40 papers on the global-cooling corpus in the
+    54.6.51 expand pass.
+
+    Offline-only surface checks (no OSF API call — that's L3):
+
+      A) `find_osf_preprints_pdf_url` exists in the downloader
+         module with signature (doi: str) -> str | None.
+      B) The resolver is wired into the `_gather_candidate_urls`
+         cascade with a _LookupSpec carrying the name
+         "osf_preprints" (grepped in source because the spec list
+         is runtime-built from the DOI conditional).
+      C) The module docstring mentions OSF Preprints so operators
+         reading the file's "Sources probed" list learn the resolver
+         is available.
+    """
+    import inspect as _inspect
+    from sciknow.ingestion import downloader as dl
+
+    # A) function surface
+    assert hasattr(dl, "find_osf_preprints_pdf_url"), (
+        "downloader.find_osf_preprints_pdf_url missing — Phase 54.6.216"
+    )
+    sig = _inspect.signature(dl.find_osf_preprints_pdf_url)
+    assert "doi" in sig.parameters, (
+        "find_osf_preprints_pdf_url must accept `doi: str`"
+    )
+
+    # B) wired into the cascade
+    gather_src = _inspect.getsource(dl._gather_candidate_urls)
+    assert '_LookupSpec("osf_preprints"' in gather_src, (
+        "_gather_candidate_urls must include an osf_preprints _LookupSpec"
+    )
+    assert "find_osf_preprints_pdf_url" in gather_src, (
+        "_gather_candidate_urls must reference find_osf_preprints_pdf_url"
+    )
+    # Placed between HAL and Zenodo (priority 7 slot) — confirm by
+    # checking the source order.
+    hal_pos = gather_src.find('_LookupSpec("hal"')
+    osf_pos = gather_src.find('_LookupSpec("osf_preprints"')
+    zenodo_pos = gather_src.find('_LookupSpec("zenodo"')
+    assert hal_pos < osf_pos < zenodo_pos, (
+        "OSF Preprints should sit between HAL and Zenodo in the cascade"
+    )
+
+    # C) module docstring advertises it
+    module_doc = dl.__doc__ or ""
+    assert "OSF Preprints" in module_doc, (
+        "downloader module docstring must advertise OSF Preprints so "
+        "operators reading the 'Sources probed' list find it"
+    )
+
+
 def l1_phase54_6_215_mineru_pipeline_deprecation_docs() -> None:
     """Phase 54.6.215 (roadmap 3.1.6 Phase 6) — `mineru` deprecation in docs.
 
@@ -12767,6 +12825,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_214_multiaspect_captions_surface,
     # Phase 54.6.215 — roadmap 3.1.6 Phase 6: deprecate `mineru` as user-visible backend
     l1_phase54_6_215_mineru_pipeline_deprecation_docs,
+    # Phase 54.6.216 — roadmap 3.0.1 partial: OSF Preprints umbrella resolver
+    l1_phase54_6_216_osf_preprints_resolver_wired,
 ]
 
 L2_TESTS: list[Callable] = [

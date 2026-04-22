@@ -71,33 +71,37 @@ Every proposal below is evaluated against at least one of:
 
 ### 3.0 Discovery + download (pre-ingest)
 
-#### 3.0.1 Expand OA resolver set (C)
+#### 3.0.1 Expand OA resolver set (C) — **partially shipped**
 
 The current download path for `sciknow db expand` etc. resolves OA
-PDFs through Crossref / Unpaywall / arXiv / Semantic Scholar. Known
-OA sources the expander **doesn't** consult today:
+PDFs through Crossref / Unpaywall / OpenAlex / Semantic Scholar /
+Europe PMC (54.6.51) / HAL / Zenodo / arXiv / Copernicus. As of
+54.6.216, **OSF Preprints** is added as one umbrella resolver
+covering EarthArXiv + bioRxiv + medRxiv + SocArXiv + PsyArXiv. That
+addresses the flagged ~40-paper gap on global-cooling.
 
-- **Europe PMC** — life-sciences + climate-adjacent, surprisingly rich
-  for geochemistry, glaciology, ecology.
-- **PubMed Central** — NIH-funded open-access. Partial overlap with
-  Europe PMC but stricter licensing clarity.
+Still gappy:
+
 - **CORE (core.ac.uk)** — aggregator of institutional repositories,
-  good recall for preprints that never hit arXiv.
-- **OSF preprints** — bioRxiv / medRxiv / EarthArXiv / SocArXiv, all
-  of which sit on OSF.
-- **bioRxiv / medRxiv direct API** — already partially via
-  OpenAlex/S2, but going direct catches newer items faster (hours
-  vs days).
+  good recall for preprints that never hit arXiv. Requires a free
+  API key. ~0.5 day to wire; medium yield expected.
+- **PubMed Central direct** — partial overlap with Europe PMC
+  (same underlying corpus); direct queries sometimes return a
+  better-quality PDF URL. Low-priority.
+- **bioRxiv / medRxiv direct API** — already covered via OSF
+  (54.6.216). Redundant.
 
-Expected win: cuts `pending_downloads` rows by ~15-25% on typical
-climate corpora; EarthArXiv alone would have saved ~40 papers on
-global-cooling in the 54.6.51 downloader pass.
+**Rough yield on climate corpus** (empirical estimate, to be
+measured post-re-ingest): Europe PMC and OSF Preprints together
+cover ~60% of the prior `pending_downloads` tail; CORE would pick
+up another ~10-15% (institutional repos catching non-arXiv
+preprints).
 
-Cost: ~1 day per resolver. API schemas differ; rate limits to respect.
-
-Open question: is the per-paper cost of querying 5 resolvers worth
-the yield vs. just accepting higher `pending_downloads` counts for
-manual retrieval?
+Open question (still): is the per-paper cost of querying N+1
+resolvers worth the yield vs. accepting higher `pending_downloads`
+counts for manual retrieval? Current cascade runs all resolvers
+in parallel (54.6.51), so the marginal wall-clock cost of each
+extra resolver is ~0 as long as the connection pool holds.
 
 #### 3.0.2 Delta velocity watcher tuning (O)
 
@@ -777,7 +781,7 @@ Scoring: **Impact** (H/M/L) × **Effort** (H/M/L) → **Verdict**.
 | 3.11.4 | Budget-aware refresh (`--budget-time`) | R, S | L | L | **Shipped 54.6.206** | `--budget-time=6h/30m` + Exit(3) for budget-hit |
 | 3.11.6 | Failure-mode clinic view | R, O | M | L | **Shipped 54.6.205** | `sciknow db failures` aggregates ingestion_jobs |
 | 3.1.6 | Full migration to MinerU 2.5-Pro via vLLM | Q, C, R | H | M | **Ship (in progress)** | 2026-04-22: replaces 3.1.1. vLLM systemd service; auto-dispatch fallback; full re-ingest |
-| 3.0.1 | Expand OA resolver set (Europe PMC + CORE + OSF) | C | H | M | **Next Review** | Queued for evaluation after 3.1.6 lands. Pilot with Europe PMC first; measure yield lift |
+| 3.0.1 | Expand OA resolver set (Europe PMC + CORE + OSF) | C | H | M | **Partially shipped 54.6.216** | OSF Preprints added (EarthArXiv + bioRxiv + medRxiv + SocArXiv). Europe PMC was already in (54.6.51). CORE still pending |
 | 3.1.1 | Routed converter backend (heuristic gate) | S, Q | H | M | **Superseded by 3.1.6** | See §3.1.1 detail + §3.1.6 rationale |
 | 3.3.1 | Semantic chunking within section | Q | M | M | **Next Review** | Unblocked by 3.1.6 merged-paragraph output. Benchmark vs current MRR before committing |
 | 3.4.3 | ColBERT late-interaction on abstracts collection | Q | M | M | **Next Review** | Cheap pilot; storage cost is the gate; independent of 3.1.6 |

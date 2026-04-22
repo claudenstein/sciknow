@@ -19,6 +19,12 @@ Sources probed for every candidate DOI, in rough priority order:
      index.
   7. **HAL** — French open archive (hal.science). Strong coverage of
      European physics + astronomy + some climate.
+  7b. **OSF Preprints** (Phase 54.6.216, roadmap 3.0.1) — umbrella
+     resolver for every OSF-hosted preprint server: EarthArXiv
+     (earth sciences — directly relevant for climate corpora),
+     bioRxiv / medRxiv, SocArXiv, PsyArXiv, etc. The OSF v2 API
+     exposes all of them through one filter-by-DOI endpoint, so one
+     resolver handles the whole family.
   8. **Zenodo** — CERN-hosted DOI-resolving OA repository; catches
      dataset-attached papers + some preprints.
 
@@ -299,6 +305,63 @@ def find_hal_pdf_url(doi: str) -> str | None:
         return None
 
 
+def find_osf_preprints_pdf_url(doi: str) -> str | None:
+    """Phase 54.6.216 (roadmap 3.0.1) — OSF Preprints umbrella resolver.
+
+    Covers every preprint server hosted on OSF:
+      * EarthArXiv   — earth sciences (climate, geophysics, glaciology,
+                       palaeoclimate). Directly relevant for the global-
+                       cooling corpus; the 54.6.51 audit flagged ~40
+                       papers that would have resolved here.
+      * bioRxiv      — life sciences.
+      * medRxiv      — clinical / epidemiological.
+      * SocArXiv     — social sciences (useful for climate-policy /
+                       environmental-economics adjacent papers).
+      * PsyArXiv, engrXiv, chemRxiv-OSF, AgriXiv, LawArXiv, …
+
+    OSF exposes a unified Preprints API at api.osf.io/v2/preprints/;
+    filter by DOI and follow the primary_file relationship to the
+    actual downloadable PDF. We do NOT try to hit the provider
+    (osf.io/<id>/download) directly because primary_file gives a
+    CDN-backed URL with stable redirects.
+
+    Placed at priority 7.5 in the cascade (below Europe PMC but
+    above Zenodo) because OSF preprint landing pages are direct
+    PDFs rather than catalog entries, so the hit rate when there
+    IS an OSF preprint is near-100%.
+    """
+    try:
+        # Filter by DOI — OSF normalises case + prefix but not all
+        # client libraries do, so we feed the raw DOI and let the
+        # API match.
+        resp = _get_client().get(
+            "https://api.osf.io/v2/preprints/",
+            params={"filter[doi]": doi, "page[size]": 1},
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        items = data.get("data") or []
+        if not items:
+            return None
+        # Each preprint carries a primary_file relationship; dereference
+        # it to get the file resource, which has the download link.
+        rels = ((items[0].get("relationships") or {})
+                .get("primary_file") or {})
+        file_url = ((rels.get("links") or {}).get("related") or {}).get("href")
+        if not file_url:
+            return None
+        file_resp = _get_client().get(file_url)
+        if file_resp.status_code != 200:
+            return None
+        file_data = (file_resp.json().get("data") or {})
+        download = ((file_data.get("links") or {}).get("download"))
+        return download or None
+    except Exception as exc:
+        logger.debug("osf preprints lookup failed for %s: %s", doi, exc)
+        return None
+
+
 def find_zenodo_pdf_url(doi: str) -> str | None:
     """Phase 54.6.51 — Zenodo (CERN-hosted OA repo).
 
@@ -411,7 +474,12 @@ def _gather_candidate_urls(
             _LookupSpec("europepmc", 4, find_europepmc_pdf_url, (doi,)),
             _LookupSpec("semantic_scholar", 5, find_semantic_scholar_pdf_url, (doi,)),
             _LookupSpec("hal", 6, find_hal_pdf_url, (doi,)),
-            _LookupSpec("zenodo", 7, find_zenodo_pdf_url, (doi,)),
+            # Phase 54.6.216 (roadmap 3.0.1) — OSF Preprints umbrella.
+            # Priority 7 slot alongside HAL/Zenodo; primary_file resolution
+            # gives a direct PDF download URL so hit rate is near-100%
+            # when OSF has the preprint.
+            _LookupSpec("osf_preprints", 7, find_osf_preprints_pdf_url, (doi,)),
+            _LookupSpec("zenodo", 8, find_zenodo_pdf_url, (doi,)),
         ])
     if doi and resolve_arxiv_from_doi and not arxiv_id:
         # Resolve an arXiv preprint via the DOI as a fallback source.
