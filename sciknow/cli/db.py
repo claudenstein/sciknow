@@ -1242,226 +1242,6 @@ def monitor(
     import time as _time
     from sciknow.core.monitor import collect_monitor_snapshot
 
-    def _render(snap: dict) -> None:
-        """Render one snapshot as Rich panels. Safe to call in a loop."""
-        from rich import box as _box
-        from rich.table import Table
-        from rich.panel import Panel
-
-        proj = snap.get("project") or {}
-        corpus = snap.get("corpus") or {}
-        gpus = snap.get("gpu") or []
-        loaded = snap.get("llm", {}).get("loaded_models") or []
-        qcolls = snap.get("qdrant") or []
-        backends = snap.get("converter_backends") or []
-        timing = snap.get("pipeline", {}).get("stage_timing") or []
-        fails = snap.get("pipeline", {}).get("stage_failures") or []
-        activity = snap.get("pipeline", {}).get("recent_activity") or []
-
-        # Header
-        slug = proj.get("slug") or "(no active project)"
-        last_r = snap.get("last_refresh") or "never"
-        console.print()
-        console.print(
-            f"[bold]sciknow monitor[/bold] · project "
-            f"[cyan]{slug}[/cyan] · last refresh [dim]{last_r}[/dim] "
-            f"· [dim]{snap.get('snapshotted_at', '')}[/dim]"
-        )
-
-        # ── Corpus panel ─────────────────────────────────────────
-        t1 = Table(
-            title="Corpus", box=_box.SIMPLE_HEAD, show_header=False,
-            expand=True,
-        )
-        t1.add_column("Metric", style="bold")
-        t1.add_column("Value", justify="right", style="cyan")
-        t1.add_row("Documents (total)", str(corpus.get("documents_total", 0)))
-        t1.add_row(
-            "Documents (complete)",
-            f"{corpus.get('documents_complete', 0)} "
-            f"({(corpus.get('documents_complete', 0) / max(corpus.get('documents_total', 1), 1) * 100):.0f}%)",
-        )
-        t1.add_row("Chunks", str(corpus.get("chunks", 0)))
-        t1.add_row("Citations", str(corpus.get("citations", 0)))
-        t1.add_row("Visuals", str(corpus.get("visuals", 0)))
-        t1.add_row("KG triples", str(corpus.get("kg_triples", 0)))
-        t1.add_row("Wiki pages", str(corpus.get("wiki_pages", 0)))
-        t1.add_row("Institutions", str(corpus.get("institutions", 0)))
-        console.print(t1)
-
-        # ── GPU + Ollama + Qdrant side-by-side-ish ───────────────
-        if gpus:
-            t_gpu = Table(title="GPU", box=_box.SIMPLE_HEAD, expand=True)
-            t_gpu.add_column("#")
-            t_gpu.add_column("Name", ratio=3)
-            t_gpu.add_column("VRAM", justify="right")
-            t_gpu.add_column("Util", justify="right")
-            t_gpu.add_column("Temp", justify="right")
-            for g in gpus:
-                vram_pct = (g["memory_used_mb"] / max(
-                    g["memory_total_mb"], 1)
-                ) * 100
-                vram_colour = (
-                    "red" if vram_pct > 95 else
-                    "yellow" if vram_pct > 85 else "cyan"
-                )
-                t_gpu.add_row(
-                    str(g["index"]), g["name"],
-                    f"[{vram_colour}]"
-                    f"{g['memory_used_mb']:,}/{g['memory_total_mb']:,} MB"
-                    f"[/{vram_colour}] ({vram_pct:.0f}%)",
-                    f"{g['utilization_pct']}%",
-                    f"{g.get('temperature_c', '?')}°C",
-                )
-            console.print(t_gpu)
-
-        if loaded:
-            t_llm = Table(
-                title="Ollama — loaded models",
-                box=_box.SIMPLE_HEAD, expand=True,
-            )
-            t_llm.add_column("Model", ratio=3)
-            t_llm.add_column("VRAM", justify="right")
-            t_llm.add_column("Expires", justify="right", style="dim")
-            for m in loaded:
-                t_llm.add_row(
-                    m.get("name", "?"),
-                    f"{m.get('vram_mb', 0):,} MB",
-                    m.get("expires_at") or "—",
-                )
-            console.print(t_llm)
-        else:
-            console.print(
-                "[dim]Ollama: no models resident right now.[/dim]"
-            )
-
-        if qcolls:
-            t_qd = Table(
-                title="Qdrant collections",
-                box=_box.SIMPLE_HEAD, expand=True,
-            )
-            t_qd.add_column("Collection", ratio=3)
-            t_qd.add_column("Points", justify="right", style="cyan")
-            t_qd.add_column("Vector fields", ratio=3, style="dim")
-            for c in qcolls:
-                vec_str = ", ".join(c.get("vectors", []) or [])
-                sparse_str = ", ".join(
-                    f"sparse:{s}" for s in c.get("sparse_vectors") or []
-                )
-                all_fields = " · ".join(
-                    x for x in (vec_str, sparse_str) if x
-                )
-                t_qd.add_row(
-                    c["name"], f"{c['points_count']:,}", all_fields or "—",
-                )
-            console.print(t_qd)
-
-        # ── Converter backend distribution ───────────────────────
-        if backends:
-            t_back = Table(
-                title="Converter backends (key migration signal)",
-                box=_box.SIMPLE_HEAD, expand=True,
-            )
-            t_back.add_column("Backend", ratio=3)
-            t_back.add_column("Papers", justify="right", style="cyan")
-            for b in backends:
-                name = b["backend"]
-                colour = "cyan"
-                if name and name.startswith("mineru-vlm-pro"):
-                    colour = "green"
-                elif name == "mineru-pipeline":
-                    colour = "yellow"
-                t_back.add_row(
-                    f"[{colour}]{name}[/{colour}]", str(b["n"])
-                )
-            console.print(t_back)
-
-        # ── Pipeline timing + failures ──────────────────────────
-        if timing:
-            t_time = Table(
-                title="Pipeline stage timing (completed jobs)",
-                box=_box.SIMPLE_HEAD, expand=True,
-            )
-            t_time.add_column("Stage", ratio=3)
-            t_time.add_column("N", justify="right", style="cyan")
-            t_time.add_column("p50", justify="right")
-            t_time.add_column("p95", justify="right")
-            t_time.add_column("mean", justify="right", style="dim")
-
-            def _fmt_ms(v):
-                if v is None:
-                    return "—"
-                if v >= 60_000:
-                    return f"{v / 60000:.1f}m"
-                if v >= 1000:
-                    return f"{v / 1000:.1f}s"
-                return f"{v:.0f}ms"
-
-            for row in timing:
-                t_time.add_row(
-                    row["stage"], str(row["n"]),
-                    _fmt_ms(row.get("p50_ms")),
-                    _fmt_ms(row.get("p95_ms")),
-                    _fmt_ms(row.get("mean_ms")),
-                )
-            console.print(t_time)
-
-        if any(f["failed"] for f in fails):
-            t_fail = Table(
-                title="Stage failures",
-                box=_box.SIMPLE_HEAD, expand=True,
-            )
-            t_fail.add_column("Stage", ratio=3)
-            t_fail.add_column("Failed", justify="right")
-            t_fail.add_column("Total", justify="right", style="dim")
-            t_fail.add_column("Rate", justify="right")
-            for f in fails:
-                rate = (f["failed"] / f["total"] * 100) if f["total"] else 0.0
-                colour = "dim" if f["failed"] == 0 else (
-                    "yellow" if rate < 5 else "red"
-                )
-                t_fail.add_row(
-                    f"[{colour}]{f['stage']}[/{colour}]",
-                    str(f["failed"]), str(f["total"]),
-                    f"[{colour}]{rate:.1f}%[/{colour}]",
-                )
-            console.print(t_fail)
-            console.print(
-                "[dim]Drill into top error classes with "
-                "`sciknow db failures --stage <name>`.[/dim]"
-            )
-
-        # ── Recent activity feed ─────────────────────────────────
-        if activity:
-            t_act = Table(
-                title=f"Recent activity (last {len(activity)} jobs)",
-                box=_box.SIMPLE_HEAD, expand=True,
-            )
-            t_act.add_column("When", ratio=3, style="dim")
-            t_act.add_column("Stage", ratio=2)
-            t_act.add_column("Status", ratio=1)
-            t_act.add_column("Duration", justify="right", width=10)
-            t_act.add_column("Doc", ratio=2, style="dim")
-            for a in activity:
-                status = a["status"] or "?"
-                scolour = (
-                    "green" if status in ("completed", "ok") else
-                    "red" if status == "failed" else "yellow"
-                )
-                ts = a["created_at"] or ""
-                dur = a.get("duration_ms")
-                dur_s = (
-                    f"{dur / 1000:.1f}s" if dur is not None else "—"
-                )
-                t_act.add_row(
-                    ts.split("T")[-1][:8] if ts else "?",
-                    a["stage"] or "?",
-                    f"[{scolour}]{status}[/{scolour}]",
-                    dur_s,
-                    (a["doc_id"] or "")[:8],
-                )
-            console.print(t_act)
-
     # Main entry
     if json_out and watch:
         console.print(
@@ -1477,25 +1257,403 @@ def monitor(
         return
 
     if watch > 0:
+        # Phase 54.6.231 — btop-inspired in-place live view using
+        # Rich's Live + Layout. Re-renders the same character cells
+        # every tick instead of scrolling new frames into history.
+        from rich.live import Live
+        _r = max(1, min(4, int(round(1 / max(watch, 0.25)))))
         try:
-            while True:
-                snap = collect_monitor_snapshot(
-                    throughput_days=days, llm_usage_days=days,
-                )
-                console.clear()
-                _render(snap)
-                console.print(
-                    f"[dim]Re-rendering every {watch}s. Ctrl+C to stop.[/dim]"
-                )
-                _time.sleep(watch)
+            snap = collect_monitor_snapshot(
+                throughput_days=days, llm_usage_days=days,
+            )
+            with Live(
+                _build_monitor_layout(snap, days=days, watch=watch),
+                console=console,
+                refresh_per_second=_r,
+                screen=True,  # alternate-screen buffer → clean restore on exit
+            ) as live:
+                while True:
+                    _time.sleep(watch)
+                    snap = collect_monitor_snapshot(
+                        throughput_days=days, llm_usage_days=days,
+                    )
+                    live.update(_build_monitor_layout(
+                        snap, days=days, watch=watch,
+                    ))
         except KeyboardInterrupt:
-            console.print("\n[dim]Monitor stopped.[/dim]")
             return
 
     snap = collect_monitor_snapshot(
         throughput_days=days, llm_usage_days=days,
     )
-    _render(snap)
+    console.print(_build_monitor_layout(snap, days=days, watch=0))
+
+
+# ── Phase 54.6.231 — btop-style layout builder ────────────────────────
+
+
+def _build_monitor_layout(snap: dict, *, days: int, watch: int):
+    """Build a Rich Layout mirroring btop's compact dashboard look.
+
+    Structure:
+
+        ┌─────────── header (3 rows) ───────────┐
+        │  project / last refresh / timestamp   │
+        ├──────────┬──────────┬─────────────────┤
+        │  corpus  │  gpu     │  qdrant         │
+        │          │  models  │  backends       │
+        ├──────────┴──────────┴─────────────────┤
+        │  stage timing (bars)                  │
+        ├───────────────────────────────────────┤
+        │  recent activity                      │
+        └───────────────────────────────────────┘
+
+    Rich's Layout handles term-width responsiveness — when the window
+    is too narrow, columns shrink / drop. Panels use heavy-line boxes
+    with accent-coloured borders for the btop aesthetic.
+    """
+    from datetime import datetime, timezone
+    from rich import box as _box
+    from rich.layout import Layout
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+    from rich.align import Align
+
+    # ── Colour palette (btop-inspired, works on dark + light terms) ──
+    C_TITLE = "bold cyan"
+    C_DIM = "grey50"
+    C_OK = "bright_green"
+    C_WARN = "yellow"
+    C_ERR = "bright_red"
+    C_ACCENT = "bright_cyan"
+    C_VALUE = "bold white"
+    C_BORDER = "bright_black"
+    BOX = _box.HEAVY
+
+    # ── Safe accessors ──────────────────────────────────────────────
+    proj = snap.get("project") or {}
+    corpus = snap.get("corpus") or {}
+    gpus = snap.get("gpu") or []
+    loaded = (snap.get("llm") or {}).get("loaded_models") or []
+    qcolls = snap.get("qdrant") or []
+    backends = snap.get("converter_backends") or []
+    timing = (snap.get("pipeline") or {}).get("stage_timing") or []
+    fails = (snap.get("pipeline") or {}).get("stage_failures") or []
+    activity = (snap.get("pipeline") or {}).get("recent_activity") or []
+
+    # ── Small helpers ───────────────────────────────────────────────
+
+    def _fmt_ms(v):
+        if v is None:
+            return "—"
+        if v >= 60_000:
+            return f"{v / 60000:.1f}m"
+        if v >= 1000:
+            return f"{v / 1000:.1f}s"
+        return f"{v:.0f}ms"
+
+    def _bar(value: float, total: float, width: int = 14,
+             palette=(C_OK, C_WARN, C_ERR)) -> Text:
+        """Eighth-block bar with tri-colour palette. Colour flips on
+        50% / 85% thresholds so bars get angrier as they fill up —
+        the btop visual language."""
+        if total <= 0:
+            return Text("─" * width, style=C_DIM)
+        pct = max(0.0, min(1.0, value / total))
+        if pct < 0.5:
+            colour = palette[0]
+        elif pct < 0.85:
+            colour = palette[1]
+        else:
+            colour = palette[2]
+        # 8 sub-steps per character for smooth fill
+        cells = pct * width * 8
+        full = int(cells // 8)
+        rem = int(cells - full * 8)
+        subs = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"]
+        bar = "█" * full
+        if rem > 0:
+            bar += subs[rem]
+        bar = bar.ljust(width, "·")
+        t = Text(bar[:width], style=colour)
+        return t
+
+    # ── Header panel ────────────────────────────────────────────────
+    slug = proj.get("slug") or "(no project)"
+    pg_db = proj.get("pg_database") or "?"
+    last_r = snap.get("last_refresh") or "never"
+    now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+    header_text = Text()
+    header_text.append("▎ sciknow monitor  ", style="bold bright_cyan")
+    header_text.append(f"project ", style=C_DIM)
+    header_text.append(slug, style=C_ACCENT)
+    header_text.append(f"  ·  db ", style=C_DIM)
+    header_text.append(pg_db, style="white")
+    header_text.append(f"  ·  last refresh ", style=C_DIM)
+    header_text.append(str(last_r)[:26], style="white")
+    header_text.append(f"  ·  {now}", style=C_DIM)
+    if watch > 0:
+        header_text.append(f"  ·  refresh {watch}s  (q to quit)",
+                            style=C_DIM)
+    header_panel = Panel(
+        Align.left(header_text, vertical="middle"),
+        border_style=C_BORDER, box=BOX, padding=(0, 1),
+    )
+
+    # ── Corpus panel ────────────────────────────────────────────────
+    corpus_tbl = Table.grid(padding=(0, 1), expand=True)
+    corpus_tbl.add_column(justify="left", style=C_DIM, ratio=2)
+    corpus_tbl.add_column(justify="right", style=C_VALUE, ratio=1)
+    done = corpus.get("documents_complete", 0)
+    total_docs = corpus.get("documents_total", 0)
+    pct_done = (done / total_docs * 100) if total_docs else 0.0
+    corpus_tbl.add_row(
+        Text("documents", style=C_DIM),
+        Text(f"{done:,} / {total_docs:,}", style=C_VALUE),
+    )
+    if total_docs:
+        bar_row = Table.grid(padding=0, expand=True)
+        bar_row.add_column(ratio=1)
+        bar_row.add_column(justify="right", width=5)
+        bar_row.add_row(
+            _bar(done, total_docs, width=12),
+            f" {pct_done:.0f}%",
+        )
+        corpus_tbl.add_row("", bar_row)
+    for label, key in (
+        ("chunks", "chunks"),
+        ("citations", "citations"),
+        ("visuals", "visuals"),
+        ("kg triples", "kg_triples"),
+        ("wiki pages", "wiki_pages"),
+        ("institutions", "institutions"),
+    ):
+        v = corpus.get(key, 0)
+        corpus_tbl.add_row(
+            Text(label, style=C_DIM),
+            Text(f"{v:,}",
+                 style=C_VALUE if v else C_DIM),
+        )
+    corpus_panel = Panel(
+        corpus_tbl, title="[bold]corpus[/bold]", title_align="left",
+        border_style=C_BORDER, box=BOX, padding=(0, 1),
+    )
+
+    # ── GPU + Ollama panel (combined middle column) ────────────────
+    gpu_tbl = Table.grid(padding=(0, 1), expand=True)
+    gpu_tbl.add_column(ratio=1)
+    if gpus:
+        for g in gpus:
+            mu = g["memory_used_mb"]
+            mt = max(g["memory_total_mb"], 1)
+            gpu_header = Text()
+            gpu_header.append("gpu", style=C_DIM)
+            gpu_header.append(f" #{g['index']} ", style=C_VALUE)
+            gpu_header.append(g["name"][:24], style=C_ACCENT)
+            gpu_header.append(
+                f"  {g.get('temperature_c', '?')}°C",
+                style=(C_ERR if g.get("temperature_c", 0) >= 85
+                       else C_WARN if g.get("temperature_c", 0) >= 75
+                       else C_DIM),
+            )
+            gpu_tbl.add_row(gpu_header)
+
+            # VRAM bar — show GB (compact) to save column width
+            vram_row = Table.grid(padding=0, expand=True)
+            vram_row.add_column(width=5, style=C_DIM)
+            vram_row.add_column(ratio=1)
+            vram_row.add_column(justify="right", width=11, style=C_VALUE)
+            vram_row.add_row(
+                "vram", _bar(mu, mt, width=14),
+                f"{mu / 1024:.1f}/{mt / 1024:.0f}G",
+            )
+            gpu_tbl.add_row(vram_row)
+
+            # Util bar
+            util = g["utilization_pct"]
+            util_row = Table.grid(padding=0, expand=True)
+            util_row.add_column(width=5, style=C_DIM)
+            util_row.add_column(ratio=1)
+            util_row.add_column(justify="right", width=5, style=C_VALUE)
+            util_row.add_row("util", _bar(util, 100, width=14),
+                              f"{util}%")
+            gpu_tbl.add_row(util_row)
+    else:
+        gpu_tbl.add_row(Text("(no GPU detected — nvidia-smi absent)",
+                              style=C_DIM))
+
+    # Ollama models mini-list
+    gpu_tbl.add_row("")
+    if loaded:
+        for m in loaded:
+            mini = Text()
+            mini.append("◉ ", style=C_OK)
+            mini.append((m.get("name") or "?")[:28], style=C_ACCENT)
+            mini.append(f"  {m.get('vram_mb', 0):,}MB", style=C_DIM)
+            exp = m.get("expires_at") or ""
+            if exp:
+                # Only show the time portion of the expiry if ISO
+                mini.append(f"  exp {str(exp)[-8:-3] if len(str(exp)) > 8 else str(exp)}", style=C_DIM)
+            gpu_tbl.add_row(mini)
+    else:
+        gpu_tbl.add_row(Text("◎ ollama: no models loaded", style=C_DIM))
+
+    gpu_panel = Panel(
+        gpu_tbl, title="[bold]gpu · models[/bold]", title_align="left",
+        border_style=C_BORDER, box=BOX, padding=(0, 1),
+    )
+
+    # ── Qdrant + backends panel (right column) ──────────────────────
+    right_tbl = Table.grid(padding=(0, 1), expand=True)
+    right_tbl.add_column(ratio=1)
+
+    # Qdrant
+    if qcolls:
+        qhead = Text()
+        qhead.append("qdrant", style=C_DIM)
+        right_tbl.add_row(qhead)
+        for c in qcolls:
+            row = Table.grid(padding=(0, 1), expand=True)
+            row.add_column(ratio=3)
+            row.add_column(justify="right", ratio=1, style=C_VALUE)
+            name = c["name"]
+            # Trim project prefix for readability
+            display = name
+            if proj.get("slug"):
+                pref = proj["slug"].replace("-", "_") + "_"
+                if display.startswith(pref):
+                    display = display[len(pref):]
+            fields = []
+            for v in c.get("vectors") or []:
+                mark = "◆" if v == "colbert" else "●"
+                fields.append(f"[cyan]{mark}{v}[/cyan]")
+            for s in c.get("sparse_vectors") or []:
+                fields.append(f"[magenta]◇{s}[/magenta]")
+            label_rendered = Text.from_markup(
+                f"[{C_ACCENT}]{display}[/{C_ACCENT}] "
+                + " ".join(fields)
+            )
+            row.add_row(label_rendered, f"{c['points_count']:,}")
+            right_tbl.add_row(row)
+
+    # Backends
+    right_tbl.add_row("")
+    if backends:
+        right_tbl.add_row(Text("converter backends", style=C_DIM))
+        for b in backends:
+            nm = b["backend"] or "(none)"
+            colour = C_OK if nm.startswith("mineru-vlm-pro") else (
+                C_WARN if nm == "mineru-pipeline" else C_DIM
+            )
+            row = Table.grid(padding=(0, 1), expand=True)
+            row.add_column(ratio=3)
+            row.add_column(justify="right", ratio=1, style=C_VALUE)
+            row.add_row(Text(nm, style=colour), f"{b['n']:,}")
+            right_tbl.add_row(row)
+
+    right_panel = Panel(
+        right_tbl, title="[bold]qdrant · backends[/bold]",
+        title_align="left",
+        border_style=C_BORDER, box=BOX, padding=(0, 1),
+    )
+
+    # ── Stage timing panel (with bars) ──────────────────────────────
+    timing_tbl = Table.grid(padding=(0, 1), expand=True)
+    timing_tbl.add_column(style=C_DIM, width=14)
+    timing_tbl.add_column(justify="right", style=C_DIM, width=7)
+    timing_tbl.add_column(ratio=1)
+    timing_tbl.add_column(justify="right", style=C_VALUE, width=9)
+    timing_tbl.add_column(justify="right", style=C_DIM, width=9)
+    if timing:
+        # Normalise bars against the slowest p95 in the set
+        max_p95 = max(
+            (row.get("p95_ms") or 0) for row in timing
+        ) or 1.0
+        for row in timing:
+            n = row["n"]
+            p50 = row.get("p50_ms")
+            p95 = row.get("p95_ms")
+            timing_tbl.add_row(
+                row["stage"], f"n={n:,}",
+                _bar(p95 or 0, max_p95, width=24,
+                     palette=(C_OK, C_WARN, C_ERR)),
+                _fmt_ms(p95), f"p50 {_fmt_ms(p50)}",
+            )
+    else:
+        timing_tbl.add_row(Text("(no completed jobs yet)", style=C_DIM),
+                           "", "", "", "")
+    any_fail = any(f["failed"] > 0 for f in fails)
+    if any_fail:
+        timing_tbl.add_row("", "", "", "", "")
+        for f in fails:
+            if not f["failed"]:
+                continue
+            rate = (f["failed"] / max(f["total"], 1)) * 100
+            colour = C_ERR if rate > 5 else C_WARN
+            timing_tbl.add_row(
+                Text(f["stage"], style=colour),
+                f"fail {f['failed']}",
+                _bar(f["failed"], f["total"], width=24,
+                     palette=(C_WARN, C_ERR, C_ERR)),
+                f"{rate:.1f}%", f"/ {f['total']}",
+            )
+    timing_panel = Panel(
+        timing_tbl,
+        title="[bold]pipeline stages[/bold] [dim](bars = p95, heat = % of slowest)[/dim]",
+        title_align="left",
+        border_style=C_BORDER, box=BOX, padding=(0, 1),
+    )
+
+    # ── Recent activity feed ────────────────────────────────────────
+    act_tbl = Table.grid(padding=(0, 1), expand=True)
+    act_tbl.add_column(style=C_DIM, width=10)
+    act_tbl.add_column(style=C_ACCENT, width=12)
+    act_tbl.add_column(width=12)
+    act_tbl.add_column(justify="right", style=C_VALUE, width=9)
+    act_tbl.add_column(style=C_DIM, ratio=1)
+    if activity:
+        for a in activity[:12]:
+            status = a["status"] or "?"
+            scolour = (
+                C_OK if status in ("completed", "ok") else
+                C_ERR if status == "failed" else C_WARN
+            )
+            ts = a["created_at"] or ""
+            hms = ts.split("T")[-1][:8] if ts else "?"
+            dur = a.get("duration_ms")
+            dur_s = f"{dur / 1000:.1f}s" if dur is not None else "—"
+            act_tbl.add_row(
+                hms, a["stage"] or "?",
+                Text(status, style=scolour),
+                dur_s, (a["doc_id"] or "")[:8],
+            )
+    else:
+        act_tbl.add_row(Text("(no recent jobs)", style=C_DIM),
+                         "", "", "", "")
+    activity_panel = Panel(
+        act_tbl, title="[bold]recent activity[/bold]", title_align="left",
+        border_style=C_BORDER, box=BOX, padding=(0, 1),
+    )
+
+    # ── Compose layout ─────────────────────────────────────────────
+    # Sized so the stack fits a 40-row terminal. `activity` takes
+    # whatever's left so resizing the terminal grows the feed
+    # instead of clipping panels. Larger terms show more history.
+    layout = Layout()
+    layout.split_column(
+        Layout(header_panel, name="header", size=3),
+        Layout(name="top", size=15),
+        Layout(timing_panel, name="timing", size=11),
+        Layout(activity_panel, name="activity", ratio=1,
+               minimum_size=10),
+    )
+    layout["top"].split_row(
+        Layout(corpus_panel, name="corpus", ratio=1),
+        Layout(gpu_panel, name="gpu", ratio=1),
+        Layout(right_panel, name="right", ratio=1),
+    )
+    return layout
 
 
 @app.command()

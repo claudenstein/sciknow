@@ -174,17 +174,25 @@ a dozen papers are new.
 
 ### Live monitor
 
-`sciknow db monitor` gives a unified snapshot of corpus counts,
-ingestion pipeline timing (p50/p95 per stage), failure rates,
-Qdrant collection shapes, GPU state, currently-loaded Ollama
-models, LLM usage, and the last-refresh marker — all in one
-Rich-rendered view (54.6.230).
+`sciknow db monitor` is a btop-inspired single-screen dashboard for
+the whole system: corpus counts with a done/total progress bar,
+GPU VRAM + utilization bars with tri-colour heat, currently-loaded
+Ollama models, Qdrant collection shapes (with ◆ColBERT / ●dense /
+◇sparse markers), converter-backend distribution, pipeline stage
+p95 timing bars normalised against the slowest stage, and a recent
+activity feed.
 
 ```bash
-uv run sciknow db monitor              # one shot
-uv run sciknow db monitor --watch 5    # live view, refresh every 5s
+uv run sciknow db monitor              # one shot, full layout
+uv run sciknow db monitor --watch 5    # btop-style in-place refresh
 uv run sciknow db monitor --json       # JSON for scripting
 ```
+
+Watch mode uses Rich's `Live` + alternate-screen buffer, so it
+redraws the same character cells every tick (no scrolling history)
+and cleanly restores the terminal on Ctrl+C. Panels are colour-
+coded: green=healthy, yellow>50% load, red>85% — same visual
+grammar as `btop` / `htop`.
 
 In the web reader, the same data is exposed at `GET /api/monitor`
 (schema identical to `--json`) and rendered inside a "System Monitor"
