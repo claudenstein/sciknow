@@ -11853,6 +11853,75 @@ def l1_phase54_6_134_agentic_coverage_uses_reranker() -> None:
     )
 
 
+def l1_phase54_6_215_mineru_pipeline_deprecation_docs() -> None:
+    """Phase 54.6.215 (roadmap 3.1.6 Phase 6) — `mineru` deprecation in docs.
+
+    Phase 2 (54.6.212) wired the deprecation warning in the code;
+    Phase 6 flips the *documentation* so new readers following
+    .env.example default to the new backend and see pipeline mode
+    labelled as deprecated rather than as a peer option.
+
+      A) .env.example lists PDF_CONVERTER_BACKEND options with
+         `mineru-vlm-pro` described, `mineru` explicitly labelled
+         DEPRECATED, and `auto` named as the default.
+      B) .env.example documents MINERU_VLM_BACKEND + MINERU_VLM_MODEL
+         (the settings shipped in Phases 1+2 but not previously
+         surfaced in the example file).
+      C) docs/INGESTION.md §Stage 1 already carries the VLM-Pro
+         primary narrative (Phase 2) AND mentions `vllm` + the
+         cross-page / paragraph-merging / in-table capabilities.
+      D) docs/ROADMAP_INGESTION.md §3.1.6 lists Phase 6 as a
+         non-optional closure item.
+    """
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[2]
+
+    # A+B) .env.example
+    env_example = repo_root / ".env.example"
+    assert env_example.exists(), ".env.example missing"
+    env_text = env_example.read_text(encoding="utf-8")
+
+    assert "PDF_CONVERTER_BACKEND=auto" in env_text, (
+        ".env.example must name `auto` as the default backend"
+    )
+    assert "mineru-vlm-pro" in env_text, (
+        ".env.example must document the `mineru-vlm-pro` backend"
+    )
+    assert "DEPRECATED" in env_text and "54.6.21" in env_text, (
+        ".env.example must label `mineru` as DEPRECATED with the "
+        "54.6.21x phase reference so users know when the narrative flipped"
+    )
+    for key in ("MINERU_VLM_BACKEND=vllm", "MINERU_VLM_MODEL="):
+        assert key in env_text, (
+            f".env.example must document {key.split('=')[0]} — "
+            "these are the settings the migration hangs on"
+        )
+
+    # C) INGESTION.md narrative
+    ingestion_md = repo_root / "docs" / "INGESTION.md"
+    ing_text = ingestion_md.read_text(encoding="utf-8")
+    assert "primary backend post-54.6.212" in ing_text, (
+        "docs/INGESTION.md must keep the Phase 2 primary-backend wording"
+    )
+    for capability in (
+        "cross-page table merging",
+        "truncated paragraph merging",
+        "in-table image recognition",
+    ):
+        assert capability in ing_text.lower(), (
+            f"docs/INGESTION.md should advertise {capability} so "
+            f"users know why the migration was worth the re-ingest"
+        )
+
+    # D) Roadmap closure
+    roadmap_md = repo_root / "docs" / "ROADMAP_INGESTION.md"
+    rm_text = roadmap_md.read_text(encoding="utf-8")
+    assert "3.1.6" in rm_text and "Phase 6" in rm_text, (
+        "docs/ROADMAP_INGESTION.md must reference §3.1.6 Phase 6"
+    )
+
+
 def l1_phase54_6_214_multiaspect_captions_surface() -> None:
     """Phase 54.6.214 (roadmap 3.1.6 Phase 5 / closes 3.5.2) — multi-aspect captions.
 
@@ -12696,6 +12765,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_213_in_table_images_and_merged_paragraphs,
     # Phase 54.6.214 — roadmap 3.1.6 Phase 5: multi-aspect captions (closes 3.5.2)
     l1_phase54_6_214_multiaspect_captions_surface,
+    # Phase 54.6.215 — roadmap 3.1.6 Phase 6: deprecate `mineru` as user-visible backend
+    l1_phase54_6_215_mineru_pipeline_deprecation_docs,
 ]
 
 L2_TESTS: list[Callable] = [
