@@ -11853,6 +11853,79 @@ def l1_phase54_6_134_agentic_coverage_uses_reranker() -> None:
     )
 
 
+def l1_phase54_6_228_colbert_rerank_search() -> None:
+    """Phase 54.6.228 (roadmap 3.4.3 Phase 2) — ColBERT rerank search path.
+
+    Phase 2 adds the retrieval side of the ColBERT experiment:
+    dense top-50 prefetch → colbert MAX_SIM rerank → top-K. Runs
+    entirely inside Qdrant via query_points(prefetch=...). Tests:
+
+      A) Module + public API exports exist
+         (`search_abstracts_with_colbert`, `ColbertRerankHit`).
+      B) Fallback contract: returns `None` when
+         `enable_colbert_abstracts=False` OR when the collection
+         pre-flip lacks the colbert slot. Callers MUST handle None
+         — silent fallback would mask a misconfigured opt-in.
+      C) Empty / whitespace-only query → None (guard).
+      D) Source references `query_points` with a `prefetch` clause
+         and `using="colbert"` on the final query. Both are load-
+         bearing: missing `prefetch` would send the colbert query
+         against every vector in the collection (wrong), and
+         missing `using="colbert"` would make the final query hit
+         the dense slot (wrong).
+      E) Slot-check helper is cached per-process (single
+         `get_collection` call even across many queries).
+    """
+    import inspect as _inspect
+
+    from sciknow.retrieval import colbert_rerank as cr
+
+    # A) public API
+    for name in ("search_abstracts_with_colbert", "ColbertRerankHit",
+                 "_abstracts_has_colbert_slot", "_encode_query"):
+        assert hasattr(cr, name), (
+            f"colbert_rerank.{name} missing"
+        )
+
+    # B) fallback: setting off (default) → None
+    result = cr.search_abstracts_with_colbert("test query")
+    assert result is None, (
+        f"search_abstracts_with_colbert must return None when "
+        f"enable_colbert_abstracts=False (got {result!r}). Silent "
+        f"fallback would mask a misconfigured opt-in — callers must "
+        f"see None and drop to the dense-only path themselves"
+    )
+
+    # C) empty query guard
+    assert cr.search_abstracts_with_colbert("") is None
+    assert cr.search_abstracts_with_colbert("   ") is None
+
+    # D) query_points + prefetch + using="colbert"
+    search_src = _inspect.getsource(cr.search_abstracts_with_colbert)
+    assert "query_points(" in search_src, (
+        "must use Qdrant's query_points API"
+    )
+    assert "prefetch=[" in search_src and "Prefetch(" in search_src, (
+        "must send a `prefetch` clause so dense top-K runs first"
+    )
+    assert 'using="colbert"' in search_src, (
+        "final query must target the `colbert` vector field — "
+        "without `using=colbert`, Qdrant treats the multi-vector "
+        "as a dense query against the dense slot, which silently "
+        "fails the whole two-stage retrieval"
+    )
+    assert 'using="dense"' in search_src, (
+        "prefetch must explicitly target the `dense` field"
+    )
+
+    # E) slot-check caching
+    slot_src = _inspect.getsource(cr._abstracts_has_colbert_slot)
+    assert "_SLOT_CHECKED" in slot_src and "_SLOT_PRESENT" in slot_src, (
+        "slot check must cache its result — one get_collection "
+        "RTT per process, not per query"
+    )
+
+
 def l1_phase54_6_227_colbert_abstracts_phase1() -> None:
     """Phase 54.6.227 (roadmap 3.4.3 Phase 1) — ColBERT wiring in embedder.
 
@@ -13796,6 +13869,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_226_caption_bench_cli_surface,
     # Phase 54.6.227 — roadmap 3.4.3 Phase 1: ColBERT on abstracts
     l1_phase54_6_227_colbert_abstracts_phase1,
+    # Phase 54.6.228 — roadmap 3.4.3 Phase 2: ColBERT rerank search
+    l1_phase54_6_228_colbert_rerank_search,
 ]
 
 L2_TESTS: list[Callable] = [
