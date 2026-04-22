@@ -795,7 +795,7 @@ Scoring: **Impact** (H/M/L) × **Effort** (H/M/L) → **Verdict**.
 | 3.2.1 | S2 author disambiguation | Q, C | M | M | **Defer** | Requires S2 author IDs per author; schema burden |
 | 3.2.4 | Institution extraction | Q, O | L | L | **Shipped 54.6.221** | `paper_institutions` table + ORM + enrich wiring + `sciknow db backfill-institutions` CLI. Enables queries like "NOAA climate papers since 2020" |
 | 3.3.2 | Reference section parsing (Grobid / LLM) | C, Q | M | M | **Defer** | Current citations table covers main use cases |
-| 3.3.3 | Figure / table caption linkage (ingest-time table) | Q | M | M | **Defer** | Phase 54.6.138 write-time linker covers main use |
+| 3.3.3 | Figure / table caption linkage (ingest-time table) | Q | M | M | **Shipped 54.6.225** | Refresh pipeline now invokes `link-visual-mentions` as step 8a between extract-visuals and caption-visuals — mention_paragraphs populated automatically, no separate CLI needed |
 | 3.3.4 | Chunk deduplication (MinHash-LSH) | S | M | M | **Defer** | Dedup risk > current duplication cost |
 | 3.4.1 | Qwen3-Embedding comparison | Q | M | L | **Defer** | Only if bench shows bge-m3 hitting a ceiling |
 | 3.4.4 | Section-type as ranking signal | Q | L | M | **Defer** | Filter already exists; ranking delta likely small |

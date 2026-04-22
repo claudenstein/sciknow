@@ -11853,6 +11853,70 @@ def l1_phase54_6_134_agentic_coverage_uses_reranker() -> None:
     )
 
 
+def l1_phase54_6_225_refresh_includes_link_mentions() -> None:
+    """Phase 54.6.225 (roadmap 3.3.3) — link-visual-mentions in refresh pipeline.
+
+    Pre-54.6.225, `visuals.mention_paragraphs` was populated only when
+    the user ran `sciknow db link-visual-mentions` manually. Refresh
+    pipeline now includes it as step 8a, between extract-visuals
+    (creates the rows the linker targets) and caption-visuals (uses
+    mention context). Tests lock:
+
+      A) `--no-link-mentions` CLI flag exposed — ops convention
+         across every refresh step.
+      B) The link-visual-mentions argv appears AFTER extract-visuals
+         and BEFORE caption-visuals in the planned-steps source (a
+         refactor that moved the step to the wrong position would
+         silently break the caption context).
+      C) The refresh docstring lists the new step 8a so operators
+         reading the file learn the pipeline order.
+    """
+    import inspect as _inspect
+    from sciknow.cli import refresh as refresh_mod
+    from typer.testing import CliRunner
+    from sciknow.cli.main import app
+
+    # A) --no-link-mentions flag surface
+    sig = _inspect.signature(refresh_mod.refresh)
+    assert "no_link_mentions" in sig.parameters, (
+        "refresh must expose --no-link-mentions (54.6.225, roadmap 3.3.3)"
+    )
+
+    # B) step ordering: extract-visuals < link-visual-mentions < caption-visuals
+    src = _inspect.getsource(refresh_mod.refresh)
+    extract_pos = src.find('"db", "extract-visuals"')
+    link_pos = src.find('"db", "link-visual-mentions"')
+    caption_pos = src.find('"db", "caption-visuals"')
+    assert extract_pos != -1, "refresh must retain extract-visuals step"
+    assert link_pos != -1, (
+        "refresh must build a link-visual-mentions step when "
+        "--no-link-mentions is not set"
+    )
+    assert caption_pos != -1, "refresh must retain caption-visuals step"
+    assert extract_pos < link_pos < caption_pos, (
+        f"refresh step order must be extract-visuals < "
+        f"link-visual-mentions < caption-visuals, got positions "
+        f"{extract_pos}/{link_pos}/{caption_pos}"
+    )
+
+    # C) docstring mentions the new step
+    doc = refresh_mod.__doc__ or ""
+    assert "link-visual-mentions" in doc, (
+        "refresh module docstring should list step 8a so operators "
+        "reading the file learn the pipeline order"
+    )
+
+    # Plan preview surfaces the step (behavioural — exercises the
+    # step-builder end-to-end without firing any subprocess).
+    r = CliRunner().invoke(
+        app, ["refresh", "--dry-run", "--no-ingest"]
+    )
+    assert r.exit_code == 0, f"dry-run failed: {r.output[:300]}"
+    assert "8a. Link visual mentions" in r.output, (
+        "refresh plan preview should show `8a. Link visual mentions`"
+    )
+
+
 def l1_phase54_6_224_bench_snapshot_diff() -> None:
     """Phase 54.6.224 (roadmap 3.11.5) — bench snapshot + diff CLIs.
 
@@ -13571,6 +13635,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_223_self_citation_detection,
     # Phase 54.6.224 — roadmap 3.11.5: bench snapshot + diff
     l1_phase54_6_224_bench_snapshot_diff,
+    # Phase 54.6.225 — roadmap 3.3.3: link-visual-mentions in refresh pipeline
+    l1_phase54_6_225_refresh_includes_link_mentions,
 ]
 
 L2_TESTS: list[Callable] = [

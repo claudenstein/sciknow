@@ -17,6 +17,8 @@ Pipeline order (matches docs/README "Full rebuild sequence"):
   6. catalog raptor build    — hierarchical summary tree rebuild
   7. db tag-multimodal       — tag chunks containing tables / equations
   8. db extract-visuals      — extract visual elements into visuals table
+  8a. db link-visual-mentions — populate visuals.mention_paragraphs from
+                                body text (54.6.225, roadmap 3.3.3)
   9. db caption-visuals      — VLM captions for figures + charts — 54.6.72
                                (needs a VLM pulled; skipped cleanly if not)
   10. db paraphrase-equations — natural-language paraphrases for retrieval
@@ -193,6 +195,11 @@ def refresh(
         help="Skip RAPTOR tree rebuild (expensive on large corpora)."),
     no_multimodal: bool = typer.Option(False, "--no-multimodal"),
     no_visuals: bool = typer.Option(False, "--no-visuals"),
+    no_link_mentions: bool = typer.Option(False, "--no-link-mentions",
+        help="Skip linking body-text mention paragraphs to visual "
+             "rows (54.6.225, roadmap 3.3.3). Cheap step, but can "
+             "be skipped on re-runs where every visual already has "
+             "mention_paragraphs populated."),
     no_caption: bool = typer.Option(False, "--no-caption",
         help="Skip VLM caption-visuals (54.6.72) — skipped anyway if "
              "no vision LLM is pulled."),
@@ -355,6 +362,17 @@ def refresh(
     if not no_visuals:
         steps.append(("8. Extract visuals",
                       ["db", "extract-visuals"], True))
+    if not no_link_mentions:
+        # Phase 54.6.225 (roadmap 3.3.3) — populate
+        # `visuals.mention_paragraphs` from body text at ingest time
+        # instead of leaving it to a separate CLI run. Order matters:
+        # this has to come AFTER extract-visuals (no rows to link
+        # against) and BEFORE caption-visuals (the caption prompt
+        # benefits from surrounding mention context). The step is
+        # idempotent: `link_visuals_for_doc` skips rows that already
+        # have mention_paragraphs populated unless --force is passed.
+        steps.append(("8a. Link visual mentions (body-text references)",
+                      ["db", "link-visual-mentions"], True))
     if not no_caption:
         # Phase 54.6.72 — VLM captions for figures + charts. Fails
         # fast + cleanly when no VLM is pulled; optional step so
