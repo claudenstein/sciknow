@@ -613,6 +613,259 @@ def cluster(
         console.print(f"[dim]{noise} papers unassigned — re-run with --min-cluster-size 3 for smaller clusters.[/dim]")
 
 
+# ── coherence (Phase 54.6.219, roadmap 3.8.3) ────────────────────────────────
+
+
+@app.command()
+def coherence(
+    top_n: int = typer.Option(
+        10, "--top-n",
+        help="Top N c-TF-IDF keywords per cluster used for coherence "
+             "calculation. 10 is the canonical NPMI-paper setting; "
+             "raising it measures the long tail (less discriminative).",
+    ),
+    flag_threshold: float = typer.Option(
+        0.05, "--flag-threshold",
+        help="Flag clusters with NPMI below this as potentially "
+             "catch-all / incoherent. Standard NPMI ranges from -1 to "
+             "+1; academic-paper NPMI rarely exceeds 0.2, so 0.05 is a "
+             "reasonable 'this topic hangs together' floor.",
+    ),
+    json_out: bool = typer.Option(
+        False, "--json",
+        help="Emit machine-readable JSON instead of a Rich table.",
+    ),
+):
+    """Phase 54.6.219 (roadmap 3.8.3) — NPMI coherence per topic cluster.
+
+    Measures how tightly the top-N c-TF-IDF keywords of each cluster
+    co-occur in the corpus abstracts. Catches catch-all clusters
+    (grab-bag topics where the keywords are a random pile) and flags
+    them for splitting or merging in the next clustering pass.
+
+    NPMI (Normalized Pointwise Mutual Information) for a keyword
+    pair (w_i, w_j) in corpus of N abstracts:
+
+        P(w_i)    = count(w_i) / N
+        P(w_i,w_j) = count_both / N
+        npmi      = log(P(w_i,w_j) / (P(w_i) * P(w_j))) / -log(P(w_i,w_j))
+
+    Mean over all pairs of the top-N keywords = cluster NPMI. Scale:
+    -1 (always separate) to +1 (always together); > 0 = real topic,
+    ~0 = chance co-occurrence, < 0 = anti-correlated keywords
+    (possible catch-all).
+
+    This command re-runs c-TF-IDF on the CURRENT cluster assignments
+    (paper_metadata.topic_cluster) — no clustering rebuild, so it's
+    cheap to run after every `catalog cluster` invocation.
+
+    Examples:
+
+      sciknow catalog coherence                 # table view
+      sciknow catalog coherence --flag-threshold 0.1
+      sciknow catalog coherence --json | jq .   # scripted pipelines
+    """
+    from sciknow.cli import preflight
+    preflight()
+
+    import json as _json
+    import math
+    import re as _re
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+
+    with get_session() as session:
+        rows = session.execute(text("""
+            SELECT topic_cluster, abstract, title
+            FROM paper_metadata
+            WHERE topic_cluster IS NOT NULL
+              AND abstract IS NOT NULL
+              AND length(abstract) >= 40
+        """)).fetchall()
+
+    if not rows:
+        console.print(
+            "[yellow]No clustered papers found.[/yellow] "
+            "Run `sciknow catalog cluster` first."
+        )
+        return
+
+    # Group abstracts by cluster
+    docs_by_cluster: dict[str, list[str]] = {}
+    for cluster, abstract, title in rows:
+        docs_by_cluster.setdefault(cluster, []).append(
+            f"{title or ''} {abstract}"
+        )
+
+    # All documents as a corpus for NPMI denominator. Using all
+    # abstracts (not just the cluster's own) gives a fairer "are
+    # these words globally associated" signal — a cluster whose
+    # keywords happen to repeat within its own tiny document set
+    # would otherwise look spuriously coherent.
+    all_docs = [f"{(t or '')} {a}" for _, a, t in rows]
+
+    # Tokenize corpus once — lowercase word boundaries, drop stop
+    # words. Using set-of-tokens per document because NPMI's
+    # co-occurrence count is document-level, not position-level.
+    _STOP = {
+        "the", "a", "an", "and", "or", "but", "of", "in", "to",
+        "for", "on", "at", "by", "with", "from", "is", "are", "was",
+        "were", "be", "been", "being", "have", "has", "had", "this",
+        "that", "these", "those", "we", "they", "their", "our",
+        "which", "it", "its", "as", "also", "than", "then", "over",
+        "can", "may", "not", "no", "only", "more", "most", "such",
+    }
+    _TOKEN_RE = _re.compile(r"[a-z][a-z\-]{2,}")
+
+    def _toks(text: str) -> set[str]:
+        return {t for t in _TOKEN_RE.findall(text.lower()) if t not in _STOP}
+
+    corpus_token_sets = [_toks(d) for d in all_docs]
+    N = len(corpus_token_sets)
+
+    # Run c-TF-IDF per cluster (one joined doc per cluster) to get
+    # top-N keywords. Re-using sklearn pipeline rather than the
+    # full topic_cluster module because we already have cluster
+    # assignments — we just need the keyword derivation.
+    from sklearn.feature_extraction.text import (
+        CountVectorizer, TfidfTransformer,
+    )
+
+    cluster_ids = sorted(docs_by_cluster.keys())
+    joined = [" ".join(docs_by_cluster[cid]) for cid in cluster_ids]
+    vectorizer = CountVectorizer(
+        max_features=5000, stop_words="english",
+        min_df=2, ngram_range=(1, 1),  # unigrams for NPMI (bigrams
+                                        # would tangle the co-occur
+                                        # count).
+    )
+    try:
+        tf = vectorizer.fit_transform(joined)
+    except ValueError:
+        console.print(
+            "[yellow]Vocabulary too sparse — needs clusters with "
+            "more abstract content. Skip.[/yellow]"
+        )
+        return
+    tfidf = TfidfTransformer().fit_transform(tf)
+    feature_names = vectorizer.get_feature_names_out()
+
+    def _top_keywords(cluster_row_idx: int) -> list[str]:
+        scores = tfidf[cluster_row_idx].toarray().flatten()
+        ordered = scores.argsort()[-top_n:][::-1]
+        return [feature_names[i] for i in ordered if scores[i] > 0]
+
+    def _npmi(keywords: list[str]) -> tuple[float, int]:
+        """Mean NPMI over all pairs of keywords. Returns (mean, pair_count).
+        Pairs where either word is absent or co-occurrence is zero get
+        skipped rather than receiving a zero score — zero-imputation
+        would bias low-keyword-coverage clusters toward apparent
+        incoherence."""
+        singles: dict[str, int] = {}
+        for w in keywords:
+            singles[w] = sum(1 for t in corpus_token_sets if w in t)
+
+        scores: list[float] = []
+        for i, w_i in enumerate(keywords):
+            c_i = singles[w_i]
+            if c_i == 0:
+                continue
+            for w_j in keywords[i + 1:]:
+                c_j = singles[w_j]
+                if c_j == 0:
+                    continue
+                c_ij = sum(
+                    1 for t in corpus_token_sets
+                    if w_i in t and w_j in t
+                )
+                if c_ij == 0:
+                    continue
+                p_ij = c_ij / N
+                p_i = c_i / N
+                p_j = c_j / N
+                # NPMI = PMI / -log(p_ij) — normalised to [-1, +1]
+                scores.append(
+                    math.log(p_ij / (p_i * p_j)) / -math.log(p_ij)
+                )
+
+        mean = sum(scores) / len(scores) if scores else 0.0
+        return mean, len(scores)
+
+    records = []
+    for idx, cid in enumerate(cluster_ids):
+        kws = _top_keywords(idx)
+        npmi_score, pairs = _npmi(kws)
+        records.append({
+            "cluster": cid,
+            "size": len(docs_by_cluster[cid]),
+            "top_keywords": kws,
+            "npmi": round(npmi_score, 4),
+            "pairs": pairs,
+            "flagged": npmi_score < flag_threshold,
+        })
+
+    # Sort by NPMI descending so the strongest topics come first; the
+    # flagged tail drops to the bottom for easy eyeball.
+    records.sort(key=lambda r: r["npmi"], reverse=True)
+
+    if json_out:
+        console.print(_json.dumps({
+            "flag_threshold": flag_threshold,
+            "top_n": top_n,
+            "total_corpus": N,
+            "clusters": records,
+        }, indent=2, ensure_ascii=False))
+        return
+
+    # Rich table
+    t = Table(
+        title=f"Topic cluster NPMI coherence (N={N} abstracts, "
+              f"top-{top_n} keywords, flag<{flag_threshold})",
+        box=box.SIMPLE_HEAD, expand=True,
+    )
+    t.add_column("Cluster", ratio=3)
+    t.add_column("Papers", justify="right", width=7, style="cyan")
+    t.add_column("NPMI", justify="right", width=7)
+    t.add_column("Pairs", justify="right", width=6, style="dim")
+    t.add_column("Top keywords", ratio=4, style="dim")
+    for r in records:
+        npmi_txt = f"{r['npmi']:+.3f}"
+        if r["flagged"]:
+            npmi_txt = f"[red]{npmi_txt}[/red]"
+        elif r["npmi"] >= 0.15:
+            npmi_txt = f"[green]{npmi_txt}[/green]"
+        cluster_txt = r["cluster"]
+        if r["flagged"]:
+            cluster_txt = f"[yellow]⚠ {cluster_txt}[/yellow]"
+        t.add_row(
+            cluster_txt,
+            str(r["size"]),
+            npmi_txt,
+            str(r["pairs"]),
+            ", ".join(r["top_keywords"][:8]),
+        )
+    console.print(t)
+
+    flagged = [r for r in records if r["flagged"]]
+    if flagged:
+        console.print(
+            f"\n[yellow]⚠ {len(flagged)} cluster(s) below NPMI "
+            f"{flag_threshold}:[/yellow] "
+            + ", ".join(r["cluster"] for r in flagged[:5])
+            + (f", … +{len(flagged) - 5} more" if len(flagged) > 5 else "")
+        )
+        console.print(
+            "[dim]Low coherence often means the cluster is a catch-all "
+            "(mixed themes) or the top keywords are stop-word-like. "
+            "Consider re-running `catalog cluster --min-cluster-size N` "
+            "with a smaller N to split them.[/dim]"
+        )
+    else:
+        console.print(
+            "[green]All clusters clear the coherence threshold.[/green]"
+        )
+
+
 # ── cluster-llm (legacy LLM-batch approach) ──────────────────────────────────
 
 @app.command(name="cluster-llm")

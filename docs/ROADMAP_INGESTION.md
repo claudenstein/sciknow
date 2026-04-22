@@ -805,7 +805,7 @@ Scoring: **Impact** (H/M/L) × **Effort** (H/M/L) → **Verdict**.
 | 3.7.2 | KG relation vocabulary constraint | Q | M | M | **Defer** | Needs user input on domain-specific relations |
 | 3.7.3 | KG quality sampling | O | L | L | **Shipped 54.6.218** | `sciknow wiki kg-sample` — LLM-judge or human grading, JSONL per-run for longitudinal tracking |
 | 3.8.2 | Dynamic topics over time | O | L | M | **Defer** | Visualization play, non-critical |
-| 3.8.3 | Topic coherence metrics | O | L | L | **Defer** | Current labels are human-acceptable |
+| 3.8.3 | Topic coherence metrics | O | L | L | **Shipped 54.6.219** | `sciknow catalog coherence` — NPMI per cluster, catch-all flagging. Validated: flagged "General Climate History" (keywords `se, 2020, principal, al`) at NPMI 0.000 |
 | 3.9.2 | Adaptive RAPTOR depth | Q | L | L | **Defer** | Current 3-level fine for current corpus size |
 | 3.10.1 | Incremental wiki updates | S | M | M | **Defer** | Full rebuild is fine at current corpus size; worth it past 2k papers |
 | 3.10.2 | Wiki-claim-to-paper consistency check | Q | M | M | **Defer** | Builds on claim-atomization; low regression risk |

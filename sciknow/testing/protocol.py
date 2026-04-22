@@ -11853,6 +11853,71 @@ def l1_phase54_6_134_agentic_coverage_uses_reranker() -> None:
     )
 
 
+def l1_phase54_6_219_topic_coherence_cli_surface() -> None:
+    """Phase 54.6.219 (roadmap 3.8.3) — NPMI topic coherence CLI.
+
+    Ships `sciknow catalog coherence`: re-runs c-TF-IDF on the current
+    cluster assignments, computes NPMI per cluster against the full
+    abstract corpus, flags catch-all clusters. Cheap to run (no
+    clustering rebuild); complements `catalog cluster`.
+
+    Offline-only surface checks:
+
+      A) Typer command `sciknow catalog coherence` registered; help
+         renders.
+      B) Parameters: `top_n`, `flag_threshold`, `json_out`.
+      C) NPMI denominator references `-math.log(p_ij)` (the
+         normalising term that distinguishes NPMI from raw PMI).
+         A silent refactor that drops the normalisation would make
+         scores unbounded and the flag threshold meaningless.
+      D) Coherence output JSON carries the expected keys
+         (`cluster`, `size`, `top_keywords`, `npmi`, `pairs`,
+         `flagged`).
+    """
+    import inspect as _inspect
+    from typer.testing import CliRunner
+    from sciknow.cli.main import app
+    from sciknow.cli import catalog as catalog_mod
+
+    # A) help renders
+    r = CliRunner().invoke(app, ["catalog", "coherence", "--help"])
+    assert r.exit_code == 0, (
+        f"`catalog coherence --help` failed: {r.output[:300]}"
+    )
+    assert "NPMI coherence" in r.output, (
+        "help should describe the NPMI metric"
+    )
+
+    # B) parameter surface
+    assert hasattr(catalog_mod, "coherence")
+    sig = _inspect.signature(catalog_mod.coherence)
+    for param in ("top_n", "flag_threshold", "json_out"):
+        assert param in sig.parameters, (
+            f"catalog coherence missing --{param.replace('_', '-')} option"
+        )
+
+    # C) NPMI formula pinning (denominator guard)
+    src = _inspect.getsource(catalog_mod.coherence)
+    assert "-math.log(p_ij)" in src, (
+        "NPMI normalising denominator `-math.log(p_ij)` missing — "
+        "without it the score becomes raw PMI (unbounded), and the "
+        "flag threshold default 0.05 stops meaning anything"
+    )
+    # Both P calculations must be there
+    for piece in ("p_ij = c_ij / N", "p_i = c_i / N", "p_j = c_j / N"):
+        assert piece in src, (
+            f"NPMI probability calc `{piece}` missing from source"
+        )
+
+    # D) Output schema keys (a JSON schema contract — stable keys
+    # for anyone consuming `--json` in a pipeline).
+    for key in ("cluster", "size", "top_keywords", "npmi",
+                "pairs", "flagged"):
+        assert f'"{key}"' in src, (
+            f"coherence output record must carry `{key}` key"
+        )
+
+
 def l1_phase54_6_218_kg_sample_cli_surface() -> None:
     """Phase 54.6.218 (roadmap 3.7.3) — KG quality sampling CLI.
 
@@ -12947,6 +13012,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_217_core_resolver_wired,
     # Phase 54.6.218 — roadmap 3.7.3: KG quality sampling CLI
     l1_phase54_6_218_kg_sample_cli_surface,
+    # Phase 54.6.219 — roadmap 3.8.3: NPMI topic coherence CLI
+    l1_phase54_6_219_topic_coherence_cli_surface,
 ]
 
 L2_TESTS: list[Callable] = [
