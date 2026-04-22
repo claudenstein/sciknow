@@ -117,6 +117,15 @@ class Settings(BaseSettings):
     # Crossref polite pool
     crossref_email: str = "user@example.com"
 
+    # Phase 54.6.217 (roadmap 3.0.1 closure) — CORE (core.ac.uk) API
+    # key. Free after registering at https://core.ac.uk/services/api;
+    # the downloader uses it to query CORE's aggregator of
+    # institutional-repository PDFs, which catches preprints that
+    # never hit arXiv / OSF. Empty/missing → the CORE resolver is
+    # skipped gracefully in the OA cascade (install still works,
+    # just without that source).
+    core_api_key: str | None = None
+
     # PDF converter backend.
     #
     # Values:

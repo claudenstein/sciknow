@@ -27,6 +27,12 @@ Sources probed for every candidate DOI, in rough priority order:
      resolver handles the whole family.
   8. **Zenodo** — CERN-hosted DOI-resolving OA repository; catches
      dataset-attached papers + some preprints.
+  9. **CORE** (core.ac.uk, Phase 54.6.217, roadmap 3.0.1 closure) —
+     aggregator of institutional-repository content (million+ PDFs
+     from university repos, government archives, smaller publishers).
+     Catches grey-lit reports and preprints that don't live in
+     commercial publisher infrastructure. Requires CORE_API_KEY;
+     skipped silently when unset.
 
 Phase 54.6.51 — two big changes to the discovery phase that used to
 dominate wall time on no-OA DOIs:
@@ -305,6 +311,59 @@ def find_hal_pdf_url(doi: str) -> str | None:
         return None
 
 
+def find_core_pdf_url(doi: str, api_key: str | None) -> str | None:
+    """Phase 54.6.217 (roadmap 3.0.1 closure) — CORE (core.ac.uk).
+
+    CORE is the largest aggregator of institutional-repository
+    content — millions of PDFs from university repos, government
+    archives, and smaller publishers that don't make it into
+    Crossref/Unpaywall's "best OA location" picks. For climate
+    corpora specifically it catches grey-lit reports from agencies
+    (NOAA, NASA mirrors, UK Met Office, IPCC preprints) that
+    live on institutional sites rather than commercial publisher
+    infrastructure.
+
+    Requires a free API key (https://core.ac.uk/services/api).
+    Called with ``api_key=None`` returns None silently so the
+    cascade stays safe on installs without a key.
+
+    CORE v3 API: POST https://api.core.ac.uk/v3/search/works with
+    JSON body ``{"q": "doi:\"<doi>\""}`` + ``Authorization: Bearer
+    <key>`` header. Response ``results[].downloadUrl`` is the
+    direct PDF URL.
+    """
+    if not api_key:
+        return None
+    try:
+        resp = _get_client().post(
+            "https://api.core.ac.uk/v3/search/works",
+            json={
+                "q": f'doi:"{doi}"',
+                "limit": 1,
+            },
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        if resp.status_code != 200:
+            # 401/403 → bad key, 429 → rate limit; both are non-fatal
+            # for the cascade — other resolvers may still succeed.
+            logger.debug(
+                "core lookup non-200 for %s: %s", doi, resp.status_code
+            )
+            return None
+        data = resp.json()
+        results = data.get("results") or []
+        if not results:
+            return None
+        download = results[0].get("downloadUrl")
+        # CORE sometimes returns a landing-page URL rather than a
+        # direct PDF; we trust the download_pdf() guard to reject
+        # non-PDF responses later.
+        return download or None
+    except Exception as exc:
+        logger.debug("core lookup failed for %s: %s", doi, exc)
+        return None
+
+
 def find_osf_preprints_pdf_url(doi: str) -> str | None:
     """Phase 54.6.216 (roadmap 3.0.1) — OSF Preprints umbrella resolver.
 
@@ -481,6 +540,16 @@ def _gather_candidate_urls(
             _LookupSpec("osf_preprints", 7, find_osf_preprints_pdf_url, (doi,)),
             _LookupSpec("zenodo", 8, find_zenodo_pdf_url, (doi,)),
         ])
+        # Phase 54.6.217 (roadmap 3.0.1 closure) — CORE (core.ac.uk).
+        # Requires an API key; only added to the cascade when the key
+        # is set so installs without one don't pay the work of a no-op
+        # call per DOI. When set, runs in parallel with the others.
+        from sciknow.config import settings as _s
+        if _s.core_api_key:
+            specs.append(
+                _LookupSpec("core", 9, find_core_pdf_url,
+                            (doi, _s.core_api_key))
+            )
     if doi and resolve_arxiv_from_doi and not arxiv_id:
         # Resolve an arXiv preprint via the DOI as a fallback source.
         # This runs in parallel with the others and only costs one

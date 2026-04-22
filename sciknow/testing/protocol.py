@@ -11853,6 +11853,63 @@ def l1_phase54_6_134_agentic_coverage_uses_reranker() -> None:
     )
 
 
+def l1_phase54_6_217_core_resolver_wired() -> None:
+    """Phase 54.6.217 (roadmap 3.0.1 closure) — CORE resolver wiring.
+
+    Closes the 3.0.1 trio (Europe PMC shipped in 54.6.51, OSF
+    Preprints in 54.6.216). Offline-only surface checks:
+
+      A) `find_core_pdf_url(doi, api_key)` exists + returns None
+         when api_key is None/empty (gate that keeps installs
+         without a key safe).
+      B) `core_api_key` setting exposed on the Settings object,
+         defaulting to None.
+      C) `_gather_candidate_urls` only appends the CORE spec when
+         `settings.core_api_key` is truthy — verified via source
+         grep for the gating `if _s.core_api_key:` so a refactor
+         can't silently fire the no-key path.
+      D) Module docstring advertises CORE as source #9.
+    """
+    import inspect as _inspect
+    from sciknow.ingestion import downloader as dl
+    from sciknow.config import settings
+
+    # A) function surface + empty-key behaviour
+    assert hasattr(dl, "find_core_pdf_url"), (
+        "downloader.find_core_pdf_url missing — Phase 54.6.217"
+    )
+    # None/empty key must short-circuit without any HTTP call
+    for bad_key in (None, ""):
+        assert dl.find_core_pdf_url("10.1/x", bad_key) is None, (
+            f"find_core_pdf_url must return None for api_key={bad_key!r} "
+            f"(gates out of the cascade on installs without a key)"
+        )
+
+    # B) setting exposed
+    assert hasattr(settings, "core_api_key"), (
+        "settings.core_api_key missing — Phase 54.6.217"
+    )
+
+    # C) cascade gating via `if _s.core_api_key`
+    gather_src = _inspect.getsource(dl._gather_candidate_urls)
+    assert 'if _s.core_api_key:' in gather_src, (
+        "_gather_candidate_urls must gate the CORE _LookupSpec behind "
+        "`if _s.core_api_key:` so installs without a key don't burn "
+        "a parallel slot on a guaranteed-None call"
+    )
+    assert '_LookupSpec("core"' in gather_src, (
+        "_gather_candidate_urls must build a CORE _LookupSpec when the "
+        "key is present"
+    )
+
+    # D) module docstring advertises CORE
+    module_doc = dl.__doc__ or ""
+    assert "CORE" in module_doc and "core.ac.uk" in module_doc, (
+        "downloader module docstring must advertise CORE (core.ac.uk) "
+        "in the 'Sources probed' list"
+    )
+
+
 def l1_phase54_6_216_osf_preprints_resolver_wired() -> None:
     """Phase 54.6.216 (roadmap 3.0.1 partial) — OSF Preprints resolver.
 
@@ -12827,6 +12884,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_215_mineru_pipeline_deprecation_docs,
     # Phase 54.6.216 — roadmap 3.0.1 partial: OSF Preprints umbrella resolver
     l1_phase54_6_216_osf_preprints_resolver_wired,
+    # Phase 54.6.217 — roadmap 3.0.1 closure: CORE (core.ac.uk) resolver
+    l1_phase54_6_217_core_resolver_wired,
 ]
 
 L2_TESTS: list[Callable] = [
