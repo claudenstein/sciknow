@@ -44,6 +44,15 @@ class ConversionError(Exception):
     pass
 
 
+def _marker_version() -> str | None:
+    """Return the marker-pdf package version for the converter stamp."""
+    try:
+        import marker as _marker_pkg
+        return f"marker-pdf {getattr(_marker_pkg, '__version__', '?')}"
+    except Exception:
+        return None
+
+
 @dataclass
 class ConversionResult:
     """Returned by convert(). Carries all forms of the converted document."""
@@ -63,6 +72,19 @@ class ConversionResult:
 
     # Always set: plain text for metadata extraction
     text: str = ""
+
+    # Phase 54.6.211 (roadmap 3.1.6 Phase 1) — free-form provenance
+    # for the stamp on documents.converter_backend / converter_version.
+    # `converter_mode` is the finer variant of `backend`:
+    #   "mineru-pipeline"          — MinerU 2.0 stack (legacy)
+    #   "mineru-vlm-pro-vllm"      — MinerU 2.5-Pro VLM via vllm
+    #   "mineru-vlm-pro-transformers" — MinerU 2.5-Pro VLM via HF
+    #   "mineru-vlm-auto"          — MinerU VLM with auto-engine
+    #   "marker-json" / "marker-md"
+    # `converter_version` is the producer's version string
+    # (e.g. "mineru 3.0.9", "marker-pdf 1.6.2"); None if unavailable.
+    converter_mode: str | None = None
+    converter_version: str | None = None
 
     @property
     def is_json(self) -> bool:
@@ -358,11 +380,38 @@ def _convert_mineru(
     """
     do_parse, read_fn = _load_mineru()
 
+    # Phase 54.6.211 (roadmap 3.1.6 Phase 1) — honour the
+    # `mineru_vlm_backend` setting when VLM-Pro is selected. The
+    # MinerU CLI accepts three variants of the VLM engine name:
+    #   auto         → let MinerU pick (vllm if available)
+    #   vllm         → vllm-engine (fast path, requires mineru[vllm])
+    #   transformers → transformers path (safe fallback)
+    # Passed through as do_parse(backend=...); MinerU maps these to
+    # its internal engine selector. Pipeline mode ignores the setting
+    # entirely because it doesn't use a VLM.
     if use_vlm_pro:
         _patch_mineru_to_pro_model(vlm_model_name or _MINERU_PRO_DEFAULT_HF)
-        chosen_backend = "vlm-auto-engine"
+        from sciknow.config import settings as _s
+        vlm_backend_pref = (_s.mineru_vlm_backend or "auto").strip().lower()
+        if vlm_backend_pref == "vllm":
+            chosen_backend = "vlm-vllm-engine"
+            converter_mode = "mineru-vlm-pro-vllm"
+        elif vlm_backend_pref == "transformers":
+            chosen_backend = "vlm-transformers"
+            converter_mode = "mineru-vlm-pro-transformers"
+        else:
+            chosen_backend = "vlm-auto-engine"
+            converter_mode = "mineru-vlm-auto"
     else:
         chosen_backend = "pipeline"
+        converter_mode = "mineru-pipeline"
+
+    # Capture MinerU version for the documents.converter_version stamp.
+    try:
+        import mineru as _mineru_pkg
+        mineru_version = f"mineru {getattr(_mineru_pkg, '__version__', '?')}"
+    except Exception:
+        mineru_version = None
 
     output_dir.mkdir(parents=True, exist_ok=True)
     stem = pdf_path.stem
@@ -435,6 +484,8 @@ def _convert_mineru(
         content_list=content_list,
         content_list_path=content_list_path,
         text=text,
+        converter_mode=converter_mode,
+        converter_version=mineru_version,
     )
 
 
@@ -470,6 +521,8 @@ def _convert_marker_json(pdf_path: Path, output_dir: Path) -> ConversionResult:
         json_path=json_path,
         json_data=json_data,
         text=text,
+        converter_mode="marker-json",
+        converter_version=_marker_version(),
     )
 
 
@@ -510,6 +563,8 @@ def _convert_marker_markdown(pdf_path: Path, output_dir: Path) -> ConversionResu
         backend="marker_md",
         md_path=md_path,
         text=text,
+        converter_mode="marker-md",
+        converter_version=_marker_version(),
     )
 
 

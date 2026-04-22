@@ -139,6 +139,21 @@ class Settings(BaseSettings):
     # like "opendatalab/MinerU2.5-Pro-2604-1.2B" to use Pro.
     mineru_vlm_model: str = "opendatalab/MinerU2.5-Pro-2604-1.2B"
 
+    # Phase 54.6.211 (roadmap 3.1.6 Phase 1) — explicit choice of the
+    # VLM inference backend when running MinerU 2.5-Pro. Values:
+    #   "auto"         — let MinerU pick (vllm if the `mineru[vllm]`
+    #                    extras are installed, transformers otherwise).
+    #                    Current default for backward compatibility.
+    #   "transformers" — force the HF transformers path (slower, no
+    #                    vllm prerequisite; safe everywhere).
+    #   "vllm"         — force the vllm-engine path (2-4× faster than
+    #                    transformers on a 3090; requires `mineru[vllm]`
+    #                    extras + a vllm-compatible CUDA stack).
+    # Only consulted when pdf_converter_backend = "mineru-vlm-pro" or
+    # when "auto" dispatch routes to VLM-Pro. Phase 2 of the 3.1.6
+    # migration flips both defaults together.
+    mineru_vlm_backend: str = "auto"
+
     # Ingestion
     # Chunks per bge-m3 batch. Default 32 is safe on a 24GB GPU when the LLM is
     # also resident; raise to 64-128 for embedder-only runs, lower to 8-16 if

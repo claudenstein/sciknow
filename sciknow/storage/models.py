@@ -33,6 +33,20 @@ class Document(Base):
     ingestion_status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
     ingestion_error: Mapped[str | None] = mapped_column(Text)
     mineru_output_path: Mapped[str | None] = mapped_column(Text)
+    # Phase 54.6.211 (roadmap 3.1.6 Phase 1) — provenance for the
+    # converter that produced this document's MinerU/Marker output.
+    # Used by:
+    #   (a) the failures clinic (§3.11.6) to attribute failure
+    #       classes to a specific backend version;
+    #   (b) post-migration audits that need to distinguish pipeline-
+    #       era chunks from VLM-Pro-era chunks even though the
+    #       content_list schema is shared;
+    #   (c) future retrieval-era filters if we ever compare quality
+    #       across the boundary.
+    # Nullable because pre-54.6.211 rows have no stamp; populated at
+    # ingest time in ingestion/pipeline.py.
+    converter_backend: Mapped[str | None] = mapped_column(Text)
+    converter_version: Mapped[str | None] = mapped_column(Text)
     # How this document entered the collection. 'seed' = manually ingested,
     # 'expand' = auto-discovered via `sciknow db expand`. Used for provenance
     # and to support future `db prune --source expand` operations.

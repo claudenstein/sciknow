@@ -225,6 +225,13 @@ def ingest(
             output_dir = settings.mineru_output_dir / str(doc_id)
             result = pdf_converter.convert(pdf_path, output_dir)
             doc.mineru_output_path = str(output_dir)
+            # Phase 54.6.211 (roadmap 3.1.6 Phase 1) — provenance stamp
+            # for audit + failures clinic + post-migration retrieval
+            # filters. Columns are nullable so pre-54.6.211 rows stay
+            # valid; we populate both on every new convert regardless
+            # of which backend ran.
+            doc.converter_backend = result.converter_mode
+            doc.converter_version = result.converter_version
 
             output_file = result.content_list_path or result.json_path or result.md_path
             _log_job(session, doc_id, "convert", "completed",

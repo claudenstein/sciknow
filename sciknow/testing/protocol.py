@@ -11853,6 +11853,96 @@ def l1_phase54_6_134_agentic_coverage_uses_reranker() -> None:
     )
 
 
+def l1_phase54_6_211_converter_provenance_surface() -> None:
+    """Phase 54.6.211 (roadmap 3.1.6 Phase 1) — converter provenance stamp.
+
+    Phase 1 of the MinerU 2.5-Pro migration lands the substrate
+    that every later phase reads:
+
+      A) `mineru_vlm_backend` setting exposed on `settings`, values
+         "auto" | "transformers" | "vllm".
+      B) `documents.converter_backend` + `documents.converter_version`
+         columns exist (migration 0036 applied) and the Document
+         ORM model declares them.
+      C) `ConversionResult` carries `converter_mode` + `converter_version`
+         fields — the source the pipeline stage reads when stamping
+         the document row.
+      D) The ingest pipeline stamps both columns from the result,
+         right alongside the existing `mineru_output_path` stamp.
+         (Structural check — Phase 2 flips the default backend, so
+         the stamp path must work regardless of which backend ran.)
+      E) The MinerU dispatcher honours the `mineru_vlm_backend`
+         setting — the source references all three engine ids
+         (vlm-vllm-engine / vlm-transformers / vlm-auto-engine) so
+         a silent refactor can't drop one of the branches.
+    """
+    import inspect as _inspect
+    from sqlalchemy import inspect as _sql_inspect
+
+    from sciknow.config import settings
+    from sciknow.storage.db import engine
+    from sciknow.storage.models import Document
+    from sciknow.ingestion import pdf_converter as conv_mod
+    from sciknow.ingestion import pipeline as pipe_mod
+
+    # A) setting exposed
+    assert hasattr(settings, "mineru_vlm_backend"), (
+        "settings.mineru_vlm_backend missing — Phase 1 roadmap 3.1.6"
+    )
+    assert settings.mineru_vlm_backend in ("auto", "transformers", "vllm"), (
+        f"mineru_vlm_backend must be auto|transformers|vllm, "
+        f"got {settings.mineru_vlm_backend!r}"
+    )
+
+    # B) DB columns + ORM declarations
+    insp = _sql_inspect(engine)
+    doc_cols = {c["name"] for c in insp.get_columns("documents")}
+    for col in ("converter_backend", "converter_version"):
+        assert col in doc_cols, (
+            f"documents.{col} missing — migration 0036 not applied?"
+        )
+        assert hasattr(Document, col), (
+            f"Document ORM missing {col} — models.py out of sync "
+            f"with migration 0036"
+        )
+
+    # C) ConversionResult fields
+    result_sig = _inspect.signature(conv_mod.ConversionResult)
+    for field in ("converter_mode", "converter_version"):
+        assert field in result_sig.parameters, (
+            f"ConversionResult.{field} missing — pipeline can't stamp "
+            f"documents.converter_{field.split('_')[-1]} without it"
+        )
+
+    # D) pipeline stamps both columns
+    pipe_src = _inspect.getsource(pipe_mod.ingest)
+    for stamp in (
+        "doc.converter_backend = result.converter_mode",
+        "doc.converter_version = result.converter_version",
+    ):
+        assert stamp in pipe_src, (
+            f"pipeline.ingest must stamp `{stamp}` — Phase 1 roadmap 3.1.6"
+        )
+
+    # E) Dispatcher honours all three engine ids
+    conv_src = _inspect.getsource(conv_mod._convert_mineru)
+    for engine_id in ("vlm-vllm-engine", "vlm-transformers", "vlm-auto-engine"):
+        assert engine_id in conv_src, (
+            f"_convert_mineru must reference {engine_id!r} engine — "
+            f"dropping any of them would silently disable that backend "
+            f"preference"
+        )
+    for mode_id in (
+        "mineru-vlm-pro-vllm",
+        "mineru-vlm-pro-transformers",
+        "mineru-pipeline",
+    ):
+        assert mode_id in conv_src, (
+            f"_convert_mineru must emit the {mode_id!r} converter_mode "
+            f"so the failures clinic can attribute failures by variant"
+        )
+
+
 def l1_phase54_6_210_refresh_since_incremental_surface() -> None:
     """Phase 54.6.210 (roadmap 3.11.2) — `sciknow refresh --since` surface.
 
@@ -12275,6 +12365,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_85_bench_profile_for_model,
     # Phase 54.6.210 — roadmap 3.11.2: incremental refresh + .last_refresh
     l1_phase54_6_210_refresh_since_incremental_surface,
+    # Phase 54.6.211 — roadmap 3.1.6 Phase 1: converter provenance stamp
+    l1_phase54_6_211_converter_provenance_surface,
 ]
 
 L2_TESTS: list[Callable] = [
