@@ -11853,6 +11853,79 @@ def l1_phase54_6_134_agentic_coverage_uses_reranker() -> None:
     )
 
 
+def l1_phase54_6_222_equation_bench_cli_surface() -> None:
+    """Phase 54.6.222 (roadmap 3.1.2) — equation extraction accuracy bench.
+
+    Mirrors the `wiki kg-sample` pattern (54.6.218) but for
+    equations: samples N equations from the visuals table, grades
+    both the LaTeX validity (MinerU MFR) and the paraphrase
+    faithfulness (54.6.78 paraphrase-equations) via LLM judge or
+    human interactive prompt, and appends results to a timestamped
+    JSONL. Complements the migration cluster because it gives us a
+    pre/post baseline when VLM-Pro re-ingest lands.
+
+    Offline-only surface checks:
+
+      A) `sciknow db equation-bench` Typer command registered; help
+         renders.
+      B) Parameters: --n, --judge, --model, --output-dir, --seed.
+      C) Grading prompt (`_EQ_GRADE_PROMPT`) defines the two-axis
+         rubric (latex_valid, paraphrase_matches) + their label
+         vocabularies (yes/partial/no and yes/partial/no/unclear).
+      D) JSON output schema keys: visual_id, document_id, latex,
+         paraphrase, latex_valid, paraphrase_matches, reason, judge,
+         graded_at — stable for JSONL pipelines.
+    """
+    import inspect as _inspect
+    from typer.testing import CliRunner
+    from sciknow.cli.main import app
+    from sciknow.cli import db as db_cli
+
+    # A) help
+    r = CliRunner().invoke(app, ["db", "equation-bench", "--help"])
+    assert r.exit_code == 0, (
+        f"equation-bench --help failed: {r.output[:300]}"
+    )
+    assert "paraphrase" in r.output.lower(), (
+        "help should describe the paraphrase axis"
+    )
+
+    # B) parameter surface
+    assert hasattr(db_cli, "equation_bench_cmd")
+    sig = _inspect.signature(db_cli.equation_bench_cmd)
+    for param in ("n", "judge", "model", "output_dir", "seed"):
+        assert param in sig.parameters, (
+            f"equation-bench missing --{param.replace('_', '-')} option"
+        )
+
+    # C) prompt rubric + label vocab
+    assert hasattr(db_cli, "_EQ_GRADE_PROMPT")
+    prompt = db_cli._EQ_GRADE_PROMPT
+    for must_mention in (
+        "latex_valid", "paraphrase_matches",
+        "yes|partial|no", "yes|partial|no|unclear",
+    ):
+        assert must_mention in prompt, (
+            f"_EQ_GRADE_PROMPT must surface {must_mention!r} — the "
+            f"schema downstream JSONL consumers rely on"
+        )
+
+    # D) output record schema — the JSON field names must be stable
+    # so scripts parsing the JSONL don't silently break across
+    # versions. Source-grep ensures a refactor that renames a field
+    # fails this test rather than drifts.
+    src = _inspect.getsource(db_cli.equation_bench_cmd)
+    for key in (
+        "visual_id", "document_id", "paper_title", "year",
+        "latex", "paraphrase", "surrounding_text",
+        "latex_valid", "paraphrase_matches",
+        "reason", "judge", "graded_at",
+    ):
+        assert f'"{key}"' in src, (
+            f"equation-bench JSONL record must carry `{key}` key"
+        )
+
+
 def l1_phase54_6_221_paper_institutions_surface() -> None:
     """Phase 54.6.221 (roadmap 3.2.4) — paper_institutions table + backfill.
 
@@ -13251,6 +13324,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_220_kg_relation_canonicalization,
     # Phase 54.6.221 — roadmap 3.2.4: paper_institutions table + backfill
     l1_phase54_6_221_paper_institutions_surface,
+    # Phase 54.6.222 — roadmap 3.1.2: equation extraction accuracy bench
+    l1_phase54_6_222_equation_bench_cli_surface,
 ]
 
 L2_TESTS: list[Callable] = [

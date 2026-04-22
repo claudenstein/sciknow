@@ -6689,6 +6689,303 @@ def parse_tables_cmd(
     )
 
 
+# ── equation-bench (Phase 54.6.222 — roadmap 3.1.2) ──────────────────────────
+
+
+_EQ_GRADE_PROMPT = """You are grading an equation that was extracted \
+from a scientific paper and then paraphrased into prose for retrieval.
+
+LaTeX (what MinerU extracted from the PDF):
+$$
+{latex}
+$$
+
+Paraphrase (what the LLM wrote to describe the equation):
+"{paraphrase}"
+
+Context from the paper (surrounding sentence, may be empty):
+"{surrounding_text}"
+
+Grade two separate things:
+
+1. latex_valid — Is the LaTeX syntactically correct and parseable?
+   * yes     — renders cleanly, all braces balanced, macros well-formed
+   * partial — renders but has minor issues (stray braces, missing
+               `\\mathrm`, etc.) that don't break the meaning
+   * no      — malformed, mojibake, truncated, or empty
+
+2. paraphrase_matches — Does the paraphrase describe the same math
+   as the LaTeX?
+   * yes     — all variables, operators, and the overall structure are
+               faithfully captured
+   * partial — most of it is right but one variable or operator is
+               wrong, missing, or hallucinated
+   * no      — paraphrase describes different math, or is generic
+               filler ("this equation relates X and Y"), or is empty
+   * unclear — paraphrase is missing or the LaTeX is so broken you
+               can't judge
+
+Respond in JSON ONLY, no prose:
+{{"latex_valid": "yes|partial|no",
+  "paraphrase_matches": "yes|partial|no|unclear",
+  "reason": "<one short sentence>"}}
+"""
+
+
+@app.command(name="equation-bench")
+def equation_bench_cmd(
+    n: int = typer.Option(
+        30, "--n", "-n",
+        help="Random sample size. 30 is enough for ±10% precision "
+             "at 95% CI on a binary metric; raise to 50-100 for "
+             "tighter intervals.",
+    ),
+    judge: str = typer.Option(
+        "llm", "--judge",
+        help="Who grades: 'llm' (LLM_FAST_MODEL auto-grades; no "
+             "human input), 'human' (interactive prompt per row), "
+             "or 'both' (LLM first, human confirms or overrides).",
+    ),
+    model: str | None = typer.Option(
+        None, "--model",
+        help="Override the judge LLM. Default: settings.llm_fast_model.",
+    ),
+    output_dir: Path = typer.Option(
+        None, "--output-dir",
+        help="Where to write the sample JSONL. Default: "
+             "<data_dir>/equation_bench/bench-<iso-timestamp>.jsonl.",
+    ),
+    seed: int | None = typer.Option(
+        None, "--seed",
+        help="Random seed for deterministic sampling (debugging only).",
+    ),
+):
+    """Phase 54.6.222 (roadmap 3.1.2) — bench equation extraction + paraphrase quality.
+
+    Picks N random equations from the visuals table (kind='equation'),
+    grades each one along two axes:
+
+      * latex_valid — did MinerU extract syntactically correct LaTeX
+                      from the PDF? (measures the converter's MFR model)
+      * paraphrase_matches — did the LLM paraphrase (54.6.78) faithfully
+                             describe the math? (measures the paraphrase
+                             prompt + model combo)
+
+    Persists one JSONL record per equation under
+    ``<data_dir>/equation_bench/bench-<iso-timestamp>.jsonl``. Track
+    both metrics over time — a sudden drop in latex_valid catches
+    MinerU regressions, a drop in paraphrase_matches catches LLM /
+    prompt drift.
+
+    Output shape (one JSON object per line):
+
+      {{
+        "visual_id": "<uuid>",
+        "document_id": "<uuid>", "paper_title": "...", "year": 2024,
+        "latex": "...", "paraphrase": "...", "surrounding_text": "...",
+        "latex_valid": "yes|partial|no",
+        "paraphrase_matches": "yes|partial|no|unclear",
+        "reason": "<judge's one-sentence rationale>",
+        "judge": "llm-<model>|human",
+        "graded_at": "<iso timestamp>"
+      }}
+
+    Examples:
+
+      sciknow db equation-bench                 # 30 equations, LLM-graded
+      sciknow db equation-bench --n 50          # bigger sample
+      sciknow db equation-bench --judge human   # interactive grading
+      sciknow db equation-bench --judge both    # LLM + human confirm
+    """
+    from sciknow.cli import preflight
+    preflight(qdrant=False)
+
+    import json as _json
+    import random as _random
+    from datetime import datetime, timezone
+    from sqlalchemy import text as sql_text
+    from sciknow.config import settings
+    from sciknow.storage.db import get_session
+
+    if judge not in ("llm", "human", "both"):
+        console.print(
+            f"[red]Invalid --judge:[/red] {judge!r} — must be "
+            "llm / human / both."
+        )
+        raise typer.Exit(2)
+
+    from sciknow.core.project import get_active_project
+    active = get_active_project()
+    out_root = output_dir or (active.data_dir / "equation_bench")
+    out_root.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out_path = out_root / f"bench-{ts}.jsonl"
+
+    if seed is not None:
+        _random.seed(seed)
+
+    with get_session() as session:
+        rows = session.execute(sql_text("""
+            SELECT v.id::text, v.document_id::text, v.content,
+                   v.ai_caption, v.surrounding_text, pm.title, pm.year
+            FROM visuals v
+            LEFT JOIN paper_metadata pm
+                   ON pm.document_id = v.document_id
+            WHERE v.kind = 'equation'
+              AND v.content IS NOT NULL
+              AND length(v.content) >= 5
+              AND v.ai_caption IS NOT NULL
+              AND length(v.ai_caption) >= 20
+            ORDER BY random()
+            LIMIT :n
+        """), {"n": n}).fetchall()
+
+    if not rows:
+        console.print(
+            "[yellow]No equations match the filter.[/yellow] "
+            "Run `sciknow db extract-visuals` and `sciknow db "
+            "paraphrase-equations` first."
+        )
+        return
+
+    console.print(
+        f"[bold]Benching {len(rows)} equation(s) → {out_path}[/bold]"
+    )
+
+    _resolved_model = model or settings.llm_fast_model or settings.llm_model
+
+    def _llm_grade(row) -> tuple[str, str, str]:
+        import ollama as _ollama
+        client = _ollama.Client(host=settings.ollama_host, timeout=60)
+        prompt = _EQ_GRADE_PROMPT.format(
+            latex=(row[2] or "")[:2000],
+            paraphrase=(row[3] or "")[:1500],
+            surrounding_text=(row[4] or "")[:500],
+        )
+        try:
+            resp = client.chat(
+                model=_resolved_model,
+                messages=[{"role": "user", "content": prompt}],
+                format="json",
+                options={"temperature": 0.0, "num_predict": 250},
+            )
+            content = (resp.get("message") or {}).get("content", "")
+            data = _json.loads(content)
+            lv = str(data.get("latex_valid", "")).strip().lower()
+            pm_ = str(data.get("paraphrase_matches", "")).strip().lower()
+            reason = str(data.get("reason", "")).strip()
+            if lv not in ("yes", "partial", "no"):
+                lv = "no"
+            if pm_ not in ("yes", "partial", "no", "unclear"):
+                pm_ = "unclear"
+            return lv, pm_, reason
+        except Exception as exc:
+            return "no", "unclear", f"judge-error: {exc}"
+
+    def _human_grade(row, llm_lv, llm_pm, llm_reason):
+        console.print()
+        console.print(
+            f"[bold cyan]LaTeX:[/bold cyan] "
+            f"{(row[2] or '')[:300]}"
+            + ("…" if row[2] and len(row[2]) > 300 else "")
+        )
+        console.print(
+            f"[bold cyan]Paraphrase:[/bold cyan] {(row[3] or '')[:400]}"
+        )
+        console.print(
+            f"[dim]Source:[/dim] \"{row[5] or '(unknown)'}\" "
+            f"({row[6] or 'n.d.'})"
+        )
+        if llm_lv is not None:
+            console.print(
+                f"[yellow]LLM:[/yellow] latex={llm_lv}, "
+                f"paraphrase={llm_pm} — {llm_reason}"
+            )
+        lv = typer.prompt(
+            "latex_valid [y=yes/p=partial/n=no]",
+            default=(llm_lv[0] if llm_lv else "y"),
+        ).strip().lower()
+        pm_ = typer.prompt(
+            "paraphrase_matches [y=yes/p=partial/n=no/u=unclear]",
+            default=(llm_pm[0] if llm_pm else "y"),
+        ).strip().lower()
+        mapping = {"y": "yes", "p": "partial", "n": "no", "u": "unclear"}
+        lv_out = mapping.get(lv, lv)
+        pm_out = mapping.get(pm_, pm_)
+        reason = typer.prompt("reason (optional)", default="")
+        return lv_out, pm_out, reason
+
+    # Running counts
+    lv_counts: dict[str, int] = {}
+    pm_counts: dict[str, int] = {}
+
+    with out_path.open("w", encoding="utf-8") as f:
+        for row in rows:
+            lv, pm_, reason = "no", "unclear", ""
+            if judge in ("llm", "both"):
+                lv, pm_, reason = _llm_grade(row)
+            if judge in ("human", "both"):
+                if judge == "both":
+                    lv, pm_, reason = _human_grade(
+                        row, lv, pm_, reason,
+                    )
+                else:
+                    lv, pm_, reason = _human_grade(row, None, None, "")
+                judge_tag = "human"
+            else:
+                judge_tag = f"llm-{_resolved_model}"
+
+            record = {
+                "visual_id": row[0],
+                "document_id": row[1],
+                "paper_title": row[5],
+                "year": row[6],
+                "latex": row[2],
+                "paraphrase": row[3],
+                "surrounding_text": row[4],
+                "latex_valid": lv,
+                "paraphrase_matches": pm_,
+                "reason": reason,
+                "judge": judge_tag,
+                "graded_at": datetime.now(timezone.utc).isoformat(),
+            }
+            f.write(_json.dumps(record, ensure_ascii=False) + "\n")
+            lv_counts[lv] = lv_counts.get(lv, 0) + 1
+            pm_counts[pm_] = pm_counts.get(pm_, 0) + 1
+
+    total = len(rows)
+    lv_ok = lv_counts.get("yes", 0)
+    lv_ok_loose = lv_ok + lv_counts.get("partial", 0)
+    pm_ok = pm_counts.get("yes", 0)
+    pm_ok_loose = pm_ok + pm_counts.get("partial", 0)
+
+    console.print()
+    console.print(f"[bold green]✓ Bench written → {out_path}[/bold green]")
+    console.print(
+        f"[bold]LaTeX validity[/bold]   "
+        f"yes:{lv_counts.get('yes', 0):3d}  "
+        f"partial:{lv_counts.get('partial', 0):3d}  "
+        f"no:{lv_counts.get('no', 0):3d}   "
+        f"→ {(lv_ok / total * 100):.1f}% strict · "
+        f"{(lv_ok_loose / total * 100):.1f}% loose"
+    )
+    console.print(
+        f"[bold]Paraphrase match[/bold] "
+        f"yes:{pm_counts.get('yes', 0):3d}  "
+        f"partial:{pm_counts.get('partial', 0):3d}  "
+        f"no:{pm_counts.get('no', 0):3d}  "
+        f"unclear:{pm_counts.get('unclear', 0):3d}   "
+        f"→ {(pm_ok / total * 100):.1f}% strict · "
+        f"{(pm_ok_loose / total * 100):.1f}% loose"
+    )
+    console.print(
+        "[dim]Track these numbers across runs under "
+        f"{out_root}/ to catch regressions in the converter's MFR "
+        "(drop in latex_valid) or the paraphrase LLM (drop in "
+        "paraphrase_matches).[/dim]"
+    )
+
+
 # ── backfill-institutions (Phase 54.6.221 — roadmap 3.2.4) ────────────────────
 
 
