@@ -2022,6 +2022,15 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
                 f"{rate:.1f}%", f"/ {f['total']}",
             )
 
+    # 54.6.239 — build a SECOND table for content that should span
+    # the full panel width (sparklines + footer lines). The 5-col
+    # `timing_tbl` forces any row content into the bar column,
+    # which shoves it ~22 chars right of the panel left edge —
+    # visually out of place. A separate full-width grid renders
+    # below the stages table inside the same Panel via Group.
+    footer_tbl = Table.grid(padding=(0, 1), expand=True)
+    footer_tbl.add_column(ratio=1)
+
     # 24h throughput sparkline — one line, left-label, right-max.
     # Makes the daily cadence (hot spots vs idle windows) visible
     # at a glance without a separate panel.
@@ -2029,29 +2038,26 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
         spark_row = Table.grid(padding=(0, 1), expand=True)
         spark_row.add_column(width=13, style=C_DIM)
         spark_row.add_column(ratio=1)
-        spark_row.add_column(justify="right", width=16, style=C_DIM)
+        spark_row.add_column(justify="right", width=18, style=C_DIM)
         peak = max(hourly) if hourly else 0
         spark_row.add_row(
             "24h docs/hr",
             _sparkline(hourly),
             f"peak {peak}  now {hourly[-1]}",
         )
-        timing_tbl.add_row("", "", spark_row, "", "")
+        footer_tbl.add_row(spark_row)
 
     # Top failure classes — shown only when any exist in the last 24h.
     # Small by design (LIMIT 3 in the query) — summary, not clinic.
     if top_failures:
-        timing_tbl.add_row("", "", "", "", "")
+        footer_tbl.add_row("")
         for tf in top_failures:
-            err = (tf.get("error") or "")[:50]
-            err_row = Table.grid(padding=0, expand=True)
-            err_row.add_column(ratio=1)
-            err_row.add_row(
+            err = (tf.get("error") or "")[:80]
+            footer_tbl.add_row(
                 Text(f"✗ {tf['stage']}  ", style=C_ERR)
                 + Text(err, style=C_DIM)
                 + Text(f"   ×{tf['count']}", style=C_ERR),
             )
-            timing_tbl.add_row("", "", err_row, "", "")
 
     # Phase 54.6.236 — system summary footer bundling
     # cost + visuals coverage + RAPTOR shape. Uses empty space in
@@ -2193,14 +2199,18 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
             footer_lines.append(u_line)
 
     if footer_lines:
-        timing_tbl.add_row("", "", "", "", "")
+        footer_tbl.add_row("")
         for line in footer_lines:
-            # Render in the "bar" column of the timing table — it's
-            # the widest, so the footer lines wrap cleanly.
-            timing_tbl.add_row("", "", line, "", "")
+            footer_tbl.add_row(line)
+
+    # Compose timing + footer into a single renderable via Group.
+    # Group stacks renderables vertically — the stages table on top
+    # (its own 5-col width math), the full-width footer below.
+    from rich.console import Group as _Group
+    timing_body = _Group(timing_tbl, footer_tbl)
 
     timing_panel = Panel(
-        timing_tbl,
+        timing_body,
         title="[bold]pipeline stages[/bold] "
               "[dim](bars = p95, heat = % of slowest)[/dim]",
         title_align="left",
