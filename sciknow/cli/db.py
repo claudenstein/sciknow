@@ -1338,9 +1338,18 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     loaded = (snap.get("llm") or {}).get("loaded_models") or []
     qcolls = snap.get("qdrant") or []
     backends = snap.get("converter_backends") or []
-    timing = (snap.get("pipeline") or {}).get("stage_timing") or []
-    fails = (snap.get("pipeline") or {}).get("stage_failures") or []
-    activity = (snap.get("pipeline") or {}).get("recent_activity") or []
+    pipeline = snap.get("pipeline") or {}
+    timing = pipeline.get("stage_timing") or []
+    fails = pipeline.get("stage_failures") or []
+    activity = pipeline.get("recent_activity") or []
+    rates = pipeline.get("rates") or {}
+    queue_states = pipeline.get("queue_states") or {}
+    top_failures = pipeline.get("top_failures") or []
+    hourly = pipeline.get("hourly_throughput") or []
+    storage = snap.get("storage") or {}
+    disk = storage.get("disk") or {}
+    pg_mb = storage.get("pg_database_mb", 0)
+    pending_dl = snap.get("pending_downloads", 0)
 
     # ── Small helpers ───────────────────────────────────────────────
 
@@ -1352,6 +1361,46 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
         if v >= 1000:
             return f"{v / 1000:.1f}s"
         return f"{v:.0f}ms"
+
+    def _fmt_mb(mb: int) -> str:
+        if mb >= 1024:
+            return f"{mb / 1024:.1f}G"
+        return f"{mb}M"
+
+    def _fmt_hours(hours: float | None) -> str:
+        if hours is None:
+            return "—"
+        if hours < 1:
+            return f"{int(hours * 60)}m"
+        if hours < 24:
+            return f"{hours:.1f}h"
+        return f"{hours / 24:.1f}d"
+
+    def _sparkline(values: list[int], width: int | None = None) -> Text:
+        """Render an int sequence as a unicode-block sparkline. Zero
+        values become ▁ so the baseline stays visible; the highest
+        bar in the window flips to bright_red as a hot-spot signal."""
+        if not values:
+            return Text("—", style=C_DIM)
+        if width:
+            values = values[-width:]
+        chars = "▁▂▃▄▅▆▇█"
+        max_v = max(values) or 1
+        out = Text()
+        for v in values:
+            if v == 0:
+                out.append("▁", style=C_DIM)
+                continue
+            idx = min(int((v / max_v) * (len(chars) - 1)),
+                      len(chars) - 1)
+            pct = v / max_v
+            colour = (
+                C_ERR if pct >= 0.9 else
+                C_WARN if pct >= 0.5 else
+                C_OK
+            )
+            out.append(chars[idx], style=colour)
+        return out
 
     def _bar(value: float, total: float, width: int = 14,
              palette=(C_OK, C_WARN, C_ERR)) -> Text:
@@ -1435,8 +1484,50 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
             Text(f"{v:,}",
                  style=C_VALUE if v else C_DIM),
         )
+
+    # ── rates + ETA + queue summary ─────────────────────────────
+    # Low-key divider + operational info block. Shows even when
+    # idle so the user can see "rate is 0, no work pending" at
+    # a glance.
+    corpus_tbl.add_row(
+        Text("─ ingest ─", style=C_DIM),
+        Text(""),
+    )
+    rate_1h = rates.get("rate_1h") or 0
+    rate_4h = rates.get("rate_4h") or 0
+    rate_colour = (
+        C_OK if rate_1h > 0 or rate_4h > 0 else C_DIM
+    )
+    corpus_tbl.add_row(
+        Text("rate (1h / 4h)", style=C_DIM),
+        Text(f"{rate_1h:.0f} / {rate_4h:.0f} /hr", style=rate_colour),
+    )
+    eta_colour = C_WARN if rates.get("eta_hours") is not None else C_DIM
+    corpus_tbl.add_row(
+        Text("ETA", style=C_DIM),
+        Text(_fmt_hours(rates.get("eta_hours")), style=eta_colour),
+    )
+    # Queue summary — collapsed into one line
+    qs = queue_states or {}
+    if qs:
+        q_str = " ".join(f"{k}:{v}" for k, v in qs.items())
+        corpus_tbl.add_row(
+            Text("queue", style=C_DIM),
+            Text(q_str, style=C_WARN),
+        )
+    elif rates.get("pending_docs", 0) == 0:
+        corpus_tbl.add_row(
+            Text("queue", style=C_DIM),
+            Text("idle", style=C_DIM),
+        )
+    if pending_dl:
+        corpus_tbl.add_row(
+            Text("pending dl", style=C_DIM),
+            Text(f"{pending_dl:,}", style=C_WARN),
+        )
     corpus_panel = Panel(
-        corpus_tbl, title="[bold]corpus[/bold]", title_align="left",
+        corpus_tbl, title="[bold]corpus · ingest[/bold]",
+        title_align="left",
         border_style=C_BORDER, box=BOX, padding=(0, 1),
     )
 
@@ -1499,8 +1590,33 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     else:
         gpu_tbl.add_row(Text("◎ ollama: no models loaded", style=C_DIM))
 
+    # Storage block — compact one-liner rows. Shows the top-level
+    # paths that can surprise you (mineru_output balloons during
+    # re-ingest) plus pg DB size.
+    gpu_tbl.add_row("")
+    gpu_tbl.add_row(Text("storage", style=C_DIM))
+    for label, key in (
+        ("data", "data_dir_mb"),
+        ("mineru", "mineru_output_mb"),
+        ("processed", "processed_mb"),
+    ):
+        mb = disk.get(key, 0)
+        if mb == 0 and label != "data":
+            continue
+        row = Table.grid(padding=0, expand=True)
+        row.add_column(width=10, style=C_DIM)
+        row.add_column(justify="right", style=C_VALUE)
+        row.add_row(label, _fmt_mb(mb))
+        gpu_tbl.add_row(row)
+    pg_row = Table.grid(padding=0, expand=True)
+    pg_row.add_column(width=10, style=C_DIM)
+    pg_row.add_column(justify="right", style=C_VALUE)
+    pg_row.add_row("pg db", _fmt_mb(pg_mb))
+    gpu_tbl.add_row(pg_row)
+
     gpu_panel = Panel(
-        gpu_tbl, title="[bold]gpu · models[/bold]", title_align="left",
+        gpu_tbl, title="[bold]gpu · models · storage[/bold]",
+        title_align="left",
         border_style=C_BORDER, box=BOX, padding=(0, 1),
     )
 
@@ -1598,9 +1714,42 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
                      palette=(C_WARN, C_ERR, C_ERR)),
                 f"{rate:.1f}%", f"/ {f['total']}",
             )
+
+    # 24h throughput sparkline — one line, left-label, right-max.
+    # Makes the daily cadence (hot spots vs idle windows) visible
+    # at a glance without a separate panel.
+    if hourly:
+        spark_row = Table.grid(padding=(0, 1), expand=True)
+        spark_row.add_column(width=13, style=C_DIM)
+        spark_row.add_column(ratio=1)
+        spark_row.add_column(justify="right", width=16, style=C_DIM)
+        peak = max(hourly) if hourly else 0
+        spark_row.add_row(
+            "24h docs/hr",
+            _sparkline(hourly),
+            f"peak {peak}  now {hourly[-1]}",
+        )
+        timing_tbl.add_row("", "", spark_row, "", "")
+
+    # Top failure classes — shown only when any exist in the last 24h.
+    # Small by design (LIMIT 3 in the query) — summary, not clinic.
+    if top_failures:
+        timing_tbl.add_row("", "", "", "", "")
+        for tf in top_failures:
+            err = (tf.get("error") or "")[:50]
+            err_row = Table.grid(padding=0, expand=True)
+            err_row.add_column(ratio=1)
+            err_row.add_row(
+                Text(f"✗ {tf['stage']}  ", style=C_ERR)
+                + Text(err, style=C_DIM)
+                + Text(f"   ×{tf['count']}", style=C_ERR),
+            )
+            timing_tbl.add_row("", "", err_row, "", "")
+
     timing_panel = Panel(
         timing_tbl,
-        title="[bold]pipeline stages[/bold] [dim](bars = p95, heat = % of slowest)[/dim]",
+        title="[bold]pipeline stages[/bold] "
+              "[dim](bars = p95, heat = % of slowest)[/dim]",
         title_align="left",
         border_style=C_BORDER, box=BOX, padding=(0, 1),
     )
@@ -1637,16 +1786,18 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     )
 
     # ── Compose layout ─────────────────────────────────────────────
-    # Sized so the stack fits a 40-row terminal. `activity` takes
+    # Sized so the stack fits a ~46-row terminal. `activity` takes
     # whatever's left so resizing the terminal grows the feed
-    # instead of clipping panels. Larger terms show more history.
+    # instead of clipping panels. The timing panel grew in 54.6.232
+    # to carry the 24h sparkline and (conditionally) top failures,
+    # so its size bumped 11 → 14.
     layout = Layout()
     layout.split_column(
         Layout(header_panel, name="header", size=3),
-        Layout(name="top", size=15),
-        Layout(timing_panel, name="timing", size=11),
+        Layout(name="top", size=18),
+        Layout(timing_panel, name="timing", size=14),
         Layout(activity_panel, name="activity", ratio=1,
-               minimum_size=10),
+               minimum_size=8),
     )
     layout["top"].split_row(
         Layout(corpus_panel, name="corpus", ratio=1),

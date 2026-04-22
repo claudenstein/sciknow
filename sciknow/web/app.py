@@ -20442,11 +20442,20 @@ function renderMonitor(snap) {{
   const loaded = ((snap.llm || {{}}).loaded_models) || [];
   const qcolls = snap.qdrant || [];
   const backends = snap.converter_backends || [];
-  const timing = ((snap.pipeline || {{}}).stage_timing) || [];
-  const fails = ((snap.pipeline || {{}}).stage_failures) || [];
-  const activity = ((snap.pipeline || {{}}).recent_activity) || [];
+  const pipe = snap.pipeline || {{}};
+  const timing = pipe.stage_timing || [];
+  const fails = pipe.stage_failures || [];
+  const activity = pipe.recent_activity || [];
+  const rates = pipe.rates || {{}};
+  const queueStates = pipe.queue_states || {{}};
+  const topFailures = pipe.top_failures || [];
+  const hourly = pipe.hourly_throughput || [];
   const clusters = snap.topic_clusters || [];
   const llmUsage = ((snap.llm || {{}}).usage_last_days) || [];
+  const storage = snap.storage || {{}};
+  const disk = storage.disk || {{}};
+  const pgMb = storage.pg_database_mb || 0;
+  const pendingDl = snap.pending_downloads || 0;
 
   const sections = [];
 
@@ -20456,6 +20465,44 @@ function renderMonitor(snap) {{
     + '<div><strong>DB</strong>: ' + _escHTML(project.pg_database || '—') + '</div>'
     + '<div><strong>Last refresh</strong>: <code>' + _escHTML(snap.last_refresh || 'never') + '</code></div>'
     + '</div>');
+
+  // ── Rates + ETA + queue banner ──────────────────────────────────
+  // Hot info at the top of the modal so "where am I?" is answered
+  // before the user scrolls past the corpus table.
+  const rate1h = Math.round(rates.rate_1h || 0);
+  const rate4h = Math.round(rates.rate_4h || 0);
+  const eta = rates.eta_hours;
+  const etaTxt = (eta === null || eta === undefined) ? '—'
+    : (eta < 1 ? Math.round(eta * 60) + 'm'
+      : eta < 24 ? eta.toFixed(1) + 'h'
+        : (eta / 24).toFixed(1) + 'd');
+  const qStr = Object.keys(queueStates).length
+    ? Object.entries(queueStates).map(([k, v]) => k + ':' + v).join(' ')
+    : 'idle';
+  sections.push('<div style="display:flex;gap:2em;flex-wrap:wrap;margin-bottom:1em;padding:0.5em;background:var(--bg-alt, #f5f5f5);border-radius:4px;">'
+    + '<div><strong>Rate (1h / 4h)</strong>: ' + rate1h + ' / ' + rate4h + ' docs/hr</div>'
+    + '<div><strong>ETA</strong>: ' + _escHTML(etaTxt) + '</div>'
+    + '<div><strong>Queue</strong>: ' + _escHTML(qStr) + '</div>'
+    + (pendingDl ? '<div><strong>Pending DL</strong>: ' + pendingDl + '</div>' : '')
+    + '</div>');
+
+  // ── 24h throughput sparkline ────────────────────────────────────
+  if (hourly.length) {{
+    const peakH = Math.max(...hourly);
+    const nowH = hourly[hourly.length - 1] || 0;
+    const chars = '▁▂▃▄▅▆▇█';
+    const spark = hourly.map(v => {{
+      if (v === 0) return '<span style="opacity:0.3">▁</span>';
+      const idx = Math.min(Math.round((v / (peakH || 1)) * (chars.length - 1)), chars.length - 1);
+      const pct = v / (peakH || 1);
+      const colour = pct >= 0.9 ? '#c00' : pct >= 0.5 ? '#e80' : '#080';
+      return '<span style="color:' + colour + '">' + chars[idx] + '</span>';
+    }}).join('');
+    sections.push('<h4>24h docs/hour</h4>'
+      + '<div style="font-family:monospace;font-size:1.3em;letter-spacing:1px;">'
+      + spark + '</div>'
+      + '<div style="color:var(--fg-muted);font-size:0.85em;">peak ' + peakH + '  ·  now ' + nowH + '</div>');
+  }}
 
   // Corpus + GPU + loaded models in a row
   const corpusCells = [
@@ -20530,6 +20577,41 @@ function renderMonitor(snap) {{
       html += '<tr><td>' + _escHTML(row.stage) + '</td><td>' + _fmtNum(row.n)
         + '</td><td>' + _fmtMs(row.p50_ms) + '</td><td>' + _fmtMs(row.p95_ms)
         + '</td><td>' + _fmtMs(row.mean_ms) + '</td></tr>';
+    }}
+    html += '</table>';
+    sections.push(html);
+  }}
+
+  // Top failure classes — summary of worst offenders in last 24h
+  if (topFailures.length) {{
+    let html = '<h4>Top failure classes (last 24h)</h4>'
+      + '<table class="stats-table" style="width:100%;">'
+      + '<tr><th>Stage</th><th>Error</th><th>Count</th></tr>';
+    for (const tf of topFailures) {{
+      html += '<tr><td>' + _escHTML(tf.stage) + '</td><td style="color:var(--fg-muted);">'
+        + _escHTML((tf.error || '').slice(0, 80)) + '</td><td>' + tf.count + '</td></tr>';
+    }}
+    html += '</table>';
+    sections.push(html);
+  }}
+
+  // Storage panel
+  if (Object.keys(disk).length || pgMb) {{
+    const fmtMb = (mb) => mb >= 1024 ? (mb / 1024).toFixed(1) + ' GB' : mb + ' MB';
+    let html = '<h4>Storage</h4><table class="stats-table" style="width:100%;">'
+      + '<tr><th>Path</th><th>Size</th></tr>';
+    const rows = [
+      ['data_dir total', disk.data_dir_mb || 0],
+      ['mineru_output', disk.mineru_output_mb || 0],
+      ['processed', disk.processed_mb || 0],
+      ['downloads', disk.downloads_mb || 0],
+      ['failed', disk.failed_mb || 0],
+      ['bench', disk.bench_mb || 0],
+      ['pg database', pgMb],
+    ];
+    for (const [label, mb] of rows) {{
+      if (mb === 0 && label !== 'data_dir total') continue;
+      html += '<tr><td>' + _escHTML(label) + '</td><td>' + fmtMb(mb) + '</td></tr>';
     }}
     html += '</table>';
     sections.push(html);

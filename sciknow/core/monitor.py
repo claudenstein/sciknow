@@ -233,6 +233,217 @@ def _pipeline_throughput(session, days: int = 14) -> list[dict]:
     ]
 
 
+def _ingest_rates_and_eta(session) -> dict:
+    """Phase 54.6.232 — trailing throughput + ETA to complete ingest.
+
+    Measures docs completed (via the terminal `embedding` stage —
+    the last step of the pipeline so one row per done paper) over
+    two windows:
+
+      * 1h  — most recent rate, sensitive to stalls
+      * 4h  — smoother average for ETA math
+
+    ETA prefers 4h rate when there's ≥3 samples; falls back to 1h
+    to stay useful during the first hour of a fresh run.
+    """
+    from sqlalchemy import text
+    out = {"rate_1h": 0.0, "rate_4h": 0.0,
+           "pending_docs": 0, "eta_hours": None}
+    try:
+        row = session.execute(text("""
+            SELECT COUNT(DISTINCT document_id)
+            FROM ingestion_jobs
+            WHERE status IN ('completed', 'ok')
+              AND stage = 'embedding'
+              AND created_at >= NOW() - INTERVAL '1 hour'
+        """)).fetchone()
+        out["rate_1h"] = float(row[0] or 0)
+
+        row = session.execute(text("""
+            SELECT COUNT(DISTINCT document_id)
+            FROM ingestion_jobs
+            WHERE status IN ('completed', 'ok')
+              AND stage = 'embedding'
+              AND created_at >= NOW() - INTERVAL '4 hours'
+        """)).fetchone()
+        out["rate_4h"] = (float(row[0] or 0)) / 4.0
+
+        row = session.execute(text("""
+            SELECT COUNT(*) FROM documents
+            WHERE ingestion_status NOT IN ('complete', 'failed')
+        """)).fetchone()
+        out["pending_docs"] = int(row[0] or 0)
+
+        # Prefer the smoother 4h rate when we have enough data,
+        # else fall back to 1h. Both are in docs/hour.
+        rate = out["rate_4h"] if out["rate_4h"] >= 3 else out["rate_1h"]
+        if rate > 0 and out["pending_docs"] > 0:
+            out["eta_hours"] = out["pending_docs"] / rate
+    except Exception:
+        pass
+    return out
+
+
+def _ingest_queue_states(session) -> dict:
+    """Count of documents by non-complete ingestion_status."""
+    from sqlalchemy import text
+    try:
+        rows = session.execute(text("""
+            SELECT ingestion_status, COUNT(*)
+            FROM documents
+            WHERE ingestion_status NOT IN ('complete', 'failed')
+            GROUP BY ingestion_status
+        """)).fetchall()
+        return {r[0]: int(r[1] or 0) for r in rows}
+    except Exception:
+        return {}
+
+
+def _pending_downloads_count(session) -> int:
+    from sqlalchemy import text
+    try:
+        return int(session.execute(text(
+            "SELECT COUNT(*) FROM pending_downloads"
+        )).scalar() or 0)
+    except Exception:
+        return 0
+
+
+def _hourly_throughput(session, hours: int = 24) -> list[int]:
+    """Per-hour docs-completed histogram over the last N hours.
+    Zero-filled so the sparkline shows silence, not a gap."""
+    from sqlalchemy import text
+    try:
+        rows = session.execute(text(f"""
+            WITH series AS (
+                SELECT generate_series(
+                    date_trunc('hour', NOW())
+                      - INTERVAL '{int(hours) - 1} hours',
+                    date_trunc('hour', NOW()),
+                    INTERVAL '1 hour'
+                ) AS hour
+            )
+            SELECT s.hour,
+                   COALESCE(COUNT(DISTINCT ij.document_id), 0)
+            FROM series s
+            LEFT JOIN ingestion_jobs ij
+              ON date_trunc('hour', ij.created_at) = s.hour
+             AND ij.stage = 'embedding'
+             AND ij.status IN ('completed', 'ok')
+            GROUP BY s.hour
+            ORDER BY s.hour
+        """)).fetchall()
+        return [int(r[1] or 0) for r in rows]
+    except Exception:
+        return []
+
+
+def _pg_database_size_mb(session) -> int:
+    """Current DB size via pg_database_size(current_database())."""
+    from sqlalchemy import text
+    try:
+        size = session.execute(text(
+            "SELECT pg_database_size(current_database())"
+        )).scalar() or 0
+        return int(size) // (1024 * 1024)
+    except Exception:
+        return 0
+
+
+def _top_failure_classes(
+    session, since_hours: int = 24, limit: int = 3,
+) -> list[dict]:
+    """Top N (stage × error-prefix) failure classes in the trailing
+    window. Small limit on purpose — this is a summary, full detail
+    lives in `sciknow db failures`."""
+    from sqlalchemy import text
+    try:
+        rows = session.execute(text(f"""
+            SELECT stage,
+                   COALESCE(
+                       substring(details->>'error' from 1 for 60),
+                       '(no error text)'
+                   ) AS err_sig,
+                   COUNT(*) AS n
+            FROM ingestion_jobs
+            WHERE status = 'failed'
+              AND created_at >= NOW() - INTERVAL '{int(since_hours)} hours'
+            GROUP BY stage, err_sig
+            ORDER BY n DESC
+            LIMIT :lim
+        """), {"lim": limit}).fetchall()
+        return [
+            {"stage": r[0], "error": r[1], "count": int(r[2])}
+            for r in rows
+        ]
+    except Exception:
+        return []
+
+
+# Per-process TTL cache — filesystem walks on mineru_output with
+# thousands of per-paper subdirs are too slow to repeat every tick.
+_DISK_CACHE: dict[str, tuple[float, int]] = {}
+_DISK_TTL_SECONDS = 60.0
+
+
+def _du_cached(path: Path) -> int:
+    """Best-effort directory size in bytes. Skips symlinks and
+    permission errors. Cached for 60s per path — a watching monitor
+    at 5s refresh pays one walk per minute, not one per tick."""
+    import time as _time
+    key = str(path)
+    now = _time.time()
+    cached = _DISK_CACHE.get(key)
+    if cached and (now - cached[0]) < _DISK_TTL_SECONDS:
+        return cached[1]
+    total = 0
+    try:
+        for dirpath, dirnames, filenames in _walk_no_symlinks(path):
+            for f in filenames:
+                try:
+                    total += (Path(dirpath) / f).stat().st_size
+                except OSError:
+                    pass
+    except Exception:
+        pass
+    _DISK_CACHE[key] = (now, total)
+    return total
+
+
+def _walk_no_symlinks(top: Path):
+    """os.walk that never follows symlinks — guards against infinite
+    loops from pathological symlink configurations."""
+    import os
+    if not top.exists():
+        return
+    for dirpath, dirnames, filenames in os.walk(
+        str(top), followlinks=False,
+    ):
+        yield dirpath, dirnames, filenames
+
+
+def _disk_usage(data_dir: Path | None) -> dict:
+    """Key directory sizes under the project data_dir, in MB. Cheap
+    thanks to _du_cached."""
+    out = {
+        "data_dir_mb": 0, "mineru_output_mb": 0, "processed_mb": 0,
+        "downloads_mb": 0, "bench_mb": 0, "failed_mb": 0,
+    }
+    if not data_dir:
+        return out
+    data_path = Path(data_dir)
+    out["data_dir_mb"] = _du_cached(data_path) // (1024 * 1024)
+    for sub, key in [
+        ("mineru_output", "mineru_output_mb"),
+        ("processed", "processed_mb"),
+        ("downloads", "downloads_mb"),
+        ("bench", "bench_mb"),
+        ("failed", "failed_mb"),
+    ]:
+        out[key] = _du_cached(data_path / sub) // (1024 * 1024)
+    return out
+
+
 def _recent_activity(session, limit: int = 15) -> list[dict]:
     from sqlalchemy import text
     rows = session.execute(text("""
@@ -428,6 +639,13 @@ def collect_monitor_snapshot(
         throughput = _pipeline_throughput(session, days=throughput_days)
         activity = _recent_activity(session, limit=activity_limit)
         llm_usage = _llm_usage(session, days=llm_usage_days)
+        # Phase 54.6.232 — operational additions
+        rates = _ingest_rates_and_eta(session)
+        queue_states = _ingest_queue_states(session)
+        pending_downloads = _pending_downloads_count(session)
+        hourly_throughput = _hourly_throughput(session, hours=24)
+        pg_db_size_mb = _pg_database_size_mb(session)
+        top_failures = _top_failure_classes(session)
 
     return {
         "project": project,
@@ -441,7 +659,13 @@ def collect_monitor_snapshot(
             "throughput": throughput,
             "recent_activity": activity,
             "throughput_days": throughput_days,
+            # 54.6.232 additions
+            "rates": rates,
+            "queue_states": queue_states,
+            "hourly_throughput": hourly_throughput,
+            "top_failures": top_failures,
         },
+        "pending_downloads": pending_downloads,
         "llm": {
             "usage_last_days": llm_usage,
             "usage_window_days": llm_usage_days,
@@ -449,6 +673,10 @@ def collect_monitor_snapshot(
         },
         "qdrant": _qdrant_collections(),
         "gpu": _gpu_info(),
+        "storage": {
+            "disk": _disk_usage(Path(data_dir) if data_dir else None),
+            "pg_database_mb": pg_db_size_mb,
+        },
         "last_refresh": _last_refresh(Path(data_dir) if data_dir else None),
         "snapshotted_at": datetime.now(timezone.utc).isoformat(),
     }
