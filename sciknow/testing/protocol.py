@@ -11853,6 +11853,115 @@ def l1_phase54_6_134_agentic_coverage_uses_reranker() -> None:
     )
 
 
+def l1_phase54_6_213_in_table_images_and_merged_paragraphs() -> None:
+    """Phase 54.6.213 (roadmap 3.1.6 Phase 3) — richer block output handling.
+
+    Two downstream adaptations to MinerU-Pro's block output land
+    together here:
+
+      (A) ``extract-visuals`` recurses into ``table`` blocks for
+          in-table images (``table_image`` kind). MinerU-Pro's
+          in-table image recognition produces either an explicit
+          image list on the table block, or HTML ``<img>`` tags
+          inside the ``table_body``. Both shapes must be handled —
+          pre-fix the walker only iterated top-level blocks, so
+          every in-table image was silently dropped.
+      (B) ``parse_sections_from_mineru`` is paragraph-count-agnostic.
+          VLM-Pro's truncated-paragraph merging means one logical
+          section can now arrive as fewer (often just one) text
+          blocks instead of N per-page fragments. The chunker was
+          already designed to accumulate body text regardless of
+          block count, but this L1 pins the invariant structurally
+          so a future refactor can't silently regress to per-block
+          chunking.
+
+    Cross-page table merging (the fourth VLM-Pro capability) needs
+    no code change: ``parse-tables`` already treats each ``table``
+    block as atomic, so a pre-merged multi-page table is handled
+    identically to a single-page one. No L1 needed for that — the
+    absence of code is the contract.
+    """
+    import inspect as _inspect
+    from sciknow.cli import db as db_cli
+    from sciknow.ingestion import chunker
+
+    # --- Part A: extract-visuals in-table image handling -----------------
+    extract_src = _inspect.getsource(db_cli.extract_visuals_cmd)
+
+    assert "def _extract_in_table_images" in extract_src, (
+        "extract-visuals must define _extract_in_table_images helper "
+        "for MinerU-Pro's in-table image recognition (Phase 3 roadmap "
+        "3.1.6)"
+    )
+    assert "table_image" in extract_src, (
+        "extract-visuals must emit visuals rows with kind='table_image' "
+        "so retrieval can distinguish in-table images from standalone "
+        "figures"
+    )
+    # Both shapes handled
+    for shape_key in ('"table_images"', '"embedded_images"', '"inner_images"'):
+        assert shape_key in extract_src, (
+            f"_extract_in_table_images must handle the {shape_key} list "
+            f"shape — MinerU-Pro output varies across versions"
+        )
+    assert "_TABLE_IMG_SRC_RE" in extract_src, (
+        "_extract_in_table_images must carry an HTML <img> regex "
+        "for the table_body-embedded shape"
+    )
+    # Called from within the table branch
+    assert "_extract_in_table_images(block)" in extract_src, (
+        "extract-visuals `table` branch must call "
+        "_extract_in_table_images(block) — otherwise in-table images "
+        "stay dropped"
+    )
+
+    # --- Part B: chunker paragraph-count invariant -----------------------
+    # Build two content_lists representing the SAME section: once with
+    # one merged paragraph (VLM-Pro output) and once with three split
+    # paragraphs (pipeline-mode output). The chunker must produce
+    # equivalent section body content.
+    merged_para = (
+        "Global temperatures in the 20th century rose by approximately "
+        "1.0 K, with the warming accelerating after 1970. This trend "
+        "is robust across multiple independent data sources including "
+        "thermometers, satellites, and ice cores."
+    )
+    split_paras = [
+        "Global temperatures in the 20th century rose by approximately "
+        "1.0 K, with the warming accelerating after 1970.",
+        "This trend is robust across multiple independent data sources "
+        "including thermometers, satellites, and ice cores.",
+    ]
+    heading = {"type": "text", "text": "Introduction", "text_level": 1}
+    cl_merged = [heading, {"type": "text", "text": merged_para,
+                            "text_level": 0}]
+    cl_split = [heading] + [
+        {"type": "text", "text": p, "text_level": 0} for p in split_paras
+    ]
+
+    sec_merged = chunker.parse_sections_from_mineru(cl_merged)
+    sec_split = chunker.parse_sections_from_mineru(cl_split)
+
+    assert len(sec_merged) == 1 and len(sec_split) == 1, (
+        "one heading must produce exactly one section regardless of "
+        "how body text is split across blocks"
+    )
+    # Body content equivalent up to whitespace differences between
+    # "one paragraph" and "two paragraphs joined by the chunker".
+    def _norm(s: str) -> str:
+        return " ".join(s.split())
+    assert _norm(sec_merged[0].content) == _norm(sec_split[0].content), (
+        f"merged vs split paragraphs must yield equivalent section "
+        f"bodies (Phase 3 invariant). merged={sec_merged[0].content!r} "
+        f"split={sec_split[0].content!r}"
+    )
+    assert sec_merged[0].section_type == sec_split[0].section_type == \
+           "introduction", (
+        "section-type classification must be stable across merge "
+        "granularity"
+    )
+
+
 def l1_phase54_6_212_vlm_pro_default_dispatch() -> None:
     """Phase 54.6.212 (roadmap 3.1.6 Phase 2) — VLM-Pro default + fallback.
 
@@ -12477,6 +12586,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_211_converter_provenance_surface,
     # Phase 54.6.212 — roadmap 3.1.6 Phase 2: auto-dispatch flip + deprecation
     l1_phase54_6_212_vlm_pro_default_dispatch,
+    # Phase 54.6.213 — roadmap 3.1.6 Phase 3: in-table images + merged-paragraph chunker invariant
+    l1_phase54_6_213_in_table_images_and_merged_paragraphs,
 ]
 
 L2_TESTS: list[Callable] = [

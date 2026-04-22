@@ -5612,6 +5612,68 @@ def extract_visuals_cmd(
             return " ".join(str(x) for x in c if x).strip()
         return str(c).strip()
 
+    # Phase 54.6.213 (roadmap 3.1.6 Phase 3) — MinerU 2.5-Pro emits
+    # in-table image recognition: images embedded inside table cells
+    # surface either as `<img src="...">` tags in the HTML table_body
+    # or as a `table_images` / `embedded_images` list on the block.
+    # Pre-fix, extract-visuals only walked top-level blocks, so every
+    # such image was silently dropped. Both shapes are handled here
+    # to be tolerant of MinerU version drift.
+    _TABLE_IMG_SRC_RE = _re.compile(
+        r'<img[^>]+src=["\']([^"\']+)["\']', _re.IGNORECASE,
+    )
+
+    def _extract_in_table_images(block: dict) -> list[dict]:
+        """Return zero or more in-table-image records for this table
+        block. Each record is a partial visuals row (kind, content,
+        caption, asset_path, surrounding_text — block_idx + figure_num
+        are filled by the caller). The `surrounding_text` carries the
+        parent table's caption so downstream caption models have
+        enough context to reason about the embedded image."""
+        found: list[dict] = []
+        parent_caption = _join_caption(
+            block.get("table_caption") or block.get("caption")
+        )
+
+        # Shape A — explicit list of in-table images.
+        for key in ("table_images", "embedded_images", "inner_images"):
+            items = block.get(key)
+            if not isinstance(items, list):
+                continue
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                img_path = it.get("img_path") or it.get("path") or ""
+                img_caption = _join_caption(
+                    it.get("caption") or it.get("alt")
+                )
+                found.append({
+                    "kind": "table_image",
+                    "content": (img_caption or parent_caption)[:2000],
+                    "caption": img_caption[:1000] if img_caption else None,
+                    "asset_path": str(img_path) if img_path else None,
+                    "surrounding_text": parent_caption[:500],
+                })
+
+        # Shape B — <img> tags embedded in the HTML body.
+        table_html = block.get("table_body") or block.get("html") or ""
+        if isinstance(table_html, str) and "<img" in table_html.lower():
+            for src in _TABLE_IMG_SRC_RE.findall(table_html):
+                if not src:
+                    continue
+                # Skip dupes against Shape A (same src already recorded).
+                if any(r.get("asset_path") == src for r in found):
+                    continue
+                found.append({
+                    "kind": "table_image",
+                    "content": parent_caption[:2000],
+                    "caption": None,
+                    "asset_path": src,
+                    "surrounding_text": parent_caption[:500],
+                })
+
+        return found
+
     extracted = 0
     skipped = 0
     papers_done = 0
@@ -5668,6 +5730,20 @@ def extract_visuals_cmd(
                     "figure_num": fig_match.group(0) if fig_match else None,
                     "surrounding_text": prev_text,
                 })
+
+                # Phase 54.6.213 (roadmap 3.1.6 Phase 3) — MinerU-Pro
+                # surfaces images embedded inside tables. We persist
+                # each as its own `table_image` row keyed to the same
+                # block_idx as the parent table so retrieval can join
+                # them back together. figure_num inherited from the
+                # parent table's caption when present.
+                for sub in _extract_in_table_images(block):
+                    sub["document_id"] = doc_id
+                    sub["block_idx"] = idx
+                    sub["figure_num"] = (
+                        fig_match.group(0) if fig_match else None
+                    )
+                    visuals_batch.append(sub)
 
             elif btype == "equation":
                 latex = block.get("text") or block.get("latex") or ""
