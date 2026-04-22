@@ -11853,6 +11853,123 @@ def l1_phase54_6_134_agentic_coverage_uses_reranker() -> None:
     )
 
 
+def l1_phase54_6_221_paper_institutions_surface() -> None:
+    """Phase 54.6.221 (roadmap 3.2.4) — paper_institutions table + backfill.
+
+    OpenAlex returns rich institution data per authorship
+    (ror / display_name / country_code / type) but pre-54.6.221 we
+    only kept unique ROR IDs on ``paper_metadata.oa_institutions_ror``.
+    This phase adds a dedicated normalised table and a backfill
+    command.
+
+    Checks:
+
+      A) Migration 0038 applied → paper_institutions columns present
+         (document_id / ror_id / display_name / country_code /
+         institution_type / author_position).
+      B) ORM model `PaperInstitution` declares those columns.
+      C) `extract_openalex_enrichment` returns a `_institutions` list
+         from authorships[].institutions[]. Underscore prefix
+         guarantees the key can't collide with a paper_metadata
+         column.
+      D) Extraction output preserves display_name + country_code +
+         institution_type (the three fields the old
+         oa_institutions_ror discarded).
+      E) `apply_openalex_enrichment` pops `_institutions` before the
+         generic UPDATE loop (otherwise SQL tries to UPDATE a
+         non-existent column and crashes on every enrich), and
+         INSERTs into paper_institutions.
+      F) `sciknow db backfill-institutions` CLI registered with
+         --limit / --force / --delay flags.
+    """
+    import inspect as _inspect
+    from typer.testing import CliRunner
+    from sqlalchemy import inspect as _sql_inspect
+
+    from sciknow.cli.main import app
+    from sciknow.cli import db as db_cli
+    from sciknow.storage.db import engine
+    from sciknow.storage.models import PaperInstitution
+    from sciknow.ingestion import openalex_enrich as oa_mod
+
+    # A) DB columns
+    insp = _sql_inspect(engine)
+    cols = {c["name"] for c in insp.get_columns("paper_institutions")}
+    for col in ("document_id", "ror_id", "display_name",
+                "country_code", "institution_type", "author_position"):
+        assert col in cols, (
+            f"paper_institutions.{col} missing — migration 0038 not "
+            f"applied?"
+        )
+
+    # B) ORM declares those columns
+    for col in ("document_id", "ror_id", "display_name",
+                "country_code", "institution_type", "author_position"):
+        assert hasattr(PaperInstitution, col), (
+            f"PaperInstitution ORM missing {col}"
+        )
+
+    # C + D) extract_openalex_enrichment returns rich institution records
+    sample_work = {
+        "authorships": [
+            {
+                "author_position": "first",
+                "institutions": [
+                    {
+                        "ror": "https://ror.org/02nr0ka47",
+                        "display_name": "National Oceanic and Atmospheric Administration",
+                        "country_code": "US",
+                        "type": "government",
+                    }
+                ],
+            }
+        ],
+    }
+    updates = oa_mod.extract_openalex_enrichment(sample_work)
+    institutions = updates.get("_institutions") or []
+    assert len(institutions) == 1, (
+        "extract_openalex_enrichment must emit _institutions list "
+        "from authorships[].institutions[]"
+    )
+    inst = institutions[0]
+    assert inst["display_name"] == \
+        "National Oceanic and Atmospheric Administration", (
+        "display_name must round-trip through the extractor — that's "
+        "the main field missing from oa_institutions_ror"
+    )
+    assert inst["country_code"] == "US"
+    assert inst["institution_type"] == "government"
+    assert inst["author_position"] == 1, (
+        "string author positions must normalise to int (first=1, "
+        "middle=2, last=3)"
+    )
+    assert inst["ror_id"] == "https://ror.org/02nr0ka47"
+
+    # E) apply_openalex_enrichment pops _institutions before UPDATE loop
+    apply_src = _inspect.getsource(oa_mod.apply_openalex_enrichment)
+    assert 'updates.pop("_institutions"' in apply_src, (
+        "apply_openalex_enrichment must pop _institutions before the "
+        "generic UPDATE loop — leaving it in `updates` would make the "
+        "SQL try to UPDATE a non-existent column"
+    )
+    assert "INSERT INTO paper_institutions" in apply_src, (
+        "apply_openalex_enrichment must INSERT the rich institution "
+        "records it just popped"
+    )
+
+    # F) CLI registered
+    r = CliRunner().invoke(app, ["db", "backfill-institutions", "--help"])
+    assert r.exit_code == 0, (
+        f"backfill-institutions --help failed: {r.output[:300]}"
+    )
+    assert hasattr(db_cli, "backfill_institutions_cmd")
+    sig = _inspect.signature(db_cli.backfill_institutions_cmd)
+    for param in ("limit", "force", "delay"):
+        assert param in sig.parameters, (
+            f"backfill-institutions missing --{param} option"
+        )
+
+
 def l1_phase54_6_220_kg_relation_canonicalization() -> None:
     """Phase 54.6.220 (roadmap 3.7.2) — KG relation vocabulary stabilization.
 
@@ -13132,6 +13249,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_219_topic_coherence_cli_surface,
     # Phase 54.6.220 — roadmap 3.7.2: KG relation vocabulary stabilization
     l1_phase54_6_220_kg_relation_canonicalization,
+    # Phase 54.6.221 — roadmap 3.2.4: paper_institutions table + backfill
+    l1_phase54_6_221_paper_institutions_surface,
 ]
 
 L2_TESTS: list[Callable] = [

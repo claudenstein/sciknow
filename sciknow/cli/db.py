@@ -6687,3 +6687,119 @@ def parse_tables_cmd(
         f"model [cyan]{stats['model']}[/cyan] · "
         f"[dim]{time.monotonic() - t0:.1f}s wall[/dim]"
     )
+
+
+# ── backfill-institutions (Phase 54.6.221 — roadmap 3.2.4) ────────────────────
+
+
+@app.command(name="backfill-institutions")
+def backfill_institutions_cmd(
+    limit: int = typer.Option(
+        0, "--limit",
+        help="Process at most N papers (0 = all).",
+    ),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Re-query OpenAlex even for papers that already have "
+             "paper_institutions rows. Use after fixing a parse bug "
+             "or if OpenAlex itself updated its affiliation data.",
+    ),
+    delay: float = typer.Option(
+        0.2, "--delay",
+        help="Seconds between OpenAlex calls (be polite — 5 req/s "
+             "free tier, 10 req/s with email in User-Agent).",
+    ),
+):
+    """Phase 54.6.221 (roadmap 3.2.4) — populate paper_institutions from OpenAlex.
+
+    For every paper with a DOI but no rows in ``paper_institutions``,
+    re-queries OpenAlex by DOI, extracts the
+    ``authorships[].institutions[]`` list, and writes one row per
+    institution into the dedicated table. Enables institution-level
+    queries the prior ``oa_institutions_ror`` column couldn't
+    support (display_name / country_code / institution_type were
+    discarded there).
+
+    Idempotent — skips papers that already have at least one
+    institutions row unless ``--force``. Safe to re-run after
+    ingesting new papers.
+
+    Examples:
+
+      sciknow db backfill-institutions                  # fill all gaps
+      sciknow db backfill-institutions --limit 100      # sample-size run
+      sciknow db backfill-institutions --force          # full refresh
+    """
+    from sciknow.cli import preflight
+    preflight(qdrant=False)
+
+    from sqlalchemy import text as sql_text
+    from sciknow.ingestion.expand_apis import fetch_openalex_work
+    from sciknow.ingestion.openalex_enrich import (
+        apply_openalex_enrichment,
+    )
+    from sciknow.storage.db import get_session
+
+    # Find candidate papers: have a DOI, either have no institutions
+    # rows (default) or all rows (force).
+    filter_sql = "" if force else (
+        " AND NOT EXISTS ("
+        "   SELECT 1 FROM paper_institutions pi "
+        "   WHERE pi.document_id = d.id"
+        " )"
+    )
+    with get_session() as session:
+        rows = session.execute(sql_text(f"""
+            SELECT pm.id::text, d.id::text, pm.doi, pm.title
+            FROM paper_metadata pm
+            JOIN documents d ON d.id = pm.document_id
+            WHERE pm.doi IS NOT NULL
+              AND d.ingestion_status = 'complete'
+              {filter_sql}
+            ORDER BY pm.year DESC NULLS LAST
+            {('LIMIT :lim' if limit else '')}
+        """), ({"lim": limit} if limit else {})).fetchall()
+
+    if not rows:
+        console.print(
+            "[green]No papers need institution backfill.[/green] "
+            "Run with --force to re-query every paper with a DOI."
+        )
+        return
+
+    console.print(
+        f"Backfilling paper_institutions for [bold]{len(rows)}[/bold] "
+        f"paper(s)…"
+    )
+    filled = 0
+    skipped = 0
+    errors = 0
+    t0 = time.monotonic()
+
+    for pid, doc_id, doi, title in rows:
+        try:
+            work = fetch_openalex_work(doi, fields="authorships,id")
+            if not work:
+                skipped += 1
+                continue
+            with get_session() as session:
+                ok = apply_openalex_enrichment(session, pid, work)
+                session.commit()
+            if ok:
+                filled += 1
+            else:
+                skipped += 1
+        except Exception as exc:
+            errors += 1
+            logger.debug("institutions backfill failed for %s: %s", pid, exc)
+
+        # Polite delay between OpenAlex calls.
+        if delay > 0:
+            time.sleep(delay)
+
+    console.print(
+        f"\n[green]✓ Filled {filled}[/green] · "
+        f"[yellow]skipped {skipped}[/yellow] · "
+        f"[red]errors {errors}[/red] · "
+        f"[dim]{time.monotonic() - t0:.1f}s wall[/dim]"
+    )

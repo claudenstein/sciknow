@@ -78,6 +78,39 @@ def extract_openalex_enrichment(work: dict | None) -> dict[str, Any]:
     if seen_ror:
         out["oa_institutions_ror"] = seen_ror[:25]
 
+    # Phase 54.6.221 (roadmap 3.2.4) — rich institution records for
+    # the paper_institutions table. One row per (author_position,
+    # institution). Preserves display_name, country_code, and
+    # institution_type that oa_institutions_ror drops. Caller writes
+    # these into paper_institutions separately from the oa_* columns
+    # on paper_metadata.
+    institutions_out: list[dict] = []
+    for a in authorships:
+        pos = a.get("author_position")
+        # OpenAlex uses string positions ("first" / "middle" / "last")
+        # in some responses and integer indices in others. Normalise
+        # to int-or-None; unknown positions round-trip as NULL.
+        pos_int: int | None = None
+        if isinstance(pos, int):
+            pos_int = pos
+        elif isinstance(pos, str):
+            mapping = {"first": 1, "middle": 2, "last": 3}
+            pos_int = mapping.get(pos.lower())
+        for inst in (a.get("institutions") or []):
+            name = (inst.get("display_name") or "").strip()
+            if not name:
+                continue
+            institutions_out.append({
+                "ror_id": inst.get("ror"),
+                "display_name": name[:300],
+                "country_code": (inst.get("country_code") or None),
+                "institution_type": (inst.get("type") or None),
+                "author_position": pos_int,
+            })
+    # Cap at 50 rows per paper — a realistic upper bound for authorships.
+    if institutions_out:
+        out["_institutions"] = institutions_out[:50]
+
     # Citation counts
     cbc = work.get("cited_by_count")
     if isinstance(cbc, int):
@@ -113,6 +146,13 @@ def apply_openalex_enrichment(session, paper_id: str, work: dict | None) -> bool
     if not updates:
         return False
 
+    # Phase 54.6.221 — pull out the rich institutions list before the
+    # generic UPDATE loop, because institutions go into a different
+    # table (paper_institutions), not a paper_metadata column. The
+    # underscore-prefixed key guarantees it can't collide with a real
+    # column name.
+    institutions_records: list[dict] = updates.pop("_institutions", []) or []
+
     import json
     # JSONB columns take dicts/lists; psycopg serializes them. Timestamp
     # is a datetime object. Integer is already an int.
@@ -125,10 +165,39 @@ def apply_openalex_enrichment(session, paper_id: str, work: dict | None) -> bool
         else:
             set_parts.append(f"{k} = :{k}")
             params[k] = v
-    sql = (
-        "UPDATE paper_metadata SET "
-        + ", ".join(set_parts)
-        + " WHERE id::text = :pid"
-    )
-    session.execute(text(sql), params)
+    if set_parts:
+        sql = (
+            "UPDATE paper_metadata SET "
+            + ", ".join(set_parts)
+            + " WHERE id::text = :pid"
+        )
+        session.execute(text(sql), params)
+
+    # Phase 54.6.221 — sync paper_institutions from the rich records.
+    # Replace-all semantics: delete prior rows for this document, then
+    # insert the new set. Idempotent across re-runs; simpler than
+    # diffing. Looks up document_id from paper_metadata.id so callers
+    # don't need to pass it separately.
+    if institutions_records:
+        doc_row = session.execute(text(
+            "SELECT document_id::text FROM paper_metadata "
+            "WHERE id::text = :pid"
+        ), {"pid": paper_id}).fetchone()
+        if doc_row and doc_row[0]:
+            doc_id = doc_row[0]
+            session.execute(text(
+                "DELETE FROM paper_institutions "
+                "WHERE document_id::text = :did"
+            ), {"did": doc_id})
+            for rec in institutions_records:
+                session.execute(text("""
+                    INSERT INTO paper_institutions
+                        (document_id, ror_id, display_name,
+                         country_code, institution_type,
+                         author_position)
+                    VALUES
+                        (CAST(:did AS uuid), :ror_id, :display_name,
+                         :country_code, :institution_type,
+                         :author_position)
+                """), {"did": doc_id, **rec})
     return True

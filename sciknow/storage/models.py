@@ -899,6 +899,49 @@ class KnowledgeGraphTriple(Base):
     )
 
 
+class PaperInstitution(Base):
+    """Phase 54.6.221 — roadmap 3.2.4: per-paper institutional affiliations.
+
+    Normalised child of ``documents``. One row per (paper, institution,
+    author_position). The same institution can appear multiple times
+    if multiple authors on one paper are affiliated with it (each at
+    their own author_position), so `(document_id, ror_id,
+    author_position)` is the natural key — not enforced as a unique
+    constraint because OpenAlex occasionally returns duplicate rows
+    for joint appointments and we'd rather tolerate that than throw
+    away signal.
+
+    Populated at enrich time from OpenAlex ``authorships[].institutions[]``;
+    backfillable via ``sciknow db backfill-institutions``.
+    """
+    __tablename__ = "paper_institutions"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True,
+                                     autoincrement=True)
+    document_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    ror_id: Mapped[str | None] = mapped_column(Text)
+    display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    country_code: Mapped[str | None] = mapped_column(Text)
+    institution_type: Mapped[str | None] = mapped_column(Text)
+    author_position: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("idx_paper_institutions_document", "document_id"),
+        Index("idx_paper_institutions_ror", "ror_id"),
+        # Case-insensitive display-name index `lower(display_name)` is
+        # declared in migration 0038 only (SQLAlchemy's ORM Index can't
+        # express a functional expression cleanly; the DDL-level
+        # declaration is authoritative).
+    )
+
+
 class Feedback(Base):
     """Phase 50.B — user feedback capture.
 
