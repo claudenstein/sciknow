@@ -758,9 +758,17 @@ def _extract_entities_and_kg(
         # Phase 54.6.209 — roadmap 3.7.1: collapse surface-variant
         # entity names onto a canonical form before insert so
         # "CO2" / "CO₂" / "carbon dioxide" / "Carbon Dioxide" all
-        # become one KG node. Predicate left alone (different
-        # vocabulary-stabilisation concern — see roadmap 3.7.2).
+        # become one KG node.
+        # Phase 54.6.220 — roadmap 3.7.2: collapse surface-variant
+        # predicate strings onto a closed vocabulary of ~18 canonical
+        # relations ("leads to" / "drives" / "causes" → "forces").
+        # Together the two canonicalisers turn the KG from "one node
+        # per surface form × one edge per wording" into a queryable
+        # structure where you can actually ask "what forces X?".
         from sciknow.core.kg_canonicalize import canonicalize as _canon_entity
+        from sciknow.core.kg_relations import (
+            canonicalize_relation as _canon_relation,
+        )
 
         with get_session() as session:
             session.execute(text(
@@ -770,7 +778,7 @@ def _extract_entities_and_kg(
                 if not isinstance(t, dict):
                     continue
                 subj = _canon_entity(_entity_name(t.get("subject")))[:200]
-                pred = _entity_name(t.get("predicate")).strip().lower()[:100]
+                pred = _canon_relation(_entity_name(t.get("predicate")))[:100]
                 obj = _canon_entity(_entity_name(t.get("object")))[:200]
                 # Phase 48d — empty / whitespace-only source sentence
                 # flows through as NULL so the UI can render "(no

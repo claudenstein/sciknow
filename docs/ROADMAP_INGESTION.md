@@ -802,7 +802,7 @@ Scoring: **Impact** (H/M/L) × **Effort** (H/M/L) → **Verdict**.
 | 3.5.2 | Multi-aspect captions (literal / synthesis / search) | Q | M | M | **Ship as Phase 5 of 3.1.6** | MinerU-Pro's per-figure output is the "literal" layer; closes as a follow-on of 3.1.6 |
 | 3.5.4 | Figure-paragraph alignment training set | O | L | L | **Likely obsolete post-3.1.6** | VLM-Pro reading-order makes the 54.6.138 heuristic exact |
 | 3.6.2 | Self-citation flagging | Q | L | L | **Defer** | Piggyback on 3.2.1 |
-| 3.7.2 | KG relation vocabulary constraint | Q | M | M | **Defer** | Needs user input on domain-specific relations |
+| 3.7.2 | KG relation vocabulary constraint | Q | M | M | **Shipped 54.6.220** | 20-relation closed vocabulary (forces / responds_to / proxies_for / reconstructs / supports / contradicts / ...) + alias table + KG_EXTRACT prompt preferences |
 | 3.7.3 | KG quality sampling | O | L | L | **Shipped 54.6.218** | `sciknow wiki kg-sample` — LLM-judge or human grading, JSONL per-run for longitudinal tracking |
 | 3.8.2 | Dynamic topics over time | O | L | M | **Defer** | Visualization play, non-critical |
 | 3.8.3 | Topic coherence metrics | O | L | L | **Shipped 54.6.219** | `sciknow catalog coherence` — NPMI per cluster, catch-all flagging. Validated: flagged "General Climate History" (keywords `se, 2020, principal, al`) at NPMI 0.000 |

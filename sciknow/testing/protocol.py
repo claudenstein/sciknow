@@ -11853,6 +11853,122 @@ def l1_phase54_6_134_agentic_coverage_uses_reranker() -> None:
     )
 
 
+def l1_phase54_6_220_kg_relation_canonicalization() -> None:
+    """Phase 54.6.220 (roadmap 3.7.2) — KG relation vocabulary stabilization.
+
+    Complement to 54.6.209 entity canonicalization: one stabilises
+    node names, the other stabilises edge types. Together they turn
+    the knowledge_graph table from "500 unique predicate strings"
+    into ~20 queryable buckets. Tests lock:
+
+      A) `canonicalize_relation` + `canonical_relations` public API
+         present.
+      B) Canonical vocabulary covers the climate-science relation set
+         (forces / responds_to / proxies_for / reconstructs /
+         supports / contradicts / cites_data / cites_method) plus
+         the generic paper-action verbs (studies / finds /
+         uses_method).
+      C) Alias-table behaviour: common synonyms collapse to the
+         canonical form (leads to → forces, inconsistent with →
+         contradicts, Proxy for → proxies_for).
+      D) Unknown predicates round-trip normalised (not dropped, not
+         collapsed to a catch-all) — losing the signal would be
+         worse than carrying a low-frequency tail.
+      E) wiki_ops.py uses canonicalize_relation at the KG insert
+         site — the refactor that inlines entity canonicalization
+         must also run predicate canonicalization, otherwise the
+         edge vocabulary drifts silently while node names stay
+         clean.
+      F) KG_EXTRACT_SYSTEM prompt surfaces the canonical vocabulary
+         as guidance so the LLM emits canonical forms directly
+         rather than relying on the alias table to clean up.
+    """
+    import inspect as _inspect
+    from sciknow.core.kg_relations import (
+        canonicalize_relation, canonical_relations,
+    )
+    from sciknow.core import wiki_ops
+    from sciknow.rag import wiki_prompts
+
+    # A) public API
+    assert callable(canonicalize_relation)
+    assert callable(canonical_relations)
+    relations = canonical_relations()
+    assert len(relations) >= 15, (
+        f"canonical vocabulary looks too narrow ({len(relations)} "
+        f"relations) — 3.7.2 target is ~18-20"
+    )
+
+    # B) climate-specific + generic coverage
+    for must_have in (
+        "forces", "responds_to", "correlates_with",
+        "proxies_for", "reconstructs",
+        "supports", "contradicts",
+        "cites_data", "cites_method",
+        "uses_method", "applied_to", "predicts",
+        "studies", "finds",
+    ):
+        assert must_have in relations, (
+            f"canonical vocabulary missing {must_have!r} — "
+            f"required for 3.7.2 climate-first coverage"
+        )
+
+    # C) alias-collapse behaviour — spot-checks of the common LLM
+    # outputs that the 2026-04-22 audit flagged as drift prone.
+    for raw, canonical in [
+        ("leads to", "forces"),
+        ("causes", "forces"),
+        ("caused by", "forces"),
+        ("Inconsistent With", "contradicts"),
+        ("Proxy for", "proxies_for"),
+        ("applied to", "applied_to"),
+        ("uses method", "uses_method"),
+        ("uses_method", "uses_method"),  # round-trip
+        ("measures", "measures"),        # round-trip
+    ]:
+        got = canonicalize_relation(raw)
+        assert got == canonical, (
+            f"canonicalize_relation({raw!r}) expected {canonical!r}, "
+            f"got {got!r}"
+        )
+
+    # D) unknown pass-through (normalised, not dropped)
+    assert canonicalize_relation("totally-novel-relation") == \
+        "totally-novel-relation", (
+        "unknown predicates must round-trip (lowercased) rather than "
+        "collapse to a generic bucket — preserves the signal for "
+        "`wiki kg-sample` to surface low-frequency tail later"
+    )
+    assert canonicalize_relation("") == ""
+
+    # E) wiki_ops wiring — the _extract_entities_and_kg insert site
+    # runs canonicalize_relation
+    ops_src = _inspect.getsource(wiki_ops)
+    assert "from sciknow.core.kg_relations import" in ops_src, (
+        "wiki_ops must import canonicalize_relation"
+    )
+    assert "_canon_relation(_entity_name(t.get(\"predicate\")))" in ops_src, (
+        "wiki_ops KG insert site must run canonicalize_relation on "
+        "the raw predicate — dropping this line restores pre-3.7.2 "
+        "free-text predicates silently"
+    )
+
+    # F) prompt surfaces canonical vocabulary
+    prompt = wiki_prompts.KG_EXTRACT_SYSTEM
+    assert "canonical" in prompt.lower() or "preferred" in prompt.lower(), (
+        "KG_EXTRACT_SYSTEM must name the canonical vocabulary as "
+        "preferred so the LLM emits canonical forms directly"
+    )
+    # At least the climate-specific relations should be mentioned in
+    # the prompt — otherwise the alias table is doing all the work
+    # and the prompt contract drifts from the code contract.
+    for must_mention in ("proxies_for", "reconstructs", "forces"):
+        assert must_mention in prompt, (
+            f"KG_EXTRACT_SYSTEM prompt should mention {must_mention!r} "
+            f"so the LLM emits it directly"
+        )
+
+
 def l1_phase54_6_219_topic_coherence_cli_surface() -> None:
     """Phase 54.6.219 (roadmap 3.8.3) — NPMI topic coherence CLI.
 
@@ -13014,6 +13130,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_218_kg_sample_cli_surface,
     # Phase 54.6.219 — roadmap 3.8.3: NPMI topic coherence CLI
     l1_phase54_6_219_topic_coherence_cli_surface,
+    # Phase 54.6.220 — roadmap 3.7.2: KG relation vocabulary stabilization
+    l1_phase54_6_220_kg_relation_canonicalization,
 ]
 
 L2_TESTS: list[Callable] = [

@@ -427,15 +427,31 @@ KG_EXTRACT_SYSTEM = """\
 You are a scientific knowledge engineer. Given a paper's title, abstract, and \
 key sections, extract entity-relationship triples for a knowledge graph.
 
-Triple types to extract:
-- (Paper, uses_method, Method) — research methods and techniques used
-- (Paper, studies, Phenomenon) — what the paper investigates
-- (Paper, finds, Finding) — key results or conclusions
-- (Paper, supports, Claim) — claims the paper provides evidence for
-- (Paper, contradicts, Claim) — claims the paper provides counter-evidence for
-- (Concept, related_to, Concept) — conceptual relationships
-- (Method, applied_to, Domain) — method-domain connections
-- (Dataset, measures, Variable) — what datasets track
+Preferred predicate vocabulary (Phase 54.6.220, roadmap 3.7.2). Emit \
+these canonical forms when possible — a downstream canonicaliser \
+maps common synonyms to them, but using the canonical form directly \
+produces cleaner triples:
+
+  Causal / forcing:       forces, responds_to, correlates_with
+  Evidence / claims:      supports, contradicts, neutral_on
+  Proxy / reconstruction: proxies_for, reconstructs
+  Measurement:            measures, observes
+  Methods:                uses_method, applied_to, predicts
+  Structural:             part_of, related_to, has_property
+  Meta / citations:       cites_data, cites_method
+  Paper actions:          studies, finds
+
+Typical triple shapes:
+- (Paper, uses_method, Method)       — research methods and techniques used
+- (Paper, studies, Phenomenon)       — what the paper investigates
+- (Paper, finds, Finding)            — key results or conclusions
+- (Paper, supports, Claim)           — claims the paper provides evidence for
+- (Paper, contradicts, Claim)        — claims the paper provides counter-evidence for
+- (Concept, related_to, Concept)     — conceptual relationships
+- (Method, applied_to, Domain)       — method-domain connections
+- (Dataset, measures, Variable)      — what datasets track
+- (Proxy, proxies_for, Target)       — "tree rings proxies_for temperature"
+- (Forcing, forces, Response)        — "solar_irradiance forces surface_temperature"
 
 Rules:
 - Extract 5-15 triples per paper
