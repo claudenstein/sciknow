@@ -11853,6 +11853,112 @@ def l1_phase54_6_134_agentic_coverage_uses_reranker() -> None:
     )
 
 
+def l1_phase54_6_214_multiaspect_captions_surface() -> None:
+    """Phase 54.6.214 (roadmap 3.1.6 Phase 5 / closes 3.5.2) — multi-aspect captions.
+
+    Ships the schema + extract-visuals + embed-visuals machinery
+    for three-layer captioning:
+
+      * literal_caption  — what the image literally shows, from
+                           MinerU-Pro's structured per-figure output.
+      * ai_caption       — synthesis caption from qwen2.5vl:32b
+                           (existing, unchanged).
+      * query_caption    — terse keyword-dense paraphrase for
+                           retrieval (column reserved; population
+                           deferred to a follow-on after Phase 4
+                           re-ingest).
+
+    This L1 locks the *structural* contracts the follow-on population
+    pass will rely on. We can't assert on populated data yet (rows
+    produced pre-54.6.214 have NULL everywhere), so the checks are:
+
+      A) Migration 0037 is applied → both columns present + ORM in
+         sync.
+      B) extract-visuals reads MinerU-Pro's structured-description
+         fields into literal_caption via a version-tolerant key list
+         (`chart_description` / `image_analysis` / ...).
+      C) extract-visuals INSERT SQL carries literal_caption; the
+         NUL-sanitization loop includes it (otherwise a \\x00 in the
+         VLM output would blow up the insert).
+      D) embed-visuals admits literal-only rows (not just ai_caption-
+         bearing rows) and concatenates literal+ai when both exist.
+
+    Population of query_caption and the VLM pass that fills
+    literal_caption on legacy rows both run post-Phase-4; nothing
+    to pin here yet.
+    """
+    import inspect as _inspect
+    from sqlalchemy import inspect as _sql_inspect
+
+    from sciknow.storage.db import engine
+    from sciknow.storage.models import Visual
+    from sciknow.cli import db as db_cli
+
+    # A) DB columns + ORM in sync
+    insp = _sql_inspect(engine)
+    vis_cols = {c["name"] for c in insp.get_columns("visuals")}
+    for col in ("literal_caption", "query_caption"):
+        assert col in vis_cols, (
+            f"visuals.{col} missing — migration 0037 not applied?"
+        )
+        assert hasattr(Visual, col), (
+            f"Visual ORM missing {col} — models.py out of sync with 0037"
+        )
+
+    # B) extract-visuals populates literal_caption from version-tolerant keys
+    extract_src = _inspect.getsource(db_cli.extract_visuals_cmd)
+    assert "_extract_literal_caption" in extract_src, (
+        "extract-visuals must define _extract_literal_caption"
+    )
+    # All four currently-known MinerU-Pro field names are probed
+    for key in (
+        "chart_description", "image_analysis",
+        "image_description", "figure_description",
+    ):
+        assert key in extract_src, (
+            f"_extract_literal_caption must probe the {key!r} key — "
+            f"MinerU-Pro field names vary across versions, tolerate them all"
+        )
+    # Called from image + chart branches (where VLM-Pro output arrives)
+    assert extract_src.count('"literal_caption": _extract_literal_caption(block)') >= 2, (
+        "extract-visuals must populate literal_caption in BOTH the "
+        "image and chart branches"
+    )
+
+    # C) INSERT SQL + NUL-sanitization
+    assert "literal_caption)" in extract_src and \
+           ":literal_caption" in extract_src, (
+        "extract-visuals INSERT SQL must carry literal_caption + its bind"
+    )
+    assert "\"literal_caption\"" in extract_src or "'literal_caption'" in extract_src, (
+        "extract-visuals should reference 'literal_caption' as a string"
+    )
+    # NUL-strip loop includes literal_caption
+    nul_loop_start = extract_src.find(
+        'for k in ("content", "caption", "asset_path",'
+    )
+    nul_loop_end = extract_src.find(")", nul_loop_start + 10)
+    nul_keys_section = extract_src[nul_loop_start:nul_loop_end]
+    assert "literal_caption" in nul_keys_section, (
+        "NUL-sanitization loop must include literal_caption — MinerU-Pro "
+        "output can carry \\x00 just like ai_caption can"
+    )
+
+    # D) embed-visuals accepts literal-only rows + concatenates when both exist
+    embed_src = _inspect.getsource(db_cli.embed_visuals_cmd)
+    assert "literal_caption" in embed_src, (
+        "embed-visuals must reference literal_caption"
+    )
+    assert "v.literal_caption IS NOT NULL" in embed_src, (
+        "embed-visuals WHERE must admit rows with literal_caption but "
+        "no ai_caption — otherwise post-VLM-Pro ingests never embed"
+    )
+    assert "v.literal_caption || ' ' || v.ai_caption" in embed_src, (
+        "embed-visuals SELECT must concatenate literal + ai when both "
+        "are present — that's the multi-aspect payoff"
+    )
+
+
 def l1_phase54_6_213_in_table_images_and_merged_paragraphs() -> None:
     """Phase 54.6.213 (roadmap 3.1.6 Phase 3) — richer block output handling.
 
@@ -12588,6 +12694,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_212_vlm_pro_default_dispatch,
     # Phase 54.6.213 — roadmap 3.1.6 Phase 3: in-table images + merged-paragraph chunker invariant
     l1_phase54_6_213_in_table_images_and_merged_paragraphs,
+    # Phase 54.6.214 — roadmap 3.1.6 Phase 5: multi-aspect captions (closes 3.5.2)
+    l1_phase54_6_214_multiaspect_captions_surface,
 ]
 
 L2_TESTS: list[Callable] = [

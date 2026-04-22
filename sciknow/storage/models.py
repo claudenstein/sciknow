@@ -594,6 +594,25 @@ class Visual(Base):
     ai_caption: Mapped[str | None] = mapped_column(Text)
     ai_caption_model: Mapped[str | None] = mapped_column(Text)
     ai_captioned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Phase 54.6.214 (roadmap 3.1.6 Phase 5 / closes 3.5.2) — multi-
+    # aspect captions for figures/charts.
+    #
+    #   literal_caption — what the image *literally* shows: axes,
+    #     labels, data shape, symbols. Populated at extract-visuals
+    #     time from MinerU 2.5-Pro's structured per-figure output
+    #     (chart parsing, image analysis fields on the content_list
+    #     block). Stays NULL for pipeline-era rows and for visual
+    #     kinds MinerU-Pro doesn't analyse.
+    #   query_caption — a short, keyword-dense paraphrase of
+    #     ai_caption, optimised for retrieval rather than human
+    #     reading. Populated by a follow-on pass after Phase 4
+    #     re-ingest completes; stays NULL until then.
+    #
+    # Both are nullable so the Phase 5 schema drop is non-
+    # destructive and downstream consumers can graceful-degrade to
+    # ai_caption when either field is missing.
+    literal_caption: Mapped[str | None] = mapped_column(Text)
+    query_caption: Mapped[str | None] = mapped_column(Text)
     # Phase 54.6.138 — paragraphs from the source paper's body that
     # reference this visual ("… as shown in Fig. 3 …"). List of
     # {"block_idx": int, "text": str, "context_before": str | null}.

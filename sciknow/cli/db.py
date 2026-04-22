@@ -5623,6 +5623,35 @@ def extract_visuals_cmd(
         r'<img[^>]+src=["\']([^"\']+)["\']', _re.IGNORECASE,
     )
 
+    # Phase 54.6.214 (roadmap 3.1.6 Phase 5 / closes 3.5.2) — MinerU
+    # 2.5-Pro's structured per-figure output (chart parsing, image
+    # analysis) lands in one of several block fields depending on
+    # version. Capture whichever is present into visuals.literal_caption
+    # so the synthesis caption (ai_caption, qwen2.5vl:32b) can be
+    # layered on top of a model-agnostic literal description. Pre-
+    # VLM-Pro blocks have none of these keys → literal_caption stays
+    # NULL and downstream consumers graceful-degrade to ai_caption.
+    _LITERAL_KEYS = (
+        "chart_description",   # MinerU 2.5-Pro chart parser
+        "image_analysis",      # MinerU 2.5-Pro image analysis
+        "image_description",   # alternate naming
+        "figure_description",  # alternate naming
+        "literal_caption",     # future-proofing
+    )
+
+    def _extract_literal_caption(block: dict) -> str | None:
+        for key in _LITERAL_KEYS:
+            val = block.get(key)
+            if not val:
+                continue
+            if isinstance(val, list):
+                joined = " ".join(str(x) for x in val if x).strip()
+                if joined:
+                    return joined[:4000]
+            elif isinstance(val, str) and val.strip():
+                return val.strip()[:4000]
+        return None
+
     def _extract_in_table_images(block: dict) -> list[dict]:
         """Return zero or more in-table-image records for this table
         block. Each record is a partial visuals row (kind, content,
@@ -5743,6 +5772,7 @@ def extract_visuals_cmd(
                     sub["figure_num"] = (
                         fig_match.group(0) if fig_match else None
                     )
+                    sub.setdefault("literal_caption", None)
                     visuals_batch.append(sub)
 
             elif btype == "equation":
@@ -5771,6 +5801,7 @@ def extract_visuals_cmd(
                     "block_idx": idx,
                     "figure_num": fig_match.group(0) if fig_match else None,
                     "surrounding_text": prev_text,
+                    "literal_caption": _extract_literal_caption(block),
                 })
 
             elif btype == "chart":
@@ -5794,6 +5825,7 @@ def extract_visuals_cmd(
                     "block_idx": idx,
                     "figure_num": fig_match.group(0) if fig_match else None,
                     "surrounding_text": prev_text,
+                    "literal_caption": _extract_literal_caption(block),
                 })
 
             elif btype == "code":
@@ -5820,7 +5852,8 @@ def extract_visuals_cmd(
             # 2026-04-18 audit saw on 3 papers during the chart backfill.
             for v in visuals_batch:
                 for k in ("content", "caption", "asset_path",
-                          "figure_num", "surrounding_text"):
+                          "figure_num", "surrounding_text",
+                          "literal_caption"):
                     val = v.get(k)
                     if isinstance(val, str) and "\x00" in val:
                         v[k] = val.replace("\x00", "")
@@ -5831,14 +5864,16 @@ def extract_visuals_cmd(
                             "DELETE FROM visuals WHERE document_id::text = :did"
                         ), {"did": doc_id})
                     for v in visuals_batch:
+                        v.setdefault("literal_caption", None)
                         session.execute(sql_text("""
                             INSERT INTO visuals
                                 (document_id, kind, content, caption, asset_path,
-                                 block_idx, figure_num, surrounding_text)
+                                 block_idx, figure_num, surrounding_text,
+                                 literal_caption)
                             VALUES
                                 (CAST(:document_id AS uuid), :kind, :content,
                                  :caption, :asset_path, :block_idx, :figure_num,
-                                 :surrounding_text)
+                                 :surrounding_text, :literal_caption)
                         """), v)
                     session.commit()
                 extracted += len(visuals_batch)
@@ -6207,9 +6242,20 @@ def embed_visuals_cmd(
     kind_ph = ", ".join(f":k{i}" for i, _ in enumerate(kinds))
     kind_params = {f"k{i}": k for i, k in enumerate(kinds)}
 
-    where = [f"v.kind IN ({kind_ph})", "v.ai_caption IS NOT NULL",
-             "(length(COALESCE(v.ai_caption, '')) >= 20 OR "
-             " length(COALESCE(v.table_summary, '')) >= 20)"]
+    # Phase 54.6.214 (roadmap 3.1.6 Phase 5) — admit rows that have
+    # EITHER ai_caption OR literal_caption OR table_summary. Previously
+    # we required ai_caption specifically, which would have left
+    # literal-only rows (post-VLM-Pro ingest, before caption-visuals
+    # has run) un-embedded forever.
+    where = [
+        f"v.kind IN ({kind_ph})",
+        "(v.ai_caption IS NOT NULL "
+        " OR v.literal_caption IS NOT NULL "
+        " OR v.table_summary IS NOT NULL)",
+        "(length(COALESCE(v.ai_caption, '')) >= 20 "
+        " OR length(COALESCE(v.literal_caption, '')) >= 20 "
+        " OR length(COALESCE(v.table_summary, '')) >= 20)",
+    ]
     if not force:
         where.append("v.qdrant_point_id IS NULL")
 
@@ -6217,12 +6263,23 @@ def embed_visuals_cmd(
         rows = session.execute(sql_text(f"""
             SELECT v.id::text, v.document_id::text, v.kind,
                    -- 54.6.109: for tables, prefer the parsed
-                   -- table_summary over ai_caption (which tables
-                   -- don't have); equation/figure/chart keep using
-                   -- ai_caption from 54.6.72 / 54.6.78.
+                   -- table_summary over ai_caption (tables don't
+                   -- get captioned).
+                   -- 54.6.214: when both literal_caption (MinerU-Pro
+                   -- per-figure description) and ai_caption
+                   -- (qwen2.5vl:32b synthesis) are present, embed
+                   -- their concatenation — literal anchors the
+                   -- retrieval in what the image shows, synthesis
+                   -- anchors it in what the paper *claims* about
+                   -- that image. Either alone is a useful fallback.
                    CASE WHEN v.kind = 'table'
                           AND COALESCE(v.table_summary, '') <> ''
                         THEN v.table_summary
+                        WHEN v.literal_caption IS NOT NULL
+                          AND COALESCE(v.ai_caption, '') <> ''
+                        THEN v.literal_caption || ' ' || v.ai_caption
+                        WHEN v.literal_caption IS NOT NULL
+                        THEN v.literal_caption
                         ELSE v.ai_caption
                    END AS embed_text,
                    v.figure_num, v.caption
