@@ -6689,6 +6689,365 @@ def parse_tables_cmd(
     )
 
 
+# ── caption-bench (Phase 54.6.226 — roadmap 3.5.1) ───────────────────────────
+
+
+_CAPTION_GRADE_PROMPT = """You are grading an AI-generated caption \
+for a figure or chart from a scientific paper. The caption was \
+produced by a vision-LLM (qwen2.5vl:32b) and is intended for \
+retrieval + downstream writing.
+
+Figure kind: {kind}
+Paper title: "{title}" ({year})
+
+Original caption from the paper (a short human-authored label, \
+usually 1 line; may be sparse — trust it as ground truth anyway):
+"{original_caption}"
+
+Surrounding body text (the paragraph just before the figure in \
+the paper; may be empty):
+"{surrounding_text}"
+
+AI-generated caption (the thing you're grading):
+"{ai_caption}"
+
+Grade three things:
+
+1. accuracy — does the AI caption describe what the original caption \
+and surrounding text suggest the figure shows?
+   * yes     — captures the main subject + key elements faithfully
+   * partial — mostly right but misses or garbles one element
+   * no      — describes something different from what the paper's \
+text indicates
+
+2. hallucination — does the AI caption invent details (specific \
+numbers, axis labels, species names, places) that aren't supported \
+by the original caption or surrounding text?
+   * none   — strictly derived from what's known
+   * minor  — adds plausible context that might or might not be \
+real; low stakes
+   * severe — states specific values or entities that look invented \
+(e.g. gives axis numeric ranges when the paper's caption never \
+mentioned them)
+
+3. usefulness — is the caption useful for retrieval (dense + sparse) \
+and for a writer looking for a figure to cite?
+   * good   — conveys what the figure shows AND why it matters in \
+the paper's argument (carries the rhetorical framing)
+   * ok     — describes the figure literally; helps retrieval but not \
+writing
+   * bland  — generic filler ("A figure showing the relationship \
+between X and Y"); provides little retrieval signal
+
+Respond in JSON ONLY, no prose:
+{{"accuracy": "yes|partial|no",
+  "hallucination": "none|minor|severe",
+  "usefulness": "good|ok|bland",
+  "reason": "<one short sentence>"}}
+"""
+
+
+@app.command(name="caption-bench")
+def caption_bench_cmd(
+    n: int = typer.Option(
+        30, "--n", "-n",
+        help="Random sample size. 30 is enough for ±10% precision "
+             "at 95% CI on the accuracy axis.",
+    ),
+    kind: str = typer.Option(
+        "figure,chart", "--kind",
+        help="Comma-separated visual kinds to sample. Default "
+             "figure,chart (the image-bearing kinds that VLM "
+             "captions). Tables don't carry ai_caption at the moment.",
+    ),
+    judge: str = typer.Option(
+        "llm", "--judge",
+        help="'llm' (LLM_FAST_MODEL text-only — compares AI caption "
+             "against the paper's original caption + surrounding "
+             "text; no image access; cheap), 'human' (interactive "
+             "prompt), or 'both'.",
+    ),
+    model: str | None = typer.Option(
+        None, "--model",
+        help="Override the judge LLM. Default: settings.llm_fast_model.",
+    ),
+    output_dir: Path = typer.Option(
+        None, "--output-dir",
+        help="Where to write the sample JSONL. Default: "
+             "<data_dir>/caption_bench/bench-<iso-timestamp>.jsonl.",
+    ),
+    seed: int | None = typer.Option(
+        None, "--seed",
+        help="Random seed for deterministic sampling (debugging only).",
+    ),
+):
+    """Phase 54.6.226 (roadmap 3.5.1) — bench ai_caption quality on figures + charts.
+
+    Third bench harness alongside `wiki kg-sample` (54.6.218) and
+    `db equation-bench` (54.6.222). Samples N random figure/chart
+    rows from the visuals table, grades their ai_caption along three
+    axes, and persists results to a timestamped JSONL for
+    longitudinal tracking.
+
+    Three-axis rubric:
+
+      * accuracy       — does the AI caption match what the paper
+                         says the figure shows?  (yes/partial/no)
+      * hallucination  — does it invent labels/axes/numbers?
+                         (none/minor/severe)
+      * usefulness     — is it retrieval- and writing-useful, or
+                         generic filler?  (good/ok/bland)
+
+    Judge is text-only by default — it compares the AI caption
+    against the paper's own short caption + surrounding body text.
+    That misses hallucinations that happen to look plausible in
+    text, but catches the common drift cases (invented axis ranges,
+    wrong subject, wrong units). A VLM-judge mode that compares
+    caption to image is a potential follow-on once we're past the
+    Phase 4 re-ingest.
+
+    Output JSONL (one record per visual):
+
+      {{
+        "visual_id": "<uuid>",
+        "document_id": "<uuid>", "paper_title": "...", "year": 2024,
+        "kind": "figure|chart",
+        "original_caption": "...",
+        "surrounding_text": "...",
+        "ai_caption": "...",
+        "ai_caption_model": "...",
+        "accuracy": "yes|partial|no",
+        "hallucination": "none|minor|severe",
+        "usefulness": "good|ok|bland",
+        "reason": "<judge's one-sentence rationale>",
+        "judge": "llm-<model>|human",
+        "graded_at": "<iso timestamp>"
+      }}
+
+    Examples:
+
+      sciknow db caption-bench                     # 30 figures+charts
+      sciknow db caption-bench --n 50              # bigger sample
+      sciknow db caption-bench --kind chart        # charts only
+      sciknow db caption-bench --judge human       # interactive
+      sciknow db caption-bench --judge both        # LLM + human confirm
+    """
+    from sciknow.cli import preflight
+    preflight(qdrant=False)
+
+    import json as _json
+    import random as _random
+    from datetime import datetime, timezone
+    from sqlalchemy import text as sql_text
+    from sciknow.config import settings
+    from sciknow.storage.db import get_session
+
+    if judge not in ("llm", "human", "both"):
+        console.print(
+            f"[red]Invalid --judge:[/red] {judge!r} — must be "
+            "llm / human / both."
+        )
+        raise typer.Exit(2)
+
+    kinds = [k.strip() for k in kind.split(",") if k.strip()]
+    if not kinds:
+        console.print("[red]--kind must be non-empty[/red]")
+        raise typer.Exit(2)
+
+    from sciknow.core.project import get_active_project
+    active = get_active_project()
+    out_root = output_dir or (active.data_dir / "caption_bench")
+    out_root.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out_path = out_root / f"bench-{ts}.jsonl"
+
+    if seed is not None:
+        _random.seed(seed)
+
+    # Pull candidate pool via random sample.
+    kind_ph = ", ".join(f":k{i}" for i, _ in enumerate(kinds))
+    kind_params = {f"k{i}": k for i, k in enumerate(kinds)}
+
+    with get_session() as session:
+        rows = session.execute(sql_text(f"""
+            SELECT v.id::text, v.document_id::text, v.kind,
+                   v.caption, v.surrounding_text,
+                   v.ai_caption, v.ai_caption_model,
+                   pm.title, pm.year
+            FROM visuals v
+            LEFT JOIN paper_metadata pm
+                   ON pm.document_id = v.document_id
+            WHERE v.kind IN ({kind_ph})
+              AND v.ai_caption IS NOT NULL
+              AND length(v.ai_caption) >= 20
+            ORDER BY random()
+            LIMIT :n
+        """), {**kind_params, "n": n}).fetchall()
+
+    if not rows:
+        console.print(
+            "[yellow]No captioned figures/charts match the filter.[/yellow] "
+            "Run `sciknow db caption-visuals` first."
+        )
+        return
+
+    console.print(
+        f"[bold]Benching {len(rows)} caption(s) → {out_path}[/bold]"
+    )
+
+    _resolved_model = model or settings.llm_fast_model or settings.llm_model
+
+    def _llm_grade(row) -> tuple[str, str, str, str]:
+        import ollama as _ollama
+        client = _ollama.Client(host=settings.ollama_host, timeout=60)
+        prompt = _CAPTION_GRADE_PROMPT.format(
+            kind=row[2],
+            title=(row[7] or "(unknown)")[:150],
+            year=row[8] or "n.d.",
+            original_caption=(row[3] or "")[:500],
+            surrounding_text=(row[4] or "")[:500],
+            ai_caption=(row[5] or "")[:1500],
+        )
+        try:
+            resp = client.chat(
+                model=_resolved_model,
+                messages=[{"role": "user", "content": prompt}],
+                format="json",
+                options={"temperature": 0.0, "num_predict": 300},
+            )
+            content = (resp.get("message") or {}).get("content", "")
+            data = _json.loads(content)
+            acc = str(data.get("accuracy", "")).strip().lower()
+            hall = str(data.get("hallucination", "")).strip().lower()
+            use = str(data.get("usefulness", "")).strip().lower()
+            reason = str(data.get("reason", "")).strip()
+            if acc not in ("yes", "partial", "no"):
+                acc = "no"
+            if hall not in ("none", "minor", "severe"):
+                hall = "severe"
+            if use not in ("good", "ok", "bland"):
+                use = "bland"
+            return acc, hall, use, reason
+        except Exception as exc:
+            return "no", "severe", "bland", f"judge-error: {exc}"
+
+    def _human_grade(row, sugg):
+        console.print()
+        console.print(
+            f"[bold cyan]Paper:[/bold cyan] "
+            f"\"{row[7] or '(unknown)'}\" ({row[8] or 'n.d.'})"
+        )
+        console.print(
+            f"[bold cyan]Original caption:[/bold cyan] {(row[3] or '')[:300]}"
+        )
+        console.print(
+            f"[bold cyan]AI caption:[/bold cyan] {(row[5] or '')[:400]}"
+        )
+        if sugg:
+            acc_s, hall_s, use_s, reason_s = sugg
+            console.print(
+                f"[yellow]LLM:[/yellow] acc={acc_s}, hall={hall_s}, "
+                f"use={use_s} — {reason_s}"
+            )
+        mapping = {
+            "y": "yes", "p": "partial", "n": "no",
+            "none": "none", "minor": "minor", "severe": "severe",
+            "g": "good", "ok": "ok", "b": "bland",
+        }
+        acc = typer.prompt(
+            "accuracy [y/p/n]",
+            default=(sugg[0][0] if sugg else "y"),
+        ).strip().lower()
+        hall = typer.prompt(
+            "hallucination [none/minor/severe]",
+            default=(sugg[1] if sugg else "none"),
+        ).strip().lower()
+        use = typer.prompt(
+            "usefulness [g=good/ok/b=bland]",
+            default=(sugg[2][0] if sugg else "g"),
+        ).strip().lower()
+        reason = typer.prompt("reason (optional)", default="")
+        return (
+            mapping.get(acc, acc),
+            mapping.get(hall, hall),
+            mapping.get(use, use),
+            reason,
+        )
+
+    acc_counts: dict[str, int] = {}
+    hall_counts: dict[str, int] = {}
+    use_counts: dict[str, int] = {}
+
+    with out_path.open("w", encoding="utf-8") as f:
+        for row in rows:
+            sugg = None
+            if judge in ("llm", "both"):
+                sugg = _llm_grade(row)
+            if judge in ("human", "both"):
+                acc, hall, use, reason = _human_grade(row, sugg)
+                judge_tag = "human"
+            else:
+                acc, hall, use, reason = sugg
+                judge_tag = f"llm-{_resolved_model}"
+
+            record = {
+                "visual_id": row[0],
+                "document_id": row[1],
+                "kind": row[2],
+                "paper_title": row[7],
+                "year": row[8],
+                "original_caption": row[3],
+                "surrounding_text": row[4],
+                "ai_caption": row[5],
+                "ai_caption_model": row[6],
+                "accuracy": acc,
+                "hallucination": hall,
+                "usefulness": use,
+                "reason": reason,
+                "judge": judge_tag,
+                "graded_at": datetime.now(timezone.utc).isoformat(),
+            }
+            f.write(_json.dumps(record, ensure_ascii=False) + "\n")
+            acc_counts[acc] = acc_counts.get(acc, 0) + 1
+            hall_counts[hall] = hall_counts.get(hall, 0) + 1
+            use_counts[use] = use_counts.get(use, 0) + 1
+
+    total = len(rows)
+
+    def _rate(d, k):
+        return d.get(k, 0) / total * 100 if total else 0.0
+
+    console.print()
+    console.print(f"[bold green]✓ Bench written → {out_path}[/bold green]")
+    console.print(
+        f"[bold]Accuracy[/bold]     "
+        f"yes:{acc_counts.get('yes', 0):3d}  "
+        f"partial:{acc_counts.get('partial', 0):3d}  "
+        f"no:{acc_counts.get('no', 0):3d}   "
+        f"→ {_rate(acc_counts, 'yes'):.1f}% strict"
+    )
+    console.print(
+        f"[bold]Hallucination[/bold] "
+        f"none:{hall_counts.get('none', 0):3d}  "
+        f"minor:{hall_counts.get('minor', 0):3d}  "
+        f"severe:{hall_counts.get('severe', 0):3d}  "
+        f"→ {_rate(hall_counts, 'severe'):.1f}% severe"
+    )
+    console.print(
+        f"[bold]Usefulness[/bold]   "
+        f"good:{use_counts.get('good', 0):3d}  "
+        f"ok:{use_counts.get('ok', 0):3d}  "
+        f"bland:{use_counts.get('bland', 0):3d}  "
+        f"→ {_rate(use_counts, 'bland'):.1f}% bland"
+    )
+    console.print(
+        "[dim]Track these across runs to catch VLM drift or "
+        "prompt regressions. A sudden jump in severe hallucinations "
+        "= model upgrade misfired; jump in bland usefulness = prompt "
+        "went generic.[/dim]"
+    )
+
+
 # ── equation-bench (Phase 54.6.222 — roadmap 3.1.2) ──────────────────────────
 
 

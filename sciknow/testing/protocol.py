@@ -11853,6 +11853,74 @@ def l1_phase54_6_134_agentic_coverage_uses_reranker() -> None:
     )
 
 
+def l1_phase54_6_226_caption_bench_cli_surface() -> None:
+    """Phase 54.6.226 (roadmap 3.5.1) — caption quality audit CLI.
+
+    Third member of the bench harness trio (kg-sample 54.6.218 +
+    equation-bench 54.6.222). Pins:
+
+      A) `sciknow db caption-bench` Typer command + help render.
+      B) Parameters: --n, --kind, --judge, --model, --output-dir, --seed.
+      C) Grading prompt defines the three-axis rubric (accuracy /
+         hallucination / usefulness) plus label vocabularies.
+      D) JSONL output schema keys — stable contract for downstream
+         JSONL consumers + the bench-diff tool.
+    """
+    import inspect as _inspect
+    from typer.testing import CliRunner
+    from sciknow.cli.main import app
+    from sciknow.cli import db as db_cli
+
+    # A) help
+    r = CliRunner().invoke(app, ["db", "caption-bench", "--help"])
+    assert r.exit_code == 0, (
+        f"caption-bench --help failed: {r.output[:300]}"
+    )
+    assert "hallucination" in r.output.lower() or \
+           "hallucination" in (db_cli.caption_bench_cmd.__doc__ or "").lower(), (
+        "caption-bench should surface the hallucination axis"
+    )
+
+    # B) parameter surface
+    assert hasattr(db_cli, "caption_bench_cmd")
+    sig = _inspect.signature(db_cli.caption_bench_cmd)
+    for param in ("n", "kind", "judge", "model", "output_dir", "seed"):
+        assert param in sig.parameters, (
+            f"caption-bench missing --{param.replace('_', '-')}"
+        )
+
+    # C) three-axis rubric + label vocab
+    assert hasattr(db_cli, "_CAPTION_GRADE_PROMPT")
+    prompt = db_cli._CAPTION_GRADE_PROMPT
+    for axis in ("accuracy", "hallucination", "usefulness"):
+        assert axis in prompt, (
+            f"_CAPTION_GRADE_PROMPT missing `{axis}` axis"
+        )
+    for vocab in (
+        "yes|partial|no",
+        "none|minor|severe",
+        "good|ok|bland",
+    ):
+        assert vocab in prompt, (
+            f"_CAPTION_GRADE_PROMPT must surface {vocab!r} label "
+            f"vocabulary — the schema downstream JSONL consumers rely on"
+        )
+
+    # D) JSONL output schema
+    src = _inspect.getsource(db_cli.caption_bench_cmd)
+    for key in (
+        "visual_id", "document_id", "kind",
+        "paper_title", "year",
+        "original_caption", "surrounding_text",
+        "ai_caption", "ai_caption_model",
+        "accuracy", "hallucination", "usefulness",
+        "reason", "judge", "graded_at",
+    ):
+        assert f'"{key}"' in src, (
+            f"caption-bench JSONL record must carry `{key}` key"
+        )
+
+
 def l1_phase54_6_225_refresh_includes_link_mentions() -> None:
     """Phase 54.6.225 (roadmap 3.3.3) — link-visual-mentions in refresh pipeline.
 
@@ -13637,6 +13705,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_224_bench_snapshot_diff,
     # Phase 54.6.225 — roadmap 3.3.3: link-visual-mentions in refresh pipeline
     l1_phase54_6_225_refresh_includes_link_mentions,
+    # Phase 54.6.226 — roadmap 3.5.1: caption quality bench CLI
+    l1_phase54_6_226_caption_bench_cli_surface,
 ]
 
 L2_TESTS: list[Callable] = [
