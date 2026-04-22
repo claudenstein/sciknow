@@ -705,12 +705,12 @@ Scoring: **Impact** (H/M/L) × **Effort** (H/M/L) → **Verdict**.
 | # | Proposal | Axes | Impact | Effort | Verdict | Notes |
 |---|---|---|---|---|---|---|
 | 3.2.3 | Retraction + correction watcher (cron) | R, Q | M | L | **Rejected** | User veto 2026-04-22: not needed |
-| 3.2.5 | Language detection + multi-lingual FTS | C, Q | M | L | **Ship** | Fixes silent FTS failures on non-EN papers |
-| 3.7.1 | KG entity canonicalization (rule-based) | Q | H | L | **Ship** | Hand-curated alias table first; Wikidata later |
-| 3.9.1 | RAPTOR summary verification | Q | M | L | **Ship** | Reuses Phase 54.6.83 claim-atomization |
-| 3.11.2 | Incremental refresh (`--since`) | S | M | L | **Ship** | 2-3 days, frequent usage win |
-| 3.11.4 | Budget-aware refresh (`--budget-time`) | R, S | L | L | **Ship** | 2 days; unblocks overnight runs |
-| 3.11.6 | Failure-mode clinic view | R, O | M | L | **Ship** | Surfaces data already in ingestion_jobs |
+| 3.2.5 | Language detection + multi-lingual FTS | C, Q | M | L | **Shipped 54.6.207** | `documents.language` + per-row `to_tsvector` |
+| 3.7.1 | KG entity canonicalization (rule-based) | Q | H | L | **Shipped 54.6.209** | Hand-curated alias table; Wikidata deferred |
+| 3.9.1 | RAPTOR summary verification | Q | M | L | **Shipped 54.6.208** | Claim-atomization gate before node persist |
+| 3.11.2 | Incremental refresh (`--since`) | S | M | L | **Shipped 54.6.210** | `sciknow refresh --since=7d/last-run` + wiki compile filter |
+| 3.11.4 | Budget-aware refresh (`--budget-time`) | R, S | L | L | **Shipped 54.6.206** | `--budget-time=6h/30m` + Exit(3) for budget-hit |
+| 3.11.6 | Failure-mode clinic view | R, O | M | L | **Shipped 54.6.205** | `sciknow db failures` aggregates ingestion_jobs |
 | 3.0.1 | Expand OA resolver set (Europe PMC + CORE + OSF) | C | H | M | **Next Review** | Queued for evaluation after Ship cluster lands. Pilot with Europe PMC first; measure yield lift |
 | 3.1.1 | Routed converter backend (heuristic gate) | S, Q | H | M | **Next Review** | Queued for evaluation after Ship cluster lands. Need 20-PDF edge-case bench set first |
 | 3.3.1 | Semantic chunking within section | Q | M | M | **Next Review** | Queued for evaluation after Ship cluster lands. Benchmark vs current MRR before committing |
@@ -791,25 +791,30 @@ listed reason:
 ## 6. Next action
 
 User decision 2026-04-22: ship the cluster **minus 3.2.3** (vetoed
-as unnecessary). After the cluster lands, revisit the five "Next
-Review" proposals flagged in §4 (3.0.1, 3.1.1, 3.3.1, 3.4.3, 3.6.1)
-and decide which ones to advance to Ship.
+as unnecessary). Ship cluster **complete** as of 2026-04-22 —
+54.6.205 (3.11.6) → 54.6.206 (3.11.4) → 54.6.207 (3.2.5) →
+54.6.208 (3.9.1) → 54.6.209 (3.7.1) → 54.6.210 (3.11.2). See
+PHASE_LOG consolidated entry "Phase 54.6.205-210 — Ingestion
+roadmap ship cluster".
 
-Shipping order (smallest → largest scope):
+**Next session**: revisit the five "Next Review" proposals from
+§4 against the post-ship baseline and decide which to advance to
+Ship:
 
-1. **3.11.6 Failure-mode clinic** — read-only aggregation over the
-   existing `ingestion_jobs` table. No schema change.
-2. **3.11.4 Budget-aware refresh (`--budget-time`)** — CLI flag +
-   per-step clock check. No schema change.
-3. **3.2.5 Language detection + multi-lingual FTS** — adds a
-   language column + switches FTS dict per row. One migration.
-4. **3.9.1 RAPTOR summary verification** — reuses claim-atomization
-   (Phase 54.6.83). No schema change.
-5. **3.7.1 KG entity canonicalization (rule-based)** — alias file
-   shipped in-repo + normalization in extract-kg. No schema change.
-6. **3.11.2 Incremental refresh (`--since`)** — touches every step's
-   filter; biggest scope, best landed after the smaller ones are in.
+- **3.0.1 Expand OA resolver set (Europe PMC + CORE + OSF)** —
+  pilot with Europe PMC first; measure yield lift on the
+  global-cooling `pending_downloads` rows.
+- **3.1.1 Routed converter backend (heuristic gate)** — curate the
+  20-PDF edge-case bench set first; MinerU 2.5 handles ~90%, the
+  gate only earns its keep on the hard tail.
+- **3.3.1 Semantic chunking within section** — bench vs current
+  MRR on a 30-query set before committing; bge-m3 chunks are
+  already semantically dense so the gain may be marginal.
+- **3.4.3 ColBERT late-interaction on abstracts collection** —
+  cheap pilot (paper-level collection is small); storage cost is
+  the gate, not accuracy.
+- **3.6.1 Citation-purpose classification** — port ACL-ARC /
+  SciCite classifier; LLM inference per citation is cheap.
 
-Total time estimate for the ship cluster (minus 3.2.3): **~10
-focused hours**, spread across 2-3 sessions. After shipping,
-reassess the Next Review set against the new baseline.
+Rank by expected ROI on the current climate-science corpus,
+pick one or two for the next ship session.

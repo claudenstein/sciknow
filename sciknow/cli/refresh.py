@@ -68,6 +68,85 @@ def _sciknow_bin() -> str:
     return "sciknow"
 
 
+_LAST_REFRESH_FILE = ".last_refresh"
+
+
+def _resolve_since(value: str, data_dir: Path) -> str:
+    """Phase 54.6.210 — normalize `--since` to an ISO-8601 UTC string.
+
+    Accepts duration shorthand (``24h`` / ``7d`` / ``30m``), the
+    special token ``last-run`` (reads ``<data_dir>/.last_refresh``),
+    or any ISO-8601 date / datetime that ``datetime.fromisoformat``
+    understands (``Z`` suffix tolerated). Raises ``typer.Exit(2)`` on
+    malformed input so the plan preview catches it before any step
+    runs.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    raw = value.strip()
+    key = raw.lower()
+
+    if key == "last-run":
+        marker = data_dir / _LAST_REFRESH_FILE
+        if not marker.exists():
+            console.print(
+                f"[red]--since=last-run:[/red] no marker at {marker}. "
+                "Run `sciknow refresh` once without --since to establish "
+                "a baseline, then --since=last-run will work."
+            )
+            raise typer.Exit(2)
+        stamp = marker.read_text(encoding="utf-8").strip()
+        if not stamp:
+            console.print(
+                f"[red]--since=last-run:[/red] {marker} is empty. "
+                "Delete it and re-run without --since to reseed."
+            )
+            raise typer.Exit(2)
+        return stamp
+
+    try:
+        if key.endswith("d"):
+            delta = timedelta(days=float(key[:-1]))
+        elif key.endswith("h"):
+            delta = timedelta(hours=float(key[:-1]))
+        elif key.endswith("m"):
+            delta = timedelta(minutes=float(key[:-1]))
+        else:
+            datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            return raw
+    except ValueError:
+        console.print(
+            f"[red]Invalid --since:[/red] {value!r} — expected "
+            "ISO-8601 (2026-04-22 / 2026-04-22T10:00Z), duration "
+            "(24h / 7d / 30m), or the token `last-run`."
+        )
+        raise typer.Exit(2)
+    return (datetime.now(timezone.utc) - delta).isoformat()
+
+
+def _write_last_refresh(data_dir: Path) -> None:
+    """Persist the successful-completion timestamp for `--since=last-run`.
+
+    Written AFTER every planned step finished without a hard failure
+    and without hitting the budget cap — a partial run must not
+    advance the marker, otherwise the next `--since=last-run` would
+    silently skip papers the interrupted run never got to.
+    """
+    from datetime import datetime, timezone
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        marker = data_dir / _LAST_REFRESH_FILE
+        marker.write_text(
+            datetime.now(timezone.utc).isoformat() + "\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        console.print(
+            f"[yellow]Could not write {data_dir / _LAST_REFRESH_FILE}: "
+            f"{exc}[/yellow]"
+        )
+
+
 def _run_step(label: str, argv: list[str], optional: bool = False) -> bool:
     """Run one pipeline step, streaming output. Returns True on success."""
     console.print(Rule(f"[bold]{label}[/bold]"))
@@ -147,6 +226,21 @@ def refresh(
              "seconds: --budget-time=6h, --budget-time=30m, "
              "--budget-time=3600. Already-completed steps remain "
              "idempotent; re-running picks up the unfinished plan.",
+    ),
+    since: str = typer.Option(
+        None, "--since",
+        help="Phase 54.6.210 — incremental refresh window. When set, "
+             "expensive LLM-heavy steps (currently `wiki compile`) "
+             "only touch papers ingested after this timestamp. "
+             "Accepts ISO-8601 (2026-04-22, 2026-04-22T10:00Z), "
+             "duration (24h, 7d, 30m), or the special token "
+             "`last-run` which reads the last successful refresh's "
+             "timestamp from <project>/data/.last_refresh. Other "
+             "steps still skip completed work via their own "
+             "idempotent filters; `--since` just prevents the "
+             "full-corpus scan on the big ones. On successful "
+             "completion, refresh writes `.last_refresh` so the "
+             "next `--since=last-run` picks up where you left off.",
     ),
 ):
     """Re-run the full post-ingest pipeline after adding new papers.
@@ -293,9 +387,17 @@ def refresh(
         # both steps earlier).
         steps.append(("12. Embed visuals into Qdrant",
                       ["db", "embed-visuals"], True))
+    # Phase 54.6.210 — resolve --since into an ISO-8601 string
+    # BEFORE steps are finalised so the wiki-compile argv can carry
+    # it forward. Kept above the dry-run return so a malformed value
+    # fails in preview, not only on the real execution.
+    since_iso = _resolve_since(since, active.data_dir) if since else None
+
     if not no_wiki:
-        steps.append(("13. Wiki compile (slowest)",
-                      ["wiki", "compile"], True))
+        wiki_argv = ["wiki", "compile"]
+        if since_iso:
+            wiki_argv += ["--since", since_iso]
+        steps.append(("13. Wiki compile (slowest)", wiki_argv, True))
 
     if not steps:
         console.print("[yellow]No steps to run — all --no-* flags set.[/yellow]")
@@ -305,6 +407,12 @@ def refresh(
     for label, argv, _opt in steps:
         console.print(f"  [dim]→[/dim] {label}")
     console.print()
+
+    if since_iso:
+        console.print(
+            f"[dim]Incremental window: expensive steps restricted to "
+            f"papers ingested since {since_iso}.[/dim]"
+        )
 
     # Phase 54.6.206 — parse --budget-time into seconds. Done BEFORE
     # the dry-run early return so a malformed value is caught in the
@@ -391,6 +499,12 @@ def refresh(
         # Distinct non-zero exit for cron/scripts so "budget hit"
         # is distinguishable from "fully completed" and "hard-failed".
         raise typer.Exit(3)
+    # Phase 54.6.210 — only advance `.last_refresh` on a full clean
+    # pass. Budget-stop already returned with Exit(3) above; a
+    # required-step hard failure raised Exit(1). Reaching here means
+    # every planned step ran; optional warnings don't invalidate the
+    # window.
+    _write_last_refresh(active.data_dir)
     console.print(
         f"[bold green]✓ Refresh complete:[/bold green] "
         f"{n_done}/{len(steps)} step(s) in {t_str}"

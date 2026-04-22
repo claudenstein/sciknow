@@ -11853,6 +11853,134 @@ def l1_phase54_6_134_agentic_coverage_uses_reranker() -> None:
     )
 
 
+def l1_phase54_6_210_refresh_since_incremental_surface() -> None:
+    """Phase 54.6.210 (roadmap 3.11.2) — `sciknow refresh --since` surface.
+
+    Incremental refresh avoids the full-corpus scan on LLM-heavy
+    steps when only a handful of papers have been added since the
+    last successful run. This L1 locks the moving parts that are
+    easy to break in a refactor and impossible to detect without an
+    expensive end-to-end run:
+
+      A) `sciknow refresh --since` and `sciknow wiki compile --since`
+         both expose the option (refresh forwards the resolved value
+         through the wiki-compile step's argv).
+      B) `_resolve_since` handles duration shorthand (7d / 24h / 30m),
+         ISO-8601 inputs, and `last-run` round-trips through the
+         `.last_refresh` marker written under the active project's
+         data_dir.
+      C) `compile_all` accepts `since=` and the SQL parameterises it
+         via `CAST(:since AS timestamptz)` — a literal concatenation
+         would open an injection path and defeat prepared-statement
+         caching.
+      D) `.last_refresh` is NOT written on dry-run / budget-exit /
+         failure (otherwise `--since=last-run` would silently skip
+         papers the interrupted run never reached).
+    """
+    import inspect as _inspect
+    import tempfile
+    from pathlib import Path
+    from sciknow.cli import refresh as refresh_mod
+    from sciknow.cli import wiki as wiki_mod
+    from sciknow.core import wiki_ops
+
+    # A) CLI surface — both commands name the flag
+    refresh_src = _inspect.getsource(refresh_mod.refresh)
+    assert '"--since"' in refresh_src, (
+        "sciknow refresh must expose --since (roadmap 3.11.2)"
+    )
+    assert '["wiki", "compile"]' in refresh_src, (
+        "refresh must build wiki compile argv as a plain list so "
+        "--since can be appended conditionally"
+    )
+
+    wiki_src = _inspect.getsource(wiki_mod.compile)
+    assert '"--since"' in wiki_src, (
+        "sciknow wiki compile must expose --since (roadmap 3.11.2)"
+    )
+
+    # B) `_resolve_since` behaviour — durations, ISO, last-run
+    assert hasattr(refresh_mod, "_resolve_since"), (
+        "refresh must export _resolve_since for the CLI wiring"
+    )
+    assert hasattr(refresh_mod, "_write_last_refresh"), (
+        "refresh must export _write_last_refresh"
+    )
+
+    with tempfile.TemporaryDirectory() as d:
+        dd = Path(d)
+
+        iso_7d = refresh_mod._resolve_since("7d", dd)
+        assert "T" in iso_7d and ("+00:00" in iso_7d or "Z" in iso_7d), (
+            f"7d shorthand must resolve to a UTC ISO string, got {iso_7d!r}"
+        )
+
+        iso_plain = refresh_mod._resolve_since("2026-04-22", dd)
+        assert iso_plain == "2026-04-22", (
+            "ISO-8601 date must pass through verbatim so SQL CAST handles it"
+        )
+
+        # last-run with no marker: resolve raises typer.Exit(2)
+        import typer as _typer
+        try:
+            refresh_mod._resolve_since("last-run", dd)
+        except _typer.Exit as exc:
+            assert exc.exit_code == 2, (
+                "missing .last_refresh must exit 2 (bad input), not 1 (failure)"
+            )
+        else:
+            raise AssertionError(
+                "last-run with no marker must raise typer.Exit(2)"
+            )
+
+        # last-run round-trip: write then resolve
+        (dd / ".last_refresh").write_text("2026-04-20T00:00:00+00:00\n")
+        assert refresh_mod._resolve_since("last-run", dd) == \
+               "2026-04-20T00:00:00+00:00", (
+            "last-run must read the marker file and strip trailing newline"
+        )
+
+        # _write_last_refresh produces a parseable ISO UTC timestamp
+        marker = dd / ".last_refresh_fresh"
+        dd2 = dd / "subdir"  # exercise mkdir(parents=True)
+        refresh_mod._write_last_refresh(dd2)
+        fresh = (dd2 / ".last_refresh").read_text().strip()
+        from datetime import datetime
+        datetime.fromisoformat(fresh)  # raises if malformed
+
+    # C) compile_all signature + SQL uses parameterised CAST
+    sig = _inspect.signature(wiki_ops.compile_all)
+    assert "since" in sig.parameters, (
+        "compile_all must accept since= (roadmap 3.11.2)"
+    )
+    compile_src = _inspect.getsource(wiki_ops.compile_all)
+    assert "CAST(:since AS timestamptz)" in compile_src, (
+        "compile_all must parameterise :since through CAST — no "
+        "string concatenation of user input into the SQL"
+    )
+
+    # D) `.last_refresh` is guarded — dry-run returns BEFORE the
+    # write, budget-stop raises Exit(3) BEFORE the write, required-
+    # step failure raises Exit(1) BEFORE the write. We enforce this
+    # structurally by checking the write lives after the budget +
+    # failure branches in the source.
+    write_pos = refresh_src.index("_write_last_refresh(active.data_dir)")
+    dry_return_pos = refresh_src.index("Dry run — nothing executed.")
+    budget_exit_pos = refresh_src.index("raise typer.Exit(3)")
+    fail_exit_pos = refresh_src.index("raise typer.Exit(1)")
+    assert dry_return_pos < write_pos, (
+        "dry-run must return before _write_last_refresh — a dry run "
+        "that writes the marker would silently skip papers on the "
+        "next --since=last-run"
+    )
+    assert budget_exit_pos < write_pos, (
+        "budget-stop must exit before _write_last_refresh"
+    )
+    assert fail_exit_pos < write_pos, (
+        "required-step failure must exit before _write_last_refresh"
+    )
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -12145,6 +12273,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_83_claim_atomize_behavior,
     # Phase 54.6.85 — bench methodology overhaul (thinking-aware budgets)
     l1_phase54_6_85_bench_profile_for_model,
+    # Phase 54.6.210 — roadmap 3.11.2: incremental refresh + .last_refresh
+    l1_phase54_6_210_refresh_since_incremental_surface,
 ]
 
 L2_TESTS: list[Callable] = [

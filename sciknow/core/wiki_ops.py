@@ -963,12 +963,20 @@ def compile_all(
     force: bool = False,
     rewrite_stale: bool = False,
     with_entities: bool = False,
+    since: str | None = None,
 ) -> Iterator[Event]:
     """Build the full wiki from all ingested papers.
 
     ``with_entities`` (Phase 54.6.35) routes through to each
     ``compile_paper_summary`` call. Off by default — entity
     extraction is its own step, run via ``sciknow wiki extract-kg``.
+
+    ``since`` (Phase 54.6.210 — roadmap 3.11.2) is an optional
+    ISO-8601 timestamp; when set, only papers whose
+    ``documents.created_at`` is >= that instant enter the compile
+    loop. Makes incremental refresh runs fast: the 5,000-paper
+    corpus doesn't get iterated every run; only the handful of
+    papers added since the last refresh.
     """
     from sqlalchemy import text
     from sciknow.storage.db import get_session
@@ -990,15 +998,22 @@ def compile_all(
         num_batch=1024,
     )
 
+    since_sql = ""
+    since_params: dict = {}
+    if since:
+        since_sql = " AND d.created_at >= CAST(:since AS timestamptz) "
+        since_params["since"] = since
+
     with get_session() as session:
-        rows = session.execute(text("""
+        rows = session.execute(text(f"""
             SELECT d.id::text, pm.title
             FROM documents d
             JOIN paper_metadata pm ON pm.document_id = d.id
             WHERE d.ingestion_status = 'complete' AND pm.title IS NOT NULL
+            {since_sql}
             ORDER BY CASE WHEN d.ingest_source = 'seed' THEN 0 ELSE 1 END,
                      pm.year DESC NULLS LAST
-        """)).fetchall()
+        """), since_params).fetchall()
 
     total = len(rows)
     # Phase 55.1.1 — opt-in parallelism. Defaults to 1 because the

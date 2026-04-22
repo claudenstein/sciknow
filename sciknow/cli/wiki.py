@@ -116,6 +116,17 @@ def compile(
              "entities for all already-compiled papers; it can retry "
              "safely and pick its own model/strategy.",
     ),
+    since: str | None = typer.Option(
+        None, "--since",
+        help="Phase 54.6.210 — only compile wiki pages for papers "
+             "ingested after this ISO-8601 timestamp. Accepts "
+             "`2026-04-22`, `2026-04-22T10:00Z`, or `--since=24h` / "
+             "`--since=7d` shorthand (resolved relative to now). "
+             "Combine with the existing compile-only-new default to "
+             "skip scanning the full corpus on incremental refresh "
+             "runs: the 5,000-paper-strong case drops from minutes "
+             "of prep to seconds when only a dozen papers are new.",
+    ),
     model: str | None = typer.Option(None, "--model"),
 ):
     """
@@ -153,6 +164,39 @@ def compile(
 
     from sciknow.core import wiki_ops
 
+    # Phase 54.6.210 — parse the `--since` shorthand into an ISO-8601
+    # timestamp compile_all can pass straight into SQL. Accepts
+    # durations (24h, 7d, 30m), ISO dates, and ISO date-times.
+    since_iso: str | None = None
+    if since:
+        from datetime import datetime, timedelta, timezone
+        s = since.strip().lower()
+        try:
+            if s.endswith("d"):
+                delta = timedelta(days=float(s[:-1]))
+                since_iso = (datetime.now(timezone.utc) - delta).isoformat()
+            elif s.endswith("h"):
+                delta = timedelta(hours=float(s[:-1]))
+                since_iso = (datetime.now(timezone.utc) - delta).isoformat()
+            elif s.endswith("m"):
+                delta = timedelta(minutes=float(s[:-1]))
+                since_iso = (datetime.now(timezone.utc) - delta).isoformat()
+            else:
+                # Let SQL CAST handle full ISO parsing — just sanity-
+                # check the shape before we forward it.
+                datetime.fromisoformat(since.replace("Z", "+00:00"))
+                since_iso = since
+        except ValueError:
+            console.print(
+                f"[red]Invalid --since:[/red] {since!r} — expected "
+                "ISO-8601 (2026-04-22) or duration (24h / 7d / 30m)."
+            )
+            raise typer.Exit(2)
+        console.print(
+            f"[dim]Incremental window: papers ingested since "
+            f"{since_iso}[/dim]"
+        )
+
     if doc_id:
         console.print(f"Compiling wiki page for document {doc_id[:8]}...")
         gen = wiki_ops.compile_paper_summary(
@@ -172,7 +216,8 @@ def compile(
 
         gen = wiki_ops.compile_all(model=model, force=rebuild,
                                     rewrite_stale=rewrite_stale,
-                                    with_entities=with_entities)
+                                    with_entities=with_entities,
+                                    since=since_iso)
 
         result = None
         total = 0

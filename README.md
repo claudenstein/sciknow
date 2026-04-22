@@ -155,14 +155,22 @@ command — it re-runs every step in the right order, skipping what's already
 done:
 
 ```bash
-uv run sciknow refresh                 # full pipeline (including wiki)
-uv run sciknow refresh --no-wiki       # skip the hours-long wiki compile
-uv run sciknow refresh --dry-run       # preview what would run
+uv run sciknow refresh                        # full pipeline (including wiki)
+uv run sciknow refresh --no-wiki              # skip the hours-long wiki compile
+uv run sciknow refresh --dry-run              # preview what would run
+uv run sciknow refresh --budget-time=6h       # soft wall-clock cap (54.6.206)
+uv run sciknow refresh --since=last-run       # incremental: skip the full-corpus scan (54.6.210)
+uv run sciknow refresh --since=7d             # or name an explicit window (24h / 7d / 2026-04-22)
 ```
 
 Every step is idempotent, so `refresh` is safe to run any time. Use
 `--no-<step>` to skip individual steps (`--no-ingest`, `--no-cluster`,
-`--no-raptor`, `--no-wiki`, etc.).
+`--no-raptor`, `--no-wiki`, etc.). `--since=last-run` reads the
+timestamp of the last clean completion from
+`projects/<slug>/data/.last_refresh` and restricts expensive LLM-heavy
+steps (currently `wiki compile`) to papers ingested after that point —
+a 5,000-paper corpus drops from minutes of prep to seconds when only
+a dozen papers are new.
 
 Once the web reader is up, the top bar gives you:
 
