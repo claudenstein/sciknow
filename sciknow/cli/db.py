@@ -1375,6 +1375,12 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     gpu_trend = snap.get("gpu_trend") or {}
     # 54.6.238 — cross-process pulses
     refresh_pulse = snap.get("refresh_pulse") or None
+    # 54.6.243 additions
+    alerts = snap.get("alerts") or []
+    inbox = snap.get("inbox") or {}
+    qsig = snap.get("quality_signals") or {}
+    wiki_mat = snap.get("wiki_materialization") or {}
+    projects_overview = snap.get("projects_overview") or []
 
     # ── Small helpers ───────────────────────────────────────────────
 
@@ -1544,6 +1550,35 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
         border_style=C_BORDER, box=BOX, padding=(0, 1),
     )
 
+    # Phase 54.6.243 — consolidated alert banner. Sits between header
+    # and the top row of panels when any alert is active; errors red,
+    # warnings yellow, info dim-cyan. Silent on a clean install, loud
+    # when something needs attention.
+    alert_panel = None
+    if alerts:
+        alert_tbl = Table.grid(padding=(0, 1), expand=True)
+        alert_tbl.add_column(ratio=1)
+        for a in alerts[:6]:  # cap to 6 so a flurry doesn't blow layout
+            sev = a.get("severity", "info")
+            icon, style = (
+                ("✗", C_ERR) if sev == "error" else
+                ("⚠", C_WARN) if sev == "warn" else
+                ("ℹ", C_ACCENT)
+            )
+            line = Text()
+            line.append(f"{icon} ", style=style)
+            line.append(a.get("message", ""), style=style)
+            alert_tbl.add_row(line)
+        border = (
+            C_ERR if any(a.get("severity") == "error" for a in alerts)
+            else C_WARN if any(a.get("severity") == "warn" for a in alerts)
+            else C_BORDER
+        )
+        alert_panel = Panel(
+            alert_tbl, title="[bold]alerts[/bold]", title_align="left",
+            border_style=border, box=BOX, padding=(0, 1),
+        )
+
     # ── Corpus panel ────────────────────────────────────────────────
     corpus_tbl = Table.grid(padding=(0, 1), expand=True)
     corpus_tbl.add_column(justify="left", style=C_DIM, ratio=2)
@@ -1619,6 +1654,21 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
             Text("pending dl", style=C_DIM),
             Text(f"{pending_dl:,}", style=C_WARN),
         )
+    # Phase 54.6.243 — inbox/drop-zone waiting count
+    if inbox.get("count", 0) > 0:
+        age_s = inbox.get("oldest_age_s") or 0
+        age_str = (
+            f"{age_s / 86400:.0f}d" if age_s >= 86400 else
+            f"{age_s / 3600:.0f}h" if age_s >= 3600 else
+            f"{age_s / 60:.0f}m"
+        )
+        # Fresh drops = green (recent work to pick up); ancient = dim
+        # (forgotten stash, not actionable).
+        colour = C_OK if age_s < 86400 else C_DIM
+        corpus_tbl.add_row(
+            Text("inbox", style=C_DIM),
+            Text(f"{inbox['count']} pdf · {age_str} old", style=colour),
+        )
 
     # Phase 54.6.234 — content quality strip. Condensed because the
     # corpus panel is already dense; each row is a one-line summary
@@ -1684,6 +1734,46 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
             Text("retracted", style=C_DIM),
             Text(str(mq["retracted"]), style=C_ERR),
         )
+    # Phase 54.6.243 — abstract coverage (ColBERT retrieval input).
+    if qsig.get("abstract_eligible"):
+        pct = qsig["abstract_pct"]
+        covered = qsig["abstract_covered"]
+        eligible = qsig["abstract_eligible"]
+        colour = (
+            C_OK if pct >= 80 else
+            C_WARN if pct >= 50 else C_ERR
+        )
+        corpus_tbl.add_row(
+            Text("abstracts", style=C_DIM),
+            Text(f"{covered:,}/{eligible:,} ({pct:.0f}%)", style=colour),
+        )
+    # Phase 54.6.243 — chunk-length distribution (splitter sanity).
+    if qsig.get("chunk_p50_chars"):
+        p50 = qsig["chunk_p50_chars"]
+        p95 = qsig["chunk_p95_chars"] or 0
+        # Healthy band is ~500-2500 at p50; outside that the splitter
+        # is producing either fragment-sized or context-window-busting
+        # chunks.
+        colour = (
+            C_OK if 500 <= p50 <= 2500 else
+            C_WARN if 300 <= p50 <= 4000 else C_ERR
+        )
+        corpus_tbl.add_row(
+            Text("chunk chars", style=C_DIM),
+            Text(f"p50 {p50:,} · p95 {p95:,}", style=colour),
+        )
+    # Phase 54.6.243 — KG density (triples per completed doc).
+    if (qsig.get("kg_triples_per_doc") or 0) > 0:
+        t_per_doc = qsig["kg_triples_per_doc"]
+        colour = (
+            C_OK if t_per_doc >= 20 else
+            C_WARN if t_per_doc >= 5 else C_DIM
+        )
+        corpus_tbl.add_row(
+            Text("kg density", style=C_DIM),
+            Text(f"{t_per_doc:.1f} triples/doc", style=colour),
+        )
+
     # Phase 54.6.235 — embeddings coverage (silent drift detector)
     if embed_cov.get("total"):
         total = embed_cov["total"]
@@ -1960,6 +2050,54 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
                      palette=(C_OK, C_OK, C_OK)),  # monochrome — same colour, heat n/a here
                 f"{c['n']}",
             )
+            right_tbl.add_row(row)
+
+    # Phase 54.6.243 — wiki materialization: compiled-wiki coverage
+    # of the distinct topic_cluster universe. Silent pre-clustering.
+    if wiki_mat.get("topics_total"):
+        pct = wiki_mat["pct"]
+        pages = wiki_mat["wiki_pages"]
+        total = wiki_mat["topics_total"]
+        colour = (
+            C_OK if pct >= 80 else
+            C_WARN if pct >= 20 else C_DIM
+        )
+        right_tbl.add_row("")
+        right_tbl.add_row(
+            Text("wiki materialization", style=C_DIM)
+        )
+        wiki_row = Table.grid(padding=(0, 1), expand=True)
+        wiki_row.add_column(ratio=1)
+        wiki_row.add_column(justify="right", width=12, style=C_VALUE)
+        wiki_row.add_row(
+            _bar(pages, total, width=14,
+                 palette=(C_DIM, C_WARN, C_OK)),
+            f"{pages}/{total} ({pct:.0f}%)",
+        )
+        right_tbl.add_row(wiki_row)
+
+    # Phase 54.6.243 — cross-project overview. Silent when only one
+    # project exists; shows compact "slug · docs · active" list
+    # otherwise. Doc count of -1 signals DB unreachable / schema drift.
+    if len(projects_overview) > 1:
+        right_tbl.add_row("")
+        right_tbl.add_row(Text("projects", style=C_DIM))
+        for pov in projects_overview[:6]:
+            row = Table.grid(padding=(0, 1), expand=True)
+            row.add_column(ratio=3)
+            row.add_column(justify="right", width=10, style=C_VALUE)
+            slug = pov["slug"]
+            if pov["is_active"]:
+                slug_rendered = Text(f"● {slug}", style=C_OK)
+            else:
+                slug_rendered = Text(f"○ {slug}", style=C_DIM)
+            docs = pov["docs"]
+            if docs < 0:
+                docs_rendered = Text("?", style=C_WARN)
+            else:
+                docs_rendered = Text(f"{docs:,}",
+                                      style=C_VALUE if docs else C_DIM)
+            row.add_row(slug_rendered, docs_rendered)
             right_tbl.add_row(row)
 
     # Year distribution sparkline — corpus age profile in one line.
@@ -2255,18 +2393,29 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     # to carry the 24h sparkline and (conditionally) top failures,
     # so its size bumped 11 → 14.
     layout = Layout()
-    layout.split_column(
-        Layout(header_panel, name="header", size=3),
-        # 54.6.234 → 22 (host load + quality strip); 54.6.235 → 24
-        # (embeds + topics + year sparkline); 54.6.236 → 26 (dupe-
-        # hash row + models); 54.6.237 → 28 (growth line + room for
-        # GPU trend sparklines + book activity footer). Activity is
-        # still ratio=1 so tall terminals absorb any further growth.
-        Layout(name="top", size=28),
+    # Phase 54.6.243 — optional alert panel between header and top
+    # row. Height scales with alert count (2 rounded borders + N
+    # lines capped at 6), so the layout stays tight when clean.
+    splits = [Layout(header_panel, name="header", size=3)]
+    if alert_panel is not None:
+        alert_lines = min(len(alerts), 6)
+        splits.append(
+            Layout(alert_panel, name="alerts", size=alert_lines + 2)
+        )
+    # 54.6.234 → 22 (host load + quality strip); 54.6.235 → 24
+    # (embeds + topics + year sparkline); 54.6.236 → 26 (dupe-
+    # hash row + models); 54.6.237 → 28 (growth line + room for
+    # GPU trend sparklines + book activity footer); 54.6.243 → 32
+    # (quality-signal rows in corpus, wiki + projects in right).
+    # Activity is still ratio=1 so tall terminals absorb any further
+    # growth.
+    splits.extend([
+        Layout(name="top", size=32),
         Layout(timing_panel, name="timing", size=18),
         Layout(activity_panel, name="activity", ratio=1,
                minimum_size=8),
-    )
+    ])
+    layout.split_column(*splits)
     layout["top"].split_row(
         Layout(corpus_panel, name="corpus", ratio=1),
         Layout(gpu_panel, name="gpu", ratio=1),

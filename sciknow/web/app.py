@@ -20489,8 +20489,39 @@ function renderMonitor(snap) {{
   const disk = storage.disk || {{}};
   const pgMb = storage.pg_database_mb || 0;
   const pendingDl = snap.pending_downloads || 0;
+  // Phase 54.6.243 additions
+  const alerts = snap.alerts || [];
+  const inbox = snap.inbox || {{}};
+  const qsig = snap.quality_signals || {{}};
+  const wikiMat = snap.wiki_materialization || {{}};
+  const projectsOverview = snap.projects_overview || [];
 
   const sections = [];
+
+  // Phase 54.6.243 — consolidated alert banner. Same list the CLI
+  // surfaces; rendered as a coloured card at the very top so the
+  // modal leads with "anything on fire?".
+  if (alerts.length) {{
+    const worstSev = alerts.some(a => a.severity === 'error') ? 'error'
+      : alerts.some(a => a.severity === 'warn') ? 'warn' : 'info';
+    const border = worstSev === 'error' ? '#c33'
+      : worstSev === 'warn' ? '#e90' : '#38c';
+    const bg = worstSev === 'error' ? 'rgba(200,50,50,0.08)'
+      : worstSev === 'warn' ? 'rgba(230,150,0,0.08)'
+        : 'rgba(50,130,200,0.06)';
+    let html = '<div style="border:1px solid ' + border
+      + ';background:' + bg + ';padding:0.5em 0.75em;border-radius:4px;margin-bottom:1em;">'
+      + '<strong>Alerts</strong><ul style="margin:0.25em 0 0 1em;padding:0;">';
+    for (const a of alerts.slice(0, 8)) {{
+      const icon = a.severity === 'error' ? '✗' : a.severity === 'warn' ? '⚠' : 'ℹ';
+      const colour = a.severity === 'error' ? '#c33'
+        : a.severity === 'warn' ? '#b70' : '#36a';
+      html += '<li style="color:' + colour + ';">' + icon + ' '
+        + _escHTML(a.message || a.code || '') + '</li>';
+    }}
+    html += '</ul></div>';
+    sections.push(html);
+  }}
 
   // Header/meta
   sections.push('<div style="display:flex;gap:2em;flex-wrap:wrap;margin-bottom:1em;">'
@@ -20517,7 +20548,35 @@ function renderMonitor(snap) {{
     + '<div><strong>ETA</strong>: ' + _escHTML(etaTxt) + '</div>'
     + '<div><strong>Queue</strong>: ' + _escHTML(qStr) + '</div>'
     + (pendingDl ? '<div><strong>Pending DL</strong>: ' + pendingDl + '</div>' : '')
+    + (inbox.count ? '<div><strong>Inbox</strong>: ' + inbox.count + ' pdf</div>' : '')
     + '</div>');
+
+  // Phase 54.6.243 — retrieval-quality strip (abstracts coverage +
+  // chunk sizing + KG density), one line each so the ops signals
+  // are scannable at a glance without hunting through tables.
+  const qualityBits = [];
+  if (qsig.abstract_eligible) {{
+    qualityBits.push('<div><strong>Abstracts</strong>: '
+      + _fmtNum(qsig.abstract_covered) + '/' + _fmtNum(qsig.abstract_eligible)
+      + ' (' + (qsig.abstract_pct || 0).toFixed(0) + '%)</div>');
+  }}
+  if (qsig.chunk_p50_chars) {{
+    qualityBits.push('<div><strong>Chunk chars</strong>: p50 '
+      + _fmtNum(qsig.chunk_p50_chars) + ' · p95 ' + _fmtNum(qsig.chunk_p95_chars || 0) + '</div>');
+  }}
+  if (qsig.kg_triples_per_doc && qsig.kg_triples_per_doc > 0) {{
+    qualityBits.push('<div><strong>KG density</strong>: '
+      + qsig.kg_triples_per_doc.toFixed(1) + ' triples/doc</div>');
+  }}
+  if (wikiMat.topics_total) {{
+    qualityBits.push('<div><strong>Wiki materialization</strong>: '
+      + _fmtNum(wikiMat.wiki_pages) + '/' + _fmtNum(wikiMat.topics_total)
+      + ' (' + (wikiMat.pct || 0).toFixed(0) + '%)</div>');
+  }}
+  if (qualityBits.length) {{
+    sections.push('<div style="display:flex;gap:2em;flex-wrap:wrap;margin-bottom:1em;">'
+      + qualityBits.join('') + '</div>');
+  }}
 
   // ── 24h throughput sparkline ────────────────────────────────────
   if (hourly.length) {{
@@ -20687,6 +20746,23 @@ function renderMonitor(snap) {{
       html += '<tr><td>' + _escHTML(when.slice(0, 8)) + '</td><td>' + _escHTML(a.stage)
         + '</td><td>' + _escHTML(a.status) + '</td><td>' + _fmtMs(a.duration_ms)
         + '</td><td><code>' + _escHTML((a.doc_id || '').slice(0, 8)) + '</code></td></tr>';
+    }}
+    html += '</table>';
+    sections.push(html);
+  }}
+
+  // Phase 54.6.243 — cross-project overview. Only rendered when
+  // more than one project exists (single-project installs don't
+  // need the extra table).
+  if (projectsOverview.length > 1) {{
+    let html = '<h4>Projects</h4><table class="stats-table" style="width:100%;">'
+      + '<tr><th>Active</th><th>Slug</th><th>Database</th><th>Documents</th></tr>';
+    for (const p of projectsOverview) {{
+      const docs = p.docs < 0 ? '?' : _fmtNum(p.docs);
+      const marker = p.is_active ? '● ' : '○ ';
+      html += '<tr><td>' + marker + '</td><td>' + _escHTML(p.slug)
+        + '</td><td>' + _escHTML(p.pg_database || '') + '</td><td>'
+        + docs + '</td></tr>';
     }}
     html += '</table>';
     sections.push(html);

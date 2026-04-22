@@ -708,6 +708,314 @@ def _duplicate_hashes(session) -> int:
         return 0
 
 
+def _inbox_pending(data_dir: Path | None) -> dict:
+    """Phase 54.6.243 — how many PDFs are sitting in data/inbox/
+    waiting to be ingested.
+
+    The inbox convention ("drop PDFs here, run ``sciknow ingest
+    directory data/inbox/``") is informal — there is no queue
+    table. This walk is just `ls *.pdf` on the top level (plus a
+    cheap oldest-mtime lookup so we can flag a drop that's been
+    sitting for days). Returns {"count": int, "oldest_age_s": float|None}.
+    """
+    out: dict = {"count": 0, "oldest_age_s": None}
+    if not data_dir:
+        return out
+    inbox = Path(data_dir) / "inbox"
+    if not inbox.is_dir():
+        return out
+    try:
+        import time as _time
+        pdfs = [p for p in inbox.iterdir()
+                if p.suffix.lower() == ".pdf" and p.is_file()]
+        out["count"] = len(pdfs)
+        if pdfs:
+            oldest = min(p.stat().st_mtime for p in pdfs)
+            out["oldest_age_s"] = _time.time() - oldest
+    except Exception:
+        pass
+    return out
+
+
+def _corpus_quality_signals(session) -> dict:
+    """Phase 54.6.243 — retrieval-quality signals that don't live in
+    an existing helper.
+
+      * abstract coverage — pct of complete docs with a non-empty
+        abstract (feeds ColBERT's abstracts collection).
+      * chunk length distribution — p50/p95 char count (too-short
+        chunks = bad split, too-long = bad context).
+      * KG density — triples per completed document (catches
+        silent degradation in extract-kg output).
+    """
+    from sqlalchemy import text
+    out = {
+        "abstract_covered": 0, "abstract_eligible": 0,
+        "abstract_pct": 0.0,
+        "chunk_p50_chars": None, "chunk_p95_chars": None,
+        "chunk_median_tokens": None,
+        "kg_triples_per_doc": 0.0,
+    }
+    try:
+        eligible = int(session.execute(text(
+            "SELECT COUNT(*) FROM documents "
+            "WHERE ingestion_status = 'complete'"
+        )).scalar() or 0)
+        covered = int(session.execute(text("""
+            SELECT COUNT(*) FROM paper_metadata pm
+            JOIN documents d ON d.id = pm.document_id
+            WHERE d.ingestion_status = 'complete'
+              AND pm.abstract IS NOT NULL
+              AND length(pm.abstract) >= 100
+        """)).scalar() or 0)
+        out["abstract_eligible"] = eligible
+        out["abstract_covered"] = covered
+        out["abstract_pct"] = (covered / eligible * 100) if eligible else 0.0
+    except Exception:
+        pass
+    try:
+        row = session.execute(text("""
+            SELECT
+                percentile_cont(0.5) WITHIN GROUP
+                    (ORDER BY length(content)),
+                percentile_cont(0.95) WITHIN GROUP
+                    (ORDER BY length(content))
+            FROM chunks
+        """)).fetchone()
+        if row and row[0] is not None:
+            out["chunk_p50_chars"] = int(row[0])
+            out["chunk_p95_chars"] = int(row[1] or 0)
+    except Exception:
+        pass
+    try:
+        triples = int(session.execute(text(
+            "SELECT COUNT(*) FROM knowledge_graph"
+        )).scalar() or 0)
+        docs = int(session.execute(text(
+            "SELECT COUNT(*) FROM documents "
+            "WHERE ingestion_status = 'complete'"
+        )).scalar() or 0)
+        out["kg_triples_per_doc"] = (triples / docs) if docs else 0.0
+    except Exception:
+        pass
+    return out
+
+
+def _wiki_materialization(session) -> dict:
+    """Phase 54.6.243 — what fraction of the topic space is backed
+    by a compiled wiki page.
+
+    There is no explicit ``topics`` table; the universe is the set of
+    distinct non-null ``paper_metadata.topic_cluster`` values, which
+    is what `sciknow catalog cluster` populates. Numerator is
+    ``wiki_pages``, populated by `sciknow wiki build`. Silent on
+    schema drift.
+    """
+    from sqlalchemy import text
+    out = {"topics_total": 0, "wiki_pages": 0, "pct": 0.0}
+    try:
+        out["topics_total"] = int(session.execute(text(
+            "SELECT COUNT(DISTINCT topic_cluster) FROM paper_metadata "
+            "WHERE topic_cluster IS NOT NULL AND topic_cluster != ''"
+        )).scalar() or 0)
+        out["wiki_pages"] = int(session.execute(text(
+            "SELECT COUNT(*) FROM wiki_pages"
+        )).scalar() or 0)
+        if out["topics_total"]:
+            out["pct"] = out["wiki_pages"] / out["topics_total"] * 100
+    except Exception:
+        pass
+    return out
+
+
+def _project_overview() -> list[dict]:
+    """Phase 54.6.243 — cross-project inventory.
+
+    Walks ``projects/`` and pulls a small summary per slug (doc
+    count via direct SQL on that project's DB, plus active marker).
+    Silent if the projects machinery isn't initialised. Cached per
+    process for 30s — listing all projects hits N Postgres DBs
+    which is a lot for a 5s tick.
+    """
+    import time as _time
+    cache = _project_overview._cache  # type: ignore[attr-defined]
+    now = _time.time()
+    if cache and (now - cache[0]) < 30.0:
+        return cache[1]
+    try:
+        from sciknow.core.project import list_projects, get_active_project
+        active = None
+        try:
+            active = get_active_project().slug
+        except Exception:
+            pass
+        out: list[dict] = []
+        for p in list_projects():
+            docs = 0
+            try:
+                from sqlalchemy import create_engine, text as _t
+                from sciknow.config import settings
+                url = (
+                    f"postgresql+psycopg2://{settings.pg_user}:"
+                    f"{settings.pg_password}@{settings.pg_host}:"
+                    f"{settings.pg_port}/{p.pg_database}"
+                )
+                eng = create_engine(url, pool_pre_ping=True)
+                with eng.connect() as conn:
+                    docs = int(conn.execute(_t(
+                        "SELECT COUNT(*) FROM documents"
+                    )).scalar() or 0)
+                eng.dispose()
+            except Exception:
+                docs = -1  # sentinel: DB unavailable or schema missing
+            out.append({
+                "slug": p.slug,
+                "pg_database": p.pg_database,
+                "docs": docs,
+                "is_active": p.slug == active,
+            })
+        out.sort(key=lambda r: (not r["is_active"], -max(r["docs"], 0)))
+        _project_overview._cache = (now, out)  # type: ignore[attr-defined]
+        return out
+    except Exception:
+        return []
+
+
+_project_overview._cache = None  # type: ignore[attr-defined]
+
+
+def _build_alerts(snap: dict) -> list[dict]:
+    """Phase 54.6.243 — consolidated alert banner feed.
+
+    Takes the already-collected snapshot pieces and returns a list of
+    ``{severity, code, message}`` records. Severities: ``error``,
+    ``warn``, ``info`` — the CLI/web renderers pick palette based on
+    severity. List is sorted error-first so the first entry is the
+    worst.
+
+    Kept in the core so both CLI and web render identical banners.
+    """
+    alerts: list[dict] = []
+
+    stuck = snap.get("stuck_job") or {}
+    if stuck.get("is_stuck"):
+        age_s = stuck.get("last_age_s", 0) or 0
+        alerts.append({
+            "severity": "error",
+            "code": "stuck_ingest",
+            "message": (
+                f"ingest STALLED — last job {age_s / 60:.1f}m ago, "
+                f"{stuck.get('pending_docs', 0)} pending"
+            ),
+        })
+
+    embed_cov = snap.get("embeddings_coverage") or {}
+    if embed_cov.get("total") and embed_cov.get("pct", 100) < 95:
+        alerts.append({
+            "severity": "error",
+            "code": "embed_drift",
+            "message": (
+                f"embeddings drift — {embed_cov['missing']:,} chunks "
+                f"in PG without vectors ({embed_cov['pct']:.1f}% covered)"
+            ),
+        })
+
+    dupe = snap.get("duplicate_hashes", 0) or 0
+    if dupe > 0:
+        alerts.append({
+            "severity": "error",
+            "code": "dupe_hashes",
+            "message": f"{dupe} file_hash collisions detected",
+        })
+
+    bench_age = (snap.get("bench_freshness") or {}).get("newest_age_days")
+    if bench_age is not None and bench_age > 14:
+        alerts.append({
+            "severity": "warn",
+            "code": "bench_stale",
+            "message": f"bench snapshot {bench_age:.0f}d stale",
+        })
+
+    mq = snap.get("meta_quality") or {}
+    if mq.get("retracted"):
+        alerts.append({
+            "severity": "warn",
+            "code": "retractions",
+            "message": f"{mq['retracted']} retracted papers in corpus",
+        })
+
+    gpus = snap.get("gpu") or []
+    for g in gpus:
+        t = g.get("temperature_c") or 0
+        if t >= 85:
+            alerts.append({
+                "severity": "error",
+                "code": "gpu_hot",
+                "message": f"gpu #{g.get('index')} {t}°C (thermal limit)",
+            })
+        elif t >= 80:
+            alerts.append({
+                "severity": "warn",
+                "code": "gpu_warm",
+                "message": f"gpu #{g.get('index')} {t}°C",
+            })
+
+    host = snap.get("host") or {}
+    if host.get("mem_pct", 0) >= 90:
+        alerts.append({
+            "severity": "warn",
+            "code": "ram_pressure",
+            "message": f"ram {host['mem_pct']:.0f}% used",
+        })
+    if host.get("cpu_count"):
+        load_ratio = host.get("load_1m", 0) / max(host["cpu_count"], 1)
+        if load_ratio >= 1.5:
+            alerts.append({
+                "severity": "warn",
+                "code": "host_overload",
+                "message": (
+                    f"load {host['load_1m']:.1f} on {host['cpu_count']}c "
+                    f"({load_ratio * 100:.0f}%)"
+                ),
+            })
+
+    storage = snap.get("storage") or {}
+    disk = storage.get("disk") or {}
+    # Data-dir-only disk is a size, not a percentage — we don't have
+    # free-space info here. Skip hard thresholds, but flag if mineru
+    # output has overtaken 50 GB (classic re-ingest cleanup signal).
+    mineru_mb = disk.get("mineru_output_mb", 0) or 0
+    if mineru_mb > 50_000:
+        alerts.append({
+            "severity": "info",
+            "code": "mineru_big",
+            "message": (
+                f"mineru_output {mineru_mb / 1024:.1f}G — "
+                "consider pruning processed outputs"
+            ),
+        })
+
+    inbox = snap.get("inbox") or {}
+    if inbox.get("count", 0) > 0:
+        age_s = inbox.get("oldest_age_s") or 0
+        age_str = (
+            f"{age_s / 86400:.1f}d" if age_s >= 86400 else
+            f"{age_s / 3600:.0f}h" if age_s >= 3600 else
+            f"{age_s / 60:.0f}m"
+        )
+        alerts.append({
+            "severity": "info",
+            "code": "inbox_waiting",
+            "message": (
+                f"inbox {inbox['count']} PDF(s) waiting — oldest {age_str}"
+            ),
+        })
+
+    severity_rank = {"error": 0, "warn": 1, "info": 2}
+    alerts.sort(key=lambda a: severity_rank.get(a["severity"], 3))
+    return alerts
+
+
 def _bench_freshness(data_dir: Path | None) -> dict:
     """Phase 54.6.236 — age of the newest bench-snapshot.
 
@@ -1433,6 +1741,9 @@ def collect_monitor_snapshot(
         # 54.6.237 — trend batch
         growth = _safe_db(session, _corpus_growth_rate, default={})
         book_act = _safe_db(session, _book_activity, default={})
+        # 54.6.243 — retrieval quality + wiki materialization
+        quality_sig = _safe_db(session, _corpus_quality_signals, default={})
+        wiki_mat = _safe_db(session, _wiki_materialization, default={})
 
     # GPU sample recording happens here, outside the session ctx,
     # so the ring buffer gets one tick per snapshot call. CLI
@@ -1441,7 +1752,7 @@ def collect_monitor_snapshot(
     gpu_info = _gpu_info()
     _record_gpu_sample(gpu_info)
 
-    return {
+    snapshot = {
         "project": project,
         "corpus": corpus,
         "ingest_sources": ingest_sources,
@@ -1500,5 +1811,12 @@ def collect_monitor_snapshot(
             "pg_database_mb": pg_db_size_mb,
         },
         "last_refresh": _last_refresh(Path(data_dir) if data_dir else None),
+        # 54.6.243 — quality signals + inbox + cross-project + alerts
+        "quality_signals": quality_sig,
+        "wiki_materialization": wiki_mat,
+        "inbox": _inbox_pending(Path(data_dir) if data_dir else None),
+        "projects_overview": _project_overview(),
         "snapshotted_at": datetime.now(timezone.utc).isoformat(),
     }
+    snapshot["alerts"] = _build_alerts(snapshot)
+    return snapshot

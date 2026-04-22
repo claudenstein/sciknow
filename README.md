@@ -180,7 +180,12 @@ GPU VRAM + utilization bars with tri-colour heat, currently-loaded
 Ollama models, Qdrant collection shapes (with ◆ColBERT / ●dense /
 ◇sparse markers), converter-backend distribution, pipeline stage
 p95 timing bars normalised against the slowest stage, and a recent
-activity feed.
+activity feed. **Phase 54.6.243** adds a consolidated **alerts
+banner** (stuck ingest, embedding drift, stale bench, GPU overheat,
+RAM pressure, inbox waiting — worst-first, red/yellow/cyan), plus
+retrieval-quality signals (abstract coverage %, chunk char p50/p95,
+KG triples/doc), wiki materialization ratio, inbox drop-zone count,
+and a cross-project inventory.
 
 ```bash
 uv run sciknow db monitor              # one shot, full layout

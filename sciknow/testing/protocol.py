@@ -11969,6 +11969,120 @@ def l1_phase54_6_230_unified_monitor() -> None:
     )
 
 
+def l1_phase54_6_243_monitor_alerts_quality() -> None:
+    """Phase 54.6.243 — monitor alerts + inbox + quality signals +
+    wiki materialization + cross-project overview.
+
+    Expands the unified monitor snapshot with five observability
+    additions that were previously scattered or missing entirely:
+
+      * ``alerts`` — consolidated list of {severity, code, message}
+        records aggregating stuck ingest / embedding drift / GPU
+        overheat / RAM pressure / stale bench / inbox waiting, so
+        the CLI/web banners read from one source.
+      * ``inbox`` — count + oldest-age of PDFs in ``data/inbox/``
+        awaiting ingest.
+      * ``quality_signals`` — abstract coverage pct, chunk length
+        p50/p95, KG triples-per-doc (retrieval quality canaries).
+      * ``wiki_materialization`` — wiki_pages / distinct topic_cluster
+        ratio.
+      * ``projects_overview`` — cross-project inventory with active
+        marker + per-project document counts.
+
+    Tests:
+
+      A) Snapshot carries all five new top-level keys with the
+         documented sub-fields.
+      B) ``_build_alerts`` is pure: given a mocked snapshot with a
+         stuck-job signal, it must emit a stuck_ingest alert at
+         error severity. Given a 90%-RAM signal, it must emit a
+         ram_pressure alert at warn severity. Given an inbox
+         count, it must emit an inbox_waiting alert at info.
+      C) Alerts are sorted error-first so the consumer can render
+         the worst signal at the top of the list.
+      D) CLI renderer reads ``snap["alerts"]`` (source-grep — the
+         whole point of the helper is that the CLI and web render
+         from the same list).
+      E) Web app renderMonitor() JS references ``snap.alerts``
+         (same contract, opposite side).
+    """
+    import inspect as _inspect
+    from pathlib import Path
+
+    from sciknow.core import monitor as mon_mod
+    from sciknow.cli import db as db_cli
+    import sciknow.web.app as _web_mod
+
+    # A) snapshot shape
+    snap = mon_mod.collect_monitor_snapshot()
+    for key in ("alerts", "inbox", "quality_signals",
+                "wiki_materialization", "projects_overview"):
+        assert key in snap, (
+            f"54.6.243 snapshot missing `{key}` — CLI + web both "
+            f"rely on this key; dropping it silently breaks rendering"
+        )
+    assert isinstance(snap["alerts"], list)
+    for k in ("count", "oldest_age_s"):
+        assert k in snap["inbox"], f"inbox.{k} missing"
+    for k in ("abstract_eligible", "abstract_covered", "abstract_pct",
+              "chunk_p50_chars", "chunk_p95_chars",
+              "kg_triples_per_doc"):
+        assert k in snap["quality_signals"], (
+            f"quality_signals.{k} missing — this is the retrieval "
+            f"quality canary, dropping it leaves the bug undetected"
+        )
+    for k in ("topics_total", "wiki_pages", "pct"):
+        assert k in snap["wiki_materialization"], (
+            f"wiki_materialization.{k} missing"
+        )
+
+    # B) alert builder — purity test with synthetic inputs
+    alerts = mon_mod._build_alerts({
+        "stuck_job": {
+            "is_stuck": True, "last_age_s": 420,
+            "pending_docs": 17,
+        },
+        "host": {"mem_pct": 92, "cpu_count": 8, "load_1m": 1.0},
+        "inbox": {"count": 3, "oldest_age_s": 3700},
+        "embeddings_coverage": {},
+        "gpu": [], "duplicate_hashes": 0,
+        "meta_quality": {}, "bench_freshness": {},
+        "storage": {"disk": {}},
+    })
+    codes = [a["code"] for a in alerts]
+    assert "stuck_ingest" in codes, (
+        "stuck_job with is_stuck=True must produce stuck_ingest alert"
+    )
+    assert "ram_pressure" in codes, (
+        "host.mem_pct>=90 must produce ram_pressure alert"
+    )
+    assert "inbox_waiting" in codes, (
+        "inbox.count>0 must produce inbox_waiting alert"
+    )
+
+    # C) error-first sort contract
+    severity_rank = {"error": 0, "warn": 1, "info": 2}
+    ranks = [severity_rank.get(a["severity"], 3) for a in alerts]
+    assert ranks == sorted(ranks), (
+        "_build_alerts output must be sorted worst-first — CLI/web "
+        "renderers both assume alerts[0] is the most urgent"
+    )
+
+    # D) CLI source uses the aggregated alerts list
+    cli_src = _inspect.getsource(db_cli._build_monitor_layout)
+    assert 'snap.get("alerts")' in cli_src, (
+        "CLI monitor must consume the aggregated alerts list — "
+        "re-deriving alert logic on the CLI side would drift from web"
+    )
+
+    # E) web JS references snap.alerts
+    web_text = Path(_web_mod.__file__).read_text(encoding="utf-8")
+    assert "snap.alerts" in web_text, (
+        "web renderMonitor() must consume snap.alerts — shared "
+        "source of truth with CLI"
+    )
+
+
 def l1_phase54_6_229_pipeline_dashboard_cli() -> None:
     """Phase 54.6.229 (roadmap 3.11.3) — pipeline observability dashboard.
 
@@ -14103,6 +14217,7 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_229_pipeline_dashboard_cli,
     # Phase 54.6.230 — unified monitor (CLI + web)
     l1_phase54_6_230_unified_monitor,
+    l1_phase54_6_243_monitor_alerts_quality,
 ]
 
 L2_TESTS: list[Callable] = [
