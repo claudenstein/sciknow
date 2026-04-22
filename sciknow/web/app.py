@@ -12330,6 +12330,36 @@ body.task-bar-open {{ padding-top: 40px; }}
               title="Close the monitor. Stops the poll.">&times;</button>
     </div>
     <div class="modal-body">
+      <!-- Phase 54.6.272 — keyboard-help overlay. Hidden by default,
+           toggled by `?` or the `?` button below the filter input.
+           Lists every hidden shortcut so the growing modal surface
+           stays discoverable. --><div id="monitor-help-overlay"
+           style="display:none;position:absolute;top:60px;right:20px;z-index:100;
+           background:var(--bg,#fff);border:2px solid #36a;border-radius:6px;
+           padding:0.75em 1em;max-width:520px;box-shadow:0 4px 16px rgba(0,0,0,0.15);">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5em;">
+          <strong>Monitor keyboard shortcuts</strong>
+          <button class="btn btn--sm" onclick="toggleMonitorHelp(false)" title="Close">✕</button>
+        </div>
+        <table style="font-size:0.9em;">
+          <tr><td><kbd>/</kbd></td><td>Focus the filter input</td></tr>
+          <tr><td><kbd>Esc</kbd> (in filter)</td><td>Clear filter</td></tr>
+          <tr><td><kbd>?</kbd></td><td>Toggle this help overlay</td></tr>
+        </table>
+        <strong style="display:block;margin-top:0.75em;">Features</strong>
+        <ul style="font-size:0.85em;margin:0.25em 0 0 1em;padding:0;">
+          <li>Filter hides non-matching <em>data</em> rows (headers stay)</li>
+          <li>Jump-to chips under the filter — click to scroll, URL hash updates (shareable <code>/#mon-...</code>)</li>
+          <li>Alert banner — <strong>📋 Copy as MD</strong> exports all alerts as Markdown</li>
+          <li>Each alert — <strong>📋</strong> per-alert copy of the suggested fix command</li>
+          <li><strong>⬇ Snapshot</strong> button — download the current /api/monitor JSON</li>
+          <li><strong>NEW</strong> badges flag alert codes not seen on this browser before</li>
+          <li>Poll auto-speeds to 2 s while any job is running (badge appears in Poll label)</li>
+          <li>Notifications fire on hidden tabs when a new error alert appears (permission prompt on first open)</li>
+          <li>Log-tail panel at the bottom is collapsed by default — click to expand</li>
+        </ul>
+      </div>
+
       <!-- Phase 54.6.254 — live filter input. Case-insensitive
            substring match across all data rows. Hides non-matches
            in place (no re-fetch) so scroll + poll state is
@@ -12343,6 +12373,8 @@ body.task-bar-open {{ padding-top: 40px; }}
                title="Live filter across every row of every table in this modal. Blank = show all. Press / to focus from anywhere while the modal is open." />
         <button class="btn btn--sm" onclick="clearMonitorFilter()" title="Clear filter">✕</button>
         <span id="monitor-filter-count" class="u-muted" style="font-size:0.85em;"></span>
+        <button class="btn btn--sm" onclick="toggleMonitorHelp()"
+                title="Show keyboard shortcuts + feature index (or press ?)">?</button>
       </div>
       <!-- Phase 54.6.256 — jump-to navigation strip. Rebuilt after
            every render from the h4 headings inside monitor-content. -->
@@ -20858,21 +20890,50 @@ function downloadMonitorSnapshot() {{
     .catch(err => alert('Snapshot download failed: ' + String(err)));
 }}
 
+// Phase 54.6.272 — keyboard-help overlay toggle. Can be invoked
+// from the ? button or the `?` key.
+function toggleMonitorHelp(forceState) {{
+  const ov = document.getElementById('monitor-help-overlay');
+  if (!ov) return;
+  const shouldShow = (typeof forceState === 'boolean')
+    ? forceState
+    : ov.style.display === 'none';
+  ov.style.display = shouldShow ? 'block' : 'none';
+}}
+
 // Phase 54.6.255 — keyboard shortcut: `/` focuses the monitor filter
 // while the modal is open. Skip if the user is already typing in an
 // input so `/` in other text fields stays a literal slash.
+// Phase 54.6.272 — `?` toggles the help overlay, Esc closes it (and
+// any other handlers get their chance first).
 (function installMonitorKeyboardShortcuts() {{
   document.addEventListener('keydown', function (e) {{
-    if (e.key !== '/') return;
     const modal = document.getElementById('monitor-modal');
     if (!modal || modal.style.display === 'none') return;
     const tag = (e.target && e.target.tagName) || '';
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-    const filterInput = document.getElementById('monitor-filter');
-    if (!filterInput) return;
-    e.preventDefault();
-    filterInput.focus();
-    filterInput.select();
+    const typing = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+
+    if (e.key === '/' && !typing) {{
+      const filterInput = document.getElementById('monitor-filter');
+      if (!filterInput) return;
+      e.preventDefault();
+      filterInput.focus();
+      filterInput.select();
+      return;
+    }}
+    if (e.key === '?' && !typing) {{
+      e.preventDefault();
+      toggleMonitorHelp();
+      return;
+    }}
+    if (e.key === 'Escape') {{
+      const ov = document.getElementById('monitor-help-overlay');
+      if (ov && ov.style.display !== 'none') {{
+        e.preventDefault();
+        toggleMonitorHelp(false);
+        return;
+      }}
+    }}
   }});
 }})();
 

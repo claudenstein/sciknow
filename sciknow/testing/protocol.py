@@ -11969,6 +11969,102 @@ def l1_phase54_6_230_unified_monitor() -> None:
     )
 
 
+def l1_phase54_6_272_monitor_help_overlay() -> None:
+    """Phase 54.6.272 — press `?` in the monitor modal to surface a
+    keyboard-shortcut + feature help overlay. Escape closes it.
+
+    Growing feature surface (filter, deep links, download, copy,
+    adaptive poll, notifications) was becoming invisible; this
+    exposes the inventory to operators who didn't read the commit
+    logs.
+
+    Guards:
+
+      A) Help-overlay div present in the modal body.
+      B) toggleMonitorHelp function defined.
+      C) `?` key branch in the key handler.
+      D) Escape branch closes overlay when visible.
+      E) ? button invokes toggleMonitorHelp.
+    """
+    from pathlib import Path
+    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+
+    assert 'id="monitor-help-overlay"' in web_text, (
+        "54.6.272 help overlay div must be declared"
+    )
+    assert "function toggleMonitorHelp" in web_text, (
+        "54.6.272 toggleMonitorHelp must be defined"
+    )
+    assert "e.key === '?'" in web_text, (
+        "54.6.272 key handler must branch on '?'"
+    )
+    assert "e.key === 'Escape'" in web_text, (
+        "54.6.272 key handler must branch on Escape"
+    )
+    assert 'onclick="toggleMonitorHelp()"' in web_text, (
+        "54.6.272 ? button must invoke toggleMonitorHelp"
+    )
+
+
+def l1_phase54_6_271_doctor_watch_mode() -> None:
+    """Phase 54.6.271 — sciknow db doctor gains --watch N for a
+    live readiness tick. Refactors the render into a pure
+    ``_render_doctor(snap)`` so watch-mode and one-shot share one
+    renderer and the verdict classification is pure.
+
+    Guards:
+
+      A) ``_doctor_compute(snap)`` pure function returns
+         (verdict, exit_code, counts) tuple.
+      B) ``_render_doctor`` returns a Rich renderable (Group) —
+         side-effect-free so it plays with Live repaint.
+      C) doctor command registers --watch typer option.
+      D) doctor watch path uses Rich Live + the shared renderer.
+    """
+    import inspect as _inspect
+
+    from sciknow.cli import db as db_cli
+
+    # A) pure compute helper
+    assert hasattr(db_cli, "_doctor_compute"), (
+        "54.6.271 _doctor_compute must be extracted for reuse"
+    )
+    v, ec, counts = db_cli._doctor_compute({
+        "alerts": [{"severity": "error"}],
+    })
+    assert v == "FAIL" and ec == 2, (
+        f"single-error snap must classify FAIL/2, got {v}/{ec}"
+    )
+    v, ec, _ = db_cli._doctor_compute({})
+    assert v == "OK" and ec == 0, (
+        f"empty snap must classify OK/0, got {v}/{ec}"
+    )
+
+    # B) renderable returned
+    from rich.console import Group
+    assert hasattr(db_cli, "_render_doctor"), (
+        "54.6.271 _render_doctor must be defined"
+    )
+    out = db_cli._render_doctor({"alerts": [], "project": {"slug": "x"}})
+    assert isinstance(out, Group), (
+        f"54.6.271 _render_doctor must return a Rich Group, got {type(out).__name__}"
+    )
+
+    # C) --watch option registered
+    doc_src = _inspect.getsource(db_cli.doctor)
+    assert '"--watch"' in doc_src, (
+        "54.6.271 doctor must register --watch typer option"
+    )
+
+    # D) Watch path uses Live + _render_doctor
+    assert "from rich.live import Live" in doc_src, (
+        "54.6.271 doctor watch mode must use rich.live.Live"
+    )
+    assert "_render_doctor(snap)" in doc_src, (
+        "54.6.271 doctor watch mode must call the shared renderer"
+    )
+
+
 def l1_phase54_6_270_cli_monitor_compact_mode() -> None:
     """Phase 54.6.270 — CLI monitor --compact flag renders a 1-page
     minimal view: verdict + health + services + alerts + jobs only.
@@ -12840,7 +12936,10 @@ def l1_phase54_6_255_modal_shortcuts_and_export() -> None:
     assert "installMonitorKeyboardShortcuts" in web_text, (
         "54.6.255 keyboard shortcut installer IIFE must be present"
     )
-    assert "e.key !== '/'" in web_text, (
+    # Phase 54.6.272 refactor flipped the gate from `e.key !== '/'`
+    # (early-return) to `e.key === '/'` (branch-then-handle) when
+    # the `?` branch was added. Either form counts.
+    assert "e.key !== '/'" in web_text or "e.key === '/'" in web_text, (
         "54.6.255 keyboard shortcut must gate on `/`"
     )
 
@@ -16003,6 +16102,10 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_269_browser_notifications_for_new_errors,
     # Phase 54.6.270 — CLI monitor --compact minimal view
     l1_phase54_6_270_cli_monitor_compact_mode,
+    # Phase 54.6.271 — doctor --watch live readiness tick
+    l1_phase54_6_271_doctor_watch_mode,
+    # Phase 54.6.272 — ? help overlay in web monitor
+    l1_phase54_6_272_monitor_help_overlay,
 ]
 
 L2_TESTS: list[Callable] = [

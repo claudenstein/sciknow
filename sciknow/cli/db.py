@@ -1185,79 +1185,35 @@ def failures(
     )
 
 
-@app.command()
-def doctor(
-    json_out: bool = typer.Option(
-        False, "--json",
-        help="Emit machine-readable JSON (same fields the CLI "
-             "renderer shows). Pipe through `jq` to script against.",
-    ),
-) -> None:
-    """Phase 54.6.253 — readiness / health check.
-
-    Thin wrapper over the monitor's alert aggregator. Prints a
-    single-line traffic-light verdict (ALL GREEN / N warnings / M
-    errors) plus a grouped-by-severity list of every alert, then
-    exits with a shell code tied to the worst severity:
-
-      * 0  — no alerts, or only info-level
-      * 1  — at least one warn-level alert
-      * 2  — at least one error-level alert
-
-    Typical uses:
-
-      uv run sciknow db doctor                 # check before heavy job
-      uv run sciknow db doctor && sciknow ingest directory ./papers/
-      uv run sciknow db doctor --json | jq .
-
-    Runs against the same `collect_monitor_snapshot` used by
-    ``sciknow db monitor`` and ``/api/monitor``; picks up every
-    alert class the dashboard does (stuck_ingest, embed_drift,
-    missing_model, backup_stale, config_drift, disk_critical, …).
-    The `doctor` exit code is the primary signal — pipelining it
-    in shell is faster than eyeballing the monitor.
-    """
-    from sciknow.cli import preflight
-    preflight(qdrant=False)
-
-    import json as _json
-    from sciknow.core.monitor import collect_monitor_snapshot
-
-    snap = collect_monitor_snapshot()
+def _doctor_compute(snap: dict) -> tuple[str, int, dict]:
+    """Phase 54.6.253 — classify a snapshot into a doctor verdict.
+    Pure function so the watch-mode re-render and the one-shot
+    render share one source of truth. Returns (verdict, exit_code,
+    counts)."""
     alerts = snap.get("alerts") or []
     errors = [a for a in alerts if a.get("severity") == "error"]
     warns = [a for a in alerts if a.get("severity") == "warn"]
     infos = [a for a in alerts if a.get("severity") == "info"]
-
-    # Compute at-a-glance hardware fields for the summary line
-    gpus = snap.get("gpu") or []
-    host = snap.get("host") or {}
-    disk_free = snap.get("disk_free") or {}
-
     if errors:
-        verdict = "FAIL"
-        exit_code = 2
-    elif warns:
-        verdict = "WARN"
-        exit_code = 1
-    else:
-        verdict = "OK"
-        exit_code = 0
+        return ("FAIL", 2, {"error": errors, "warn": warns, "info": infos})
+    if warns:
+        return ("WARN", 1, {"error": errors, "warn": warns, "info": infos})
+    return ("OK", 0, {"error": errors, "warn": warns, "info": infos})
 
-    if json_out:
-        console.print(_json.dumps({
-            "verdict": verdict,
-            "exit_code": exit_code,
-            "counts": {
-                "error": len(errors), "warn": len(warns), "info": len(infos),
-            },
-            "alerts": alerts,
-            "project": (snap.get("project") or {}).get("slug"),
-            "snapshotted_at": snap.get("snapshotted_at"),
-        }, indent=2, default=str))
-        raise typer.Exit(exit_code)
 
-    # Rich verdict header
+def _render_doctor(snap: dict):
+    """Phase 54.6.271 — render a doctor snapshot as a Rich renderable.
+
+    Returns a ``rich.console.Group`` of Text lines so ``watch`` mode
+    can repaint it via ``rich.live.Live`` without sprinkling
+    ``console.print`` side-effects through the function.
+    """
+    from rich.console import Group
+    from rich.text import Text
+
+    verdict, _exit, counts = _doctor_compute(snap)
+    errors, warns, infos = counts["error"], counts["warn"], counts["info"]
+
     palette = {
         "OK": ("bright_green", "✓"),
         "WARN": ("yellow", "⚠"),
@@ -1265,8 +1221,6 @@ def doctor(
     }
     colour, icon = palette[verdict]
     project_slug = (snap.get("project") or {}).get("slug") or "?"
-    # Phase 54.6.259 — surface the composite health score next to
-    # the verdict. Same palette as the CLI monitor header chip.
     health = snap.get("health_score") or {}
     hs = health.get("score")
     hs_colour = ""
@@ -1276,16 +1230,25 @@ def doctor(
             "yellow" if hs >= 60 else "bright_red"
         )
 
-    console.print(
-        f"[bold {colour}]{icon} {verdict}[/bold {colour}]  "
-        f"project [cyan]{project_slug}[/cyan]  "
-        + (f"[dim]health[/dim] [{hs_colour}]{hs}/100[/{hs_colour}]  " if hs is not None else "")
-        + f"[dim]errors[/dim] [red]{len(errors)}[/red]  "
-        f"[dim]warn[/dim] [yellow]{len(warns)}[/yellow]  "
-        f"[dim]info[/dim] [blue]{len(infos)}[/blue]"
-    )
+    lines: list = []
+    head = Text()
+    head.append(f"{icon} {verdict}  ", style=f"bold {colour}")
+    head.append("project ", style="dim")
+    head.append(project_slug, style="cyan")
+    if hs is not None:
+        head.append("  ·  health ", style="dim")
+        head.append(f"{hs}/100", style=hs_colour)
+    head.append("  ·  errors ", style="dim")
+    head.append(str(len(errors)), style="red")
+    head.append("  warn ", style="dim")
+    head.append(str(len(warns)), style="yellow")
+    head.append("  info ", style="dim")
+    head.append(str(len(infos)), style="blue")
+    lines.append(head)
 
-    # Hardware summary — one line so the terminal view is scannable
+    gpus = snap.get("gpu") or []
+    host = snap.get("host") or {}
+    disk_free = snap.get("disk_free") or {}
     hw_parts = []
     if gpus:
         g0 = gpus[0]
@@ -1304,27 +1267,121 @@ def doctor(
             f"({free_pct:.0f}%)"
         )
     if hw_parts:
-        console.print("[dim]" + "  ·  ".join(hw_parts) + "[/dim]")
+        lines.append(Text("  ·  ".join(hw_parts), style="dim"))
 
-    # Grouped alerts
-    def _render_group(label: str, items: list, tone: str) -> None:
+    def _group(label: str, items: list, tone: str):
         if not items:
             return
-        console.print()
-        console.print(f"[bold {tone}]{label}[/bold {tone}]")
+        lines.append(Text(""))
+        lines.append(Text(label, style=f"bold {tone}"))
         for a in items:
-            console.print(
-                f"  [{tone}]•[/{tone}] "
-                f"[dim]({a.get('code')})[/dim] {a.get('message')}"
-            )
+            ln = Text(f"  • ", style=tone)
+            ln.append(f"({a.get('code')}) ", style="dim")
+            ln.append(a.get("message", ""), style=tone)
+            lines.append(ln)
+            act = a.get("action")
+            if act:
+                aln = Text(f"      $ ", style="dim")
+                aln.append(act, style="bright_cyan")
+                lines.append(aln)
 
-    _render_group("Errors",   errors, "red")
-    _render_group("Warnings", warns,  "yellow")
-    _render_group("Info",     infos,  "blue")
+    _group("Errors",   errors, "red")
+    _group("Warnings", warns,  "yellow")
+    _group("Info",     infos,  "blue")
 
     if verdict == "OK":
-        console.print("\n[green]All systems green — safe to proceed.[/green]")
+        lines.append(Text(""))
+        lines.append(Text("All systems green — safe to proceed.", style="green"))
 
+    return Group(*lines)
+
+
+@app.command()
+def doctor(
+    json_out: bool = typer.Option(
+        False, "--json",
+        help="Emit machine-readable JSON (same fields the CLI "
+             "renderer shows). Pipe through `jq` to script against.",
+    ),
+    watch: int = typer.Option(
+        0, "--watch",
+        help="Phase 54.6.271 — repaint the verdict + alerts every "
+             "N seconds (Rich Live; no alt-screen, since the doctor "
+             "view is short). 0 (default) = one-shot mode. Exit "
+             "code is always the final snapshot's worst-severity "
+             "classification; Ctrl+C exits with code 130.",
+    ),
+) -> None:
+    """Phase 54.6.253 — readiness / health check.
+
+    Thin wrapper over the monitor's alert aggregator. Prints a
+    single-line traffic-light verdict (ALL GREEN / N warnings / M
+    errors) plus a grouped-by-severity list of every alert, then
+    exits with a shell code tied to the worst severity:
+
+      * 0  — no alerts, or only info-level
+      * 1  — at least one warn-level alert
+      * 2  — at least one error-level alert
+
+    Typical uses:
+
+      uv run sciknow db doctor                 # check before heavy job
+      uv run sciknow db doctor && sciknow ingest directory ./papers/
+      uv run sciknow db doctor --json | jq .
+      uv run sciknow db doctor --watch 5       # live readiness tick (54.6.271)
+
+    Runs against the same `collect_monitor_snapshot` used by
+    ``sciknow db monitor`` and ``/api/monitor``; picks up every
+    alert class the dashboard does (stuck_ingest, embed_drift,
+    missing_model, backup_stale, config_drift, disk_critical, …).
+    The `doctor` exit code is the primary signal — pipelining it
+    in shell is faster than eyeballing the monitor.
+    """
+    from sciknow.cli import preflight
+    preflight(qdrant=False)
+
+    import json as _json
+    import time as _time
+    from sciknow.core.monitor import collect_monitor_snapshot
+
+    snap = collect_monitor_snapshot()
+    verdict, exit_code, counts = _doctor_compute(snap)
+
+    if json_out:
+        console.print(_json.dumps({
+            "verdict": verdict,
+            "exit_code": exit_code,
+            "counts": {
+                "error": len(counts["error"]),
+                "warn": len(counts["warn"]),
+                "info": len(counts["info"]),
+            },
+            "alerts": snap.get("alerts") or [],
+            "project": (snap.get("project") or {}).get("slug"),
+            "snapshotted_at": snap.get("snapshotted_at"),
+            "health_score": (snap.get("health_score") or {}).get("score"),
+        }, indent=2, default=str))
+        raise typer.Exit(exit_code)
+
+    # Phase 54.6.271 — live watch mode. Uses Rich Live (no alt-
+    # screen; doctor output is short enough to fit in the scrolling
+    # region). Exits 130 on Ctrl+C per shell convention.
+    if watch > 0:
+        from rich.live import Live
+        try:
+            with Live(
+                _render_doctor(snap), console=console,
+                refresh_per_second=max(1, min(4, int(round(1 / max(watch, 0.25))))),
+                screen=False,
+            ) as live:
+                while True:
+                    _time.sleep(watch)
+                    snap = collect_monitor_snapshot()
+                    live.update(_render_doctor(snap))
+        except KeyboardInterrupt:
+            raise typer.Exit(130)
+
+    console.print(_render_doctor(snap))
     raise typer.Exit(exit_code)
 
 
