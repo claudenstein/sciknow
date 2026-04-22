@@ -530,14 +530,31 @@ def _model_assignments() -> dict:
     Reads from `Settings` (no DB hit). Surfaces the model-per-task
     mapping that the user configures via .env — useful for "wait,
     which model is autowrite using right now?" moments.
+
+    Phase 54.6.244 — added per-role book writer / reviewer / autowrite
+    scorer keys. Pre-244 the monitor showed only ``llm_main`` /
+    ``llm_fast``, so the four overrides
+    (``BOOK_WRITE_MODEL`` new in 54.6.243, ``BOOK_REVIEW_MODEL``,
+    ``AUTOWRITE_SCORER_MODEL``, ``VISUALS_CAPTION_MODEL``) were
+    invisible from the dashboard. Each key falls back to ``llm_main``
+    in the consumer UI so an unset override renders explicitly
+    rather than as ``null``.
     """
     try:
         from sciknow.config import settings
         return {
             "llm_main": settings.llm_model or None,
             "llm_fast": settings.llm_fast_model or None,
+            # Per-role book pipeline overrides (None → inherits llm_main)
+            "book_write": getattr(settings, "book_write_model", None),
+            "book_review": getattr(settings, "book_review_model", None),
+            "autowrite_scorer": getattr(
+                settings, "autowrite_scorer_model", None,
+            ),
+            # Visual captioning
             "caption_vlm": (
-                getattr(settings, "caption_vlm_model", None)
+                getattr(settings, "visuals_caption_model", None)
+                or getattr(settings, "caption_vlm_model", None)
                 or getattr(settings, "vlm_model", None)
             ),
             "embedder": settings.embedding_model or None,
@@ -706,6 +723,92 @@ def _duplicate_hashes(session) -> int:
         """)).scalar() or 0)
     except Exception:
         return 0
+
+
+def _ingest_funnel(session) -> list[dict]:
+    """Phase 54.6.244 — document-count funnel across the canonical
+    pipeline stages.
+
+    Unlike `_ingest_queue_states` (which only counts non-terminal
+    docs), this returns **all** stages in canonical pipeline order
+    so a renderer can draw a funnel and the user sees where docs
+    accumulate. Each entry: ``{stage, n}``. Stages that never
+    appear in the DB come back with n=0 so the funnel is always
+    shaped the same.
+    """
+    from sqlalchemy import text
+    canonical = [
+        "pending", "converting", "metadata_extraction",
+        "chunking", "embedding", "complete", "failed",
+    ]
+    try:
+        rows = session.execute(text("""
+            SELECT ingestion_status, COUNT(*)
+            FROM documents
+            GROUP BY ingestion_status
+        """)).fetchall()
+        got = {r[0]: int(r[1] or 0) for r in rows}
+    except Exception:
+        got = {}
+    ordered = [{"stage": s, "n": got.get(s, 0)} for s in canonical]
+    # Surface any non-canonical stage values so schema drift is
+    # visible rather than silently dropped.
+    for stage, n in got.items():
+        if stage not in canonical:
+            ordered.append({"stage": stage, "n": n})
+    return ordered
+
+
+def _hourly_failures(session, hours: int = 24) -> list[int]:
+    """Per-hour failure histogram over the last N hours. Same
+    bucketing as `_hourly_throughput` so the two sparklines align
+    one-to-one visually."""
+    from sqlalchemy import text
+    try:
+        rows = session.execute(text(f"""
+            WITH series AS (
+                SELECT generate_series(
+                    date_trunc('hour', NOW())
+                      - INTERVAL '{int(hours) - 1} hours',
+                    date_trunc('hour', NOW()),
+                    INTERVAL '1 hour'
+                ) AS hour
+            )
+            SELECT s.hour,
+                   COALESCE(SUM(CASE WHEN ij.status = 'failed' THEN 1
+                                     ELSE 0 END), 0)
+            FROM series s
+            LEFT JOIN ingestion_jobs ij
+              ON date_trunc('hour', ij.created_at) = s.hour
+            GROUP BY s.hour
+            ORDER BY s.hour
+        """)).fetchall()
+        return [int(r[1] or 0) for r in rows]
+    except Exception:
+        return []
+
+
+def _disk_free(data_dir: Path | None) -> dict:
+    """Phase 54.6.244 — disk total / used / free for the data_dir's
+    filesystem. Adds the context the size-only numbers in
+    `_disk_usage` don't carry ("4.4G in data_dir" is meaningless
+    without knowing total capacity). Silent on non-existent dirs.
+    """
+    out = {
+        "total_mb": 0, "used_mb": 0, "free_mb": 0, "pct_used": 0.0,
+    }
+    if not data_dir:
+        return out
+    try:
+        import shutil
+        total, used, free = shutil.disk_usage(str(data_dir))
+        out["total_mb"] = total // (1024 * 1024)
+        out["used_mb"] = used // (1024 * 1024)
+        out["free_mb"] = free // (1024 * 1024)
+        out["pct_used"] = (used / total * 100) if total else 0.0
+    except Exception:
+        pass
+    return out
 
 
 def _inbox_pending(data_dir: Path | None) -> dict:
@@ -936,6 +1039,118 @@ def _build_alerts(snap: dict) -> list[dict]:
             "message": f"bench snapshot {bench_age:.0f}d stale",
         })
 
+    # Phase 54.6.263 — snapshot-slow watchdog. When the collector
+    # itself crosses 2s the dashboard has stopped being "live" in
+    # any useful sense — usually a stuck DB session or slow Qdrant
+    # probe. Warn-only; nothing's broken, it's just visibility.
+    sd_ms = snap.get("snapshot_duration_ms")
+    if isinstance(sd_ms, (int, float)) and sd_ms > 2000:
+        alerts.append({
+            "severity": "warn",
+            "code": "snapshot_slow",
+            "message": (
+                f"monitor snapshot took {sd_ms:.0f}ms — investigate "
+                "slow PG pool or stalled external probe"
+            ),
+        })
+
+    # Phase 54.6.262 — services reachability. Postgres + Qdrant are
+    # critical: ingest/retrieval won't run if either is down.
+    # Ollama is warn-level (browse-only installs still work without
+    # it). Messages include the latency budget so "slow but up"
+    # reads as a distinct state from "unreachable".
+    services = snap.get("services") or {}
+    CRITICAL_SERVICES = {"postgres", "qdrant"}
+    for name, info in services.items():
+        if info.get("up"):
+            continue
+        is_critical = name in CRITICAL_SERVICES
+        err_snippet = (info.get("error") or "").splitlines()[0][:80]
+        alerts.append({
+            "severity": "error" if is_critical else "warn",
+            "code": "service_down",
+            "message": (
+                f"{name} unreachable — {err_snippet or 'no response'}"
+            ),
+            "action": (
+                "systemctl --user status ollama" if name == "ollama" else
+                "systemctl status postgresql" if name == "postgres" else
+                "systemctl --user status qdrant" if name == "qdrant" else
+                None
+            ),
+        })
+
+    # Phase 54.6.261 — stuck-LLM-job watchdog. A job with a non-
+    # zero elapsed time but 0 TPS has either hit a network/thinking
+    # stall or the model has wedged. Threshold of 60s dodges the
+    # legitimate "qwen3.6 spent 30s inside <think>" false positive.
+    # Info-severity: it's suspicious but not always broken — some
+    # CoT-heavy prompts spend >60s producing no tokens. Operators
+    # can cancel via DELETE /api/jobs/{id} or the web cancel button;
+    # action hint points at the web UI path.
+    STUCK_THRESHOLD_S = 60
+    for j in snap.get("active_jobs") or []:
+        elapsed = float(j.get("elapsed_s") or 0)
+        tps = float(j.get("tps") or 0)
+        state = j.get("stream_state")
+        if state != "streaming":
+            continue
+        if elapsed > STUCK_THRESHOLD_S and tps == 0:
+            jid = str(j.get("id") or "?")[:8]
+            model = j.get("model") or "?"
+            alerts.append({
+                "severity": "warn",
+                "code": "stuck_llm_job",
+                "message": (
+                    f"job {jid} ({model}) at 0 tok/s for "
+                    f"{elapsed:.0f}s — cancel via the web UI if "
+                    "the model is wedged"
+                ),
+                "action": (
+                    f"curl -X DELETE http://localhost:8080/api/jobs/{jid}"
+                ),
+            })
+
+    # Phase 54.6.252 — config drift. Info-severity (it's ambiguous —
+    # user may intend the override, or may have forgotten a stale
+    # .env key after switching projects). Message enumerates the
+    # first two overrides so the banner stays one line.
+    drift = snap.get("config_drift") or []
+    if drift:
+        head = "; ".join(drift[:2])
+        more = f" (+{len(drift) - 2} more)" if len(drift) > 2 else ""
+        alerts.append({
+            "severity": "info",
+            "code": "config_drift",
+            "message": (
+                f".env overridden by active project: {head}{more} — "
+                "drop those keys from .env to silence"
+            ),
+        })
+
+    # Phase 54.6.250 — backup staleness. Warn at >7d (one week past
+    # the default daily cron cadence), error at >30d (something's
+    # definitely broken in the backup pipeline — crons stopped,
+    # disk full, etc.). Silent when no backup has ever run —
+    # that's a "clean install" state, not a regression.
+    backup_age = (snap.get("backup_freshness") or {}).get("newest_age_days")
+    if backup_age is not None:
+        if backup_age > 30:
+            alerts.append({
+                "severity": "error",
+                "code": "backup_stale",
+                "message": (
+                    f"newest backup {backup_age:.0f}d old — "
+                    "run `sciknow backup run` or check the cron"
+                ),
+            })
+        elif backup_age > 7:
+            alerts.append({
+                "severity": "warn",
+                "code": "backup_stale",
+                "message": f"newest backup {backup_age:.0f}d old",
+            })
+
     mq = snap.get("meta_quality") or {}
     if mq.get("retracted"):
         alerts.append({
@@ -981,9 +1196,6 @@ def _build_alerts(snap: dict) -> list[dict]:
 
     storage = snap.get("storage") or {}
     disk = storage.get("disk") or {}
-    # Data-dir-only disk is a size, not a percentage — we don't have
-    # free-space info here. Skip hard thresholds, but flag if mineru
-    # output has overtaken 50 GB (classic re-ingest cleanup signal).
     mineru_mb = disk.get("mineru_output_mb", 0) or 0
     if mineru_mb > 50_000:
         alerts.append({
@@ -994,6 +1206,33 @@ def _build_alerts(snap: dict) -> list[dict]:
                 "consider pruning processed outputs"
             ),
         })
+
+    # Phase 54.6.244 — disk-free thresholds. Free space matters more
+    # than absolute usage (a 2T drive at 4G used is fine; a 50G drive
+    # at 47G used isn't). Error at <5% free, warn at <10%.
+    disk_free = snap.get("disk_free") or {}
+    total_mb = disk_free.get("total_mb") or 0
+    free_mb = disk_free.get("free_mb") or 0
+    if total_mb > 0:
+        free_pct = free_mb / total_mb * 100
+        if free_pct < 5:
+            alerts.append({
+                "severity": "error",
+                "code": "disk_critical",
+                "message": (
+                    f"disk {free_mb / 1024:.1f}G free "
+                    f"({free_pct:.1f}% of {total_mb / 1024:.0f}G)"
+                ),
+            })
+        elif free_pct < 10:
+            alerts.append({
+                "severity": "warn",
+                "code": "disk_low",
+                "message": (
+                    f"disk {free_mb / 1024:.1f}G free "
+                    f"({free_pct:.1f}% of {total_mb / 1024:.0f}G)"
+                ),
+            })
 
     inbox = snap.get("inbox") or {}
     if inbox.get("count", 0) > 0:
@@ -1010,6 +1249,73 @@ def _build_alerts(snap: dict) -> list[dict]:
                 f"inbox {inbox['count']} PDF(s) waiting — oldest {age_str}"
             ),
         })
+
+    # Phase 54.6.245 — missing-model alert. Cross-checks every
+    # Ollama-served role in ``model_assignments`` against the list
+    # of locally-pulled tags. A role that's configured but not
+    # installed (`ollama pull` never ran) fails the first chat call
+    # with a 404 — an operational class of bug that doesn't surface
+    # anywhere else in the monitor. ``installed == None`` means
+    # the list call itself failed (Ollama down) — skip silently
+    # rather than emit N alerts when the server is just unreachable.
+    installed = snap.get("ollama_installed_models")
+    if isinstance(installed, (set, list)):
+        installed_set = set(installed)
+        models = snap.get("model_assignments") or {}
+        # Only Ollama-served roles. `embedder` + `reranker` are HF,
+        # `mineru_vlm_model` runs inside the MinerU VLM container
+        # (not Ollama), `pdf_backend` is a string enum, not a model.
+        ollama_roles: list[tuple[str, str]] = [
+            ("LLM_MODEL",              models.get("llm_main")),
+            ("LLM_FAST_MODEL",         models.get("llm_fast")),
+            ("BOOK_WRITE_MODEL",       models.get("book_write")),
+            ("BOOK_REVIEW_MODEL",      models.get("book_review")),
+            ("AUTOWRITE_SCORER_MODEL", models.get("autowrite_scorer")),
+            ("VISUALS_CAPTION_MODEL",  models.get("caption_vlm")),
+        ]
+        seen: set[str] = set()
+        for role, name in ollama_roles:
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            if name not in installed_set:
+                alerts.append({
+                    "severity": "error",
+                    "code": "missing_model",
+                    "message": (
+                        f"{role}={name} not pulled in Ollama — run "
+                        f"`ollama pull {name}` (or change the .env "
+                        f"override)"
+                    ),
+                })
+
+    # Phase 54.6.257 — attach a suggested-fix command to each alert
+    # by code. The web modal renders this as a "📋 copy" affordance;
+    # the CLI prints it dimly under the message. When a code needs
+    # parameters we can't safely supply (e.g. missing_model needs
+    # the tag name, which is already in the message), we leave
+    # `action` None and rely on the inline hint.
+    _ACTIONS: dict[str, str] = {
+        "stuck_ingest":    "sciknow ingest directory ./data/inbox --resume",
+        "embed_drift":     "sciknow db reingest --stage embedding",
+        "dupe_hashes":     "sciknow db stats  # inspect hash dupes",
+        "bench_stale":     "sciknow bench-snapshot",
+        "backup_stale":    "sciknow backup run",
+        "inbox_waiting":   "sciknow ingest directory ./data/inbox",
+        "gpu_hot":         "nvidia-smi  # confirm temp and check airflow",
+        "gpu_warm":        "nvidia-smi  # monitor temp",
+        "ram_pressure":    "ps axu --sort=-%mem | head",
+        "host_overload":   "uptime; top -b -n 1 | head -20",
+        "mineru_big":      "du -sh data/mineru_output/  # consider pruning processed outputs",
+        "disk_critical":   "df -h",
+        "disk_low":        "df -h",
+        "retractions":     "sciknow db stats  # flagged retractions",
+    }
+    for a in alerts:
+        code = a.get("code")
+        # Only fill action when the individual builder didn't set one.
+        if code and a.get("action") is None and _ACTIONS.get(code):
+            a["action"] = _ACTIONS[code]
 
     severity_rank = {"error": 0, "warn": 1, "info": 2}
     alerts.sort(key=lambda a: severity_rank.get(a["severity"], 3))
@@ -1041,6 +1347,400 @@ def _bench_freshness(data_dir: Path | None) -> dict:
         newest_mtime = max(p.stat().st_mtime for p in snaps)
         age_s = _time.time() - newest_mtime
         out["newest_age_days"] = age_s / 86400
+    except Exception:
+        pass
+    return out
+
+
+def _ping_postgres() -> dict:
+    """Phase 54.6.262 — Postgres reachability probe.
+
+    Opens a fresh connection via the existing session factory, runs
+    ``SELECT 1``, and times the round trip. Reports ``{up, latency_ms,
+    error}``. Counts as "down" for any connect/query exception.
+    """
+    import time as _time
+    t0 = _time.monotonic()
+    try:
+        from sqlalchemy import text
+        from sciknow.storage.db import get_session
+        with get_session() as s:
+            s.execute(text("SELECT 1")).scalar_one()
+        return {
+            "up": True,
+            "latency_ms": int((_time.monotonic() - t0) * 1000),
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "up": False,
+            "latency_ms": int((_time.monotonic() - t0) * 1000),
+            "error": str(exc)[:120],
+        }
+
+
+def _ping_qdrant() -> dict:
+    """Phase 54.6.262 — Qdrant reachability probe. ``GET /healthz``
+    via the existing client. Returns same shape as _ping_postgres."""
+    import time as _time
+    t0 = _time.monotonic()
+    try:
+        from sciknow.storage.qdrant import get_client
+        client = get_client()
+        # Qdrant client has a lightweight `get_collections` call;
+        # prefer it over a raw HTTP ping so any auth/proxy
+        # configuration inherited from the client still applies.
+        client.get_collections()
+        return {
+            "up": True,
+            "latency_ms": int((_time.monotonic() - t0) * 1000),
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "up": False,
+            "latency_ms": int((_time.monotonic() - t0) * 1000),
+            "error": str(exc)[:120],
+        }
+
+
+def _ping_ollama() -> dict:
+    """Phase 54.6.262 — Ollama reachability probe. ``ollama.list()``
+    via the client. Returns same shape as _ping_postgres."""
+    import time as _time
+    t0 = _time.monotonic()
+    try:
+        import ollama
+        from sciknow.config import settings
+        client = ollama.Client(host=settings.ollama_host)
+        client.list()
+        return {
+            "up": True,
+            "latency_ms": int((_time.monotonic() - t0) * 1000),
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "up": False,
+            "latency_ms": int((_time.monotonic() - t0) * 1000),
+            "error": str(exc)[:120],
+        }
+
+
+def _services_health() -> dict:
+    """Phase 54.6.262 — PG + Qdrant + Ollama reachability probe.
+
+    Returns a dict keyed by service name. Ollama is the only optional
+    service (a read-only install without Ollama still works for
+    retrieval + browsing), so its down-state is a warn rather than
+    an error in the alert logic.
+
+    Phase 54.6.264 — parallelised via ThreadPoolExecutor. Initial
+    measurement showed Qdrant probe alone at ~350 ms (HTTPS TLS
+    handshake on remote host), which serialised with the other two
+    was most of the snapshot wall clock. Each probe is I/O-bound
+    and holds no shared state, so threads are the right primitive.
+    Worker count matches probe count (3) so there's no queueing.
+    Timeout per probe = 3s — enough for remote Qdrant on a slow
+    link but short enough to fail-fast without wedging the whole
+    monitor.
+    """
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as _TO
+
+    probes = {
+        "postgres": _ping_postgres,
+        "qdrant":   _ping_qdrant,
+        "ollama":   _ping_ollama,
+    }
+    out: dict = {}
+    with ThreadPoolExecutor(max_workers=len(probes)) as pool:
+        futures = {name: pool.submit(fn) for name, fn in probes.items()}
+        for name, fut in futures.items():
+            try:
+                out[name] = fut.result(timeout=3.0)
+            except _TO:
+                out[name] = {
+                    "up": False,
+                    "latency_ms": 3000,
+                    "error": "probe timed out after 3s",
+                }
+            except Exception as exc:
+                out[name] = {
+                    "up": False,
+                    "latency_ms": 0,
+                    "error": f"probe raised: {type(exc).__name__}"[:120],
+                }
+    return out
+
+
+def _log_tail(data_dir: Path | None, n: int = 20) -> dict:
+    """Phase 54.6.260 — last ``n`` lines of ``<data_dir>/sciknow.log``.
+
+    Reverse-read via ``seek`` so we don't slurp an 8 MB log when the
+    operator just wants the last 20 lines. Returns::
+
+        {
+            "lines": list[str],
+            "file_path": str | None,  # absolute path for UI hint
+            "error_lines": int,       # count of ERROR/WARNING in tail
+        }
+
+    ``lines`` is empty when the log file doesn't exist (fresh
+    install) — consumers render nothing.
+    """
+    out: dict = {"lines": [], "file_path": None, "error_lines": 0}
+    if not data_dir:
+        return out
+    log_path = Path(data_dir) / "sciknow.log"
+    if not log_path.exists():
+        return out
+    out["file_path"] = str(log_path)
+    try:
+        # 4KB per line × n + 50% overhead as the seek budget
+        block = max(8192, n * 400)
+        size = log_path.stat().st_size
+        with log_path.open("rb") as f:
+            start = max(0, size - block)
+            f.seek(start)
+            chunk = f.read()
+        # Decode with latin-1 fallback so malformed bytes don't crash
+        try:
+            text = chunk.decode("utf-8")
+        except UnicodeDecodeError:
+            text = chunk.decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        # If we didn't read from the start, drop the first (likely
+        # truncated) line so we return complete records.
+        if start > 0 and lines:
+            lines = lines[1:]
+        tail = lines[-n:]
+        out["lines"] = tail
+        out["error_lines"] = sum(
+            1 for ln in tail if "ERROR" in ln or "CRITICAL" in ln
+        )
+    except Exception as exc:
+        logger.debug("log tail read failed: %s", exc)
+    return out
+
+
+def alerts_as_markdown(snap: dict) -> str:
+    """Phase 54.6.268 — render the snapshot's alerts as a Markdown
+    block suitable for pasting into Slack / Linear / a GitHub
+    issue. Same helper is used by the CLI ``--alerts-md`` flag
+    and the web "Copy as Markdown" button so the shape stays
+    identical across both surfaces.
+
+    Format:
+
+        # sciknow alerts — <slug> @ <ISO-UTC>
+
+        Health: NN/100 · Errors: X · Warn: Y · Info: Z
+
+        - ❌ **code**: message · `sciknow …`
+        - ⚠️ **code**: message
+        - ℹ️ **code**: message
+
+    Empty alerts list → "_No alerts at this snapshot._"
+    """
+    from datetime import datetime, timezone
+    project = (snap.get("project") or {}).get("slug") or "(no project)"
+    alerts = snap.get("alerts") or []
+    health = (snap.get("health_score") or {}).get("score")
+    ts = snap.get("snapshotted_at") or datetime.now(timezone.utc).isoformat()
+
+    lines: list[str] = []
+    lines.append(f"# sciknow alerts — {project} @ {ts}")
+    lines.append("")
+    counts = {
+        "error": sum(1 for a in alerts if a.get("severity") == "error"),
+        "warn":  sum(1 for a in alerts if a.get("severity") == "warn"),
+        "info":  sum(1 for a in alerts if a.get("severity") == "info"),
+    }
+    header = []
+    if health is not None:
+        header.append(f"Health: {health}/100")
+    header.append(f"Errors: {counts['error']}")
+    header.append(f"Warn: {counts['warn']}")
+    header.append(f"Info: {counts['info']}")
+    lines.append(" · ".join(header))
+    lines.append("")
+    if not alerts:
+        lines.append("_No alerts at this snapshot._")
+        return "\n".join(lines)
+    icon = {"error": "❌", "warn": "⚠️", "info": "ℹ️"}
+    for a in alerts:
+        sev = a.get("severity", "info")
+        bullet = f"- {icon.get(sev, '•')} **{a.get('code', '?')}**: {a.get('message', '')}"
+        act = a.get("action")
+        if act:
+            # Inline code span rather than fence so the line stays
+            # compact in Slack / Linear preview.
+            bullet += f" · `{act}`"
+        lines.append(bullet)
+    return "\n".join(lines)
+
+
+def _compute_health_score(snap: dict) -> dict:
+    """Phase 54.6.259 — composite 0-100 pipeline-health rollup.
+
+    One number that answers "am I in good shape?" without requiring
+    the operator to read every panel. Starts at 100; penalties:
+
+      * -20 per error alert
+      * -5 per warn alert
+      * -(100 - embed_pct) / 2 when embeddings_coverage < 100 %
+      * -10 if free disk < 10 %
+      * -10 if any GPU ≥ 85 °C
+      * -5 if RAM ≥ 90 %
+
+    Clamps to [0, 100]. Returns ``{score, verdict, penalties}`` so
+    both renderers can show a breakdown tooltip.
+
+    Must run AFTER alerts have been built (it reads them). Pure
+    function against the snapshot — no side effects.
+    """
+    score = 100
+    penalties: list[str] = []
+
+    alerts = snap.get("alerts") or []
+    errs = sum(1 for a in alerts if a.get("severity") == "error")
+    warns = sum(1 for a in alerts if a.get("severity") == "warn")
+    if errs:
+        score -= 20 * errs
+        penalties.append(f"−{20 * errs} ({errs} error alert(s))")
+    if warns:
+        score -= 5 * warns
+        penalties.append(f"−{5 * warns} ({warns} warn alert(s))")
+
+    embed_cov = snap.get("embeddings_coverage") or {}
+    if embed_cov.get("total") and embed_cov.get("pct", 100) < 100:
+        drop = (100 - embed_cov["pct"]) / 2
+        if drop > 0.5:
+            score -= drop
+            penalties.append(
+                f"−{drop:.0f} (embeddings coverage {embed_cov['pct']:.1f}%)"
+            )
+
+    disk_free = snap.get("disk_free") or {}
+    if disk_free.get("total_mb") and disk_free.get("free_mb") is not None:
+        free_pct = disk_free["free_mb"] / disk_free["total_mb"] * 100
+        if free_pct < 10:
+            score -= 10
+            penalties.append(f"−10 (disk {free_pct:.0f}% free)")
+
+    for g in snap.get("gpu") or []:
+        if (g.get("temperature_c") or 0) >= 85:
+            score -= 10
+            penalties.append(
+                f"−10 (gpu #{g.get('index', '?')} {g['temperature_c']}°C)"
+            )
+            break  # cap the GPU penalty at 10 even with many cards
+
+    host = snap.get("host") or {}
+    if host.get("mem_pct", 0) >= 90:
+        score -= 5
+        penalties.append(f"−5 (ram {host['mem_pct']:.0f}%)")
+
+    score = max(0, min(100, round(score)))
+    if score >= 90:
+        verdict = "healthy"
+    elif score >= 60:
+        verdict = "degraded"
+    else:
+        verdict = "critical"
+    return {
+        "score": int(score),
+        "verdict": verdict,
+        "penalties": penalties,
+    }
+
+
+def _config_drift() -> list[str]:
+    """Phase 54.6.252 — config-drift list.
+
+    Reads the list ``settings._env_overrides`` stashed by
+    ``Settings._project_wins_over_env_overrides``. Each entry is a
+    human-readable string like ``"pg_database 'sciknow' →
+    'sciknow_global-cooling'"`` — one per .env key that the active
+    project silently overrode.
+
+    Empty list is the "clean" state. A non-empty list is a footgun
+    signal: the user's .env doesn't match the actual runtime config,
+    and anything they read from .env by eye will be misleading.
+    """
+    try:
+        from sciknow.config import settings
+        overrides = getattr(settings, "_env_overrides", None) or []
+        # Always return a list (never None) for stable JSON shape.
+        return [str(o) for o in overrides]
+    except Exception:
+        return []
+
+
+def _backup_freshness() -> dict:
+    """Phase 54.6.250 — age + count of the newest ``sciknow backup``.
+
+    Reads ``archives/backups/.backup-state.json`` (the
+    ``backup_retain_count``-capped ledger maintained by
+    ``sciknow backup run``). Returns::
+
+        {
+            "newest_age_days": float | None,
+            "count": int,
+            "newest_timestamp": str | None,
+            "total_bytes": int | None,
+        }
+
+    ``newest_age_days`` is ``None`` when no backup has run yet (or
+    the ledger is unreadable) — consumers treat that as "no
+    backup-stale alert" rather than "infinitely stale".
+
+    Pulls from the repo-relative ``archives/backups/`` path (same
+    as ``_backup_root()`` in sciknow/cli/backup.py), not the
+    project data_dir, because backup sets span multiple projects
+    and live at the repo level.
+    """
+    import time as _time
+    import json as _json
+
+    out: dict = {
+        "newest_age_days": None,
+        "count": 0,
+        "newest_timestamp": None,
+        "total_bytes": None,
+    }
+    try:
+        from sciknow.core.project import _repo_root
+        state_path = _repo_root() / "archives" / "backups" / ".backup-state.json"
+        if not state_path.exists():
+            return out
+        state = _json.loads(state_path.read_text(encoding="utf-8"))
+        backups = state.get("backups") or []
+        if not backups:
+            return out
+        out["count"] = len(backups)
+        # Newest = last appended (the runner appends chronologically)
+        newest = backups[-1]
+        out["newest_timestamp"] = newest.get("timestamp")
+        out["total_bytes"] = newest.get("total_bytes")
+        # Parse the timestamp into an age; format is
+        # ``YYYYMMDDTHHMMSSZ``. Use mtime of the backup dir as a
+        # sturdy fallback when the timestamp is malformed.
+        ts = out["newest_timestamp"] or ""
+        age_s: float | None = None
+        if ts:
+            try:
+                from datetime import datetime
+                dt = datetime.strptime(ts, "%Y%m%dT%H%M%SZ")
+                age_s = _time.time() - dt.timestamp()
+            except Exception:
+                age_s = None
+        if age_s is None:
+            backup_dir = state_path.parent / (newest.get("dir") or ts)
+            if backup_dir.exists():
+                age_s = _time.time() - backup_dir.stat().st_mtime
+        if age_s is not None:
+            out["newest_age_days"] = max(0.0, age_s / 86400)
     except Exception:
         pass
     return out
@@ -1128,6 +1828,45 @@ def _read_refresh_pulse(data_dir: Path | None) -> dict | None:
         return read_pulse(data_dir, "refresh")
     except Exception:
         return None
+
+
+def _read_web_jobs_pulse(data_dir: Path | None) -> list[dict]:
+    """Phase 54.6.246 — read the active-web-jobs pulse.
+
+    The web server writes this file from
+    ``_write_web_jobs_pulse()`` on every job state transition. The
+    CLI ``sciknow db monitor`` runs in a *different* process with no
+    access to the web's in-memory ``_jobs`` dict, so without this
+    pulse it can never show running autowrite / book-write / wiki
+    compile jobs — a real gap for anyone babysitting a long run
+    over SSH.
+
+    Returns an empty list when:
+      * no pulse file exists (no web server has started since the
+        project was created)
+      * the pulse is stale by ``core.pulse`` standards (web server
+        crashed / was stopped; do not render imaginary jobs)
+      * the pulse payload is malformed
+
+    Staleness tagging: each job entry gets its own ``is_stale``
+    flag from the *pulse-level* ``is_stale`` so the CLI renderer can
+    render a "[STALE]" suffix.
+    """
+    try:
+        from sciknow.core.pulse import read_pulse
+        body = read_pulse(data_dir, "web_jobs")
+        if not body:
+            return []
+        active = body.get("active") or []
+        # Decorate with pulse-level staleness so consumers can tell
+        # "this web job is probably zombie" without re-checking
+        # pulse_at themselves.
+        is_stale = bool(body.get("is_stale", False))
+        for j in active:
+            j["is_stale"] = is_stale
+        return active
+    except Exception:
+        return []
 
 
 def _host_load() -> dict:
@@ -1548,6 +2287,48 @@ def _llm_usage(session, days: int = 7) -> list[dict]:
     ]
 
 
+def _ollama_installed_models() -> set[str]:
+    """Phase 54.6.245 — names of every Ollama model pulled locally
+    (``ollama.list()``). Distinct from ``_ollama_loaded_models`` —
+    that only returns the currently-resident ones. We use *installed*
+    for the ``missing_model`` alert that cross-checks the
+    .env-configured assignments: a model that's configured but not
+    pulled will fail on the first chat call, not just be slow.
+
+    Returns ``None`` (not an empty set) when the Ollama client fails
+    — e.g. Ollama isn't running. Downstream callers treat ``None``
+    as "unknown; skip the missing-model check" rather than "every
+    model is missing" so we don't spam alerts when the server is
+    briefly down during monitor polling.
+    """
+    try:
+        import ollama
+        from sciknow.config import settings
+        client = ollama.Client(host=settings.ollama_host)
+        resp = client.list()
+        names: set[str] = set()
+        # The ollama python client evolved through several response
+        # shapes (dict with "models" list, .models attribute, tag vs
+        # name field). Handle all three defensively.
+        raw = resp.get("models") if isinstance(resp, dict) else getattr(resp, "models", None)
+        for m in (raw or []):
+            name = None
+            if isinstance(m, dict):
+                name = m.get("name") or m.get("model") or m.get("tag")
+            else:
+                name = (
+                    getattr(m, "name", None)
+                    or getattr(m, "model", None)
+                    or getattr(m, "tag", None)
+                )
+            if name:
+                names.add(str(name))
+        return names
+    except Exception as exc:
+        logger.debug("ollama list failed: %s", exc)
+        return None  # type: ignore[return-value]
+
+
 def _ollama_loaded_models() -> list[dict]:
     """Currently-resident Ollama models via ``ollama.ps()``. Each
     entry carries the keep-alive expiry so we can tell "this will
@@ -1680,8 +2461,12 @@ def collect_monitor_snapshot(
     Any single source that fails degrades to empty — we don't let a
     dead ollama daemon prevent the user from seeing corpus stats.
     """
+    import time as _time
     from sciknow.storage.db import get_session
 
+    # Phase 54.6.263 — time the collector itself; attached to the
+    # snapshot as ``snapshot_duration_ms``.
+    _snap_t0 = _time.monotonic()
     project = _project_info()
     data_dir = project.get("data_dir")
 
@@ -1744,6 +2529,11 @@ def collect_monitor_snapshot(
         # 54.6.243 — retrieval quality + wiki materialization
         quality_sig = _safe_db(session, _corpus_quality_signals, default={})
         wiki_mat = _safe_db(session, _wiki_materialization, default={})
+        # 54.6.244 — ingest funnel + hourly failure histogram
+        funnel = _safe_db(session, _ingest_funnel, default=[])
+        hourly_fails = _safe_db(
+            session, _hourly_failures, hours=24, default=[],
+        )
 
     # GPU sample recording happens here, outside the session ctx,
     # so the ring buffer gets one tick per snapshot call. CLI
@@ -1751,6 +2541,9 @@ def collect_monitor_snapshot(
     # rolling buffer per worker.
     gpu_info = _gpu_info()
     _record_gpu_sample(gpu_info)
+    # 54.6.245 — cache the installed-tags list once per snapshot so
+    # we don't round-trip to Ollama twice.
+    _installed_ollama = _ollama_installed_models()
 
     snapshot = {
         "project": project,
@@ -1787,6 +2580,24 @@ def collect_monitor_snapshot(
         "bench_freshness": _bench_freshness(
             Path(data_dir) if data_dir else None
         ),
+        # 54.6.250 — newest backup age + count, read from
+        # archives/backups/.backup-state.json. Drives the
+        # backup_stale alert (warn >7d, error >30d).
+        "backup_freshness": _backup_freshness(),
+        # 54.6.252 — list of active-project → .env overrides. Empty
+        # when either there's no project or .env matches the project.
+        # Non-empty means the user's .env is misleading at a glance.
+        "config_drift": _config_drift(),
+        # 54.6.260 — last 20 lines of data_dir/sciknow.log. Empty
+        # when the log file doesn't exist (fresh install).
+        "log_tail": _log_tail(
+            Path(data_dir) if data_dir else None, n=20,
+        ),
+        # 54.6.262 — per-service reachability probes. Drives the
+        # services_down alert + Services panel. Serial (<150ms total
+        # on localhost); not cached so each snapshot call gives a
+        # fresh reading.
+        "services": _services_health(),
         # 54.6.237 additions
         "corpus_growth": growth,
         "book_activity": book_act,
@@ -1797,7 +2608,16 @@ def collect_monitor_snapshot(
         "refresh_pulse": _read_refresh_pulse(
             Path(data_dir) if data_dir else None
         ),
-        "active_jobs": [],
+        # 54.6.246 — cross-process web-jobs pulse. CLI reads the
+        # pulse file the web writes per state transition so `sciknow
+        # db monitor --watch` over SSH sees active autowrite /
+        # book-write / wiki-compile jobs without hitting the web
+        # endpoint. The web endpoint still overrides this list at
+        # /api/monitor time with its in-process direct read — which
+        # is authoritative and fresher than the pulse.
+        "active_jobs": _read_web_jobs_pulse(
+            Path(data_dir) if data_dir else None
+        ),
         "llm": {
             "usage_last_days": llm_usage,
             "usage_window_days": llm_usage_days,
@@ -1816,7 +2636,32 @@ def collect_monitor_snapshot(
         "wiki_materialization": wiki_mat,
         "inbox": _inbox_pending(Path(data_dir) if data_dir else None),
         "projects_overview": _project_overview(),
+        # 54.6.244 — funnel + failure sparkline + disk free
+        "ingest_funnel": funnel,
+        "pipeline_hourly_failures": hourly_fails,
+        "disk_free": _disk_free(Path(data_dir) if data_dir else None),
+        # 54.6.245 — installed Ollama tags, consumed by the
+        # missing_model alert. ``None`` means the list call failed
+        # (Ollama unreachable) — alert builder skips the check.
+        "ollama_installed_models": (
+            sorted(_installed_ollama)
+            if _installed_ollama is not None else None
+        ),
         "snapshotted_at": datetime.now(timezone.utc).isoformat(),
     }
+    # Phase 54.6.263 — snapshot self-timing. Must be computed
+    # BEFORE alerts so the snapshot_slow alert can inspect the
+    # freshly-measured value. Rounded to ms for display.
+    snapshot["snapshot_duration_ms"] = int(
+        (_time.monotonic() - _snap_t0) * 1000
+    )
+    # Re-inject as a set for _build_alerts — it early-outs when the
+    # value is None (Ollama down) and uses set-membership otherwise.
+    # Store the sorted-list form in the snapshot so the JSON payload
+    # is stable-ordered.
     snapshot["alerts"] = _build_alerts(snapshot)
+    # Phase 54.6.259 — composite health score rolls up alerts +
+    # coverage + hardware penalties into a single 0-100 number.
+    # Must run AFTER alerts exist (_compute_health_score reads them).
+    snapshot["health_score"] = _compute_health_score(snapshot)
     return snapshot

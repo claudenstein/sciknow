@@ -1,10 +1,38 @@
+# Phase 54.6.243 — Unsloth Qwen3.6-27B-GGUF import, thinking-mode
+# defaults baked. The GGUF declares architecture=qwen35 and Ollama
+# 0.21+ handles it via its qwen35 runner (Gated DeltaNet hybrid +
+# the qwen3.5 RENDERER/PARSER pair for chat template + <think>
+# splitting). Probe (docs/PHASE_LOG.md 54.6.243) confirms: simple
+# prompt → ~400 char <think> + clean content, no parsing bug, no
+# stop-token issue, done_reason=stop.
+#
+# Qwen3.6 README "Best Practices" — sampling recipes:
+#   Thinking mode (general):
+#     temperature=1.0, top_p=0.95, top_k=20, min_p=0.0,
+#     presence_penalty=0.0, repetition_penalty=1.0
+#   Instruct / non-thinking mode:
+#     temperature=0.7, top_p=0.80, top_k=20, min_p=0.0,
+#     presence_penalty=1.5, repetition_penalty=1.0
+#
+# We bake thinking defaults here since the README says "Qwen3.6
+# models operate in thinking mode by default". Callers that want
+# direct output (bench extract_kg/compile/write, book_ops writer)
+# MUST pass `think=False` AND override sampling to the instruct
+# recipe — using thinking sampling with think=False is what made
+# qwen3.6 look worse than qwen3:30b-a3b-instruct in 54.6.240.
+# The model_sweep bench encodes this via ModelProfile.nt_* fields
+# and force_no_thinking=True (see model_sweep.effective_budget).
+
 FROM /home/kartofel/Claude/huggingface/unsloth-Qwen3.6-27B-GGUF/Qwen3.6-27B-UD-Q4_K_XL.gguf
 TEMPLATE {{ .Prompt }}
 RENDERER qwen3.5
 PARSER qwen3.5
 
 PARAMETER num_ctx 32768
-PARAMETER temperature 0.7
-PARAMETER top_p 0.9
+
+# README thinking-mode recommended sampling
+PARAMETER temperature 1.0
+PARAMETER top_p 0.95
 PARAMETER top_k 20
-PARAMETER repeat_penalty 1.05
+PARAMETER min_p 0.0
+PARAMETER repeat_penalty 1.0

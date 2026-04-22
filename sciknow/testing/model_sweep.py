@@ -152,14 +152,28 @@ class ModelProfile:
     multiplier and sampling recommendations.
     ``can_disable_thinking`` — True when the Ollama ``think`` flag
     works (3.5+ support it, thinking-only 2507 variants don't).
-    ``temperature`` / ``top_p`` / ``top_k`` — Qwen-recommended
-    sampling per model-family doc; overrides the per-task default.
+    ``temperature`` / ``top_p`` / ``top_k`` — thinking-mode sampling
+    per model-family doc.
+    ``nt_*`` — instruct (non-thinking) sampling. When the bench
+    forces no-thinking on a hybrid model, use these instead.
+    Qwen3.6 README prescribes temp=0.7, top_p=0.80, top_k=20,
+    min_p=0.0, presence_penalty=1.5 for instruct mode — radically
+    different from the thinking-mode recipe — and using the
+    thinking-mode recipe with thinking off is what made the model
+    look worse than qwen3:30b-a3b-instruct in 54.6.240-242.
     """
     thinks_by_default: bool
     can_disable_thinking: bool
+    # thinking-mode sampling
     temperature: float
     top_p: float
     top_k: int
+    # instruct-mode (non-thinking) sampling — per Qwen3.6 README
+    nt_temperature: float = 0.7
+    nt_top_p: float = 0.8
+    nt_top_k: int = 20
+    nt_presence_penalty: float = 0.0
+    nt_min_p: float = 0.0
 
 
 def profile_for(model: str) -> ModelProfile:
@@ -171,11 +185,16 @@ def profile_for(model: str) -> ModelProfile:
     Add new entries here when new candidates join ``CANDIDATE_MODELS``.
     """
     m = (model or "").lower()
-    # Qwen 3.5 / 3.6 — hybrid thinking, soft-switchable
+    # Qwen 3.5 / 3.6 — hybrid thinking, soft-switchable. Instruct-mode
+    # sampling per Qwen3.6 README: temp=0.7, top_p=0.80, top_k=20,
+    # min_p=0.0, presence_penalty=1.5 (see
+    # huggingface/unsloth-Qwen3.6-27B-GGUF/README.md "Best Practices").
     if "qwen3.5" in m or "qwen3.6" in m or "ornstein3.6" in m:
         return ModelProfile(
             thinks_by_default=True, can_disable_thinking=True,
             temperature=1.0, top_p=0.95, top_k=20,
+            nt_temperature=0.7, nt_top_p=0.80, nt_top_k=20,
+            nt_presence_penalty=1.5, nt_min_p=0.0,
         )
     # Qwen 3 Thinking-2507 — thinking-only, no soft-switch
     if ("qwen3-thinking" in m or "qwen3:thinking" in m
@@ -203,17 +222,41 @@ def profile_for(model: str) -> ModelProfile:
     )
 
 
-def effective_budget(task: str, model: str) -> dict:
+def effective_budget(
+    task: str, model: str, *, force_no_thinking: bool = False,
+) -> dict:
     """Return a budget dict scaled for the model's profile.
 
-    Thinking models get a 8× num_predict multiplier with a 12k floor.
-    Sampling params come from the profile, not the task default.
+    Default (``force_no_thinking=False``): thinking models get an 8×
+    num_predict multiplier with a 12k floor, and thinking-mode
+    sampling.
+
+    ``force_no_thinking=True``: if the model supports the soft switch
+    (hybrid Qwen3.5/3.6), return the instruct-mode sampling recipe
+    (temp=0.7, top_p=0.80, presence_penalty=1.5 …) and base
+    num_predict — no thinking multiplier needed. Phase 54.6.243
+    added this path after the 54.6.240 bench showed qwen3.6 looking
+    worse than qwen3:30b-a3b-instruct only because it was compared
+    in thinking mode against non-thinking baselines; with this
+    budget the same model beats them on a probe run.
     """
     base = BUDGETS[task]
     p = profile_for(model)
+    use_nt = force_no_thinking and p.can_disable_thinking
     predict = base["num_predict"]
-    if p.thinks_by_default:
+    if p.thinks_by_default and not use_nt:
         predict = max(THINKING_MIN_PREDICT, predict * THINKING_PREDICT_MULT)
+    if use_nt:
+        return {
+            "num_ctx":     base["num_ctx"],
+            "num_predict": predict,
+            "temperature": p.nt_temperature,
+            "top_p":       p.nt_top_p,
+            "top_k":       p.nt_top_k,
+            "min_p":       p.nt_min_p,
+            "presence_penalty": p.nt_presence_penalty,
+            "thinks_by_default": False,
+        }
     return {
         "num_ctx":     base["num_ctx"],
         "num_predict": predict,
@@ -320,17 +363,28 @@ def _installed_models() -> set[str]:
         return set()
 
 
-def _call_model_raw(system: str, user: str, model: str, budget: dict) -> dict:
+def _call_model_raw(
+    system: str, user: str, model: str, budget: dict,
+    *, force_no_thinking: bool = False,
+) -> dict:
     """One chat call. Returns {content, thinking, elapsed_s, eval_count,
     done_reason, error, budget_predict, temp}. We go through the raw
     ollama client so we can capture ``thinking`` separately — without
     that, a thinking-runaway is indistinguishable from a hang.
 
-    Phase 54.6.85 — budget now includes Qwen-recommended sampling
-    (top_p, top_k) and ``thinks_by_default`` signal. On hybrid models
-    we leave Ollama to decide whether to thinking (no explicit
-    ``think`` flag) so the comparison is "what the model does when
-    nobody overrides it" — that's the real production path.
+    Phase 54.6.85 — budget includes Qwen-recommended sampling (top_p,
+    top_k) and ``thinks_by_default`` signal. By default the caller
+    leaves Ollama to decide whether to think (no explicit ``think``
+    flag) so the "default behavior" comparison stays pure.
+
+    Phase 54.6.241 — ``force_no_thinking=True`` explicitly passes
+    ``think=False`` to Ollama. Only meaningful on hybrid models
+    where ``profile_for(model).can_disable_thinking`` is true;
+    non-hybrid models ignore the flag. The write_section task in
+    particular uses this because a short grounded writing prompt
+    doesn't benefit from CoT, and we observed qwen3.6:27b-dense
+    burning the whole num_predict budget inside <think>…</think>
+    with an empty final answer when thinking was on.
     """
     import ollama
     client = ollama.Client()
@@ -345,16 +399,40 @@ def _call_model_raw(system: str, user: str, model: str, budget: dict) -> dict:
         options["top_p"] = budget["top_p"]
     if budget.get("top_k") is not None:
         options["top_k"] = budget["top_k"]
+    # Phase 54.6.243 — forward instruct-mode penalties when the
+    # budget carries them (set only by force_no_thinking on hybrid
+    # Qwen3.5/3.6). The Qwen3.6 README prescribes presence_penalty=1.5
+    # for non-thinking mode specifically because without it the model
+    # repeats itself; omitting it was one of the silent fairness
+    # bugs behind the "qwen3.6 looks worse than qwen3:30b-a3b" result
+    # on 54.6.240.
+    if budget.get("min_p") is not None:
+        options["min_p"] = budget["min_p"]
+    if budget.get("presence_penalty") is not None:
+        options["presence_penalty"] = budget["presence_penalty"]
+    chat_kwargs: dict = dict(
+        model=model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user",   "content": user},
+        ],
+        options=options,
+        keep_alive=0,   # unload after so the next candidate gets fresh VRAM
+    )
+    # Phase 54.6.241 — explicit think flag for hybrid models. Only
+    # applied when force_no_thinking is set AND the model supports
+    # the switch (non-hybrid models either error or no-op on the
+    # flag; we skip silently). Passing `think=False` on a model
+    # that supports it suppresses the <think> block entirely and
+    # produces a direct answer — fixes the write_section runaway
+    # where qwen3.6:27b-dense produced 3970 thinking tokens + 0
+    # content chars.
+    if force_no_thinking:
+        prof = profile_for(model)
+        if prof.can_disable_thinking:
+            chat_kwargs["think"] = False
     try:
-        resp = client.chat(
-            model=model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user",   "content": user},
-            ],
-            options=options,
-            keep_alive=0,   # unload after so the next candidate gets fresh VRAM
-        )
+        resp = client.chat(**chat_kwargs)
     except Exception as exc:
         return {"error": str(exc), "elapsed_s": time.monotonic() - t0,
                 "content": "", "thinking": "", "eval_count": 0,
@@ -507,7 +585,17 @@ def b_model_sweep_extract_kg() -> Iterable[BenchMetric]:
             yield BenchMetric(f"{model}::status", "not-installed", "",
                               note="pull with `ollama pull " + model + "`")
             continue
-        resp = _call_model_raw(sys_p, usr_p, model, effective_budget("extract_kg", model))
+        # Phase 54.6.243 — extract_kg is structured JSON; hybrid models
+        # should run this task in instruct (non-thinking) mode for an
+        # apples-to-apples comparison vs qwen3:30b-a3b-instruct. Pre-243,
+        # Qwen3.6 emitted ~16k chars of <think> and truncated to 7 triples
+        # vs qwen3's 12 triples in 15s — that made the model look worse
+        # when it's actually faster + cleaner when allowed to skip CoT.
+        resp = _call_model_raw(
+            sys_p, usr_p, model,
+            effective_budget("extract_kg", model, force_no_thinking=True),
+            force_no_thinking=True,
+        )
         if resp.get("error"):
             yield BenchMetric(f"{model}::status", "error", "",
                               note=resp["error"][:80])
@@ -599,7 +687,15 @@ def b_model_sweep_compile_summary() -> Iterable[BenchMetric]:
         if installed and model not in installed:
             yield BenchMetric(f"{model}::status", "not-installed", "")
             continue
-        resp = _call_model_raw(sys_p, usr_p, model, effective_budget("compile_summary", model))
+        # Phase 54.6.243 — same fairness fix as extract_kg: compile_summary
+        # is a direct-output prose task, not a reasoning task. qwen3:30b-a3b
+        # runs it in 13s non-thinking; qwen3.6 in thinking took 125s with
+        # a 12.5k-char CoT preamble. Force no-thinking + instruct sampling.
+        resp = _call_model_raw(
+            sys_p, usr_p, model,
+            effective_budget("compile_summary", model, force_no_thinking=True),
+            force_no_thinking=True,
+        )
         if resp.get("error"):
             yield BenchMetric(f"{model}::status", "error", "",
                               note=resp["error"][:80])
@@ -703,19 +799,38 @@ def b_model_sweep_write_section() -> Iterable[BenchMetric]:
         if installed and model not in installed:
             yield BenchMetric(f"{model}::status", "not-installed", "")
             continue
-        resp = _call_model_raw(sys_p, usr_p, model, effective_budget("write_section", model))
+        # Phase 54.6.243 — aligned with extract_kg / compile_summary:
+        # hybrid models run this direct-writing task in instruct mode
+        # with instruct sampling (temp=0.7 / top_p=0.80 / top_k=20 /
+        # presence_penalty=1.5), matching the Qwen3.6 README recipe.
+        # 54.6.242's "use thinking defaults" rollback was wrong: the
+        # probe in Phase 54.6.243 confirms thinking mode burns 80 %+
+        # of the budget inside <think> for a 150-word writing prompt,
+        # so instruct sampling is the right default for this task.
+        resp = _call_model_raw(
+            sys_p, usr_p, model,
+            effective_budget("write_section", model, force_no_thinking=True),
+            force_no_thinking=True,
+        )
         if resp.get("error"):
             yield BenchMetric(f"{model}::status", "error", "",
                               note=resp["error"][:80])
             continue
 
         content = resp["content"]
+        thinking = resp.get("thinking", "") or ""
         scored = _score_write_section(content)
         yield BenchMetric(f"{model}::elapsed_s",
                           round(resp["elapsed_s"], 1), "s",
                           note=f"done={resp.get('done_reason','')}")
         yield BenchMetric(f"{model}::eval_count", resp["eval_count"], "tok")
         yield BenchMetric(f"{model}::content_chars", len(content), "chars")
+        # 54.6.241 — expose thinking_chars so a silent runaway is
+        # distinguishable from an empty-response failure. Should be
+        # 0 when force_no_thinking sticks; a positive number means
+        # the model still emitted a <think> block despite the flag.
+        yield BenchMetric(f"{model}::thinking_chars", len(thinking), "chars",
+                          note="should be 0 with force_no_thinking=True")
         yield BenchMetric(f"{model}::words", scored["words"], "words")
         yield BenchMetric(f"{model}::on_target", scored["on_target"], "bool",
                           note="1 if words ∈ [80, 300] for target=150")

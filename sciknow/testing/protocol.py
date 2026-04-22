@@ -11969,6 +11969,1737 @@ def l1_phase54_6_230_unified_monitor() -> None:
     )
 
 
+def l1_phase54_6_270_cli_monitor_compact_mode() -> None:
+    """Phase 54.6.270 — CLI monitor --compact flag renders a 1-page
+    minimal view: verdict + health + services + alerts + jobs only.
+
+    Use cases: narrow terminals, tmux status bars, screenshots
+    for status posts / incident retrospectives.
+
+    Guards:
+
+      A) CLI registers --compact typer option.
+      B) Compact body calls collect_monitor_snapshot and builds a
+         separate _render_compact renderer (not the full layout).
+      C) Compact respects --watch for live updates.
+    """
+    import inspect as _inspect
+
+    from sciknow.cli import db as db_cli
+
+    mon_src = _inspect.getsource(db_cli.monitor)
+
+    # A) option registered
+    assert '"--compact"' in mon_src, (
+        "54.6.270 CLI monitor must register --compact typer option"
+    )
+
+    # B) dedicated renderer + snapshot call
+    assert "_render_compact" in mon_src, (
+        "54.6.270 compact path must define a separate renderer"
+    )
+    assert "collect_monitor_snapshot" in mon_src, (
+        "54.6.270 compact path must reuse the shared snapshot source"
+    )
+
+    # C) live view support
+    assert "from rich.live import Live" in mon_src, (
+        "54.6.270 compact + --watch must reuse Rich Live for in-place "
+        "repaint"
+    )
+
+
+def l1_phase54_6_269_browser_notifications_for_new_errors() -> None:
+    """Phase 54.6.269 — fire a browser notification when a newly-
+    raised error alert appears and the tab is hidden.
+
+    Turns the monitor into a passive guardian during long ingestion
+    runs: operator tabs away to something else; when an error fires
+    they get a system notification instead of discovering it 40 min
+    later.
+
+    Guards:
+
+      A) _requestNotificationPermissionIfNeeded invoked from
+         openMonitorModal (permission ask happens on first use,
+         not at page load — less hostile UX).
+      B) _maybeNotifyNewErrors invoked after the alert delta block.
+      C) Helper gates on Notification.permission === 'granted' and
+         document.visibilityState === 'hidden'.
+      D) Helper only fires for severity === 'error'.
+    """
+    from pathlib import Path
+    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+
+    assert "function _requestNotificationPermissionIfNeeded" in web_text, (
+        "54.6.269 permission-request helper must be defined"
+    )
+    assert "_requestNotificationPermissionIfNeeded();" in web_text, (
+        "54.6.269 openMonitorModal must request permission on first use"
+    )
+    assert "function _maybeNotifyNewErrors" in web_text, (
+        "54.6.269 notification helper must be defined"
+    )
+    assert "_maybeNotifyNewErrors(newCodes, alerts);" in web_text, (
+        "54.6.269 alert banner must invoke _maybeNotifyNewErrors "
+        "after the localStorage delta block"
+    )
+    assert "Notification.permission !== 'granted'" in web_text, (
+        "54.6.269 helper must gate on granted permission"
+    )
+    assert "document.visibilityState !== 'hidden'" in web_text, (
+        "54.6.269 helper must only notify on hidden tabs"
+    )
+    assert "a.severity !== 'error'" in web_text, (
+        "54.6.269 helper must skip non-error alerts"
+    )
+
+
+def l1_phase54_6_268_alerts_as_markdown() -> None:
+    """Phase 54.6.268 — alerts-as-Markdown export shared by
+    CLI ``--alerts-md`` and web Copy-as-MD button.
+
+    Guards:
+
+      A) monitor.alerts_as_markdown returns a string with the header
+         line "# sciknow alerts — …" and a bullet per alert, with
+         severity icons and the action as an inline code span.
+      B) Empty alerts → "No alerts" placeholder instead of an empty
+         list.
+      C) CLI monitor registers --alerts-md and short-circuits the
+         render when set.
+      D) Web endpoint /api/monitor/alerts-md is registered.
+      E) Web modal alert banner renders a Copy-as-MD button wired
+         to copyAlertsMarkdown().
+    """
+    import inspect as _inspect
+    from pathlib import Path
+
+    from sciknow.core import monitor as mon
+
+    # A) non-empty alerts
+    md = mon.alerts_as_markdown({
+        "project": {"slug": "test"},
+        "snapshotted_at": "2026-04-22T10:00:00Z",
+        "health_score": {"score": 75},
+        "alerts": [
+            {"severity": "error", "code": "x",
+             "message": "broken", "action": "fix-it"},
+        ],
+    })
+    assert md.startswith("# sciknow alerts — test"), (
+        "54.6.268 markdown header must carry the project slug"
+    )
+    assert "❌" in md and "**x**" in md and "`fix-it`" in md, (
+        "54.6.268 alert bullet must render severity icon + code "
+        "+ inline action"
+    )
+    assert "Health: 75/100" in md, (
+        "54.6.268 header must surface the health score"
+    )
+
+    # B) empty alerts
+    md_empty = mon.alerts_as_markdown({
+        "project": {"slug": "test"},
+        "snapshotted_at": "z",
+        "alerts": [],
+    })
+    assert "No alerts" in md_empty, (
+        "54.6.268 empty alerts must render a placeholder line"
+    )
+
+    # C) CLI option + short-circuit path
+    from sciknow.cli import db as db_cli
+    mon_src = _inspect.getsource(db_cli.monitor)
+    assert '"--alerts-md"' in mon_src, (
+        "54.6.268 CLI monitor must register --alerts-md typer option"
+    )
+    assert "alerts_as_markdown" in mon_src, (
+        "54.6.268 CLI monitor must call alerts_as_markdown"
+    )
+
+    # D) Web endpoint
+    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    assert "/api/monitor/alerts-md" in web_text, (
+        "54.6.268 web must expose /api/monitor/alerts-md endpoint"
+    )
+
+    # E) Web button + helper
+    assert "function copyAlertsMarkdown" in web_text, (
+        "54.6.268 web must define copyAlertsMarkdown() helper"
+    )
+    assert "onclick=\"copyAlertsMarkdown(this)\"" in web_text, (
+        "54.6.268 alerts banner must wire a Copy-as-MD button"
+    )
+
+
+def l1_phase54_6_267_health_score_trend_sparkline() -> None:
+    """Phase 54.6.267 — web verdict banner carries a rolling health
+    sparkline sourced from a localStorage ring (60 samples) — pure
+    client-side trend indicator, no backend state.
+
+    Guards:
+
+      A) Ring storage key declared.
+      B) Ring size clamp (>60 → slice).
+      C) 8-level Unicode ramp matches the existing _spark helper.
+      D) Sparkline only renders when ring has at least 2 samples
+         (avoids the "single dot" useless display).
+      E) min/max tooltip for the trend.
+    """
+    from pathlib import Path
+    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+
+    assert "sciknow.monitor.healthRing" in web_text, (
+        "54.6.267 must declare the localStorage key for the health ring"
+    )
+    assert "ring = ring.slice(-60)" in web_text, (
+        "54.6.267 ring must cap at 60 entries"
+    )
+    assert "const sparkRamp = '▁▂▃▄▅▆▇█'" in web_text, (
+        "54.6.267 must reuse the 8-level block-character ramp"
+    )
+    assert "ring.length >= 2" in web_text, (
+        "54.6.267 sparkline must only render when ring has ≥2 samples"
+    )
+    assert "'min '" in web_text and "' / max '" in web_text, (
+        "54.6.267 tooltip must include min/max"
+    )
+
+
+def l1_phase54_6_266_alert_delta_new_badge() -> None:
+    """Phase 54.6.266 — web alert banner marks newly-raised alert
+    codes with a NEW badge based on a localStorage acknowledgement
+    set. Saves current codes back immediately so repeat polls
+    within the same session stop flagging already-seen ones.
+
+    Guards:
+
+      A) STORAGE_KEY constant present.
+      B) localStorage.getItem loads the seen set.
+      C) Per-alert NEW badge rendered when code ∉ seen.
+      D) localStorage.setItem persists the current codes.
+    """
+    from pathlib import Path
+    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+
+    assert "sciknow.monitor.seenAlertCodes" in web_text, (
+        "54.6.266 alert-delta helper must use a stable storage key"
+    )
+    assert "window.localStorage.getItem(STORAGE_KEY)" in web_text, (
+        "54.6.266 must read the acknowledgement set from localStorage"
+    )
+    assert "newCodes.has(a.code)" in web_text, (
+        "54.6.266 per-alert NEW badge must gate on newCodes membership"
+    )
+    assert "window.localStorage.setItem" in web_text, (
+        "54.6.266 must persist current codes after rendering"
+    )
+    # Visible NEW marker
+    assert ">NEW</span>" in web_text, (
+        "54.6.266 visible NEW badge span must render"
+    )
+
+
+def l1_phase54_6_265_monitor_hash_deep_links() -> None:
+    """Phase 54.6.265 — URL-hash deep links into monitor panels.
+
+    Clicking a jump-to chip updates the URL hash via
+    history.replaceState; loading a URL with a ``#mon-*`` hash
+    opens the monitor and scrolls to that panel after the first
+    render lands.
+
+    Guards:
+
+      A) openMonitorFromHash function present.
+      B) Nav chip onclick invokes history.replaceState with the
+         hash — makes the URL shareable.
+      C) DOMContentLoaded + hashchange listeners registered so the
+         entry point works both on first paint and live edits.
+    """
+    from pathlib import Path
+    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+
+    assert "function openMonitorFromHash" in web_text, (
+        "54.6.265 openMonitorFromHash() must be defined"
+    )
+    assert "history.replaceState(null, ''" in web_text, (
+        "54.6.265 nav chip click must replace the URL hash"
+    )
+    assert "window.addEventListener('DOMContentLoaded', openMonitorFromHash)" in web_text, (
+        "54.6.265 DOMContentLoaded must invoke openMonitorFromHash"
+    )
+    assert "window.addEventListener('hashchange', openMonitorFromHash)" in web_text, (
+        "54.6.265 hashchange must invoke openMonitorFromHash"
+    )
+    # URL hash prefix contract
+    assert "'mon-'" in web_text and "h.startsWith('mon-')" in web_text, (
+        "54.6.265 hash handler must gate on the 'mon-' prefix"
+    )
+
+
+def l1_phase54_6_264_services_probes_are_parallel() -> None:
+    """Phase 54.6.264 — _services_health runs the three probes
+    concurrently via ThreadPoolExecutor so the snapshot wall-clock
+    scales with max(probe), not sum(probe).
+
+    Pre-264 with a 350ms Qdrant probe + 5ms PG + 20ms Ollama the
+    snapshot paid ~375ms on services alone; post-264 it pays
+    max(350, 5, 20) = ~350ms. In local-everything setups both are
+    cheap, but the difference matters when Qdrant is remote.
+
+    Guards:
+
+      A) _services_health source-grep for ThreadPoolExecutor.
+      B) Per-probe timeout (3.0) is wired — regression guard against
+         "one hung probe hangs the whole snapshot".
+      C) Shape unchanged (still returns the three keys with the
+         three documented sub-fields).
+      D) Probe error caught → up=False fallback (sanity: if an
+         individual helper raises we must still return the dict).
+    """
+    import inspect as _inspect
+
+    from sciknow.core import monitor as mon
+
+    # A) parallel executor
+    src = _inspect.getsource(mon._services_health)
+    assert "ThreadPoolExecutor" in src, (
+        "54.6.264 _services_health must use ThreadPoolExecutor "
+        "(probes are I/O-bound)"
+    )
+
+    # B) timeout wired
+    assert "timeout=3.0" in src or "timeout=3" in src, (
+        "54.6.264 per-probe timeout must be <=3s to fail-fast"
+    )
+
+    # C) shape unchanged — re-call the live helper; expect three
+    # keys regardless of service state.
+    out = mon._services_health()
+    assert set(out.keys()) == {"postgres", "qdrant", "ollama"}
+    for svc, info in out.items():
+        for k in ("up", "latency_ms", "error"):
+            assert k in info, (
+                f"{svc} missing `{k}` after parallelisation"
+            )
+
+    # D) individual raiser still yields up=False (via the except
+    # Exception path in _services_health — source-grep)
+    assert "probe raised" in src, (
+        "54.6.264 _services_health must catch exceptions from "
+        "individual probes and return up=False with an error message"
+    )
+
+
+def l1_phase54_6_263_snapshot_self_timing() -> None:
+    """Phase 54.6.263 — snapshot times itself and exposes
+    ``snapshot_duration_ms``; alert fires when > 2000ms.
+
+    Guards:
+
+      A) Snapshot carries snapshot_duration_ms (int).
+      B) Alert builder silent when the field is absent / small.
+      C) Alert builder emits snapshot_slow warn when > 2000ms.
+      D) CLI header renders "built Nms" chip.
+      E) Web last-updated label includes a built-in duration span.
+    """
+    import inspect as _inspect
+    from pathlib import Path
+
+    from sciknow.core import monitor as mon
+
+    # A) snapshot has the field
+    snap = mon.collect_monitor_snapshot()
+    assert isinstance(snap.get("snapshot_duration_ms"), int), (
+        "54.6.263 snapshot must carry int snapshot_duration_ms"
+    )
+
+    # B) small duration → no alert
+    sil = mon._build_alerts({"snapshot_duration_ms": 300})
+    assert not [a for a in sil if a["code"] == "snapshot_slow"], (
+        "54.6.263 300ms snapshot must not trip snapshot_slow"
+    )
+
+    # C) > threshold → warn
+    warn_alerts = mon._build_alerts({"snapshot_duration_ms": 5000})
+    matches = [a for a in warn_alerts if a["code"] == "snapshot_slow"]
+    assert matches and matches[0]["severity"] == "warn", (
+        "54.6.263 5000ms snapshot must emit warn-level snapshot_slow"
+    )
+
+    # D) CLI header chip
+    from sciknow.cli import db as db_cli
+    cli_src = _inspect.getsource(db_cli._build_monitor_layout)
+    assert 'snap.get("snapshot_duration_ms")' in cli_src, (
+        "54.6.263 CLI header must read snapshot_duration_ms"
+    )
+    assert "built " in cli_src and "ms" in cli_src, (
+        "54.6.263 CLI header must render a 'built Nms' chip"
+    )
+
+    # E) Web last-updated label
+    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    assert "snap.snapshot_duration_ms" in web_text, (
+        "54.6.263 web must read snap.snapshot_duration_ms"
+    )
+    assert "built in " in web_text, (
+        "54.6.263 web Updated label must include the 'built in Nms' span"
+    )
+
+
+def l1_phase54_6_262_services_reachability() -> None:
+    """Phase 54.6.262 — services reachability probe (PG/Qdrant/Ollama).
+
+    Each service gets a fresh ping per snapshot with up/latency/error
+    fields. Alert builder emits `service_down` at error severity for
+    critical services (postgres, qdrant) and warn for Ollama (install
+    can still browse the web UI without it).
+
+    Guards:
+
+      A) _services_health returns dict keyed by service with the
+         three documented fields per entry.
+      B) Snapshot carries `services`.
+      C) Alert builder emits service_down at error for PG/Qdrant
+         down, warn for Ollama down, silent when all up.
+      D) CLI header renders the "svc P Q O" dot chip.
+      E) Web verdict banner renders the PG/Qdr/Ollama pills.
+    """
+    import inspect as _inspect
+    from pathlib import Path
+
+    from sciknow.core import monitor as mon
+
+    # A) helper shape
+    out = mon._services_health()
+    assert set(out.keys()) == {"postgres", "qdrant", "ollama"}, (
+        f"_services_health must return {{postgres, qdrant, ollama}} keys, "
+        f"got {set(out.keys())}"
+    )
+    for svc, info in out.items():
+        for k in ("up", "latency_ms", "error"):
+            assert k in info, f"services.{svc} missing `{k}`"
+
+    # B) snapshot integration
+    snap = mon.collect_monitor_snapshot()
+    assert "services" in snap, (
+        "54.6.262 snapshot must carry services"
+    )
+
+    # C) Alert severity rules
+    # PG down → error
+    alerts_pg_down = mon._build_alerts({"services": {
+        "postgres": {"up": False, "latency_ms": 0, "error": "connection refused"},
+        "qdrant":   {"up": True, "latency_ms": 10, "error": None},
+        "ollama":   {"up": True, "latency_ms": 5, "error": None},
+    }})
+    matches = [a for a in alerts_pg_down if a.get("code") == "service_down"]
+    assert len(matches) == 1 and matches[0]["severity"] == "error", (
+        "54.6.262 PG down must emit exactly one error-level service_down alert"
+    )
+    assert "postgres" in matches[0]["message"]
+
+    # Ollama down → warn (non-critical)
+    alerts_ollama_down = mon._build_alerts({"services": {
+        "postgres": {"up": True, "latency_ms": 2, "error": None},
+        "qdrant":   {"up": True, "latency_ms": 10, "error": None},
+        "ollama":   {"up": False, "latency_ms": 0, "error": "refused"},
+    }})
+    matches = [a for a in alerts_ollama_down if a.get("code") == "service_down"]
+    assert len(matches) == 1 and matches[0]["severity"] == "warn", (
+        "54.6.262 Ollama-only down must emit a warn-level alert"
+    )
+
+    # All up → silent
+    alerts_all_up = mon._build_alerts({"services": {
+        "postgres": {"up": True, "latency_ms": 2, "error": None},
+        "qdrant":   {"up": True, "latency_ms": 10, "error": None},
+        "ollama":   {"up": True, "latency_ms": 5, "error": None},
+    }})
+    assert not [a for a in alerts_all_up if a.get("code") == "service_down"], (
+        "54.6.262 all services up must not emit service_down alerts"
+    )
+
+    # D) CLI header chip
+    from sciknow.cli import db as db_cli
+    cli_src = _inspect.getsource(db_cli._build_monitor_layout)
+    assert 'snap.get("services")' in cli_src, (
+        "54.6.262 CLI header must read services from the snapshot"
+    )
+    assert '("postgres", "P")' in cli_src, (
+        "54.6.262 CLI header must render the P/Q/O three-dot chip"
+    )
+
+    # E) Web verdict banner pills
+    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    assert "snap.services" in web_text, (
+        "54.6.262 web modal must read snap.services"
+    )
+    assert "['postgres', 'PG']" in web_text, (
+        "54.6.262 web modal must list the PG/Qdr/Ollama pill order"
+    )
+
+
+def l1_phase54_6_261_stuck_llm_job_watchdog() -> None:
+    """Phase 54.6.261 — watchdog alert on long-running jobs whose
+    token rate has dropped to zero.
+
+    Pre-261 a wedged Ollama call (model hung, network died mid-
+    stream, etc.) would stay visible as an Active job with 0 TPS
+    without any hint that something's broken. This surfaces the
+    condition at warn severity after 60s of zero-tps streaming,
+    with a DELETE-the-job action hint.
+
+    Guards:
+
+      A) Healthy job (positive tps) → no alert.
+      B) Zero-tps job within threshold (<60s) → no alert (dodges
+         the legitimate "model is thinking" case).
+      C) Zero-tps job beyond threshold → warn-level stuck_llm_job
+         alert; message names the job id + model + elapsed; action
+         points at the DELETE endpoint.
+      D) Non-streaming job (done / error) → ignored even at 0 tps.
+    """
+    from sciknow.core import monitor as mon
+
+    # A) healthy
+    a = mon._build_alerts({"active_jobs": [{
+        "id": "ok", "model": "qwen3.6", "elapsed_s": 120, "tps": 6.0,
+        "stream_state": "streaming",
+    }]})
+    assert not [x for x in a if x["code"] == "stuck_llm_job"], (
+        "54.6.261 healthy job with positive TPS must not trip watchdog"
+    )
+
+    # B) fresh job
+    a = mon._build_alerts({"active_jobs": [{
+        "id": "new", "model": "x", "elapsed_s": 30, "tps": 0,
+        "stream_state": "streaming",
+    }]})
+    assert not [x for x in a if x["code"] == "stuck_llm_job"], (
+        "54.6.261 jobs under 60s must not trip (initial thinking)"
+    )
+
+    # C) stuck
+    a = mon._build_alerts({"active_jobs": [{
+        "id": "stuck123abc", "model": "qwen3.6:27b-dense",
+        "elapsed_s": 125, "tps": 0, "stream_state": "streaming",
+    }]})
+    matches = [x for x in a if x["code"] == "stuck_llm_job"]
+    assert len(matches) == 1, (
+        f"54.6.261 expected one stuck_llm_job alert, got {len(matches)}"
+    )
+    assert matches[0]["severity"] == "warn"
+    assert "qwen3.6:27b-dense" in matches[0]["message"]
+    assert "stuck123" in matches[0]["message"]
+    assert "api/jobs/" in (matches[0].get("action") or "")
+
+    # D) non-streaming state ignored
+    a = mon._build_alerts({"active_jobs": [{
+        "id": "done", "elapsed_s": 300, "tps": 0,
+        "stream_state": "done",
+    }]})
+    assert not [x for x in a if x["code"] == "stuck_llm_job"], (
+        "54.6.261 terminal-state jobs must be ignored"
+    )
+
+
+def l1_phase54_6_260_log_tail_in_monitor() -> None:
+    """Phase 54.6.260 — monitor snapshot carries the last N lines
+    of data_dir/sciknow.log; both renderers surface them.
+
+    Pre-260 operators debugging broken ingests had to SSH in and
+    `tail -f data/sciknow.log` separately. The monitor already
+    snapshots every other state; the log tail closes that gap.
+
+    Guards:
+
+      A) monitor._log_tail returns a dict with the three documented
+         keys; empty `lines` when the log doesn't exist.
+      B) Snapshot carries `log_tail` after collect_monitor_snapshot.
+      C) CLI monitor command registers ``--log-tail N`` option.
+      D) Web renderMonitor reads snap.log_tail and renders a
+         collapsible <details> panel.
+    """
+    import inspect as _inspect
+    from pathlib import Path
+
+    from sciknow.core import monitor as mon
+
+    # A) helper shape on missing dir
+    out = mon._log_tail(Path("/nonexistent/path"), n=5)
+    for k in ("lines", "file_path", "error_lines"):
+        assert k in out, f"log_tail dict missing `{k}`"
+    assert out["lines"] == [], (
+        "nonexistent log must return empty lines (fresh install case)"
+    )
+
+    # B) snapshot integration
+    snap = mon.collect_monitor_snapshot()
+    assert "log_tail" in snap, (
+        "54.6.260 snapshot must carry log_tail"
+    )
+
+    # C) CLI option
+    from sciknow.cli import db as db_cli
+    mon_src = _inspect.getsource(db_cli.monitor)
+    assert '"--log-tail"' in mon_src, (
+        "54.6.260 CLI monitor must register --log-tail typer option"
+    )
+    assert "log_tail > 0" in mon_src, (
+        "54.6.260 CLI monitor body must honour log_tail value"
+    )
+
+    # D) Web modal panel
+    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    assert "snap.log_tail" in web_text, (
+        "54.6.260 web renderMonitor must read snap.log_tail"
+    )
+    assert "Recent log" in web_text, (
+        "54.6.260 web modal must label the log tail panel"
+    )
+
+
+def l1_phase54_6_259_composite_health_score() -> None:
+    """Phase 54.6.259 — composite 0-100 pipeline health score.
+
+    Single roll-up of alert severities + coverage drift + hardware
+    distress. Rendered in both dashboards as the headline "am I
+    OK?" number. Formula is intentionally simple: start at 100,
+    subtract by category, clamp to [0,100].
+
+    Guards:
+
+      A) monitor._compute_health_score(snap) returns a dict with
+         score (int), verdict (str), penalties (list[str]).
+      B) Snapshot carries health_score after collect_monitor_snapshot.
+      C) Empty-alert snap → score 100 + verdict healthy.
+      D) Two-error snap → score 60 + verdict degraded (deterministic
+         so CLI / web colour transitions are predictable).
+      E) CLI header renders "health NN/100" chip; doctor command
+         renders the health term.
+      F) Web verdict banner renders the Health value.
+    """
+    import inspect as _inspect
+    from pathlib import Path
+
+    from sciknow.core import monitor as mon
+
+    # A) helper contract
+    out = mon._compute_health_score({})
+    for k in ("score", "verdict", "penalties"):
+        assert k in out, f"health_score dict missing `{k}`"
+    assert isinstance(out["score"], int)
+    assert out["score"] == 100 and out["verdict"] == "healthy", (
+        "empty snapshot must map to 100/healthy"
+    )
+
+    # B) snapshot integration
+    snap = mon.collect_monitor_snapshot()
+    assert "health_score" in snap, (
+        "54.6.259 collect_monitor_snapshot must populate health_score"
+    )
+
+    # C) already covered by A
+
+    # D) deterministic penalties
+    deg = mon._compute_health_score({
+        "alerts": [
+            {"severity": "error"}, {"severity": "error"},
+        ],
+    })
+    assert deg["score"] == 60, (
+        f"2-error snap expected score 60, got {deg['score']}"
+    )
+    assert deg["verdict"] == "degraded", (
+        f"score 60 must map to degraded, got {deg['verdict']}"
+    )
+
+    # E) CLI header chip + doctor term
+    from sciknow.cli import db as db_cli
+    cli_layout_src = _inspect.getsource(db_cli._build_monitor_layout)
+    assert 'snap.get("health_score")' in cli_layout_src, (
+        "54.6.259 CLI monitor header must read health_score"
+    )
+    assert "health " in cli_layout_src and "/100" in cli_layout_src, (
+        "54.6.259 CLI monitor header must render a 'health NN/100' chip"
+    )
+    doc_src = _inspect.getsource(db_cli.doctor)
+    assert "health_score" in doc_src, (
+        "54.6.259 doctor CLI must surface health_score in its header"
+    )
+
+    # F) Web verdict banner
+    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    assert "snap.health_score" in web_text, (
+        "54.6.259 web verdict banner must read snap.health_score"
+    )
+    assert "health.score" in web_text and "/100" in web_text, (
+        "54.6.259 web verdict banner must render the score /100"
+    )
+
+
+def l1_phase54_6_258_adaptive_poll_rate() -> None:
+    """Phase 54.6.258 — monitor poll cadence adapts to workload.
+
+    When the snapshot's active_jobs list is non-empty the modal
+    polls every 2 s so TPS and token counts feel live; when idle
+    it drops back to the user-configured poll interval. Poll=0
+    (explicitly off) stays off regardless — manual-only wins.
+
+    Guards:
+
+      A) MONITOR_FAST_POLL_S constant defined.
+      B) _monitorAdaptPollRate function exists and checks
+         active_jobs length + user interval.
+      C) refreshMonitor invokes _monitorAdaptPollRate with the
+         active_jobs length from the just-fetched snapshot.
+      D) Poll label explains the adaptive behaviour in its title.
+      E) Badge placeholder element present so adaptive state has
+         a visible cue.
+    """
+    from pathlib import Path
+
+    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+
+    assert "const MONITOR_FAST_POLL_S" in web_text, (
+        "54.6.258 MONITOR_FAST_POLL_S constant must be declared"
+    )
+    assert "function _monitorAdaptPollRate" in web_text, (
+        "54.6.258 _monitorAdaptPollRate() helper must be defined"
+    )
+    assert "_monitorAdaptPollRate(" in web_text, (
+        "54.6.258 refreshMonitor must invoke _monitorAdaptPollRate"
+    )
+    # Poll=0 stays off
+    assert "user <= 0" in web_text, (
+        "54.6.258 adaptive helper must early-out when user interval "
+        "is 0 (manual-only mode stays manual)"
+    )
+    # Label messaging
+    assert "Automatically speeds up" in web_text, (
+        "54.6.258 Poll label tooltip must explain the adaptive "
+        "speed-up"
+    )
+    # Badge element
+    assert 'id="monitor-poll-badge"' in web_text, (
+        "54.6.258 modal must render a monitor-poll-badge placeholder"
+    )
+
+
+def l1_phase54_6_257_actionable_alerts() -> None:
+    """Phase 54.6.257 — alerts carry an ``action`` shell command
+    that both renderers surface: CLI prints it under each alert;
+    web shows a copy button that uses the Clipboard API.
+
+    Pre-257 the operator had to know (or remember) the fix command
+    per alert code. Now every known code maps to a suggested
+    command; unknown codes silently skip the action so we never
+    show a misleading fix.
+
+    Guards:
+
+      A) monitor._build_alerts attaches `action` for known codes
+         via the ``_ACTIONS`` table.
+      B) Action survives alert severity sort (sort doesn't drop keys).
+      C) Unknown-code alerts retain action == None / missing.
+      D) CLI renderer references ``a.get("action")`` and prints
+         the command under the message.
+      E) Web banner renders a copy button when action is set and
+         defines copyMonitorAction().
+    """
+    import inspect as _inspect
+    from pathlib import Path
+
+    from sciknow.core import monitor as mon
+
+    # A) table + attachment
+    build_src = _inspect.getsource(mon._build_alerts)
+    assert "_ACTIONS" in build_src, (
+        "54.6.257 _build_alerts must define an _ACTIONS mapping"
+    )
+    assert 'a["action"]' in build_src or "a['action']" in build_src, (
+        "54.6.257 _build_alerts must attach action to each alert"
+    )
+
+    # B) smoke: inject two known codes + one unknown, confirm shape
+    snap = {
+        "inbox": {"count": 1, "oldest_age_s": 60},
+        "backup_freshness": {"newest_age_days": 10.0},
+    }
+    alerts = mon._build_alerts(snap)
+    codes = {a["code"]: a for a in alerts}
+    assert "inbox_waiting" in codes, "inbox alert must fire"
+    assert codes["inbox_waiting"].get("action") == (
+        "sciknow ingest directory ./data/inbox"
+    ), "inbox_waiting action must point at ingest directory"
+    assert "backup_stale" in codes, "backup alert must fire"
+    assert "sciknow backup run" in (codes["backup_stale"].get("action") or ""), (
+        "backup_stale action must invoke backup run"
+    )
+
+    # C) severity sort must not drop the action field
+    sorted_alerts = sorted(alerts, key=lambda a: a.get("severity", ""))
+    for a in sorted_alerts:
+        if a["code"] in ("inbox_waiting", "backup_stale"):
+            assert a.get("action"), (
+                "sorting alerts must preserve the action field"
+            )
+
+    # D) CLI footer reads action
+    from sciknow.cli import db as db_cli
+    cli_src = _inspect.getsource(db_cli._build_monitor_layout)
+    assert 'a.get("action")' in cli_src, (
+        "54.6.257 CLI alert renderer must read a.get('action')"
+    )
+
+    # E) Web banner copy button + helper
+    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    assert "copyMonitorAction" in web_text, (
+        "54.6.257 web must define copyMonitorAction()"
+    )
+    assert "navigator.clipboard" in web_text, (
+        "54.6.257 web copy helper must use the Clipboard API"
+    )
+    assert "a.action" in web_text, (
+        "54.6.257 web alert banner must gate copy button on a.action"
+    )
+
+
+def l1_phase54_6_256_jump_to_nav_strip() -> None:
+    """Phase 54.6.256 — jump-to navigation strip in the monitor modal.
+
+    With 20+ panels the modal needed a scroll shortcut. Each ``<h4>``
+    inside ``#monitor-content`` becomes a clickable chip in the
+    strip; clicking scrolls it into view. Hidden when ≤3 panels
+    (clean install) to keep the chrome quiet.
+
+    Guards:
+
+      A) ``<div id="monitor-nav-strip">`` declared in the modal body.
+      B) ``rebuildMonitorNavStrip`` function defined.
+      C) ``refreshMonitor`` calls ``rebuildMonitorNavStrip`` after
+         render (so chips refresh on every poll).
+      D) Hidden-when-≤3 rule present.
+    """
+    from pathlib import Path
+
+    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+
+    assert 'id="monitor-nav-strip"' in web_text, (
+        "54.6.256 modal body must declare monitor-nav-strip"
+    )
+    assert "function rebuildMonitorNavStrip" in web_text, (
+        "54.6.256 rebuildMonitorNavStrip() must be defined"
+    )
+    assert "rebuildMonitorNavStrip();" in web_text, (
+        "54.6.256 refreshMonitor must invoke rebuildMonitorNavStrip() "
+        "after each render"
+    )
+    assert "headings.length <= 3" in web_text, (
+        "54.6.256 nav strip must hide when ≤3 headings"
+    )
+
+
+def l1_phase54_6_255_modal_shortcuts_and_export() -> None:
+    """Phase 54.6.255 — web monitor modal ops-QoL additions:
+
+      * ``/`` keyboard shortcut focuses the monitor filter while the
+        modal is open (skipped if the user is typing in another
+        input).
+      * ``Esc`` inside the filter clears it (via onkeydown).
+      * ⬇ Snapshot button downloads the current /api/monitor JSON
+        as ``sciknow-monitor-<slug>-<ts>.json``.
+
+    Guards:
+
+      A) downloadMonitorSnapshot() defined + wired into a modal-
+         header button.
+      B) installMonitorKeyboardShortcuts IIFE runs on document
+         keydown and focuses the filter on `/`.
+      C) Filter input carries an onkeydown that handles Esc →
+         clearMonitorFilter.
+    """
+    from pathlib import Path
+
+    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+
+    # A) download function + button
+    assert "function downloadMonitorSnapshot" in web_text, (
+        "54.6.255 downloadMonitorSnapshot() must be defined"
+    )
+    assert 'onclick="downloadMonitorSnapshot()"' in web_text, (
+        "54.6.255 ⬇ Snapshot button must call downloadMonitorSnapshot()"
+    )
+    assert "sciknow-monitor-" in web_text, (
+        "54.6.255 snapshot filename must follow the sciknow-monitor-* pattern"
+    )
+
+    # B) keyboard shortcut IIFE
+    assert "installMonitorKeyboardShortcuts" in web_text, (
+        "54.6.255 keyboard shortcut installer IIFE must be present"
+    )
+    assert "e.key !== '/'" in web_text, (
+        "54.6.255 keyboard shortcut must gate on `/`"
+    )
+
+    # C) Esc handler on filter input
+    assert "event.key==='Escape'" in web_text, (
+        "54.6.255 monitor-filter input must handle Esc via onkeydown"
+    )
+
+
+def l1_phase54_6_254_monitor_filter_search() -> None:
+    """Phase 54.6.254 — live filter input on the web modal, matching
+    ``--filter`` flag on the CLI monitor.
+
+    Pre-254 operators had no way to triage monitor output by paper
+    name / error class; they'd eyeball a wall of rows. The filter
+    makes the modal useful for incident response: type `timeout`
+    → every row with that substring is visible, everything else
+    hidden. CLI gets the same via ``--filter``.
+
+    Guards:
+
+      A) monitor-filter input + applyMonitorFilter + clearMonitorFilter
+         helpers exist in the template (source-grep).
+      B) refreshMonitor calls applyMonitorFilter after render so
+         the filter reapplies on every poll.
+      C) CLI monitor has a `--filter` option + a local
+         ``_apply_filter`` helper that narrows
+         pipeline.recent_activity + pipeline.top_failures.
+      D) CLI filter is applied in all three render paths (json,
+         watch, one-shot).
+    """
+    import inspect as _inspect
+    from pathlib import Path
+
+    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+
+    # A) web input + helpers
+    assert 'id="monitor-filter"' in web_text, (
+        "54.6.254 monitor modal must include a monitor-filter input"
+    )
+    assert "function applyMonitorFilter" in web_text, (
+        "54.6.254 applyMonitorFilter() must be defined"
+    )
+    assert "function clearMonitorFilter" in web_text, (
+        "54.6.254 clearMonitorFilter() must be defined"
+    )
+
+    # B) refreshMonitor re-applies the filter
+    assert "applyMonitorFilter();" in web_text, (
+        "54.6.254 refreshMonitor must call applyMonitorFilter() "
+        "after renderMonitor so filter survives polls"
+    )
+
+    # C) CLI option + helper
+    from sciknow.cli import db as db_cli
+    mon_src = _inspect.getsource(db_cli.monitor)
+    assert '"--filter"' in mon_src, (
+        "54.6.254 CLI monitor must register a --filter typer option"
+    )
+    assert "_apply_filter" in mon_src, (
+        "54.6.254 CLI monitor body must define _apply_filter helper"
+    )
+    assert "recent_activity" in mon_src and "top_failures" in mon_src, (
+        "54.6.254 CLI _apply_filter must touch recent_activity and "
+        "top_failures"
+    )
+
+    # D) Three render paths
+    assert mon_src.count("_apply_filter(snap)") >= 3, (
+        "54.6.254 _apply_filter must run on all three render paths "
+        "(json, watch, one-shot)"
+    )
+
+
+def l1_phase54_6_253_doctor_command_and_verdict_banner() -> None:
+    """Phase 54.6.253 — new ``sciknow db doctor`` readiness command
+    and matching web verdict banner.
+
+    Pre-253 there was no "is this system ready to run a long job?"
+    one-command check — operators had to eyeball ``db monitor`` or
+    read through ``db stats`` output. The doctor aggregates every
+    alert class the monitor already knows about and exits with a
+    shell-friendly code (0 / 1 / 2 by worst severity).
+
+    Guards:
+
+      A) ``sciknow db doctor`` is registered as a CLI subcommand.
+      B) The command's source body calls ``collect_monitor_snapshot``,
+         reads ``alerts`` by severity, and raises typer.Exit with a
+         code derived from the worst severity (0 / 1 / 2 mapping).
+      C) JSON mode returns the documented keys.
+      D) Web renderMonitor emits a traffic-light verdict banner at
+         the top of the modal, computed from alerts by severity.
+    """
+    import inspect as _inspect
+    from pathlib import Path
+
+    from sciknow.cli import db as db_cli
+
+    # A) CLI command exists under `db`
+    assert hasattr(db_cli, "doctor"), (
+        "54.6.253 sciknow/cli/db.py must define a `doctor` command"
+    )
+    # It's a Typer command, so getattr returns the decorated function
+    doc_src = _inspect.getsource(db_cli.doctor)
+    # B) body contract
+    assert "collect_monitor_snapshot" in doc_src, (
+        "54.6.253 doctor must reuse collect_monitor_snapshot"
+    )
+    assert 'raise typer.Exit' in doc_src, (
+        "54.6.253 doctor must exit with a typer.Exit(code) based on worst severity"
+    )
+    assert '"verdict"' in doc_src or "'verdict'" in doc_src, (
+        "54.6.253 doctor JSON mode must include a `verdict` field"
+    )
+    assert '"exit_code"' in doc_src or "'exit_code'" in doc_src, (
+        "54.6.253 doctor JSON mode must include an `exit_code` field"
+    )
+
+    # C) JSON shape keys (already checked above in B; this is
+    # another way to view the contract via the module docstring)
+    assert "readiness / health check" in (db_cli.doctor.__doc__ or "").lower() \
+        or "doctor" in (db_cli.doctor.__doc__ or "").lower(), (
+        "54.6.253 doctor command must be documented in its docstring"
+    )
+
+    # D) Web verdict banner
+    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    assert "doctor-style verdict banner" in web_text \
+        or "sciknow db doctor" in web_text, (
+        "54.6.253 web modal must render a doctor-style verdict "
+        "banner referencing the CLI equivalent"
+    )
+    # The verdict computation mirror
+    assert "const verdict = errN" in web_text, (
+        "54.6.253 web banner must compute its verdict from alert severities"
+    )
+
+
+def l1_phase54_6_252_config_drift_surface() -> None:
+    """Phase 54.6.252 — monitor surfaces the active-project → .env
+    override list that Settings stashes at startup.
+
+    Pre-252 the drift was logged as a one-off warning at module
+    import time; if the operator missed that log line (most do),
+    they'd assume ``.env`` was the single source of truth and
+    potentially edit it without effect. The dashboard signal fixes
+    that.
+
+    Guards:
+
+      A) Settings.__post_init validator stashes ``_env_overrides``
+         on the instance (attribute exists even when empty).
+      B) monitor._config_drift() returns a list.
+      C) Snapshot carries ``config_drift``.
+      D) _build_alerts emits ``config_drift`` at info severity for
+         a non-empty list; silent for empty.
+      E) CLI footer renders the drift line when non-empty (source-
+         grep on the builder).
+      F) Web modal renders a Config-drift card (source-grep).
+    """
+    import inspect as _inspect
+    from pathlib import Path
+
+    from sciknow.core import monitor as mon
+    from sciknow.config import settings
+
+    # A) attribute presence
+    assert hasattr(settings, "_env_overrides"), (
+        "54.6.252 Settings must expose _env_overrides (empty list "
+        "when no explicit project is active)"
+    )
+    assert isinstance(settings._env_overrides, list), (
+        "_env_overrides must be a list"
+    )
+
+    # B) helper returns list
+    out = mon._config_drift()
+    assert isinstance(out, list), (
+        "54.6.252 _config_drift() must return a list"
+    )
+
+    # C) snapshot carries the field
+    snap = mon.collect_monitor_snapshot()
+    assert "config_drift" in snap, (
+        "54.6.252 snapshot must carry config_drift"
+    )
+
+    # D) alert emits on non-empty, silent on empty
+    alerts_nonempty = mon._build_alerts({
+        "config_drift": ["pg_database 'sciknow' → 'sciknow_gc'"],
+    })
+    drift_alerts = [a for a in alerts_nonempty if a["code"] == "config_drift"]
+    assert drift_alerts, (
+        "54.6.252 non-empty drift must emit a config_drift alert"
+    )
+    assert drift_alerts[0]["severity"] == "info", (
+        "54.6.252 config_drift severity must be info (typically intentional)"
+    )
+    alerts_empty = mon._build_alerts({"config_drift": []})
+    assert not [a for a in alerts_empty if a["code"] == "config_drift"], (
+        "54.6.252 empty drift must not emit an alert"
+    )
+
+    # E) CLI footer rendering
+    from sciknow.cli import db as db_cli
+    cli_src = _inspect.getsource(db_cli._build_monitor_layout)
+    assert 'snap.get("config_drift")' in cli_src, (
+        "54.6.252 CLI footer must read config_drift"
+    )
+    assert 'drift' in cli_src and 'override(s)' in cli_src, (
+        "54.6.252 CLI footer must render a drift tag with count"
+    )
+
+    # F) web modal drift card
+    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    assert "snap.config_drift" in web_text, (
+        "54.6.252 web modal must read snap.config_drift"
+    )
+    assert "Config drift" in web_text, (
+        "54.6.252 web modal must label the drift card"
+    )
+
+
+def l1_phase54_6_251_web_parity_meta_year_coverage() -> None:
+    """Phase 54.6.251 — web modal surfaces three snapshot fields
+    previously rendered only in the CLI:
+
+      * ``meta_quality`` — metadata-source breakdown and
+        citations cross-linked %
+      * ``year_histogram`` — sparkline of papers-per-year
+      * ``embeddings_coverage`` + ``visuals_coverage`` — percent
+        pills per coverage dimension
+
+    Guards (source-grep on the inlined JS):
+
+      A) snap.meta_quality → metaQ; renders a stacked-bar breakdown
+         under "Metadata sources" and the cross-linked citations
+         headline.
+      B) snap.year_histogram → yearHist; rendered as a
+         "Corpus year distribution" sparkline using the shared
+         _spark() helper.
+      C) snap.embeddings_coverage → embedCov; rendered under a
+         "Coverage" strip with a tri-colour percentage tag.
+      D) snap.visuals_coverage → vcov; figures / charts / equations
+         rows in the Coverage strip (only when total > 0).
+      E) CLI regression guard — meta sources, year histogram, and
+         embed coverage all stay rendered in the CLI layout.
+    """
+    from pathlib import Path
+    import inspect as _inspect
+
+    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+
+    # A) meta quality
+    assert "snap.meta_quality" in web_text, (
+        "54.6.251 web must read snap.meta_quality"
+    )
+    assert "Metadata sources" in web_text, (
+        "54.6.251 web must render a Metadata sources section"
+    )
+    assert "Citations resolved" in web_text, (
+        "54.6.251 cross-linked citations headline must render in the "
+        "Metadata sources section when citations_total > 0"
+    )
+
+    # B) year histogram
+    assert "snap.year_histogram" in web_text, (
+        "54.6.251 web must read snap.year_histogram"
+    )
+    assert "Corpus year distribution" in web_text, (
+        "54.6.251 web must label the year-histogram sparkline"
+    )
+
+    # C) embeddings coverage
+    assert "snap.embeddings_coverage" in web_text, (
+        "54.6.251 web must read snap.embeddings_coverage"
+    )
+    # The shared Coverage strip
+    assert ">Coverage<" in web_text, (
+        "54.6.251 web must render a Coverage strip"
+    )
+
+    # D) visuals coverage
+    assert "snap.visuals_coverage" in web_text, (
+        "54.6.251 web must read snap.visuals_coverage"
+    )
+    assert "Figures captioned" in web_text, (
+        "54.6.251 Coverage strip must render the figures-captioned row"
+    )
+
+    # E) CLI regression guard
+    from sciknow.cli import db as db_cli
+    cli_src = _inspect.getsource(db_cli._build_monitor_layout)
+    assert 'snap.get("meta_quality")' in cli_src, (
+        "54.6.251 CLI must keep reading meta_quality"
+    )
+    assert 'snap.get("year_histogram")' in cli_src, (
+        "54.6.251 CLI must keep reading year_histogram"
+    )
+    assert 'snap.get("embeddings_coverage")' in cli_src, (
+        "54.6.251 CLI must keep reading embeddings_coverage"
+    )
+
+
+def l1_phase54_6_250_backup_freshness_signal() -> None:
+    """Phase 54.6.250 — backup freshness signal + alert.
+
+    Pre-250 the dashboard had zero visibility into ``sciknow backup
+    run``. If the nightly cron silently failed the backups would go
+    stale for weeks before anyone noticed. Fills the gap with a
+    snapshot field, a two-threshold alert (warn >7d / error >30d),
+    and a "backup Nd" chip in both renderers.
+
+    Guards:
+
+      A) ``monitor._backup_freshness()`` returns a dict with the
+         four documented keys. ``newest_age_days`` is None when no
+         backup ledger exists, int/float otherwise.
+      B) Snapshot carries ``backup_freshness``.
+      C) ``_build_alerts`` emits a ``backup_stale`` warn at >7d and
+         error at >30d; silent when newest_age_days is None.
+      D) CLI header source references ``backup_fresh`` and ``backup Nd``.
+      E) Web modal source reads ``snap.backup_freshness`` and shows
+         the Backup pill in the quality strip.
+    """
+    import inspect as _inspect
+    from pathlib import Path
+
+    from sciknow.core import monitor as mon
+
+    # A) helper shape
+    assert hasattr(mon, "_backup_freshness"), (
+        "54.6.250 monitor must expose _backup_freshness()"
+    )
+    out = mon._backup_freshness()
+    for key in ("newest_age_days", "count", "newest_timestamp", "total_bytes"):
+        assert key in out, f"backup_freshness missing `{key}`"
+
+    # B) snapshot carries the field
+    snap = mon.collect_monitor_snapshot()
+    assert "backup_freshness" in snap, (
+        "54.6.250 snapshot must include backup_freshness"
+    )
+
+    # C) alert thresholds
+    warn_alerts = mon._build_alerts({
+        "backup_freshness": {"newest_age_days": 10.0}
+    })
+    warn_match = [a for a in warn_alerts if a["code"] == "backup_stale"]
+    assert warn_match and warn_match[0]["severity"] == "warn", (
+        "54.6.250 10d-old backup must emit warn-level backup_stale"
+    )
+    error_alerts = mon._build_alerts({
+        "backup_freshness": {"newest_age_days": 45.0}
+    })
+    error_match = [a for a in error_alerts if a["code"] == "backup_stale"]
+    assert error_match and error_match[0]["severity"] == "error", (
+        "54.6.250 45d-old backup must emit error-level backup_stale"
+    )
+    # Silent when None
+    silent = mon._build_alerts({"backup_freshness": {"newest_age_days": None}})
+    assert not [a for a in silent if a["code"] == "backup_stale"], (
+        "54.6.250 backup_stale must stay silent when no backup exists"
+    )
+
+    # D) CLI header renders the chip
+    from sciknow.cli import db as db_cli
+    cli_src = _inspect.getsource(db_cli._build_monitor_layout)
+    assert "backup_fresh" in cli_src, (
+        "54.6.250 CLI header must read backup_freshness"
+    )
+    assert "backup " in cli_src and "{bk_age" in cli_src, (
+        "54.6.250 CLI header must format a 'backup Nd' chip"
+    )
+
+    # E) Web modal renders the pill
+    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    assert "snap.backup_freshness" in web_text, (
+        "54.6.250 web modal must read snap.backup_freshness"
+    )
+    assert "backupFresh.newest_age_days" in web_text, (
+        "54.6.250 web modal must format a Backup freshness pill"
+    )
+
+
+def l1_phase54_6_249_web_modal_parity_book_cost_growth() -> None:
+    """Phase 54.6.249 — web monitor modal surfaces ``book_activity``,
+    ``cost_totals``, and ``corpus_growth`` — all three collected by
+    ``collect_monitor_snapshot`` pre-249 but rendered only in the
+    CLI footer. The gap meant web-only operators couldn't answer:
+
+      * "where is autowrite right now?" (book_activity)
+      * "how much LLM time have I spent this month?" (cost_totals)
+      * "how fast is the corpus growing?" (corpus_growth)
+
+    Guards (source-grep on the inlined JS):
+
+      A) ``snap.book_activity`` read into ``bookAct`` and rendered
+         under an "Active book" section.
+      B) ``snap.cost_totals`` read into ``costTotals`` and rendered
+         under an "LLM cost" section, with the ``window_days`` label.
+      C) ``snap.corpus_growth`` read into ``corpusGrowth`` and
+         rendered as a sparkline with 24h/7d/30d deltas.
+      D) CLI renderer still references the matching source fields
+         (regression guard — don't drop CLI surface while extending
+         web).
+    """
+    from pathlib import Path
+    import inspect as _inspect
+
+    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+
+    # A) book_activity
+    assert "snap.book_activity" in web_text, (
+        "54.6.249 web must read snap.book_activity for the "
+        "Active book card"
+    )
+    assert "Active book" in web_text, (
+        "54.6.249 web modal must label the Active book section"
+    )
+    assert "bookAct.chapters_drafted" in web_text, (
+        "54.6.249 Active book card must show chapters drafted / total"
+    )
+
+    # B) cost_totals
+    assert "snap.cost_totals" in web_text, (
+        "54.6.249 web must read snap.cost_totals for the LLM cost strip"
+    )
+    assert "LLM cost" in web_text, (
+        "54.6.249 web modal must label the LLM cost strip"
+    )
+    assert "costTotals.window_days" in web_text, (
+        "54.6.249 LLM cost strip must surface the window_days label"
+    )
+
+    # C) corpus_growth
+    assert "snap.corpus_growth" in web_text, (
+        "54.6.249 web must read snap.corpus_growth"
+    )
+    assert "Corpus growth" in web_text, (
+        "54.6.249 web modal must label the Corpus growth sparkline"
+    )
+    assert "corpusGrowth.weekly_sparkline" in web_text, (
+        "54.6.249 Corpus growth section must render the weekly sparkline"
+    )
+
+    # D) CLI regression guard
+    from sciknow.cli import db as db_cli
+    cli_src = _inspect.getsource(db_cli._build_monitor_layout)
+    assert 'book_act.get("title")' in cli_src, (
+        "54.6.249 CLI footer must keep rendering book_activity"
+    )
+    assert 'cost.get("calls")' in cli_src, (
+        "54.6.249 CLI footer must keep rendering cost_totals"
+    )
+
+
+def l1_phase54_6_248_web_monitor_sparklines() -> None:
+    """Phase 54.6.248 — web monitor modal gains sparklines for
+    24h failures and per-GPU temp/util trend, matching the CLI.
+
+    Pre-248 the modal rendered a 24h throughput sparkline but the
+    matching failure histogram + GPU trend data went unused even
+    though the snapshot carried both. Result: "why is throughput
+    dropping?" required opening a separate tab; "is the GPU
+    warming over time?" required manual polling.
+
+    Guards (source-grep on the template string because the JS is
+    inlined as an f-string in sciknow/web/app.py):
+
+      A) A shared ``_spark(values, opts)`` helper is defined.
+      B) The "24h failures" section uses ``_spark(hourlyFails, …)``
+         with a red palette.
+      C) The GPU section renders ``utilSamples`` and ``tempSamples``
+         sourced from ``snap.gpu_trend``.
+      D) CLI retains its existing sparkline calls for hourly and
+         GPU trend (regression guard — 248 must not remove any).
+    """
+    from pathlib import Path
+    import inspect as _inspect
+
+    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+
+    # A) shared helper
+    assert "const _spark = (values, opts) =>" in web_text, (
+        "54.6.248 web renderMonitor must declare a shared _spark helper"
+    )
+
+    # B) 24h failures sparkline
+    assert "_spark(hourlyFails" in web_text, (
+        "54.6.248 web monitor must render a sparkline of "
+        "pipeline_hourly_failures via _spark(hourlyFails, ...)"
+    )
+    assert "24h failures" in web_text, (
+        "54.6.248 web monitor must label the failures sparkline"
+    )
+
+    # C) GPU trend sparkline
+    assert "snap.gpu_trend" in web_text, (
+        "54.6.248 web monitor must read snap.gpu_trend for the GPU row"
+    )
+    assert "tempSamples" in web_text and "utilSamples" in web_text, (
+        "54.6.248 web GPU section must render temp + util sparklines"
+    )
+
+    # D) CLI sparkline regression guard
+    from sciknow.cli import db as db_cli
+    cli_src = _inspect.getsource(db_cli._build_monitor_layout)
+    assert "_sparkline(hourly)" in cli_src, (
+        "54.6.248 CLI hourly-throughput sparkline must stay in place"
+    )
+    assert "_sparkline(temp_samples)" in cli_src, (
+        "54.6.248 CLI GPU temp sparkline must stay in place"
+    )
+
+
+def l1_phase54_6_247_tps_in_active_jobs_pulse() -> None:
+    """Phase 54.6.247 — active-jobs pulse and the stats endpoint
+    share a single ``_job_tps`` helper, and the CLI header + web
+    modal both render the TPS column.
+
+    Pre-247, TPS was inlined in ``/api/jobs/{id}/stats`` but absent
+    from ``_write_web_jobs_pulse`` and the ``/api/monitor``
+    in-process active list. Result: the dashboard showed "tokens
+    going up" but not "generating at 35 t/s" — so a stalled model
+    (TPS==0 mid-run) looked indistinguishable from a slow one.
+
+    Guards:
+
+      A) ``web.app._job_tps`` exists and returns a float.
+      B) ``_job_tps`` with a deque of recent timestamps returns
+         non-zero; with an empty deque returns 0.0.
+      C) web source: ``_write_web_jobs_pulse`` calls ``_job_tps``
+         and ``"tps"`` appears in the pulse payload (source-grep).
+      D) CLI renderer references ``tps`` in the active_jobs loop
+         (source-grep).
+      E) Web modal renderer references ``j.tps`` in the Active
+         jobs table (source-grep).
+    """
+    import inspect as _inspect
+    from collections import deque
+    from pathlib import Path
+    import time as _time
+
+    from sciknow.web import app as web_app
+
+    # A) helper exists + returns float
+    assert hasattr(web_app, "_job_tps"), (
+        "54.6.247 web must expose _job_tps (shared TPS helper)"
+    )
+    out = web_app._job_tps({})
+    assert isinstance(out, float) and out == 0.0, (
+        f"_job_tps on empty job must return 0.0 float, got {out!r}"
+    )
+
+    # B) live calc
+    now = _time.monotonic()
+    ts = deque([now - 1.0] * 9, maxlen=200)  # 9 tokens 1s ago
+    fake = {"token_timestamps": ts}
+    out = web_app._job_tps(fake, window_s=3.0)
+    # 9 tokens / 3s window = 3.0 t/s
+    assert abs(out - 3.0) < 0.01, f"expected TPS ≈ 3.0, got {out}"
+
+    # C) pulse writer calls the helper
+    writer_src = _inspect.getsource(web_app._write_web_jobs_pulse)
+    assert "_job_tps" in writer_src, (
+        "54.6.247 _write_web_jobs_pulse must call _job_tps (shared "
+        "TPS calc with /api/jobs/{id}/stats)"
+    )
+    assert '"tps"' in writer_src or "'tps'" in writer_src, (
+        "54.6.247 pulse payload must include a `tps` field"
+    )
+
+    # D) CLI header renders tps in the active_jobs loop
+    from sciknow.cli import db as db_cli
+    cli_src = _inspect.getsource(db_cli._build_monitor_layout)
+    assert 'j.get("tps"' in cli_src or "j.get('tps'" in cli_src, (
+        "54.6.247 CLI monitor header must read `tps` from each job"
+    )
+    assert "t/s" in cli_src, (
+        "54.6.247 CLI monitor must label the TPS value with a unit"
+    )
+
+    # E) Web modal renders j.tps
+    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    assert "j.tps" in web_text, (
+        "54.6.247 web monitor modal Active-jobs table must read j.tps"
+    )
+
+
+def l1_phase54_6_246_cross_process_active_jobs_pulse() -> None:
+    """Phase 54.6.246 — cross-process active-job pulse.
+
+    The web server writes ``<data_dir>/monitor/web_jobs.json`` on
+    every job state transition; the CLI monitor reads it so SSH
+    operators see what the web is running. Pre-246, CLI's
+    ``active_jobs`` was always ``[]`` — a real visibility gap.
+
+    Guards:
+
+      A) ``monitor._read_web_jobs_pulse`` exists and returns an
+         empty list when no pulse file is present.
+      B) ``monitor.collect_monitor_snapshot`` populates
+         ``active_jobs`` from the pulse (not hard-coded to ``[]``).
+      C) A pulse written via ``core.pulse.write_pulse`` is picked
+         up in a subsequent snapshot with ``is_stale=False`` on
+         each job entry.
+      D) web/app.py has ``_write_web_jobs_pulse`` and calls it from
+         ``_observe_event_for_stats`` (source-grep — the writer
+         side of the cross-process bridge).
+      E) web/app.py renderMonitor reads ``snap.active_jobs`` so
+         the modal renders the same list (source-grep).
+      F) CLI renderer reads ``active_jobs`` (source-grep).
+    """
+    import inspect as _inspect
+    from pathlib import Path
+
+    from sciknow.core import monitor as mon
+    from sciknow.core.pulse import write_pulse
+    from sciknow.core.project import get_active_project
+
+    # A) helper presence + empty default
+    assert hasattr(mon, "_read_web_jobs_pulse"), (
+        "54.6.246 monitor must expose _read_web_jobs_pulse()"
+    )
+    # Safe call on non-existent path → empty list (not crash)
+    out = mon._read_web_jobs_pulse(Path("/nonexistent/path"))
+    assert out == [], f"expected [] for missing pulse, got {out!r}"
+
+    # B) collect_monitor_snapshot wires the pulse (not []) —
+    # source-grep the hard-coded literal can't creep back in.
+    src = _inspect.getsource(mon.collect_monitor_snapshot)
+    assert "_read_web_jobs_pulse" in src, (
+        "54.6.246 collect_monitor_snapshot must call "
+        "_read_web_jobs_pulse (replacing the `[]` placeholder)"
+    )
+
+    # C) round-trip: write a pulse, confirm snapshot sees it
+    dd = get_active_project().data_dir
+    pulse_path = write_pulse(dd, "web_jobs", {
+        "active": [{
+            "id": "aaaabbbb",
+            "type": "book autowrite",
+            "model": "qwen3.6:27b-dense",
+            "tokens": 7,
+            "target_words": 150,
+            "elapsed_s": 3.5,
+            "stream_state": "streaming",
+        }]
+    })
+    try:
+        jobs = mon._read_web_jobs_pulse(dd)
+        assert len(jobs) == 1, f"expected 1 job from pulse, got {len(jobs)}"
+        assert jobs[0]["id"] == "aaaabbbb"
+        assert jobs[0].get("is_stale") is False, (
+            "fresh pulse must mark jobs is_stale=False"
+        )
+    finally:
+        if pulse_path and pulse_path.exists():
+            pulse_path.unlink()
+
+    # D) web writer side + observer call-site source-grep
+    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    assert "def _write_web_jobs_pulse" in web_text, (
+        "web/app.py must define _write_web_jobs_pulse (cross-process "
+        "bridge writer)"
+    )
+    assert "_write_web_jobs_pulse()" in web_text, (
+        "web/app.py must call _write_web_jobs_pulse() — the function "
+        "is pointless if nothing invokes it"
+    )
+
+    # E) web modal renders active_jobs
+    assert "snap.active_jobs" in web_text, (
+        "54.6.246 web monitor modal must render snap.active_jobs"
+    )
+
+    # F) CLI renderer reads active_jobs
+    from sciknow.cli import db as db_cli
+    cli_src = _inspect.getsource(db_cli._build_monitor_layout)
+    assert 'active_jobs' in cli_src, (
+        "54.6.246 CLI _build_monitor_layout must read active_jobs "
+        "from the snapshot"
+    )
+
+
+def l1_phase54_6_245_monitor_missing_model_alert() -> None:
+    """Phase 54.6.245 — monitor emits a ``missing_model`` alert when
+    a configured Ollama-served role points at a tag that isn't
+    pulled locally.
+
+    Why this matters: pre-245, setting
+    ``BOOK_WRITE_MODEL=qwen3.6:27b-dense`` in ``.env`` without first
+    running ``ollama pull qwen3.6:27b-dense`` meant the first book
+    autowrite call 404'd at chat time. The operator had no
+    dashboard signal — bench ran fine on the old model, and
+    loaded-model list just showed whatever was warm.
+
+    Guards:
+
+      A) ``_ollama_installed_models()`` exists and returns a set of
+         strings (or None when Ollama is unreachable).
+      B) The snapshot carries ``ollama_installed_models`` (list when
+         reachable, None otherwise).
+      C) ``_build_alerts`` emits a ``missing_model`` error alert
+         for each role whose configured tag isn't in the installed
+         set. Simulated with a synthetic snapshot so the test is
+         deterministic and doesn't require a specific Ollama state.
+      D) When ``ollama_installed_models`` is None (unreachable)
+         the alert builder skips the check entirely (no false
+         positives when the daemon is briefly down).
+      E) Roles that resolve to the same model tag (e.g.
+         ``llm_main == llm_fast``) fire at most one missing_model
+         alert for that tag — the `seen` dedupe loop.
+    """
+    from sciknow.core import monitor as mon
+
+    # A) helper exists
+    assert hasattr(mon, "_ollama_installed_models"), (
+        "54.6.245 monitor must expose _ollama_installed_models()"
+    )
+
+    # B) live snapshot has the key (value may be list or None)
+    snap = mon.collect_monitor_snapshot()
+    assert "ollama_installed_models" in snap, (
+        "54.6.245 snapshot must include ollama_installed_models "
+        "(even when Ollama is down — set to None then)"
+    )
+    val = snap["ollama_installed_models"]
+    assert val is None or isinstance(val, list), (
+        f"ollama_installed_models must be list|None, got {type(val).__name__}"
+    )
+
+    # C) alert fires for a role with an unpulled tag
+    synthetic = {
+        "ollama_installed_models": {"qwen3:30b-a3b-instruct-2507-q4_K_M"},
+        "model_assignments": {
+            "llm_main": "qwen3:30b-a3b-instruct-2507-q4_K_M",
+            "book_write": "phantom-model:7b",
+        },
+    }
+    alerts = mon._build_alerts(synthetic)
+    missing = [a for a in alerts if a.get("code") == "missing_model"]
+    assert len(missing) == 1, (
+        f"expected exactly 1 missing_model alert, got {len(missing)}: {alerts}"
+    )
+    assert missing[0]["severity"] == "error", "missing_model must be error severity"
+    assert "phantom-model:7b" in missing[0]["message"], (
+        "missing_model alert message must include the offending tag"
+    )
+    assert "BOOK_WRITE_MODEL" in missing[0]["message"], (
+        "missing_model alert message must name the role env var"
+    )
+
+    # D) None installed → skip check entirely
+    synthetic_none = {
+        "ollama_installed_models": None,
+        "model_assignments": {"book_write": "phantom-model:7b"},
+    }
+    alerts_none = mon._build_alerts(synthetic_none)
+    assert not [a for a in alerts_none if a.get("code") == "missing_model"], (
+        "when ollama_installed_models is None, missing_model check "
+        "must be skipped (avoid false positives when Ollama is down)"
+    )
+
+    # E) duplicate tags across roles → single alert
+    synthetic_dupe = {
+        "ollama_installed_models": set(),
+        "model_assignments": {
+            "llm_main": "shared-tag:latest",
+            "llm_fast": "shared-tag:latest",
+            "book_write": "shared-tag:latest",
+        },
+    }
+    alerts_dupe = mon._build_alerts(synthetic_dupe)
+    missing_dupe = [a for a in alerts_dupe if a.get("code") == "missing_model"]
+    assert len(missing_dupe) == 1, (
+        f"roles sharing a tag must dedupe to one missing_model alert; "
+        f"got {len(missing_dupe)}"
+    )
+
+
+def l1_phase54_6_244_monitor_model_assignments_full() -> None:
+    """Phase 54.6.244 — monitor model_assignments surfaces every
+    LLM-role override (CLI + web).
+
+    Pre-244, ``_model_assignments()`` returned only ``llm_main`` /
+    ``llm_fast`` / ``caption_vlm`` / embedder / reranker / PDF
+    backend. That meant the book pipeline overrides
+    (``BOOK_WRITE_MODEL`` added in 54.6.243, ``BOOK_REVIEW_MODEL``,
+    ``AUTOWRITE_SCORER_MODEL``) were invisible from the monitor
+    dashboard — the user had to open Book Settings → Models or read
+    ``.env`` by hand to know which model was actually wired.
+
+    Guards:
+
+      A) ``_model_assignments()`` returns the three book-pipeline
+         keys (``book_write``, ``book_review``, ``autowrite_scorer``)
+         alongside the pre-existing ones. Any one of them missing
+         means a role was dropped silently from the dashboard.
+      B) CLI renderer in sciknow/cli/db.py references the new keys
+         (source-grep) so the CLI monitor displays them.
+      C) Web renderMonitor() references ``snap.model_assignments``
+         and the three new keys (source-grep), so the web monitor
+         modal mirrors the CLI.
+      D) The /api/settings/models endpoint exposes
+         ``book_write_model`` (source-grep) so the Book Settings
+         Models tab can render it.
+      E) The Models tab HTML includes a ``BOOK_WRITE_MODEL`` row
+         (source-grep) so it's visible in the settings UI.
+    """
+    import inspect as _inspect
+    from pathlib import Path
+
+    from sciknow.core import monitor as mon_mod
+    from sciknow.cli import db as db_cli
+
+    # A) dict shape
+    ma = mon_mod._model_assignments()
+    for key in ("book_write", "book_review", "autowrite_scorer"):
+        assert key in ma, (
+            f"54.6.244 _model_assignments() missing `{key}` — the "
+            "dashboard surfaces only what this dict exposes. Add it "
+            "in sciknow/core/monitor.py::_model_assignments."
+        )
+
+    # B) CLI renderer references the keys
+    cli_src = _inspect.getsource(db_cli._build_monitor_layout)
+    for key in ("book_write", "book_review", "autowrite_scorer"):
+        assert f'"{key}"' in cli_src or f"'{key}'" in cli_src, (
+            f"54.6.244 CLI monitor renderer must surface "
+            f"`{key}` — add a row in _build_monitor_layout models panel"
+        )
+
+    # C) Web renderMonitor references the keys
+    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    assert "snap.model_assignments" in web_text or "model_assignments" in web_text, (
+        "54.6.244 web app must render snap.model_assignments "
+        "(mirror the CLI models panel in the monitor modal)"
+    )
+    for key in ("book_write", "book_review", "autowrite_scorer"):
+        assert f"models.{key}" in web_text, (
+            f"54.6.244 web renderMonitor must surface models.{key}"
+        )
+
+    # D) /api/settings/models endpoint exposes book_write_model
+    assert '"book_write_model"' in web_text, (
+        "54.6.244 /api/settings/models must expose book_write_model "
+        "so the Book Settings → Models tab can render it"
+    )
+
+    # E) Book Settings Models tab row for BOOK_WRITE_MODEL
+    assert "'BOOK_WRITE_MODEL'" in web_text, (
+        "54.6.244 Book Settings → Models tab must include a row "
+        "labelled BOOK_WRITE_MODEL"
+    )
+
+
 def l1_phase54_6_243_monitor_alerts_quality() -> None:
     """Phase 54.6.243 — monitor alerts + inbox + quality signals +
     wiki materialization + cross-project overview.
@@ -14218,6 +15949,60 @@ L1_TESTS: list[Callable] = [
     # Phase 54.6.230 — unified monitor (CLI + web)
     l1_phase54_6_230_unified_monitor,
     l1_phase54_6_243_monitor_alerts_quality,
+    # Phase 54.6.244 — full model assignments in monitor (CLI + web)
+    l1_phase54_6_244_monitor_model_assignments_full,
+    # Phase 54.6.245 — missing-model alert (configured but not pulled)
+    l1_phase54_6_245_monitor_missing_model_alert,
+    # Phase 54.6.246 — cross-process active-jobs pulse (CLI ↔ web)
+    l1_phase54_6_246_cross_process_active_jobs_pulse,
+    # Phase 54.6.247 — TPS on active-jobs pulse + dashboards
+    l1_phase54_6_247_tps_in_active_jobs_pulse,
+    # Phase 54.6.248 — failure + GPU-trend sparklines in web modal
+    l1_phase54_6_248_web_monitor_sparklines,
+    # Phase 54.6.249 — web parity: book activity, LLM cost, corpus growth
+    l1_phase54_6_249_web_modal_parity_book_cost_growth,
+    # Phase 54.6.250 — backup freshness signal + alert
+    l1_phase54_6_250_backup_freshness_signal,
+    # Phase 54.6.251 — web parity: meta quality, year hist, coverage
+    l1_phase54_6_251_web_parity_meta_year_coverage,
+    # Phase 54.6.252 — config drift signal + alert
+    l1_phase54_6_252_config_drift_surface,
+    # Phase 54.6.253 — sciknow db doctor + web verdict banner
+    l1_phase54_6_253_doctor_command_and_verdict_banner,
+    # Phase 54.6.254 — live filter on web modal + CLI --filter flag
+    l1_phase54_6_254_monitor_filter_search,
+    # Phase 54.6.255 — modal keyboard shortcuts + snapshot export
+    l1_phase54_6_255_modal_shortcuts_and_export,
+    # Phase 54.6.256 — jump-to nav strip in web modal
+    l1_phase54_6_256_jump_to_nav_strip,
+    # Phase 54.6.257 — actionable alerts (fix commands + copy button)
+    l1_phase54_6_257_actionable_alerts,
+    # Phase 54.6.258 — adaptive poll rate (fast when jobs, idle default)
+    l1_phase54_6_258_adaptive_poll_rate,
+    # Phase 54.6.259 — composite pipeline health score (0-100)
+    l1_phase54_6_259_composite_health_score,
+    # Phase 54.6.260 — log tail in snapshot + both dashboards
+    l1_phase54_6_260_log_tail_in_monitor,
+    # Phase 54.6.261 — stuck-LLM-job watchdog
+    l1_phase54_6_261_stuck_llm_job_watchdog,
+    # Phase 54.6.262 — services reachability (PG/Qdrant/Ollama)
+    l1_phase54_6_262_services_reachability,
+    # Phase 54.6.263 — snapshot self-timing + snapshot_slow alert
+    l1_phase54_6_263_snapshot_self_timing,
+    # Phase 54.6.264 — parallel service probes
+    l1_phase54_6_264_services_probes_are_parallel,
+    # Phase 54.6.265 — URL-hash deep links into monitor sections
+    l1_phase54_6_265_monitor_hash_deep_links,
+    # Phase 54.6.266 — NEW badge for unseen alert codes
+    l1_phase54_6_266_alert_delta_new_badge,
+    # Phase 54.6.267 — health-score trend sparkline (localStorage ring)
+    l1_phase54_6_267_health_score_trend_sparkline,
+    # Phase 54.6.268 — alerts-as-markdown export
+    l1_phase54_6_268_alerts_as_markdown,
+    # Phase 54.6.269 — browser notifications for new error alerts
+    l1_phase54_6_269_browser_notifications_for_new_errors,
+    # Phase 54.6.270 — CLI monitor --compact minimal view
+    l1_phase54_6_270_cli_monitor_compact_mode,
 ]
 
 L2_TESTS: list[Callable] = [

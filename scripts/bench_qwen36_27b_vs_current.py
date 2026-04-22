@@ -35,11 +35,23 @@ FOCUS = [
     "qwen3.5:27b",                         # former book baseline (for reference)
 ]
 
-TASKS = [
+import os as _os
+
+# 54.6.241 — allow subsetting via env var, e.g.
+#   BENCH_TASKS=write_section uv run python scripts/bench_qwen36_27b_vs_current.py
+# Used for the post-fix re-run after qwen3.6:27b-dense's thinking
+# runaway was fixed by force_no_thinking=True on this task.
+_ALL_TASKS = [
     ("extract_kg",      ms.b_model_sweep_extract_kg),
     ("compile_summary", ms.b_model_sweep_compile_summary),
     ("write_section",   ms.b_model_sweep_write_section),
 ]
+_task_filter = _os.environ.get("BENCH_TASKS", "").strip()
+if _task_filter:
+    wanted = {t.strip() for t in _task_filter.split(",")}
+    TASKS = [(n, f) for n, f in _ALL_TASKS if n in wanted]
+else:
+    TASKS = _ALL_TASKS
 
 
 def _consume(fn) -> list[BenchMetric]:

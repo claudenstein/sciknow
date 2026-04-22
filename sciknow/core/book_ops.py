@@ -3097,7 +3097,16 @@ def write_section_stream(
 
     # Draft — Phase 14.6: emit model info before the first token so the
     # user can confirm the writer is using the flagship model.
+    # Phase 54.6.243 — prefer `book_write_model` over the global
+    # `llm_model` when set; keeps wiki-compile/extract-kg on
+    # qwen3:30b-a3b while letting the writer use qwen3.6:27b-dense.
+    # Must assign back to `model` (not just resolved_model) — every
+    # downstream llm.stream()/complete() call reads from the local
+    # `model` var and would otherwise re-default to settings.llm_model
+    # inside rag/llm.py, silently ignoring the override.
     from sciknow.config import settings as _settings
+    if model is None and _settings.book_write_model:
+        model = _settings.book_write_model
     resolved_model = model or _settings.llm_model
     yield {"type": "model_info", "writer_model": resolved_model,
            "fast_model": _settings.llm_fast_model,
@@ -4326,7 +4335,18 @@ def _autowrite_section_body(
     # user never has to ask. resolved_model is what `llm.complete()` will
     # default to when called with model=None below; this mirrors the
     # `chosen_model = model or settings.llm_model` line in rag/llm.py.
+    # Phase 54.6.243 — prefer `book_write_model` over the global
+    # `llm_model` when set. The autowrite scorer/verifier/CoVe share
+    # this model (see Phase 37 section-override logic above), which
+    # matches the 54.6.243 bench showing qwen3.6:27b-dense writes
+    # richer, better-cited prose than qwen3:30b-a3b. Assign back to
+    # `model` (not just resolved_model) so every downstream
+    # llm.stream()/complete() call below sees the override — passing
+    # model=None into rag/llm.py would re-default to settings.llm_model
+    # and silently ignore book_write_model.
     from sciknow.config import settings
+    if model is None and settings.book_write_model:
+        model = settings.book_write_model
     resolved_model = model or settings.llm_model
 
     yield {"type": "model_info", "writer_model": resolved_model,

@@ -73,6 +73,17 @@ class Settings(BaseSettings):
     # gemma3:27b-it-qat wins book_review judge 100% / dims 5/5 vs
     # the unified qwen default's 71.4% / 3/5).
     book_review_model: str | None = None
+    # Phase 54.6.243 — optional per-role override for book writing
+    # (both `book write` and `book autowrite` drafting passes; does
+    # NOT cover review, scoring, or verification). Falls back to
+    # llm_model when unset. Added after the 54.6.243 focused 3-way
+    # bench showed qwen3.6:27b-dense beats qwen3:30b-a3b-instruct
+    # (the current global LLM_MODEL) on write_section by 5× on
+    # citation density (7.08 vs 1.60 cites/100w) at comparable
+    # wall-clock (13.8s vs 6.1s for a 150-word target). Only wire
+    # it here — substituting the global LLM_MODEL would hurt
+    # wiki_compile and extract_kg where qwen3:30b-a3b wins.
+    book_write_model: str | None = None
     # Phase 54.6.59 — optional per-role override for the autowrite
     # score + rescore steps (NOT verify/CoVe, which stay on the writer
     # model). Falls back to llm_model when unset. The 2026-04-17-full
@@ -293,6 +304,9 @@ class Settings(BaseSettings):
             or read_active_slug_from_file() is not None
         )
         if not explicit:
+            # Phase 54.6.252 — always initialise the attribute so the
+            # monitor helper doesn't have to guard with hasattr.
+            object.__setattr__(self, "_env_overrides", [])
             return self
 
         active = get_active_project()
@@ -315,6 +329,11 @@ class Settings(BaseSettings):
                 "matching key from .env to silence this warning.",
                 active.slug, "; ".join(overrides),
             )
+        # Phase 54.6.252 — stash the override list on the Settings
+        # instance so the monitor can surface "config drift" in the
+        # dashboard. Pre-252 this was warning-only (log line once at
+        # startup; users who didn't read the log missed it entirely).
+        object.__setattr__(self, "_env_overrides", overrides)
         return self
 
     @computed_field

@@ -187,11 +187,34 @@ retrieval-quality signals (abstract coverage %, chunk char p50/p95,
 KG triples/doc), wiki materialization ratio, inbox drop-zone count,
 and a cross-project inventory.
 
+**Phases 54.6.244–270** extend the monitor with a 0-100 composite
+health score, service-up probes (PG / Qdrant / Ollama with latency),
+active-job cross-process visibility (CLI sees web jobs via a
+`web_jobs.json` pulse file), stop-light TPS per job, stall watchdog,
+backup/bench freshness chips, config-drift surfacing, a log tail,
+11 more alert classes with actionable fix commands, and — on the web
+side — filter/search, URL-hash deep links, snapshot download, NEW
+badges on unseen alerts, a health-trend sparkline, Markdown export,
+and browser notifications when new error alerts fire on a hidden tab.
+
 ```bash
 uv run sciknow db monitor              # one shot, full layout
 uv run sciknow db monitor --watch 5    # btop-style in-place refresh
 uv run sciknow db monitor --json       # JSON for scripting
+uv run sciknow db monitor --compact    # minimal 1-page view (54.6.270)
+uv run sciknow db monitor --filter foo # case-insensitive row filter  (54.6.254)
+uv run sciknow db monitor --log-tail 20       # append last N log lines (54.6.260)
+uv run sciknow db monitor --alerts-md         # alerts as Markdown block (54.6.268)
+
+uv run sciknow db doctor               # go/no-go readiness (54.6.253)
+uv run sciknow db doctor --json        # scriptable (exit 0/1/2)
 ```
+
+`sciknow db doctor` is a focused wrapper that prints the traffic-
+light verdict + health score + hardware summary + grouped alerts,
+then exits with a shell-friendly code tied to the worst severity.
+Pipeline-friendly: `sciknow db doctor && sciknow ingest directory …`
+is safer than eyeballing the monitor before a long run.
 
 Watch mode uses Rich's `Live` + alternate-screen buffer, so it
 redraws the same character cells every tick (no scrolling history)
@@ -204,6 +227,19 @@ In the web reader, the same data is exposed at `GET /api/monitor`
 modal that polls every 5s — open via ⌘K → `monitor`. CLI and GUI
 share the aggregator (`sciknow.core.monitor.collect_monitor_snapshot`),
 so they can never drift out of sync.
+
+**Web-side QoL** (Phases 54.6.254–269): filter input at the top of
+the modal (press `/` to focus from anywhere, Esc to clear); ⬇
+Snapshot button downloads the current `/api/monitor` JSON; a jump-
+to nav strip lists every panel as a scroll-chip that also updates
+the URL hash so links like `/#mon-active-jobs` deep-link into a
+panel; alert banner shows a 📋 Copy-as-MD button plus per-alert
+📋 copy buttons that pull suggested fix commands to the clipboard;
+"NEW" badges flag alert codes not seen before (per-browser via
+localStorage); poll cadence auto-drops to 2s while any job is
+running and back when idle; and new error-level alerts raised
+while the tab is hidden fire a browser notification so long
+ingestion runs can babysit themselves.
 
 Once the web reader is up, the top bar gives you:
 

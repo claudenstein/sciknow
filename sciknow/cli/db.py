@@ -1186,6 +1186,149 @@ def failures(
 
 
 @app.command()
+def doctor(
+    json_out: bool = typer.Option(
+        False, "--json",
+        help="Emit machine-readable JSON (same fields the CLI "
+             "renderer shows). Pipe through `jq` to script against.",
+    ),
+) -> None:
+    """Phase 54.6.253 — readiness / health check.
+
+    Thin wrapper over the monitor's alert aggregator. Prints a
+    single-line traffic-light verdict (ALL GREEN / N warnings / M
+    errors) plus a grouped-by-severity list of every alert, then
+    exits with a shell code tied to the worst severity:
+
+      * 0  — no alerts, or only info-level
+      * 1  — at least one warn-level alert
+      * 2  — at least one error-level alert
+
+    Typical uses:
+
+      uv run sciknow db doctor                 # check before heavy job
+      uv run sciknow db doctor && sciknow ingest directory ./papers/
+      uv run sciknow db doctor --json | jq .
+
+    Runs against the same `collect_monitor_snapshot` used by
+    ``sciknow db monitor`` and ``/api/monitor``; picks up every
+    alert class the dashboard does (stuck_ingest, embed_drift,
+    missing_model, backup_stale, config_drift, disk_critical, …).
+    The `doctor` exit code is the primary signal — pipelining it
+    in shell is faster than eyeballing the monitor.
+    """
+    from sciknow.cli import preflight
+    preflight(qdrant=False)
+
+    import json as _json
+    from sciknow.core.monitor import collect_monitor_snapshot
+
+    snap = collect_monitor_snapshot()
+    alerts = snap.get("alerts") or []
+    errors = [a for a in alerts if a.get("severity") == "error"]
+    warns = [a for a in alerts if a.get("severity") == "warn"]
+    infos = [a for a in alerts if a.get("severity") == "info"]
+
+    # Compute at-a-glance hardware fields for the summary line
+    gpus = snap.get("gpu") or []
+    host = snap.get("host") or {}
+    disk_free = snap.get("disk_free") or {}
+
+    if errors:
+        verdict = "FAIL"
+        exit_code = 2
+    elif warns:
+        verdict = "WARN"
+        exit_code = 1
+    else:
+        verdict = "OK"
+        exit_code = 0
+
+    if json_out:
+        console.print(_json.dumps({
+            "verdict": verdict,
+            "exit_code": exit_code,
+            "counts": {
+                "error": len(errors), "warn": len(warns), "info": len(infos),
+            },
+            "alerts": alerts,
+            "project": (snap.get("project") or {}).get("slug"),
+            "snapshotted_at": snap.get("snapshotted_at"),
+        }, indent=2, default=str))
+        raise typer.Exit(exit_code)
+
+    # Rich verdict header
+    palette = {
+        "OK": ("bright_green", "✓"),
+        "WARN": ("yellow", "⚠"),
+        "FAIL": ("bright_red", "✗"),
+    }
+    colour, icon = palette[verdict]
+    project_slug = (snap.get("project") or {}).get("slug") or "?"
+    # Phase 54.6.259 — surface the composite health score next to
+    # the verdict. Same palette as the CLI monitor header chip.
+    health = snap.get("health_score") or {}
+    hs = health.get("score")
+    hs_colour = ""
+    if hs is not None:
+        hs_colour = (
+            "bright_green" if hs >= 90 else
+            "yellow" if hs >= 60 else "bright_red"
+        )
+
+    console.print(
+        f"[bold {colour}]{icon} {verdict}[/bold {colour}]  "
+        f"project [cyan]{project_slug}[/cyan]  "
+        + (f"[dim]health[/dim] [{hs_colour}]{hs}/100[/{hs_colour}]  " if hs is not None else "")
+        + f"[dim]errors[/dim] [red]{len(errors)}[/red]  "
+        f"[dim]warn[/dim] [yellow]{len(warns)}[/yellow]  "
+        f"[dim]info[/dim] [blue]{len(infos)}[/blue]"
+    )
+
+    # Hardware summary — one line so the terminal view is scannable
+    hw_parts = []
+    if gpus:
+        g0 = gpus[0]
+        hw_parts.append(
+            f"GPU {g0.get('utilization_pct', 0)}% · "
+            f"{g0.get('temperature_c', '?')}°C"
+        )
+    if host.get("mem_pct"):
+        hw_parts.append(f"RAM {host['mem_pct']:.0f}%")
+    if disk_free.get("free_mb") and disk_free.get("total_mb"):
+        free_pct = (
+            disk_free["free_mb"] / disk_free["total_mb"] * 100
+        )
+        hw_parts.append(
+            f"disk {disk_free['free_mb'] / 1024:.0f}G free "
+            f"({free_pct:.0f}%)"
+        )
+    if hw_parts:
+        console.print("[dim]" + "  ·  ".join(hw_parts) + "[/dim]")
+
+    # Grouped alerts
+    def _render_group(label: str, items: list, tone: str) -> None:
+        if not items:
+            return
+        console.print()
+        console.print(f"[bold {tone}]{label}[/bold {tone}]")
+        for a in items:
+            console.print(
+                f"  [{tone}]•[/{tone}] "
+                f"[dim]({a.get('code')})[/dim] {a.get('message')}"
+            )
+
+    _render_group("Errors",   errors, "red")
+    _render_group("Warnings", warns,  "yellow")
+    _render_group("Info",     infos,  "blue")
+
+    if verdict == "OK":
+        console.print("\n[green]All systems green — safe to proceed.[/green]")
+
+    raise typer.Exit(exit_code)
+
+
+@app.command()
 def monitor(
     days: int = typer.Option(
         14, "--days",
@@ -1201,6 +1344,36 @@ def monitor(
         help="Emit machine-readable JSON instead of Rich panels. "
              "Shape matches /api/monitor so scripts can consume "
              "either source interchangeably.",
+    ),
+    filter_str: str = typer.Option(
+        "", "--filter",
+        help="Phase 54.6.254 — case-insensitive substring match "
+             "applied to recent_activity and top_failures rows. "
+             "Use for triage: `--filter 'timeout'` to find every "
+             "job that timed out, `--filter 'foo.pdf'` for a "
+             "specific paper. Blank = show everything (default).",
+    ),
+    log_tail: int = typer.Option(
+        0, "--log-tail",
+        help="Phase 54.6.260 — after rendering the dashboard, "
+             "print the last N lines of data_dir/sciknow.log. "
+             "Useful during ingestion debugging without opening a "
+             "second terminal. 0 (default) = skip.",
+    ),
+    alerts_md: bool = typer.Option(
+        False, "--alerts-md",
+        help="Phase 54.6.268 — print just the current alerts as a "
+             "Markdown block (no dashboard, no JSON). Suitable for "
+             "pasting into Slack / Linear / a GitHub issue. Honours "
+             "--filter.",
+    ),
+    compact: bool = typer.Option(
+        False, "--compact",
+        help="Phase 54.6.270 — trimmed 1-page view: verdict + health "
+             "chip + services + alerts + active jobs only. Skips the "
+             "heavy panels (GPU / corpus / Qdrant / storage). Useful "
+             "on narrow terminals, tmux status bars, and `watch` "
+             "without losing the must-read signals.",
     ),
 ):
     """Phase 54.6.230 — unified live monitor.
@@ -1250,10 +1423,150 @@ def monitor(
         )
         raise typer.Exit(2)
 
+    def _apply_filter(s: dict) -> dict:
+        """Phase 54.6.254 — substring-match filter over the rows that
+        carry operator-searchable text. Applied in-place to a COPY of
+        the snapshot so --watch re-renders work unchanged.
+
+        Scope kept deliberately narrow: recent_activity (per-document
+        job log), top_failures (aggregated error classes), and
+        recent_activity drafts that carry title/file fields. Adding
+        more tables is mechanical but we stop at the ones that
+        actually have row-granular free text worth filtering.
+        """
+        if not filter_str:
+            return s
+        needle = filter_str.lower()
+        def _matches(row) -> bool:
+            try:
+                return needle in _json.dumps(row, default=str).lower()
+            except Exception:
+                return True
+        s = dict(s)
+        pipe = dict(s.get("pipeline") or {})
+        pipe["recent_activity"] = [
+            r for r in (pipe.get("recent_activity") or [])
+            if _matches(r)
+        ]
+        pipe["top_failures"] = [
+            r for r in (pipe.get("top_failures") or [])
+            if _matches(r)
+        ]
+        s["pipeline"] = pipe
+        return s
+
     if json_out:
         snap = collect_monitor_snapshot(throughput_days=days,
                                          llm_usage_days=days)
+        snap = _apply_filter(snap)
         console.print(_json.dumps(snap, indent=2, default=str))
+        return
+
+    # Phase 54.6.268 — alerts-as-markdown short-circuit. Runs after
+    # filter so `--alerts-md --filter 'some_code'` would narrow if
+    # we ever extend the filter to alerts (currently narrows
+    # recent_activity / top_failures only — a no-op here).
+    if alerts_md:
+        from sciknow.core.monitor import alerts_as_markdown
+        snap = collect_monitor_snapshot(throughput_days=days,
+                                         llm_usage_days=days)
+        snap = _apply_filter(snap)
+        # Plain print (no Rich styling) so stdout is paste-ready.
+        print(alerts_as_markdown(snap))
+        return
+
+    # Phase 54.6.270 — compact short-circuit. Renders a fixed minimal
+    # view using the same data source as the full dashboard but only
+    # the must-read panels. Still respects --watch for live updates.
+    if compact:
+        def _render_compact(s: dict):
+            from rich.text import Text
+            from rich.panel import Panel
+            from rich import box as _box
+            _s = _apply_filter(s)
+            proj = (_s.get("project") or {}).get("slug") or "?"
+            h = _s.get("health_score") or {}
+            hs = h.get("score")
+            verdict = h.get("verdict") or "?"
+            alerts_l = _s.get("alerts") or []
+            errs = sum(1 for a in alerts_l if a.get("severity") == "error")
+            warns = sum(1 for a in alerts_l if a.get("severity") == "warn")
+            svc = _s.get("services") or {}
+            jobs = _s.get("active_jobs") or []
+
+            head = Text()
+            icon = "✓" if verdict == "healthy" else "⚠" if verdict == "degraded" else "✗"
+            head_colour = "bright_green" if verdict == "healthy" else "yellow" if verdict == "degraded" else "bright_red"
+            head.append(f"{icon} sciknow monitor · ", style=f"bold {head_colour}")
+            head.append(proj, style="cyan")
+            if hs is not None:
+                hs_colour = "bright_green" if hs >= 90 else "yellow" if hs >= 60 else "bright_red"
+                head.append(f"  ·  health ", style="dim")
+                head.append(f"{hs}/100", style=hs_colour)
+            head.append("  ·  svc ", style="dim")
+            for k, short in (("postgres", "P"), ("qdrant", "Q"), ("ollama", "O")):
+                info = svc.get(k) or {}
+                head.append(short, style="bright_green" if info.get("up") else "bright_red")
+            head.append(f"  ·  errors ", style="dim")
+            head.append(str(errs), style="bright_red")
+            head.append(f"  warn ", style="dim")
+            head.append(str(warns), style="yellow")
+
+            lines = [head]
+            for a in alerts_l[:5]:
+                sev = a.get("severity", "info")
+                style = "bright_red" if sev == "error" else "yellow" if sev == "warn" else "dim"
+                sev_icon = "✗" if sev == "error" else "⚠" if sev == "warn" else "ℹ"
+                ln = Text(f"  {sev_icon} ", style=style)
+                ln.append(a.get("message", ""), style=style)
+                lines.append(ln)
+                act = a.get("action")
+                if act:
+                    aln = Text(f"    $ ", style="dim")
+                    aln.append(act, style="bright_cyan")
+                    lines.append(aln)
+            for j in jobs[:3]:
+                elapsed = j.get("elapsed_s", 0) or 0
+                el_str = f"{elapsed / 60:.1f}m" if elapsed >= 60 else f"{elapsed:.0f}s"
+                ln = Text(f"  ► ", style="bright_cyan")
+                ln.append(
+                    f"{(j.get('id') or '?')[:8]} · {(j.get('type') or '?')[:30]} · "
+                    f"{j.get('model') or '?'} · {j.get('tokens', 0)}tok @ "
+                    f"{j.get('tps') or 0:.1f}t/s · {el_str}",
+                    style="white",
+                )
+                lines.append(ln)
+            if not alerts_l and not jobs:
+                lines.append(Text("  All systems green · no active jobs", style="green"))
+
+            body = Text()
+            for i, line in enumerate(lines):
+                if i:
+                    body.append("\n")
+                body.append_text(line)
+            return Panel(
+                body, title="[bold]compact[/bold]", title_align="left",
+                border_style="bright_green", box=_box.ROUNDED, padding=(0, 1),
+            )
+
+        if watch > 0:
+            from rich.live import Live
+            try:
+                snap = collect_monitor_snapshot(throughput_days=days, llm_usage_days=days)
+                with Live(
+                    _render_compact(snap), console=console,
+                    refresh_per_second=max(1, min(4, int(round(1 / max(watch, 0.25))))),
+                    screen=False,  # compact is 1-page, no alt-screen
+                ) as live:
+                    while True:
+                        _time.sleep(watch)
+                        snap = collect_monitor_snapshot(throughput_days=days, llm_usage_days=days)
+                        live.update(_render_compact(snap))
+            except KeyboardInterrupt:
+                return
+        else:
+            snap = collect_monitor_snapshot(throughput_days=days, llm_usage_days=days)
+            console.print(_render_compact(snap))
         return
 
     if watch > 0:
@@ -1266,6 +1579,7 @@ def monitor(
             snap = collect_monitor_snapshot(
                 throughput_days=days, llm_usage_days=days,
             )
+            snap = _apply_filter(snap)
             with Live(
                 _build_monitor_layout(snap, days=days, watch=watch),
                 console=console,
@@ -1277,6 +1591,7 @@ def monitor(
                     snap = collect_monitor_snapshot(
                         throughput_days=days, llm_usage_days=days,
                     )
+                    snap = _apply_filter(snap)
                     live.update(_build_monitor_layout(
                         snap, days=days, watch=watch,
                     ))
@@ -1286,7 +1601,33 @@ def monitor(
     snap = collect_monitor_snapshot(
         throughput_days=days, llm_usage_days=days,
     )
+    snap = _apply_filter(snap)
     console.print(_build_monitor_layout(snap, days=days, watch=0))
+
+    # Phase 54.6.260 — optional log tail after the dashboard. Put it
+    # last so scrolling up recovers the panels, and it doesn't burn
+    # terminal rows when the operator didn't ask for it.
+    if log_tail > 0:
+        # Pull the cached tail from the snapshot (already computed
+        # above) and extend to log_tail lines if requested > default.
+        from sciknow.core.monitor import _log_tail as _lt
+        from sciknow.core.project import get_active_project
+        try:
+            data_dir = get_active_project().data_dir
+        except Exception:
+            data_dir = None
+        tail = _lt(data_dir, n=log_tail) if data_dir else {"lines": []}
+        console.print()
+        console.print(f"[bold]── last {log_tail} log lines ──[/bold]")
+        for ln in tail.get("lines") or []:
+            style = (
+                "bright_red" if "ERROR" in ln or "CRITICAL" in ln else
+                "yellow" if "WARNING" in ln else
+                "dim"
+            )
+            console.print(f"[{style}]{ln}[/{style}]")
+        if not tail.get("lines"):
+            console.print("[dim](log file not found or empty)[/dim]")
 
 
 # ── Phase 54.6.231 — btop-style layout builder ────────────────────────
@@ -1368,6 +1709,14 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     raptor = snap.get("raptor_shape") or {}
     dupe_hashes = snap.get("duplicate_hashes", 0) or 0
     bench_fresh = snap.get("bench_freshness") or {}
+    # 54.6.250 — backup freshness: compact "backup Nd" marker
+    backup_fresh = snap.get("backup_freshness") or {}
+    # 54.6.259 — composite health score
+    health = snap.get("health_score") or {}
+    # 54.6.262 — services reachability (pg/qdrant/ollama up?)
+    services = snap.get("services") or {}
+    # 54.6.263 — snapshot self-timing
+    snap_ms = snap.get("snapshot_duration_ms")
     # 54.6.237 — trend batch
     growth = snap.get("corpus_growth") or {}
     book_act = snap.get("book_activity") or {}
@@ -1375,12 +1724,18 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     gpu_trend = snap.get("gpu_trend") or {}
     # 54.6.238 — cross-process pulses
     refresh_pulse = snap.get("refresh_pulse") or None
+    # 54.6.246 — active web jobs (from cross-process pulse)
+    active_jobs = snap.get("active_jobs") or []
     # 54.6.243 additions
     alerts = snap.get("alerts") or []
     inbox = snap.get("inbox") or {}
     qsig = snap.get("quality_signals") or {}
     wiki_mat = snap.get("wiki_materialization") or {}
     projects_overview = snap.get("projects_overview") or []
+    # 54.6.244 additions
+    funnel = snap.get("ingest_funnel") or []
+    hourly_fails = snap.get("pipeline_hourly_failures") or []
+    disk_free = snap.get("disk_free") or {}
 
     # ── Small helpers ───────────────────────────────────────────────
 
@@ -1459,6 +1814,7 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
         t = Text(bar[:width], style=colour)
         return t
 
+
     # ── Header panel ────────────────────────────────────────────────
     slug = proj.get("slug") or "(no project)"
     pg_db = proj.get("pg_database") or "?"
@@ -1476,6 +1832,15 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     if watch > 0:
         header_text.append(f"  ·  refresh {watch}s  (q to quit)",
                             style=C_DIM)
+    # Phase 54.6.263 — how long the snapshot took. Red when
+    # >2000ms (the snapshot_slow alert threshold).
+    if isinstance(snap_ms, (int, float)):
+        sm_colour = (
+            C_ERR if snap_ms > 2000 else
+            C_WARN if snap_ms > 1000 else C_DIM
+        )
+        header_text.append(f"  ·  ", style=C_DIM)
+        header_text.append(f"built {snap_ms}ms", style=sm_colour)
     # Phase 54.6.234 — stuck-job indicator (only shown when a stall
     # is detected — pending work with no recent job activity). Loud
     # on purpose because it's a "go check what's wrong" signal that
@@ -1545,6 +1910,105 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
             bf_str = f"bench {bf_age:.0f}d STALE"
         header_text.append(f"  ·  ", style=C_DIM)
         header_text.append(bf_str, style=bf_colour)
+
+    # Phase 54.6.262 — services status chip. Compact three-dot
+    # indicator: P (pg) Q (qdrant) O (ollama). Green up, red down.
+    # Only rendered when the services dict is populated.
+    if services:
+        header_text.append(f"  ·  ", style=C_DIM)
+        header_text.append("svc ", style=C_DIM)
+        for key, short in (("postgres", "P"), ("qdrant", "Q"), ("ollama", "O")):
+            info = services.get(key) or {}
+            dot_colour = C_OK if info.get("up") else C_ERR
+            header_text.append(short, style=dot_colour)
+
+    # Phase 54.6.259 — composite health chip. Shows "health NN/100"
+    # with a three-colour palette (green ≥90, yellow 60-89, red <60)
+    # as the first telemetry chip on the header so operators read
+    # the rollup before the bench/backup freshness chips.
+    if health.get("score") is not None:
+        hs = int(health["score"])
+        if hs >= 90:
+            hc = C_OK
+        elif hs >= 60:
+            hc = C_WARN
+        else:
+            hc = C_ERR
+        header_text.append(f"  ·  ", style=C_DIM)
+        header_text.append(f"health {hs}/100", style=hc)
+
+    # Phase 54.6.250 — backup freshness chip. Thresholds match the
+    # alert builder: green <7d, yellow 7-30d, red >30d. Silent when
+    # no backup has ever run — a clean install state, not a
+    # regression, so don't clutter the header.
+    bk_age = backup_fresh.get("newest_age_days")
+    if bk_age is not None:
+        if bk_age < 1:
+            bk_colour = C_OK
+            bk_str = f"backup {int(bk_age * 24)}h"
+        elif bk_age < 7:
+            bk_colour = C_OK
+            bk_str = f"backup {bk_age:.0f}d"
+        elif bk_age < 30:
+            bk_colour = C_WARN
+            bk_str = f"backup {bk_age:.0f}d STALE"
+        else:
+            bk_colour = C_ERR
+            bk_str = f"backup {bk_age:.0f}d STALE"
+        header_text.append(f"  ·  ", style=C_DIM)
+        header_text.append(bk_str, style=bk_colour)
+
+    # Phase 54.6.246 — active web jobs banner. One compact line per
+    # running job: "id · type · model · Ntok @ TPS · elapsed". Pulse-
+    # level staleness means the web server crashed without clearing —
+    # then render with a STALE tag in error colour so a zombie doesn't
+    # look like an active run. Limited to 3 jobs to keep the header
+    # at a reasonable height on small terminals.
+    # Phase 54.6.247 — includes TPS (3-second rolling tokens/sec)
+    # per job. TPS==0 with a fresh pulse and >5s elapsed is the
+    # "model is stuck in thinking / network stall" signal.
+    if active_jobs:
+        for j in active_jobs[:3]:
+            elapsed = j.get("elapsed_s", 0) or 0
+            elapsed_str = (
+                f"{elapsed / 60:.1f}m" if elapsed >= 60 else f"{elapsed:.0f}s"
+            )
+            model = j.get("model") or "?"
+            # Strip org prefix (`BAAI/` etc.) to keep the line compact
+            if "/" in str(model):
+                model = str(model).split("/", 1)[1]
+            tokens = j.get("tokens", 0) or 0
+            tps = j.get("tps") or 0.0
+            tw = j.get("target_words")
+            tw_str = f"/{tw}w" if tw else ""
+            task = (j.get("type") or "?")[:24]
+            header_text.append("\n   ", style=C_DIM)
+            if j.get("is_stale"):
+                header_text.append("web STALE ", style=C_ERR)
+            else:
+                header_text.append("web ", style=C_ACCENT)
+            # Colour TPS: red when elapsed > 5s and tps == 0 (probable
+            # stall), green when > 5 tok/s, dim otherwise.
+            tps_str = f"@ {tps:.1f}t/s"
+            if elapsed > 5 and tps == 0:
+                tps_style = f"[{C_ERR}]{tps_str}[/{C_ERR}]"
+            elif tps >= 5:
+                tps_style = f"[{C_OK}]{tps_str}[/{C_OK}]"
+            else:
+                tps_style = f"[{C_DIM}]{tps_str}[/{C_DIM}]"
+            header_text.append(
+                f"{j.get('id','?')[:8]} · {task} · {model[:28]} · "
+                f"{tokens}{tw_str} ",
+                style=C_VALUE,
+            )
+            header_text.append_text(Text.from_markup(tps_style))
+            header_text.append(f" · {elapsed_str}", style=C_VALUE)
+        if len(active_jobs) > 3:
+            header_text.append(
+                f"\n   [dim]…+{len(active_jobs) - 3} more jobs[/dim]",
+                style=C_DIM,
+            )
+
     header_panel = Panel(
         Align.left(header_text, vertical="middle"),
         border_style=C_BORDER, box=BOX, padding=(0, 1),
@@ -1569,6 +2033,15 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
             line.append(f"{icon} ", style=style)
             line.append(a.get("message", ""), style=style)
             alert_tbl.add_row(line)
+            # Phase 54.6.257 — render suggested-fix command under the
+            # message so operators can copy-paste. Dimmed so the
+            # severity-coloured message stays the visual anchor.
+            act = a.get("action")
+            if act:
+                aline = Text()
+                aline.append("    $ ", style=C_DIM)
+                aline.append(act, style=C_ACCENT)
+                alert_tbl.add_row(aline)
         border = (
             C_ERR if any(a.get("severity") == "error" for a in alerts)
             else C_WARN if any(a.get("severity") == "warn" for a in alerts)
@@ -1936,32 +2409,66 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     pg_row.add_row("pg db", _fmt_mb(pg_mb))
     gpu_tbl.add_row(pg_row)
 
+    # Phase 54.6.244 — disk free on the data_dir filesystem. Gives
+    # the capacity context the per-path sizes above don't convey.
+    if disk_free.get("total_mb"):
+        total_gb = disk_free["total_mb"] / 1024
+        free_gb = disk_free["free_mb"] / 1024
+        pct = disk_free["pct_used"]
+        free_row = Table.grid(padding=0, expand=True)
+        free_row.add_column(width=5, style=C_DIM)
+        free_row.add_column(ratio=1)
+        free_row.add_column(justify="right", width=11, style=C_VALUE)
+        free_row.add_row(
+            "free",
+            _bar(disk_free["used_mb"], disk_free["total_mb"], width=14),
+            f"{free_gb:.0f}/{total_gb:.0f}G",
+        )
+        gpu_tbl.add_row(free_row)
+
     # Phase 54.6.236 — model assignments per role. Surfaces the
     # .env-configured mapping ("which LLM is autowrite using right
     # now?"). Compact two-col: role → model (trimmed to 28 chars).
+    # Phase 54.6.244 — added book writer / reviewer / autowrite
+    # scorer / caption VLM rows so the whole book pipeline is
+    # auditable from the dashboard. Inherited slots (override = None)
+    # render with a subtle "↑llm" suffix so the user can tell
+    # "explicitly set to llm_main" apart from "inherits llm_main".
     if models:
         gpu_tbl.add_row("")
         gpu_tbl.add_row(Text("models", style=C_DIM))
-        rows_to_show = [
-            ("llm", models.get("llm_main")),
-            ("fast", models.get("llm_fast") if
-                     models.get("llm_fast") != models.get("llm_main")
-                     else None),
-            ("vlm-pro", models.get("mineru_vlm_model")),
-            ("embedder", models.get("embedder")),
-            ("reranker", models.get("reranker")),
+        llm_main = models.get("llm_main")
+        rows_to_show: list[tuple[str, str | None, bool]] = [
+            ("llm",      llm_main, False),
+            ("fast",     models.get("llm_fast")
+                         if models.get("llm_fast") != llm_main else None,
+                         False),
+            ("book-wr",  models.get("book_write")  or llm_main,
+                         models.get("book_write") is None),
+            ("book-rv",  models.get("book_review") or llm_main,
+                         models.get("book_review") is None),
+            ("aw-score", models.get("autowrite_scorer") or llm_main,
+                         models.get("autowrite_scorer") is None),
+            ("caption",  models.get("caption_vlm"), False),
+            ("vlm-pro",  models.get("mineru_vlm_model"), False),
+            ("embedder", models.get("embedder"), False),
+            ("reranker", models.get("reranker"), False),
         ]
-        for role, name in rows_to_show:
+        for role, name, inherited in rows_to_show:
             if not name:
                 continue
             display = str(name)
             # Drop `BAAI/` / `opendatalab/` org prefixes for width
             if "/" in display:
                 display = display.split("/", 1)[1]
+            display = display[:32]
+            if inherited:
+                # "↑llm" marker — muted so the model name still reads first
+                display = f"{display} [dim](↑llm)[/dim]"
             row = Table.grid(padding=0, expand=True)
             row.add_column(width=9, style=C_DIM)
             row.add_column(ratio=1, style=C_ACCENT, overflow="fold")
-            row.add_row(role, display[:32])
+            row.add_row(role, display)
             gpu_tbl.add_row(row)
 
     gpu_panel = Panel(
@@ -2185,6 +2692,67 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
         )
         footer_tbl.add_row(spark_row)
 
+    # Phase 54.6.244 — ingest funnel visualization. Canonical
+    # pipeline stages as horizontal bars scaled against the largest
+    # stage population. Unlike `queue_states` (only non-terminal),
+    # the funnel shows where docs *accumulate* including "complete"
+    # (the sink) — visually obvious when one stage acts as a
+    # bottleneck or when docs are stuck pre-terminal.
+    if funnel and any(f["n"] for f in funnel):
+        max_n = max(f["n"] for f in funnel) or 1
+        footer_tbl.add_row("")
+        footer_tbl.add_row(Text("ingest funnel", style=C_DIM))
+        for row in funnel:
+            n = row["n"]
+            if n == 0:
+                continue  # skip stages with nothing in them
+            stage = row["stage"]
+            # Terminal stages are green (complete) / red (failed),
+            # pre-terminal are yellow (in flight).
+            palette = (
+                (C_OK, C_OK, C_OK) if stage == "complete" else
+                (C_ERR, C_ERR, C_ERR) if stage == "failed" else
+                (C_WARN, C_WARN, C_WARN)
+            )
+            funnel_row = Table.grid(padding=(0, 1), expand=True)
+            funnel_row.add_column(width=20, style=C_DIM)
+            funnel_row.add_column(ratio=1)
+            funnel_row.add_column(justify="right", width=6, style=C_VALUE)
+            funnel_row.add_row(
+                stage,
+                _bar(n, max_n, width=18, palette=palette),
+                f"{n:,}",
+            )
+            footer_tbl.add_row(funnel_row)
+
+    # Phase 54.6.244 — hourly failure sparkline aligned to the 24h
+    # throughput sparkline above. Same bucketing → visual pair.
+    if hourly_fails and any(hourly_fails):
+        spark_row = Table.grid(padding=(0, 1), expand=True)
+        spark_row.add_column(width=13, style=C_DIM)
+        spark_row.add_column(ratio=1)
+        spark_row.add_column(justify="right", width=18, style=C_DIM)
+        peak = max(hourly_fails) if hourly_fails else 0
+        # Use a red-leaning palette for failures — visually distinct
+        # from the green throughput sparkline even when both are
+        # drawn with the same unicode blocks.
+        chars = "▁▂▃▄▅▆▇█"
+        max_v = max(hourly_fails) or 1
+        t = Text()
+        for v in hourly_fails:
+            if v == 0:
+                t.append("▁", style=C_DIM)
+                continue
+            idx = min(int((v / max_v) * (len(chars) - 1)),
+                      len(chars) - 1)
+            t.append(chars[idx], style=C_ERR)
+        spark_row.add_row(
+            "24h fails/hr",
+            t,
+            f"peak {peak}  now {hourly_fails[-1]}",
+        )
+        footer_tbl.add_row(spark_row)
+
     # Top failure classes — shown only when any exist in the last 24h.
     # Small by design (LIMIT 3 in the query) — summary, not clinic.
     if top_failures:
@@ -2201,6 +2769,21 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     # cost + visuals coverage + RAPTOR shape. Uses empty space in
     # the pipeline panel rather than adding a new layout row.
     footer_lines: list[Text] = []
+
+    # Phase 54.6.252 — config drift footer line. Visible only when
+    # non-empty (i.e., active project is overriding one or more .env
+    # keys). Yellow "drift" tag so it jumps out but doesn't look
+    # like an error. Truncated to 70 chars per entry to fit a 120-
+    # wide terminal comfortably.
+    drift = snap.get("config_drift") or []
+    if drift:
+        line = Text()
+        line.append("drift    ", style=C_DIM)
+        line.append(f"{len(drift)} override(s): ", style=C_WARN)
+        line.append("; ".join(d[:70] for d in drift[:2]), style=C_VALUE)
+        if len(drift) > 2:
+            line.append(f"  (+{len(drift) - 2} more)", style=C_DIM)
+        footer_lines.append(line)
 
     if cost.get("calls"):
         days = cost.get("window_days", 30)
@@ -2411,7 +2994,7 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     # growth.
     splits.extend([
         Layout(name="top", size=32),
-        Layout(timing_panel, name="timing", size=18),
+        Layout(timing_panel, name="timing", size=26),
         Layout(activity_panel, name="activity", ratio=1,
                minimum_size=8),
     ])

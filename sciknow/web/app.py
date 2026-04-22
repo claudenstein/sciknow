@@ -189,6 +189,10 @@ def _create_job(job_type: str) -> tuple[str, asyncio.Queue]:
             "target_words": None,
             "stream_state": "streaming",  # streaming | done | error
             "error_message": None,
+            # Phase 54.6.246 — placeholder so the cross-process pulse
+            # still knows about this job before the first `token` /
+            # `progress` event fires. Filled in by `_observe_event_for_stats`
+            # on the first model_info event.
             # Phase 50.A — reasoning-steps trace. Collected automatically
             # by _observe_event_for_stats from the same event stream the
             # task bar already watches; persisted to the new draft's
@@ -197,7 +201,78 @@ def _create_job(job_type: str) -> tuple[str, asyncio.Queue]:
             "reasoning_trace": [],
             "reasoning_draft_id": None,
         }
+        # Phase 54.6.246 — announce the new job to the cross-process
+        # pulse so `sciknow db monitor` sees it before the first event.
+        _write_web_jobs_pulse()
     return job_id, queue
+
+
+def _job_tps(job: dict, *, window_s: float = 3.0) -> float:
+    """Phase 54.6.247 — rolling tokens-per-second over the last
+    ``window_s`` seconds, derived from the per-job
+    ``token_timestamps`` deque maintained by
+    ``_observe_event_for_stats``. Shared by the pulse writer and
+    the ``/api/jobs/{id}/stats`` endpoint so both UIs see the same
+    number (was duplicated inline pre-247)."""
+    ts = job.get("token_timestamps") or deque()
+    if not ts:
+        return 0.0
+    now = time.monotonic()
+    cutoff = now - window_s
+    recent = sum(1 for t in ts if t >= cutoff)
+    return (recent / window_s) if recent else 0.0
+
+
+def _write_web_jobs_pulse() -> None:
+    """Phase 54.6.246 — cross-process active-job pulse.
+
+    Serialises the currently-active slice of ``_jobs`` into
+    ``<data_dir>/monitor/web_jobs.json`` so a separate ``sciknow db
+    monitor`` process (typically an SSH session) can see what the
+    web server is working on. Best-effort — any failure is swallowed
+    rather than blocking the streaming event loop.
+
+    Throttled implicitly by the callers: written from
+    ``_observe_event_for_stats`` only on state-transition events
+    (progress / model_info / length_target / completed / error /
+    cancelled), NOT per-token — which keeps file writes at tens per
+    section rather than thousands. The monitor's own pulse staleness
+    threshold (120s) means a job that genuinely stalls still stops
+    showing as active after a reasonable window.
+
+    Caller must hold ``_job_lock`` so the jobs dict doesn't mutate
+    under the iteration.
+
+    Phase 54.6.247 — pulse payload now carries ``tps`` (3-second
+    rolling tokens/sec) per job so downstream CLI can show the
+    generation rate. Zero when no tokens have streamed yet.
+    """
+    try:
+        from sciknow.core.pulse import write_pulse
+        from sciknow.core.project import get_active_project
+        now = time.monotonic()
+        active: list[dict] = []
+        for jid, j in _jobs.items():
+            if j.get("status") not in ("running", "starting"):
+                continue
+            if j.get("stream_state") not in ("streaming", "starting", None):
+                # "done"/"error" — already terminal; skip
+                continue
+            started = j.get("started_at") or now
+            active.append({
+                "id": jid[:8],
+                "type": j.get("task_desc") or j.get("type") or "?",
+                "model": j.get("model_name"),
+                "tokens": j.get("tokens", 0),
+                "tps": round(_job_tps(j), 2),
+                "target_words": j.get("target_words"),
+                "elapsed_s": max(0.0, now - started),
+                "stream_state": j.get("stream_state"),
+            })
+        data_dir = get_active_project().data_dir
+        write_pulse(data_dir, "web_jobs", {"active": active})
+    except Exception:
+        pass
 
 
 def _observe_event_for_stats(job_id: str, event: dict) -> None:
@@ -212,6 +287,10 @@ def _observe_event_for_stats(job_id: str, event: dict) -> None:
     model name, task description, target words, and lifecycle state.
     Lock-protected dict mutation — fast enough to not bottleneck the
     streaming generator.
+
+    Phase 54.6.246 — also writes a cross-process active-jobs pulse
+    on non-token events so `sciknow db monitor` over SSH sees which
+    jobs are running without polling the web endpoint.
     """
     et = event.get("type")
     if not et:
@@ -251,6 +330,14 @@ def _observe_event_for_stats(job_id: str, event: dict) -> None:
         elif et == "error":
             job["stream_state"] = "error"
             job["error_message"] = str(event.get("message") or "unknown")[:200]
+
+        # Phase 54.6.246 — refresh the cross-process jobs pulse on
+        # state transitions (every non-token event). Skipping `token`
+        # keeps writes at ~tens/section rather than thousands; the
+        # task bar's in-process poll already covers per-token updates.
+        # Caller holds _job_lock, required by _write_web_jobs_pulse.
+        if et != "token":
+            _write_web_jobs_pulse()
 
         # Phase 50.A — reasoning-steps trace. Record a compact entry
         # for every event that isn't pure token streaming (skip 'token'
@@ -5787,11 +5874,18 @@ async def api_viz_gap_radar():
 async def api_settings_models():
     """54.6.106 — effective model assignments, surfaced in the Book
     Settings → Models tab. Read-only snapshot of the Settings object.
+
+    Phase 54.6.244 — exposes ``book_write_model`` (added alongside the
+    qwen3.6:27b-dense writer-role split in 54.6.243). The Models tab
+    renders it with an explicit "inherits LLM_MODEL" indicator when
+    unset, so the user can tell "writer explicitly pinned to the
+    global" apart from "writer role defaults to the global".
     """
     from sciknow.config import settings as _s
     return JSONResponse({
         "llm_model": _s.llm_model,
         "llm_fast_model": _s.llm_fast_model,
+        "book_write_model": getattr(_s, "book_write_model", None),
         "book_review_model": _s.book_review_model,
         "autowrite_scorer_model": _s.autowrite_scorer_model,
         "visuals_caption_model": _s.visuals_caption_model,
@@ -5876,6 +5970,23 @@ async def api_stats():
     return JSONResponse(out)
 
 
+@app.get("/api/monitor/alerts-md")
+async def api_monitor_alerts_md():
+    """Phase 54.6.268 — return current alerts as a Markdown block.
+
+    Shares ``core.monitor.alerts_as_markdown`` with the CLI
+    ``sciknow db monitor --alerts-md`` so both UIs produce the same
+    paste-ready format. Returns ``text/plain`` so copy-to-clipboard
+    in the browser sees unescaped Markdown.
+    """
+    from fastapi.responses import PlainTextResponse
+    from sciknow.core.monitor import (
+        collect_monitor_snapshot, alerts_as_markdown,
+    )
+    snap = collect_monitor_snapshot()
+    return PlainTextResponse(alerts_as_markdown(snap))
+
+
 @app.get("/api/monitor")
 async def api_monitor(days: int = 14):
     """Phase 54.6.230 — unified monitor snapshot for the web reader.
@@ -5902,7 +6013,7 @@ async def api_monitor(days: int = 14):
     )
     # Active web jobs — same process, direct read of _jobs dict.
     active: list[dict] = []
-    now = _time.time()
+    now = _time.monotonic()
     with _job_lock:
         for jid, j in _jobs.items():
             if j.get("status") not in ("running", "starting"):
@@ -5913,8 +6024,11 @@ async def api_monitor(days: int = 14):
                 "type": j.get("task_desc") or j.get("job_type") or "?",
                 "model": j.get("model_name") or None,
                 "tokens": j.get("tokens", 0),
+                # Phase 54.6.247 — TPS, shared helper with pulse writer
+                "tps": round(_job_tps(j), 2),
                 "elapsed_s": max(0, now - started),
                 "target_words": j.get("target_words"),
+                "stream_state": j.get("stream_state"),
             })
     snap["active_jobs"] = active
     # Refresh pulse — cross-process signal from `sciknow refresh`.
@@ -5990,12 +6104,10 @@ async def get_job_stats(job_id: str):
             # Treat as already-finished — the GC swept it after the
             # 5-minute window, OR the job was never created.
             raise HTTPException(410, "Job not found (likely already finished)")
-        now = time.monotonic()
-        ts = job.get("token_timestamps") or deque()
-        cutoff = now - 3.0
-        recent = sum(1 for t in ts if t >= cutoff)
-        tps = recent / 3.0 if recent else 0.0
-        elapsed_s = now - job.get("started_at", now)
+        # Phase 54.6.247 — shared helper with _write_web_jobs_pulse
+        # so both UIs see the same number.
+        tps = _job_tps(job)
+        elapsed_s = time.monotonic() - job.get("started_at", time.monotonic())
         return JSONResponse({
             "id": job_id,
             "stream_state": job.get("stream_state", "streaming"),
@@ -12205,16 +12317,37 @@ body.task-bar-open {{ padding-top: 40px; }}
       <div style="flex:1;"></div>
       <span id="monitor-last-updated" style="color:var(--fg-muted);font-size:0.85em;margin-right:12px;"></span>
       <label style="color:var(--fg-muted);font-size:0.85em;margin-right:12px;"
-             title="Seconds between auto-refresh polls. Set to 0 to stop polling; click Refresh to force a manual update.">
+             title="Seconds between auto-refresh polls. Set to 0 to stop polling; click Refresh to force a manual update. Automatically speeds up to 2s while any active job is running.">
         Poll <input type="number" id="monitor-poll-seconds" value="5" min="0" max="600"
                     style="width:60px;margin-left:4px;" onchange="restartMonitorPoll()">s
+        <span id="monitor-poll-badge" style="display:none;margin-left:4px;font-weight:bold;"></span>
       </label>
       <button class="btn btn--sm" onclick="refreshMonitor()"
               title="Force an immediate refresh of every panel.">Refresh</button>
+      <button class="btn btn--sm" onclick="downloadMonitorSnapshot()"
+              title="Phase 54.6.255 — download the current /api/monitor JSON as a timestamped file. Useful for debugging / sharing state.">⬇ Snapshot</button>
       <button class="modal-close" onclick="closeModal('monitor-modal'); stopMonitorPoll();"
               title="Close the monitor. Stops the poll.">&times;</button>
     </div>
     <div class="modal-body">
+      <!-- Phase 54.6.254 — live filter input. Case-insensitive
+           substring match across all data rows. Hides non-matches
+           in place (no re-fetch) so scroll + poll state is
+           preserved. Reset with the ✕ or blank the input. -->
+      <div style="display:flex;align-items:center;gap:0.75em;margin-bottom:0.75em;">
+        <input type="text" id="monitor-filter"
+               placeholder="Filter rows (press / to focus, Esc to clear)…"
+               oninput="applyMonitorFilter()"
+               onkeydown="if(event.key==='Escape'){{event.preventDefault();clearMonitorFilter();}}"
+               style="flex:1;min-width:180px;padding:0.3em 0.5em;"
+               title="Live filter across every row of every table in this modal. Blank = show all. Press / to focus from anywhere while the modal is open." />
+        <button class="btn btn--sm" onclick="clearMonitorFilter()" title="Clear filter">✕</button>
+        <span id="monitor-filter-count" class="u-muted" style="font-size:0.85em;"></span>
+      </div>
+      <!-- Phase 54.6.256 — jump-to navigation strip. Rebuilt after
+           every render from the h4 headings inside monitor-content. -->
+      <div id="monitor-nav-strip"
+           style="display:flex;flex-wrap:wrap;gap:0.3em;margin-bottom:0.75em;"></div>
       <div id="monitor-content" style="font-size:0.92em;">
         <p class="u-note" style="text-align:center;padding:2em;">
           Loading system state…
@@ -20415,7 +20548,44 @@ function openToolsModal() {{
 // and /api/monitor is cheap (all SELECTs + small external reads).
 let _monitorInterval = null;
 
+// Phase 54.6.269 — browser notification for newly-raised ERROR
+// alerts when the tab is hidden. Request permission quietly on
+// first monitor open; never block. Opt-out honoured when the
+// user denies.
+function _requestNotificationPermissionIfNeeded() {{
+  try {{
+    if (typeof Notification === 'undefined') return;
+    if (Notification.permission === 'default') {{
+      Notification.requestPermission().catch(() => {{}});
+    }}
+  }} catch (_) {{ /* restrictive sandbox */ }}
+}}
+
+// Fire once per new error code. Caller passes the snap and the
+// set of codes that were previously seen (via the iter-23
+// localStorage ring). Silent no-op when the tab is visible, the
+// user denied the permission, or there's nothing new.
+function _maybeNotifyNewErrors(newCodes, alerts) {{
+  try {{
+    if (typeof Notification === 'undefined') return;
+    if (Notification.permission !== 'granted') return;
+    if (document.visibilityState !== 'hidden') return;
+    for (const a of alerts) {{
+      if (a.severity !== 'error') continue;
+      if (!a.code || !newCodes.has(a.code)) continue;
+      try {{
+        new Notification('sciknow: ' + a.code, {{
+          body: a.message || a.code,
+          tag: 'sciknow-' + a.code,  // dedupe identical reappearances
+          requireInteraction: false,
+        }});
+      }} catch (_) {{ /* ignore per-alert failures */ }}
+    }}
+  }} catch (_) {{ /* storage/notification disabled */ }}
+}}
+
 function openMonitorModal() {{
+  _requestNotificationPermissionIfNeeded();
   openModal('monitor-modal');
   refreshMonitor();
   restartMonitorPoll();
@@ -20426,19 +20596,71 @@ function stopMonitorPoll() {{
     _monitorInterval = null;
   }}
 }}
-function restartMonitorPoll() {{
-  stopMonitorPoll();
-  const secs = parseInt(
+// Phase 54.6.258 — adaptive poll cadence. When snap.active_jobs is
+// non-empty we tick at FAST_POLL_S (default 2s) so TPS / token
+// counters on the Active jobs table feel live. When idle we fall
+// back to the user-configured "Poll Ns" input value. Poll=0 stays
+// OFF regardless — manual-only mode.
+const MONITOR_FAST_POLL_S = 2;
+let _monitorCurrentCadence = 0;  // 0 = not polling
+
+function _monitorUserPollSeconds() {{
+  return parseInt(
     (document.getElementById('monitor-poll-seconds') || {{}}).value || '0', 10
   );
+}}
+
+function restartMonitorPoll() {{
+  stopMonitorPoll();
+  const secs = _monitorUserPollSeconds();
   if (secs > 0) {{
+    _monitorCurrentCadence = secs;
     _monitorInterval = setInterval(refreshMonitor, secs * 1000);
+  }} else {{
+    _monitorCurrentCadence = 0;
+  }}
+  updateMonitorPollBadge(false);
+}}
+
+// Called from refreshMonitor after we know whether active_jobs is
+// non-empty; flips the interval if needed without burning a tick.
+function _monitorAdaptPollRate(activeJobsCount) {{
+  const user = _monitorUserPollSeconds();
+  if (user <= 0) {{
+    // User explicitly disabled polling; never auto-resume
+    updateMonitorPollBadge(false);
+    return;
+  }}
+  const desired = activeJobsCount > 0 ? MONITOR_FAST_POLL_S : user;
+  if (desired !== _monitorCurrentCadence) {{
+    stopMonitorPoll();
+    _monitorCurrentCadence = desired;
+    _monitorInterval = setInterval(refreshMonitor, desired * 1000);
+  }}
+  updateMonitorPollBadge(activeJobsCount > 0 && desired < user);
+}}
+
+function updateMonitorPollBadge(isFast) {{
+  const badge = document.getElementById('monitor-poll-badge');
+  if (!badge) return;
+  if (isFast) {{
+    badge.style.display = '';
+    badge.textContent = '(fast tick · ' + MONITOR_FAST_POLL_S + 's)';
+    badge.style.color = '#080';
+  }} else {{
+    badge.style.display = 'none';
   }}
 }}
+
 function refreshMonitor() {{
   fetch('/api/monitor?days=14')
     .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
-    .then(renderMonitor)
+    .then(snap => {{
+      renderMonitor(snap);
+      rebuildMonitorNavStrip();
+      applyMonitorFilter();
+      _monitorAdaptPollRate(((snap && snap.active_jobs) || []).length);
+    }})
     .catch(err => {{
       const target = document.getElementById('monitor-content');
       if (target) {{
@@ -20447,6 +20669,212 @@ function refreshMonitor() {{
       }}
     }});
 }}
+
+// Phase 54.6.256 — rebuild jump-to nav strip from the current set of
+// h4 headings. Each heading gets a slug id (derived from its text),
+// and the strip renders a chip per heading that scrolls it into view.
+// Hidden when ≤3 headings to keep clean installs quiet.
+// Phase 54.6.265 — clicking a nav chip also updates the URL hash
+// via history.replaceState (not pushState — we don't want monitor
+// navigation polluting browser history). Reloads to that URL
+// scroll straight to the target panel via openMonitorFromHash().
+function rebuildMonitorNavStrip() {{
+  const strip = document.getElementById('monitor-nav-strip');
+  const target = document.getElementById('monitor-content');
+  if (!strip || !target) return;
+  strip.innerHTML = '';
+  const headings = target.querySelectorAll('h4');
+  if (headings.length <= 3) {{
+    strip.style.display = 'none';
+    return;
+  }}
+  strip.style.display = 'flex';
+  const seen = {{}};
+  headings.forEach((h, i) => {{
+    const txt = (h.textContent || ('section ' + i)).trim();
+    let slug = 'mon-' + txt.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    // de-dupe
+    if (seen[slug]) {{
+      seen[slug] += 1;
+      slug = slug + '-' + seen[slug];
+    }} else {{
+      seen[slug] = 1;
+    }}
+    h.id = slug;
+    const chip = document.createElement('button');
+    chip.className = 'btn btn--sm';
+    chip.style.fontSize = '0.8em';
+    chip.style.padding = '0.15em 0.5em';
+    chip.textContent = txt;
+    chip.title = 'Jump to ' + txt + ' (updates URL hash — copy the address to share)';
+    chip.onclick = () => {{
+      h.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+      try {{
+        history.replaceState(null, '', '#' + slug);
+      }} catch (e) {{ /* restrictive sandbox */ }}
+    }};
+    strip.appendChild(chip);
+  }});
+}}
+
+// Phase 54.6.265 — if the page URL has a #mon-* hash at load time,
+// open the monitor modal and scroll the matching section into view
+// after the first render lands. The hashchange listener also picks
+// up runtime changes so typing #mon-gpu in the URL bar works.
+function openMonitorFromHash() {{
+  const h = (window.location.hash || '').slice(1);
+  if (!h || !h.startsWith('mon-')) return;
+  // Open the modal if closed; refreshMonitor will populate it.
+  const modal = document.getElementById('monitor-modal');
+  const wasOpen = modal && modal.style.display !== 'none';
+  if (!wasOpen && typeof openMonitorModal === 'function') {{
+    openMonitorModal();
+  }}
+  // Wait for the first render to finish before scrolling — poll
+  // up to 10x (5s) then give up.
+  let tries = 0;
+  const timer = setInterval(() => {{
+    tries += 1;
+    const target = document.getElementById(h);
+    if (target) {{
+      target.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+      clearInterval(timer);
+    }} else if (tries >= 10) {{
+      clearInterval(timer);
+    }}
+  }}, 500);
+}}
+
+window.addEventListener('DOMContentLoaded', openMonitorFromHash);
+window.addEventListener('hashchange', openMonitorFromHash);
+
+// Phase 54.6.254 — live filter across every data row in the modal.
+// Skips header rows (<th>) and keeps section headings (<h4>) always
+// visible. "M rows · N of M visible" feedback in the count label.
+// Blank query = show everything.
+function applyMonitorFilter() {{
+  const input = document.getElementById('monitor-filter');
+  const countLabel = document.getElementById('monitor-filter-count');
+  if (!input) return;
+  const q = (input.value || '').trim().toLowerCase();
+  const target = document.getElementById('monitor-content');
+  if (!target) return;
+  const rows = target.querySelectorAll('tr');
+  let shown = 0, total = 0;
+  rows.forEach(r => {{
+    // Header rows: keep visible
+    if (r.querySelector('th') && !r.querySelector('td')) {{
+      r.style.display = '';
+      return;
+    }}
+    total += 1;
+    if (!q) {{ r.style.display = ''; shown += 1; return; }}
+    const text = (r.textContent || '').toLowerCase();
+    if (text.indexOf(q) !== -1) {{
+      r.style.display = '';
+      shown += 1;
+    }} else {{
+      r.style.display = 'none';
+    }}
+  }});
+  if (countLabel) {{
+    if (q) {{
+      countLabel.textContent = shown + ' / ' + total + ' rows';
+    }} else {{
+      countLabel.textContent = '';
+    }}
+  }}
+}}
+
+function clearMonitorFilter() {{
+  const input = document.getElementById('monitor-filter');
+  if (input) {{ input.value = ''; applyMonitorFilter(); input.focus(); }}
+}}
+
+// Phase 54.6.268 — fetch /api/monitor/alerts-md and copy its plain-
+// text body to the clipboard. Button flashes ✓ on success. Falls
+// back to window.prompt for insecure origins / disabled clipboard.
+function copyAlertsMarkdown(btn) {{
+  fetch('/api/monitor/alerts-md')
+    .then(r => r.ok ? r.text() : Promise.reject(new Error('HTTP ' + r.status)))
+    .then(md => {{
+      const flash = (ok) => {{
+        if (!btn) return;
+        const orig = btn.textContent;
+        btn.textContent = ok ? '✓ Copied' : '! failed';
+        setTimeout(() => {{ btn.textContent = orig; }}, 1100);
+      }};
+      if (navigator.clipboard && navigator.clipboard.writeText) {{
+        navigator.clipboard.writeText(md).then(
+          () => flash(true),
+          () => {{ flash(false); window.prompt('Copy this Markdown:', md); }}
+        );
+      }} else {{
+        window.prompt('Copy this Markdown:', md);
+      }}
+    }})
+    .catch(err => alert('Alerts-MD fetch failed: ' + String(err)));
+}}
+
+// Phase 54.6.257 — copy a suggested-fix command from an alert to the
+// clipboard. Flashes the button briefly so the user gets a success
+// cue. Falls back to a window.prompt() on insecure origins where
+// navigator.clipboard is unavailable.
+function copyMonitorAction(cmd, btn) {{
+  const flash = (ok) => {{
+    if (!btn) return;
+    const orig = btn.textContent;
+    btn.textContent = ok ? '✓' : '!';
+    setTimeout(() => {{ btn.textContent = orig; }}, 900);
+  }};
+  if (navigator.clipboard && navigator.clipboard.writeText) {{
+    navigator.clipboard.writeText(cmd).then(
+      () => flash(true),
+      () => {{ flash(false); window.prompt('Copy this command:', cmd); }}
+    );
+  }} else {{
+    window.prompt('Copy this command:', cmd);
+  }}
+}}
+
+// Phase 54.6.255 — download current snapshot as JSON file. Re-fetches
+// (doesn't grab last-rendered state) so operator gets fresh data.
+// Filename carries UTC timestamp so multiple snapshots don't collide.
+function downloadMonitorSnapshot() {{
+  fetch('/api/monitor?days=14')
+    .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+    .then(snap => {{
+      const blob = new Blob([JSON.stringify(snap, null, 2)],
+                            {{ type: 'application/json' }});
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const slug = (snap.project && snap.project.slug) ? snap.project.slug : 'default';
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'sciknow-monitor-' + slug + '-' + ts + '.json';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {{ URL.revokeObjectURL(a.href); a.remove(); }}, 100);
+    }})
+    .catch(err => alert('Snapshot download failed: ' + String(err)));
+}}
+
+// Phase 54.6.255 — keyboard shortcut: `/` focuses the monitor filter
+// while the modal is open. Skip if the user is already typing in an
+// input so `/` in other text fields stays a literal slash.
+(function installMonitorKeyboardShortcuts() {{
+  document.addEventListener('keydown', function (e) {{
+    if (e.key !== '/') return;
+    const modal = document.getElementById('monitor-modal');
+    if (!modal || modal.style.display === 'none') return;
+    const tag = (e.target && e.target.tagName) || '';
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    const filterInput = document.getElementById('monitor-filter');
+    if (!filterInput) return;
+    e.preventDefault();
+    filterInput.focus();
+    filterInput.select();
+  }});
+}})();
 
 function _escHTML(s) {{
   if (s === null || s === undefined) return '—';
@@ -20495,12 +20923,134 @@ function renderMonitor(snap) {{
   const qsig = snap.quality_signals || {{}};
   const wikiMat = snap.wiki_materialization || {{}};
   const projectsOverview = snap.projects_overview || [];
+  // Phase 54.6.244 additions
+  const funnel = snap.ingest_funnel || [];
+  const hourlyFails = snap.pipeline_hourly_failures || [];
+  const diskFree = snap.disk_free || {{}};
+  // Phase 54.6.249 additions — book activity, LLM cost, corpus growth
+  const bookAct = snap.book_activity || {{}};
+  const costTotals = snap.cost_totals || {{}};
+  const corpusGrowth = snap.corpus_growth || {{}};
+  // Phase 54.6.250 additions — bench + backup freshness
+  const benchFresh = snap.bench_freshness || {{}};
+  const backupFresh = snap.backup_freshness || {{}};
+  // Phase 54.6.251 additions — meta quality + year histogram + coverage
+  const metaQ = snap.meta_quality || {{}};
+  const yearHist = snap.year_histogram || [];
+  const embedCov = snap.embeddings_coverage || {{}};
+  const vcov = snap.visuals_coverage || {{}};
+  // Phase 54.6.252 — config drift list (active project overrides .env)
+  const configDrift = snap.config_drift || [];
+  // Phase 54.6.260 — log tail panel data
+  const logTail = snap.log_tail || {{}};
+  // Phase 54.6.262 — services reachability
+  const services = snap.services || {{}};
 
   const sections = [];
+
+  // Phase 54.6.253 — doctor-style verdict banner at the top of the
+  // modal. Traffic-light verdict (OK / WARN / FAIL) mirrors the CLI
+  // `sciknow db doctor` output: same rule — error wins over warn
+  // wins over info. Rendered even when there are zero alerts so
+  // operators get an explicit "all green" confirmation.
+  {{
+    const errN = alerts.filter(a => a.severity === 'error').length;
+    const warnN = alerts.filter(a => a.severity === 'warn').length;
+    const infoN = alerts.filter(a => a.severity === 'info').length;
+    const verdict = errN ? 'FAIL' : warnN ? 'WARN' : 'OK';
+    const palette = {{
+      OK: {{ colour: '#080', icon: '✓', bg: 'rgba(0,130,0,0.08)' }},
+      WARN: {{ colour: '#b70', icon: '⚠', bg: 'rgba(230,150,0,0.08)' }},
+      FAIL: {{ colour: '#c33', icon: '✗', bg: 'rgba(200,50,50,0.08)' }},
+    }};
+    const p = palette[verdict];
+    // Phase 54.6.259 — composite health score (0-100). Renders next
+    // to the verdict. Penalty breakdown goes into the title tooltip
+    // so hover reveals why the score isn't 100.
+    // Phase 54.6.267 — health-score ring in localStorage (60 samples
+    // per origin). Appended per render; trimmed to size; rendered as
+    // a mini sparkline next to the score. Lets operators spot a
+    // dropping trend ("were at 100, now 70") without server-side
+    // state.
+    const health = snap.health_score || {{}};
+    const hs = typeof health.score === 'number' ? health.score : null;
+    let healthHtml = '';
+    if (hs !== null) {{
+      const hc = hs >= 90 ? '#080' : hs >= 60 ? '#b70' : '#c33';
+      const pen = (health.penalties || []).join(' · ') || 'no penalties';
+      // Load + update the local ring
+      const HS_KEY = 'sciknow.monitor.healthRing';
+      let ring = [];
+      try {{
+        ring = JSON.parse(window.localStorage.getItem(HS_KEY) || '[]');
+        if (!Array.isArray(ring)) ring = [];
+      }} catch (_) {{ ring = []; }}
+      ring.push(hs);
+      if (ring.length > 60) ring = ring.slice(-60);
+      try {{
+        window.localStorage.setItem(HS_KEY, JSON.stringify(ring));
+      }} catch (_) {{ /* storage disabled */ }}
+      let sparkHtml = '';
+      if (ring.length >= 2) {{
+        const sparkRamp = '▁▂▃▄▅▆▇█';
+        // Scale 0..100 across the 8-level ramp
+        const spark = ring.map(v => {{
+          const idx = Math.min(Math.round((v / 100) * (sparkRamp.length - 1)), sparkRamp.length - 1);
+          return sparkRamp[idx];
+        }}).join('');
+        const minV = Math.min(...ring), maxV = Math.max(...ring);
+        sparkHtml = ' <span title="last ' + ring.length + ' readings · '
+          + 'min ' + minV + ' / max ' + maxV + '" '
+          + 'style="font-family:monospace;color:' + hc + ';letter-spacing:0.5px;">'
+          + spark + '</span>';
+      }}
+      healthHtml = '<div title="' + _escHTML(pen) + '">'
+        + '<strong>Health</strong> '
+        + '<span style="color:' + hc + ';font-size:1.1em;font-weight:bold;">'
+        + hs + '/100</span>' + sparkHtml + '</div>';
+    }}
+    // Phase 54.6.262 — services reachability pill group. PG / Qdrant
+    // / Ollama with latency-aware colouring (green up, red down, dim
+    // "n/a" when the probe key is missing).
+    let svcHtml = '';
+    const svcOrder = [
+      ['postgres', 'PG'], ['qdrant', 'Qdr'], ['ollama', 'Ollama'],
+    ];
+    const svcBits = [];
+    for (const [key, label] of svcOrder) {{
+      const info = services[key];
+      if (!info) continue;
+      const c = info.up ? '#080' : '#c33';
+      const lat = info.latency_ms !== undefined ? info.latency_ms + 'ms' : '?';
+      svcBits.push('<span style="color:' + c + ';" title="' + _escHTML(info.error || '')
+        + '">' + (info.up ? '●' : '✗') + ' <strong>' + label + '</strong> '
+        + _escHTML(lat) + '</span>');
+    }}
+    if (svcBits.length) {{
+      svcHtml = '<div style="display:flex;gap:1em;">' + svcBits.join('') + '</div>';
+    }}
+    sections.push('<div style="border:2px solid ' + p.colour
+      + ';background:' + p.bg + ';padding:0.5em 0.75em;border-radius:4px;'
+      + 'margin-bottom:1em;display:flex;align-items:center;gap:1.5em;flex-wrap:wrap;">'
+      + '<div style="font-size:1.5em;color:' + p.colour + ';font-weight:bold;">'
+      + p.icon + ' ' + verdict + '</div>'
+      + healthHtml
+      + '<div><strong>Errors</strong> <span style="color:#c33;">' + errN + '</span></div>'
+      + '<div><strong>Warn</strong> <span style="color:#b70;">' + warnN + '</span></div>'
+      + '<div><strong>Info</strong> <span style="color:#36a;">' + infoN + '</span></div>'
+      + svcHtml
+      + '<div class="u-muted" style="margin-left:auto;font-size:0.85em;">'
+      + 'Equivalent: <code>sciknow db doctor</code></div>'
+      + '</div>');
+  }}
 
   // Phase 54.6.243 — consolidated alert banner. Same list the CLI
   // surfaces; rendered as a coloured card at the very top so the
   // modal leads with "anything on fire?".
+  // Phase 54.6.257 — each alert that carries an `action` renders a
+  // 📋 copy button next to the message. Uses the Clipboard API when
+  // available (secure-origin requirement met on localhost) and
+  // falls back to a noop prompt otherwise.
   if (alerts.length) {{
     const worstSev = alerts.some(a => a.severity === 'error') ? 'error'
       : alerts.some(a => a.severity === 'warn') ? 'warn' : 'info';
@@ -20509,15 +21059,68 @@ function renderMonitor(snap) {{
     const bg = worstSev === 'error' ? 'rgba(200,50,50,0.08)'
       : worstSev === 'warn' ? 'rgba(230,150,0,0.08)'
         : 'rgba(50,130,200,0.06)';
+    // Phase 54.6.266 — delta vs last seen alert codes.
+    // Load persisted acknowledgement set (localStorage is per-origin
+    // so this scales to any number of sessions). Compute `newCodes`
+    // as the difference. Save current codes back immediately so a
+    // 10-second rapid-fire poll doesn't keep showing NEW once
+    // acknowledged.
+    const STORAGE_KEY = 'sciknow.monitor.seenAlertCodes';
+    let seenSet = new Set();
+    try {{
+      const raw = window.localStorage.getItem(STORAGE_KEY) || '[]';
+      seenSet = new Set(JSON.parse(raw));
+    }} catch (_) {{ /* storage disabled */ }}
+    const currentCodes = new Set(alerts.map(a => a.code).filter(Boolean));
+    const newCodes = new Set();
+    for (const c of currentCodes) {{
+      if (!seenSet.has(c)) newCodes.add(c);
+    }}
+    try {{
+      window.localStorage.setItem(
+        STORAGE_KEY, JSON.stringify(Array.from(currentCodes))
+      );
+    }} catch (_) {{ /* storage disabled */ }}
+    // Phase 54.6.269 — passive-guardian notification. Only fires
+    // when the tab is hidden AND there's a new error-level code,
+    // so idle-tab operators see "something broke" without polling.
+    _maybeNotifyNewErrors(newCodes, alerts);
     let html = '<div style="border:1px solid ' + border
       + ';background:' + bg + ';padding:0.5em 0.75em;border-radius:4px;margin-bottom:1em;">'
-      + '<strong>Alerts</strong><ul style="margin:0.25em 0 0 1em;padding:0;">';
+      + '<div style="display:flex;align-items:center;gap:1em;">'
+      + '<strong>Alerts</strong>'
+      + (newCodes.size
+        ? ' <span style="color:#c33;font-weight:bold;">· ' + newCodes.size + ' NEW</span>'
+        : '')
+      // Phase 54.6.268 — Markdown export button. Fetches the shared
+      // /api/monitor/alerts-md endpoint so the copied text matches
+      // what `sciknow db monitor --alerts-md` produces.
+      + ' <button class="btn btn--sm" style="padding:0.1em 0.5em;font-size:0.75em;margin-left:auto;" '
+      + 'onclick="copyAlertsMarkdown(this)" '
+      + 'title="Copy current alerts as a Markdown block — paste into Slack / Linear / GitHub ticket">📋 Copy as MD</button>'
+      + '</div>'
+      + '<ul style="margin:0.25em 0 0 1em;padding:0;">';
     for (const a of alerts.slice(0, 8)) {{
       const icon = a.severity === 'error' ? '✗' : a.severity === 'warn' ? '⚠' : 'ℹ';
       const colour = a.severity === 'error' ? '#c33'
         : a.severity === 'warn' ? '#b70' : '#36a';
+      const isNew = a.code && newCodes.has(a.code);
+      const newBadge = isNew
+        ? ' <span style="background:#c33;color:#fff;padding:0 0.3em;border-radius:3px;font-size:0.75em;font-weight:bold;margin-left:0.3em;">NEW</span>'
+        : '';
       html += '<li style="color:' + colour + ';">' + icon + ' '
-        + _escHTML(a.message || a.code || '') + '</li>';
+        + _escHTML(a.message || a.code || '') + newBadge;
+      if (a.action) {{
+        // Attribute-safe: single-quoted HTML with backslash-escaped
+        // single quotes inside the onclick arg.
+        const safeAct = String(a.action).replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'");
+        html += ' <code style="background:rgba(0,0,0,0.06);padding:0.1em 0.3em;border-radius:3px;'
+             + 'font-size:0.85em;color:#444;margin-left:0.4em;">$ ' + _escHTML(a.action) + '</code>'
+             + ' <button class="btn btn--sm" style="padding:0.1em 0.4em;font-size:0.8em;" '
+             + 'title="Copy command to clipboard" '
+             + 'onclick="copyMonitorAction(\\'' + safeAct + '\\', this)">📋</button>';
+      }}
+      html += '</li>';
     }}
     html += '</ul></div>';
     sections.push(html);
@@ -20529,6 +21132,24 @@ function renderMonitor(snap) {{
     + '<div><strong>DB</strong>: ' + _escHTML(project.pg_database || '—') + '</div>'
     + '<div><strong>Last refresh</strong>: <code>' + _escHTML(snap.last_refresh || 'never') + '</code></div>'
     + '</div>');
+
+  // Phase 54.6.252 — config drift card. Non-empty means the active
+  // project is overriding .env-provided values at runtime. Yellow
+  // tint because it's typically intentional (user switched projects
+  // without cleaning .env) but worth surfacing since any manual
+  // read of .env would show the wrong db/data_dir.
+  if (configDrift.length) {{
+    let html = '<div style="border:1px solid #e90;background:rgba(230,150,0,0.08);'
+      + 'padding:0.5em 0.75em;border-radius:4px;margin-bottom:1em;">'
+      + '<strong>Config drift</strong> — active project overrides '
+      + configDrift.length + ' .env key(s):<ul style="margin:0.25em 0 0 1em;padding:0;">';
+    for (const entry of configDrift) {{
+      html += '<li><code>' + _escHTML(entry) + '</code></li>';
+    }}
+    html += '</ul><div style="font-size:0.85em;margin-top:0.25em;color:var(--fg-muted);">'
+      + 'Drop the listed keys from <code>.env</code> to silence.</div></div>';
+    sections.push(html);
+  }}
 
   // ── Rates + ETA + queue banner ──────────────────────────────────
   // Hot info at the top of the modal so "where am I?" is answered
@@ -20573,27 +21194,130 @@ function renderMonitor(snap) {{
       + _fmtNum(wikiMat.wiki_pages) + '/' + _fmtNum(wikiMat.topics_total)
       + ' (' + (wikiMat.pct || 0).toFixed(0) + '%)</div>');
   }}
+  // Phase 54.6.250 — bench + backup freshness pills. Same
+  // threshold palette as the CLI header chips: green <7d,
+  // yellow 7-14d (bench) / 7-30d (backup), red beyond.
+  const _freshnessPill = (ageDays, warnAt, errorAt) => {{
+    if (ageDays === null || ageDays === undefined) return null;
+    let colour = '#080';
+    if (ageDays >= errorAt) colour = '#c33';
+    else if (ageDays >= warnAt) colour = '#e80';
+    const txt = ageDays < 1
+      ? Math.round(ageDays * 24) + 'h'
+      : ageDays.toFixed(0) + 'd';
+    return {{ colour, txt }};
+  }};
+  const benchPill = _freshnessPill(benchFresh.newest_age_days, 7, 14);
+  if (benchPill) {{
+    qualityBits.push('<div><strong>Bench</strong>: '
+      + '<span style="color:' + benchPill.colour + ';">'
+      + benchPill.txt + '</span></div>');
+  }}
+  const backupPill = _freshnessPill(backupFresh.newest_age_days, 7, 30);
+  if (backupPill) {{
+    qualityBits.push('<div><strong>Backup</strong>: '
+      + '<span style="color:' + backupPill.colour + ';">'
+      + backupPill.txt + '</span>'
+      + (backupFresh.count ? ' <span class="u-muted">(' + backupFresh.count + ' sets)</span>' : '')
+      + '</div>');
+  }}
   if (qualityBits.length) {{
     sections.push('<div style="display:flex;gap:2em;flex-wrap:wrap;margin-bottom:1em;">'
       + qualityBits.join('') + '</div>');
   }}
 
+  // Phase 54.6.244 — ingest funnel table (all canonical pipeline
+  // stages with doc counts; stages with zero docs hidden).
+  if (funnel.length && funnel.some(f => f.n > 0)) {{
+    const maxN = Math.max(...funnel.map(f => f.n || 0)) || 1;
+    let html = '<h4>Ingest funnel</h4><table class="stats-table" style="width:100%;">'
+      + '<tr><th>Stage</th><th>Documents</th><th>Fill</th></tr>';
+    for (const row of funnel) {{
+      if (!row.n) continue;
+      const pct = (row.n / maxN * 100).toFixed(0);
+      const colour = row.stage === 'complete' ? '#080'
+        : row.stage === 'failed' ? '#c33' : '#e90';
+      html += '<tr><td>' + _escHTML(row.stage) + '</td><td>'
+        + _fmtNum(row.n) + '</td><td><div style="background:' + colour
+        + ';height:8px;width:' + pct + '%;border-radius:2px;"></div></td></tr>';
+    }}
+    html += '</table>';
+    sections.push(html);
+  }}
+
+  // Phase 54.6.244 — disk-free strip. Renders a compact
+  // "data_dir free: 120G / 500G (76% used)" line when available.
+  if (diskFree.total_mb) {{
+    const freeGb = (diskFree.free_mb / 1024).toFixed(0);
+    const totalGb = (diskFree.total_mb / 1024).toFixed(0);
+    const pct = diskFree.pct_used.toFixed(0);
+    const colour = diskFree.pct_used >= 95 ? '#c33'
+      : diskFree.pct_used >= 90 ? '#e90' : '#444';
+    sections.push('<div style="margin:0.5em 0;color:' + colour + ';">'
+      + '<strong>Disk</strong>: ' + freeGb + 'G free of ' + totalGb
+      + 'G (' + pct + '% used)</div>');
+  }}
+
   // ── 24h throughput sparkline ────────────────────────────────────
+  // Phase 54.6.248 — shared _spark() helper for throughput, hourly
+  // failures, and GPU trend (CLI has _sparkline() in
+  // sciknow/cli/db.py; this mirror keeps the look consistent).
+  const _spark = (values, opts) => {{
+    const o = opts || {{}};
+    const chars = o.chars || '▁▂▃▄▅▆▇█';
+    const defColour = o.defaultColour || '#080';
+    const warnColour = o.warnColour || '#e80';
+    const critColour = o.critColour || '#c00';
+    if (!values || !values.length) return '<span style="opacity:0.3">—</span>';
+    const mx = Math.max(...values, 1);
+    return values.map(v => {{
+      if (v === 0) return '<span style="opacity:0.3">▁</span>';
+      const idx = Math.min(Math.round((v / mx) * (chars.length - 1)), chars.length - 1);
+      const pct = v / mx;
+      const c = pct >= 0.9 ? critColour : pct >= 0.5 ? warnColour : defColour;
+      return '<span style="color:' + c + '">' + chars[idx] + '</span>';
+    }}).join('');
+  }};
+
   if (hourly.length) {{
     const peakH = Math.max(...hourly);
     const nowH = hourly[hourly.length - 1] || 0;
-    const chars = '▁▂▃▄▅▆▇█';
-    const spark = hourly.map(v => {{
-      if (v === 0) return '<span style="opacity:0.3">▁</span>';
-      const idx = Math.min(Math.round((v / (peakH || 1)) * (chars.length - 1)), chars.length - 1);
-      const pct = v / (peakH || 1);
-      const colour = pct >= 0.9 ? '#c00' : pct >= 0.5 ? '#e80' : '#080';
-      return '<span style="color:' + colour + '">' + chars[idx] + '</span>';
-    }}).join('');
     sections.push('<h4>24h docs/hour</h4>'
       + '<div style="font-family:monospace;font-size:1.3em;letter-spacing:1px;">'
-      + spark + '</div>'
+      + _spark(hourly) + '</div>'
       + '<div style="color:var(--fg-muted);font-size:0.85em;">peak ' + peakH + '  ·  now ' + nowH + '</div>');
+  }}
+
+  // Phase 54.6.249 — 14-week corpus growth sparkline with headline
+  // 24h / 7d / 30d deltas. CLI has the same headline ("growth +N /24h
+  // +M /7d") in the footer; web renders a wider sparkline too since
+  // it has the space.
+  if (corpusGrowth.weekly_sparkline && corpusGrowth.weekly_sparkline.some(v => v > 0)) {{
+    const weeks = corpusGrowth.weekly_sparkline || [];
+    const weeksBack = corpusGrowth.weeks_back || weeks.length;
+    sections.push('<h4>Corpus growth (last ' + weeksBack + ' weeks)</h4>'
+      + '<div style="font-family:monospace;font-size:1.3em;letter-spacing:1px;">'
+      + _spark(weeks) + '</div>'
+      + '<div style="color:var(--fg-muted);font-size:0.85em;">'
+      + 'added <strong>' + _fmtNum(corpusGrowth.last_24h || 0) + '</strong> /24h · '
+      + '<strong>' + _fmtNum(corpusGrowth.last_7d || 0) + '</strong> /7d · '
+      + '<strong>' + _fmtNum(corpusGrowth.last_30d || 0) + '</strong> /30d'
+      + '</div>');
+  }}
+
+  // Phase 54.6.248 — 24h failure sparkline. Always-red palette so a
+  // single unexpected blip visually jumps out at the operator. CLI
+  // aligns hourly_throughput and pipeline_hourly_failures to the
+  // same 24h window so the two sparklines stack for diff-reading.
+  if (hourlyFails.length && hourlyFails.some(v => v > 0)) {{
+    const totalFails = hourlyFails.reduce((a, b) => a + b, 0);
+    sections.push('<h4>24h failures</h4>'
+      + '<div style="font-family:monospace;font-size:1.3em;letter-spacing:1px;">'
+      + _spark(hourlyFails, {{
+        defaultColour: '#c33', warnColour: '#c33', critColour: '#900'
+      }}) + '</div>'
+      + '<div style="color:var(--fg-muted);font-size:0.85em;">total failures in window: '
+      + totalFails + '</div>');
   }}
 
   // Corpus + GPU + loaded models in a row
@@ -20608,17 +21332,178 @@ function renderMonitor(snap) {{
     + '<tr>' + corpusCells.map(c => '<td>' + _escHTML(c[1]) + '</td>').join('') + '</tr>'
     + '</table>');
 
+  // Phase 54.6.249 — active-book summary + LLM cost totals strip. Both
+  // were collected by `collect_monitor_snapshot` but only the CLI
+  // footer surfaced them. Card + inline strip render so operators
+  // see "where is autowrite right now?" and "is the LLM spend
+  // reasonable?" without opening another view.
+  if (bookAct && bookAct.title) {{
+    const pct = bookAct.chapters_total
+      ? Math.round((bookAct.chapters_drafted / bookAct.chapters_total) * 100)
+      : 0;
+    const lastUp = bookAct.last_updated ? _escHTML(bookAct.last_updated) : '—';
+    sections.push('<h4>Active book</h4>'
+      + '<div style="display:flex;gap:2em;flex-wrap:wrap;padding:0.5em 0.75em;'
+      + 'background:var(--bg-alt, #f5f5f5);border-radius:4px;">'
+      + '<div><strong>' + _escHTML(bookAct.title) + '</strong>'
+      + (bookAct.book_type ? ' <span class="u-muted">(' + _escHTML(bookAct.book_type) + ')</span>' : '')
+      + '</div>'
+      + '<div><strong>Chapters drafted</strong>: ' + _fmtNum(bookAct.chapters_drafted || 0)
+      + ' / ' + _fmtNum(bookAct.chapters_total || 0) + ' (' + pct + '%)</div>'
+      + '<div><strong>Words</strong>: ' + _fmtNum(bookAct.total_words || 0) + '</div>'
+      + '<div><strong>Updated</strong>: <code>' + lastUp + '</code></div>'
+      + '</div>');
+  }}
+
+  // Phase 54.6.251 — metadata-source breakdown. Source is where the
+  // paper's title/authors/year came from: "crossref" (ideal),
+  // "embedded_pdf" (OK), "unknown" (dashboard asks user to run
+  // `sciknow db enrich`). Rendered as a horizontal stacked bar so
+  // ratio is legible without a legend per slice.
+  if (metaQ.sources && metaQ.sources.length) {{
+    const total = metaQ.sources.reduce((a, s) => a + (s.n || 0), 0);
+    const colour = {{
+      crossref: '#080',
+      openalex: '#080',
+      semantic_scholar: '#0a8',
+      arxiv: '#28a',
+      embedded_pdf: '#88a',
+      llm_extracted: '#e80',
+      unknown: '#c33',
+    }};
+    const segs = metaQ.sources.map(s => {{
+      const pct = total ? (s.n / total * 100) : 0;
+      const c = colour[s.source] || '#888';
+      return '<div title="' + _escHTML(s.source) + ': ' + _fmtNum(s.n)
+        + ' (' + pct.toFixed(0) + '%)" '
+        + 'style="background:' + c + ';width:' + pct + '%;"></div>';
+    }}).join('');
+    let html = '<h4>Metadata sources</h4>'
+      + '<div style="display:flex;height:1em;border-radius:3px;overflow:hidden;margin-bottom:0.4em;">'
+      + segs + '</div>'
+      + '<div style="font-size:0.85em;color:var(--fg-muted);">';
+    for (const s of metaQ.sources) {{
+      const pct = total ? (s.n / total * 100).toFixed(0) : 0;
+      const c = colour[s.source] || '#888';
+      html += '<span style="margin-right:1em;"><span style="display:inline-block;width:0.7em;height:0.7em;background:'
+        + c + ';margin-right:0.2em;"></span>' + _escHTML(s.source)
+        + ' <strong>' + _fmtNum(s.n) + '</strong> (' + pct + '%)</span>';
+    }}
+    html += '</div>';
+    // Citations cross-linked headline is on the same snapshot field
+    if (metaQ.citations_total) {{
+      const xl = metaQ.citations_crosslinked || 0;
+      const xlPct = metaQ.citations_crosslinked_pct || 0;
+      html += '<div style="margin-top:0.4em;font-size:0.9em;">'
+        + '<strong>Citations resolved</strong>: ' + _fmtNum(xl) + ' / '
+        + _fmtNum(metaQ.citations_total) + ' (' + xlPct.toFixed(1) + '%)</div>';
+    }}
+    sections.push(html);
+  }}
+
+  // Phase 54.6.251 — year histogram sparkline. Using the same shared
+  // _spark() helper as throughput and corpus growth. Trims trailing
+  // zeros so a sparse corpus doesn't waste half the bar on empty.
+  if (yearHist.length) {{
+    // year_histogram is a list of year/count pairs; extract counts
+    const counts = yearHist.map(r => r.count || 0);
+    // Trim trailing zeros (future-proof: histogram may extend past
+    // "now year" when DB has malformed rows)
+    while (counts.length && counts[counts.length - 1] === 0) counts.pop();
+    const total = counts.reduce((a, b) => a + b, 0);
+    if (total > 0) {{
+      const startYear = yearHist[0] && yearHist[0].year;
+      const endYear = yearHist[counts.length - 1] && yearHist[counts.length - 1].year;
+      sections.push('<h4>Corpus year distribution</h4>'
+        + '<div style="font-family:monospace;font-size:1.3em;letter-spacing:1px;">'
+        + _spark(counts) + '</div>'
+        + '<div style="color:var(--fg-muted);font-size:0.85em;">'
+        + _escHTML(String(startYear)) + ' → ' + _escHTML(String(endYear))
+        + ' · ' + _fmtNum(total) + ' dated papers</div>');
+    }}
+  }}
+
+  // Phase 54.6.251 — embeddings + visuals coverage pills. Both are
+  // already-collected percentages; the dashboard calls out drift when
+  // anything slips below 100 %. embeddings_coverage is the critical
+  // one — retrieval is broken if chunks exist in PG without vectors.
+  const coverageBits = [];
+  if (embedCov.total) {{
+    const pct = embedCov.pct || 0;
+    const col = pct >= 99 ? '#080' : pct >= 90 ? '#e80' : '#c33';
+    coverageBits.push('<div><strong>Embeddings</strong>: '
+      + '<span style="color:' + col + ';">' + pct.toFixed(1) + '%</span>'
+      + ' (' + _fmtNum(embedCov.embedded) + '/' + _fmtNum(embedCov.total)
+      + ', missing ' + _fmtNum(embedCov.missing) + ')</div>');
+  }}
+  const vcovPct = (num, tot) => tot ? ((num / tot) * 100).toFixed(0) + '%' : '—';
+  if (vcov.figures_total) {{
+    coverageBits.push('<div><strong>Figures captioned</strong>: '
+      + _fmtNum(vcov.figures_captioned) + '/' + _fmtNum(vcov.figures_total)
+      + ' (' + vcovPct(vcov.figures_captioned, vcov.figures_total) + ')</div>');
+  }}
+  if (vcov.charts_total) {{
+    coverageBits.push('<div><strong>Charts captioned</strong>: '
+      + _fmtNum(vcov.charts_captioned) + '/' + _fmtNum(vcov.charts_total)
+      + ' (' + vcovPct(vcov.charts_captioned, vcov.charts_total) + ')</div>');
+  }}
+  if (vcov.equations_total) {{
+    coverageBits.push('<div><strong>Equations paraphrased</strong>: '
+      + _fmtNum(vcov.equations_paraphrased) + '/' + _fmtNum(vcov.equations_total)
+      + ' (' + vcovPct(vcov.equations_paraphrased, vcov.equations_total) + ')</div>');
+  }}
+  if (coverageBits.length) {{
+    sections.push('<h4>Coverage</h4>'
+      + '<div style="display:flex;gap:2em;flex-wrap:wrap;">'
+      + coverageBits.join('') + '</div>');
+  }}
+
+  if (costTotals && costTotals.calls) {{
+    const dSec = costTotals.seconds || 0;
+    const dHrs = dSec >= 3600 ? (dSec / 3600).toFixed(1) + 'h'
+      : dSec >= 60 ? (dSec / 60).toFixed(1) + 'm' : Math.round(dSec) + 's';
+    sections.push('<h4>LLM cost (last ' + (costTotals.window_days || 30) + 'd)</h4>'
+      + '<div style="display:flex;gap:2em;flex-wrap:wrap;">'
+      + '<div><strong>Tokens</strong>: ' + _fmtNum(costTotals.tokens || 0) + '</div>'
+      + '<div><strong>LLM wall-time</strong>: ' + _escHTML(dHrs) + '</div>'
+      + '<div><strong>Calls</strong>: ' + _fmtNum(costTotals.calls || 0) + '</div>'
+      + '<div><strong>Models used</strong>: ' + _fmtNum(costTotals.models || 0) + '</div>'
+      + '</div>');
+  }}
+
   // GPU
   if (gpus.length) {{
+    // Phase 54.6.248 — GPU row gains temp + util trend sparklines
+    // sourced from snap.gpu_trend (populated by the core monitor
+    // on every collect_monitor_snapshot call, rolling window up to
+    // N samples per worker). Both series share the palette so hot
+    // and overloaded GPUs go red.
+    const gpuTrend = snap.gpu_trend || {{}};
+    const tempSamples = gpuTrend.temp_samples || [];
+    const utilSamples = gpuTrend.util_samples || [];
+    const sparkCol = (vals) => (
+      (vals && vals.length)
+        ? '<span style="font-family:monospace;letter-spacing:1px;">'
+          + _spark(vals) + '</span>'
+        : '<span class="u-muted">—</span>'
+    );
     let html = '<h4>GPU</h4><table class="stats-table" style="width:100%;">'
-      + '<tr><th>#</th><th>Name</th><th>VRAM</th><th>Util</th><th>Temp</th></tr>';
+      + '<tr><th>#</th><th>Name</th><th>VRAM</th><th>Util</th><th>Temp</th>'
+      + '<th>Util trend</th><th>Temp trend</th></tr>';
     for (const g of gpus) {{
       const vpct = g.memory_total_mb ? (g.memory_used_mb / g.memory_total_mb * 100).toFixed(0) : '0';
       html += '<tr><td>' + g.index + '</td><td>' + _escHTML(g.name)
         + '</td><td>' + _fmtNum(g.memory_used_mb) + ' / ' + _fmtNum(g.memory_total_mb) + ' MB (' + vpct + '%)'
-        + '</td><td>' + g.utilization_pct + '%</td><td>' + (g.temperature_c || '?') + '°C</td></tr>';
+        + '</td><td>' + g.utilization_pct + '%</td><td>' + (g.temperature_c || '?') + '°C</td>'
+        + '<td>' + sparkCol(utilSamples) + '</td>'
+        + '<td>' + sparkCol(tempSamples) + '</td>'
+        + '</tr>';
     }}
     html += '</table>';
+    if (gpuTrend.sample_count) {{
+      html += '<div class="u-muted" style="font-size:0.85em;">Trend: '
+        + gpuTrend.sample_count + ' sample(s) in the worker rolling buffer — populates over time as you keep the modal open.</div>';
+    }}
     sections.push(html);
   }}
 
@@ -20634,6 +21519,83 @@ function renderMonitor(snap) {{
     sections.push(html);
   }} else {{
     sections.push('<p class="u-note">Ollama: no models resident right now.</p>');
+  }}
+
+  // Phase 54.6.246 — active web jobs panel. Inside the web process
+  // this is the authoritative in-memory list (same data /api/monitor
+  // returns); inside the CLI it comes from the cross-process pulse
+  // file and may carry is_stale=true when the web crashed without
+  // clearing it. Table hidden when no jobs — don't occupy space on
+  // an idle system.
+  const activeJobs = snap.active_jobs || [];
+  if (activeJobs.length) {{
+    // Phase 54.6.247 — added TPS column. Coloured stop-light: red
+    // when elapsed > 5s but TPS == 0 (stalled), green when >= 5 t/s,
+    // muted otherwise. Same logic as the CLI header.
+    let html = '<h4>Active jobs</h4>'
+      + '<table class="stats-table" style="width:100%;">'
+      + '<tr><th>Job</th><th>Type</th><th>Model</th><th>Tokens</th><th>TPS</th><th>Elapsed</th><th></th></tr>';
+    for (const j of activeJobs) {{
+      const el = j.elapsed_s || 0;
+      const elStr = el >= 60 ? (el / 60).toFixed(1) + 'm' : Math.round(el) + 's';
+      const twStr = j.target_words ? ' / ' + j.target_words + 'w' : '';
+      const stale = j.is_stale
+        ? ' <span style="color:#c33;font-weight:bold;">STALE</span>'
+        : '';
+      const tps = j.tps || 0;
+      let tpsColour = 'inherit';
+      if (el > 5 && tps === 0) tpsColour = '#c33';
+      else if (tps >= 5) tpsColour = '#080';
+      else tpsColour = '#888';
+      html += '<tr>'
+        + '<td><code>' + _escHTML((j.id || '?').slice(0, 8)) + '</code>' + stale + '</td>'
+        + '<td>' + _escHTML(j.type || '?') + '</td>'
+        + '<td><code>' + _escHTML(j.model || '—') + '</code></td>'
+        + '<td>' + _fmtNum(j.tokens || 0) + twStr + '</td>'
+        + '<td style="color:' + tpsColour + ';"><strong>' + tps.toFixed(1) + '</strong> t/s</td>'
+        + '<td>' + _escHTML(elStr) + '</td>'
+        + '<td><code class="u-muted">' + _escHTML(j.stream_state || '') + '</code></td>'
+        + '</tr>';
+    }}
+    html += '</table>';
+    sections.push(html);
+  }}
+
+  // Phase 54.6.244 — model assignments per role. Mirrors the CLI
+  // "gpu · models" panel — the user can see the whole LLM wiring at
+  // a glance without opening Book Settings → Models tab. Overrides
+  // that fall back to llm_main render the main model name with a
+  // "(↑LLM_MODEL)" suffix so the user can tell "explicitly pinned
+  // to llm_main" apart from "inherits llm_main".
+  const models = snap.model_assignments || {{}};
+  if (models.llm_main) {{
+    const main = models.llm_main;
+    const fmt = (val, inherits) => {{
+      if (val) return '<code>' + _escHTML(val) + '</code>';
+      if (inherits && main) return '<code>' + _escHTML(main)
+        + '</code> <span class="u-muted">(↑LLM_MODEL)</span>';
+      return '<em class="u-muted">(unset)</em>';
+    }};
+    const rows = [
+      ['LLM_MODEL',              main,                      false],
+      ['LLM_FAST_MODEL',         models.llm_fast,           false],
+      ['BOOK_WRITE_MODEL',       models.book_write,         true],
+      ['BOOK_REVIEW_MODEL',      models.book_review,        true],
+      ['AUTOWRITE_SCORER_MODEL', models.autowrite_scorer,   true],
+      ['VISUALS_CAPTION_MODEL',  models.caption_vlm,        false],
+      ['MINERU_VLM_MODEL',       models.mineru_vlm_model,   false],
+      ['EMBEDDING_MODEL',        models.embedder,           false],
+      ['RERANKER_MODEL',         models.reranker,           false],
+    ];
+    let html = '<h4>Model assignments</h4>'
+      + '<table class="stats-table" style="width:100%;">'
+      + '<tr><th>Role</th><th>Model</th></tr>';
+    for (const [role, val, inherits] of rows) {{
+      if (val === undefined) continue;
+      html += '<tr><td>' + _escHTML(role) + '</td><td>' + fmt(val, inherits) + '</td></tr>';
+    }}
+    html += '</table>';
+    sections.push(html);
   }}
 
   // Qdrant collections
@@ -20768,9 +21730,49 @@ function renderMonitor(snap) {{
     sections.push(html);
   }}
 
+  // Phase 54.6.260 — collapsible log tail at the bottom. Uses the
+  // native <details>/<summary> pair so no JS state to manage;
+  // operators click to expand and see the 20-line tail. ERROR +
+  // CRITICAL lines render red, WARNING in yellow. File path shown
+  // in the summary so operators can `tail -f` it if they want a
+  // live view.
+  if ((logTail.lines || []).length) {{
+    const errCount = logTail.error_lines || 0;
+    const filePath = logTail.file_path || '';
+    const summaryColour = errCount > 0 ? '#c33' : 'var(--fg-muted)';
+    let html = '<details style="margin-top:0.5em;">'
+      + '<summary style="cursor:pointer;color:' + summaryColour + ';">'
+      + '<strong>Recent log</strong> (' + logTail.lines.length + ' lines'
+      + (errCount ? ', <span style="color:#c33;">' + errCount + ' ERROR/CRITICAL</span>' : '')
+      + ')'
+      + (filePath ? ' <code class="u-muted" style="font-size:0.85em;">' + _escHTML(filePath) + '</code>' : '')
+      + '</summary>'
+      + '<pre style="font-family:monospace;font-size:0.8em;'
+      + 'background:var(--bg-alt,#f5f5f5);padding:0.5em;border-radius:4px;'
+      + 'max-height:300px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;">';
+    for (const ln of logTail.lines) {{
+      let c = '#333';
+      if (/\\bERROR\\b|\\bCRITICAL\\b/.test(ln)) c = '#c33';
+      else if (/\\bWARNING\\b/.test(ln)) c = '#b70';
+      html += '<span style="color:' + c + ';">' + _escHTML(ln) + '</span>\\n';
+    }}
+    html += '</pre></details>';
+    sections.push(html);
+  }}
+
   target.innerHTML = sections.join('');
   const ts = document.getElementById('monitor-last-updated');
-  if (ts) ts.textContent = 'Updated ' + new Date().toLocaleTimeString();
+  if (ts) {{
+    // Phase 54.6.263 — show snapshot build time. Red at >2s,
+    // yellow at >1s, muted otherwise.
+    const ms = snap.snapshot_duration_ms;
+    let msTxt = '';
+    if (typeof ms === 'number') {{
+      const col = ms > 2000 ? '#c33' : ms > 1000 ? '#e80' : 'var(--fg-muted)';
+      msTxt = ' · <span style="color:' + col + ';">built in ' + ms + 'ms</span>';
+    }}
+    ts.innerHTML = 'Updated ' + new Date().toLocaleTimeString() + msTxt;
+  }}
 }}
 
 function switchToolsTab(name) {{
@@ -25681,10 +26683,14 @@ async function loadBookSettingsModels() {{
     // "(unset)" isn't misleading. VISUALS_CAPTION_MODEL and
     // MINERU_VLM_MODEL don't fall back to LLM_MODEL; they have their
     // own code-level defaults (qwen2.5vl:32b + the MinerU pipeline
-    // VLM). BOOK_REVIEW / AUTOWRITE_SCORER DO fall back to LLM_MODEL.
+    // VLM). BOOK_REVIEW / AUTOWRITE_SCORER / BOOK_WRITE DO fall back
+    // to LLM_MODEL. Phase 54.6.244 — added BOOK_WRITE_MODEL row and
+    // moved "book write · autowrite writer" out of the LLM_MODEL
+    // description (where it was before the 54.6.243 split).
     const rows = [
-      ['LLM_MODEL',              data.llm_model,              'book write · autowrite writer · ask · wiki compile · extract-kg', null],
+      ['LLM_MODEL',              data.llm_model,              'ask · wiki compile · extract-kg · everything without a per-role override', null],
       ['LLM_FAST_MODEL',         data.llm_fast_model,         'book outline · classify-papers · paraphrase-equations · RAPTOR · metadata fallback', 'LLM_MODEL'],
+      ['BOOK_WRITE_MODEL',       data.book_write_model,       'book write · autowrite writer/scorer/verify/cove (55.6.243 split)', 'LLM_MODEL'],
       ['BOOK_REVIEW_MODEL',      data.book_review_model,      'book review (5-dim critic)', 'LLM_MODEL'],
       ['AUTOWRITE_SCORER_MODEL', data.autowrite_scorer_model, 'autowrite score + rescore (not verify/cove)', 'LLM_MODEL'],
       ['VISUALS_CAPTION_MODEL',  data.visuals_caption_model,  'db caption-visuals (figures + charts) — 54.6.74 VLM-sweep winner', 'qwen2.5vl:32b (code default)'],
