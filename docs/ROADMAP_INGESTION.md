@@ -809,7 +809,7 @@ Scoring: **Impact** (H/M/L) × **Effort** (H/M/L) → **Verdict**.
 | 3.9.2 | Adaptive RAPTOR depth | Q | L | L | **Defer** | Current 3-level fine for current corpus size |
 | 3.10.1 | Incremental wiki updates | S | M | M | **Defer** | Full rebuild is fine at current corpus size; worth it past 2k papers |
 | 3.10.2 | Wiki-claim-to-paper consistency check | Q | M | M | **Defer** | Builds on claim-atomization; low regression risk |
-| 3.11.3 | Pipeline observability dashboard | O | M | M | **Defer** | Useful polish; wait for a real incident to motivate |
+| 3.11.3 | Pipeline observability dashboard | O | M | M | **Shipped 54.6.229** | `sciknow db dashboard` — stage timing p50/p95 + failure rate + throughput trend + LLM usage. CLI only; web-UI follow-on pending |
 | 3.11.5 | Quality regression suite | O | M | L | **Shipped 54.6.224** | `sciknow bench-snapshot` (per-commit git-SHA snapshots) + `sciknow bench-diff A B` (direction-aware regression flagging, exit-1 on regression suitable for CI) |
 | 3.1.2 | Equation extraction accuracy bench | O, Q | L | L | **Shipped 54.6.222** | `sciknow db equation-bench` — two-axis (latex_valid + paraphrase_matches) grading via LLM or human, JSONL per run. Gives pre/post baseline when VLM-Pro re-ingest lands |
 | 3.1.5 | Reading-order ML model | Q | M | H | **Superseded by 3.1.6** | VLM-Pro reads natively; scrambled-order tail shrinks to near-zero |

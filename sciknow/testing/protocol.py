@@ -11853,6 +11853,95 @@ def l1_phase54_6_134_agentic_coverage_uses_reranker() -> None:
     )
 
 
+def l1_phase54_6_229_pipeline_dashboard_cli() -> None:
+    """Phase 54.6.229 (roadmap 3.11.3) — pipeline observability dashboard.
+
+    `sciknow db dashboard` composes existing telemetry
+    (ingestion_jobs + llm_usage_log) into a single four-panel view.
+    Read-only and safe to run alongside active ingestion. Tests:
+
+      A) Typer command registered; help renders.
+      B) --days and --json flags on the surface.
+      C) JSON output schema carries all four panels
+         (stage_timing / stage_failures / throughput / llm_usage)
+         with the expected keys on each row — stable contract for
+         anyone piping --json into a dashboarding tool.
+      D) The command is read-only: source doesn't contain INSERT,
+         UPDATE, DELETE statements (guards against a refactor that
+         inadvertently turns the dashboard into a write path).
+      E) The stage-timing query uses percentile_cont(0.5) + (0.95)
+         — mean-only stats hide outliers, and p95 is the specific
+         signal the roadmap called out.
+    """
+    import inspect as _inspect
+    import json as _json
+    from typer.testing import CliRunner
+    from sciknow.cli.main import app
+    from sciknow.cli import db as db_cli
+
+    # A) help renders
+    r = CliRunner().invoke(app, ["db", "dashboard", "--help"])
+    assert r.exit_code == 0, (
+        f"dashboard --help failed: {r.output[:300]}"
+    )
+
+    # B) flag surface
+    assert hasattr(db_cli, "dashboard")
+    sig = _inspect.signature(db_cli.dashboard)
+    for param in ("days", "json_out"):
+        assert param in sig.parameters, (
+            f"dashboard missing --{param.replace('_', '-')}"
+        )
+
+    # C) JSON output schema — exercise end-to-end because the
+    # aggregation queries are the main surface and a regression
+    # that drops, say, the throughput panel is silently bad.
+    r = CliRunner().invoke(app, ["db", "dashboard", "--json"])
+    assert r.exit_code == 0, (
+        f"dashboard --json failed: {r.output[:300]}"
+    )
+    data = _json.loads(r.output)
+    for panel in (
+        "stage_timing", "stage_failures", "throughput", "llm_usage",
+    ):
+        assert panel in data, (
+            f"dashboard --json must emit `{panel}` panel — stable "
+            f"schema contract for downstream consumers"
+        )
+    assert data.get("window_days") is not None, (
+        "dashboard --json must surface `window_days` so consumers "
+        "know what trailing window the throughput + LLM panels used"
+    )
+    # Stage timing rows must carry p50/p95 — the stats the roadmap
+    # explicitly called out.
+    if data["stage_timing"]:
+        sample = data["stage_timing"][0]
+        for k in ("stage", "n", "p50_ms", "p95_ms"):
+            assert k in sample, (
+                f"stage_timing row missing `{k}` key"
+            )
+
+    # D) read-only guard (source-level)
+    src = _inspect.getsource(db_cli.dashboard)
+    for forbidden in ("INSERT ", "UPDATE ", "DELETE FROM"):
+        assert forbidden not in src, (
+            f"dashboard must stay read-only — a {forbidden!r} "
+            f"statement implies someone added a write path. "
+            f"Dashboards that mutate state are a footgun (lose "
+            f"the 'safe to run alongside ingestion' invariant)."
+        )
+
+    # E) percentile_cont usage — mean-only stats hide outliers
+    assert "percentile_cont(0.5)" in src, (
+        "stage timing must include p50 via percentile_cont(0.5)"
+    )
+    assert "percentile_cont(0.95)" in src, (
+        "stage timing must include p95 via percentile_cont(0.95) — "
+        "the roadmap 3.11.3 brief specifically called out tail "
+        "latency visibility as the dashboard's point"
+    )
+
+
 def l1_phase54_6_228_colbert_rerank_search() -> None:
     """Phase 54.6.228 (roadmap 3.4.3 Phase 2) — ColBERT rerank search path.
 
@@ -13871,6 +13960,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_227_colbert_abstracts_phase1,
     # Phase 54.6.228 — roadmap 3.4.3 Phase 2: ColBERT rerank search
     l1_phase54_6_228_colbert_rerank_search,
+    # Phase 54.6.229 — roadmap 3.11.3: pipeline observability dashboard
+    l1_phase54_6_229_pipeline_dashboard_cli,
 ]
 
 L2_TESTS: list[Callable] = [

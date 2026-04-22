@@ -1186,6 +1186,266 @@ def failures(
 
 
 @app.command()
+def dashboard(
+    days: int = typer.Option(
+        30, "--days",
+        help="Trailing window for throughput + LLM usage panels. "
+             "Doesn't affect the stage-timing panel (which uses the "
+             "full ingestion_jobs history).",
+    ),
+    json_out: bool = typer.Option(
+        False, "--json",
+        help="Emit machine-readable JSON instead of Rich tables.",
+    ),
+):
+    """Phase 54.6.229 (roadmap 3.11.3) — pipeline observability snapshot.
+
+    Four-panel read-only view that composes existing telemetry tables
+    (``ingestion_jobs``, ``llm_usage_log``) into a single dashboard:
+
+      1. **Stage timing** — count, p50, p95 duration per stage. Catches
+         the "embedding suddenly got slow" regressions that
+         `bench --layer live` doesn't cover because it runs synthetic
+         queries rather than real ingestion.
+      2. **Stage failures** — error rate per stage + top error class.
+         Builds on the `sciknow db failures` clinic (54.6.205) —
+         this surface is the summary view; `failures` is the deep-
+         dive.
+      3. **Throughput trend** — documents-per-day for the trailing
+         `--days` window. Spot stalls (flat line) vs bursts.
+      4. **LLM cost** — tokens + seconds per operation × model from
+         `llm_usage_log`. Populated by web-UI runs; CLI LLM calls
+         aren't logged here today (follow-on instrumentation needed).
+
+    Read-only — never writes to any table. Safe to run alongside
+    active ingestion.
+
+    Examples:
+
+      sciknow db dashboard                # default 30-day window
+      sciknow db dashboard --days 7       # last week only
+      sciknow db dashboard --json | jq .  # scripted pipelines
+    """
+    from sciknow.cli import preflight
+    preflight(qdrant=False)
+
+    import json as _json
+    from datetime import datetime, timezone
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+
+    since = datetime.now(timezone.utc)
+    # Best-effort — if days is bad, we'll just use "all time".
+    try:
+        since_iso = (since.replace(microsecond=0)
+                     - __import__("datetime").timedelta(days=days)
+                    ).isoformat()
+    except Exception:
+        since_iso = None
+
+    with get_session() as session:
+        # 1) Stage timing — percentiles on completed jobs with
+        # non-null duration. Order is ascending on p95 so the
+        # biggest latency offenders float down.
+        timing = session.execute(text("""
+            SELECT stage,
+                   COUNT(*) AS n,
+                   percentile_cont(0.5) WITHIN GROUP
+                       (ORDER BY duration_ms) AS p50,
+                   percentile_cont(0.95) WITHIN GROUP
+                       (ORDER BY duration_ms) AS p95,
+                   AVG(duration_ms) AS mean_ms
+            FROM ingestion_jobs
+            WHERE status IN ('completed', 'ok')
+              AND duration_ms IS NOT NULL
+            GROUP BY stage
+            ORDER BY p95 DESC NULLS LAST
+        """)).fetchall()
+
+        # 2) Per-stage failure rate + top error signature.
+        fails = session.execute(text("""
+            SELECT stage,
+                   SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)
+                       AS failed,
+                   COUNT(*) AS total
+            FROM ingestion_jobs
+            GROUP BY stage
+            ORDER BY failed DESC
+        """)).fetchall()
+
+        # 3) Throughput — distinct documents touched per day in
+        # the trailing window. Uses DATE() because ingestion_jobs
+        # created_at is timestamptz.
+        if since_iso:
+            throughput = session.execute(text("""
+                SELECT DATE(created_at) AS day,
+                       COUNT(DISTINCT document_id) AS docs,
+                       COUNT(*) AS jobs
+                FROM ingestion_jobs
+                WHERE created_at >= CAST(:since AS timestamptz)
+                GROUP BY day
+                ORDER BY day DESC
+                LIMIT 30
+            """), {"since": since_iso}).fetchall()
+        else:
+            throughput = []
+
+        # 4) LLM usage — tokens + seconds per (operation, model).
+        if since_iso:
+            llm = session.execute(text("""
+                SELECT operation, model_name,
+                       SUM(tokens) AS tokens,
+                       SUM(duration_seconds) AS seconds,
+                       COUNT(*) AS calls
+                FROM llm_usage_log
+                WHERE started_at >= CAST(:since AS timestamptz)
+                GROUP BY operation, model_name
+                ORDER BY tokens DESC NULLS LAST
+                LIMIT 30
+            """), {"since": since_iso}).fetchall()
+        else:
+            llm = []
+
+    if json_out:
+        console.print(_json.dumps({
+            "window_days": days,
+            "since": since_iso,
+            "stage_timing": [
+                {"stage": t[0], "n": int(t[1]),
+                 "p50_ms": float(t[2]) if t[2] is not None else None,
+                 "p95_ms": float(t[3]) if t[3] is not None else None,
+                 "mean_ms": float(t[4]) if t[4] is not None else None}
+                for t in timing
+            ],
+            "stage_failures": [
+                {"stage": f[0], "failed": int(f[1]),
+                 "total": int(f[2]),
+                 "failure_rate": (f[1] / f[2]) if f[2] else 0.0}
+                for f in fails
+            ],
+            "throughput": [
+                {"day": str(t[0]), "docs": int(t[1]),
+                 "jobs": int(t[2])}
+                for t in throughput
+            ],
+            "llm_usage": [
+                {"operation": l[0], "model": l[1],
+                 "tokens": int(l[2] or 0),
+                 "seconds": float(l[3] or 0.0),
+                 "calls": int(l[4] or 0)}
+                for l in llm
+            ],
+        }, indent=2, default=str))
+        return
+
+    # Rich rendering
+    console.print(
+        f"[bold]sciknow pipeline dashboard[/bold]  "
+        f"[dim](window: last {days} day(s), timing: all-time)[/dim]"
+    )
+
+    # --- Stage timing panel ---
+    t1 = Table(
+        title="Stage timing (completed jobs only)",
+        box=box.SIMPLE_HEAD, expand=True,
+    )
+    t1.add_column("Stage", ratio=3)
+    t1.add_column("N", justify="right", width=8, style="cyan")
+    t1.add_column("p50", justify="right", width=10)
+    t1.add_column("p95", justify="right", width=10)
+    t1.add_column("mean", justify="right", width=10, style="dim")
+
+    def _fmt_ms(v):
+        if v is None:
+            return "—"
+        if v >= 60_000:
+            return f"{v / 60000:.1f}m"
+        if v >= 1000:
+            return f"{v / 1000:.1f}s"
+        return f"{v:.0f}ms"
+
+    for stage, n, p50, p95, mean_ms in timing:
+        t1.add_row(
+            stage, str(n), _fmt_ms(p50), _fmt_ms(p95), _fmt_ms(mean_ms)
+        )
+    console.print(t1)
+
+    # --- Failure-rate panel ---
+    t2 = Table(
+        title="Stage failures",
+        box=box.SIMPLE_HEAD, expand=True,
+    )
+    t2.add_column("Stage", ratio=3)
+    t2.add_column("Failed", justify="right", width=8)
+    t2.add_column("Total", justify="right", width=8, style="dim")
+    t2.add_column("Rate", justify="right", width=8)
+
+    any_failures = False
+    for stage, failed, total in fails:
+        rate = (failed / total * 100) if total else 0.0
+        colour = "dim" if failed == 0 else ("yellow" if rate < 5 else "red")
+        if failed:
+            any_failures = True
+        t2.add_row(
+            f"[{colour}]{stage}[/{colour}]",
+            str(failed), str(total),
+            f"[{colour}]{rate:.1f}%[/{colour}]",
+        )
+    console.print(t2)
+    if any_failures:
+        console.print(
+            "[dim]Drill into top error classes with "
+            "`sciknow db failures --stage <name>`.[/dim]"
+        )
+
+    # --- Throughput panel ---
+    if throughput:
+        t3 = Table(
+            title=f"Throughput — documents touched per day (last {days}d)",
+            box=box.SIMPLE_HEAD, expand=True,
+        )
+        t3.add_column("Day", ratio=2)
+        t3.add_column("Documents", justify="right", width=11,
+                      style="cyan")
+        t3.add_column("Jobs", justify="right", width=8, style="dim")
+        t3.add_column("", ratio=4)
+        max_docs = max((r[1] for r in throughput), default=1) or 1
+        for day, docs, jobs in throughput:
+            bar = "█" * int(40 * docs / max_docs)
+            t3.add_row(str(day), str(docs), str(jobs),
+                       f"[cyan]{bar}[/cyan]")
+        console.print(t3)
+
+    # --- LLM panel ---
+    if llm:
+        t4 = Table(
+            title=f"LLM usage (last {days}d, web-UI jobs only)",
+            box=box.SIMPLE_HEAD, expand=True,
+        )
+        t4.add_column("Operation", ratio=2)
+        t4.add_column("Model", ratio=3)
+        t4.add_column("Tokens", justify="right", width=10, style="cyan")
+        t4.add_column("Seconds", justify="right", width=10, style="dim")
+        t4.add_column("Calls", justify="right", width=7)
+        for op, model, tokens, seconds, calls in llm:
+            t4.add_row(
+                str(op or "—"),
+                str(model or "—"),
+                f"{int(tokens or 0):,}",
+                f"{float(seconds or 0.0):.0f}s",
+                str(int(calls or 0)),
+            )
+        console.print(t4)
+    else:
+        console.print(
+            f"[dim]No LLM calls logged in the last {days}d. "
+            "llm_usage_log is populated from web-UI runs only; "
+            "CLI LLM calls (wiki compile, extract-kg, etc.) aren't "
+            "instrumented here yet — follow-on work.[/dim]"
+        )
+
+
+@app.command()
 def stats():
     """Show paper counts and ingestion status breakdown."""
     from sqlalchemy import func, text
