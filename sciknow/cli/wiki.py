@@ -11,6 +11,7 @@ Commands:
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -1042,3 +1043,288 @@ def synthesize(
             f"\n[green]✓ Synthesis page created:[/green] [[{result.get('slug', '')}]] "
             f"({result.get('word_count', 0)} words)"
         )
+
+
+_KG_GRADE_PROMPT = """You are grading a knowledge-graph triple extracted \
+from a scientific paper.
+
+Triple: <subject>{subject}</subject> <predicate>{predicate}</predicate> \
+<object>{object}</object>
+
+Source paper: "{title}" ({year})
+Evidence sentence (verbatim from the paper): "{source_sentence}"
+
+Grade the triple with one of four labels:
+
+- correct   — the triple faithfully represents a claim the evidence \
+sentence makes. Subject and object are accurate; the predicate is a \
+reasonable paraphrase.
+- plausible — the triple is broadly consistent with the evidence but \
+loses nuance (e.g. omits a hedge, conflates a correlation with a cause, \
+or uses a too-general predicate).
+- wrong     — the triple contradicts the evidence, swaps subject/object, \
+or asserts a claim the evidence does not actually make.
+- unclear   — the evidence sentence is missing, truncated, or too \
+ambiguous to grade.
+
+Respond in JSON ONLY, no prose:
+{{"grade": "correct|plausible|wrong|unclear", "reason": "<one short sentence>"}}
+"""
+
+
+@app.command(name="kg-sample")
+def kg_sample(
+    n: int = typer.Option(
+        30, "--n", "-n",
+        help="How many random triples to sample (default 30 — enough "
+             "to estimate precision with ±10% confidence at a 95% CI).",
+    ),
+    judge: str = typer.Option(
+        "llm", "--judge",
+        help="Who grades the sample: 'llm' (LLM_FAST_MODEL auto-grades; "
+             "no human input; fast), 'human' (interactive prompt per "
+             "triple), or 'both' (LLM grades first, then human confirms "
+             "the disagreements).",
+    ),
+    model: str | None = typer.Option(
+        None, "--model",
+        help="Override the judge LLM. Default: settings.llm_fast_model.",
+    ),
+    output_dir: Path = typer.Option(
+        None, "--output-dir",
+        help="Where to write the sample JSONL. Default: "
+             "<data_dir>/kg_samples/sample-<iso-timestamp>.jsonl.",
+    ),
+    only_canonicalised: bool = typer.Option(
+        False, "--only-canonicalised",
+        help="Restrict the sample to triples whose subject AND object "
+             "both hit a canonical alias (54.6.209). Useful for auditing "
+             "the canonicalization step itself.",
+    ),
+    seed: int | None = typer.Option(
+        None, "--seed",
+        help="Random seed for deterministic sampling (debugging only).",
+    ),
+):
+    """Phase 54.6.218 (roadmap 3.7.3) — sample KG triples for precision tracking.
+
+    Picks N random triples from ``knowledge_graph``, grades each one
+    (LLM judge or human), and appends results to a timestamped JSONL
+    file under ``<data_dir>/kg_samples/``. Track precision over time
+    by running this command periodically (e.g. weekly) and comparing
+    the ratio of ``correct / (correct + plausible + wrong)`` — a
+    sudden drop catches silent regressions when the extract model
+    changes or the canonicalization rules drift.
+
+    Output shape (one JSON object per line):
+
+      {{
+        "triple_id": "<uuid>",
+        "subject": "...", "predicate": "...", "object": "...",
+        "source_doc_id": "<uuid>", "paper_title": "...", "year": 2024,
+        "source_sentence": "...",
+        "grade": "correct|plausible|wrong|unclear",
+        "reason": "<judge's one-sentence rationale>",
+        "judge": "llm-<model>|human",
+        "sampled_at": "<iso timestamp>"
+      }}
+
+    Examples:
+
+      sciknow wiki kg-sample                  # 30 triples, LLM-graded
+      sciknow wiki kg-sample --n 50           # bigger sample
+      sciknow wiki kg-sample --judge human    # interactive grading
+      sciknow wiki kg-sample --judge both     # LLM first, human confirms disagreements
+      sciknow wiki kg-sample --only-canonicalised  # audit 54.6.209 step
+    """
+    from sciknow.cli import preflight
+    preflight()
+
+    import json as _json
+    import random as _random
+    from datetime import datetime, timezone
+    from sqlalchemy import text as sql_text
+    from sciknow.config import settings
+    from sciknow.storage.db import get_session
+
+    if judge not in ("llm", "human", "both"):
+        console.print(
+            f"[red]Invalid --judge:[/red] {judge!r} — must be "
+            "llm / human / both."
+        )
+        raise typer.Exit(2)
+
+    # Resolve output path — Phase 54.6.20 rule: honour active project
+    # data_dir when set, else fall back to settings.data_dir.
+    from sciknow.core.project import get_active_project
+    active = get_active_project()
+    out_root = output_dir or (active.data_dir / "kg_samples")
+    out_root.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out_path = out_root / f"sample-{ts}.jsonl"
+
+    if seed is not None:
+        _random.seed(seed)
+
+    # Pull a candidate pool + random-shuffle in Python. TABLESAMPLE is
+    # tempting but on a 10k-row table it's fiddly to get a clean N;
+    # the simpler ORDER BY random() LIMIT N is fine at this scale.
+    filter_sql = ""
+    if only_canonicalised:
+        # Subject/object hit a canonical alias means they appear more
+        # than once across the KG (canonicalization collapses variants).
+        # Approximate via "appears >= 2 times" as a cheap proxy.
+        filter_sql = """
+          AND kg.subject IN (
+              SELECT subject FROM knowledge_graph
+              GROUP BY subject HAVING COUNT(*) >= 2
+          )
+          AND kg.object IN (
+              SELECT object FROM knowledge_graph
+              GROUP BY object HAVING COUNT(*) >= 2
+          )
+        """
+
+    with get_session() as session:
+        rows = session.execute(sql_text(f"""
+            SELECT kg.id::text, kg.subject, kg.predicate, kg.object,
+                   kg.source_doc_id::text, pm.title, pm.year,
+                   kg.source_sentence
+            FROM knowledge_graph kg
+            LEFT JOIN paper_metadata pm ON pm.document_id = kg.source_doc_id
+            WHERE kg.source_sentence IS NOT NULL
+              AND length(kg.source_sentence) >= 20
+              {filter_sql}
+            ORDER BY random()
+            LIMIT :n
+        """), {"n": n}).fetchall()
+
+    if not rows:
+        console.print(
+            "[yellow]No triples match the filter.[/yellow] "
+            "Run `sciknow wiki extract-kg` first, or drop "
+            "--only-canonicalised."
+        )
+        return
+
+    console.print(
+        f"[bold]Sampling {len(rows)} triple(s) → {out_path}[/bold]"
+    )
+
+    _resolved_model = model or settings.llm_fast_model or settings.llm_model
+
+    def _llm_grade(row) -> tuple[str, str]:
+        """Return (grade, reason) from the LLM judge. Empty strings on
+        parse failure — caller treats that as 'unclear'."""
+        import ollama as _ollama
+        client = _ollama.Client(host=settings.ollama_host, timeout=60)
+        prompt = _KG_GRADE_PROMPT.format(
+            subject=row[1], predicate=row[2], object=row[3],
+            title=row[5] or "(unknown)", year=row[6] or "n.d.",
+            source_sentence=row[7] or "",
+        )
+        try:
+            resp = client.chat(
+                model=_resolved_model,
+                messages=[{"role": "user", "content": prompt}],
+                format="json",
+                options={"temperature": 0.0, "num_predict": 200},
+            )
+            content = (resp.get("message") or {}).get("content", "")
+            data = _json.loads(content)
+            grade = str(data.get("grade", "")).strip().lower()
+            reason = str(data.get("reason", "")).strip()
+            if grade not in ("correct", "plausible", "wrong", "unclear"):
+                grade = "unclear"
+            return grade, reason
+        except Exception as exc:
+            return "unclear", f"judge-error: {exc}"
+
+    def _human_grade(row, llm_suggestion: str | None) -> tuple[str, str]:
+        """Interactive prompt. Pressing ENTER accepts llm_suggestion
+        when provided; otherwise defaults to 'skip'."""
+        console.print()
+        console.print(
+            f"[bold cyan]Triple:[/bold cyan] {row[1]} → {row[2]} → {row[3]}"
+        )
+        console.print(
+            f"[dim]Source:[/dim] \"{row[5] or '(unknown)'}\" ({row[6] or 'n.d.'})"
+        )
+        console.print(f"[dim]Evidence:[/dim] {row[7]}")
+        if llm_suggestion:
+            console.print(f"[yellow]LLM suggests:[/yellow] {llm_suggestion}")
+        prompt = "[c]orrect / [p]lausible / [w]rong / [u]nclear / [s]kip> "
+        while True:
+            ans = typer.prompt(prompt, default="").strip().lower()
+            if not ans and llm_suggestion:
+                return llm_suggestion, "(human confirmed LLM)"
+            if ans in ("c", "correct"):
+                return "correct", typer.prompt("reason (optional)", default="")
+            if ans in ("p", "plausible"):
+                return "plausible", typer.prompt("reason (optional)", default="")
+            if ans in ("w", "wrong"):
+                return "wrong", typer.prompt("reason (optional)", default="")
+            if ans in ("u", "unclear"):
+                return "unclear", typer.prompt("reason (optional)", default="")
+            if ans in ("s", "skip", ""):
+                return "skip", ""
+
+    counts: dict[str, int] = {}
+    with out_path.open("w", encoding="utf-8") as f:
+        for row in rows:
+            llm_grade: str | None = None
+            llm_reason = ""
+            if judge in ("llm", "both"):
+                llm_grade, llm_reason = _llm_grade(row)
+
+            if judge == "llm":
+                final_grade, final_reason = llm_grade, llm_reason
+                judge_tag = f"llm-{_resolved_model}"
+            elif judge == "human":
+                final_grade, final_reason = _human_grade(row, None)
+                judge_tag = "human"
+            else:  # both
+                # Show LLM's grade; human can override with a keystroke.
+                final_grade, final_reason = _human_grade(row, llm_grade)
+                judge_tag = (
+                    f"human+llm-{_resolved_model}"
+                    if final_reason == "(human confirmed LLM)"
+                    else "human"
+                )
+
+            record = {
+                "triple_id": row[0],
+                "subject": row[1], "predicate": row[2], "object": row[3],
+                "source_doc_id": row[4],
+                "paper_title": row[5], "year": row[6],
+                "source_sentence": row[7],
+                "grade": final_grade,
+                "reason": final_reason,
+                "judge": judge_tag,
+                "sampled_at": datetime.now(timezone.utc).isoformat(),
+            }
+            f.write(_json.dumps(record, ensure_ascii=False) + "\n")
+            counts[final_grade] = counts.get(final_grade, 0) + 1
+
+    # Summary readout
+    total_graded = sum(n for g, n in counts.items() if g != "skip")
+    correct = counts.get("correct", 0)
+    plausible = counts.get("plausible", 0)
+    wrong = counts.get("wrong", 0)
+    unclear = counts.get("unclear", 0)
+    precision = (correct / total_graded * 100) if total_graded else 0.0
+
+    console.print()
+    console.print(f"[bold green]✓ Sample written → {out_path}[/bold green]")
+    console.print(
+        f"  correct:   {correct:3d}   plausible: {plausible:3d}   "
+        f"wrong: {wrong:3d}   unclear: {unclear:3d}"
+    )
+    if total_graded:
+        console.print(
+            f"  precision (correct / graded): {precision:.1f}%"
+        )
+    console.print(
+        "[dim]Compare this file against prior samples under the same "
+        "directory to track KG quality drift over time.[/dim]"
+    )

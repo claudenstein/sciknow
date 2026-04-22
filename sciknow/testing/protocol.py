@@ -11853,6 +11853,65 @@ def l1_phase54_6_134_agentic_coverage_uses_reranker() -> None:
     )
 
 
+def l1_phase54_6_218_kg_sample_cli_surface() -> None:
+    """Phase 54.6.218 (roadmap 3.7.3) — KG quality sampling CLI.
+
+    Complements 54.6.209 rule-based KG canonicalization: gives the
+    user a way to measure KG extraction precision over time and
+    catch silent regressions when the extract model changes or the
+    canonicalization rules drift.
+
+    Offline-only surface checks:
+
+      A) `sciknow wiki kg-sample` is exposed as a Typer command on
+         the wiki subapp.
+      B) The command accepts `--n`, `--judge`, `--model`,
+         `--output-dir`, `--only-canonicalised`, `--seed`. Each of
+         those is part of the documented interface; dropping one
+         silently would be a breaking change to anyone scripting
+         against it.
+      C) The grading prompt (`_KG_GRADE_PROMPT`) defines the four
+         canonical labels (correct / plausible / wrong / unclear)
+         so the downstream JSONL schema is stable.
+      D) CLI help surfaces cleanly (no Typer registration errors).
+    """
+    import inspect as _inspect
+    from typer.testing import CliRunner
+    from sciknow.cli.main import app
+    from sciknow.cli import wiki as wiki_mod
+
+    # A + D) Typer registration + help
+    r = CliRunner().invoke(app, ["wiki", "kg-sample", "--help"])
+    assert r.exit_code == 0, (
+        f"`sciknow wiki kg-sample --help` failed: {r.output[:300]}"
+    )
+    assert "kg-sample" in r.output.lower() or \
+           "KG triples for precision tracking" in r.output, (
+        "kg-sample help text should identify the command"
+    )
+
+    # B) Flag surface — use typer signature, not help text (help wraps
+    # long option names, which breaks naive substring matching).
+    assert hasattr(wiki_mod, "kg_sample"), "wiki_mod.kg_sample missing"
+    sig = _inspect.signature(wiki_mod.kg_sample)
+    for param in ("n", "judge", "model", "output_dir",
+                  "only_canonicalised", "seed"):
+        assert param in sig.parameters, (
+            f"wiki kg-sample signature missing `{param}` — this is "
+            f"part of the documented interface"
+        )
+
+    # C) Grade labels + prompt surface
+    assert hasattr(wiki_mod, "_KG_GRADE_PROMPT"), (
+        "wiki_mod._KG_GRADE_PROMPT missing — the prompt defines the "
+        "four-label taxonomy downstream JSONL relies on"
+    )
+    for label in ("correct", "plausible", "wrong", "unclear"):
+        assert label in wiki_mod._KG_GRADE_PROMPT, (
+            f"grade label {label!r} missing from _KG_GRADE_PROMPT"
+        )
+
+
 def l1_phase54_6_217_core_resolver_wired() -> None:
     """Phase 54.6.217 (roadmap 3.0.1 closure) — CORE resolver wiring.
 
@@ -12886,6 +12945,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_216_osf_preprints_resolver_wired,
     # Phase 54.6.217 — roadmap 3.0.1 closure: CORE (core.ac.uk) resolver
     l1_phase54_6_217_core_resolver_wired,
+    # Phase 54.6.218 — roadmap 3.7.3: KG quality sampling CLI
+    l1_phase54_6_218_kg_sample_cli_surface,
 ]
 
 L2_TESTS: list[Callable] = [
