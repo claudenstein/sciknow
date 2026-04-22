@@ -11853,6 +11853,144 @@ def l1_phase54_6_134_agentic_coverage_uses_reranker() -> None:
     )
 
 
+def l1_phase54_6_224_bench_snapshot_diff() -> None:
+    """Phase 54.6.224 (roadmap 3.11.5) — bench snapshot + diff CLIs.
+
+    Thin wrapper over the existing ``sciknow/testing/bench.py``
+    machinery that enables per-commit snapshotting + arbitrary-pair
+    diff with direction-aware regression flagging. Tests:
+
+      A) Both CLIs (`bench-snapshot` + `bench-diff`) are Typer-
+         registered; help renders.
+      B) `bench-diff` behaves correctly on a direction-aware pair:
+         a quality-metric DECREASE (MRR 0.55 → 0.48) is flagged
+         REGRESSion; a latency-metric DECREASE (250ms → 200ms) is
+         flagged IMPROVEment. Exit code 1 when regressions present.
+      C) Unknown-direction metrics (arbitrary name, no known unit)
+         never get the REGRESSion flag, only a neutral Δ readout.
+      D) `_load_bench_snapshot` raises typer.Exit(2) on missing
+         files with a useful error message (no silent empty diffs).
+      E) Snapshot JSON schema carries the load-bearing fields:
+         `schema` tag, `git` block with `sha`/`dirty`/`branch`,
+         `layer`, `results` — downstream consumers (a future CI
+         step, a human audit script) rely on this contract.
+    """
+    import json as _json
+    import tempfile
+    from pathlib import Path
+    from typer.testing import CliRunner
+    from sciknow.cli.main import (
+        app, _git_head_info, _load_bench_snapshot,
+    )
+
+    runner = CliRunner()
+
+    # A) CLI surface + help
+    for sub in ("bench-snapshot", "bench-diff"):
+        r = runner.invoke(app, [sub, "--help"])
+        assert r.exit_code == 0, (
+            f"{sub} --help failed: {r.output[:300]}"
+        )
+
+    # _git_head_info returns the expected shape whether or not we're
+    # in a git repo (never crashes — fundamental for keeping
+    # bench-snapshot usable in non-git environments).
+    info = _git_head_info()
+    assert set(info.keys()) == {"sha", "branch", "dirty"}
+    assert isinstance(info["dirty"], bool)
+
+    # B+C+E) Build synthetic snapshots, run the diff, inspect.
+    def _snap(sha: str, mrr: float, latency: float, mystery: float):
+        return {
+            "schema": "sciknow-bench-snapshot/1",
+            "git": {"sha": sha, "dirty": False, "branch": "main"},
+            "layer": "live",
+            "tag": "",
+            "snapshotted_at": "2026-04-22T00:00:00+00:00",
+            "results": [
+                {
+                    "name": "retrieval", "category": "live",
+                    "layer": "live", "duration_ms": 100,
+                    "status": "ok", "message": "",
+                    "metrics": [
+                        {"name": "mrr_at_10", "value": mrr,
+                         "unit": "", "note": ""},
+                        {"name": "query_latency_ms", "value": latency,
+                         "unit": "ms", "note": ""},
+                        {"name": "mystery_number", "value": mystery,
+                         "unit": "", "note": ""},
+                    ],
+                }
+            ],
+        }
+
+    with tempfile.TemporaryDirectory() as d:
+        dd = Path(d)
+        a_path = dd / "a.json"
+        b_path = dd / "b.json"
+        a_path.write_text(_json.dumps(
+            _snap("abc1234", mrr=0.55, latency=250.0, mystery=100.0)
+        ))
+        b_path.write_text(_json.dumps(
+            # MRR down 12.7% (regression), latency down 20% (improvement),
+            # mystery up 50% (neutral — unknown direction)
+            _snap("def5678", mrr=0.48, latency=200.0, mystery=150.0)
+        ))
+
+        # Use JSON output for a stable programmatic check.
+        r = runner.invoke(app, [
+            "bench-diff", "--json", str(a_path), str(b_path),
+        ])
+        # JSON output still raises Exit(1) when regressions are present,
+        # so exit_code 1 with valid JSON is the expected shape.
+        assert r.exit_code == 1, (
+            f"bench-diff should exit 1 when MRR regresses; got "
+            f"{r.exit_code}. Output: {r.output[:400]}"
+        )
+        try:
+            report = _json.loads(r.output)
+        except Exception as exc:
+            raise AssertionError(
+                f"bench-diff --json produced invalid JSON: {exc}. "
+                f"Output: {r.output[:400]}"
+            )
+
+        regressions = report.get("regressions") or []
+        improvements = report.get("improvements") or []
+        neutral = report.get("neutral") or []
+
+        reg_metrics = {r["metric"] for r in regressions}
+        imp_metrics = {i["metric"] for i in improvements}
+        neu_metrics = {n["metric"] for n in neutral}
+
+        assert "retrieval:mrr_at_10" in reg_metrics, (
+            "MRR decrease (0.55 → 0.48, -12.7%) must be flagged as "
+            "REGRESSion — quality metric, down_is_bad"
+        )
+        assert "retrieval:query_latency_ms" in imp_metrics, (
+            "Latency decrease (250ms → 200ms, -20%) must be flagged "
+            "as IMPROVEment — latency metric with unit=ms, up_is_bad"
+        )
+        assert "retrieval:mystery_number" in neu_metrics, (
+            "Unknown-direction metric must NOT be flagged as a "
+            "regression — guards against false alarms on custom bench "
+            "metrics with non-standard names"
+        )
+
+    # D) _load_bench_snapshot on missing file raises typer.Exit(2)
+    import typer as _typer
+    try:
+        _load_bench_snapshot("/nonexistent/snapshot.json")
+    except _typer.Exit as exc:
+        assert exc.exit_code == 2, (
+            "missing snapshot must raise typer.Exit(2), not 1"
+        )
+    else:
+        raise AssertionError(
+            "_load_bench_snapshot must raise on missing files"
+        )
+
+
 def l1_phase54_6_223_self_citation_detection() -> None:
     """Phase 54.6.223 (roadmap 3.6.2) — self-citation flagging.
 
@@ -13431,6 +13569,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_222_equation_bench_cli_surface,
     # Phase 54.6.223 — roadmap 3.6.2: self-citation flagging
     l1_phase54_6_223_self_citation_detection,
+    # Phase 54.6.224 — roadmap 3.11.5: bench snapshot + diff
+    l1_phase54_6_224_bench_snapshot_diff,
 ]
 
 L2_TESTS: list[Callable] = [

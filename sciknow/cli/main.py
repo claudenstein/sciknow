@@ -236,6 +236,402 @@ def bench_cmd(
     raise typer.Exit(0 if n_err == 0 else 1)
 
 
+# ── bench-snapshot + bench-diff (Phase 54.6.224 — roadmap 3.11.5) ────────────
+
+
+def _git_head_info() -> dict[str, str | bool]:
+    """Capture HEAD SHA + branch + dirty flag for bench snapshots.
+
+    Returns all-empty strings if the repo root isn't git-managed — the
+    snapshot still lands, just without the commit stamp. Branch falls
+    back to 'HEAD' when detached.
+    """
+    import subprocess
+    info = {"sha": "", "branch": "", "dirty": False}
+    try:
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        info["sha"] = sha
+    except Exception:
+        return info
+    try:
+        branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        info["branch"] = branch
+    except Exception:
+        pass
+    try:
+        dirty = subprocess.check_output(
+            ["git", "status", "--porcelain"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        info["dirty"] = bool(dirty)
+    except Exception:
+        pass
+    return info
+
+
+@app.command(name="bench-snapshot")
+def bench_snapshot_cmd(
+    layer: str = typer.Option(
+        "live", "--layer", "-l",
+        help="Bench layer to snapshot. Default 'live' — adds embedder + "
+             "hybrid_search + reranker on top of 'fast', which is what "
+             "most retrieval regressions would show up in. Use 'full' "
+             "before a release or after a model swap.",
+    ),
+    tag: str = typer.Option(
+        "", "--tag",
+        help="Free-form label (prefix of the snapshot filename).",
+    ),
+    output_dir: Path = typer.Option(
+        None, "--output-dir",
+        help="Override the snapshot directory. Default: "
+             "<data_dir>/bench/snapshots/.",
+    ),
+):
+    """Phase 54.6.224 (roadmap 3.11.5) — per-commit bench snapshot.
+
+    Runs a bench layer and persists the results to a stable file
+    named ``<sha>[-dirty]-<timestamp>[-tag].json`` under
+    ``<data_dir>/bench/snapshots/``. Enables longitudinal tracking:
+    run this once per commit you care about, then
+    ``sciknow bench-diff <sha_a> <sha_b>`` reports per-metric deltas
+    and flags regressions.
+
+    Difference from plain ``sciknow bench``:
+      * plain bench writes a timestamped JSONL + updates latest.json
+        so the NEXT run diffs against it;
+      * bench-snapshot writes a git-SHA-stamped JSON file kept
+        forever, so you can diff arbitrary commit pairs months later.
+
+    Examples:
+
+      sciknow bench-snapshot                         # 'live' on current HEAD
+      sciknow bench-snapshot --layer full            # full bench
+      sciknow bench-snapshot --tag pre-vlm-pro       # human label prefix
+    """
+    import json as _json
+    from datetime import datetime, timezone
+    from sciknow.testing import bench as bench_mod
+    from sciknow.core.project import get_active_project
+
+    if layer not in bench_mod.VALID_LAYERS:
+        console.print(
+            f"[red]Unknown layer:[/red] {layer!r}. "
+            f"Use {list(bench_mod.VALID_LAYERS)}"
+        )
+        raise typer.Exit(2)
+
+    head = _git_head_info()
+    if not head["sha"]:
+        console.print(
+            "[yellow]⚠ git HEAD not available — snapshot will not "
+            "carry a commit stamp.[/yellow]"
+        )
+
+    # Resolve destination dir.
+    active = get_active_project()
+    snap_dir = output_dir or (active.data_dir / "bench" / "snapshots")
+    snap_dir.mkdir(parents=True, exist_ok=True)
+
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    sha_part = head["sha"] or "nosha"
+    dirty_part = "-dirty" if head["dirty"] else ""
+    tag_part = f"-{tag}" if tag else ""
+    out_path = snap_dir / f"{sha_part}{dirty_part}-{ts}{tag_part}.json"
+
+    console.print(
+        f"[bold]sciknow bench-snapshot[/bold] · layer: "
+        f"[cyan]{layer}[/cyan] · sha: [cyan]{sha_part}{dirty_part}[/cyan]"
+        + (f" · tag: [dim]{tag}[/dim]" if tag else "")
+    )
+    console.print()
+
+    results, _ = bench_mod.run(layer=layer, tag=tag or f"snapshot-{layer}")
+    bench_mod.render_report(results)
+
+    snapshot = {
+        "schema": "sciknow-bench-snapshot/1",
+        "snapshotted_at": datetime.now(timezone.utc).isoformat(),
+        "git": head,
+        "layer": layer,
+        "tag": tag,
+        "results": [r.as_dict() for r in results],
+    }
+    out_path.write_text(_json.dumps(snapshot, indent=2))
+    console.print()
+    console.print(f"[green]✓ Snapshot written →[/green] {out_path}")
+    console.print(
+        f"[dim]Compare with: sciknow bench-diff {out_path.name} "
+        f"<other-snapshot>[/dim]"
+    )
+
+    n_err = sum(1 for r in results if r.status == "error")
+    raise typer.Exit(0 if n_err == 0 else 1)
+
+
+def _load_bench_snapshot(path_or_name: str) -> dict:
+    """Accept either an absolute path, a relative path, or a bare
+    filename under <data_dir>/bench/snapshots/. Raises typer.Exit(2)
+    with a useful message on failure."""
+    import json as _json
+    from sciknow.core.project import get_active_project
+
+    candidates = [Path(path_or_name)]
+    snap_dir = get_active_project().data_dir / "bench" / "snapshots"
+    candidates.append(snap_dir / path_or_name)
+    # Also allow passing just the SHA (partial match on filename prefix)
+    if snap_dir.exists():
+        for p in snap_dir.glob(f"{path_or_name}*.json"):
+            candidates.append(p)
+
+    for c in candidates:
+        if c.is_file():
+            try:
+                return _json.loads(c.read_text())
+            except Exception as exc:
+                console.print(
+                    f"[red]Failed to parse snapshot {c}:[/red] {exc}"
+                )
+                raise typer.Exit(2)
+
+    console.print(
+        f"[red]No snapshot found for[/red] {path_or_name!r}. "
+        f"Checked: {', '.join(str(c) for c in candidates[:3])}"
+    )
+    raise typer.Exit(2)
+
+
+@app.command(name="bench-diff")
+def bench_diff_cmd(
+    snapshot_a: str = typer.Argument(
+        ..., help="Earlier snapshot (path, filename, or SHA prefix).",
+    ),
+    snapshot_b: str = typer.Argument(
+        ..., help="Later snapshot (path, filename, or SHA prefix).",
+    ),
+    threshold: float = typer.Option(
+        0.05, "--threshold",
+        help="Flag a metric as a regression when its relative "
+             "worsening exceeds this fraction. Default 0.05 = 5%. "
+             "'Worsening' is direction-aware: for latency-like "
+             "metrics (ms / seconds / tokens_per_s:lower-better) "
+             "an INCREASE is bad; for quality metrics (mrr / "
+             "recall / ndcg / score / accuracy) a DECREASE is bad. "
+             "Metrics with unknown direction get a delta readout "
+             "but no red flag.",
+    ),
+    json_out: bool = typer.Option(
+        False, "--json",
+        help="Emit machine-readable JSON instead of a Rich table.",
+    ),
+):
+    """Phase 54.6.224 (roadmap 3.11.5) — diff two bench snapshots.
+
+    Loads two snapshot files (by path, filename, or SHA prefix) and
+    reports per-metric deltas. Regressions beyond ``--threshold`` are
+    flagged red; improvements are green; neutral moves are dim.
+
+    Direction of "better" is inferred from the metric name and unit:
+
+      * Quality↑ (bigger = better): mrr, recall, ndcg, score,
+        accuracy, precision, f1, faithfulness, citation_precision,
+        agreement, win_rate
+      * Latency↓ (smaller = better): ms, seconds, _latency, tokens_per_s
+        is actually better-bigger but we special-case it
+
+    Examples:
+
+      sciknow bench-diff abc1234 def5678
+      sciknow bench-diff abc1234-dirty-20260422T120000Z.json def5678*
+      sciknow bench-diff --threshold 0.10 abc1234 def5678   # 10% threshold
+      sciknow bench-diff --json abc1234 def5678 | jq .regressions
+    """
+    import json as _json
+
+    snap_a = _load_bench_snapshot(snapshot_a)
+    snap_b = _load_bench_snapshot(snapshot_b)
+
+    def _index(snap: dict) -> dict[str, tuple[float, str, str]]:
+        """Build {fn:metric_name: (value, unit, fn_category)}."""
+        idx: dict[str, tuple[float, str, str]] = {}
+        for res in snap.get("results") or []:
+            if res.get("status") != "ok":
+                continue
+            fn = res.get("name") or ""
+            category = res.get("category") or ""
+            for m in res.get("metrics") or []:
+                v = m.get("value")
+                if not isinstance(v, (int, float)):
+                    continue
+                key = f"{fn}:{m.get('name')}"
+                idx[key] = (float(v), m.get("unit") or "",
+                            category or "")
+        return idx
+
+    idx_a = _index(snap_a)
+    idx_b = _index(snap_b)
+
+    _QUALITY_UP = (
+        "mrr", "recall", "ndcg", "score", "accuracy", "precision",
+        "f1", "faithfulness", "citation_precision", "agreement",
+        "win_rate", "tokens_per_s", "coherence", "npmi",
+    )
+    _LATENCY_DOWN_UNITS = {"ms", "seconds", "s"}
+    _LATENCY_DOWN_KEYWORDS = ("latency", "_ms", "duration")
+
+    def _regression_direction(name: str, unit: str) -> str | None:
+        """Return 'up_is_bad' (latency-like), 'down_is_bad' (quality-
+        like), or None (unknown)."""
+        n = name.lower()
+        u = (unit or "").lower()
+        # Quality: down is bad
+        if any(k in n for k in _QUALITY_UP):
+            return "down_is_bad"
+        # Latency: up is bad
+        if u in _LATENCY_DOWN_UNITS:
+            return "up_is_bad"
+        if any(k in n for k in _LATENCY_DOWN_KEYWORDS):
+            return "up_is_bad"
+        return None
+
+    regressions: list[dict] = []
+    improvements: list[dict] = []
+    neutral: list[dict] = []
+
+    for key in sorted(set(idx_a) | set(idx_b)):
+        in_a = key in idx_a
+        in_b = key in idx_b
+        a_val = idx_a.get(key, (None, "", ""))[0]
+        b_val = idx_b.get(key, (None, "", ""))[0]
+        unit = (idx_b if in_b else idx_a)[key][1]
+        name = key.split(":", 1)[1] if ":" in key else key
+        direction = _regression_direction(name, unit)
+
+        record = {
+            "metric": key,
+            "a": a_val, "b": b_val,
+            "unit": unit,
+            "direction": direction,
+            "only_in": None if (in_a and in_b)
+                       else ("a" if in_a else "b"),
+        }
+
+        if in_a and in_b:
+            delta = b_val - a_val
+            pct = (delta / a_val) if a_val not in (0, None) else None
+            record["delta"] = delta
+            record["delta_pct"] = pct
+            is_regression = False
+            is_improvement = False
+            if pct is not None and direction:
+                if direction == "up_is_bad":
+                    is_regression = pct > threshold
+                    is_improvement = pct < -threshold
+                else:
+                    is_regression = pct < -threshold
+                    is_improvement = pct > threshold
+            if is_regression:
+                regressions.append(record)
+            elif is_improvement:
+                improvements.append(record)
+            else:
+                neutral.append(record)
+        else:
+            record["delta"] = None
+            record["delta_pct"] = None
+            neutral.append(record)
+
+    if json_out:
+        console.print(_json.dumps({
+            "a": {"git": snap_a.get("git"), "layer": snap_a.get("layer"),
+                   "snapshotted_at": snap_a.get("snapshotted_at")},
+            "b": {"git": snap_b.get("git"), "layer": snap_b.get("layer"),
+                   "snapshotted_at": snap_b.get("snapshotted_at")},
+            "threshold": threshold,
+            "regressions": regressions,
+            "improvements": improvements,
+            "neutral": neutral,
+        }, indent=2, default=str))
+        raise typer.Exit(1 if regressions else 0)
+
+    # Rich summary
+    from rich.table import Table
+    from rich import box as _box
+
+    def _sha(snap):
+        g = snap.get("git") or {}
+        sha = g.get("sha") or "?"
+        dirty = "-dirty" if g.get("dirty") else ""
+        return f"{sha}{dirty}"
+
+    console.print(
+        f"[bold]Bench diff[/bold] · "
+        f"A: [cyan]{_sha(snap_a)}[/cyan] "
+        f"({snap_a.get('layer')}) "
+        f"vs B: [cyan]{_sha(snap_b)}[/cyan] "
+        f"({snap_b.get('layer')}) · threshold {threshold:.0%}"
+    )
+    if snap_a.get("layer") != snap_b.get("layer"):
+        console.print(
+            "[yellow]⚠ layers differ — metric sets may not align.[/yellow]"
+        )
+
+    t = Table(box=_box.SIMPLE_HEAD, expand=True)
+    t.add_column("Metric", ratio=4)
+    t.add_column("A", justify="right", width=10)
+    t.add_column("B", justify="right", width=10)
+    t.add_column("Δ", justify="right", width=9)
+    t.add_column("Δ%", justify="right", width=8)
+    t.add_column("Status", width=10)
+
+    def _fmt_val(v):
+        if v is None:
+            return "—"
+        if isinstance(v, float) and abs(v) >= 100:
+            return f"{v:.1f}"
+        return f"{v:.4g}" if isinstance(v, float) else str(v)
+
+    for rec in regressions + improvements + neutral:
+        delta = rec["delta"]
+        pct = rec["delta_pct"]
+        if rec in regressions:
+            status, colour = "REGRESS", "red"
+        elif rec in improvements:
+            status, colour = "IMPROVE", "green"
+        elif rec.get("only_in") == "a":
+            status, colour = "removed", "yellow"
+        elif rec.get("only_in") == "b":
+            status, colour = "new", "cyan"
+        else:
+            status, colour = "—", "dim"
+        t.add_row(
+            rec["metric"],
+            _fmt_val(rec["a"]),
+            _fmt_val(rec["b"]),
+            _fmt_val(delta),
+            f"{pct * 100:+.1f}%" if pct is not None else "—",
+            f"[{colour}]{status}[/{colour}]",
+        )
+    console.print(t)
+
+    console.print(
+        f"\n[bold]{len(regressions)}[/bold] regression(s), "
+        f"[bold]{len(improvements)}[/bold] improvement(s), "
+        f"[dim]{len(neutral)}[/dim] neutral"
+    )
+    if regressions:
+        console.print(
+            "[red]⚠ Regressions detected — inspect before merging.[/red]"
+        )
+    raise typer.Exit(1 if regressions else 0)
+
+
 @app.command(name="mcp-serve")
 def mcp_serve_cmd():
     """Phase 54.6.77 (#16) — run sciknow as an MCP (Model Context Protocol)
