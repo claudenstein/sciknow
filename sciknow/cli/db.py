@@ -1321,10 +1321,12 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     from rich.align import Align
 
     # ── Colour palette (btop-inspired, works on dark + light terms) ──
-    # 54.6.233: every-dim-text-in-green pass. Labels, secondary info,
-    # and sparkline baselines use `green4` (named Rich shade: muted
-    # enough to act as "dim" without clashing with the bright_green
-    # reserved for healthy status indicators).
+    # 54.6.233: dim text → green4 (muted green so status indicators
+    # in bright_green still stand out).
+    # 54.6.234: panel borders → green. Box lines sit between the
+    # bright_green status markers and the green4 dim text in
+    # brightness, so the panel frames read as distinct structure
+    # rather than bleeding into the content.
     C_TITLE = "bold cyan"
     C_DIM = "green4"
     C_OK = "bright_green"
@@ -1332,7 +1334,7 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     C_ERR = "bright_red"
     C_ACCENT = "bright_cyan"
     C_VALUE = "bold white"
-    C_BORDER = "bright_black"
+    C_BORDER = "green"
     BOX = _box.HEAVY
 
     # ── Safe accessors ──────────────────────────────────────────────
@@ -1354,6 +1356,9 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     disk = storage.get("disk") or {}
     pg_mb = storage.get("pg_database_mb", 0)
     pending_dl = snap.get("pending_downloads", 0)
+    host = snap.get("host") or {}
+    stuck = snap.get("stuck_job") or {}
+    mq = snap.get("meta_quality") or {}
 
     # ── Small helpers ───────────────────────────────────────────────
 
@@ -1449,6 +1454,18 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     if watch > 0:
         header_text.append(f"  ·  refresh {watch}s  (q to quit)",
                             style=C_DIM)
+    # Phase 54.6.234 — stuck-job indicator (only shown when a stall
+    # is detected — pending work with no recent job activity). Loud
+    # on purpose because it's a "go check what's wrong" signal that
+    # wouldn't be useful if buried.
+    if stuck.get("is_stuck"):
+        age_s = stuck.get("last_age_s", 0) or 0
+        age_str = f"{age_s / 60:.1f}m" if age_s >= 60 else f"{age_s:.0f}s"
+        header_text.append(
+            f"   ⚠ STALLED — last job {age_str} ago, "
+            f"{stuck.get('pending_docs', 0)} pending",
+            style=C_ERR,
+        )
     header_panel = Panel(
         Align.left(header_text, vertical="middle"),
         border_style=C_BORDER, box=BOX, padding=(0, 1),
@@ -1529,8 +1546,74 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
             Text("pending dl", style=C_DIM),
             Text(f"{pending_dl:,}", style=C_WARN),
         )
+
+    # Phase 54.6.234 — content quality strip. Condensed because the
+    # corpus panel is already dense; each row is a one-line summary
+    # of a dimension that's otherwise hidden in the DB. Shows
+    # immediately which stages need re-running (e.g. crossref-low =
+    # re-run enrich; paper_types empty = run classify-papers).
+    sources = mq.get("sources") or []
+    paper_types = mq.get("paper_types") or []
+    languages = mq.get("languages") or []
+    if sources or paper_types or languages or mq.get("citations_total"):
+        corpus_tbl.add_row(
+            Text("─ quality ─", style=C_DIM),
+            Text(""),
+        )
+    if sources:
+        # Top source name + count + "/total"
+        top = sources[0]
+        total_src = sum(s["n"] for s in sources)
+        src_str = f"{top['source']} {top['n']}/{total_src}"
+        colour = (
+            C_OK if top["source"] in ("crossref", "arxiv") else C_DIM
+        )
+        corpus_tbl.add_row(
+            Text("metadata src", style=C_DIM),
+            Text(src_str, style=colour),
+        )
+    if paper_types:
+        top = paper_types[0]
+        total_pt = sum(p["n"] for p in paper_types)
+        corpus_tbl.add_row(
+            Text("paper types", style=C_DIM),
+            Text(f"{top['type']} {top['n']}/{total_pt}", style=C_DIM),
+        )
+    elif corpus.get("documents_complete", 0) > 0:
+        # No types yet → flag as a to-do
+        corpus_tbl.add_row(
+            Text("paper types", style=C_DIM),
+            Text("not classified", style=C_WARN),
+        )
+    if languages and len(languages) > 1:
+        # Multi-lingual corpus — list top-3 briefly
+        top_langs = ", ".join(
+            f"{l['lang']}:{l['n']}" for l in languages[:3]
+        )
+        corpus_tbl.add_row(
+            Text("languages", style=C_DIM),
+            Text(top_langs, style=C_DIM),
+        )
+    if mq.get("citations_total"):
+        xlinked_pct = mq.get("citations_crosslinked_pct", 0)
+        colour = (
+            C_OK if xlinked_pct >= 20 else
+            C_WARN if xlinked_pct >= 5 else C_DIM
+        )
+        corpus_tbl.add_row(
+            Text("cites xlinked", style=C_DIM),
+            Text(f"{mq['citations_crosslinked']:,}/"
+                 f"{mq['citations_total']:,} "
+                 f"({xlinked_pct:.1f}%)", style=colour),
+        )
+    if mq.get("retracted"):
+        corpus_tbl.add_row(
+            Text("retracted", style=C_DIM),
+            Text(str(mq["retracted"]), style=C_ERR),
+        )
+
     corpus_panel = Panel(
-        corpus_tbl, title="[bold]corpus · ingest[/bold]",
+        corpus_tbl, title="[bold]corpus · ingest · quality[/bold]",
         title_align="left",
         border_style=C_BORDER, box=BOX, padding=(0, 1),
     )
@@ -1577,6 +1660,38 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     else:
         gpu_tbl.add_row(Text("(no GPU detected — nvidia-smi absent)",
                               style=C_DIM))
+
+    # Phase 54.6.234 — host RAM + load average. Sits under GPU so
+    # the panel covers the whole compute surface, not just the card.
+    if host.get("mem_total_mb"):
+        gpu_tbl.add_row("")
+        gpu_tbl.add_row(Text("host", style=C_DIM))
+        mem_row = Table.grid(padding=0, expand=True)
+        mem_row.add_column(width=5, style=C_DIM)
+        mem_row.add_column(ratio=1)
+        mem_row.add_column(justify="right", width=11, style=C_VALUE)
+        mem_row.add_row(
+            "ram",
+            _bar(host["mem_used_mb"], host["mem_total_mb"], width=14),
+            f"{host['mem_used_mb'] / 1024:.1f}/"
+            f"{host['mem_total_mb'] / 1024:.0f}G",
+        )
+        gpu_tbl.add_row(mem_row)
+        # Load avg normalised against cpu_count. 1.0× load per core
+        # = fully loaded; >1× = queue forming. Colour coding kicks
+        # at the same 50%/85% thresholds as the rest of the UI.
+        if host.get("cpu_count"):
+            cores = host["cpu_count"]
+            load_row = Table.grid(padding=0, expand=True)
+            load_row.add_column(width=5, style=C_DIM)
+            load_row.add_column(ratio=1)
+            load_row.add_column(justify="right", width=11, style=C_VALUE)
+            load_row.add_row(
+                "load",
+                _bar(host["load_1m"], cores, width=14),
+                f"{host['load_1m']:.1f} ({cores}c)",
+            )
+            gpu_tbl.add_row(load_row)
 
     # Ollama models mini-list
     gpu_tbl.add_row("")
@@ -1798,7 +1913,10 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     layout = Layout()
     layout.split_column(
         Layout(header_panel, name="header", size=3),
-        Layout(name="top", size=18),
+        # 54.6.234 — bumped 18→22 to carry host load + content
+        # quality strip without clipping. Activity stays ratio=1
+        # so it still absorbs extra height on tall terminals.
+        Layout(name="top", size=22),
         Layout(timing_panel, name="timing", size=14),
         Layout(activity_panel, name="activity", ratio=1,
                minimum_size=8),

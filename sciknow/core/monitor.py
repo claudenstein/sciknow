@@ -233,6 +233,163 @@ def _pipeline_throughput(session, days: int = 14) -> list[dict]:
     ]
 
 
+def _host_load() -> dict:
+    """Phase 54.6.234 — system RAM + load average from /proc.
+
+    Portable Linux-only read; on non-Linux or read failure the
+    returned dict has zeros so rendering degrades gracefully. Zero
+    new dependencies — /proc/meminfo and /proc/loadavg are always
+    present on Linux systems running sciknow.
+    """
+    import os
+    out = {
+        "mem_used_mb": 0, "mem_total_mb": 0, "mem_pct": 0.0,
+        "load_1m": 0.0, "load_5m": 0.0, "load_15m": 0.0,
+        "cpu_count": 0,
+    }
+    try:
+        with open("/proc/meminfo") as f:
+            info: dict[str, int] = {}
+            for line in f:
+                parts = line.split(":")
+                if len(parts) == 2:
+                    k = parts[0].strip()
+                    v = parts[1].strip().split()[0]
+                    info[k] = int(v)  # kB
+        total_kb = info.get("MemTotal", 0)
+        # MemAvailable is the kernel's "how much can an app grab right
+        # now" estimate — more useful than MemFree which misses
+        # reclaimable cache.
+        avail_kb = info.get("MemAvailable", info.get("MemFree", 0))
+        used_kb = max(total_kb - avail_kb, 0)
+        out["mem_total_mb"] = total_kb // 1024
+        out["mem_used_mb"] = used_kb // 1024
+        out["mem_pct"] = (used_kb / total_kb * 100) if total_kb else 0.0
+    except Exception:
+        pass
+    try:
+        with open("/proc/loadavg") as f:
+            parts = f.read().split()
+            if len(parts) >= 3:
+                out["load_1m"] = float(parts[0])
+                out["load_5m"] = float(parts[1])
+                out["load_15m"] = float(parts[2])
+    except Exception:
+        pass
+    try:
+        out["cpu_count"] = os.cpu_count() or 0
+    except Exception:
+        pass
+    return out
+
+
+def _stuck_job(session) -> dict:
+    """Phase 54.6.234 — detect a stalled ingest.
+
+    Compares the newest ingestion_jobs row against "now" and the
+    queue depth. Returns a dict:
+      {"is_stuck": bool, "last_age_s": float | None,
+       "pending_docs": int, "threshold_s": int}
+
+    Stuck = queue has pending docs AND newest job is older than
+    the threshold (5 min — convert p95 is the usual worst case,
+    so 5 min with no new jobs strongly suggests a stall).
+    """
+    from sqlalchemy import text
+    out = {
+        "is_stuck": False, "last_age_s": None,
+        "pending_docs": 0, "threshold_s": 300,
+    }
+    try:
+        row = session.execute(text("""
+            SELECT EXTRACT(EPOCH FROM NOW() - MAX(created_at))
+            FROM ingestion_jobs
+        """)).fetchone()
+        if row and row[0] is not None:
+            out["last_age_s"] = float(row[0])
+        out["pending_docs"] = int(session.execute(text("""
+            SELECT COUNT(*) FROM documents
+            WHERE ingestion_status NOT IN ('complete', 'failed')
+        """)).scalar() or 0)
+        if (out["last_age_s"] is not None
+                and out["last_age_s"] > out["threshold_s"]
+                and out["pending_docs"] > 0):
+            out["is_stuck"] = True
+    except Exception:
+        pass
+    return out
+
+
+def _metadata_quality(session) -> dict:
+    """Phase 54.6.234 — content-quality breakdown for the corpus
+    panel. Counts by metadata source, paper type, language, and
+    retraction flag — all from existing columns (no new queries
+    per iteration, just aggregations).
+    """
+    from sqlalchemy import text
+    out: dict = {
+        "sources": [], "paper_types": [], "languages": [],
+        "retracted": 0, "citations_crosslinked_pct": 0.0,
+        "citations_total": 0, "citations_crosslinked": 0,
+    }
+    try:
+        rows = session.execute(text("""
+            SELECT metadata_source, COUNT(*) FROM paper_metadata
+            GROUP BY metadata_source ORDER BY COUNT(*) DESC
+        """)).fetchall()
+        out["sources"] = [
+            {"source": r[0] or "unknown", "n": int(r[1])}
+            for r in rows
+        ]
+    except Exception:
+        pass
+    try:
+        rows = session.execute(text("""
+            SELECT paper_type, COUNT(*) FROM paper_metadata
+            WHERE paper_type IS NOT NULL
+            GROUP BY paper_type ORDER BY COUNT(*) DESC
+        """)).fetchall()
+        out["paper_types"] = [
+            {"type": r[0], "n": int(r[1])} for r in rows
+        ]
+    except Exception:
+        pass
+    try:
+        rows = session.execute(text("""
+            SELECT language, COUNT(*) FROM documents
+            WHERE ingestion_status = 'complete'
+            GROUP BY language ORDER BY COUNT(*) DESC
+        """)).fetchall()
+        out["languages"] = [
+            {"lang": r[0], "n": int(r[1])} for r in rows
+        ]
+    except Exception:
+        pass
+    try:
+        out["retracted"] = int(session.execute(text("""
+            SELECT COUNT(*) FROM paper_metadata
+            WHERE retraction_status IN ('retracted', 'withdrawn')
+        """)).scalar() or 0)
+    except Exception:
+        pass
+    try:
+        total = int(session.execute(text(
+            "SELECT COUNT(*) FROM citations"
+        )).scalar() or 0)
+        xlinked = int(session.execute(text(
+            "SELECT COUNT(*) FROM citations "
+            "WHERE cited_document_id IS NOT NULL"
+        )).scalar() or 0)
+        out["citations_total"] = total
+        out["citations_crosslinked"] = xlinked
+        out["citations_crosslinked_pct"] = (
+            (xlinked / total * 100) if total else 0.0
+        )
+    except Exception:
+        pass
+    return out
+
+
 def _ingest_rates_and_eta(session) -> dict:
     """Phase 54.6.232 — trailing throughput + ETA to complete ingest.
 
@@ -646,6 +803,9 @@ def collect_monitor_snapshot(
         hourly_throughput = _hourly_throughput(session, hours=24)
         pg_db_size_mb = _pg_database_size_mb(session)
         top_failures = _top_failure_classes(session)
+        # Phase 54.6.234 — host load + stuck-job + content quality
+        stuck_job = _stuck_job(session)
+        meta_quality = _metadata_quality(session)
 
     return {
         "project": project,
@@ -666,6 +826,10 @@ def collect_monitor_snapshot(
             "top_failures": top_failures,
         },
         "pending_downloads": pending_downloads,
+        # 54.6.234 additions
+        "host": _host_load(),
+        "stuck_job": stuck_job,
+        "meta_quality": meta_quality,
         "llm": {
             "usage_last_days": llm_usage,
             "usage_window_days": llm_usage_days,
