@@ -11853,6 +11853,109 @@ def l1_phase54_6_134_agentic_coverage_uses_reranker() -> None:
     )
 
 
+def l1_phase54_6_223_self_citation_detection() -> None:
+    """Phase 54.6.223 (roadmap 3.6.2) — self-citation flagging.
+
+    Mostly behavioural because the detection logic is pure Python
+    with no I/O. Pins:
+
+      A) Migration 0039 applied — citations table has `is_self_cite`
+         (bool) + `self_cite_authors` (JSONB) columns + the
+         conditional index.
+      B) ORM model reflects the new columns.
+      C) `surname_key` normalisation handles the four common
+         author-name shapes: "Given Surname", "Surname, Given",
+         "Surname GI" (initials after surname), accented surnames.
+      D) `detect_self_cite` returns the three-valued verdict
+         (True / False / None) plus overlap list. Specifically the
+         None-on-empty-input behaviour is load-bearing: the UI and
+         retrieval filters must distinguish "no data" from
+         "author independence confirmed".
+      E) `sciknow db flag-self-citations` CLI registered with
+         --limit / --force flags; the implementation reads from
+         cross-linked citations (cited_document_id IS NOT NULL).
+    """
+    import inspect as _inspect
+    from sqlalchemy import inspect as _sql_inspect
+    from typer.testing import CliRunner
+    from sciknow.cli.main import app
+    from sciknow.cli import db as db_cli
+    from sciknow.storage.db import engine
+    from sciknow.storage.models import Citation
+    from sciknow.core.self_citation import (
+        surname_key, surname_keys_from_authors, detect_self_cite,
+    )
+
+    # A) DB columns present
+    insp = _sql_inspect(engine)
+    cols = {c["name"] for c in insp.get_columns("citations")}
+    for col in ("is_self_cite", "self_cite_authors"):
+        assert col in cols, (
+            f"citations.{col} missing — migration 0039 not applied?"
+        )
+
+    # B) ORM in sync
+    for col in ("is_self_cite", "self_cite_authors"):
+        assert hasattr(Citation, col), (
+            f"Citation ORM missing {col}"
+        )
+
+    # C) surname_key normalisation
+    assert surname_key("James K. Whittaker") == "whittaker,j"
+    assert surname_key("Whittaker, James K.") == "whittaker,j"
+    assert surname_key("J. K. Whittaker") == "whittaker,j"
+    assert surname_key("Whittaker") == "whittaker,"
+    # Accent fold: Müller == Muller
+    assert surname_key("Müller, Anna") == surname_key("Muller, Anna")
+    # Garbage: empty / et al only / single char
+    assert surname_key("") is None
+    assert surname_key("et al.") is None
+    assert surname_key("X") is None
+
+    # D) detect_self_cite three-valued verdict
+    # Overlap → True
+    verdict, overlap = detect_self_cite(
+        [{"name": "James K. Whittaker"}, {"name": "Anna Müller"}],
+        [{"name": "Whittaker, J. K."}],
+    )
+    assert verdict is True
+    assert overlap == ["whittaker,j"]
+    # No overlap → False (distinct sets, both non-empty)
+    verdict, overlap = detect_self_cite(
+        [{"name": "James Whittaker"}],
+        [{"name": "Anna Müller"}],
+    )
+    assert verdict is False
+    assert overlap == []
+    # One side empty → None (undecided)
+    verdict, _ = detect_self_cite([{"name": "James Whittaker"}], [])
+    assert verdict is None
+    verdict, _ = detect_self_cite([], [{"name": "Anna Müller"}])
+    assert verdict is None
+    # Robust to unparseable names
+    assert surname_keys_from_authors([{"name": "et al."}]) == set()
+
+    # E) CLI registered
+    r = CliRunner().invoke(app, ["db", "flag-self-citations", "--help"])
+    assert r.exit_code == 0, (
+        f"flag-self-citations --help failed: {r.output[:300]}"
+    )
+    assert hasattr(db_cli, "flag_self_citations_cmd")
+    sig = _inspect.signature(db_cli.flag_self_citations_cmd)
+    for param in ("limit", "force"):
+        assert param in sig.parameters, (
+            f"flag-self-citations missing --{param} option"
+        )
+    # Implementation filters on cross-linked citations
+    src = _inspect.getsource(db_cli.flag_self_citations_cmd)
+    assert "cited_document_id IS NOT NULL" in src, (
+        "flag-self-citations must restrict to cross-linked citations "
+        "— without that filter, cited_authors is always NULL on "
+        "non-crosslinked rows and every such row would get is_self_"
+        "cite=None anyway, just with more work"
+    )
+
+
 def l1_phase54_6_222_equation_bench_cli_surface() -> None:
     """Phase 54.6.222 (roadmap 3.1.2) — equation extraction accuracy bench.
 
@@ -13326,6 +13429,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_221_paper_institutions_surface,
     # Phase 54.6.222 — roadmap 3.1.2: equation extraction accuracy bench
     l1_phase54_6_222_equation_bench_cli_surface,
+    # Phase 54.6.223 — roadmap 3.6.2: self-citation flagging
+    l1_phase54_6_223_self_citation_detection,
 ]
 
 L2_TESTS: list[Callable] = [

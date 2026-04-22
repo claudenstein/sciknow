@@ -6986,6 +6986,125 @@ def equation_bench_cmd(
     )
 
 
+# ── flag-self-citations (Phase 54.6.223 — roadmap 3.6.2) ─────────────────────
+
+
+@app.command(name="flag-self-citations")
+def flag_self_citations_cmd(
+    limit: int = typer.Option(
+        0, "--limit",
+        help="Process at most N citations (0 = all).",
+    ),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Re-classify citations that already have is_self_cite "
+             "set. Use after fixing a surname-normalisation bug.",
+    ),
+):
+    """Phase 54.6.223 (roadmap 3.6.2) — flag self-citations via author overlap.
+
+    Walks citations that are **cross-linked in-corpus** (both citing
+    and cited papers are in our ``paper_metadata`` table) and marks
+    each one as self-referential when the citing paper's author list
+    overlaps the cited paper's author list on at least one
+    ``(surname, first_initial)`` key.
+
+    Enables consensus auditing — "is this claim supported by
+    independent work or only by the same group citing itself?" — and
+    feeds the writer's groundedness / overstated-claim passes with
+    the signal (``citations.is_self_cite = true`` is a trust-weight
+    tag for retrieval).
+
+    Scope (Phase 1): only cross-linked citations
+    (``cited_document_id IS NOT NULL``). Non-cross-linked citations
+    have ``cited_authors = NULL`` in the current schema, so we can't
+    run the overlap check on them without a separate enrichment
+    pass that fetches cited authors from Crossref / OpenAlex —
+    that's a follow-on.
+
+    Examples:
+
+      sciknow db flag-self-citations              # all cross-linked
+      sciknow db flag-self-citations --limit 50   # smoke test
+      sciknow db flag-self-citations --force      # re-run everything
+    """
+    from sciknow.cli import preflight
+    preflight(qdrant=False)
+
+    import json as _json
+    from sqlalchemy import text as sql_text
+    from sciknow.core.self_citation import detect_self_cite
+    from sciknow.storage.db import get_session
+
+    filter_sql = "" if force else "AND c.is_self_cite IS NULL"
+    with get_session() as session:
+        rows = session.execute(sql_text(f"""
+            SELECT c.id::text,
+                   citing_pm.authors,
+                   cited_pm.authors
+            FROM citations c
+            JOIN paper_metadata citing_pm
+              ON citing_pm.document_id = c.citing_document_id
+            JOIN paper_metadata cited_pm
+              ON cited_pm.document_id = c.cited_document_id
+            WHERE c.cited_document_id IS NOT NULL
+              {filter_sql}
+            {('LIMIT :lim' if limit else '')}
+        """), ({"lim": limit} if limit else {})).fetchall()
+
+    if not rows:
+        console.print(
+            "[green]No cross-linked citations need classification.[/green] "
+            "Run with --force to re-classify everything."
+        )
+        return
+
+    console.print(
+        f"Classifying [bold]{len(rows)}[/bold] cross-linked citation(s)…"
+    )
+    flagged_self = 0
+    flagged_other = 0
+    undecided = 0
+
+    with get_session() as session:
+        for cid, citing_authors, cited_authors in rows:
+            verdict, overlap = detect_self_cite(citing_authors, cited_authors)
+            # is_self_cite = NULL for undecided (author data missing);
+            # self_cite_authors = [] on undecided so the UI can tell
+            # "not run" from "ran but no overlap".
+            session.execute(sql_text("""
+                UPDATE citations
+                   SET is_self_cite = :verdict,
+                       self_cite_authors = CAST(:overlap AS jsonb)
+                 WHERE id::text = :cid
+            """), {
+                "cid": cid,
+                "verdict": verdict,
+                "overlap": _json.dumps(overlap),
+            })
+            if verdict is True:
+                flagged_self += 1
+            elif verdict is False:
+                flagged_other += 1
+            else:
+                undecided += 1
+        session.commit()
+
+    total = len(rows)
+    self_rate = (flagged_self / total * 100) if total else 0.0
+    console.print(
+        f"[green]✓ {flagged_self} self-cites[/green] · "
+        f"{flagged_other} independent · "
+        f"[yellow]{undecided} undecided[/yellow]"
+    )
+    console.print(
+        f"[dim]Self-cite rate on in-corpus cross-linked citations: "
+        f"{self_rate:.1f}% — ballpark for academic corpora is 5-20%; "
+        f"large outliers signal either an author-clustering bug or a "
+        f"very insular research group.[/dim]"
+    )
+
+
 # ── backfill-institutions (Phase 54.6.221 — roadmap 3.2.4) ────────────────────
 
 

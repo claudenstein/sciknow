@@ -801,7 +801,7 @@ Scoring: **Impact** (H/M/L) × **Effort** (H/M/L) → **Verdict**.
 | 3.4.4 | Section-type as ranking signal | Q | L | M | **Defer** | Filter already exists; ranking delta likely small |
 | 3.5.2 | Multi-aspect captions (literal / synthesis / search) | Q | M | M | **Ship as Phase 5 of 3.1.6** | MinerU-Pro's per-figure output is the "literal" layer; closes as a follow-on of 3.1.6 |
 | 3.5.4 | Figure-paragraph alignment training set | O | L | L | **Likely obsolete post-3.1.6** | VLM-Pro reading-order makes the 54.6.138 heuristic exact |
-| 3.6.2 | Self-citation flagging | Q | L | L | **Defer** | Piggyback on 3.2.1 |
+| 3.6.2 | Self-citation flagging | Q | L | L | **Shipped 54.6.223** | `citations.is_self_cite` + surname-key overlap detection + `sciknow db flag-self-citations`. Live: 40.3% self-cite rate on the 340 in-corpus cross-linked citations |
 | 3.7.2 | KG relation vocabulary constraint | Q | M | M | **Shipped 54.6.220** | 20-relation closed vocabulary (forces / responds_to / proxies_for / reconstructs / supports / contradicts / ...) + alias table + KG_EXTRACT prompt preferences |
 | 3.7.3 | KG quality sampling | O | L | L | **Shipped 54.6.218** | `sciknow wiki kg-sample` — LLM-judge or human grading, JSONL per-run for longitudinal tracking |
 | 3.8.2 | Dynamic topics over time | O | L | M | **Defer** | Visualization play, non-critical |

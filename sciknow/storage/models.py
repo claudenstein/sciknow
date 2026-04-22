@@ -294,6 +294,12 @@ class Citation(Base):
         PG_UUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL")
     )
     raw_reference_text: Mapped[str | None] = mapped_column(Text)
+    # Phase 54.6.223 (roadmap 3.6.2) — self-citation flags. Both are
+    # nullable: NULL = classifier hasn't run; TRUE/FALSE = verdict
+    # after running. `self_cite_authors` carries the normalised
+    # surname keys that overlapped, for audit.
+    is_self_cite: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    self_cite_authors: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
