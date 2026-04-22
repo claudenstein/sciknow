@@ -127,31 +127,19 @@ Risk: if the scoring is loose, `pending_downloads` explodes.
 
 ### 3.1 PDF conversion
 
-#### 3.1.1 Routed converter backend (S, Q)
+#### 3.1.1 Routed converter backend (S, Q) — **SUPERSEDED by 3.1.6**
 
-Current dispatch is user-selected (`PDF_CONVERTER_BACKEND = auto |
-mineru | mineru-vlm-pro | marker`) and applies per-file uniformly.
-MinerU 2.5 (86.2 OmniDocBench) handles ~90% of papers cleanly but
-loses on:
-- heavily-figured papers (figure-text reading order gets tangled)
-- old scans without OCR
-- PDFs with embedded XObject form-fields
+Early proposal: heuristic decision gate before conversion routing
+typical papers to MinerU pipeline-mode (fast path, ~0.4 pages/s) and
+complex/figure-heavy papers to MinerU 2.5-Pro VLM. Retained here for
+historical reference.
 
-Proposal: add a **decision gate** before conversion that inspects:
-- first-page heuristics (has machine-readable text via PyMuPDF?)
-- figure density (number of images × area fraction)
-- scan signature (monochrome rasters, no embedded text)
-
-Route:
-- Typical paper → MinerU 2.5 pipeline (fast path, ~0.4 pages/s)
-- Complex/figure-heavy → MinerU 2.5-Pro VLM (95.69 OmniDocBench)
-- Pure scan → Marker JSON with Surya OCR (slower but tolerant)
-
-Cost: ~2 days. Benchmark set needed: curate 20 edge-case PDFs.
-
-Expected win: quality bump on the ~10% hard tail; the 90% fast path
-unchanged. Benchmark OmniDocBench difference: 86.2 → ~89+ composite
-when the gate correctly picks VLM-Pro for hard cases.
+**Why superseded**: 2026-04-22 decision to migrate fully to MinerU
+2.5-Pro via vLLM backend. The four new capabilities that 3.1.1 was
+routing around (cross-page table merging, truncated paragraph merging,
+in-table image recognition, image/chart parsing) are all native in
+2.5-Pro, so a routed-mode fast path loses more quality than it saves
+wall-clock. See §3.1.6 for the migration plan.
 
 #### 3.1.2 Equation + chart extraction benchmark (O, Q)
 
@@ -166,43 +154,120 @@ accuracy check. Establishes a baseline before we swap extractors.
 
 Cost: ~1 day for the eval set + harness. No new extractor yet.
 
-#### 3.1.3 Nougat / Pix2Tex comparison (Q)
+#### 3.1.3 Nougat / Pix2Tex comparison (Q) — **SUPERSEDED by 3.1.6**
 
-Alternative LaTeX recognizers. **Meta's Nougat** (Blecher et al. 2023)
-claims better formula recognition on academic papers. **Pix2Tex**
-(LaTeX-OCR, open source) is a lightweight per-formula recognizer.
+Retained for historical reference. Gated on 3.1.2 showing a real
+formula-recognition gap in MinerU pipeline-mode MFR. With the full
+migration to MinerU 2.5-Pro VLM (§3.1.6), formula recognition is
+same-team SOTA — the OmniDocBench v1.6 composite jumps 86.2 → 95.69
+and formulas are the largest single contributor. Re-open only if
+post-migration 3.1.2 audit shows >15% LaTeX error on corpus.
 
-Proposal: after 3.1.2 establishes a baseline, try Nougat as a
-parallel pipeline, see if composite OmniDocBench improves by >3
-points. Only worth adopting if MinerU-MFR is a measurable bottleneck.
+#### 3.1.4 Table recognition — PaddleOCR PP-StructureV3 comparison (Q) — **SUPERSEDED by 3.1.6**
 
-Cost: ~3 days. Likely only worthwhile if 3.1.2 shows >15% LaTeX
-error rate on our corpus.
+Retained for historical reference. With MinerU 2.5-Pro (§3.1.6) the
+table HTML gets richer headers + cross-page merging natively, and
+in-table image recognition lands too. Re-open only if numeric
+table search becomes a primary need AND post-migration table
+quality proves insufficient.
 
-#### 3.1.4 Table recognition — PaddleOCR PP-StructureV3 comparison (Q)
+#### 3.1.5 Reading-order ML model (Q) — **SUPERSEDED by 3.1.6**
 
-MinerU HTML tables recover most structure but lose column types and
-multi-row headers on complex stats tables. PP-StructureV3 (Baidu) is
-competitive on PubTabNet. Phase 54.6.106 already downstream-parses
-MinerU HTML into `{title, headers[], summary}` via LLM — if the
-upstream HTML is richer, the parse step could emit real structured
-rows instead of just a summary.
+Retained for historical reference. The scrambled-reading-order tail
+(~5% of papers under pipeline-mode heuristics) shrinks to near-zero
+under VLM-Pro which reads documents natively. Re-open only if
+post-migration audit shows a residual >2% scrambled-order failure
+class in the failures clinic (§3.11.6).
 
-Cost: ~2 days benchmark. Only worth pursuing if the user starts
-needing **numeric table search** (query → rows with matching cells).
+#### 3.1.6 Full migration to MinerU 2.5-Pro via vLLM (Q, C, R)
 
-#### 3.1.5 Reading-order ML model (Q)
+**2026-04-22 decision:** ship in progress. Replaces the whole
+§3.1.1 routed-backend idea — why route past capabilities when the
+premium backend covers them natively?
 
-MinerU uses heuristics (column detection, block bounding-box
-ordering). Most of the time it's right; ~5% of papers get reading
-order scrambled (common in two-column layouts with floating figures).
+**What changes:**
 
-Proposal: train a lightweight reading-order classifier on
-DocLayout-YOLO outputs. OR: accept MinerU's output as-is, post-process
-with LLM-based reading-order fixing on the 5% where heuristics fail
-(detect via section-header discontinuities).
+- `PDF_CONVERTER_BACKEND` default flips to `mineru-vlm-pro`.
+- vLLM becomes the inference backend (new setting
+  `MINERU_VLM_BACKEND=transformers|vllm`, default `vllm`), served
+  as a **systemd user service** (same operational pattern as
+  Qdrant / Ollama).
+- Pipeline-mode MinerU 2.0 stack stays on disk as `auto`-dispatch
+  fallback when VLM-Pro raises (rare — vLLM OOM on very long
+  documents, disk-full during model download).
+- Marker remains the final fallback for pure scans with no
+  embedded text (VLM-Pro is not an OCR model).
 
-Cost: ~1 week for training; ~1 day for LLM post-fix.
+**Why worth the full re-ingest:**
+
+- OmniDocBench v1.5 86.2 → v1.6 95.69 (~11-point composite jump).
+- Four new capabilities that land as **free upgrades** to
+  downstream stages:
+  - *Cross-page table merging* — one `table` block now spans
+    pages N..N+1; the `parse-tables` stage (54.6.106) stops
+    getting split halves.
+  - *Truncated paragraph merging* — no more "…conti-" / "nued…"
+    fragments bisecting a chunk boundary.
+  - *In-table image recognition* — images embedded inside
+    tables become addressable visual elements; requires
+    `extract-visuals` to recurse into `table` blocks.
+  - *Image & chart parsing* — per-figure structured output;
+    feeds the multi-aspect captions plan (§3.5.2) as the
+    "literal" layer.
+
+**Image captioning decision (2026-04-22):** *keep*
+`qwen2.5vl:32b` as the synthesis-caption model. MinerU-Pro's
+per-figure output is a 1.2B VLM doing literal/layout-aware
+extraction; `qwen2.5vl:32b` is a 32B VLM doing domain-aware
+narrative captioning pinned by the 54.6.74 sweep. They're
+complementary, not substitutes. Layered naturally in §3.5.2:
+MinerU → `literal_caption`, qwen2.5vl:32b → `synthesis_caption`,
+qwen2.5vl:7b → `query_caption`.
+
+**Shipping plan (this session):**
+
+1. **Phase 1 — vLLM service + DB stamps.** New systemd user unit
+   `mineru-vllm.service`; new `MINERU_VLM_BACKEND` setting; new
+   `documents.converter_backend` + `documents.converter_version`
+   columns via Alembic so we can tell post-migration chunks from
+   pipeline-era ones in audits / retrieval filters.
+2. **Phase 2 — flip default + auto-dispatch fallback chain.**
+   `auto` now tries vlm-pro → pipeline → marker; explicit
+   `PDF_CONVERTER_BACKEND=mineru` gets a one-shot deprecation
+   warning.
+3. **Phase 3 — downstream updates.** `extract-visuals` recurses
+   into `table` blocks for in-table images; chunker stays stable
+   (block schema is unchanged); parse-tables no-op; L1 regressions
+   pin each touch-point.
+4. **Phase 4 — full re-ingest.** `sciknow db reset` then the
+   standard refresh sequence. Decision on 3090-now vs DGX Spark
+   documented in the handoff doc written at Phase 4 time.
+5. **Phase 5 — multi-aspect captions (closes §3.5.2).** See the
+   image-captioning decision above; ships as Phase 5 of this
+   migration, not its own roadmap item.
+6. **Phase 6 — deprecate pipeline-mode** as a user-visible
+   backend: drop from `.env.example` + CLAUDE.md as an option; the
+   code stays reachable only via auto-dispatch fallback.
+
+**Costs:** ~5-6 days of coding + 1 week of wall-clock re-ingest on
+RTX 3090 (or ~1 day re-ingest on DGX Spark once it arrives).
+
+**Risks / edge cases to watch:**
+
+- **vLLM VRAM co-residence.** VLM-Pro is Qwen2VL-1.2B (~4-5 GB
+  with vLLM overhead). Co-resident with `qwen2.5vl:32b` at
+  caption time is not feasible on a 3090; conversion and
+  captioning run in separate stages so model swapping at stage
+  boundaries is the intended pattern.
+- **Parallel ingest unlock.** Because vLLM runs as a standalone
+  service with a queue, `sciknow ingest directory` with N workers
+  becomes trivial (§3.11.1 "Gated" → "Ship" after this migration
+  lands). Not in-scope for 3.1.6 but the architecture is chosen
+  to make it possible later without rework.
+- **Pipeline-era chunks.** Mixing pipeline-mode chunks with
+  VLM-Pro chunks in the same Qdrant collection is unreasonable;
+  `db reset` is the honest starting point. Retrieval quality
+  comparisons across the boundary are not supported.
 
 ---
 
@@ -711,11 +776,12 @@ Scoring: **Impact** (H/M/L) × **Effort** (H/M/L) → **Verdict**.
 | 3.11.2 | Incremental refresh (`--since`) | S | M | L | **Shipped 54.6.210** | `sciknow refresh --since=7d/last-run` + wiki compile filter |
 | 3.11.4 | Budget-aware refresh (`--budget-time`) | R, S | L | L | **Shipped 54.6.206** | `--budget-time=6h/30m` + Exit(3) for budget-hit |
 | 3.11.6 | Failure-mode clinic view | R, O | M | L | **Shipped 54.6.205** | `sciknow db failures` aggregates ingestion_jobs |
-| 3.0.1 | Expand OA resolver set (Europe PMC + CORE + OSF) | C | H | M | **Next Review** | Queued for evaluation after Ship cluster lands. Pilot with Europe PMC first; measure yield lift |
-| 3.1.1 | Routed converter backend (heuristic gate) | S, Q | H | M | **Next Review** | Queued for evaluation after Ship cluster lands. Need 20-PDF edge-case bench set first |
-| 3.3.1 | Semantic chunking within section | Q | M | M | **Next Review** | Queued for evaluation after Ship cluster lands. Benchmark vs current MRR before committing |
-| 3.4.3 | ColBERT late-interaction on abstracts collection | Q | M | M | **Next Review** | Queued for evaluation after Ship cluster lands. Cheap pilot; storage cost is the gate |
-| 3.6.1 | Citation-purpose classification | Q | M | M | **Next Review** | Queued for evaluation after Ship cluster lands. Port ACL-ARC / SciCite classifier |
+| 3.1.6 | Full migration to MinerU 2.5-Pro via vLLM | Q, C, R | H | M | **Ship (in progress)** | 2026-04-22: replaces 3.1.1. vLLM systemd service; auto-dispatch fallback; full re-ingest |
+| 3.0.1 | Expand OA resolver set (Europe PMC + CORE + OSF) | C | H | M | **Next Review** | Queued for evaluation after 3.1.6 lands. Pilot with Europe PMC first; measure yield lift |
+| 3.1.1 | Routed converter backend (heuristic gate) | S, Q | H | M | **Superseded by 3.1.6** | See §3.1.1 detail + §3.1.6 rationale |
+| 3.3.1 | Semantic chunking within section | Q | M | M | **Next Review** | Unblocked by 3.1.6 merged-paragraph output. Benchmark vs current MRR before committing |
+| 3.4.3 | ColBERT late-interaction on abstracts collection | Q | M | M | **Next Review** | Cheap pilot; storage cost is the gate; independent of 3.1.6 |
+| 3.6.1 | Citation-purpose classification | Q | M | M | **Next Review** | Port ACL-ARC / SciCite classifier; independent of 3.1.6 |
 | 3.5.1 | Caption quality audit + retry pass | Q, O | M | L | **Investigate** | 30-sample rubric; adjust prompts iteratively |
 | 3.8.1 | Hierarchical BERTopic clusters | C, Q | M | L | **Investigate** | Check: does hierarchy reveal genuine sub-topics or over-split? |
 | 3.0.2 | Velocity watcher nightly cron | O | L | L | **Investigate** | User preference call — do they want a digest? |
@@ -726,8 +792,8 @@ Scoring: **Impact** (H/M/L) × **Effort** (H/M/L) → **Verdict**.
 | 3.3.4 | Chunk deduplication (MinHash-LSH) | S | M | M | **Defer** | Dedup risk > current duplication cost |
 | 3.4.1 | Qwen3-Embedding comparison | Q | M | L | **Defer** | Only if bench shows bge-m3 hitting a ceiling |
 | 3.4.4 | Section-type as ranking signal | Q | L | M | **Defer** | Filter already exists; ranking delta likely small |
-| 3.5.2 | Multi-aspect captions (literal / synthesis / search) | Q | M | M | **Defer** | VLM cost 3×; defer until visual search is a primary surface |
-| 3.5.4 | Figure-paragraph alignment training set | O | L | L | **Defer** | Phase 54.6.138 heuristic is good enough for now |
+| 3.5.2 | Multi-aspect captions (literal / synthesis / search) | Q | M | M | **Ship as Phase 5 of 3.1.6** | MinerU-Pro's per-figure output is the "literal" layer; closes as a follow-on of 3.1.6 |
+| 3.5.4 | Figure-paragraph alignment training set | O | L | L | **Likely obsolete post-3.1.6** | VLM-Pro reading-order makes the 54.6.138 heuristic exact |
 | 3.6.2 | Self-citation flagging | Q | L | L | **Defer** | Piggyback on 3.2.1 |
 | 3.7.2 | KG relation vocabulary constraint | Q | M | M | **Defer** | Needs user input on domain-specific relations |
 | 3.7.3 | KG quality sampling | O | L | L | **Defer** | Useful when KG surface is more central |
@@ -739,16 +805,16 @@ Scoring: **Impact** (H/M/L) × **Effort** (H/M/L) → **Verdict**.
 | 3.11.3 | Pipeline observability dashboard | O | M | M | **Defer** | Useful polish; wait for a real incident to motivate |
 | 3.11.5 | Quality regression suite | O | M | L | **Defer** | Already partly exists via `bench --layer live` |
 | 3.1.2 | Equation extraction accuracy bench | O, Q | L | L | **Defer** | Run only before considering 3.1.3 |
-| 3.1.5 | Reading-order ML model | Q | M | H | **Defer** | 5% of papers affected; training effort high |
+| 3.1.5 | Reading-order ML model | Q | M | H | **Superseded by 3.1.6** | VLM-Pro reads natively; scrambled-order tail shrinks to near-zero |
 | 3.2.6 | Keyword normalization to OpenAlex concepts | Q | L | M | **Defer** | User hasn't hit the noise yet |
 | 3.0.3 | Citation-graph two-hop expansion | Q, C | M | M | **Defer** | Risk of `pending_downloads` explosion |
-| 3.1.3 | Nougat / Pix2Tex comparison | Q | L | M | **Gated** | Depends on 3.1.2 showing a real gap |
-| 3.1.4 | PaddleOCR table comparison | Q | L | M | **Gated** | Only when numeric table search becomes a primary need |
+| 3.1.3 | Nougat / Pix2Tex comparison | Q | L | M | **Superseded by 3.1.6** | VLM-Pro formula recognition is same-team SOTA |
+| 3.1.4 | PaddleOCR table comparison | Q | L | M | **Superseded by 3.1.6** | VLM-Pro table HTML + cross-page merging native |
 | 3.2.2 | Publisher-specific resolvers (Wiley, Springer, …) | C | M | M | **Gated** | User to provide institutional API tokens |
 | 3.4.2 | Domain contrastive fine-tune of bge-m3 | Q | H | H | **Gated** | DGX Spark hardware + ≥2k labeled positive pairs |
 | 3.5.3 | Chart data extraction (DePlot / UniChart) | Q | M | H | **Gated** | Research-level; DGX Spark helpful |
 | 3.6.3 | Per-chunk forward citation counts | Q | L | H | **Gated** | Needs external citation-context database |
-| 3.11.1 | Parallel ingest of multiple documents | S | H | M | **Gated** | Best tested on DGX Spark; RTX 3090 VRAM marginal |
+| 3.11.1 | Parallel ingest of multiple documents | S | H | M | **Unlocked by 3.1.6** | vLLM runs as a queue-backed service; N ingest workers can share it |
 
 ---
 
@@ -797,24 +863,36 @@ as unnecessary). Ship cluster **complete** as of 2026-04-22 —
 PHASE_LOG consolidated entry "Phase 54.6.205-210 — Ingestion
 roadmap ship cluster".
 
-**Next session**: revisit the five "Next Review" proposals from
-§4 against the post-ship baseline and decide which to advance to
-Ship:
+**2026-04-22 current work — §3.1.6 full MinerU 2.5-Pro migration
+via vLLM.** Six-phase plan (see §3.1.6). Blast radius is corpus-
+wide (full re-ingest), so the coding phases (1/2/3/5/6) land one
+commit at a time with L1 regressions, and Phase 4 (`db reset` +
+re-ingest) is the user-gated destructive step.
+
+**Side-effects of shipping 3.1.6**: 3.1.1, 3.1.3, 3.1.4, 3.1.5 are
+marked Superseded in §4 — re-open only with post-migration
+evidence. 3.5.2 becomes Phase 5 of 3.1.6 (multi-aspect captions
+layered on MinerU-Pro's per-figure literal output). 3.11.1
+(parallel ingest) becomes much more tractable because vLLM is a
+queue-backed service rather than an in-process model — promoted
+from "Gated" to "Unlocked" in §4.
+
+**After 3.1.6 lands and re-ingest completes:** revisit the four
+remaining "Next Review" proposals against the post-VLM-Pro
+baseline:
 
 - **3.0.1 Expand OA resolver set (Europe PMC + CORE + OSF)** —
   pilot with Europe PMC first; measure yield lift on the
-  global-cooling `pending_downloads` rows.
-- **3.1.1 Routed converter backend (heuristic gate)** — curate the
-  20-PDF edge-case bench set first; MinerU 2.5 handles ~90%, the
-  gate only earns its keep on the hard tail.
-- **3.3.1 Semantic chunking within section** — bench vs current
-  MRR on a 30-query set before committing; bge-m3 chunks are
-  already semantically dense so the gain may be marginal.
+  global-cooling `pending_downloads` rows. Independent of 3.1.6.
+- **3.3.1 Semantic chunking within section** — now backed by
+  VLM-Pro's merged-paragraph output; bench vs current MRR on a
+  30-query set before committing.
 - **3.4.3 ColBERT late-interaction on abstracts collection** —
   cheap pilot (paper-level collection is small); storage cost is
-  the gate, not accuracy.
+  the gate, not accuracy. Independent of 3.1.6.
 - **3.6.1 Citation-purpose classification** — port ACL-ARC /
   SciCite classifier; LLM inference per citation is cheap.
+  Independent of 3.1.6.
 
 Rank by expected ROI on the current climate-science corpus,
 pick one or two for the next ship session.
