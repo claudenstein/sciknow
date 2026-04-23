@@ -2846,15 +2846,36 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
         max_p95 = max(
             (row.get("p95_ms") or 0) for row in timing
         ) or 1.0
+        # Phase 54.6.288 — index deltas by stage for the regression chip
+        deltas_by_stage = {
+            d.get("stage"): d
+            for d in (pipeline.get("stage_timing_deltas") or [])
+        }
         for row in timing:
             n = row["n"]
             p50 = row.get("p50_ms")
             p95 = row.get("p95_ms")
+            # Right-hand p50 cell gains a "Δ+NN%" chip when this week's
+            # p95 differs ≥30 % from last week's.
+            p50_cell = f"p50 {_fmt_ms(p50)}"
+            d = deltas_by_stage.get(row["stage"])
+            if d and d.get("delta_pct") is not None:
+                dp = d["delta_pct"]
+                sev = d.get("severity")
+                if sev == "regression":
+                    p50_cell = (
+                        f"[bright_red]Δ+{dp:.0f}%[/bright_red]  p50 {_fmt_ms(p50)}"
+                    )
+                elif sev == "improvement":
+                    p50_cell = (
+                        f"[bright_green]Δ{dp:.0f}%[/bright_green]  p50 {_fmt_ms(p50)}"
+                    )
             timing_tbl.add_row(
                 row["stage"], f"n={n:,}",
                 _bar(p95 or 0, max_p95, width=24,
                      palette=(C_OK, C_WARN, C_ERR)),
-                _fmt_ms(p95), f"p50 {_fmt_ms(p50)}",
+                _fmt_ms(p95),
+                Text.from_markup(p50_cell),
             )
     else:
         timing_tbl.add_row(Text("(no completed jobs yet)", style=C_DIM),

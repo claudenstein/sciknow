@@ -706,6 +706,95 @@ def _raptor_tree_shape(session) -> dict:
     return out
 
 
+def _stage_timing_deltas(session, min_samples: int = 5) -> list[dict]:
+    """Phase 54.6.288 — week-over-week p95 delta per pipeline stage.
+
+    Compares the trailing 7 days against the preceding 7 days to
+    catch silent slowdowns — e.g. "embedding p95 jumped 2.4× after
+    we flipped dense_embedder_model to Qwen3-4B".  Without this,
+    the existing `stage_timing` panel shows *current* p95 but no
+    baseline, so regressions only surface when something actually
+    breaks.
+
+    Returns one dict per stage::
+
+        [
+          {
+            "stage":       "embedding",
+            "p95_cur_ms":  2664,
+            "p95_prev_ms": 950,
+            "delta_pct":   180.5,      # None when no prev-window data
+            "n_cur":       809,
+            "n_prev":      421,
+            "severity":    "regression" | "improvement" | "stable",
+          },
+          ...
+        ]
+
+    ``severity == 'regression'`` when delta_pct ≥ 30 and we have at
+    least ``min_samples`` rows in each window.  ``improvement`` at
+    ≤ -30 %.  Stages without a prev-window baseline land as
+    ``stable`` (silent, no alert) — the delta_pct is None in that
+    case so renderers can dim them.
+    """
+    from sqlalchemy import text
+    try:
+        rows = session.execute(text("""
+            SELECT stage,
+              PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_ms)
+                FILTER (WHERE created_at >= NOW() - interval '7 days')
+                AS p95_cur,
+              PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_ms)
+                FILTER (WHERE created_at >= NOW() - interval '14 days'
+                          AND created_at <  NOW() - interval '7 days')
+                AS p95_prev,
+              COUNT(*) FILTER (WHERE created_at >= NOW() - interval '7 days')
+                AS n_cur,
+              COUNT(*) FILTER (WHERE created_at >= NOW() - interval '14 days'
+                                  AND created_at <  NOW() - interval '7 days')
+                AS n_prev
+            FROM ingestion_jobs
+            WHERE status = 'completed' AND duration_ms > 0
+            GROUP BY stage
+            ORDER BY stage
+        """)).fetchall()
+    except Exception:
+        return []
+
+    out: list[dict] = []
+    for stage, p95_cur, p95_prev, n_cur, n_prev in rows:
+        n_cur = int(n_cur or 0)
+        n_prev = int(n_prev or 0)
+        p95_cur_ms = int(p95_cur) if p95_cur is not None else 0
+        p95_prev_ms = int(p95_prev) if p95_prev is not None else None
+        if (
+            p95_prev_ms is None or p95_prev_ms == 0
+            or n_cur < min_samples or n_prev < min_samples
+        ):
+            delta_pct = None
+            severity = "stable"
+        else:
+            delta_pct = round(
+                (p95_cur_ms - p95_prev_ms) / p95_prev_ms * 100, 1,
+            )
+            if delta_pct >= 30:
+                severity = "regression"
+            elif delta_pct <= -30:
+                severity = "improvement"
+            else:
+                severity = "stable"
+        out.append({
+            "stage": stage,
+            "p95_cur_ms": p95_cur_ms,
+            "p95_prev_ms": p95_prev_ms,
+            "delta_pct": delta_pct,
+            "n_cur": n_cur,
+            "n_prev": n_prev,
+            "severity": severity,
+        })
+    return out
+
+
 def _section_coverage_by_backend(session) -> list[dict]:
     """Phase 54.6.287 — section-type coverage split by converter
     backend.
@@ -1514,6 +1603,26 @@ def _build_alerts(snap: dict) -> list[dict]:
             ),
         })
 
+    # Phase 54.6.288 — stage-timing regression alert.  Fires warn
+    # per stage when p95 jumped ≥50 % vs the preceding 7-day window
+    # (well above the 30 % "flagged in panel" threshold, so only
+    # real slowdowns page).
+    for d in (snap.get("pipeline") or {}).get("stage_timing_deltas") or []:
+        if d.get("severity") != "regression":
+            continue
+        dp = d.get("delta_pct")
+        if dp is None or dp < 50:
+            continue
+        alerts.append({
+            "severity": "warn",
+            "code": "stage_slowdown",
+            "message": (
+                f"{d['stage']} p95 "
+                f"{d['p95_prev_ms']}ms → {d['p95_cur_ms']}ms "
+                f"(+{dp:.0f}% vs last week)"
+            ),
+        })
+
     gpus = snap.get("gpu") or []
     for g in gpus:
         t = g.get("temperature_c") or 0
@@ -1696,6 +1805,9 @@ def _build_alerts(snap: dict) -> list[dict]:
         "vram_low":        (
             "nvidia-smi --query-compute-apps=pid,used_memory,process_name "
             "--format=csv"
+        ),
+        "stage_slowdown":  (
+            "sciknow db failures  # inspect recent per-doc timing"
         ),
         "ram_pressure":    "ps axu --sort=-%mem | head",
         "host_overload":   "uptime; top -b -n 1 | head -20",
@@ -2981,6 +3093,10 @@ def collect_monitor_snapshot(
             limit=topic_clusters_limit, default=[],
         )
         stage_timing = _safe_db(session, _pipeline_timing, default=[])
+        # 54.6.288 — week-over-week p95 regression detector.
+        stage_timing_deltas = _safe_db(
+            session, _stage_timing_deltas, default=[],
+        )
         stage_failures = _safe_db(session, _pipeline_failures, default=[])
         throughput = _safe_db(
             session, _pipeline_throughput,
@@ -3068,6 +3184,8 @@ def collect_monitor_snapshot(
         "topic_clusters": topic_clusters,
         "pipeline": {
             "stage_timing": stage_timing,
+            # 54.6.288 — week-over-week p95 deltas per stage.
+            "stage_timing_deltas": stage_timing_deltas,
             "stage_failures": stage_failures,
             "throughput": throughput,
             "recent_activity": activity,

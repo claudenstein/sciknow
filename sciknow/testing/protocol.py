@@ -12045,6 +12045,62 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_288_stage_timing_regression() -> None:
+    """Phase 54.6.288 — week-over-week p95 regression detector.
+
+    Guards:
+
+      A) `_stage_timing_deltas` exists, returns list with
+         stage/p95_cur_ms/p95_prev_ms/delta_pct/severity.
+      B) collect_monitor_snapshot wires pipeline.stage_timing_deltas.
+      C) `_build_alerts` emits stage_slowdown when delta ≥50%.
+      D) CLI timing panel renders a Δ chip per stage.
+      E) Web timing table renders a "Δ vs 7d prior" column.
+    """
+    import inspect as _inspect
+    from sciknow.core import monitor as _mon
+
+    assert hasattr(_mon, "_stage_timing_deltas"), (
+        "54.6.288 _stage_timing_deltas helper must exist"
+    )
+    src = _inspect.getsource(_mon._stage_timing_deltas)
+    for key in (
+        "p95_cur_ms", "p95_prev_ms", "delta_pct", "severity",
+        "n_cur", "n_prev",
+    ):
+        assert key in src, (
+            f"54.6.288 helper must populate {key!r}"
+        )
+    assert "regression" in src and "improvement" in src, (
+        "54.6.288 helper must classify severity as regression/improvement"
+    )
+
+    snap_src = _inspect.getsource(_mon.collect_monitor_snapshot)
+    assert '"stage_timing_deltas"' in snap_src, (
+        "54.6.288 snapshot must expose pipeline.stage_timing_deltas"
+    )
+
+    alerts_src = _inspect.getsource(_mon._build_alerts)
+    assert "stage_slowdown" in alerts_src, (
+        "54.6.288 _build_alerts must emit stage_slowdown"
+    )
+
+    from sciknow.cli import db as _db_cli
+    cli_src = _inspect.getsource(_db_cli._build_monitor_layout)
+    assert "stage_timing_deltas" in cli_src, (
+        "54.6.288 CLI must read pipeline.stage_timing_deltas"
+    )
+
+    from sciknow.testing.helpers import web_app_full_source
+    web_src = web_app_full_source()
+    assert "stage_timing_deltas" in web_src, (
+        "54.6.288 web must read pipe.stage_timing_deltas"
+    )
+    assert "Δ vs 7d prior" in web_src, (
+        "54.6.288 web must render the 'Δ vs 7d prior' column heading"
+    )
+
+
 def l1_phase54_6_287_section_coverage_by_backend() -> None:
     """Phase 54.6.287 — per-converter-backend breakdown of section
     coverage.
@@ -16643,6 +16699,7 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_285_sidecar_sweep_on_force_reingest,
     l1_phase54_6_286_vram_headroom_watchdog,
     l1_phase54_6_287_section_coverage_by_backend,
+    l1_phase54_6_288_stage_timing_regression,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]

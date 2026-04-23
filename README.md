@@ -256,6 +256,14 @@ one backend has contributed chunks; the web modal renders a
 per-backend table with a distribution bar per row so the operator
 can eyeball the comparison.
 
+**Phase 54.6.288** adds a **stage-timing regression detector** —
+compares this week's p95 per pipeline stage against the preceding
+7 days. CLI timing panel gets a coloured `Δ±NN%` chip next to p50;
+web modal gets a `Δ vs 7d prior` column. `stage_slowdown` alert
+fires at ≥+50 %, flagging real slowdowns (vs the ±30 % "show in
+panel only" threshold). Catches silent regressions like "embedding
+got 2× slower after we flipped `dense_embedder_model`".
+
 ```bash
 uv run sciknow db monitor              # one shot, full layout
 uv run sciknow db monitor --watch 5    # btop-style in-place refresh

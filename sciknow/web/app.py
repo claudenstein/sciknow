@@ -21923,15 +21923,36 @@ function renderMonitor(snap) {{
     sections.push(html);
   }}
 
-  // Pipeline timing
+  // Pipeline timing.  Phase 54.6.288 adds a "Δ vs last week" column
+  // driven by pipe.stage_timing_deltas — coloured chip per stage.
   if (timing.length) {{
+    const deltas = {{}};
+    for (const d of (pipe.stage_timing_deltas || [])) {{
+      deltas[d.stage] = d;
+    }}
     let html = '<h4>Pipeline stage timing (completed jobs)</h4>'
       + '<table class="stats-table" style="width:100%;">'
-      + '<tr><th>Stage</th><th>N</th><th>p50</th><th>p95</th><th>mean</th></tr>';
+      + '<tr><th>Stage</th><th>N</th><th>p50</th><th>p95</th><th>mean</th>'
+      + '<th title="p95 change vs the preceding 7-day window — regression ≥+30%, improvement ≤-30%">Δ vs 7d prior</th></tr>';
     for (const row of timing) {{
+      const d = deltas[row.stage];
+      let deltaCell = '<span class="u-muted">—</span>';
+      if (d && d.delta_pct !== null && d.delta_pct !== undefined) {{
+        const dp = d.delta_pct;
+        const col = d.severity === 'regression' ? '#c33'
+          : d.severity === 'improvement' ? '#080'
+          : 'var(--fg-muted)';
+        const sign = dp >= 0 ? '+' : '';
+        deltaCell = '<span style="color:' + col + ';font-weight:bold;" '
+          + 'title="prev p95 ' + _fmtMs(d.p95_prev_ms)
+          + ' → current p95 ' + _fmtMs(d.p95_cur_ms)
+          + ' · n_prev=' + d.n_prev + ' n_cur=' + d.n_cur + '">'
+          + sign + dp.toFixed(0) + '%</span>';
+      }}
       html += '<tr><td>' + _escHTML(row.stage) + '</td><td>' + _fmtNum(row.n)
         + '</td><td>' + _fmtMs(row.p50_ms) + '</td><td>' + _fmtMs(row.p95_ms)
-        + '</td><td>' + _fmtMs(row.mean_ms) + '</td></tr>';
+        + '</td><td>' + _fmtMs(row.mean_ms) + '</td>'
+        + '<td>' + deltaCell + '</td></tr>';
     }}
     html += '</table>';
     sections.push(html);
