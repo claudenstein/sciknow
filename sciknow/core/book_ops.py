@@ -4227,15 +4227,26 @@ def _autowrite_section_body(
     # Phase 54.6.59 — scorer-role resolution. Explicit `--model` beats
     # everything (the user asked for one model end-to-end). Otherwise,
     # route scoring + rescoring through AUTOWRITE_SCORER_MODEL if set,
-    # else fall through to the writer's llm_model (scorer_model=None
-    # → llm.stream/complete default). NOTE: verify + CoVe stay on the
-    # writer model — the gemopus4 scorer win is specific to the score
-    # task; we did not bench it for verify/CoVe and other scorer tasks
-    # on gemopus4 hang or produce 0 words.
+    # else fall through to the writer (which the model_info event
+    # advertises as "writing/scoring/verification/CoVe — flagship").
+    #
+    # Phase 54.6.306 — the fallback used to be ``None`` → llm.stream
+    # default → ``settings.llm_model``.  That was fine pre-54.6.243
+    # when llm_model WAS the writer, but the writer has since moved
+    # to ``book_write_model``.  Falling back to llm_model forced
+    # Ollama to swap between the writer (22 GB, pinned by
+    # keep_alive=-1) and the general model the moment scoring kicked
+    # in — on 24 GB that swap failed with "model failed to load,
+    # status code 500" because both sticky models wanted to stay
+    # resident.  Matching the writer here keeps the single LLM hot
+    # across writing → scoring → verification → CoVe → revision with
+    # zero swaps.
     if model is not None:
         scorer_model = model
     elif _s.autowrite_scorer_model:
         scorer_model = _s.autowrite_scorer_model
+    elif _s.book_write_model:
+        scorer_model = _s.book_write_model
     else:
         scorer_model = None
 
@@ -4911,6 +4922,25 @@ def _autowrite_section_body(
         log.stage("scoring", iteration=iteration + 1)
         yield {"type": "progress", "stage": "scoring",
                "detail": f"Scoring iteration {iteration + 1}..."}
+        # Phase 54.6.306 — when the scorer is a different model from
+        # the writer (i.e. AUTOWRITE_SCORER_MODEL override is set,
+        # like gemopus4), Ollama can't keep both sticky models
+        # resident on a 24 GB card.  Writer is pinned with
+        # keep_alive=-1 from the writing stage (~22 GB); the scorer
+        # load then fails with "model failed to load, status code 500"
+        # because Ollama refuses to evict a keep_alive=-1 model to make
+        # room for another keep_alive=-1 model.  Explicitly release
+        # the writer before the scorer load so Ollama has a clean GPU
+        # to work with.  The writer will reload naturally on the next
+        # writer-model call (verify / CoVe / revise) — ~10 s cost per
+        # iteration, vs the alternative of the scoring phase hard-
+        # failing and the iteration never converging.
+        try:
+            if scorer_model and settings.book_write_model and scorer_model != settings.book_write_model:
+                from sciknow.rag.llm import release_llm as _release_llm
+                _release_llm([settings.book_write_model])
+        except Exception as exc:
+            logger.debug("pre-scorer writer release failed: %s", exc)
         try:
             sys_s, usr_s = rag_prompts.score_draft(section_type, topic, content, results)
             score_raw = yield from _stream_phase(
@@ -4924,6 +4954,15 @@ def _autowrite_section_body(
             log.event("scoring_failed", message=str(exc)[:200])
             scores = {"overall": 0.5, "weakest_dimension": "unknown",
                       "revision_instruction": "Improve overall quality."}
+        # Symmetric release so the next stage (verify/CoVe/revise) can
+        # reload the writer on a clean GPU without fighting the sticky
+        # scorer.  No-op when scorer_model == writer (shared-model path).
+        try:
+            if scorer_model and settings.book_write_model and scorer_model != settings.book_write_model:
+                from sciknow.rag.llm import release_llm as _release_llm
+                _release_llm([scorer_model])
+        except Exception as exc:
+            logger.debug("post-scorer release failed: %s", exc)
 
         # Phase 54.6.79 (#6) — plan coverage as a dimension. Computes
         # NLI entailment of each atomic plan bullet against the draft;
@@ -5355,6 +5394,17 @@ def _autowrite_section_body(
         # Re-score (Fix 3: same results) — Phase 15.3 streamed
         log.stage("rescoring", iteration=iteration + 1)
         yield {"type": "progress", "stage": "scoring", "detail": "Re-scoring revision..."}
+        # Phase 54.6.306 — same sticky-LLM swap problem as the initial
+        # scoring call above; the writer was just used for "revising"
+        # with keep_alive=-1, so release it before the scorer tries to
+        # load its different model.  See the comment on the first
+        # scoring block for the full rationale.
+        try:
+            if scorer_model and settings.book_write_model and scorer_model != settings.book_write_model:
+                from sciknow.rag.llm import release_llm as _release_llm
+                _release_llm([settings.book_write_model])
+        except Exception as exc:
+            logger.debug("pre-rescorer writer release failed: %s", exc)
         try:
             sys_rs, usr_rs = rag_prompts.score_draft(section_type, topic, revised, results)
             rescore_raw = yield from _stream_phase(
@@ -5365,6 +5415,12 @@ def _autowrite_section_body(
             new_scores = json.loads(_clean_json(rescore_raw), strict=False)
         except Exception:
             new_scores = {"overall": overall}
+        try:
+            if scorer_model and settings.book_write_model and scorer_model != settings.book_write_model:
+                from sciknow.rag.llm import release_llm as _release_llm
+                _release_llm([scorer_model])
+        except Exception as exc:
+            logger.debug("post-rescorer release failed: %s", exc)
 
         # Phase 17 — inject length into new_scores so the KEEP/DISCARD
         # comparison is fair. Without this, a length-driven revision
