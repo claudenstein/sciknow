@@ -108,6 +108,23 @@ def _metrics_from_ranks(ranks: list[int]) -> dict:
     }
 
 
+def _metrics_by_section(
+    ranks: list[int], sections: list[str],
+) -> dict[str, dict]:
+    """Phase 54.6.278 — per-section-type MRR breakdown. Useful when
+    a candidate wins globally but loses on a specific section (e.g.
+    dense embedders typically win on discussion/analysis prose but
+    lose on methods/equations where sparse lexical matching
+    dominates)."""
+    from collections import defaultdict
+    buckets: dict[str, list[int]] = defaultdict(list)
+    for r, s in zip(ranks, sections):
+        buckets[s or "unknown"].append(r)
+    return {
+        sec: _metrics_from_ranks(rs) for sec, rs in buckets.items()
+    }
+
+
 # ════════════════════════════════════════════════════════════════════════
 # Mode 1 — Reranker A/B
 # ════════════════════════════════════════════════════════════════════════
@@ -381,6 +398,176 @@ def _find_rank(
         if pid == source_qdrant_id or pid == source_chunk_id:
             return i
     return 0
+
+
+def run_comprehensive_ab(skip_embed: bool = False) -> dict:
+    """Phase 54.6.278 — ALL scenarios on one probe set.
+
+    Runs 4 scenarios paired per-query so deltas are measured on
+    identical retrieval inputs:
+
+      1. [dense-only]   bge-m3 dense (prod collection)
+      2. [dense-only]   Qwen3-4B dense (sidecar)
+      3. [full-stack]   RRF(bge-dense, bge-sparse, FTS) — current prod
+      4. [full-stack]   RRF(Qwen3-dense, bge-sparse, FTS) — dense-swap
+
+    Per-section-type MRR breakdown added (abstract, introduction,
+    methods, results, discussion, conclusion, other) so we can see
+    WHERE each scenario wins. Dense embedders typically win on
+    discussion/analysis prose; lose on methods/equations where
+    sparse lexical dominates.
+
+    Same as --mode hybrid but runs both dense-only and full-stack
+    in one script invocation to save ~5 min of embedder load
+    overhead, and emits the breakdown.
+    """
+    from sciknow.testing.retrieval_eval import load_probe_set
+    from sciknow.storage.qdrant import get_client
+    from sciknow.storage.db import get_session
+    from sciknow.retrieval.hybrid_search import (
+        _postgres_fts, _rrf_merge, PAPERS_COLLECTION,
+    )
+    from sentence_transformers import SentenceTransformer
+    from FlagEmbedding import BGEM3FlagModel
+    from sciknow.retrieval.device import load_with_cpu_fallback
+
+    records = load_probe_set()
+    if not records:
+        console.print("[red]No probe set found.[/red]")
+        sys.exit(2)
+
+    baseline_tag, _ = EMBEDDER_CANDIDATES[0]
+    candidate_tag, candidate_dim = EMBEDDER_CANDIDATES[1]
+
+    console.print(
+        f"[bold]Retrieval A/B — comprehensive mode[/bold]  "
+        f"probe={len(records)} queries · 4 scenarios · per-section breakdown"
+    )
+
+    sidecar = _sidecar_collection_name(candidate_tag)
+    client = get_client()
+    if skip_embed:
+        if client.collection_exists(sidecar):
+            info = client.get_collection(sidecar)
+            console.print(
+                f"  [yellow]--skip-embed[/yellow] → reusing sidecar "
+                f"{sidecar} ({info.points_count} points)"
+            )
+        else:
+            console.print(
+                f"  [red]sidecar {sidecar} missing[/red]; rerun without "
+                "--skip-embed (~55 min) or run `--mode embedder` first."
+            )
+            sys.exit(2)
+    else:
+        sidecar = _ab_reembed_corpus(candidate_tag, candidate_dim)
+
+    console.print("\n[dim]loading bge-m3 (dense + sparse)…[/dim]")
+    bge = load_with_cpu_fallback(BGEM3FlagModel, baseline_tag, use_fp16=True)
+    console.print("[dim]loading Qwen3-Embedding-4B (BF16)…[/dim]")
+    import torch as _torch
+    qwen = SentenceTransformer(
+        candidate_tag, device="cuda", trust_remote_code=True,
+        model_kwargs={"torch_dtype": _torch.bfloat16},
+    )
+
+    WEIGHTS = [1.0, 1.0, 0.5]
+    TOP_POOL = 50
+
+    # Accumulators — parallel lists, one entry per successful probe
+    sections: list[str] = []
+    ranks_bge_dense: list[int] = []
+    ranks_qwen_dense: list[int] = []
+    ranks_bge_hybrid: list[int] = []
+    ranks_qwen_hybrid: list[int] = []
+
+    total_probes = len(records)
+    with get_session() as session:
+        for i, rec in enumerate(records):
+            q = rec["question"]
+            src_qpid = rec.get("source_qdrant_point_id", "")
+            src_cid = rec.get("source_chunk_id", "")
+            sec = rec.get("source_section_type", "unknown")
+
+            try:
+                bge_out = bge.encode(
+                    [q], batch_size=1, max_length=512,
+                    return_dense=True, return_sparse=True,
+                    return_colbert_vecs=False,
+                )
+                bge_dense = bge_out["dense_vecs"][0].tolist()
+                bge_lw = bge_out["lexical_weights"][0]
+                qwen_dense = _ab_embed_query(qwen, q, is_qwen3=True)
+            except Exception as exc:
+                console.print(f"[dim]probe {i} encode failed: {exc}[/dim]")
+                continue
+
+            from qdrant_client.models import SparseVector
+            sparse_vec = SparseVector(
+                indices=[int(k) for k in bge_lw.keys()],
+                values=[float(v) for v in bge_lw.values()],
+            )
+
+            try:
+                dense_ids_b = _ab_dense_search(
+                    client, PAPERS_COLLECTION, bge_dense, TOP_POOL,
+                )
+                dense_ids_q = _ab_dense_search(
+                    client, sidecar, qwen_dense, TOP_POOL,
+                )
+                sparse_resp = client.query_points(
+                    collection_name=PAPERS_COLLECTION, query=sparse_vec,
+                    using="sparse", limit=TOP_POOL, with_payload=False,
+                )
+                sparse_ids = [str(p.id) for p in sparse_resp.points]
+                fts_ids = _postgres_fts(
+                    session, q, TOP_POOL, None, None, None, None, None,
+                )
+
+                merged_bh = _rrf_merge(
+                    [dense_ids_b, sparse_ids, fts_ids], weights=WEIGHTS,
+                )[:TOP_POOL]
+                merged_qh = _rrf_merge(
+                    [dense_ids_q, sparse_ids, fts_ids], weights=WEIGHTS,
+                )[:TOP_POOL]
+                ids_bh = [pid for pid, _ in merged_bh]
+                ids_qh = [pid for pid, _ in merged_qh]
+            except Exception as exc:
+                console.print(f"[dim]probe {i} search failed: {exc}[/dim]")
+                continue
+
+            sections.append(sec)
+            ranks_bge_dense.append(_find_rank(dense_ids_b, src_qpid, src_cid))
+            ranks_qwen_dense.append(_find_rank(dense_ids_q, src_qpid, src_cid))
+            ranks_bge_hybrid.append(_find_rank(ids_bh, src_qpid, src_cid))
+            ranks_qwen_hybrid.append(_find_rank(ids_qh, src_qpid, src_cid))
+
+            if (i + 1) % 50 == 0:
+                console.print(f"  [dim]{i + 1}/{total_probes} done[/dim]")
+
+    # Global metrics per scenario
+    results = {
+        "1. bge-m3 dense alone":                _metrics_from_ranks(ranks_bge_dense),
+        "2. Qwen3-4B dense alone":              _metrics_from_ranks(ranks_qwen_dense),
+        "3. RRF(bge-dense, sparse, FTS)":       _metrics_from_ranks(ranks_bge_hybrid),
+        "4. RRF(Qwen3-dense, sparse, FTS)":     _metrics_from_ranks(ranks_qwen_hybrid),
+    }
+
+    # Per-section breakdown
+    per_section = {
+        "1. bge-m3 dense alone":                _metrics_by_section(ranks_bge_dense, sections),
+        "2. Qwen3-4B dense alone":              _metrics_by_section(ranks_qwen_dense, sections),
+        "3. RRF(bge-dense, sparse, FTS)":       _metrics_by_section(ranks_bge_hybrid, sections),
+        "4. RRF(Qwen3-dense, sparse, FTS)":     _metrics_by_section(ranks_qwen_hybrid, sections),
+    }
+
+    return {
+        "mode": "comprehensive",
+        "results": results,
+        "per_section": per_section,
+        "sidecar_collection": sidecar,
+        "n_probes": len(ranks_bge_dense),
+    }
 
 
 def run_hybrid_ab(skip_embed: bool = False) -> dict:
@@ -726,6 +913,47 @@ def run_embedder_ab(skip_embed: bool = False) -> dict:
 # ════════════════════════════════════════════════════════════════════════
 
 
+def _render_per_section(result: dict) -> None:
+    """Phase 54.6.278 — per-section-type MRR table.
+
+    Shows MRR@10 per (scenario × section_type) so you can see
+    where the dense-swap wins/loses inside the corpus. Useful
+    because global MRR averages can hide big section-level
+    reversals.
+    """
+    per_section = result.get("per_section")
+    if not per_section:
+        return
+    # Collect all section names seen
+    all_sections: set[str] = set()
+    for scen_data in per_section.values():
+        all_sections.update(scen_data.keys())
+    section_order = sorted(all_sections)
+
+    t = Table(
+        title="Per-section-type MRR@10",
+        box=box.SIMPLE_HEAD,
+    )
+    t.add_column("Section")
+    t.add_column("N", justify="right")
+    for scen in per_section.keys():
+        t.add_column(scen[:30], justify="right")
+
+    for sec in section_order:
+        row = [sec]
+        # Use the first scenario's N for this section (same across)
+        first_scen = list(per_section.values())[0]
+        n = first_scen.get(sec, {}).get("n", 0)
+        row.append(str(n))
+        for scen in per_section.keys():
+            m = per_section[scen].get(sec, {})
+            mrr = m.get("mrr_at_10", 0.0)
+            row.append(f"{mrr:.3f}")
+        t.add_row(*row)
+    console.print()
+    console.print(t)
+
+
 def _render_results(result: dict) -> None:
     mode = result["mode"]
     results = result["results"]
@@ -811,13 +1039,16 @@ def _render_results(result: dict) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
-        "--mode", choices=["reranker", "embedder", "hybrid"],
+        "--mode",
+        choices=["reranker", "embedder", "hybrid", "comprehensive"],
         default="reranker",
         help="reranker: swap rerankers on identical candidates (cheap). "
              "embedder: dense-only retrieval A/B on sidecar collection. "
              "hybrid (54.6.277): FULL-STACK A/B — bge-dense vs Qwen3-dense "
-             "with bge-sparse + FTS unchanged, no reranker. The right "
-             "test for the 'does dual-embedder help in prod?' question.",
+             "with bge-sparse + FTS unchanged. "
+             "comprehensive (54.6.278): all 4 scenarios (dense-only×2 + "
+             "full-hybrid×2) in one pass + per-section-type breakdown. "
+             "Longer test, complete picture.",
     )
     p.add_argument(
         "--i-know-it-is-heavy", action="store_true",
@@ -842,10 +1073,13 @@ def main() -> None:
         result = run_reranker_ab()
     elif args.mode == "embedder":
         result = run_embedder_ab(skip_embed=args.skip_embed)
-    else:  # hybrid
+    elif args.mode == "hybrid":
         result = run_hybrid_ab(skip_embed=args.skip_embed)
+    else:  # comprehensive
+        result = run_comprehensive_ab(skip_embed=args.skip_embed)
 
     _render_results(result)
+    _render_per_section(result)
 
 
 if __name__ == "__main__":
