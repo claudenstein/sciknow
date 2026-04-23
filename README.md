@@ -273,29 +273,6 @@ and the web modal renders a "Model swap churn" panel with the last
 over ≥10 min — each swap costs 5-10 s of Ollama cold-load, so
 15/hr = ~3 min of pipeline cold-loads per hour, worth surfacing.
 
-**Phase 54.6.304** wires an **opt-in `llama-server` backend for the
-book-writer hot path**. `sciknow book write` / `autowrite` calls
-whose model matches `BOOK_WRITE_MODEL` now route through a
-standalone `llama-server` process (OpenAI-compatible HTTP at
-`LLAMACPP_BASE_URL`) instead of Ollama; every other LLM role keeps
-using Ollama unchanged. Measured **+12 % decode tok/s** on this
-3090 for Qwen3.6-27B Q4_K_XL at 32 k ctx (32.03 → 35.95 t/s, avg
-of 3 bench runs after 1 warmup; prompt eval 979 → 1 136 t/s).
-Opt in with `LLAMACPP_BOOK_WRITER_ENABLED=true` in `.env` and
-start the server via `scripts/llama_server_book_writer.sh`; the
-dispatcher falls back to Ollama with a one-line WARNING if
-`/health` is unreachable, so a forgotten "start the server" fails
-loud instead of silent. Ceiling honesty: this 3090 is fully
-bandwidth-bound at 99 % util / 9501 MHz mem clock on this quant
-(68 % of the card's 53 t/s theoretical peak — identical efficiency
-to the @Punch_Taylor 4090 bench against its own card's peak). The
-40 t/s target sits at ~76 % efficiency and is only reachable by
-swapping in a lighter quant (IQ4_XS / UD-Q3_K_XL) or adding
-speculative decoding. Full recipe, env-var knobs, tuning-sweep
-driver (`scripts/tune_llama_server.sh`), and the
-`thinking_budget` vs `enable_thinking` gotcha are documented at
-`docs/LLAMACPP_BOOK_WRITER.md`.
-
 **Phase 54.6.303** is a two-part fix: (1) the visuals image
 endpoint (`/api/visuals/image/{id}`) now also probes the `vlm/`
 subfolder when serving figures — MinerU 2.5 VLM-Pro writes
