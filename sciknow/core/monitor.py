@@ -383,6 +383,151 @@ def _book_activity(session) -> dict:
     return out
 
 
+def _book_chapter_velocity(session, book_id: str | None = None) -> list[dict]:
+    """Phase 54.6.302 — per-chapter draft velocity for the active book.
+
+    Expands the 54.6.237 ``_book_activity`` headline ("N/M chapters
+    drafted, W total words") into one row per chapter so the
+    operator can see:
+
+      * which chapters are stalled (no drafts, or latest draft
+        hours/days old)
+      * which chapters are furthest from target
+      * how many revision versions each chapter has (high numbers
+        signal quality issues — the writer keeps rewriting)
+
+    Runs in O(chapters × 1 query) + 1 roll-up query = fast on a
+    typical book (≤20 chapters).  Returns the chapters ordered by
+    their canonical number so a progress-bar render stays stable
+    across snapshots.
+
+    ``book_id`` optional — defaults to the most-recently-updated
+    book (matches ``_book_activity``).
+
+    Each returned row::
+
+        {
+          "chapter_id": str, "number": int, "title": str,
+          "target_words": int,       # from book_chapters.target_words
+                                     # or the book-level default
+          "words":       int,        # sum of latest-version drafts
+                                     # across section_types
+          "completion_pct": float,   # words / target_words * 100
+          "versions":    int,        # max draft version seen
+          "draft_count": int,        # total draft rows
+          "last_updated_iso": str | None,
+          "section_types": [str],    # which sections have drafts
+        }
+    """
+    from sqlalchemy import text
+    # ``target_chapter_words`` lives in books.custom_metadata JSONB,
+    # not a top-level column (Phase 17 design — see
+    # core.book_ops.DEFAULT_TARGET_CHAPTER_WORDS).  Pull it out with
+    # the -> operator; fall back to 6000 matching the book_ops
+    # default so a missing override doesn't zero the target.
+    try:
+        if book_id is None:
+            row = session.execute(text(
+                "SELECT id::text, "
+                "COALESCE(NULLIF((custom_metadata->>'target_chapter_words'), '')::int, 6000) "
+                "FROM books ORDER BY updated_at DESC NULLS LAST LIMIT 1"
+            )).fetchone()
+            if not row:
+                return []
+            book_id = row[0]
+            default_target = int(row[1] or 6000)
+        else:
+            row = session.execute(text(
+                "SELECT COALESCE(NULLIF((custom_metadata->>'target_chapter_words'), '')::int, 6000) "
+                "FROM books WHERE id = CAST(:bid AS uuid)"
+            ), {"bid": book_id}).fetchone()
+            default_target = int((row[0] if row else 6000) or 6000)
+    except Exception:
+        return []
+
+    # Fetch all chapters in one shot.
+    try:
+        chapters = session.execute(text(
+            "SELECT id::text, number, title, target_words "
+            "FROM book_chapters "
+            "WHERE book_id = CAST(:bid AS uuid) "
+            "ORDER BY number"
+        ), {"bid": book_id}).fetchall()
+    except Exception:
+        return []
+
+    if not chapters:
+        return []
+
+    # Fetch per-chapter aggregates: latest-version words, version
+    # counts, draft counts, last update.  One query across all
+    # chapters in the book.
+    try:
+        agg = session.execute(text("""
+            WITH latest AS (
+                SELECT chapter_id, section_type,
+                       word_count, version, updated_at,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY chapter_id, section_type
+                           ORDER BY version DESC
+                       ) AS rn
+                FROM drafts
+                WHERE chapter_id IN (
+                    SELECT id FROM book_chapters
+                    WHERE book_id = CAST(:bid AS uuid)
+                )
+            )
+            SELECT
+              l.chapter_id::text,
+              COALESCE(SUM(l.word_count) FILTER (WHERE l.rn = 1), 0) AS words,
+              COALESCE(MAX(l.version), 0) AS max_version,
+              COUNT(*) AS total_drafts,
+              MAX(l.updated_at) AS last_updated,
+              ARRAY_AGG(DISTINCT l.section_type) FILTER (WHERE l.rn = 1)
+                  AS section_types
+            FROM latest l
+            GROUP BY l.chapter_id
+        """), {"bid": book_id}).fetchall()
+    except Exception:
+        agg = []
+    by_chapter: dict[str, dict] = {}
+    for r in agg:
+        by_chapter[str(r[0])] = {
+            "words": _safe_int(r[1]),
+            "versions": _safe_int(r[2]),
+            "draft_count": _safe_int(r[3]),
+            "last_updated": r[4],
+            "section_types": list(r[5] or []),
+        }
+
+    out: list[dict] = []
+    for ch_id, number, title, target_w in chapters:
+        stats = by_chapter.get(str(ch_id), {})
+        words = stats.get("words", 0)
+        target = int(target_w or default_target)
+        completion_pct = (
+            round(min(words / target * 100, 100.0), 1)
+            if target > 0 else 0.0
+        )
+        last_updated = stats.get("last_updated")
+        out.append({
+            "chapter_id": str(ch_id),
+            "number": _safe_int(number),
+            "title": title or "(untitled)",
+            "target_words": target,
+            "words": words,
+            "completion_pct": completion_pct,
+            "versions": stats.get("versions", 0),
+            "draft_count": stats.get("draft_count", 0),
+            "last_updated_iso": (
+                last_updated.isoformat()
+                if last_updated is not None else None
+            ),
+            "section_types": stats.get("section_types", []),
+        })
+    return out
+
+
 def _bench_quality_delta() -> dict:
     """Phase 54.6.237 — diff the two newest bench snapshots.
 
@@ -4338,6 +4483,10 @@ def collect_monitor_snapshot(
         # 54.6.237 — trend batch
         growth = _safe_db(session, _corpus_growth_rate, default={})
         book_act = _safe_db(session, _book_activity, default={})
+        # 54.6.302 — per-chapter velocity for the active book.
+        book_chapter_velocity = _safe_db(
+            session, _book_chapter_velocity, default=[],
+        )
         # 54.6.243 — retrieval quality + wiki materialization
         quality_sig = _safe_db(session, _corpus_quality_signals, default={})
         wiki_mat = _safe_db(session, _wiki_materialization, default={})
@@ -4458,6 +4607,9 @@ def collect_monitor_snapshot(
         # 54.6.237 additions
         "corpus_growth": growth,
         "book_activity": book_act,
+        # 54.6.302 — per-chapter breakdown of the active book.
+        # Empty list when no books exist or no chapters yet.
+        "book_chapter_velocity": book_chapter_velocity,
         "bench_quality_delta": _bench_quality_delta(),
         # 54.6.238 — cross-process pulse from `sciknow refresh`.
         # Web process also overrides `active_jobs` at endpoint time;

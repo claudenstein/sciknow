@@ -273,6 +273,16 @@ and the web modal renders a "Model swap churn" panel with the last
 over ≥10 min — each swap costs 5-10 s of Ollama cold-load, so
 15/hr = ~3 min of pipeline cold-loads per hour, worth surfacing.
 
+**Phase 54.6.302** adds a **per-chapter book-writing velocity panel**.
+CLI gets an 8-block progress sparkline inline with the "book" footer
+(one block per chapter, height encodes completion %, colour green ≥80 %
+/ yellow ≥30 % / dim otherwise) so a brand-new book renders as
+`▁▁▁▁▁▁▁▁` and a mostly-finished one as `███▅▇█▇▂`. Web modal gets a
+full per-chapter table (number / title / progress bar / words
+drafted vs target / version count / last updated) inside the
+existing "Active book" panel — identifies stalled chapters at a
+glance.
+
 **Phase 54.6.301** adds **retrieval query-latency instrumentation**
 — every `hybrid_search.search()` call records into a 60-entry
 session ring buffer (same shape as the GPU-trend / model-swap /

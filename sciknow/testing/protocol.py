@@ -12045,6 +12045,64 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_302_chapter_velocity_panel() -> None:
+    """Phase 54.6.302 — per-chapter book writing velocity panel.
+
+    Guards:
+
+      A) `_book_chapter_velocity` helper exists with per-chapter
+         completion_pct / words / versions / draft_count /
+         last_updated_iso fields.
+      B) Snapshot exposes `book_chapter_velocity`.
+      C) Helper resolves target_chapter_words from
+         ``books.custom_metadata->>'target_chapter_words'`` (NOT a
+         top-level column — the schema has no such column).
+      D) CLI renders the per-chapter sparkline inline with the book
+         activity footer.
+      E) Web modal renders a per-chapter table inside the 'Active
+         book' panel.
+    """
+    import inspect as _inspect
+    from sciknow.core import monitor as _mon
+
+    assert hasattr(_mon, "_book_chapter_velocity"), (
+        "54.6.302 _book_chapter_velocity helper must exist"
+    )
+    src = _inspect.getsource(_mon._book_chapter_velocity)
+    for key in (
+        "completion_pct", "words", "target_words",
+        "versions", "draft_count", "last_updated_iso",
+        "section_types",
+    ):
+        assert key in src, (
+            f"54.6.302 helper must populate {key!r}"
+        )
+    assert "custom_metadata->>'target_chapter_words'" in src, (
+        "54.6.302 helper must read target_chapter_words from "
+        "books.custom_metadata JSONB, not a top-level column"
+    )
+
+    snap_src = _inspect.getsource(_mon.collect_monitor_snapshot)
+    assert '"book_chapter_velocity"' in snap_src, (
+        "54.6.302 snapshot must expose book_chapter_velocity"
+    )
+
+    from sciknow.cli import db as _db_cli
+    cli_src = _inspect.getsource(_db_cli._build_monitor_layout)
+    assert "book_chapter_velocity" in cli_src, (
+        "54.6.302 CLI must read snap['book_chapter_velocity']"
+    )
+    assert "▁▂▃▄▅▆▇█" in cli_src, (
+        "54.6.302 CLI must render the per-chapter block sparkline"
+    )
+
+    from sciknow.testing.helpers import web_app_full_source
+    web_src = web_app_full_source()
+    assert "snap.book_chapter_velocity" in web_src, (
+        "54.6.302 web must read snap.book_chapter_velocity"
+    )
+
+
 def l1_phase54_6_301_retrieval_latency_buffer() -> None:
     """Phase 54.6.301 — retrieval latency ring buffer + dashboard panel.
 
@@ -17422,6 +17480,7 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_298_enrichment_coverage,
     l1_phase54_6_299_hnsw_drift_check,
     l1_phase54_6_301_retrieval_latency_buffer,
+    l1_phase54_6_302_chapter_velocity_panel,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]

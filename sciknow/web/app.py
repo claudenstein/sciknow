@@ -21465,7 +21465,7 @@ function renderMonitor(snap) {{
       ? Math.round((bookAct.chapters_drafted / bookAct.chapters_total) * 100)
       : 0;
     const lastUp = bookAct.last_updated ? _escHTML(bookAct.last_updated) : '—';
-    sections.push('<h4>Active book</h4>'
+    let html = '<h4>Active book</h4>'
       + '<div style="display:flex;gap:2em;flex-wrap:wrap;padding:0.5em 0.75em;'
       + 'background:var(--bg-alt, #f5f5f5);border-radius:4px;">'
       + '<div><strong>' + _escHTML(bookAct.title) + '</strong>'
@@ -21475,7 +21475,40 @@ function renderMonitor(snap) {{
       + ' / ' + _fmtNum(bookAct.chapters_total || 0) + ' (' + pct + '%)</div>'
       + '<div><strong>Words</strong>: ' + _fmtNum(bookAct.total_words || 0) + '</div>'
       + '<div><strong>Updated</strong>: <code>' + lastUp + '</code></div>'
-      + '</div>');
+      + '</div>';
+    // Phase 54.6.302 — per-chapter velocity table.  Identifies
+    // stalled chapters (no drafts) + chapters that need another
+    // pass (versions > 1 but still below target).
+    const chapters = snap.book_chapter_velocity || [];
+    if (chapters.length) {{
+      html += '<table class="stats-table" style="width:100%;font-size:0.9em;margin-top:0.5em;">'
+        + '<tr><th style="width:2.5em;">#</th><th>Title</th>'
+        + '<th style="width:14em;">Progress</th>'
+        + '<th style="width:8em;text-align:right;">Words</th>'
+        + '<th style="width:3em;text-align:right;">v</th>'
+        + '<th style="width:9em;">Last updated</th></tr>';
+      for (const c of chapters) {{
+        const p = c.completion_pct || 0;
+        const col = p >= 80 ? '#080' : p >= 30 ? '#b70' : 'var(--fg-muted)';
+        const bar = '<div style="display:flex;height:0.85em;border-radius:3px;overflow:hidden;background:#eee;">'
+          + '<div style="background:' + col + ';width:' + p.toFixed(0) + '%;"></div>'
+          + '</div>';
+        const updated = c.last_updated_iso
+          ? _escHTML(c.last_updated_iso.slice(5, 16).replace('T', ' '))
+          : '<span class="u-muted">—</span>';
+        html += '<tr><td>' + c.number + '</td>'
+          + '<td>' + _escHTML((c.title || '').slice(0, 60)) + '</td>'
+          + '<td>' + bar
+          + '<div style="font-size:0.75em;color:var(--fg-muted);margin-top:0.1em;">'
+          + p.toFixed(0) + '%</div></td>'
+          + '<td style="text-align:right;color:' + col + ';">'
+          + _fmtNum(c.words) + ' / ' + _fmtNum(c.target_words) + '</td>'
+          + '<td style="text-align:right;" class="u-muted">' + (c.versions || 0) + '</td>'
+          + '<td>' + updated + '</td></tr>';
+      }}
+      html += '</table>';
+    }}
+    sections.push(html);
   }}
 
   // Phase 54.6.284 — retraction detail.  Title list behind the

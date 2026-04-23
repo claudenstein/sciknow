@@ -3665,6 +3665,11 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
 
     # Phase 54.6.237 — active book activity summary (when any book
     # exists in the DB). Compact: title, chapter completion, word count.
+    # Phase 54.6.302 — inline per-chapter progress sparkline driven
+    # by snap['book_chapter_velocity'].  Each chapter becomes one
+    # block whose height encodes completion % (0-100 mapped to the
+    # 8-level ▁▂▃▄▅▆▇█ ramp).  Empty chapters show as ▁, so an 8-
+    # chapter brand-new book renders as "▁▁▁▁▁▁▁▁" (flat grey).
     if book_act.get("title"):
         chapters_total = book_act.get("chapters_total", 0) or 0
         chapters_done = book_act.get("chapters_drafted", 0) or 0
@@ -3679,6 +3684,23 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
             style=C_DIM,
         )
         bline.append(f"  {words:,}w", style=C_VALUE)
+        # 54.6.302 — inline sparkline, one block per chapter.
+        chapters = snap.get("book_chapter_velocity") or []
+        if chapters:
+            ramp = "▁▂▃▄▅▆▇█"
+            bline.append("  ", style=C_DIM)
+            for ch in chapters:
+                pct = ch.get("completion_pct", 0) or 0
+                idx = min(
+                    len(ramp) - 1,
+                    int(pct / 100 * (len(ramp) - 1)),
+                )
+                block = ramp[idx]
+                c = (
+                    C_OK if pct >= 80 else
+                    C_WARN if pct >= 30 else C_DIM
+                )
+                bline.append(block, style=c)
         footer_lines.append(bline)
 
     # Phase 54.6.237 — bench quality delta from the two newest
