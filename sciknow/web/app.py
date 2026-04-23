@@ -20991,6 +20991,8 @@ function renderMonitor(snap) {{
   const cgraph = snap.citation_graph || {{}};
   // Phase 54.6.282 — chunker section-type coverage.
   const seccov = snap.section_coverage || {{}};
+  // Phase 54.6.287 — per-converter-backend section coverage.
+  const seccovByBackend = snap.section_coverage_by_backend || [];
   // Phase 54.6.284 — retraction detail (counts + recent list).
   const retractions = snap.retractions || {{}};
   // Phase 54.6.244 additions
@@ -21538,8 +21540,45 @@ function renderMonitor(snap) {{
       + unkPct.toFixed(1) + '%</span>'
       + (unkPct >= 70 ? ' <span class="u-muted">(chunker may be losing heading structure — check `converter_backend` mix)</span>' : '')
       + '</div>';
+    // Phase 54.6.287 — per-backend rows appear below the aggregate
+    // bar when more than one backend has contributed chunks.  Lets
+    // the operator eyeball "is VLM-Pro actually better at heading
+    // detection than pipeline?" without running SQL.
+    let perBackend = '';
+    if (seccovByBackend && seccovByBackend.length >= 2) {{
+      const bPalette = {{
+        abstract: '#6aa', introduction: '#7a5', methods: '#38a',
+        results: '#a73', discussion: '#a58', conclusion: '#85a',
+        related_work: '#aa5', appendix: '#888', unknown: '#c33',
+      }};
+      let html = '<div style="margin-top:0.75em;">'
+        + '<div style="font-size:0.9em;margin-bottom:0.4em;"><strong>By converter backend</strong></div>'
+        + '<table class="stats-table" style="width:100%;font-size:0.85em;">'
+        + '<tr><th style="text-align:left;">Backend</th>'
+        + '<th style="text-align:right;">Chunks</th>'
+        + '<th style="text-align:right;">Unknown</th>'
+        + '<th>Type distribution</th></tr>';
+      for (const b of seccovByBackend) {{
+        const u = b.unknown_pct || 0;
+        const uCol = u < 40 ? '#080' : u < 70 ? '#b70' : '#c33';
+        let bbar = '<div style="display:flex;height:0.9em;border-radius:3px;overflow:hidden;">';
+        for (const t of (b.per_type || [])) {{
+          const c = bPalette[t.type] || '#666';
+          bbar += '<div style="background:' + c + ';width:' + t.pct + '%;" '
+            + 'title="' + _escHTML(t.type) + ': ' + _fmtNum(t.n)
+            + ' (' + t.pct.toFixed(1) + '%)"></div>';
+        }}
+        bbar += '</div>';
+        html += '<tr><td><code>' + _escHTML(b.backend) + '</code></td>'
+          + '<td style="text-align:right;">' + _fmtNum(b.total) + '</td>'
+          + '<td style="text-align:right;color:' + uCol + ';">' + u.toFixed(1) + '%</td>'
+          + '<td>' + bbar + '</td></tr>';
+      }}
+      html += '</table></div>';
+      perBackend = html;
+    }}
     sections.push('<h4>Section coverage</h4>'
-      + headline + bar + legend);
+      + headline + bar + legend + perBackend);
   }}
 
   // Phase 54.6.280 — citation graph connectivity. Three compact

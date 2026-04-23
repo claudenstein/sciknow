@@ -248,6 +248,14 @@ and OOM mid-ingest. The CLI GPU header and the web GPU table now
 show a colour-coded "free N%" chip so the pressure is visible
 before the alert fires.
 
+**Phase 54.6.287** splits the section-coverage signal by converter
+backend — answers "is VLM-Pro actually giving us better heading
+detection than pipeline, or is the chunker's regex the bottleneck
+regardless?". CLI adds a compact "by backend" row when more than
+one backend has contributed chunks; the web modal renders a
+per-backend table with a distribution bar per row so the operator
+can eyeball the comparison.
+
 ```bash
 uv run sciknow db monitor              # one shot, full layout
 uv run sciknow db monitor --watch 5    # btop-style in-place refresh

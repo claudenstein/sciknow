@@ -1769,6 +1769,8 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     cgraph = snap.get("citation_graph") or {}
     # 54.6.282 — chunker section-type coverage.
     seccov = snap.get("section_coverage") or {}
+    # 54.6.287 — per-converter-backend section coverage.
+    seccov_by_backend = snap.get("section_coverage_by_backend") or []
     bench_fresh = snap.get("bench_freshness") or {}
     # 54.6.250 — backup freshness: compact "backup Nd" marker
     backup_fresh = snap.get("backup_freshness") or {}
@@ -2388,6 +2390,36 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
             Text("chunk types", style=C_DIM),
             Text(" · ".join(bits), style=colour),
         )
+
+        # Phase 54.6.287 — per-backend unknown% when more than one
+        # backend has touched the corpus.  Single-backend installs
+        # stay quiet (the aggregate row above already covers them).
+        if len(seccov_by_backend) >= 2:
+            parts = []
+            for b in seccov_by_backend[:3]:
+                short = (b.get("backend") or "?").replace("mineru-", "")[:15]
+                u = b.get("unknown_pct", 0.0)
+                c = (
+                    C_OK if u < 40 else
+                    C_WARN if u < 70 else C_ERR
+                )
+                style_open = {
+                    C_OK: "[bright_green]",
+                    C_WARN: "[yellow]",
+                    C_ERR: "[bright_red]",
+                }.get(c, "")
+                style_close = {
+                    C_OK: "[/bright_green]",
+                    C_WARN: "[/yellow]",
+                    C_ERR: "[/bright_red]",
+                }.get(c, "")
+                parts.append(
+                    f"{short} {style_open}{u:.0f}%{style_close}"
+                )
+            corpus_tbl.add_row(
+                Text("  by backend", style=C_DIM),
+                Text.from_markup(" · ".join(parts)),
+            )
 
     # Phase 54.6.280 — citation graph health. Three compact rows
     # surfacing internal coverage (how many cited refs are in the

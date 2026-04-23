@@ -706,6 +706,82 @@ def _raptor_tree_shape(session) -> dict:
     return out
 
 
+def _section_coverage_by_backend(session) -> list[dict]:
+    """Phase 54.6.287 — section-type coverage split by converter
+    backend.
+
+    Complements ``_section_coverage`` (aggregate across the corpus)
+    by letting the operator compare heading-detection quality
+    between converter backends — e.g. is MinerU-VLM-Pro giving us
+    cleaner headings than pipeline mode, or is the chunker's
+    section-regex the bottleneck regardless of converter?
+
+    Returns one dict per backend::
+
+        [
+          {
+            "backend":     "mineru-vlm-pro-vllm",
+            "total":        25115,
+            "unknown_pct":  80.2,
+            "per_type":    [{"type": ..., "n": ..., "pct": ...}],
+          },
+          ...
+        ]
+
+    Sorted descending by total chunks.  Silent (empty list) when
+    the chunks or documents table is empty.
+    """
+    from sqlalchemy import text
+    try:
+        rows = session.execute(text("""
+            SELECT d.converter_backend, c.section_type, COUNT(*) AS n
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            GROUP BY d.converter_backend, c.section_type
+        """)).fetchall()
+    except Exception:
+        return []
+
+    # Bucket rows by backend, then compute per-type percentages.
+    by_backend: dict[str, dict] = {}
+    for backend, section_type, n in rows:
+        backend = backend or "unknown"
+        section_type = section_type or "unknown"
+        entry = by_backend.setdefault(
+            backend, {"backend": backend, "total": 0, "per_type_counts": {}},
+        )
+        entry["total"] += int(n or 0)
+        entry["per_type_counts"][section_type] = (
+            entry["per_type_counts"].get(section_type, 0) + int(n or 0)
+        )
+
+    out: list[dict] = []
+    for entry in by_backend.values():
+        total = entry["total"]
+        if total == 0:
+            continue
+        counts = entry.pop("per_type_counts")
+        per_type = sorted(
+            (
+                {
+                    "type": t,
+                    "n": n,
+                    "pct": round(n / total * 100, 1),
+                }
+                for t, n in counts.items()
+            ),
+            key=lambda r: r["n"], reverse=True,
+        )
+        entry["per_type"] = per_type
+        entry["unknown_pct"] = round(
+            counts.get("unknown", 0) / total * 100, 1,
+        )
+        out.append(entry)
+
+    out.sort(key=lambda e: e["total"], reverse=True)
+    return out
+
+
 def _retraction_detail(session, limit: int = 20) -> dict:
     """Phase 54.6.284 — paper-level retraction / correction detail.
 
@@ -2954,6 +3030,10 @@ def collect_monitor_snapshot(
         section_coverage = _safe_db(
             session, _section_coverage, default={},
         )
+        # 54.6.287 — per-backend breakdown of section coverage.
+        section_coverage_by_backend = _safe_db(
+            session, _section_coverage_by_backend, default=[],
+        )
         # 54.6.284 — retraction detail (titles/DOIs behind the alert).
         retractions = _safe_db(
             session, _retraction_detail, default={},
@@ -3020,6 +3100,10 @@ def collect_monitor_snapshot(
         # flags a chunker regression or a new heading style the
         # regex patterns don't cover.
         "section_coverage": section_coverage,
+        # 54.6.287 — per-converter-backend section coverage.  Lets
+        # the operator compare VLM-Pro vs pipeline vs Marker heading
+        # detection quality.
+        "section_coverage_by_backend": section_coverage_by_backend,
         # 54.6.284 — retraction detail: counts + newest N items for
         # the operator to review.  Behind the "retracted_papers"
         # info-level alert.

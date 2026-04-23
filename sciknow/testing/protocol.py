@@ -12045,6 +12045,56 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_287_section_coverage_by_backend() -> None:
+    """Phase 54.6.287 — per-converter-backend breakdown of section
+    coverage.
+
+    Guards:
+
+      A) `_section_coverage_by_backend` exists and returns a list of
+         {backend, total, unknown_pct, per_type} dicts.
+      B) collect_monitor_snapshot wires it as
+         snap['section_coverage_by_backend'].
+      C) CLI layout consumes the snapshot key.
+      D) Web renderMonitor consumes the snapshot key.
+    """
+    import inspect as _inspect
+    from sciknow.core import monitor as _mon
+
+    assert hasattr(_mon, "_section_coverage_by_backend"), (
+        "54.6.287 _section_coverage_by_backend helper must exist"
+    )
+    src = _inspect.getsource(_mon._section_coverage_by_backend)
+    for key in ("backend", "total", "unknown_pct", "per_type"):
+        assert key in src, (
+            f"54.6.287 helper must populate {key!r}"
+        )
+    assert "JOIN documents" in src, (
+        "54.6.287 helper must join chunks against documents to group "
+        "by converter_backend"
+    )
+
+    snap_src = _inspect.getsource(_mon.collect_monitor_snapshot)
+    assert '"section_coverage_by_backend"' in snap_src, (
+        "54.6.287 snapshot must expose section_coverage_by_backend"
+    )
+
+    from sciknow.cli import db as _db_cli
+    cli_src = _inspect.getsource(_db_cli._build_monitor_layout)
+    assert 'snap.get("section_coverage_by_backend")' in cli_src, (
+        "54.6.287 CLI must read snap['section_coverage_by_backend']"
+    )
+
+    from sciknow.testing.helpers import web_app_full_source
+    web_src = web_app_full_source()
+    assert "snap.section_coverage_by_backend" in web_src, (
+        "54.6.287 web must read snap.section_coverage_by_backend"
+    )
+    assert "By converter backend" in web_src, (
+        "54.6.287 web must render a 'By converter backend' sub-heading"
+    )
+
+
 def l1_phase54_6_286_vram_headroom_watchdog() -> None:
     """Phase 54.6.286 — VRAM headroom watchdog alert + header chip.
 
@@ -16592,6 +16642,7 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_284_retraction_detail,
     l1_phase54_6_285_sidecar_sweep_on_force_reingest,
     l1_phase54_6_286_vram_headroom_watchdog,
+    l1_phase54_6_287_section_coverage_by_backend,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]
