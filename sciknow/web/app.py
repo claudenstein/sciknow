@@ -21235,7 +21235,33 @@ function renderMonitor(snap) {{
     + '<div><strong>ETA</strong>: ' + _escHTML(etaTxt) + '</div>'
     + '<div><strong>Queue</strong>: ' + _escHTML(qStr) + '</div>'
     + (pendingDl ? '<div><strong>Pending DL</strong>: ' + pendingDl + '</div>' : '')
-    + (inbox.count ? '<div><strong>Inbox</strong>: ' + inbox.count + ' pdf</div>' : '')
+    + (inbox.count ? '<div><strong>Inbox</strong>: ' + inbox.count + ' pdf'
+      // Phase 54.6.281 — inline age-bucket breakdown.  Palette
+      // matches the CLI: fresh green, week cyan, month amber, stale
+      // grey.  Only the non-zero buckets render.
+      + (function() {{
+        const b = inbox.age_buckets || {{}};
+        const parts = [];
+        const pals = [
+          ['fresh_24h', '24h', '#080'],
+          ['week', '1w', '#28a'],
+          ['month', '1mo', '#b70'],
+          ['stale', 'old', '#888'],
+        ];
+        for (const [k, lbl, col] of pals) {{
+          const n = b[k] || 0;
+          if (n > 0) {{
+            parts.push('<span style="color:' + col + ';margin-left:0.4em;" '
+              + 'title="' + lbl + ' bucket">' + lbl + '·'
+              + '<strong>' + n + '</strong></span>');
+          }}
+        }}
+        return parts.length
+          ? ' <span style="color:var(--fg-muted);font-size:0.9em;">('
+            + parts.join('') + ')</span>'
+          : '';
+      }})()
+      + '</div>' : '')
     + '</div>');
 
   // Phase 54.6.243 — retrieval-quality strip (abstracts coverage +

@@ -206,6 +206,15 @@ modal additionally lists the top-5 most-cited papers. Useful for
 deciding when to run `sciknow db expand` (low coverage) vs when the
 MinerU fallback is dropping reference sections (low extraction).
 
+**Phase 54.6.281** adds an **inbox age histogram** — the inbox scan
+now walks recursively (matching `ingest directory data/inbox/` and
+`cleanup-downloads --include-inbox`) and buckets waiting PDFs into
+fresh (<24h), week (1-7d), month (7-30d), and stale (>30d). Before
+54.6.281 the top-level-only scan was under-counting inbox load; now
+the operator sees which drops are recent vs forgotten. Colour-coded
+inline in the CLI corpus panel and in the web monitor's rates/ETA
+banner.
+
 ```bash
 uv run sciknow db monitor              # one shot, full layout
 uv run sciknow db monitor --watch 5    # btop-style in-place refresh

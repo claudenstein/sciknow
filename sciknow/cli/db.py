@@ -2186,7 +2186,10 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
             Text("pending dl", style=C_DIM),
             Text(f"{pending_dl:,}", style=C_WARN),
         )
-    # Phase 54.6.243 — inbox/drop-zone waiting count
+    # Phase 54.6.243 — inbox/drop-zone waiting count.
+    # Phase 54.6.281 — age-bucket breakdown (fresh/1w/1mo/stale) so
+    # the operator sees which of the inbox PDFs are actionable now
+    # vs forgotten-in-a-drawer.
     if inbox.get("count", 0) > 0:
         age_s = inbox.get("oldest_age_s") or 0
         age_str = (
@@ -2201,6 +2204,30 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
             Text("inbox", style=C_DIM),
             Text(f"{inbox['count']} pdf · {age_str} old", style=colour),
         )
+        buckets = inbox.get("age_buckets") or {}
+        if any(buckets.values()):
+            # "24h·3 1w·1 1mo·2 old·9" — colour-coded: fresh green,
+            # week cyan, month yellow, stale dim. Silent when all
+            # zero (shouldn't happen with count>0 but defensive).
+            age_bits = Text()
+            wrote = False
+            palette = (
+                ("fresh_24h", "24h", C_OK),
+                ("week", "1w", C_ACCENT),
+                ("month", "1mo", C_WARN),
+                ("stale", "old", C_DIM),
+            )
+            for key, label, style in palette:
+                n = buckets.get(key, 0)
+                if n <= 0:
+                    continue
+                if wrote:
+                    age_bits.append(" ", style=C_DIM)
+                age_bits.append(f"{label}·", style=C_DIM)
+                age_bits.append(str(n), style=style)
+                wrote = True
+            if wrote:
+                corpus_tbl.add_row(Text("  age", style=C_DIM), age_bits)
 
     # Phase 54.6.234 — content quality strip. Condensed because the
     # corpus panel is already dense; each row is a one-line summary

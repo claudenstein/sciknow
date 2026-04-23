@@ -12045,6 +12045,48 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_281_inbox_age_histogram() -> None:
+    """Phase 54.6.281 — inbox age histogram in both CLI + web.
+
+    Guards:
+
+      A) `_inbox_pending` walks recursively (rglob) and returns
+         `age_buckets` with fresh_24h / week / month / stale keys.
+      B) CLI monitor renders bucket breakdown under the `inbox` row.
+      C) Web modal renders inline bucket parts in the rates/eta banner.
+    """
+    import inspect as _inspect
+    from sciknow.core import monitor as _mon
+
+    helper_src = _inspect.getsource(_mon._inbox_pending)
+    for key in ("fresh_24h", "week", "month", "stale", "age_buckets"):
+        assert key in helper_src, (
+            f"54.6.281 _inbox_pending must populate {key!r}"
+        )
+    assert "rglob" in helper_src, (
+        "54.6.281 _inbox_pending must scan the inbox recursively "
+        "(matches ingest + cleanup-downloads)"
+    )
+
+    from sciknow.cli import db as _db_cli
+    cli_src = _inspect.getsource(_db_cli._build_monitor_layout)
+    assert 'inbox.get("age_buckets")' in cli_src, (
+        "54.6.281 CLI layout must read inbox.age_buckets"
+    )
+    assert 'fresh_24h' in cli_src, (
+        "54.6.281 CLI must label the fresh bucket"
+    )
+
+    from sciknow.testing.helpers import web_app_full_source
+    web_src = web_app_full_source()
+    assert "inbox.age_buckets" in web_src, (
+        "54.6.281 web modal must read inbox.age_buckets"
+    )
+    assert "'fresh_24h'" in web_src or '"fresh_24h"' in web_src, (
+        "54.6.281 web modal must render the fresh_24h bucket"
+    )
+
+
 def l1_phase54_6_280_citation_graph_panel() -> None:
     """Phase 54.6.280 — citation graph panel surfaces internal coverage,
     extraction coverage, orphan count, and top-5 most-cited papers in
@@ -16333,6 +16375,7 @@ L1_TESTS: list[Callable] = [
     # Phase 54.6.274 — reranker backend dispatch (bge + Qwen3-Reranker)
     l1_phase54_6_274_reranker_backend_dispatch,
     l1_phase54_6_280_citation_graph_panel,
+    l1_phase54_6_281_inbox_age_histogram,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]

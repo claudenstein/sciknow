@@ -921,15 +921,37 @@ def _disk_free(data_dir: Path | None) -> dict:
 
 def _inbox_pending(data_dir: Path | None) -> dict:
     """Phase 54.6.243 — how many PDFs are sitting in data/inbox/
-    waiting to be ingested.
+    waiting to be ingested.  Phase 54.6.281 adds an age histogram.
 
     The inbox convention ("drop PDFs here, run ``sciknow ingest
     directory data/inbox/``") is informal — there is no queue
-    table. This walk is just `ls *.pdf` on the top level (plus a
-    cheap oldest-mtime lookup so we can flag a drop that's been
-    sitting for days). Returns {"count": int, "oldest_age_s": float|None}.
+    table. This walk is recursive (``rglob`` — matches the
+    cleanup-downloads scan behaviour from 54.6.273) so PDFs inside
+    subfolders are counted too.
+
+    Returns::
+
+        {
+          "count": int,
+          "oldest_age_s": float | None,
+          "age_buckets": {
+            "fresh_24h":   int,   # mtime within last day — worth
+                                  # ingesting soon; likely a new drop
+            "week":        int,   # 1–7 days old
+            "month":       int,   # 7–30 days old
+            "stale":       int,   # >30 days old — probably forgotten
+          },
+        }
+
+    Fresh / week drops signal active operator flow; stale counts
+    flag "my inbox turned into a dumping ground".
     """
-    out: dict = {"count": 0, "oldest_age_s": None}
+    out: dict = {
+        "count": 0, "oldest_age_s": None,
+        "age_buckets": {
+            "fresh_24h": 0, "week": 0, "month": 0, "stale": 0,
+        },
+    }
     if not data_dir:
         return out
     inbox = Path(data_dir) / "inbox"
@@ -937,12 +959,30 @@ def _inbox_pending(data_dir: Path | None) -> dict:
         return out
     try:
         import time as _time
-        pdfs = [p for p in inbox.iterdir()
-                if p.suffix.lower() == ".pdf" and p.is_file()]
+        # Recursive match: `sciknow ingest directory data/inbox/` walks
+        # subfolders, and `sciknow db cleanup-downloads --include-inbox`
+        # does too.  Stay consistent so the count doesn't diverge from
+        # what the ingest command actually sees.
+        pdfs = [
+            p for p in inbox.rglob("*.pdf") if p.is_file()
+        ]
         out["count"] = len(pdfs)
         if pdfs:
-            oldest = min(p.stat().st_mtime for p in pdfs)
-            out["oldest_age_s"] = _time.time() - oldest
+            now = _time.time()
+            mtimes = [p.stat().st_mtime for p in pdfs]
+            out["oldest_age_s"] = now - min(mtimes)
+            buckets = out["age_buckets"]
+            day = 24 * 3600
+            for mt in mtimes:
+                age = now - mt
+                if age < day:
+                    buckets["fresh_24h"] += 1
+                elif age < 7 * day:
+                    buckets["week"] += 1
+                elif age < 30 * day:
+                    buckets["month"] += 1
+                else:
+                    buckets["stale"] += 1
     except Exception:
         pass
     return out
