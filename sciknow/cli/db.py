@@ -3727,6 +3727,24 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
         title_align="left",
         border_style=C_BORDER, box=BOX, padding=(0, 1),
     )
+    # Phase 54.6.300 — shrink-to-content height.  Rich's Layout
+    # doesn't measure panel height on its own; a fixed ``size=26``
+    # (pre-300) left a big gap between the pipeline-stages content
+    # and the activity panel when the corpus had few completed
+    # stages or failure rows.  Sum the rows actually added to
+    # timing_tbl + footer_tbl and add 2 for the rounded borders so
+    # the panel is exactly the size of its content.  The
+    # ``activity`` layout below has ``ratio=1 minimum_size=8`` so
+    # any slack reclaimed from the timing panel expands the
+    # activity feed instead of becoming empty real estate.
+    timing_height = (
+        (getattr(timing_tbl, "row_count", 0) or 0)
+        + (getattr(footer_tbl, "row_count", 0) or 0)
+        + 2  # top + bottom border
+    )
+    # Keep a small floor so the title + first stage row always fit
+    # even on a near-empty corpus.
+    timing_height = max(6, timing_height)
 
     # ── Recent activity feed ────────────────────────────────────────
     act_tbl = Table.grid(padding=(0, 1), expand=True)
@@ -3784,7 +3802,10 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     # growth.
     splits.extend([
         Layout(name="top", size=32),
-        Layout(timing_panel, name="timing", size=26),
+        # Phase 54.6.300 — timing panel now sizes to its content
+        # (computed above as row_count + borders, floor 6).  Any
+        # slack reclaimed flows into ``activity`` via its ratio=1.
+        Layout(timing_panel, name="timing", size=timing_height),
         Layout(activity_panel, name="activity", ratio=1,
                minimum_size=8),
     ])
