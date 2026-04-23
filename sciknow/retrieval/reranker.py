@@ -36,52 +36,154 @@ _QWEN3_RERANK_INSTRUCTION = (
 
 
 class _Qwen3RerankerAdapter:
-    """Phase 54.6.274 — thin adapter wrapping sentence_transformers
-    ``CrossEncoder`` so the Qwen3-Reranker API matches FlagReranker's
-    ``.compute_score(pairs, normalize=True)`` contract used by the
-    existing ``rerank()`` call site.
+    """Phase 54.6.274.3 — Qwen3-Reranker adapter using the HF model
+    card's prescribed CausalLM + yes/no-token-probability scoring.
 
-    Applies the prescribed instruction prompt + sigmoid activation
-    internally; caller passes plain (query, doc) pairs as before.
+    ### Why not CrossEncoder?
+
+    Earlier attempts used ``sentence_transformers.CrossEncoder``,
+    which wraps the checkpoint as ``Qwen3ForSequenceClassification``
+    — a head shape that doesn't exist in the Qwen3-Reranker
+    checkpoint. transformers silently initialises ``score.weight``
+    randomly and emits the warning "Some weights were not
+    initialized... You should probably TRAIN this model on a
+    down-stream task". The returned scores are essentially noise.
+    We discovered this when the adapter scored "Berlin is the
+    capital of Germany" higher than "Paris is the capital of France"
+    for the query "what is the capital of france?".
+
+    ### Correct approach (per the Qwen3-Reranker HF model card)
+
+    1. Load as ``AutoModelForCausalLM`` with left-padding.
+    2. Format each (query, doc) as::
+
+           <Instruct>: {instruction}
+           <Query>: {query}
+           <Document>: {doc}
+
+       (the model was trained with this exact template)
+    3. Append the fixed assistant prefix that elicits a yes/no
+       answer, get the logits at the final position.
+    4. Extract logits for the "yes" and "no" tokens and compute
+       ``softmax([no_logit, yes_logit])[1]`` — the probability the
+       document is relevant.
+
+    ### Batch handling
+
+    Left padding + ``pad_token=eos_token`` + attention mask so the
+    final-position logits correspond to the actual last content
+    token (not a padding token) across a variable-length batch.
+
+    Returns floats in [0, 1] when ``normalize=True`` (always, for
+    this adapter — the yes-probability is already a probability).
+    ``normalize=False`` returns the raw yes-minus-no logit.
     """
 
+    # Fixed prefix/suffix that the HF model card uses. The CausalLM
+    # is trained to emit "yes" or "no" after this exact template.
+    _PREFIX_MSG = (
+        "<|im_start|>system\n"
+        "Judge whether the Document meets the requirements based on "
+        "the Query and the Instruct provided. Note that the answer "
+        "can only be \"yes\" or \"no\"."
+        "<|im_end|>\n<|im_start|>user\n"
+    )
+    _SUFFIX_MSG = (
+        "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    )
+
     def __init__(self, model_id: str, devices=None, **_extra):
-        """``devices`` kwarg matches the FlagReranker / sciknow
-        ``load_with_cpu_fallback`` contract — it can be ``"cpu"``,
-        ``"cuda"``, ``"cuda:0"``, or a list. sentence-transformers
-        ``CrossEncoder`` expects a single ``device`` string, so
-        normalise the first-of-list case here."""
-        from sentence_transformers import CrossEncoder
-        kwargs: dict = {}
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        dev = "cuda"
         if devices is not None:
             dev = devices[0] if isinstance(devices, (list, tuple)) else devices
-            kwargs["device"] = dev
-        # The Qwen3-Reranker model card exposes `default_prompt_name`
-        # via the `prompts` dict — see HF card "Sentence-Transformers"
-        # section. This is what folds the instruction into the input
-        # at predict time without the caller constructing it each call.
-        self._model = CrossEncoder(
-            model_id,
-            prompts={"retrieval": _QWEN3_RERANK_INSTRUCTION},
-            default_prompt_name="retrieval",
-            **kwargs,
+
+        # Left padding is critical — the yes/no prediction reads the
+        # logits at the LAST token. Right-padding would put pad
+        # tokens at the end and we'd read their garbage logits.
+        self._tokenizer = AutoTokenizer.from_pretrained(
+            model_id, padding_side="left",
+        )
+        if self._tokenizer.pad_token is None:
+            self._tokenizer.pad_token = self._tokenizer.eos_token
+
+        self._model = AutoModelForCausalLM.from_pretrained(
+            model_id, torch_dtype=torch.bfloat16,
+        ).to(dev).eval()
+        self._device = dev
+
+        # Precompute the yes/no token IDs — these are single tokens
+        # in Qwen's vocab (confirmed by the HF card's example).
+        self._yes_id = self._tokenizer.convert_tokens_to_ids("yes")
+        self._no_id = self._tokenizer.convert_tokens_to_ids("no")
+
+        # Pre-tokenise the boilerplate prefix/suffix once; these
+        # don't change across calls, so repeated predict() saves
+        # the tokenisation cost.
+        self._prefix_ids = self._tokenizer.encode(
+            self._PREFIX_MSG, add_special_tokens=False,
+        )
+        self._suffix_ids = self._tokenizer.encode(
+            self._SUFFIX_MSG, add_special_tokens=False,
         )
 
-    def compute_score(self, pairs, normalize: bool = True):
-        import torch
-        # sentence-transformers CrossEncoder.predict returns numpy
-        # array of floats. `normalize=True` maps to sigmoid on the
-        # raw logit output so scores fall in [0, 1] (FlagReranker
-        # parity). `normalize=False` returns raw logits — we still
-        # expose it for symmetry.
-        act = torch.nn.Sigmoid() if normalize else None
-        out = self._model.predict(
-            pairs, activation_fn=act,
+    def _format_user(self, query: str, doc: str) -> str:
+        return (
+            f"<Instruct>: {_QWEN3_RERANK_INSTRUCTION}\n"
+            f"<Query>: {query}\n"
+            f"<Document>: {doc}"
         )
-        try:
-            return out.tolist()
-        except AttributeError:
-            return list(out)
+
+    def compute_score(self, pairs, normalize: bool = True, batch_size: int = 8):
+        import torch
+
+        all_scores: list[float] = []
+        for start in range(0, len(pairs), batch_size):
+            batch = pairs[start:start + batch_size]
+            user_texts = [self._format_user(q, d) for q, d in batch]
+
+            # Tokenise user chunk, then wrap with fixed prefix/suffix
+            # ids. Max length 8192 is the Qwen3-Reranker context.
+            user_enc = self._tokenizer(
+                user_texts, add_special_tokens=False, padding=False,
+                truncation=True, max_length=8192 - len(self._prefix_ids) - len(self._suffix_ids),
+            )["input_ids"]
+
+            full_ids = [
+                self._prefix_ids + ut + self._suffix_ids for ut in user_enc
+            ]
+
+            # Left-pad to the longest sequence in this batch so the
+            # last token (= the position we read yes/no logits at)
+            # lines up across samples.
+            maxlen = max(len(x) for x in full_ids)
+            padded = []
+            attn = []
+            for ids in full_ids:
+                pad = maxlen - len(ids)
+                padded.append([self._tokenizer.pad_token_id] * pad + ids)
+                attn.append([0] * pad + [1] * len(ids))
+            input_ids = torch.tensor(padded, device=self._device)
+            attention_mask = torch.tensor(attn, device=self._device)
+
+            with torch.no_grad():
+                out = self._model(
+                    input_ids=input_ids, attention_mask=attention_mask,
+                )
+                logits = out.logits[:, -1, :]  # [B, vocab]
+                yes_logit = logits[:, self._yes_id]
+                no_logit = logits[:, self._no_id]
+                if normalize:
+                    # Softmax over just [no, yes] so score ∈ [0, 1]
+                    stacked = torch.stack([no_logit, yes_logit], dim=-1)
+                    probs = torch.softmax(stacked, dim=-1)
+                    scores = probs[:, 1]  # P(yes | …)
+                else:
+                    scores = yes_logit - no_logit
+                all_scores.extend(scores.float().cpu().tolist())
+        return all_scores
 
 
 def _get_reranker():

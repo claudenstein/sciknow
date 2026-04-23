@@ -872,9 +872,18 @@ def b_model_embedder_throughput() -> Iterable[BenchMetric]:
 
 
 def b_model_reranker_throughput() -> Iterable[BenchMetric]:
-    """bge-reranker-v2-m3 pairs/second on real (query, chunk) pairs."""
+    """Reranker pairs/second on real (query, chunk) pairs.
+
+    Phase 54.6.274.4 — release the query embedder(s) before loading
+    the reranker on Qwen3-Reranker-4B (8 GB BF16). With bge-m3 +
+    Qwen3-Embedding-4B + Qwen3-Reranker-4B all resident, combined
+    footprint exceeds 20 GB and OOMs the 24 GB 3090 on the first
+    reranker forward pass. The embedders auto-reload on the next
+    retrieval call that needs them.
+    """
     from sqlalchemy import text
     from sciknow.retrieval.reranker import _get_reranker
+    from sciknow.retrieval.hybrid_search import release_embed_model
     from sciknow.storage.db import get_session
     with get_session() as session:
         rows = session.execute(text("""
@@ -885,6 +894,8 @@ def b_model_reranker_throughput() -> Iterable[BenchMetric]:
     chunks = [r[0] for r in rows]
     if len(chunks) < 20:
         skip("need 20+ chunks")
+    # Free VRAM held by earlier benches before loading the reranker.
+    release_embed_model()
     reranker = _get_reranker()
     # Warmup
     _ = reranker.compute_score([["what is this", chunks[0]]], normalize=True)
