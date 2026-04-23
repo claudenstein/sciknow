@@ -212,49 +212,280 @@ def run_reranker_ab() -> dict:
 # ════════════════════════════════════════════════════════════════════════
 
 
-def run_embedder_ab() -> dict:
-    """Re-embed the corpus into a sidecar Qdrant collection per
-    candidate embedder, run the probe set against each, compare.
+def _safe_tag_slug(tag: str) -> str:
+    """Qdrant collection names must be filesystem-safe. Replace /, :
+    with _, lowercase. e.g. 'Qwen/Qwen3-Embedding-4B' → 'qwen_qwen3-embedding-4b'."""
+    return tag.replace("/", "_").replace(":", "_").lower()
 
-    Not fully implemented here — designed as a spec + orchestrator.
-    Re-embedding 25k chunks with a 4-8B embedder is ~30-60 min; we
-    stage this as explicit opt-in to avoid surprising the user.
+
+def _sidecar_collection_name(embedder_tag: str) -> str:
+    """Sidecar collection carries the project's Qdrant prefix + an
+    `ab_<tag>_papers` suffix so it's easy to spot in `qdrant-web`."""
+    from sciknow.core.project import get_active_project
+    prefix = get_active_project().qdrant_prefix
+    # e.g. 'global_cooling_ab_qwen_qwen3-embedding-4b_papers'
+    return f"{prefix}_ab_{_safe_tag_slug(embedder_tag)}_papers"
+
+
+def _ab_reembed_corpus(embedder_tag: str, dim: int, batch_size: int = 16) -> str:
+    """Create <sidecar>_papers, batch-embed every chunk with the
+    candidate dense embedder (sentence-transformers), and upsert with
+    the SAME qdrant_point_id as the prod collection so probe records
+    still resolve. Returns the collection name.
+
+    Idempotent: drops any pre-existing sidecar before recreating. The
+    baseline bge-m3 collection is never touched.
     """
-    from sciknow.testing.retrieval_eval import (
-        load_probe_set, _find_source_rank,
+    from sqlalchemy import text as sql_text
+    from qdrant_client.models import (
+        Distance, VectorParams, PointStruct,
     )
+    from sciknow.storage.qdrant import get_client
     from sciknow.storage.db import get_session
+    from sentence_transformers import SentenceTransformer
+
+    coll = _sidecar_collection_name(embedder_tag)
+    client = get_client()
+
+    # Drop + create (idempotent rerun)
+    if client.collection_exists(coll):
+        client.delete_collection(coll)
+    client.create_collection(
+        collection_name=coll,
+        vectors_config={
+            "dense": VectorParams(size=dim, distance=Distance.COSINE),
+        },
+    )
+    console.print(f"  [dim]created sidecar collection {coll} (dim={dim})[/dim]")
+
+    # Load the embedder. Qwen3-Embedding accepts a scientific-literature
+    # instruction for queries but documents don't get prefixed, so we
+    # encode raw chunk text during ingest.
+    console.print(f"  [dim]loading {embedder_tag}… (may download ~8 GB on first run)[/dim]")
+    model = SentenceTransformer(embedder_tag, device="cuda", trust_remote_code=True)
+
+    # Fetch every chunk + its prod qdrant_point_id
+    with get_session() as s:
+        rows = s.execute(sql_text("""
+            SELECT qdrant_point_id::text, content FROM chunks
+            WHERE qdrant_point_id IS NOT NULL
+            ORDER BY id
+        """)).fetchall()
+    total = len(rows)
+    console.print(f"  [dim]embedding {total} chunks in batches of {batch_size}[/dim]")
+
+    t0 = time.monotonic()
+    for i in range(0, total, batch_size):
+        batch = rows[i:i + batch_size]
+        texts = [r[1] for r in batch]
+        # Truncate very long chunks at model's max context to avoid OOM.
+        # Qwen3-Embedding handles 32k tokens but SciKnow chunks are
+        # typically 500-2500 tokens, so this is a safety rail.
+        emb = model.encode(
+            texts, batch_size=batch_size, convert_to_numpy=True,
+            normalize_embeddings=True, show_progress_bar=False,
+        )
+        points = [
+            PointStruct(id=str(r[0]), vector={"dense": e.tolist()})
+            for r, e in zip(batch, emb)
+        ]
+        client.upsert(collection_name=coll, points=points)
+        if (i // batch_size) % 20 == 0:
+            elapsed = time.monotonic() - t0
+            rate = (i + batch_size) / max(elapsed, 0.001)
+            eta_s = (total - i) / max(rate, 0.001)
+            console.print(
+                f"    [dim]{i + len(batch)}/{total}  "
+                f"({rate:.0f} chunks/s · ETA {eta_s / 60:.1f}m)[/dim]"
+            )
+
+    console.print(
+        f"  [green]✓[/green] re-embedded {total} chunks "
+        f"in {(time.monotonic() - t0) / 60:.1f}m"
+    )
+    return coll
+
+
+def _ab_embed_query(model, query: str, is_qwen3: bool) -> list[float]:
+    """Encode a query. Qwen3-Embedding recommends an instruction prefix
+    on QUERIES only (documents are unprefixed at encode time). bge-m3
+    doesn't need one. Scientific-literature instruction per the HF
+    model card's task-description pattern.
+    """
+    if is_qwen3:
+        instruction = (
+            "Given a scientific literature search query, retrieve "
+            "relevant passages that answer the query"
+        )
+        # Qwen3-Embedding format: "Instruct: {task}\nQuery: {query}"
+        prompt = f"Instruct: {instruction}\nQuery: {query}"
+        emb = model.encode(
+            [prompt], convert_to_numpy=True, normalize_embeddings=True,
+            show_progress_bar=False,
+        )
+    else:
+        emb = model.encode(
+            [query], convert_to_numpy=True, normalize_embeddings=True,
+            show_progress_bar=False,
+        )
+    return emb[0].tolist()
+
+
+def _ab_dense_search(
+    client, collection: str, vector: list[float], top_k: int,
+) -> list[str]:
+    """Pure dense search on a named collection. Returns point-id list
+    in descending relevance."""
+    resp = client.query_points(
+        collection_name=collection, query=vector,
+        using="dense", limit=top_k, with_payload=False,
+    )
+    return [str(p.id) for p in resp.points]
+
+
+def _find_rank(
+    ordered_ids: list[str], source_qdrant_id: str, source_chunk_id: str,
+) -> int:
+    """1-based rank of the source point; 0 if not in the list."""
+    for i, pid in enumerate(ordered_ids, 1):
+        if pid == source_qdrant_id or pid == source_chunk_id:
+            return i
+    return 0
+
+
+def run_embedder_ab() -> dict:
+    """Three-way A/B: baseline dense (bge-m3 on prod collection) vs
+    candidate dense (Qwen3-Embedding-4B on sidecar) vs RRF-fused of
+    the two (the 'dual-embedder' architecture).
+
+    Uses DENSE-ONLY retrieval on each side to isolate the dense
+    signal's quality — sparse and FTS are excluded so the three
+    numbers are directly comparable. This is deliberately different
+    from `sciknow bench retrieval` (which benchmarks the full hybrid
+    stack).
+    """
+    from sciknow.testing.retrieval_eval import load_probe_set
+    from sciknow.storage.qdrant import get_client
+    from sciknow.storage.db import get_session  # noqa: F401 — kept for parity
+    from sentence_transformers import SentenceTransformer
+    from FlagEmbedding import BGEM3FlagModel
 
     records = load_probe_set()
     if not records:
-        console.print("[red]No probe set found.[/red]")
+        console.print("[red]No probe set found.[/red] Run "
+                      "`uv run sciknow bench retrieval-gen` first.")
         sys.exit(2)
 
+    baseline_tag, _ = EMBEDDER_CANDIDATES[0]
+    candidate_tag, candidate_dim = EMBEDDER_CANDIDATES[1]
+
     console.print(
-        f"[bold yellow]Retrieval A/B — EMBEDDER mode (heavy)[/bold yellow]\n"
-        f"  probe={len(records)} queries\n"
-        f"  candidates={[c[0] for c in EMBEDDER_CANDIDATES]}"
+        f"[bold]Retrieval A/B — embedder mode[/bold]  "
+        f"probe={len(records)} queries\n"
+        f"  baseline:  [cyan]{baseline_tag}[/cyan] (prod Qdrant `papers`)\n"
+        f"  candidate: [cyan]{candidate_tag}[/cyan] (sidecar, dim {candidate_dim})\n"
     )
+
+    # Stage 1: re-embed corpus with candidate into sidecar.
+    sidecar = _ab_reembed_corpus(candidate_tag, candidate_dim)
+
+    # Stage 2: load the two query embedders concurrently. bge-m3 is
+    # the FlagEmbedding-native class; Qwen3 is sentence-transformers.
+    # Reuse the sciknow CPU-fallback helper for bge-m3 so the test
+    # path matches prod exactly.
+    from sciknow.retrieval.device import load_with_cpu_fallback
+    console.print("\n[dim]loading bge-m3 query embedder…[/dim]")
+    bge = load_with_cpu_fallback(
+        BGEM3FlagModel, baseline_tag, use_fp16=True,
+    )
+    console.print("[dim]loading Qwen3 query embedder…[/dim]")
+    qwen = SentenceTransformer(
+        candidate_tag, device="cuda", trust_remote_code=True,
+    )
+
+    # Stage 3: run the probe set through each of the three scenarios.
+    from sciknow.retrieval.hybrid_search import PAPERS_COLLECTION
+    from sciknow.storage.qdrant import get_client as _get_client
+    client = _get_client()
+
     console.print(
-        "[yellow]Per embedder:[/yellow] create a sidecar Qdrant collection "
-        "<slug>_ab_<embedder_tag>_papers, batch-embed all chunks, then run "
-        "the probe set via a direct Qdrant dense query (not hybrid_search — "
-        "that's wired to the prod collection name). Estimated ~30-60 min per "
-        "embedder, ~2-4 GB Qdrant space per collection."
+        f"\n[dim]running {len(records)} probes × 3 scenarios "
+        f"(bge dense, Qwen3 dense, RRF-fused)[/dim]"
     )
-    console.print(
-        "[yellow]Not auto-running[/yellow] — this is a scaffold. To enable, "
-        "implement `_ab_reembed_corpus(embedder_tag, dim)` and "
-        "`_ab_eval_collection(collection_name, probe_records)` below per the "
-        "docstring contract; they're deliberately left as stubs so the "
-        "script is safe to invoke by accident. See docs/RESEARCH.md §embedder-ab."
+
+    def _rrf_merge(list_a: list[str], list_b: list[str], top: int) -> list[str]:
+        """Small RRF merge for two lists; scores bye id, returns top-k."""
+        RRF_K = 60
+        scores: dict[str, float] = {}
+        for lst in (list_a, list_b):
+            for rank, pid in enumerate(lst):
+                scores[pid] = scores.get(pid, 0.0) + 1.0 / (RRF_K + rank + 1)
+        return [
+            pid for pid, _ in sorted(
+                scores.items(), key=lambda x: x[1], reverse=True,
+            )
+        ][:top]
+
+    ranks_bge: list[int] = []
+    ranks_qwen: list[int] = []
+    ranks_rrf: list[int] = []
+    latencies_bge: list[float] = []
+    latencies_qwen: list[float] = []
+
+    total_probes = len(records)
+    for i, rec in enumerate(records):
+        q = rec["question"]
+        src_qpid = rec.get("source_qdrant_point_id", "")
+        src_cid = rec.get("source_chunk_id", "")
+        try:
+            t0 = time.monotonic()
+            bge_out = bge.encode(
+                [q], batch_size=1, max_length=512,
+                return_dense=True, return_sparse=False,
+                return_colbert_vecs=False,
+            )
+            bge_vec = bge_out["dense_vecs"][0].tolist()
+            latencies_bge.append((time.monotonic() - t0) * 1000)
+
+            t0 = time.monotonic()
+            qwen_vec = _ab_embed_query(qwen, q, is_qwen3=True)
+            latencies_qwen.append((time.monotonic() - t0) * 1000)
+
+            # Dense-only searches on each collection
+            ids_bge = _ab_dense_search(client, PAPERS_COLLECTION, bge_vec, 50)
+            ids_qwen = _ab_dense_search(client, sidecar, qwen_vec, 50)
+            ids_rrf = _rrf_merge(ids_bge, ids_qwen, top=50)
+
+            ranks_bge.append(_find_rank(ids_bge, src_qpid, src_cid))
+            ranks_qwen.append(_find_rank(ids_qwen, src_qpid, src_cid))
+            ranks_rrf.append(_find_rank(ids_rrf, src_qpid, src_cid))
+        except Exception as exc:
+            console.print(f"[dim]probe {i} failed: {exc}[/dim]")
+            continue
+
+        if (i + 1) % 25 == 0:
+            console.print(f"  [dim]{i + 1}/{total_probes} done[/dim]")
+
+    # Stage 4: metrics per scenario
+    m_bge = _metrics_from_ranks(ranks_bge)
+    m_qwen = _metrics_from_ranks(ranks_qwen)
+    m_rrf = _metrics_from_ranks(ranks_rrf)
+    if latencies_bge:
+        latencies_bge.sort()
+        m_bge["latency_p50_ms"] = round(latencies_bge[len(latencies_bge) // 2], 1)
+    if latencies_qwen:
+        latencies_qwen.sort()
+        m_qwen["latency_p50_ms"] = round(latencies_qwen[len(latencies_qwen) // 2], 1)
+    m_rrf["latency_p50_ms"] = round(
+        (m_bge.get("latency_p50_ms", 0) + m_qwen.get("latency_p50_ms", 0)), 1,
     )
-    # Intentional exit — see docstring. When someone implements the
-    # stubs, flip the `NotImplementedError` to an actual call.
-    raise NotImplementedError(
-        "Embedder A/B orchestrator is a stub. Implement "
-        "_ab_reembed_corpus + _ab_eval_collection to enable."
-    )
+
+    results = {
+        f"{baseline_tag} (dense)":         m_bge,
+        f"{candidate_tag} (dense)":        m_qwen,
+        f"RRF-fused dual dense":           m_rrf,
+    }
+    return {"mode": "embedder", "results": results, "sidecar_collection": sidecar}
 
 
 # ════════════════════════════════════════════════════════════════════════

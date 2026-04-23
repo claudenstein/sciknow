@@ -4143,8 +4143,11 @@ def feedback_remove_cmd(
 def refresh_retractions_cmd(
     limit: int = typer.Option(0, "--limit", "-n",
         help="Max papers to check this run (0 = all)."),
-    max_age_days: int = typer.Option(30, "--max-age-days",
-        help="Skip papers whose retraction_checked_at is newer than N days."),
+    max_age_days: int = typer.Option(365, "--max-age-days",
+        help="Phase 54.6.276 — default raised to 365 (once/year) "
+             "because retraction-status rarely changes quarter-to-quarter "
+             "and the Crossref polite-pool rate is too valuable to burn "
+             "on monthly no-ops. Pass --max-age-days 0 to force."),
     delay: float = typer.Option(0.1, "--delay",
         help="Seconds between Crossref API calls."),
     dry_run: bool = typer.Option(False, "--dry-run"),
@@ -4157,15 +4160,29 @@ def refresh_retractions_cmd(
     ``paper_metadata.retraction_checked_at``. Skips papers checked
     within ``--max-age-days``; pass ``--max-age-days 0`` to force.
 
-    Downstream effects: retracted papers are dropped by ``hybrid_search``
-    (see 54.6.81 paper-type weighting — retraction is treated as a
-    hard filter, not a soft weight) and flagged in the dashboard.
+    Phase 54.6.276 — retracted papers are **flagged, not excluded**.
+    The monitor raises the ``retractions`` alert so the operator sees
+    the count. Retrieval (``hybrid_search``) does not filter them out
+    because, as a user-configurable policy: many retracted papers stay
+    in the corpus for legitimate reasons (the corrigendum addressed
+    the concern; the retraction was political, not scientific; the
+    paper's data is still informative despite the headline). The
+    operator decides per-paper whether to exclude, typically by
+    adjusting the wiki-compile gate or book-write filters — not by
+    the dashboard auto-downgrading them.
+
+    (Pre-54.6.276 this docstring claimed retracted papers were
+    dropped by hybrid_search. That claim was never implemented and
+    is retracted here.)
+
+    Default cadence: once a year. Override with ``--max-age-days 0``
+    to force a fresh check on every paper.
 
     Examples:
 
-      sciknow db refresh-retractions              # all eligible
-      sciknow db refresh-retractions -n 100
-      sciknow db refresh-retractions --max-age-days 0   # force
+      sciknow db refresh-retractions              # all eligible (365d skip)
+      sciknow db refresh-retractions -n 100       # sample 100
+      sciknow db refresh-retractions --max-age-days 0   # force full re-sweep
     """
     from sciknow.cli import preflight
     preflight(qdrant=False)

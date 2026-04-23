@@ -1153,10 +1153,20 @@ def _build_alerts(snap: dict) -> list[dict]:
 
     mq = snap.get("meta_quality") or {}
     if mq.get("retracted"):
+        # Phase 54.6.276 — demoted from warn → info. Retracted papers
+        # are a tracked-but-not-excluded class per user policy; many
+        # are in the corpus for legitimate reasons (data still useful,
+        # retraction was political, corrigendum addressed the issue).
+        # The dashboard just surfaces the count; the operator decides
+        # per-paper whether to exclude via wiki-compile gates or book
+        # filters, not by the monitor auto-downgrading retrieval.
         alerts.append({
-            "severity": "warn",
+            "severity": "info",
             "code": "retractions",
-            "message": f"{mq['retracted']} retracted papers in corpus",
+            "message": (
+                f"{mq['retracted']} retracted papers in corpus "
+                "(flagged only — not auto-excluded)"
+            ),
         })
 
     gpus = snap.get("gpu") or []

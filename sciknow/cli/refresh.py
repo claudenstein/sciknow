@@ -337,9 +337,13 @@ def refresh(
         steps.append(("2. DOI enrichment (Crossref/OpenAlex/arXiv/S2)",
                       ["db", "enrich"], True))
     if not no_retraction_sweep:
-        # Phase 54.6.111 — weekly-by-default retraction sweep against
-        # Crossref's update-type index. Skips papers checked within 30d.
-        steps.append(("2a. Retraction sweep (flag retracted/corrected)",
+        # Phase 54.6.111 — retraction sweep against Crossref's
+        # update-type index. Phase 54.6.276 bumped the default
+        # --max-age-days from 30 to 365 so refresh triggers it at
+        # most once/year per paper (status rarely changes). Retracted
+        # papers are FLAGGED only — not auto-excluded from retrieval
+        # — because most remain in the corpus for legitimate reasons.
+        steps.append(("2a. Retraction sweep (flag, do not exclude)",
                       ["db", "refresh-retractions"], True))
     if not no_citations:
         steps.append(("3. Link citations",
