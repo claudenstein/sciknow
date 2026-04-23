@@ -1296,6 +1296,226 @@ def _render_doctor(snap: dict):
     return Group(*lines)
 
 
+@app.command("audit-sidecar")
+def audit_sidecar_cmd(
+    json_out: bool = typer.Option(
+        False, "--json",
+        help="Emit machine-readable JSON (same shape as the monitor "
+             "snapshot's `sidecar_audit` key). Pipe through `jq` to "
+             "act on the problem docs.",
+    ),
+    limit: int = typer.Option(
+        20, "--limit",
+        help="Max rows per problem category to include. The summary "
+             "counts are always authoritative regardless of --limit.",
+    ),
+    fix_orphans: bool = typer.Option(
+        False, "--fix-orphans",
+        help="Delete sidecar points whose document_id no longer "
+             "exists in PG (corresponds to the sidecar_orphan bucket "
+             "when sidecar > chunks because of a stale ingest). "
+             "Skips untagged / RAPTOR-style prod entries since those "
+             "live only in prod. Destructive; Qdrant deletion is "
+             "atomic per doc but not reversible.",
+    ),
+):
+    """Phase 54.6.292 — per-document integrity audit across the PG
+    chunks table, the prod Qdrant collection, and the dual-embedder
+    sidecar collection.
+
+    Fast (~0.6 s on an 807-doc corpus): single scroll per Qdrant
+    collection, single GROUP BY on chunks.  Run any time to verify
+    the dual-embedder state is internally consistent.
+
+    Problem categories:
+
+      * ``sidecar_missing``  chunks > 0, sidecar has 0 points —
+                             dual-embed silently didn't run.
+      * ``sidecar_partial``  0 < sidecar < chunks — write crashed
+                             mid-batch, or an ingest hit an error
+                             after partial upsert.
+      * ``sidecar_orphan``   sidecar > chunks — stale points from a
+                             prior --force re-ingest (54.6.285 bug
+                             class, patched there but could recur
+                             if any code path bypasses the sweep).
+      * ``prod_missing`` / ``prod_partial`` — same three for the
+                             prod collection (extremely rare; the
+                             prod upsert is the authoritative write).
+      * ``prod_orphan``      prod > chunks — typically NOT an error;
+                             RAPTOR summary nodes are correctly in
+                             prod only.  Count reported but never
+                             alerted.
+
+    Exit code: 0 on a clean audit, 1 when any of the critical
+    buckets (sidecar_missing / sidecar_partial / sidecar_orphan /
+    prod_missing / prod_partial) is non-zero.  Pipeline-friendly:
+
+        sciknow db audit-sidecar && echo OK
+
+    ``--fix-orphans`` sweeps sidecar_orphan docs (applies the
+    54.6.285 sidecar-sweep to the specific document_ids flagged).
+    Destructive; prints the plan first and acts only after the
+    user confirms (unless piped, in which case confirmation is
+    auto-denied and the plan is printed without acting).
+    """
+    from sciknow.cli import preflight
+    preflight(qdrant=True)
+
+    import json as _json
+    from sciknow.core.monitor import _sidecar_integrity_audit
+    from sciknow.storage.db import get_session
+
+    with get_session() as session:
+        report = _sidecar_integrity_audit(session, limit_problems=limit)
+
+    if json_out:
+        console.print(_json.dumps(report, indent=2, default=str))
+        # Exit via code like the non-JSON path below.
+        if not report.get("enabled"):
+            return
+        critical = (
+            report.get("sidecar_missing", 0)
+            + report.get("sidecar_partial", 0)
+            + report.get("sidecar_orphan", 0)
+            + report.get("prod_missing", 0)
+            + report.get("prod_partial", 0)
+        )
+        if critical:
+            raise typer.Exit(1)
+        return
+
+    if not report.get("enabled"):
+        console.print(
+            "[yellow]Dual-embedder not active[/yellow] "
+            "(settings.dense_embedder_model unset). Nothing to audit."
+        )
+        return
+
+    if report.get("error"):
+        console.print(
+            f"[red]audit failed: {report['error']}[/red]"
+        )
+        raise typer.Exit(2)
+
+    from rich.table import Table as _Table
+    from rich.panel import Panel as _Panel
+    from rich import box as _box
+
+    n = report["n_docs"]
+    healthy = report["healthy"]
+    sum_rows = _Table.grid(padding=(0, 2), expand=False)
+    sum_rows.add_column(style="dim", width=18)
+    sum_rows.add_column(justify="right", style="bold")
+    sum_rows.add_row("docs (complete)", f"{n:,}")
+    sum_rows.add_row("db chunks", f"{report['db_chunks']:,}")
+    sum_rows.add_row("prod total", f"{report['prod_total']:,}")
+    sum_rows.add_row("sidecar total", f"{report['sidecar_total']:,}")
+    sum_rows.add_row("untagged (prod)", f"{report['untagged_prod']:,}")
+    sum_rows.add_row(
+        "healthy",
+        f"[bright_green]{healthy:,}/{n:,}[/bright_green]",
+    )
+
+    problem_rows = _Table.grid(padding=(0, 2), expand=False)
+    problem_rows.add_column(style="dim", width=22)
+    problem_rows.add_column(justify="right")
+    any_critical = 0
+    for label, colour in (
+        ("sidecar_missing", "bright_red"),
+        ("sidecar_partial", "bright_red"),
+        ("sidecar_orphan", "yellow"),
+        ("prod_missing", "bright_red"),
+        ("prod_partial", "bright_red"),
+        ("prod_orphan", "dim"),
+    ):
+        n_bucket = report.get(label, 0)
+        if label != "prod_orphan":
+            any_critical += n_bucket
+        style = colour if n_bucket > 0 else "dim"
+        problem_rows.add_row(
+            label,
+            f"[{style}]{n_bucket}[/{style}]",
+        )
+
+    console.print(_Panel(
+        sum_rows,
+        title="[bold]sidecar audit summary[/bold]",
+        title_align="left",
+        border_style=("bright_green" if any_critical == 0
+                       else "bright_red"),
+        box=_box.ROUNDED, padding=(0, 1),
+    ))
+    console.print(_Panel(
+        problem_rows,
+        title="[bold]mismatch counts[/bold]",
+        title_align="left",
+        border_style="dim", box=_box.ROUNDED, padding=(0, 1),
+    ))
+
+    # Per-bucket sample rows for buckets with content.
+    for label in (
+        "sidecar_missing", "sidecar_partial", "sidecar_orphan",
+        "prod_missing", "prod_partial",
+    ):
+        rows_bucket = (report.get("problems") or {}).get(label) or []
+        if not rows_bucket:
+            continue
+        tbl = _Table(title=f"{label} (first {len(rows_bucket)})")
+        tbl.add_column("document_id", style="cyan", no_wrap=True)
+        tbl.add_column("chunks", justify="right")
+        tbl.add_column("prod", justify="right")
+        tbl.add_column("sidecar", justify="right")
+        for r in rows_bucket:
+            tbl.add_row(
+                r["document_id"][:8],
+                str(r["chunks"]),
+                str(r["prod"]),
+                str(r["sidecar"]),
+            )
+        console.print(tbl)
+
+    if fix_orphans and report.get("sidecar_orphan", 0) > 0:
+        orphan_rows = (report.get("problems") or {}).get(
+            "sidecar_orphan"
+        ) or []
+        orphan_ids = [r["document_id"] for r in orphan_rows]
+        console.print(
+            f"\n[yellow]--fix-orphans[/yellow]: will delete sidecar "
+            f"points for {len(orphan_ids)} doc(s) listed above."
+        )
+        confirm = typer.confirm("Proceed?", default=False)
+        if confirm:
+            from sciknow.storage.qdrant import get_client
+            from qdrant_client.http import models as _qm
+            from sciknow.ingestion.embedder import (
+                _sidecar_collection_name,
+            )
+            sidecar = _sidecar_collection_name()
+            qc = get_client()
+            for doc_id in orphan_ids:
+                try:
+                    qc.delete(
+                        collection_name=sidecar,
+                        points_selector=_qm.Filter(must=[
+                            _qm.FieldCondition(
+                                key="document_id",
+                                match=_qm.MatchValue(value=doc_id),
+                            )
+                        ]),
+                    )
+                    console.print(
+                        f"[green]✓[/green] swept sidecar orphans for "
+                        f"doc={doc_id[:8]}"
+                    )
+                except Exception as e:
+                    console.print(
+                        f"[red]✗[/red] doc={doc_id[:8]} delete failed: {e}"
+                    )
+
+    if any_critical:
+        raise typer.Exit(1)
+
+
 @app.command()
 def doctor(
     json_out: bool = typer.Option(

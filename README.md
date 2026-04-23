@@ -273,6 +273,18 @@ and the web modal renders a "Model swap churn" panel with the last
 over ≥10 min — each swap costs 5-10 s of Ollama cold-load, so
 15/hr = ~3 min of pipeline cold-loads per hour, worth surfacing.
 
+**Phase 54.6.292** adds a **per-doc sidecar integrity audit** —
+`sciknow db audit-sidecar` cross-checks every complete document's
+chunk count against both Qdrant collections (prod + dual-embedder
+sidecar) and categorises mismatches (sidecar_missing,
+sidecar_partial, sidecar_orphan, prod_missing, prod_partial,
+prod_orphan). Pipeline-friendly: exit code 0 when clean, 1 when
+any critical bucket is non-zero. `--json` for scripting, `--fix-
+orphans` to sweep stale sidecar points for already-ingested docs.
+Runs in ~0.6 s on the 807-doc corpus (single scroll per collection).
+Confirms the dual-embedder state is internally consistent — 807/807
+healthy on this corpus post-54.6.285/290/291 work.
+
 **Phase 54.6.291** adds **preflight event history** to the monitor —
 every call to `vram_budget.preflight()` records a ring-buffer entry
 with reason / need / before-and-after free / which releasers fired /

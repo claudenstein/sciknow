@@ -590,6 +590,175 @@ def _build_llm_section(
     }
 
 
+def _sidecar_integrity_audit(session, *, limit_problems: int = 20) -> dict:
+    """Phase 54.6.292 — per-document integrity check across the
+    PG chunks table, the prod Qdrant collection, and the dual-
+    embedder sidecar collection.
+
+    Runs in O(N_points) time (single scroll per collection); on
+    the current 807-doc corpus this is ~0.6 s.  Not cheap enough
+    to call from every monitor snapshot, but fine for an explicit
+    ``sciknow db audit-sidecar`` command + an opt-in monitor
+    inclusion via ``--audit-sidecar``.
+
+    Returns a summary dict plus the first ``limit_problems`` rows
+    of each problem category so an operator can act on the output
+    directly::
+
+        {
+          "enabled":          bool,    # False when dual-embedder not active
+          "n_docs":           int,
+          "db_chunks":        int,
+          "prod_total":       int,
+          "sidecar_total":    int,
+          "untagged_prod":    int,     # prod points with no document_id or
+                                       # a document_id that isn't in PG
+                                       # (RAPTOR summary nodes land here)
+          "healthy":          int,     # n_chunks == prod == sidecar
+          "sidecar_missing":  int,     # chunks > 0, sidecar == 0
+          "sidecar_partial":  int,     # 0 < sidecar < chunks
+          "sidecar_orphan":   int,     # sidecar > chunks
+          "prod_missing":     int,
+          "prod_partial":     int,
+          "prod_orphan":      int,
+          "problems": {
+            "sidecar_missing": [(doc_id, chunks, prod, side), ...],
+            ...
+          },
+        }
+
+    When the dual-embedder isn't configured (no
+    ``settings.dense_embedder_model``), returns
+    ``{"enabled": False}`` and skips the Qdrant scrolls.
+    """
+    from sqlalchemy import text as _text
+    from sciknow.config import settings
+    from sciknow.storage.qdrant import (
+        get_client as _get_qdrant, PAPERS_COLLECTION,
+    )
+
+    if not getattr(settings, "dense_embedder_model", None):
+        return {"enabled": False}
+
+    try:
+        from sciknow.ingestion.embedder import _sidecar_collection_name
+        sidecar_name = _sidecar_collection_name()
+    except Exception:
+        sidecar_name = None
+
+    # 1. Per-doc chunk counts from PG.
+    try:
+        rows = session.execute(_text(
+            "SELECT d.id, COUNT(c.id) "
+            "FROM documents d "
+            "LEFT JOIN chunks c ON c.document_id = d.id "
+            "WHERE d.ingestion_status = 'complete' "
+            "GROUP BY d.id"
+        )).fetchall()
+    except Exception:
+        return {"enabled": True, "error": "pg read failed"}
+    db_chunks = {str(r[0]): _safe_int(r[1]) for r in rows}
+
+    # 2. Scroll each Qdrant collection counting points by document_id.
+    client = _get_qdrant()
+
+    def _scroll_counts(coll: str) -> tuple[dict[str, int], int]:
+        counts: dict[str, int] = {}
+        total = 0
+        offset = None
+        while True:
+            try:
+                pts, offset = client.scroll(
+                    collection_name=coll, limit=5000, offset=offset,
+                    with_payload=["document_id"], with_vectors=False,
+                )
+            except Exception:
+                return {}, 0
+            for p in pts:
+                doc = (p.payload or {}).get("document_id") or ""
+                counts[doc] = counts.get(doc, 0) + 1
+                total += 1
+            if not offset:
+                break
+        return counts, total
+
+    prod_counts, prod_total = _scroll_counts(PAPERS_COLLECTION)
+    side_counts, side_total = (
+        _scroll_counts(sidecar_name) if sidecar_name else ({}, 0)
+    )
+
+    # Untagged prod points: either no document_id (RAPTOR nodes
+    # typically land here) or tagged with an id that isn't in PG
+    # (stale leftovers).  Sum of (prod_counts[doc] for doc not in
+    # db_chunks) + prod_counts.get("", 0).
+    untagged_prod = prod_counts.get("", 0) + sum(
+        n for doc, n in prod_counts.items()
+        if doc and doc not in db_chunks
+    )
+
+    # 3. Categorise.
+    healthy = 0
+    sidecar_missing: list[tuple[str, int, int, int]] = []
+    sidecar_partial: list[tuple[str, int, int, int]] = []
+    sidecar_orphan:  list[tuple[str, int, int, int]] = []
+    prod_missing:    list[tuple[str, int, int, int]] = []
+    prod_partial:    list[tuple[str, int, int, int]] = []
+    prod_orphan:     list[tuple[str, int, int, int]] = []
+    for doc_id, n_chunks in db_chunks.items():
+        if n_chunks == 0:
+            continue
+        nprod = prod_counts.get(doc_id, 0)
+        nside = side_counts.get(doc_id, 0)
+        if nside == n_chunks and nprod == n_chunks:
+            healthy += 1
+            continue
+        if nside == 0:
+            sidecar_missing.append((doc_id, n_chunks, nprod, nside))
+        elif nside < n_chunks:
+            sidecar_partial.append((doc_id, n_chunks, nprod, nside))
+        elif nside > n_chunks:
+            sidecar_orphan.append((doc_id, n_chunks, nprod, nside))
+        if nprod == 0:
+            prod_missing.append((doc_id, n_chunks, nprod, nside))
+        elif nprod < n_chunks:
+            prod_partial.append((doc_id, n_chunks, nprod, nside))
+        elif nprod > n_chunks:
+            prod_orphan.append((doc_id, n_chunks, nprod, nside))
+
+    # Keep the first N rows of each problem bucket in the output
+    # (caller can re-run with more detail via the CLI command).
+    def _cap(rows):
+        return [
+            {"document_id": d, "chunks": c, "prod": p, "sidecar": s}
+            for (d, c, p, s) in rows[:limit_problems]
+        ]
+
+    return {
+        "enabled": True,
+        "sidecar_collection": sidecar_name,
+        "n_docs": len(db_chunks),
+        "db_chunks": sum(db_chunks.values()),
+        "prod_total": prod_total,
+        "sidecar_total": side_total,
+        "untagged_prod": untagged_prod,
+        "healthy": healthy,
+        "sidecar_missing": len(sidecar_missing),
+        "sidecar_partial": len(sidecar_partial),
+        "sidecar_orphan": len(sidecar_orphan),
+        "prod_missing": len(prod_missing),
+        "prod_partial": len(prod_partial),
+        "prod_orphan": len(prod_orphan),
+        "problems": {
+            "sidecar_missing": _cap(sidecar_missing),
+            "sidecar_partial": _cap(sidecar_partial),
+            "sidecar_orphan": _cap(sidecar_orphan),
+            "prod_missing": _cap(prod_missing),
+            "prod_partial": _cap(prod_partial),
+            "prod_orphan": _cap(prod_orphan),
+        },
+    }
+
+
 def _summarize_preflight_events(events: list[dict]) -> dict:
     """Phase 54.6.291 — roll up the vram_budget preflight ring buffer
     into a dashboard-friendly summary.

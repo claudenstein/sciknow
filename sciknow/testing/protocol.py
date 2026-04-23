@@ -12045,6 +12045,55 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_292_sidecar_audit_cli() -> None:
+    """Phase 54.6.292 — per-document sidecar integrity audit + CLI.
+
+    Guards:
+
+      A) `_sidecar_integrity_audit` helper exists with the documented
+         return keys.
+      B) CLI registers `audit-sidecar` command (hyphenated name).
+      C) CLI emits --json, raises typer.Exit(1) on critical
+         mismatches, and has a --fix-orphans option.
+    """
+    import inspect as _inspect
+    from sciknow.core import monitor as _mon
+
+    assert hasattr(_mon, "_sidecar_integrity_audit"), (
+        "54.6.292 _sidecar_integrity_audit helper must exist"
+    )
+    src = _inspect.getsource(_mon._sidecar_integrity_audit)
+    for key in (
+        "n_docs", "db_chunks", "prod_total", "sidecar_total",
+        "untagged_prod", "healthy",
+        "sidecar_missing", "sidecar_partial", "sidecar_orphan",
+        "prod_missing", "prod_partial", "prod_orphan",
+        "problems",
+    ):
+        assert key in src, (
+            f"54.6.292 audit helper must populate {key!r}"
+        )
+    assert "dense_embedder_model" in src, (
+        "54.6.292 audit must early-out when dual-embedder not active"
+    )
+
+    from sciknow.cli import db as _db_cli
+    assert hasattr(_db_cli, "audit_sidecar_cmd"), (
+        "54.6.292 CLI must register an audit-sidecar command"
+    )
+    cli_src = _inspect.getsource(_db_cli.audit_sidecar_cmd)
+    assert '@app.command("audit-sidecar")' in _inspect.getsource(_db_cli), (
+        "54.6.292 CLI must use hyphenated name audit-sidecar"
+    )
+    assert '--json' in cli_src, "54.6.292 must support --json"
+    assert '--fix-orphans' in cli_src, (
+        "54.6.292 must expose --fix-orphans"
+    )
+    assert "typer.Exit(1)" in cli_src, (
+        "54.6.292 must exit 1 on critical mismatches for pipelining"
+    )
+
+
 def l1_phase54_6_291_preflight_event_history() -> None:
     """Phase 54.6.291 — VRAM preflight event ring buffer + dashboard
     panels.
@@ -16910,6 +16959,7 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_289_model_swap_counter,
     l1_phase54_6_290_vram_budget_preflight,
     l1_phase54_6_291_preflight_event_history,
+    l1_phase54_6_292_sidecar_audit_cli,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]
