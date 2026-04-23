@@ -276,15 +276,40 @@ def _ensure_sidecar_exists(qdrant_client: QdrantClient) -> str:
     """
     from qdrant_client.models import (
         Distance, VectorParams, PayloadSchemaType,
+        HnswConfigDiff, ScalarQuantization, ScalarQuantizationConfig,
+        ScalarType,
     )
     coll = _sidecar_collection_name()
     if not qdrant_client.collection_exists(coll):
         dim = int(getattr(settings, "dense_embedder_dim", 2560))
+        # Phase 54.6.299 — apply the same HNSW + quantization tuning
+        # as the prod papers collection (see init_collections in
+        # storage/qdrant.py).  Pre-54.6.299 sidecars took Qdrant
+        # defaults (m=16, ef_construct=100, no quantization) which
+        # hurt dense-leg recall vs the tuned prod collection.  Since
+        # the sidecar carries the same number of points as prod, it
+        # should share the same tuning.
+        hnsw_cfg = HnswConfigDiff(
+            m=settings.qdrant_hnsw_m,
+            ef_construct=settings.qdrant_hnsw_ef_construct,
+        )
+        quant_cfg = (
+            ScalarQuantization(
+                scalar=ScalarQuantizationConfig(
+                    type=ScalarType.INT8, always_ram=True,
+                ),
+            )
+            if settings.qdrant_scalar_quantization else None
+        )
         qdrant_client.create_collection(
             collection_name=coll,
             vectors_config={
-                "dense": VectorParams(size=dim, distance=Distance.COSINE),
+                "dense": VectorParams(
+                    size=dim, distance=Distance.COSINE,
+                    hnsw_config=hnsw_cfg,
+                ),
             },
+            quantization_config=quant_cfg,
         )
     # Ensure payload indexes — must mirror init_collections() for the
     # prod papers collection so retrieval filters hit indexes on both

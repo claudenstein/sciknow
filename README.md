@@ -273,6 +273,19 @@ and the web modal renders a "Model swap churn" panel with the last
 over ≥10 min — each swap costs 5-10 s of Ollama cold-load, so
 15/hr = ~3 min of pipeline cold-loads per hour, worth surfacing.
 
+**Phase 54.6.299** adds **Qdrant HNSW / quantization drift check**
++ fixes a second dual-embedder sidecar bug found while building it.
+The sidecar was being created with Qdrant's default HNSW config
+(m=16, ef_construct=100, no quantization) while the prod papers
+collection used tuned `m=32 / ef_construct=256 / scalar quantization`
+from `.env`. `_ensure_sidecar_exists` now mirrors prod's tuning so
+new sidecars match. Monitor adds a per-collection HNSW column to
+the web qdrant table, a "hnsw tuning" row in the CLI qdrant panel,
+and an info-level `hnsw_drift` alert when any papers-class
+collection is on defaults. Small collections (abstracts / wiki /
+visuals) are expected to use defaults and never trigger drift.
+Existing sidecars keep their old settings until rebuilt.
+
 **Phase 54.6.298** adds a **metadata-enrichment coverage** panel —
 per-field missing counts (DOI / abstract / authors / year / title /
 journal) across all complete documents. Surfaces a compact

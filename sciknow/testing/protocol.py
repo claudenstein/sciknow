@@ -12045,6 +12045,70 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_299_hnsw_drift_check() -> None:
+    """Phase 54.6.299 — Qdrant HNSW / quantization drift check +
+    tuned sidecar creation.
+
+    Guards:
+
+      A) `_qdrant_hnsw_drift` helper exists with the expected / per-
+         collection / drift_count return shape.
+      B) `_ensure_sidecar_exists` passes HNSW + quantization tuning
+         so new sidecars match the prod papers collection.
+      C) `_build_alerts` emits `hnsw_drift`.
+      D) CLI renders 'hnsw tuning' row.
+      E) Web qdrant table renders the HNSW column.
+    """
+    import inspect as _inspect
+    from sciknow.core import monitor as _mon
+
+    assert hasattr(_mon, "_qdrant_hnsw_drift"), (
+        "54.6.299 _qdrant_hnsw_drift helper must exist"
+    )
+    src = _inspect.getsource(_mon._qdrant_hnsw_drift)
+    for key in (
+        "expected", "collections", "drift_count",
+        "m", "ef_construct", "quantization",
+        "drift", "drift_reasons",
+    ):
+        assert key in src, (
+            f"54.6.299 helper must populate {key!r}"
+        )
+
+    from sciknow.ingestion import embedder as _emb
+    ensure_src = _inspect.getsource(_emb._ensure_sidecar_exists)
+    assert "HnswConfigDiff" in ensure_src, (
+        "54.6.299 _ensure_sidecar_exists must pass HnswConfigDiff"
+    )
+    assert "ScalarQuantization" in ensure_src, (
+        "54.6.299 _ensure_sidecar_exists must pass ScalarQuantization "
+        "when settings.qdrant_scalar_quantization"
+    )
+    assert "qdrant_hnsw_m" in ensure_src, (
+        "54.6.299 sidecar must read qdrant_hnsw_m from settings"
+    )
+
+    alerts_src = _inspect.getsource(_mon._build_alerts)
+    assert "hnsw_drift" in alerts_src, (
+        "54.6.299 _build_alerts must emit hnsw_drift"
+    )
+
+    from sciknow.cli import db as _db_cli
+    cli_src = _inspect.getsource(_db_cli._build_monitor_layout)
+    assert "qdrant_hnsw" in cli_src, (
+        "54.6.299 CLI must read snap['qdrant_hnsw']"
+    )
+    assert "hnsw tuning" in cli_src, (
+        "54.6.299 CLI must render the 'hnsw tuning' row"
+    )
+
+    from sciknow.testing.helpers import web_app_full_source
+    web_src = web_app_full_source()
+    assert "snap.qdrant_hnsw" in web_src, (
+        "54.6.299 web must read snap.qdrant_hnsw"
+    )
+
+
 def l1_phase54_6_298_enrichment_coverage() -> None:
     """Phase 54.6.298 — per-field metadata enrichment coverage panel.
 
@@ -17292,6 +17356,7 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_296_payload_index_health,
     l1_phase54_6_297_book_outline_model,
     l1_phase54_6_298_enrichment_coverage,
+    l1_phase54_6_299_hnsw_drift_check,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]

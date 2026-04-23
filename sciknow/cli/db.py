@@ -2089,6 +2089,8 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     qcolls = snap.get("qdrant") or []
     # 54.6.296 — payload-index health.
     qdrant_indexes = snap.get("qdrant_indexes") or {}
+    # 54.6.299 — HNSW / quantization drift.
+    qdrant_hnsw = snap.get("qdrant_hnsw") or {}
     backends = snap.get("converter_backends") or []
     pipeline = snap.get("pipeline") or {}
     timing = pipeline.get("stage_timing") or []
@@ -3199,6 +3201,31 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
                 points_col = points_str
             row.add_row(label_rendered, points_col)
             right_tbl.add_row(row)
+
+    # Phase 54.6.299 — HNSW/quantization drift one-liner.  Only
+    # fires for papers-class collections that should be on tuned
+    # values; small collections (abstracts/wiki/visuals) legitimately
+    # use defaults.
+    if qdrant_hnsw.get("collections"):
+        drift_n = qdrant_hnsw.get("drift_count", 0) or 0
+        right_tbl.add_row("")
+        row = Table.grid(padding=(0, 1), expand=True)
+        row.add_column(ratio=3, style=C_DIM)
+        row.add_column(justify="right", ratio=1)
+        if drift_n == 0:
+            row.add_row(
+                "hnsw tuning",
+                Text("all tuned ✓", style=C_OK),
+            )
+        else:
+            row.add_row(
+                "hnsw tuning",
+                Text(
+                    f"{drift_n} on defaults",
+                    style=C_WARN,
+                ),
+            )
+        right_tbl.add_row(row)
 
     # Phase 54.6.296 — payload-index health one-liner.  Quiet when
     # every collection has its expected indexes; red when any are

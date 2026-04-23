@@ -21014,6 +21014,8 @@ function renderMonitor(snap) {{
   const slowDocs = snap.slow_docs || [];
   // Phase 54.6.296 — per-collection payload-index health check.
   const qdrantIndexes = snap.qdrant_indexes || {{}};
+  // Phase 54.6.299 — HNSW / quantization drift check.
+  const qdrantHnsw = snap.qdrant_hnsw || {{}};
   // Phase 54.6.284 — retraction detail (counts + recent list).
   const retractions = snap.retractions || {{}};
   // Phase 54.6.244 additions
@@ -22092,9 +22094,18 @@ function renderMonitor(snap) {{
     for (const c of (qdrantIndexes.collections || [])) {{
       idxMap[c.name] = c;
     }}
+    // Phase 54.6.299 — HNSW row map.  Papers-class collections
+    // can have multiple vector fields (dense only today, colbert
+    // on abstracts when enabled); pick the first papers-class
+    // entry per collection for the summary cell.
+    const hnswMap = {{}};
+    for (const c of (qdrantHnsw.collections || [])) {{
+      if (!hnswMap[c.name]) hnswMap[c.name] = c;
+    }}
     let html = '<h4>Qdrant collections</h4><table class="stats-table" style="width:100%;">'
       + '<tr><th>Collection</th><th>Points</th><th>Vector fields</th>'
-      + '<th title="Payload indexes present / expected — missing indexes turn filter pushdown into a full scan">Indexes</th></tr>';
+      + '<th title="Payload indexes present / expected — missing indexes turn filter pushdown into a full scan">Indexes</th>'
+      + '<th title="HNSW tuning — m / ef_construct / quantization. Papers-class collections should match the .env QDRANT_HNSW_* values (54.6.299).">HNSW</th></tr>';
     for (const c of qcolls) {{
       const fields = (c.vectors || []).concat((c.sparse_vectors || []).map(s => 'sparse:' + s));
       const idx = idxMap[c.name];
@@ -22112,9 +22123,26 @@ function renderMonitor(snap) {{
           + (miss ? ' (✗' + miss + ' missing)' : ' ✓')
           + '</span>';
       }}
+      const hnsw = hnswMap[c.name];
+      let hnswCell = '<span class="u-muted">—</span>';
+      if (hnsw) {{
+        const drift = hnsw.drift;
+        const reasons = (hnsw.drift_reasons || []).join(' · ');
+        const kind = hnsw.kind;
+        const col = drift ? '#c33' : (kind === 'papers' ? '#080' : 'var(--fg-muted)');
+        const label = 'm=' + hnsw.m + '/ef=' + hnsw.ef_construct
+          + (hnsw.quantization ? ' ·Q' : '');
+        const title = drift
+          ? 'drift: ' + reasons
+          : (kind === 'papers' ? 'tuned (papers-class)' : 'defaults (small collection)');
+        const icon = drift ? '✗ ' : (kind === 'papers' ? '✓ ' : '');
+        hnswCell = '<span style="color:' + col + ';" title="' + _escHTML(title) + '">'
+          + icon + label + '</span>';
+      }}
       html += '<tr><td>' + _escHTML(c.name) + '</td><td>' + _fmtNum(c.points_count)
         + '</td><td>' + _escHTML(fields.join(', ')) + '</td>'
-        + '<td>' + idxCell + '</td></tr>';
+        + '<td>' + idxCell + '</td>'
+        + '<td>' + hnswCell + '</td></tr>';
     }}
     html += '</table>';
     sections.push(html);

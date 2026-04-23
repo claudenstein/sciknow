@@ -633,6 +633,133 @@ def _sidecar_audit_cached(session) -> dict:
     return out
 
 
+def _qdrant_hnsw_drift() -> dict:
+    """Phase 54.6.299 — compare each collection's actual HNSW +
+    quantization config against ``settings``.
+
+    Only **papers-class** collections (the prod papers + any dual-
+    embedder sidecar ``<prefix>_ab_..._papers``) are checked against
+    the tuned ``QDRANT_HNSW_M`` / ``QDRANT_HNSW_EF_CONSTRUCT`` /
+    ``QDRANT_SCALAR_QUANTIZATION`` env values.  Small collections
+    (abstracts / wiki / visuals) legitimately use Qdrant's defaults
+    (m=16, ef_construct=100, no quantization), so they get a
+    reduced expectation set and never flag drift for those fields.
+
+    HNSW params are read from the per-vector override
+    (``info.config.params.vectors["dense"].hnsw_config``) when
+    present; ``init_collections`` sets them that way inside
+    ``VectorParams`` rather than at the collection level, so the
+    collection-level ``info.config.hnsw_config`` often reflects
+    the Qdrant defaults even when the collection is tuned.
+
+    Returns::
+
+        {
+          "expected": {"m": int, "ef_construct": int, "quantization": bool},
+          "collections": [
+            {
+              "name":              str,
+              "kind":              "papers" | "small",
+              "vector_field":      "dense" | "colbert" | ...,
+              "m":                 int,
+              "ef_construct":      int,
+              "quantization":      "scalar" | None,
+              "drift":             bool,     # papers-class only
+              "drift_reasons":     [str],
+            },
+            ...
+          ],
+          "drift_count": int,
+        }
+
+    Silent (empty collections list) when Qdrant is unreachable.
+    """
+    try:
+        from sciknow.storage.qdrant import get_client
+        from sciknow.config import settings as _settings
+        client = get_client()
+        collections = client.get_collections().collections
+    except Exception:
+        return {"collections": [], "drift_count": 0,
+                "expected": {}}
+
+    expected = {
+        "m": int(getattr(_settings, "qdrant_hnsw_m", 32)),
+        "ef_construct": int(
+            getattr(_settings, "qdrant_hnsw_ef_construct", 256),
+        ),
+        "quantization": bool(
+            getattr(_settings, "qdrant_scalar_quantization", True),
+        ),
+    }
+
+    out: list[dict] = []
+    drift_count = 0
+    for col in collections:
+        name = col.name
+        # "papers-class" = anything ending in "_papers", which
+        # covers both the prod collection and dual-embedder
+        # sidecars (<prefix>_ab_<slug>_papers).
+        kind = "papers" if name.endswith("_papers") else "small"
+        try:
+            info = client.get_collection(name)
+        except Exception:
+            continue
+        # Per-vector field iteration — papers-class carries only
+        # "dense"; abstracts may carry "dense" + "colbert".
+        vp = info.config.params.vectors
+        items = list(vp.items()) if hasattr(vp, "items") else [
+            ("dense", vp)
+        ]
+        q = info.config.quantization_config
+        quant_type = "scalar" if q else None
+
+        for vec_name, vec_cfg in items:
+            h = getattr(vec_cfg, "hnsw_config", None)
+            if h is not None and h.m is not None:
+                m = int(h.m)
+                ef_c = int(h.ef_construct or 0)
+            else:
+                ch = info.config.hnsw_config
+                m = int(ch.m or 0)
+                ef_c = int(ch.ef_construct or 0)
+
+            drift = False
+            reasons: list[str] = []
+            if kind == "papers":
+                if m != expected["m"]:
+                    drift = True
+                    reasons.append(f"m={m} (expected {expected['m']})")
+                if ef_c != expected["ef_construct"]:
+                    drift = True
+                    reasons.append(
+                        f"ef_construct={ef_c} "
+                        f"(expected {expected['ef_construct']})"
+                    )
+                if expected["quantization"] and quant_type != "scalar":
+                    drift = True
+                    reasons.append("quantization=off (expected scalar)")
+
+            out.append({
+                "name": name,
+                "kind": kind,
+                "vector_field": vec_name,
+                "m": m,
+                "ef_construct": ef_c,
+                "quantization": quant_type,
+                "drift": drift,
+                "drift_reasons": reasons,
+            })
+            if drift:
+                drift_count += 1
+
+    return {
+        "expected": expected,
+        "collections": out,
+        "drift_count": drift_count,
+    }
+
+
 def _qdrant_payload_indexes() -> dict:
     """Phase 54.6.296 — verify every Qdrant collection carries its
     expected payload indexes.
@@ -2369,6 +2496,28 @@ def _build_alerts(snap: dict) -> list[dict]:
             ),
         })
 
+    # Phase 54.6.299 — HNSW/quantization drift alert.  Fires info
+    # when a papers-class collection (prod papers or dual-embedder
+    # sidecar) is on defaults instead of the tuned env values.
+    # info-level because the fix (rebuild collection) is expensive
+    # and the operator may legitimately defer it.
+    hnsw = snap.get("qdrant_hnsw") or {}
+    drift_n = hnsw.get("drift_count", 0) or 0
+    if drift_n > 0:
+        drifted = [
+            c for c in (hnsw.get("collections") or []) if c.get("drift")
+        ]
+        sample = drifted[0] if drifted else {}
+        alerts.append({
+            "severity": "info",
+            "code": "hnsw_drift",
+            "message": (
+                f"qdrant: {drift_n} papers-class collection(s) on "
+                f"HNSW defaults — e.g. {sample.get('name', '?')} "
+                f"({', '.join(sample.get('drift_reasons', [])[:2])})"
+            ),
+        })
+
     # Phase 54.6.298 — enrichment gap alert.  Fires info when any
     # actionable field (doi/abstract/authors/title/journal) is
     # missing on >50% of complete docs — actionable because
@@ -2678,6 +2827,11 @@ def _build_alerts(snap: dict) -> list[dict]:
         "enrichment_gap": (
             "sciknow db enrich  # fills DOI/abstract/authors from "
             "Crossref / OpenAlex / arXiv"
+        ),
+        "hnsw_drift": (
+            "# Accept the drift (cheap) or rebuild — new sidecars\n"
+            "# auto-apply tuning (54.6.299). To rebuild the current\n"
+            "# one, delete + re-encode via sync-dense-sidecar."
         ),
         "ram_pressure":    "ps axu --sort=-%mem | head",
         "host_overload":   "uptime; top -b -n 1 | head -20",
@@ -4268,6 +4422,8 @@ def collect_monitor_snapshot(
         "qdrant": _qdrant_collections(),
         # 54.6.296 — per-collection payload-index health check.
         "qdrant_indexes": _qdrant_payload_indexes(),
+        # 54.6.299 — per-collection HNSW + quantization drift vs .env
+        "qdrant_hnsw": _qdrant_hnsw_drift(),
         "gpu": gpu_info,
         "gpu_trend": _gpu_trend_snapshot(),
         # 54.6.291 — VRAM preflight observability (see vram_budget).
