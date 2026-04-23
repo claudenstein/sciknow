@@ -5568,8 +5568,16 @@ def cleanup_downloads(
                                             "downloads/failed_ingest/) plus the corresponding `documents` rows "
                                             "with ingestion_status='failed'. These are PDFs the pipeline gave "
                                             "up on; keeping them just wastes disk. Phase 54.6.19."),
+    include_inbox: bool = typer.Option(True, "--include-inbox/--no-include-inbox",
+                                        help="Phase 54.6.273 — ALSO walk <data_dir>/inbox/ recursively: "
+                                             "any PDF whose SHA-256 is already 'complete' in this or any "
+                                             "other project's DB is DELETED (inbox is a user staging area, "
+                                             "no audit trail to preserve), and empty subfolders are removed "
+                                             "bottom-up. Files still pending or not yet in the DB are left "
+                                             "alone so new drops aren't eaten. Default ON — flip off with "
+                                             "--no-include-inbox if you want the old downloads-only scope."),
 ):
-    """Phase 49.2 + 54.6.4 — comprehensive dedup of every place a PDF can end up.
+    """Phase 49.2 + 54.6.4 + 54.6.273 — comprehensive dedup of every place a PDF can end up.
 
     Scans ALL of these locations for PDFs:
 
@@ -5579,6 +5587,7 @@ def cleanup_downloads(
       * <download_dir>/failed_ingest/        (Phase 49.1 ingest-failed archive)
       * <data_dir>/processed/                (main pipeline success archive)
       * <data_dir>/failed/                   (main pipeline failure archive)
+      * <data_dir>/inbox/ (recursive)        (user staging area — 54.6.273; --include-inbox)
 
     For each PDF, SHA-256 its bytes. Group by hash and pick a
     canonical location (priority: data/processed > downloads/processed
@@ -5614,26 +5623,36 @@ def cleanup_downloads(
 
     # Scan locations in canonical-preference order — the first one a
     # given SHA appears in is "kept", later ones are dupes.
-    scan_locations: list[tuple[str, Path]] = [
-        ("data/processed",            data_dir / "processed"),
-        ("downloads/processed",       download_dir / _PROCESSED_SUBDIR),
-        ("downloads (root)",          download_dir),
-        ("data/failed",               data_dir / "failed"),
-        ("downloads/failed_ingest",   download_dir / _FAILED_SUBDIR),
+    # Phase 54.6.273 — inbox goes LAST so canonical preference picks
+    # any real archive copy before the inbox staging copy. Inbox is
+    # also the only location we scan recursively (users drop folders).
+    scan_locations: list[tuple[str, Path, bool]] = [
+        ("data/processed",            data_dir / "processed",               False),
+        ("downloads/processed",       download_dir / _PROCESSED_SUBDIR,     False),
+        ("downloads (root)",          download_dir,                          False),
+        ("data/failed",               data_dir / "failed",                   False),
+        ("downloads/failed_ingest",   download_dir / _FAILED_SUBDIR,         False),
     ]
+    if include_inbox:
+        scan_locations.append(
+            ("data/inbox",            data_dir / "inbox",                    True)
+        )
 
-    def _pdfs_in(p: Path) -> list[Path]:
+    def _pdfs_in(p: Path, recursive: bool = False) -> list[Path]:
         if not p.exists():
             return []
-        # Non-recursive — we scan each location individually.
+        # Phase 54.6.273 — recursive for inbox so nested folders the
+        # user dropped are fully audited. Non-recursive for archive
+        # dirs where a flat layout is expected.
+        iterator = p.rglob("*") if recursive else p.iterdir()
         return sorted(
-            f for f in p.iterdir()
+            f for f in iterator
             if f.is_file() and not f.is_symlink() and f.suffix.lower() == ".pdf"
         )
 
     found: list[tuple[str, Path]] = []
-    for label, loc in scan_locations:
-        for pdf in _pdfs_in(loc):
+    for label, loc, recursive in scan_locations:
+        for pdf in _pdfs_in(loc, recursive=recursive):
             found.append((label, pdf))
     if not found and not clean_failed:
         console.print("[green]No PDF files found across any archive location.[/green]")
@@ -5759,9 +5778,19 @@ def cleanup_downloads(
     moved = deleted = kept = 0
     archived_orphans = 0
     foreign_ingested = 0  # 54.6.4: hits that are only ingested in OTHER projects
+    # Phase 54.6.273 — label-based priority. Previously the sort key
+    # matched on x[1].parent, which worked when every scan dir was
+    # flat but breaks once inbox is walked recursively (nested PDF's
+    # parent is a subfolder, not the scan root). Priorities are
+    # assigned from the scan_locations order (first = highest pref).
+    _label_priority = {
+        lbl: i for i, (lbl, _, _) in enumerate(scan_locations)
+    }
     for sha, locs in by_sha.items():
         # Canonical = first in scan_locations order that appears
-        locs_sorted = sorted(locs, key=lambda x: [i for i, (_, p) in enumerate(scan_locations) if p == x[1].parent][0] if any(p == x[1].parent for _, p in scan_locations) else 99)
+        locs_sorted = sorted(
+            locs, key=lambda x: _label_priority.get(x[0], 99),
+        )
         canonical_label, canonical_path = locs_sorted[0]
         dupes = locs_sorted[1:]
         # Phase 54.6.4 — if the SHA is already ingested in ANOTHER project
@@ -5833,7 +5862,13 @@ def cleanup_downloads(
                 moved += 1
                 continue
             try:
-                if delete_dupes or cross_hit:
+                # Phase 54.6.273 — inbox dupes are ALWAYS deleted. The
+                # inbox is a user staging area; once a PDF is archived
+                # under data/processed (or known-complete elsewhere),
+                # the inbox copy has no reason to linger. No archive/
+                # audit semantics to preserve.
+                inbox_dupe = (lbl == "data/inbox")
+                if delete_dupes or cross_hit or inbox_dupe:
                     # Cross-project hits are ALWAYS deleted — keeping a
                     # second archive of a paper that's already sitting in
                     # another project's data/processed/ is just wasted
@@ -5875,6 +5910,78 @@ def cleanup_downloads(
         + (f"  [cyan]↷ {foreign_ingested} already-ingested-in-other-project[/cyan]" if foreign_ingested else "")
         + (f"  [dim]({archived_orphans} not-in-DB groups consolidated)[/dim]" if archived_orphans else "")
     )
+
+    # Phase 54.6.273 — inbox-only sweep + empty-folder cleanup.
+    # The dupe loop above handles inbox files that have same-SHA
+    # siblings in other scan locations. But an inbox file can be
+    # the ONLY on-disk copy of a paper whose DB row says 'complete'
+    # — e.g. after the pipeline archived it elsewhere and the user
+    # has since re-dropped the same file. That case needs a second
+    # pass: re-walk inbox, delete anything complete-in-DB, then
+    # remove empty subfolders bottom-up so the inbox stays tidy.
+    inbox_deleted = 0
+    empty_dirs_removed = 0
+    if include_inbox:
+        inbox_root = data_dir / "inbox"
+        if inbox_root.exists():
+            remaining = _pdfs_in(inbox_root, recursive=True)
+            for pdf in remaining:
+                try:
+                    h = hashlib.sha256(pdf.read_bytes()).hexdigest()
+                except Exception:
+                    continue
+                if sha_status.get(h) == "complete":
+                    rel = pdf.relative_to(inbox_root)
+                    if dry_run:
+                        _emit(
+                            inbox_deleted + 1, 0, "⊘", "cyan", "DRY_REM",
+                            f"data/inbox/{rel}",
+                            f"already complete in '{sha_project.get(h, active.slug)}'",
+                        )
+                        inbox_deleted += 1
+                        continue
+                    try:
+                        pdf.unlink()
+                        inbox_deleted += 1
+                        _emit(
+                            inbox_deleted, 0, "✗", "red", "INBOX_DEL",
+                            f"data/inbox/{rel}",
+                            f"already complete in '{sha_project.get(h, active.slug)}'",
+                        )
+                    except Exception as exc:
+                        _emit(
+                            inbox_deleted + 1, 0, "⚠", "red", "SKIP",
+                            f"data/inbox/{rel}", str(exc)[:80],
+                        )
+
+            # Bottom-up walk: remove empty inbox subfolders (never
+            # the inbox root itself). rmdir only succeeds on empty
+            # dirs — safe by construction.
+            if not dry_run:
+                all_dirs = sorted(
+                    (d for d in inbox_root.rglob("*") if d.is_dir()),
+                    key=lambda p: len(p.parts), reverse=True,
+                )
+                for d in all_dirs:
+                    try:
+                        d.rmdir()
+                        empty_dirs_removed += 1
+                        _emit(
+                            empty_dirs_removed, 0, "✗", "red", "EMPTY_DIR",
+                            f"data/inbox/{d.relative_to(inbox_root)}",
+                            "removed empty folder",
+                        )
+                    except OSError:
+                        # Not empty — skip silently
+                        pass
+
+        if inbox_deleted or empty_dirs_removed:
+            verb2 = "Would remove" if dry_run else "Removed"
+            console.print(
+                f"[bold]Inbox cleanup:[/bold] "
+                f"[red]✗ {verb2.lower()} {inbox_deleted} complete-in-DB inbox PDF(s)[/red]"
+                + (f"  [dim]+ {empty_dirs_removed} empty folder(s)[/dim]" if empty_dirs_removed else "")
+            )
 
     # Phase 54.6.19 — purge failed-ingest PDFs + their documents rows.
     # Runs AFTER the dedup pass so any failed file that was actually a

@@ -5582,15 +5582,17 @@ async def api_corpus_cleanup_downloads(
     delete_dupes: bool = Form(True),
     cross_project: bool = Form(True),
     clean_failed: bool = Form(True),
+    include_inbox: bool = Form(True),
 ):
-    """Phase 54.6.4 + 54.6.19 — trigger `sciknow db cleanup-downloads` from the GUI.
+    """Phase 54.6.4 + 54.6.19 + 54.6.273 — trigger `sciknow db cleanup-downloads`.
 
     Streams the subprocess log over SSE. Defaults: dry_run=False,
-    delete_dupes=True, cross_project=True, clean_failed=True — so a
-    single click removes all downloads that are already ingested anywhere
-    (including other projects) AND nukes the failed-ingest archive +
-    associated documents rows. The GUI exposes one button; advanced
-    users can flip the flags via the CLI.
+    delete_dupes=True, cross_project=True, clean_failed=True,
+    include_inbox=True — so a single click removes all downloads +
+    inbox files already ingested anywhere (including other projects),
+    nukes the failed-ingest archive + associated documents rows, and
+    removes empty inbox subfolders. The GUI exposes one button;
+    advanced users can flip the flags via the CLI.
     """
     job_id, _queue = _create_job("corpus_cleanup_downloads")
     loop = asyncio.get_event_loop()
@@ -5601,6 +5603,7 @@ async def api_corpus_cleanup_downloads(
         argv.append("--delete-dupes")
     argv.append("--cross-project" if cross_project else "--no-cross-project")
     argv.append("--clean-failed" if clean_failed else "--no-clean-failed")
+    argv.append("--include-inbox" if include_inbox else "--no-include-inbox")
     _spawn_cli_streaming(job_id, argv, loop)
     return JSONResponse({"job_id": job_id})
 
@@ -10284,7 +10287,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         <button role="menuitem" onclick="openCorpusModal('corp-topic')" title="OpenAlex free-text topic search ranked by citation count. Good for kickstarting a new project."><svg class="icon"><use href="#i-tag"/></svg> Topic search</button>
         <button role="menuitem" onclick="openCorpusModal('corp-coauth')" title="Find people who coauthored with your corpus's authors. Useful for invisible-college expansion."><svg class="icon"><use href="#i-users"/></svg> Coauthors</button>
         <div class="u-border-b" style="height:1px;margin:2px 0;"></div>
-        <button role="menuitem" onclick="openCorpusModal('corp-enrich');doToolCorpus('cleanup')" title="Remove already-ingested duplicates from the downloads/ directory AND permanently delete the failed-ingest archive. Frees disk; the main pipeline archive stays intact."><svg class="icon"><use href="#i-trash"/></svg> Cleanup downloads + failed</button>
+        <button role="menuitem" onclick="openCorpusModal('corp-enrich');doToolCorpus('cleanup')" title="Remove already-ingested duplicates from the downloads/ directory, delete inbox/ PDFs already 'complete' in the DB (plus empty inbox subfolders), AND permanently delete the failed-ingest archive. Frees disk; the main pipeline archive stays intact."><svg class="icon"><use href="#i-trash"/></svg> Cleanup downloads + inbox + failed</button>
         <button role="menuitem" onclick="openPendingDownloadsModal()" title="Papers you selected for download but couldn't be auto-retrieved (no open-access PDF). Retry, mark manually acquired, or export for ILL."><svg class="icon"><use href="#i-clipboard"/></svg> Pending downloads</button>
       </div>
     </div>
@@ -12550,8 +12553,8 @@ body.task-bar-open {{ padding-top: 40px; }}
              manual acquisition for papers without a legal OA PDF). -->
         <div class="u-flex-raw u-gap-2 u-ai-center u-mb-m u-p-2 u-bg-alt u-r-md u-small u-wrap">
           <button class="btn-secondary" onclick="doToolCorpus('cleanup')"
-                  title="Remove PDFs from downloads/ that are already ingested in this or any other project's DB, AND permanently nuke failed-ingest PDFs (data/failed/ + downloads/failed_ingest/) plus their documents rows. Frees disk; pipeline archive is preserved.">
-            &#129529; Cleanup downloads + failed
+                  title="Remove PDFs from downloads/ and data/inbox/ that are already ingested in this or any other project's DB (inbox also gets empty subfolders removed), AND permanently nuke failed-ingest PDFs (data/failed/ + downloads/failed_ingest/) plus their documents rows. Frees disk; pipeline archive is preserved.">
+            &#129529; Cleanup downloads + inbox + failed
           </button>
           <button class="btn-secondary" onclick="openPendingDownloadsModal()"
                   title="Papers you selected but couldn't be auto-downloaded (no legal OA PDF). Retry, mark manually acquired, or export for ILL.">

@@ -11969,6 +11969,80 @@ def l1_phase54_6_230_unified_monitor() -> None:
     )
 
 
+def l1_phase54_6_273_cleanup_downloads_includes_inbox() -> None:
+    """Phase 54.6.273 — `sciknow db cleanup-downloads` scans
+    data/inbox/ recursively and force-deletes PDFs already 'complete'
+    in the DB, then removes empty inbox subfolders.
+
+    Guards:
+
+      A) CLI registers --include-inbox/--no-include-inbox option.
+      B) scan_locations carries (label, path, recursive) 3-tuples,
+         with a data/inbox entry flagged recursive=True.
+      C) Force-delete rule: inbox dupes bypass --delete-dupes.
+      D) Post-loop inbox sweep exists for standalone complete-in-DB
+         inbox files.
+      E) Empty-folder cleanup pass (rglob dirs, rmdir bottom-up).
+      F) Web endpoint forwards --include-inbox/--no-include-inbox.
+    """
+    import inspect as _inspect
+    from pathlib import Path
+
+    from sciknow.cli import db as db_cli
+
+    # A) CLI option
+    src = _inspect.getsource(db_cli.cleanup_downloads)
+    assert '"--include-inbox/--no-include-inbox"' in src, (
+        "54.6.273 cleanup-downloads must register "
+        "--include-inbox/--no-include-inbox"
+    )
+
+    # B) scan_locations shape includes inbox + recursive flag
+    assert '("data/inbox",' in src, (
+        "54.6.273 scan_locations must include a data/inbox entry"
+    )
+    assert "recursive: bool = False" in src, (
+        "54.6.273 _pdfs_in must take a recursive flag"
+    )
+    assert "p.rglob" in src, (
+        "54.6.273 recursive inbox scan must use rglob"
+    )
+
+    # C) Force-delete inbox rule
+    assert 'lbl == "data/inbox"' in src, (
+        "54.6.273 dupe-handling must branch on the data/inbox label"
+    )
+    assert "inbox_dupe = (lbl ==" in src, (
+        "54.6.273 must force-delete inbox dupes regardless of --delete-dupes"
+    )
+
+    # D) Post-loop inbox sweep
+    assert "Inbox cleanup:" in src, (
+        "54.6.273 must print an Inbox cleanup summary line"
+    )
+    assert "INBOX_DEL" in src, (
+        "54.6.273 must emit INBOX_DEL events for standalone inbox deletes"
+    )
+
+    # E) Empty-folder cleanup — rmdir in bottom-up walk
+    assert "d.rmdir()" in src, (
+        "54.6.273 must call rmdir on empty inbox subfolders"
+    )
+    assert "EMPTY_DIR" in src, (
+        "54.6.273 must emit EMPTY_DIR events for removed folders"
+    )
+
+    # F) Web endpoint forwards the flag
+    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    assert '"--include-inbox" if include_inbox else "--no-include-inbox"' in web_text, (
+        "54.6.273 /api/corpus/cleanup-downloads must forward "
+        "--include-inbox to the CLI subprocess"
+    )
+    assert "include_inbox: bool = Form(True)" in web_text, (
+        "54.6.273 API endpoint must default include_inbox=True"
+    )
+
+
 def l1_phase54_6_272_monitor_help_overlay() -> None:
     """Phase 54.6.272 — press `?` in the monitor modal to surface a
     keyboard-shortcut + feature help overlay. Escape closes it.
@@ -16106,6 +16180,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_271_doctor_watch_mode,
     # Phase 54.6.272 — ? help overlay in web monitor
     l1_phase54_6_272_monitor_help_overlay,
+    # Phase 54.6.273 — cleanup-downloads also purges processed inbox
+    l1_phase54_6_273_cleanup_downloads_includes_inbox,
 ]
 
 L2_TESTS: list[Callable] = [
