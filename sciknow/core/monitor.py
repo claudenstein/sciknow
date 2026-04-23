@@ -1454,6 +1454,36 @@ def _build_alerts(snap: dict) -> list[dict]:
                 "message": f"gpu #{g.get('index')} {t}°C",
             })
 
+        # Phase 54.6.286 — VRAM headroom watchdog.  The 54.6.279 dual-
+        # embedder + MinerU-VLM + Ollama stack can push a 24 GB 3090
+        # to <100 MB free during ingest (caught a real OOM during the
+        # 54.6.285 verification).  Warn BEFORE OOM so the operator
+        # can act (kill a stale vLLM subprocess, drop a model, switch
+        # converter backend).  ``error`` at <5% free since that's
+        # where OOMs become imminent; ``warn`` at <15%.
+        free_mb = g.get("memory_free_mb")
+        total_mb = g.get("memory_total_mb") or 0
+        headroom = g.get("headroom_pct")
+        if total_mb > 0 and headroom is not None:
+            if headroom < 5:
+                alerts.append({
+                    "severity": "error",
+                    "code": "vram_critical",
+                    "message": (
+                        f"gpu #{g.get('index')} {free_mb} MB free "
+                        f"({headroom:.1f}% headroom) — OOM imminent"
+                    ),
+                })
+            elif headroom < 15:
+                alerts.append({
+                    "severity": "warn",
+                    "code": "vram_low",
+                    "message": (
+                        f"gpu #{g.get('index')} {free_mb} MB free "
+                        f"({headroom:.1f}% headroom)"
+                    ),
+                })
+
     host = snap.get("host") or {}
     if host.get("mem_pct", 0) >= 90:
         alerts.append({
@@ -1583,6 +1613,14 @@ def _build_alerts(snap: dict) -> list[dict]:
         "inbox_waiting":   "sciknow ingest directory ./data/inbox",
         "gpu_hot":         "nvidia-smi  # confirm temp and check airflow",
         "gpu_warm":        "nvidia-smi  # monitor temp",
+        "vram_critical":   (
+            "nvidia-smi --query-compute-apps=pid,used_memory,process_name "
+            "--format=csv  # find + kill the heaviest"
+        ),
+        "vram_low":        (
+            "nvidia-smi --query-compute-apps=pid,used_memory,process_name "
+            "--format=csv"
+        ),
         "ram_pressure":    "ps axu --sort=-%mem | head",
         "host_overload":   "uptime; top -b -n 1 | head -20",
         "mineru_big":      "du -sh data/mineru_output/  # consider pruning processed outputs",
@@ -2749,11 +2787,23 @@ def _gpu_info() -> list[dict]:
             parts = [p.strip() for p in line.split(",")]
             if len(parts) < 6:
                 continue
+            used = _safe_int(parts[2])
+            total = _safe_int(parts[3])
+            # Phase 54.6.286 — headroom % = free / total, derived
+            # once here so renderers and the VRAM alert share one
+            # definition.  Defaults to 100 when total is 0 (nvidia-
+            # smi reported 0; treat as "unknown, don't warn").
+            headroom_pct = (
+                round(100.0 * (total - used) / total, 1)
+                if total > 0 else 100.0
+            )
             out.append({
                 "index": _safe_int(parts[0]),
                 "name": parts[1],
-                "memory_used_mb": _safe_int(parts[2]),
-                "memory_total_mb": _safe_int(parts[3]),
+                "memory_used_mb": used,
+                "memory_total_mb": total,
+                "memory_free_mb": max(0, total - used),
+                "headroom_pct": headroom_pct,
                 "utilization_pct": _safe_int(parts[4]),
                 "temperature_c": _safe_int(parts[5]),
             })

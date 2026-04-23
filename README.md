@@ -239,6 +239,15 @@ behind the existing `retracted_papers` info alert. Per Phase
 are not auto-excluded (they may be in the corpus for good reason;
 the operator decides per-case). DOI cells link to doi.org.
 
+**Phase 54.6.286** adds a **VRAM headroom watchdog** — `vram_low`
+alerts fire at <15 % free, `vram_critical` at <5 % free, with a
+suggested-fix command that dumps the per-process GPU memory map.
+Motivated by the 54.6.285 verification finding: the dual-embedder
++ MinerU-VLM + Ollama stack can push a 24 GB 3090 to <100 MB free
+and OOM mid-ingest. The CLI GPU header and the web GPU table now
+show a colour-coded "free N%" chip so the pressure is visible
+before the alert fires.
+
 ```bash
 uv run sciknow db monitor              # one shot, full layout
 uv run sciknow db monitor --watch 5    # btop-style in-place refresh

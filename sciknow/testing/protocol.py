@@ -12045,6 +12045,51 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_286_vram_headroom_watchdog() -> None:
+    """Phase 54.6.286 — VRAM headroom watchdog alert + header chip.
+
+    Guards:
+
+      A) `_gpu_info` returns headroom_pct + memory_free_mb per GPU.
+      B) `_build_alerts` emits vram_critical (<5%) + vram_low (<15%).
+      C) Suggested-fix map has entries for both codes.
+      D) CLI layout renders the headroom chip in the GPU header.
+      E) Web GPU table renders a Free column using headroom_pct.
+    """
+    import inspect as _inspect
+    from sciknow.core import monitor as _mon
+
+    gpu_src = _inspect.getsource(_mon._gpu_info)
+    for key in ("memory_free_mb", "headroom_pct"):
+        assert key in gpu_src, (
+            f"54.6.286 _gpu_info must populate {key!r}"
+        )
+
+    alerts_src = _inspect.getsource(_mon._build_alerts)
+    for code in ("vram_critical", "vram_low"):
+        assert code in alerts_src, (
+            f"54.6.286 _build_alerts must emit {code!r}"
+        )
+    assert "vram_critical" in alerts_src and "vram_low" in alerts_src, (
+        "54.6.286 both VRAM alert codes must be present"
+    )
+
+    from sciknow.cli import db as _db_cli
+    cli_src = _inspect.getsource(_db_cli._build_monitor_layout)
+    assert 'g.get("headroom_pct")' in cli_src, (
+        "54.6.286 CLI GPU header must read g['headroom_pct']"
+    )
+
+    from sciknow.testing.helpers import web_app_full_source
+    web_src = web_app_full_source()
+    assert "g.headroom_pct" in web_src, (
+        "54.6.286 web GPU table must read g.headroom_pct"
+    )
+    assert "vram_low" in web_src or "Free" in web_src, (
+        "54.6.286 web must surface the Free / headroom column"
+    )
+
+
 def l1_phase54_6_285_sidecar_sweep_on_force_reingest() -> None:
     """Phase 54.6.285 — `--force` re-ingest must sweep the dual-embedder
     sidecar collection along with the prod papers collection.
@@ -16546,6 +16591,7 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_283_llm_usage_heatmap,
     l1_phase54_6_284_retraction_detail,
     l1_phase54_6_285_sidecar_sweep_on_force_reingest,
+    l1_phase54_6_286_vram_headroom_watchdog,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]

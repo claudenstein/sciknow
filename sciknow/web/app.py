@@ -21734,13 +21734,29 @@ function renderMonitor(snap) {{
         : '<span class="u-muted">—</span>'
     );
     let html = '<h4>GPU</h4><table class="stats-table" style="width:100%;">'
-      + '<tr><th>#</th><th>Name</th><th>VRAM</th><th>Util</th><th>Temp</th>'
+      + '<tr><th>#</th><th>Name</th><th>VRAM</th><th>Free</th>'
+      + '<th>Util</th><th>Temp</th>'
       + '<th>Util trend</th><th>Temp trend</th></tr>';
     for (const g of gpus) {{
       const vpct = g.memory_total_mb ? (g.memory_used_mb / g.memory_total_mb * 100).toFixed(0) : '0';
+      // Phase 54.6.286 — headroom chip next to VRAM so operators
+      // spot the dual-embedder + VLM OOM risk before it fires.
+      const headroom = (g.headroom_pct !== undefined && g.headroom_pct !== null)
+        ? g.headroom_pct : null;
+      const hColour = headroom === null ? 'var(--fg-muted)'
+        : headroom < 5 ? '#c33'
+        : headroom < 15 ? '#b70'
+        : '#080';
+      const freeCell = headroom === null ? '—'
+        : '<span style="color:' + hColour + ';font-weight:bold;" '
+          + 'title="<15% = vram_low alert · <5% = vram_critical · '
+          + 'dual-embedder + VLM stack can OOM a 24GB 3090">'
+          + (g.memory_free_mb !== undefined ? _fmtNum(g.memory_free_mb) + ' MB ' : '')
+          + '(' + headroom.toFixed(1) + '%)</span>';
       html += '<tr><td>' + g.index + '</td><td>' + _escHTML(g.name)
-        + '</td><td>' + _fmtNum(g.memory_used_mb) + ' / ' + _fmtNum(g.memory_total_mb) + ' MB (' + vpct + '%)'
-        + '</td><td>' + g.utilization_pct + '%</td><td>' + (g.temperature_c || '?') + '°C</td>'
+        + '</td><td>' + _fmtNum(g.memory_used_mb) + ' / ' + _fmtNum(g.memory_total_mb) + ' MB (' + vpct + '%)</td>'
+        + '<td>' + freeCell + '</td>'
+        + '<td>' + g.utilization_pct + '%</td><td>' + (g.temperature_c || '?') + '°C</td>'
         + '<td>' + sparkCol(utilSamples) + '</td>'
         + '<td>' + sparkCol(tempSamples) + '</td>'
         + '</tr>';

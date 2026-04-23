@@ -2476,6 +2476,17 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
                        else C_WARN if g.get("temperature_c", 0) >= 75
                        else C_DIM),
             )
+            # Phase 54.6.286 — inline VRAM headroom chip so the
+            # dual-embedder + VLM OOM class is visible before it
+            # fires.  Red <5 % (alert territory), yellow <15 %.
+            headroom = g.get("headroom_pct")
+            if headroom is not None:
+                h_colour = (
+                    C_ERR if headroom < 5 else
+                    C_WARN if headroom < 15 else C_DIM
+                )
+                gpu_header.append(f"  free ", style=C_DIM)
+                gpu_header.append(f"{headroom:.0f}%", style=h_colour)
             gpu_tbl.add_row(gpu_header)
 
             # VRAM bar — show GB (compact) to save column width
