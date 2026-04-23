@@ -273,6 +273,17 @@ and the web modal renders a "Model swap churn" panel with the last
 over ≥10 min — each swap costs 5-10 s of Ollama cold-load, so
 15/hr = ~3 min of pipeline cold-loads per hour, worth surfacing.
 
+**Phase 54.6.296** adds **Qdrant payload-index health check** — and
+fixes a real bug found while building it: the dual-embedder sidecar
+was being created with **zero payload indexes**, so filter pushdown
+on the dense leg (`document_id` / `year` / `section_type` / …) was
+silently degrading to a full scan — ~100× slower on a 30k-point
+collection. `_ensure_sidecar_exists` now creates all six expected
+indexes idempotently. Monitor adds a `payload_index_missing` alert,
+a "payload indexes" row in the CLI qdrant panel, and an Indexes
+column in the web qdrant table that flags any missing index per
+collection with a tooltip listing the specific field names.
+
 **Phase 54.6.295** adds a **`--deep` audit** — goes beyond the 292
 count-match audit to check:
 

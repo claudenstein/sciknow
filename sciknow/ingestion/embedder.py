@@ -4,6 +4,7 @@ The model is loaded once and reused across calls.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
@@ -13,6 +14,8 @@ from qdrant_client.models import PointStruct, SparseVector
 from sciknow.config import settings
 from sciknow.ingestion.chunker import Chunk
 from sciknow.storage.qdrant import ABSTRACTS_COLLECTION, PAPERS_COLLECTION
+
+logger = logging.getLogger(__name__)
 
 _model = None
 
@@ -259,8 +262,21 @@ def backfill_sidecar_payload(
 def _ensure_sidecar_exists(qdrant_client: QdrantClient) -> str:
     """Create the sidecar collection on-demand if missing. Dim is
     read from settings.dense_embedder_dim. Returns the collection
-    name. Idempotent — no-op when the collection already exists."""
-    from qdrant_client.models import Distance, VectorParams
+    name. Idempotent — no-op when the collection already exists.
+
+    Phase 54.6.296 — also ensures the same payload indexes that
+    ``storage/qdrant.py::init_collections`` creates on the prod
+    papers collection.  Without these, filter pushdown on the
+    dense leg (``document_id``, ``year``, ``section_type``,
+    ``domains``, ``journal``, ``node_level``) degrades to a full
+    scan — the problem that motivated this phase (sidecars created
+    pre-54.6.296 had zero payload indexes).  Calls are idempotent
+    per the Qdrant semantics (``create_payload_index`` on an
+    existing index is a no-op).
+    """
+    from qdrant_client.models import (
+        Distance, VectorParams, PayloadSchemaType,
+    )
     coll = _sidecar_collection_name()
     if not qdrant_client.collection_exists(coll):
         dim = int(getattr(settings, "dense_embedder_dim", 2560))
@@ -270,6 +286,28 @@ def _ensure_sidecar_exists(qdrant_client: QdrantClient) -> str:
                 "dense": VectorParams(size=dim, distance=Distance.COSINE),
             },
         )
+    # Ensure payload indexes — must mirror init_collections() for the
+    # prod papers collection so retrieval filters hit indexes on both
+    # sides.  Idempotent: create_payload_index raises on duplicate,
+    # which we swallow.
+    _expected_indexes = [
+        ("document_id", PayloadSchemaType.KEYWORD),
+        ("section_type", PayloadSchemaType.KEYWORD),
+        ("year", PayloadSchemaType.INTEGER),
+        ("domains", PayloadSchemaType.KEYWORD),
+        ("journal", PayloadSchemaType.KEYWORD),
+        ("node_level", PayloadSchemaType.INTEGER),
+    ]
+    for field, schema in _expected_indexes:
+        try:
+            qdrant_client.create_payload_index(coll, field, schema)
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "already exists" in msg or "already created" in msg:
+                continue
+            logger.debug(
+                "sidecar payload index %s failed: %s", field, exc,
+            )
     return coll
 
 

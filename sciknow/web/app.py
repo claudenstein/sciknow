@@ -20997,6 +20997,8 @@ function renderMonitor(snap) {{
   const sidecarAudit = snap.sidecar_audit || {{}};
   // Phase 54.6.294 — top-N slow ingest docs.
   const slowDocs = snap.slow_docs || [];
+  // Phase 54.6.296 — per-collection payload-index health check.
+  const qdrantIndexes = snap.qdrant_indexes || {{}};
   // Phase 54.6.284 — retraction detail (counts + recent list).
   const retractions = snap.retractions || {{}};
   // Phase 54.6.244 additions
@@ -22028,14 +22030,38 @@ function renderMonitor(snap) {{
     sections.push(html);
   }}
 
-  // Qdrant collections
+  // Qdrant collections — Phase 54.6.296 adds an Indexes column
+  // listing expected/present/missing per collection so filter-
+  // pushdown regressions (a missed create_payload_index) jump out.
   if (qcolls.length) {{
+    // Index map keyed by collection name for O(1) lookup
+    const idxMap = {{}};
+    for (const c of (qdrantIndexes.collections || [])) {{
+      idxMap[c.name] = c;
+    }}
     let html = '<h4>Qdrant collections</h4><table class="stats-table" style="width:100%;">'
-      + '<tr><th>Collection</th><th>Points</th><th>Vector fields</th></tr>';
+      + '<tr><th>Collection</th><th>Points</th><th>Vector fields</th>'
+      + '<th title="Payload indexes present / expected — missing indexes turn filter pushdown into a full scan">Indexes</th></tr>';
     for (const c of qcolls) {{
       const fields = (c.vectors || []).concat((c.sparse_vectors || []).map(s => 'sparse:' + s));
+      const idx = idxMap[c.name];
+      let idxCell = '<span class="u-muted">—</span>';
+      if (idx) {{
+        const pres = (idx.present || []).length;
+        const exp  = (idx.expected || []).length;
+        const miss = (idx.missing || []).length;
+        const col = miss === 0 ? '#080' : '#c33';
+        const title = (idx.missing || []).length
+          ? 'missing: ' + idx.missing.join(', ')
+          : 'all expected indexes present';
+        idxCell = '<span style="color:' + col + ';" title="' + _escHTML(title) + '">'
+          + pres + '/' + Math.max(pres, exp)
+          + (miss ? ' (✗' + miss + ' missing)' : ' ✓')
+          + '</span>';
+      }}
       html += '<tr><td>' + _escHTML(c.name) + '</td><td>' + _fmtNum(c.points_count)
-        + '</td><td>' + _escHTML(fields.join(', ')) + '</td></tr>';
+        + '</td><td>' + _escHTML(fields.join(', ')) + '</td>'
+        + '<td>' + idxCell + '</td></tr>';
     }}
     html += '</table>';
     sections.push(html);

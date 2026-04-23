@@ -12045,6 +12045,70 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_296_payload_index_health() -> None:
+    """Phase 54.6.296 — Qdrant payload-index health check.
+
+    Guards:
+
+      A) `_qdrant_payload_indexes` helper exists returning per-
+         collection expected/present/missing/extra lists.
+      B) `_ensure_sidecar_exists` creates all six expected payload
+         indexes (document_id / section_type / year / domains /
+         journal / node_level) — this is the fix for the bug where
+         sidecars had zero indexes and filter pushdown fell back
+         to a full scan.
+      C) `_build_alerts` emits `payload_index_missing` when any
+         expected index is absent.
+      D) CLI renders a "payload indexes" row in the qdrant panel.
+      E) Web modal renders an Indexes column in the qdrant table.
+    """
+    import inspect as _inspect
+    from sciknow.core import monitor as _mon
+
+    assert hasattr(_mon, "_qdrant_payload_indexes"), (
+        "54.6.296 _qdrant_payload_indexes helper must exist"
+    )
+    src = _inspect.getsource(_mon._qdrant_payload_indexes)
+    for key in ("expected", "present", "missing", "extra"):
+        assert key in src, (
+            f"54.6.296 helper must populate {key!r}"
+        )
+
+    from sciknow.ingestion import embedder as _emb
+    ensure_src = _inspect.getsource(_emb._ensure_sidecar_exists)
+    for field in (
+        "document_id", "section_type", "year",
+        "domains", "journal", "node_level",
+    ):
+        assert f'"{field}"' in ensure_src, (
+            f"54.6.296 _ensure_sidecar_exists must create payload "
+            f"index for {field!r}"
+        )
+    assert "create_payload_index" in ensure_src, (
+        "54.6.296 sidecar must create payload indexes"
+    )
+
+    alerts_src = _inspect.getsource(_mon._build_alerts)
+    assert "payload_index_missing" in alerts_src, (
+        "54.6.296 _build_alerts must emit payload_index_missing"
+    )
+
+    from sciknow.cli import db as _db_cli
+    cli_src = _inspect.getsource(_db_cli._build_monitor_layout)
+    assert "qdrant_indexes" in cli_src, (
+        "54.6.296 CLI must read snap['qdrant_indexes']"
+    )
+    assert "payload indexes" in cli_src, (
+        "54.6.296 CLI must render 'payload indexes' row"
+    )
+
+    from sciknow.testing.helpers import web_app_full_source
+    web_src = web_app_full_source()
+    assert "snap.qdrant_indexes" in web_src, (
+        "54.6.296 web must read snap.qdrant_indexes"
+    )
+
+
 def l1_phase54_6_295_sidecar_deep_audit() -> None:
     """Phase 54.6.295 — deep audit helper + --deep CLI flag.
 
@@ -17110,6 +17174,7 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_293_sidecar_audit_in_monitor,
     l1_phase54_6_294_slow_docs_leaderboard,
     l1_phase54_6_295_sidecar_deep_audit,
+    l1_phase54_6_296_payload_index_health,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]

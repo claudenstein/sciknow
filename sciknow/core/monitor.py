@@ -633,6 +633,104 @@ def _sidecar_audit_cached(session) -> dict:
     return out
 
 
+def _qdrant_payload_indexes() -> dict:
+    """Phase 54.6.296 — verify every Qdrant collection carries its
+    expected payload indexes.
+
+    Expected index sets mirror ``storage/qdrant.py::init_collections``
+    and ``ingestion/embedder.py::_ensure_sidecar_exists`` (54.6.296
+    fix).  Missing indexes silently degrade retrieval — filter
+    pushdown on the dense leg falls back to a full scan, which on
+    a 30k-point collection is ~100× slower than an indexed lookup.
+
+    Returns::
+
+        {
+          "collections": [
+            {
+              "name":          str,
+              "expected":      [str],      # field names
+              "present":       [str],
+              "missing":       [str],
+              "extra":         [str],      # not wrong, just unexpected
+            },
+            ...
+          ],
+          "missing_total": int,
+        }
+
+    Collections not in the expected-set table are reported with an
+    empty ``expected`` list (their indexes, if any, land in
+    ``extra`` without triggering the missing_total counter).
+    """
+    from sciknow.storage.qdrant import get_client as _get_qdrant
+    from sciknow.core.project import get_active_project
+
+    try:
+        client = _get_qdrant()
+        collections = client.get_collections().collections
+    except Exception:
+        return {"collections": [], "missing_total": 0}
+
+    try:
+        prefix = get_active_project().qdrant_prefix
+    except Exception:
+        prefix = ""
+
+    expected_by_suffix: dict[str, set[str]] = {
+        "papers": {
+            "document_id", "section_type", "year",
+            "domains", "journal", "node_level",
+        },
+        "abstracts": {"document_id"},
+        "wiki": {"page_type", "slug"},
+        "visuals": {"document_id", "kind"},
+    }
+
+    def _expected_for(name: str) -> set[str]:
+        # Try suffix match against the active project's prefix first.
+        if prefix:
+            for suffix, idxs in expected_by_suffix.items():
+                if name == f"{prefix}_{suffix}":
+                    return idxs
+        # Dual-embedder sidecar: name format
+        # ``<prefix>_ab_<slug>_papers`` — same indexes as the prod
+        # papers collection because retrieval filters apply to both.
+        if name.endswith("_papers") and "_ab_" in name:
+            return expected_by_suffix["papers"]
+        # Generic match when prefix resolution fails (e.g. multi-
+        # project install looking at another project's collections).
+        for suffix, idxs in expected_by_suffix.items():
+            if name.endswith(f"_{suffix}"):
+                return idxs
+        return set()
+
+    out_colls: list[dict] = []
+    missing_total = 0
+    for col in collections:
+        name = col.name
+        try:
+            info = client.get_collection(name)
+            present = set(
+                (info.payload_schema or {}).keys()
+            )
+        except Exception:
+            present = set()
+        expected = _expected_for(name)
+        missing = sorted(expected - present)
+        extra = sorted(present - expected)
+        out_colls.append({
+            "name": name,
+            "expected": sorted(expected),
+            "present": sorted(present),
+            "missing": missing,
+            "extra": extra,
+        })
+        missing_total += len(missing)
+
+    return {"collections": out_colls, "missing_total": missing_total}
+
+
 def _sidecar_deep_audit(session, *, uuid_sample: int = 0) -> dict:
     """Phase 54.6.295 — deeper audit beyond chunk-count parity.
 
@@ -2270,6 +2368,30 @@ def _build_alerts(snap: dict) -> list[dict]:
             ),
         })
 
+    # Phase 54.6.296 — missing payload-index alert.  Fires warn when
+    # any expected payload index is missing on any collection.
+    # Filter pushdown without indexes is a full scan — 100× slower
+    # on a 30k-point collection.
+    qi = snap.get("qdrant_indexes") or {}
+    missing_total = qi.get("missing_total", 0) or 0
+    if missing_total > 0:
+        # List the most-affected collection for context.
+        affected = [
+            c for c in (qi.get("collections") or []) if c.get("missing")
+        ]
+        sample = affected[0] if affected else {}
+        affected_name = (sample.get("name") or "?").split("_")[-1]
+        alerts.append({
+            "severity": "warn",
+            "code": "payload_index_missing",
+            "message": (
+                f"qdrant: {missing_total} payload index(es) missing "
+                f"across {len(affected)} collection(s) — "
+                f"e.g. {sample.get('name', '?')} missing "
+                f"{', '.join(sample.get('missing', [])[:3])}"
+            ),
+        })
+
     # Phase 54.6.293 — sidecar integrity alert.  Fires warn whenever
     # any critical bucket is non-zero (sidecar_missing, _partial,
     # _orphan, prod_missing, prod_partial).  prod_orphan is NOT
@@ -2528,6 +2650,10 @@ def _build_alerts(snap: dict) -> list[dict]:
         ),
         "sidecar_drift":   (
             "sciknow db audit-sidecar  # per-doc mismatch detail"
+        ),
+        "payload_index_missing": (
+            "sciknow db init  # idempotent; re-creates missing "
+            "payload indexes"
         ),
         "ram_pressure":    "ps axu --sort=-%mem | head",
         "host_overload":   "uptime; top -b -n 1 | head -20",
@@ -4015,6 +4141,8 @@ def collect_monitor_snapshot(
             llm_usage, llm_usage_days, llm_usage_by_day,
         ),
         "qdrant": _qdrant_collections(),
+        # 54.6.296 — per-collection payload-index health check.
+        "qdrant_indexes": _qdrant_payload_indexes(),
         "gpu": gpu_info,
         "gpu_trend": _gpu_trend_snapshot(),
         # 54.6.291 — VRAM preflight observability (see vram_budget).
