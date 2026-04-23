@@ -41,19 +41,45 @@ class AlreadyIngested(Exception):
 
 
 def _delete_qdrant_vectors(qdrant, document_id: str) -> None:
-    """Remove all Qdrant points for a document before re-ingesting it."""
+    """Remove all Qdrant points for a document before re-ingesting it.
+
+    Phase 54.6.285 — also sweeps the dense sidecar collection when the
+    dual-embedder split is active.  Without this, `--force` re-ingest
+    would leave orphan sidecar points from the previous ingest (found
+    during the 54.6.279 end-to-end verification: a 16-chunk doc ended
+    up with 16 prod points + 32 sidecar points after one --force
+    cycle — old + new concatenated).
+    """
     from qdrant_client.models import Filter, FieldCondition, MatchValue
     from sciknow.storage.qdrant import PAPERS_COLLECTION
 
+    point_filter = Filter(
+        must=[FieldCondition(
+            key="document_id", match=MatchValue(value=document_id),
+        )]
+    )
     try:
         qdrant.delete(
             collection_name=PAPERS_COLLECTION,
-            points_selector=Filter(
-                must=[FieldCondition(key="document_id", match=MatchValue(value=document_id))]
-            ),
+            points_selector=point_filter,
         )
     except Exception:
         pass  # collection may not exist yet on first run
+
+    # Sidecar sweep (Phase 54.6.285).  Lazy-imported to keep the
+    # embedder module off the hot path when the split is inactive.
+    try:
+        from sciknow.config import settings
+        if getattr(settings, "dense_embedder_model", None):
+            from sciknow.ingestion.embedder import _sidecar_collection_name
+            sidecar = _sidecar_collection_name()
+            if qdrant.collection_exists(sidecar):
+                qdrant.delete(
+                    collection_name=sidecar,
+                    points_selector=point_filter,
+                )
+    except Exception:
+        pass  # best-effort; never block a re-ingest on sidecar cleanup
 
 
 def _sha256(path: Path) -> str:

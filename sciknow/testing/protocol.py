@@ -12045,6 +12045,41 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_285_sidecar_sweep_on_force_reingest() -> None:
+    """Phase 54.6.285 — `--force` re-ingest must sweep the dual-embedder
+    sidecar collection along with the prod papers collection.
+
+    Without this, sidecar accumulates stale points on every --force
+    cycle (found during the 54.6.279 end-to-end ingestion verification:
+    a 16-chunk doc ended up with 16 prod + 32 sidecar points after one
+    --force, because the delete path only touched prod).
+
+    Guards:
+
+      A) `_delete_qdrant_vectors` branches on `settings.dense_embedder_model`
+         to invoke the sidecar sweep.
+      B) Uses `_sidecar_collection_name` (shared helper) to resolve the
+         sidecar collection name, keeping ingest + retrieval aligned.
+      C) Swallows exceptions so best-effort cleanup doesn't block the
+         re-ingest when the sidecar doesn't exist yet.
+    """
+    import inspect as _inspect
+    from sciknow.ingestion import pipeline as _pipe
+
+    src = _inspect.getsource(_pipe._delete_qdrant_vectors)
+    assert "dense_embedder_model" in src, (
+        "54.6.285 _delete_qdrant_vectors must branch on dense_embedder_model"
+    )
+    assert "_sidecar_collection_name" in src, (
+        "54.6.285 sidecar sweep must use the shared _sidecar_collection_name "
+        "helper so ingest + retrieval resolve the same collection"
+    )
+    assert "collection_exists" in src, (
+        "54.6.285 sidecar sweep must guard on collection_exists so the "
+        "first ingest on a fresh install doesn't error"
+    )
+
+
 def l1_phase54_6_284_retraction_detail() -> None:
     """Phase 54.6.284 — retraction detail behind the existing
     `retracted_papers` alert.
@@ -16510,6 +16545,7 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_282_section_coverage,
     l1_phase54_6_283_llm_usage_heatmap,
     l1_phase54_6_284_retraction_detail,
+    l1_phase54_6_285_sidecar_sweep_on_force_reingest,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]
