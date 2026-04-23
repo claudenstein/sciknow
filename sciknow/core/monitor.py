@@ -706,6 +706,114 @@ def _raptor_tree_shape(session) -> dict:
     return out
 
 
+def _citation_graph(session) -> dict:
+    """Phase 54.6.280 — citation graph connectivity metrics.
+
+    Surfaces three operational signals the other panels don't cover:
+
+      * **Internal coverage** — how many of the corpus's outgoing
+        references land on papers we actually have. Low numbers mean
+        `sciknow db expand` has room to run.
+      * **Extraction coverage** — how many complete docs have had
+        their reference list extracted at all. Papers with zero
+        outgoing refs usually indicate converter drop-out (MinerU
+        missing the References section) or an old pre-citations
+        ingest.
+      * **Orphan count** — complete docs with zero *incoming*
+        internal citations. High orphan rates in a domain-focused
+        corpus suggest we're ingesting papers that aren't referenced
+        by the rest of the collection (stray downloads, off-topic
+        expand results).
+
+    Plus a top-5 most-cited leaderboard so the operator can
+    eyeball the citation "spine" of the corpus at a glance.
+
+    All counts are snapshot-fast (single aggregate per metric;
+    `citations.citing_document_id` and `cited_document_id` are both
+    indexed). Safe during active ingestion.
+    """
+    from sqlalchemy import text
+    try:
+        totals = session.execute(text("""
+            SELECT
+                COUNT(*) AS total_refs,
+                COUNT(cited_document_id) AS internal_refs,
+                COUNT(*) FILTER (WHERE is_self_cite = TRUE)
+                    AS self_refs,
+                COUNT(DISTINCT citing_document_id) AS citing_docs
+            FROM citations
+        """)).fetchone()
+    except Exception:
+        totals = None
+    try:
+        orphans = int(session.execute(text("""
+            SELECT COUNT(*) FROM documents d
+            WHERE d.ingestion_status = 'complete'
+              AND NOT EXISTS (
+                  SELECT 1 FROM citations c
+                  WHERE c.cited_document_id = d.id
+              )
+        """)).scalar() or 0)
+    except Exception:
+        orphans = 0
+    try:
+        zero_out = int(session.execute(text("""
+            SELECT COUNT(*) FROM documents d
+            WHERE d.ingestion_status = 'complete'
+              AND NOT EXISTS (
+                  SELECT 1 FROM citations c
+                  WHERE c.citing_document_id = d.id
+              )
+        """)).scalar() or 0)
+    except Exception:
+        zero_out = 0
+    try:
+        rows = session.execute(text("""
+            SELECT d.id, pm.title, pm.year, COUNT(c.id) AS n
+            FROM documents d
+            JOIN citations c ON c.cited_document_id = d.id
+            LEFT JOIN paper_metadata pm ON pm.document_id = d.id
+            WHERE d.ingestion_status = 'complete'
+            GROUP BY d.id, pm.title, pm.year
+            ORDER BY n DESC
+            LIMIT 5
+        """)).fetchall()
+    except Exception:
+        rows = []
+    total_refs = _safe_int(totals[0]) if totals else 0
+    internal_refs = _safe_int(totals[1]) if totals else 0
+    self_refs = _safe_int(totals[2]) if totals else 0
+    citing_docs = _safe_int(totals[3]) if totals else 0
+    avg_out = (total_refs / citing_docs) if citing_docs else 0.0
+    coverage_pct = (
+        (internal_refs / total_refs * 100.0) if total_refs else 0.0
+    )
+    self_cite_pct = (
+        (self_refs / internal_refs * 100.0) if internal_refs else 0.0
+    )
+    return {
+        "total_refs": total_refs,
+        "internal_refs": internal_refs,
+        "external_refs": max(0, total_refs - internal_refs),
+        "self_refs": self_refs,
+        "coverage_pct": round(coverage_pct, 1),
+        "self_cite_pct": round(self_cite_pct, 1),
+        "citing_docs": citing_docs,
+        "avg_out_degree": round(avg_out, 1),
+        "orphans": orphans,
+        "zero_outgoing": zero_out,
+        "top_cited": [
+            {
+                "document_id": str(r[0]),
+                "title": (r[1] or "")[:120],
+                "year": _safe_int(r[2]) if r[2] is not None else None,
+                "n": _safe_int(r[3]),
+            }
+            for r in rows
+        ],
+    }
+
+
 def _duplicate_hashes(session) -> int:
     """Phase 54.6.236 — count of file_hash collisions in documents.
 
@@ -2533,6 +2641,8 @@ def collect_monitor_snapshot(
         visuals_cov = _safe_db(session, _visuals_coverage, default={})
         raptor_shape = _safe_db(session, _raptor_tree_shape, default={})
         dupe_hashes = _safe_db(session, _duplicate_hashes, default=0)
+        # 54.6.280 — citation graph connectivity.
+        citation_graph = _safe_db(session, _citation_graph, default={})
         # 54.6.237 — trend batch
         growth = _safe_db(session, _corpus_growth_rate, default={})
         book_act = _safe_db(session, _book_activity, default={})
@@ -2587,6 +2697,10 @@ def collect_monitor_snapshot(
         "visuals_coverage": visuals_cov,
         "raptor_shape": raptor_shape,
         "duplicate_hashes": dupe_hashes,
+        # 54.6.280 — citation graph connectivity metrics. Populated
+        # on every snapshot; empty dict when the citations table is
+        # missing (fresh install).
+        "citation_graph": citation_graph,
         "bench_freshness": _bench_freshness(
             Path(data_dir) if data_dir else None
         ),

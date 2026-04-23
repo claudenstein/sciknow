@@ -1765,6 +1765,8 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     vcov = snap.get("visuals_coverage") or {}
     raptor = snap.get("raptor_shape") or {}
     dupe_hashes = snap.get("duplicate_hashes", 0) or 0
+    # 54.6.280 — citation graph connectivity.
+    cgraph = snap.get("citation_graph") or {}
     bench_fresh = snap.get("bench_freshness") or {}
     # 54.6.250 — backup freshness: compact "backup Nd" marker
     backup_fresh = snap.get("backup_freshness") or {}
@@ -2331,6 +2333,57 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
             Text("dupe hashes", style=C_DIM),
             Text(str(dupe_hashes), style=dupe_colour),
         )
+
+    # Phase 54.6.280 — citation graph health. Three compact rows
+    # surfacing internal coverage (how many cited refs are in the
+    # corpus), extraction coverage (how many papers had refs pulled),
+    # and orphan count (papers with zero incoming internal cites).
+    # Quiet when the citations table is empty (fresh install).
+    if cgraph.get("total_refs"):
+        total_refs = cgraph.get("total_refs", 0)
+        internal = cgraph.get("internal_refs", 0)
+        coverage = cgraph.get("coverage_pct", 0.0)
+        cov_colour = (
+            C_OK if coverage >= 30 else
+            C_WARN if coverage >= 10 else C_DIM
+        )
+        corpus_tbl.add_row(
+            Text("cites in-corpus", style=C_DIM),
+            Text(
+                f"{internal:,}/{total_refs:,} ({coverage:.1f}%)",
+                style=cov_colour,
+            ),
+        )
+        total_docs = corpus.get("documents_complete", 0) or 0
+        citing = cgraph.get("citing_docs", 0)
+        if total_docs:
+            ex_pct = citing / total_docs * 100
+            ex_colour = (
+                C_OK if ex_pct >= 80 else
+                C_WARN if ex_pct >= 40 else C_ERR
+            )
+            corpus_tbl.add_row(
+                Text("refs extracted", style=C_DIM),
+                Text(
+                    f"{citing:,}/{total_docs:,} docs "
+                    f"({ex_pct:.0f}%)",
+                    style=ex_colour,
+                ),
+            )
+        orphans = cgraph.get("orphans", 0)
+        if total_docs and orphans:
+            orph_pct = orphans / total_docs * 100
+            orph_colour = (
+                C_OK if orph_pct < 30 else
+                C_WARN if orph_pct < 70 else C_ERR
+            )
+            corpus_tbl.add_row(
+                Text("orphans", style=C_DIM),
+                Text(
+                    f"{orphans:,} ({orph_pct:.0f}% uncited in corpus)",
+                    style=orph_colour,
+                ),
+            )
 
     # Phase 54.6.237 — corpus growth rate: compact "+N /24h · +M /7d"
     # line. Shows only when 7d > 0 (keeps rows quiet on a dormant

@@ -12045,6 +12045,78 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_280_citation_graph_panel() -> None:
+    """Phase 54.6.280 — citation graph panel surfaces internal coverage,
+    extraction coverage, orphan count, and top-5 most-cited papers in
+    both the CLI monitor and the web modal.
+
+    Guards:
+
+      A) core.monitor._citation_graph helper exists with the documented
+         key contract.
+      B) collect_monitor_snapshot wires citation_graph into the dict.
+      C) CLI `_build_monitor_layout` consumes snap['citation_graph'].
+      D) Web renderMonitor JS consumes snap.citation_graph with the
+         same field names (coverage_pct, orphans, top_cited, …).
+    """
+    import inspect as _inspect
+    from sciknow.core import monitor as _mon
+
+    # A) helper exists + exposes the documented keys
+    assert hasattr(_mon, "_citation_graph"), (
+        "54.6.280 core.monitor._citation_graph helper must exist"
+    )
+    helper_src = _inspect.getsource(_mon._citation_graph)
+    for key in (
+        "total_refs", "internal_refs", "external_refs",
+        "coverage_pct", "orphans", "zero_outgoing",
+        "citing_docs", "avg_out_degree", "top_cited",
+    ):
+        assert key in helper_src, (
+            f"54.6.280 _citation_graph must populate {key!r}"
+        )
+
+    # B) collect_monitor_snapshot wires the key
+    snap_src = _inspect.getsource(_mon.collect_monitor_snapshot)
+    assert '"citation_graph"' in snap_src, (
+        "54.6.280 collect_monitor_snapshot must expose citation_graph"
+    )
+    assert "_citation_graph" in snap_src, (
+        "54.6.280 collect_monitor_snapshot must call _citation_graph"
+    )
+
+    # C) CLI layout consumes it
+    from sciknow.cli import db as _db_cli
+    cli_src = _inspect.getsource(_db_cli._build_monitor_layout)
+    assert 'snap.get("citation_graph")' in cli_src, (
+        "54.6.280 CLI _build_monitor_layout must read snap['citation_graph']"
+    )
+    assert "cites in-corpus" in cli_src, (
+        "54.6.280 CLI must render the 'cites in-corpus' coverage row"
+    )
+    assert "refs extracted" in cli_src, (
+        "54.6.280 CLI must render the 'refs extracted' coverage row"
+    )
+
+    # D) Web renderMonitor JS consumes it
+    from sciknow.testing.helpers import web_app_full_source
+    web_src = web_app_full_source()
+    assert "snap.citation_graph" in web_src, (
+        "54.6.280 web renderMonitor must read snap.citation_graph"
+    )
+    assert "Citation graph" in web_src, (
+        "54.6.280 web must render a 'Citation graph' section heading"
+    )
+    # Field names the JS reads from the snapshot must match helper output.
+    for key in (
+        "coverage_pct", "orphans", "citing_docs", "top_cited",
+        "avg_out_degree",
+    ):
+        assert key in web_src, (
+            f"54.6.280 web renderMonitor must reference cgraph.{key}"
+        )
+
+
 def l1_phase54_6_273_cleanup_downloads_includes_inbox() -> None:
     """Phase 54.6.273 — `sciknow db cleanup-downloads` scans
     data/inbox/ recursively and force-deletes PDFs already 'complete'
@@ -16260,6 +16332,7 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_273_cleanup_downloads_includes_inbox,
     # Phase 54.6.274 — reranker backend dispatch (bge + Qwen3-Reranker)
     l1_phase54_6_274_reranker_backend_dispatch,
+    l1_phase54_6_280_citation_graph_panel,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]

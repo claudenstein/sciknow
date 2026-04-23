@@ -20987,6 +20987,8 @@ function renderMonitor(snap) {{
   const qsig = snap.quality_signals || {{}};
   const wikiMat = snap.wiki_materialization || {{}};
   const projectsOverview = snap.projects_overview || [];
+  // Phase 54.6.280 — citation graph connectivity metrics.
+  const cgraph = snap.citation_graph || {{}};
   // Phase 54.6.244 additions
   const funnel = snap.ingest_funnel || [];
   const hourlyFails = snap.pipeline_hourly_failures || [];
@@ -21417,6 +21419,65 @@ function renderMonitor(snap) {{
       + '<div><strong>Words</strong>: ' + _fmtNum(bookAct.total_words || 0) + '</div>'
       + '<div><strong>Updated</strong>: <code>' + lastUp + '</code></div>'
       + '</div>');
+  }}
+
+  // Phase 54.6.280 — citation graph connectivity. Three compact
+  // stat cards (coverage %, papers with extracted refs, orphan
+  // count) plus a top-5 most-cited leaderboard. The data source is
+  // `core.monitor._citation_graph`, shared with the CLI's "corpus"
+  // panel — this view just has room to list the top-cited papers,
+  // which the narrow CLI column doesn't.
+  if (cgraph && (cgraph.total_refs || 0) > 0) {{
+    const totalRefs = cgraph.total_refs || 0;
+    const internal = cgraph.internal_refs || 0;
+    const coverage = cgraph.coverage_pct || 0;
+    const covColour = coverage >= 30 ? '#080'
+      : coverage >= 10 ? '#b70' : '#c33';
+    const totalDocs = corpus.documents_complete || 0;
+    const citing = cgraph.citing_docs || 0;
+    const exPct = totalDocs ? Math.round(citing / totalDocs * 100) : 0;
+    const exColour = exPct >= 80 ? '#080'
+      : exPct >= 40 ? '#b70' : '#c33';
+    const orphans = cgraph.orphans || 0;
+    const orphPct = totalDocs ? Math.round(orphans / totalDocs * 100) : 0;
+    const orphColour = orphPct < 30 ? '#080'
+      : orphPct < 70 ? '#b70' : '#c33';
+    let html = '<h4>Citation graph</h4>'
+      + '<div style="display:flex;gap:2em;flex-wrap:wrap;padding:0.5em 0.75em;'
+      + 'background:var(--bg-alt, #f5f5f5);border-radius:4px;margin-bottom:0.5em;">'
+      + '<div title="Citations whose target paper is also in the corpus — grow with `sciknow db expand`">'
+      + '<strong>In-corpus refs</strong><br>'
+      + '<span style="color:' + covColour + ';font-size:1.1em;">'
+      + _fmtNum(internal) + ' / ' + _fmtNum(totalRefs)
+      + ' (' + coverage.toFixed(1) + '%)</span></div>'
+      + '<div title="Complete docs whose reference section was successfully parsed">'
+      + '<strong>Refs extracted</strong><br>'
+      + '<span style="color:' + exColour + ';font-size:1.1em;">'
+      + _fmtNum(citing) + ' / ' + _fmtNum(totalDocs)
+      + ' docs (' + exPct + '%)</span></div>'
+      + '<div title="Complete docs with zero incoming citations from other corpus papers">'
+      + '<strong>Orphans</strong><br>'
+      + '<span style="color:' + orphColour + ';font-size:1.1em;">'
+      + _fmtNum(orphans) + ' (' + orphPct + '%)</span></div>'
+      + '<div title="Average outgoing references per citing document (extracted papers only)">'
+      + '<strong>Avg out-degree</strong><br>'
+      + '<span style="font-size:1.1em;">'
+      + (cgraph.avg_out_degree || 0).toFixed(1) + ' refs/doc</span></div>'
+      + '</div>';
+    const topCited = cgraph.top_cited || [];
+    if (topCited.length) {{
+      html += '<table class="stats-table" style="width:100%;font-size:0.9em;">'
+        + '<tr><th style="width:3em;">#</th><th>Most-cited paper</th>'
+        + '<th style="width:5em;">Year</th><th style="width:5em;">Cites</th></tr>';
+      topCited.forEach((p, i) => {{
+        html += '<tr><td class="u-muted">' + (i + 1) + '</td>'
+          + '<td>' + _escHTML(p.title || '(no title)') + '</td>'
+          + '<td class="u-muted">' + (p.year !== null && p.year !== undefined ? _escHTML(String(p.year)) : '—') + '</td>'
+          + '<td><strong>' + _fmtNum(p.n) + '</strong></td></tr>';
+      }});
+      html += '</table>';
+    }}
+    sections.push(html);
   }}
 
   // Phase 54.6.251 — metadata-source breakdown. Source is where the

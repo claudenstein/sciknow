@@ -197,6 +197,15 @@ side — filter/search, URL-hash deep links, snapshot download, NEW
 badges on unseen alerts, a health-trend sparkline, Markdown export,
 and browser notifications when new error alerts fire on a hidden tab.
 
+**Phase 54.6.280** surfaces the corpus's **citation graph** in both
+surfaces: internal-ref coverage (what fraction of outgoing refs land
+on papers we also have), extraction coverage (how many papers had
+their references parsed at all), and the orphan count (complete docs
+with zero incoming citations from the rest of the corpus). The web
+modal additionally lists the top-5 most-cited papers. Useful for
+deciding when to run `sciknow db expand` (low coverage) vs when the
+MinerU fallback is dropping reference sections (low extraction).
+
 ```bash
 uv run sciknow db monitor              # one shot, full layout
 uv run sciknow db monitor --watch 5    # btop-style in-place refresh
