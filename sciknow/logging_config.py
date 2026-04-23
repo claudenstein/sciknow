@@ -66,3 +66,59 @@ def setup_logging(log_dir: str | None = None, level: int = logging.DEBUG) -> Non
     )
     handler.setFormatter(formatter)
     logger.addHandler(handler)
+
+
+def attach_uvicorn_to_sciknow_log() -> None:
+    """Phase 54.6.308 — route uvicorn's loggers into data/sciknow.log.
+
+    By default uvicorn writes access + error logs to its own stderr
+    handlers, so ``sciknow book serve`` left the sciknow log silent
+    on GUI clicks.  We can't fully debug GUI-triggered issues without
+    seeing which endpoints the browser hit (especially the SSE
+    endpoints that back long-running autowrite/review jobs).
+
+    This helper attaches sciknow's rotating file handler to the three
+    uvicorn loggers (``uvicorn``, ``uvicorn.access``, ``uvicorn.error``)
+    so each HTTP request lands in ``<project>/data/sciknow.log`` with
+    the same formatter as the rest of the CLI log — one file to grep.
+
+    ``propagate=False`` is already the uvicorn default; we set it
+    explicitly here to be defensive in case uvicorn's internals ever
+    change.  Also sets level=INFO on uvicorn.access — anything less
+    and the per-request lines would be filtered before the handler
+    ever sees them.
+
+    Idempotent: safe to call more than once.
+    """
+    import sys
+
+    sciknow_logger = logging.getLogger("sciknow")
+    if not sciknow_logger.handlers:
+        # setup_logging() hasn't run yet — caller bug, but don't crash.
+        return
+    sk_handler = sciknow_logger.handlers[0]
+    # Mirror to stderr too so the interactive ``sciknow book serve``
+    # terminal still shows "Application startup complete", request
+    # lines, and shutdown — passing ``log_config=None`` to uvicorn.run
+    # suppresses its built-in stream handler, and without this the
+    # user's terminal goes silent after the startup banner.
+    stream_handler = logging.StreamHandler(sys.stderr)
+    stream_handler.setLevel(logging.INFO)
+    stream_handler.setFormatter(sk_handler.formatter)
+    for name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
+        lg = logging.getLogger(name)
+        has_file = any(
+            getattr(h, "baseFilename", None) == getattr(sk_handler, "baseFilename", None)
+            for h in lg.handlers
+        )
+        if not has_file:
+            lg.addHandler(sk_handler)
+        has_stream = any(
+            isinstance(h, logging.StreamHandler)
+            and not isinstance(h, logging.FileHandler)
+            for h in lg.handlers
+        )
+        if not has_stream:
+            lg.addHandler(stream_handler)
+        lg.setLevel(logging.INFO)
+        lg.propagate = False

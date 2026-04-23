@@ -2785,8 +2785,19 @@ def serve(
     console.print(f"  [link=http://{host}:{port}]http://{host}:{port}[/link]")
     console.print(f"  [dim]Press Ctrl+C to stop.[/dim]\n")
 
+    # Phase 54.6.308 — pipe uvicorn into sciknow.log so every GUI
+    # HTTP hit is captured alongside CLI invocations, LLM summaries,
+    # and error tracebacks.  ``log_config=None`` is the key bit:
+    # without it, uvicorn.run() applies its built-in LOGGING_CONFIG
+    # at startup and blows away any handlers we attach beforehand.
+    # With log_config=None uvicorn trusts whatever logging is already
+    # wired, so our rotating-file handler on uvicorn.* loggers sticks
+    # and every HTTP request lands in <project>/data/sciknow.log.
+    from sciknow.logging_config import attach_uvicorn_to_sciknow_log
+    attach_uvicorn_to_sciknow_log()
     import uvicorn
-    uvicorn.run(web_app, host=host, port=port, log_level="warning")
+    uvicorn.run(web_app, host=host, port=port, log_level="info",
+                log_config=None, access_log=True)
 
 
 # ── autowrite (Karpathy-loop-inspired convergence) ─────────────────────────────
