@@ -215,6 +215,15 @@ the operator sees which drops are recent vs forgotten. Colour-coded
 inline in the CLI corpus panel and in the web monitor's rates/ETA
 banner.
 
+**Phase 54.6.282** adds a **section-type coverage** panel — chunks
+are grouped by canonical section type (abstract / introduction /
+methods / results / discussion / conclusion / related_work /
+appendix / unknown) and rendered as a one-line summary in the CLI
+corpus panel and as a stacked bar with legend in the web modal. A
+high `unknown` percentage flags either a chunker regression or a
+converter class that's losing heading structure — check the
+`converter_backend` mix when the number climbs above 70 %.
+
 ```bash
 uv run sciknow db monitor              # one shot, full layout
 uv run sciknow db monitor --watch 5    # btop-style in-place refresh

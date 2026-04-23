@@ -20989,6 +20989,8 @@ function renderMonitor(snap) {{
   const projectsOverview = snap.projects_overview || [];
   // Phase 54.6.280 — citation graph connectivity metrics.
   const cgraph = snap.citation_graph || {{}};
+  // Phase 54.6.282 — chunker section-type coverage.
+  const seccov = snap.section_coverage || {{}};
   // Phase 54.6.244 additions
   const funnel = snap.ingest_funnel || [];
   const hourlyFails = snap.pipeline_hourly_failures || [];
@@ -21445,6 +21447,56 @@ function renderMonitor(snap) {{
       + '<div><strong>Words</strong>: ' + _fmtNum(bookAct.total_words || 0) + '</div>'
       + '<div><strong>Updated</strong>: <code>' + lastUp + '</code></div>'
       + '</div>');
+  }}
+
+  // Phase 54.6.282 — chunker section-type coverage. Horizontal
+  // stacked bar with per-type colours + legend. `unknown` gets
+  // the flag colour (red) so the chunker health signal jumps.
+  if (seccov && (seccov.total || 0) > 0) {{
+    const total = seccov.total;
+    const types = seccov.per_type || [];
+    const unkPct = seccov.unknown_pct || 0;
+    // Canonical palette aligned with _SECTION_PATTERNS.  Keeps the
+    // same type → colour mapping between renderings so operators
+    // can eyeball "is methods shrinking?" across snapshots.
+    const palette = {{
+      abstract: '#6aa',
+      introduction: '#7a5',
+      methods: '#38a',
+      results: '#a73',
+      discussion: '#a58',
+      conclusion: '#85a',
+      related_work: '#aa5',
+      appendix: '#888',
+      unknown: '#c33',
+    }};
+    let bar = '<div style="display:flex;height:1em;border-radius:3px;overflow:hidden;">';
+    for (const p of types) {{
+      const c = palette[p.type] || '#666';
+      bar += '<div style="background:' + c + ';width:' + p.pct + '%;" '
+        + 'title="' + _escHTML(p.type) + ': ' + _fmtNum(p.n)
+        + ' (' + p.pct.toFixed(1) + '%)"></div>';
+    }}
+    bar += '</div>';
+    let legend = '<div style="font-size:0.85em;color:var(--fg-muted);margin-top:0.4em;display:flex;flex-wrap:wrap;gap:0.75em;">';
+    for (const p of types) {{
+      const c = palette[p.type] || '#666';
+      legend += '<span><span style="display:inline-block;width:0.7em;height:0.7em;background:'
+        + c + ';margin-right:0.25em;vertical-align:middle;"></span>'
+        + _escHTML(p.type) + ' <strong>' + _fmtNum(p.n) + '</strong> ('
+        + p.pct.toFixed(1) + '%)</span>';
+    }}
+    legend += '</div>';
+    const unkColour = unkPct < 40 ? '#080'
+      : unkPct < 70 ? '#b70' : '#c33';
+    const headline = '<div style="font-size:0.9em;margin-bottom:0.4em;">'
+      + '<strong>Chunk types</strong>: ' + _fmtNum(total)
+      + ' total · <span style="color:' + unkColour + ';">unknown '
+      + unkPct.toFixed(1) + '%</span>'
+      + (unkPct >= 70 ? ' <span class="u-muted">(chunker may be losing heading structure — check `converter_backend` mix)</span>' : '')
+      + '</div>';
+    sections.push('<h4>Section coverage</h4>'
+      + headline + bar + legend);
   }}
 
   // Phase 54.6.280 — citation graph connectivity. Three compact

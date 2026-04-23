@@ -706,6 +706,64 @@ def _raptor_tree_shape(session) -> dict:
     return out
 
 
+def _section_coverage(session) -> dict:
+    """Phase 54.6.282 — distribution of chunks across canonical
+    section types.
+
+    The chunker (sciknow/ingestion/chunker.py) classifies each
+    section into one of the canonical types in ``_SECTION_PATTERNS``
+    (abstract / introduction / methods / results / discussion /
+    conclusion / related_work / appendix) or falls through to
+    "unknown" when the heading doesn't match any pattern.  High
+    ``unknown`` rates flag a chunker regression — either the PDF
+    converter is dropping heading structure, or new heading styles
+    aren't covered by the regex patterns.
+
+    Returns::
+
+        {
+          "total": int,
+          "unknown_pct": float,   # headline signal for the CLI
+          "per_type": [
+            {"type": "introduction", "n": 1740, "pct": 5.6},
+            ...  # sorted descending by count
+          ],
+        }
+
+    Silent (empty dict) when the chunks table is empty (fresh
+    install).
+    """
+    from sqlalchemy import text
+    try:
+        rows = session.execute(text("""
+            SELECT section_type, COUNT(*) AS n
+            FROM chunks
+            GROUP BY section_type
+            ORDER BY n DESC
+        """)).fetchall()
+    except Exception:
+        return {}
+    total = sum(int(r[1] or 0) for r in rows)
+    if total == 0:
+        return {"total": 0, "unknown_pct": 0.0, "per_type": []}
+    per_type = [
+        {
+            "type": r[0] or "unknown",
+            "n": _safe_int(r[1]),
+            "pct": round(int(r[1] or 0) / total * 100, 1),
+        }
+        for r in rows
+    ]
+    unknown_pct = next(
+        (p["pct"] for p in per_type if p["type"] == "unknown"), 0.0
+    )
+    return {
+        "total": total,
+        "unknown_pct": round(unknown_pct, 1),
+        "per_type": per_type,
+    }
+
+
 def _citation_graph(session) -> dict:
     """Phase 54.6.280 — citation graph connectivity metrics.
 
@@ -2683,6 +2741,10 @@ def collect_monitor_snapshot(
         dupe_hashes = _safe_db(session, _duplicate_hashes, default=0)
         # 54.6.280 — citation graph connectivity.
         citation_graph = _safe_db(session, _citation_graph, default={})
+        # 54.6.282 — section-type coverage (chunker health signal).
+        section_coverage = _safe_db(
+            session, _section_coverage, default={},
+        )
         # 54.6.237 — trend batch
         growth = _safe_db(session, _corpus_growth_rate, default={})
         book_act = _safe_db(session, _book_activity, default={})
@@ -2741,6 +2803,10 @@ def collect_monitor_snapshot(
         # on every snapshot; empty dict when the citations table is
         # missing (fresh install).
         "citation_graph": citation_graph,
+        # 54.6.282 — chunker/section-type coverage. High unknown %
+        # flags a chunker regression or a new heading style the
+        # regex patterns don't cover.
+        "section_coverage": section_coverage,
         "bench_freshness": _bench_freshness(
             Path(data_dir) if data_dir else None
         ),

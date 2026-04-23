@@ -1767,6 +1767,8 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     dupe_hashes = snap.get("duplicate_hashes", 0) or 0
     # 54.6.280 — citation graph connectivity.
     cgraph = snap.get("citation_graph") or {}
+    # 54.6.282 — chunker section-type coverage.
+    seccov = snap.get("section_coverage") or {}
     bench_fresh = snap.get("bench_freshness") or {}
     # 54.6.250 — backup freshness: compact "backup Nd" marker
     backup_fresh = snap.get("backup_freshness") or {}
@@ -2359,6 +2361,32 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
         corpus_tbl.add_row(
             Text("dupe hashes", style=C_DIM),
             Text(str(dupe_hashes), style=dupe_colour),
+        )
+
+    # Phase 54.6.282 — chunker section-type coverage. One-line
+    # health signal: high ``unknown`` % flags either a chunker
+    # regression (headings not classified) or PDFs where the
+    # converter dropped structure. Colour tightens as unknown
+    # climbs: green <40 %, yellow 40-70 %, red >70 %.
+    if seccov.get("total"):
+        unk = seccov.get("unknown_pct", 0.0)
+        colour = (
+            C_OK if unk < 40 else
+            C_WARN if unk < 70 else C_ERR
+        )
+        # "chunk types" label + "unknown 80% · intro 6% · methods 4%"
+        # Show top 3 non-unknown types so the mix is visible alongside
+        # the unknown-dominance flag.
+        bits = [f"unknown {unk:.0f}%"]
+        non_unknown = [
+            p for p in seccov.get("per_type", [])
+            if p["type"] != "unknown"
+        ][:2]
+        for p in non_unknown:
+            bits.append(f"{p['type'][:5]} {p['pct']:.0f}%")
+        corpus_tbl.add_row(
+            Text("chunk types", style=C_DIM),
+            Text(" · ".join(bits), style=colour),
         )
 
     # Phase 54.6.280 — citation graph health. Three compact rows

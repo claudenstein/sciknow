@@ -12045,6 +12045,60 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_282_section_coverage() -> None:
+    """Phase 54.6.282 — section-type coverage panel surfaces chunker
+    health in both the CLI monitor and the web modal.
+
+    Guards:
+
+      A) `_section_coverage` returns total / unknown_pct / per_type.
+      B) CLI layout reads `snap['section_coverage']` and renders the
+         'chunk types' row.
+      C) Web renderMonitor references `snap.section_coverage`, renders
+         a 'Section coverage' heading + stacked bar.
+    """
+    import inspect as _inspect
+    from sciknow.core import monitor as _mon
+
+    helper_src = _inspect.getsource(_mon._section_coverage)
+    for key in ("total", "unknown_pct", "per_type"):
+        assert key in helper_src, (
+            f"54.6.282 _section_coverage must populate {key!r}"
+        )
+    assert "FROM chunks" in helper_src, (
+        "54.6.282 _section_coverage must aggregate from the chunks table"
+    )
+    assert "GROUP BY section_type" in helper_src, (
+        "54.6.282 _section_coverage must group by section_type"
+    )
+
+    snap_src = _inspect.getsource(_mon.collect_monitor_snapshot)
+    assert '"section_coverage"' in snap_src, (
+        "54.6.282 collect_monitor_snapshot must expose section_coverage"
+    )
+    assert "_section_coverage" in snap_src, (
+        "54.6.282 collect_monitor_snapshot must invoke _section_coverage"
+    )
+
+    from sciknow.cli import db as _db_cli
+    cli_src = _inspect.getsource(_db_cli._build_monitor_layout)
+    assert 'snap.get("section_coverage")' in cli_src, (
+        "54.6.282 CLI layout must read snap['section_coverage']"
+    )
+    assert "chunk types" in cli_src, (
+        "54.6.282 CLI must render a 'chunk types' coverage row"
+    )
+
+    from sciknow.testing.helpers import web_app_full_source
+    web_src = web_app_full_source()
+    assert "snap.section_coverage" in web_src, (
+        "54.6.282 web modal must read snap.section_coverage"
+    )
+    assert "Section coverage" in web_src, (
+        "54.6.282 web modal must render a 'Section coverage' heading"
+    )
+
+
 def l1_phase54_6_281_inbox_age_histogram() -> None:
     """Phase 54.6.281 — inbox age histogram in both CLI + web.
 
@@ -16376,6 +16430,7 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_274_reranker_backend_dispatch,
     l1_phase54_6_280_citation_graph_panel,
     l1_phase54_6_281_inbox_age_histogram,
+    l1_phase54_6_282_section_coverage,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]
