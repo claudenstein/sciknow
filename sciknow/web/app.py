@@ -1103,8 +1103,17 @@ async def api_book_outline_generate(
             m = get_method("elicitation", method)
             if m:
                 usr_p = method_preamble(m) + usr_p
+        # Phase 54.6.297 — resolve the outline-specific model.
+        # Explicit request param > BOOK_OUTLINE_MODEL env > LLM_MODEL
+        # (the llm_stream default).
+        from sciknow.config import settings as _settings
+        effective_model = (
+            model
+            or getattr(_settings, "book_outline_model", None)
+            or None
+        )
         tokens: list[str] = []
-        for tok in llm_stream(sys_p, usr_p, model=model or None):
+        for tok in llm_stream(sys_p, usr_p, model=effective_model):
             tokens.append(tok)
             yield {"type": "token", "text": tok}
 
@@ -1132,7 +1141,10 @@ async def api_book_outline_generate(
             from sciknow.core.book_ops import resize_sections_by_density as _resize
             yield {"type": "progress", "stage": "resizing",
                    "detail": "Resizing sections by corpus evidence density…"}
-            chapters = _resize(chapters)
+            # Phase 54.6.297 — pass the outline-specific model into
+            # _grow_sections_llm so the resize step agrees with the
+            # generation step on model choice.
+            chapters = _resize(chapters, model=effective_model)
         except Exception as exc:
             logger.warning("density resize failed: %s", exc)
 
@@ -5889,6 +5901,7 @@ async def api_settings_models():
         "llm_model": _s.llm_model,
         "llm_fast_model": _s.llm_fast_model,
         "book_write_model": getattr(_s, "book_write_model", None),
+        "book_outline_model": getattr(_s, "book_outline_model", None),
         "book_review_model": _s.book_review_model,
         "autowrite_scorer_model": _s.autowrite_scorer_model,
         "visuals_caption_model": _s.visuals_caption_model,
@@ -27268,7 +27281,8 @@ async function loadBookSettingsModels() {{
     // description (where it was before the 54.6.243 split).
     const rows = [
       ['LLM_MODEL',              data.llm_model,              'ask · wiki compile · extract-kg · everything without a per-role override', null],
-      ['LLM_FAST_MODEL',         data.llm_fast_model,         'book outline · classify-papers · paraphrase-equations · RAPTOR · metadata fallback', 'LLM_MODEL'],
+      ['LLM_FAST_MODEL',         data.llm_fast_model,         'classify-papers · paraphrase-equations · RAPTOR · metadata fallback', 'LLM_MODEL'],
+      ['BOOK_OUTLINE_MODEL',     data.book_outline_model,     'book outline (3-candidate tournament + density-driven section growth)', 'LLM_MODEL'],
       ['BOOK_WRITE_MODEL',       data.book_write_model,       'book write · autowrite writer/scorer/verify/cove (55.6.243 split)', 'LLM_MODEL'],
       ['BOOK_REVIEW_MODEL',      data.book_review_model,      'book review (5-dim critic)', 'LLM_MODEL'],
       ['AUTOWRITE_SCORER_MODEL', data.autowrite_scorer_model, 'autowrite score + rescore (not verify/cove)', 'LLM_MODEL'],

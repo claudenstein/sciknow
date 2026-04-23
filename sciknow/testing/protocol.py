@@ -12045,6 +12045,64 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_297_book_outline_model() -> None:
+    """Phase 54.6.297 — BOOK_OUTLINE_MODEL plumbing + A/B harness.
+
+    Guards:
+
+      A) Settings exposes `book_outline_model`.
+      B) CLI `book outline` resolves the effective model as
+         --model > settings.book_outline_model > None (LLM_MODEL).
+      C) Web `/api/book/outline/generate` does the same resolution.
+      D) `resize_sections_by_density` accepts and threads a `model=` kw
+         so the grow step uses the same override.
+      E) Monitor `_model_assignments` + the Settings/Models web page
+         surface the new override.
+      F) `scripts/bench_outline_model.py` exists.
+    """
+    import inspect as _inspect
+    from pathlib import Path as _Path
+    from sciknow.config import settings
+
+    assert hasattr(settings, "book_outline_model"), (
+        "54.6.297 Settings must expose book_outline_model"
+    )
+
+    from sciknow.cli import book as _book_cli
+    cli_src = _inspect.getsource(_book_cli.outline)
+    assert "book_outline_model" in cli_src, (
+        "54.6.297 CLI outline must read settings.book_outline_model"
+    )
+    assert "effective_model" in cli_src, (
+        "54.6.297 CLI outline must resolve an effective model once"
+    )
+
+    from sciknow.testing.helpers import web_app_full_source
+    web_src = web_app_full_source()
+    assert "book_outline_model" in web_src, (
+        "54.6.297 web must read settings.book_outline_model"
+    )
+    assert 'BOOK_OUTLINE_MODEL' in web_src, (
+        "54.6.297 web Models page must list BOOK_OUTLINE_MODEL"
+    )
+
+    from sciknow.core import book_ops as _bo
+    resize_src = _inspect.getsource(_bo.resize_sections_by_density)
+    assert "model=" in resize_src or "model:" in resize_src, (
+        "54.6.297 resize_sections_by_density must accept a model kwarg"
+    )
+
+    from sciknow.core import monitor as _mon
+    assigns_src = _inspect.getsource(_mon._model_assignments)
+    assert "book_outline" in assigns_src, (
+        "54.6.297 model_assignments must include book_outline key"
+    )
+
+    assert _Path("scripts/bench_outline_model.py").exists(), (
+        "54.6.297 bench_outline_model.py harness must exist"
+    )
+
+
 def l1_phase54_6_296_payload_index_health() -> None:
     """Phase 54.6.296 — Qdrant payload-index health check.
 
@@ -17175,6 +17233,7 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_294_slow_docs_leaderboard,
     l1_phase54_6_295_sidecar_deep_audit,
     l1_phase54_6_296_payload_index_health,
+    l1_phase54_6_297_book_outline_model,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]

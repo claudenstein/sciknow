@@ -100,6 +100,17 @@ class Settings(BaseSettings):
     # it here — substituting the global LLM_MODEL would hurt
     # wiki_compile and extract_kg where qwen3:30b-a3b wins.
     book_write_model: str | None = None
+    # Phase 54.6.297 — optional per-role override for `book outline`
+    # (both the 3-candidate tournament in the CLI and the single-pass
+    # web endpoint) AND the per-chapter `_grow_sections_llm` call.
+    # Falls back to llm_model when unset.  Motivated by the 54.6.243
+    # split: `book write` uses qwen3.6:27b-dense (writing wins), but
+    # outline is a structured-JSON task where qwen3:30b-a3b still wins
+    # the 2026-04-17 sweep (9/10 tasks including JSON-heavy ones like
+    # compile_summary, extract-kg, wiki_consensus).  Keep the default
+    # conservative; run `uv run python scripts/bench_outline_model.py`
+    # to A/B before flipping it on your corpus.
+    book_outline_model: str | None = None
     # Phase 54.6.59 — optional per-role override for the autowrite
     # score + rescore steps (NOT verify/CoVe, which stay on the writer
     # model). Falls back to llm_model when unset. The 2026-04-17-full

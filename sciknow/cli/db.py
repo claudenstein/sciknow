@@ -3081,6 +3081,8 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
             ("fast",     models.get("llm_fast")
                          if models.get("llm_fast") != llm_main else None,
                          False),
+            ("book-out", models.get("book_outline") or llm_main,
+                         models.get("book_outline") is None),
             ("book-wr",  models.get("book_write")  or llm_main,
                          models.get("book_write") is None),
             ("book-rv",  models.get("book_review") or llm_main,

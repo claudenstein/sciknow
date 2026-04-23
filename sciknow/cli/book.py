@@ -1155,11 +1155,20 @@ def outline(
     """
     import json
     from sqlalchemy import text
+    from sciknow.config import settings
     from sciknow.rag import prompts
     from sciknow.rag.llm import complete
     from sciknow.storage.db import get_session
 
     from sciknow.core.project_type import get_project_type
+
+    # Phase 54.6.297 — per-role outline model override.  CLI `--model`
+    # arg wins > BOOK_OUTLINE_MODEL env > LLM_MODEL (default in the
+    # llm.stream helper).  Resolve once so both the tournament loop
+    # and the fallback single-pass path use the same choice.
+    effective_model = (
+        model or getattr(settings, "book_outline_model", None) or None
+    )
 
     with get_session() as session:
         book = _get_book(session, book_title)
@@ -1207,7 +1216,7 @@ def outline(
         raw_i = complete_with_status(
             system, user,
             label=f"Candidate {ci + 1}/{N_CANDIDATES}",
-            model=model, temperature=0.5 + ci * 0.15,  # 0.5, 0.65, 0.8
+            model=effective_model, temperature=0.5 + ci * 0.15,  # 0.5, 0.65, 0.8
             num_ctx=16384,
         )
         raw_i = raw_i.strip()
@@ -1247,7 +1256,7 @@ def outline(
     if not candidates:
         console.print("[red]All candidate outlines failed. Trying single pass…[/red]")
         raw = complete_with_status(system, user, label="Generating outline",
-                                   model=model, temperature=0.3, num_ctx=16384)
+                                   model=effective_model, temperature=0.3, num_ctx=16384)
         raw = raw.strip()
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
@@ -1277,7 +1286,9 @@ def outline(
     # reachable; offline invocations fall through silently.
     from sciknow.core.book_ops import resize_sections_by_density as _resize
     console.print("  [dim]Resizing sections by corpus evidence density…[/dim]")
-    chapters = _resize(chapters)
+    # Phase 54.6.297 — _grow_sections_llm uses the same outline model
+    # override; pass it through so both steps agree.
+    chapters = _resize(chapters, model=effective_model)
 
     # Display
     console.print()

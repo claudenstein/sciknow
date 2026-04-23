@@ -1242,6 +1242,7 @@ def _model_assignments() -> dict:
             "llm_fast": settings.llm_fast_model or None,
             # Per-role book pipeline overrides (None → inherits llm_main)
             "book_write": getattr(settings, "book_write_model", None),
+            "book_outline": getattr(settings, "book_outline_model", None),
             "book_review": getattr(settings, "book_review_model", None),
             "autowrite_scorer": getattr(
                 settings, "autowrite_scorer_model", None,

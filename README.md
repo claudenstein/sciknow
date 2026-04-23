@@ -273,6 +273,25 @@ and the web modal renders a "Model swap churn" panel with the last
 over ≥10 min — each swap costs 5-10 s of Ollama cold-load, so
 15/hr = ~3 min of pipeline cold-loads per hour, worth surfacing.
 
+**Phase 54.6.297** adds a **`BOOK_OUTLINE_MODEL`** per-role override
+(mirroring the `BOOK_WRITE_MODEL` / `BOOK_REVIEW_MODEL` /
+`AUTOWRITE_SCORER_MODEL` precedent). Both surfaces resolve the
+model as `--model` arg > `BOOK_OUTLINE_MODEL` env > `LLM_MODEL`
+(the default). The `_grow_sections_llm` call inside
+`resize_sections_by_density` now threads the same override so all
+three LLM calls in an outline run agree on model choice.
+
+Plus `scripts/bench_outline_model.py` A/B harness: runs the full
+3-candidate tournament against two models (default: the current
+`qwen3:30b-a3b-instruct-2507-q4_K_M` vs `qwen3.6:27b-dense`),
+scores on JSON-validity + chapter count + section variance +
+wall-clock, writes JSONL to `data/bench/outline_ab-<ts>.jsonl`,
+prints a rec if a non-default model wins the mean scorer.
+
+Monitor's `model_assignments` panel (CLI + web Models tab) now
+renders the new `book-out` row alongside `book-wr` / `book-rv` /
+`aw-score`.
+
 **Phase 54.6.296** adds **Qdrant payload-index health check** — and
 fixes a real bug found while building it: the dual-embedder sidecar
 was being created with **zero payload indexes**, so filter pushdown
