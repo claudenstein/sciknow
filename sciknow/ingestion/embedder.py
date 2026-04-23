@@ -42,10 +42,28 @@ def release_model() -> None:
     `db expand`, so the main process doesn't hold a redundant copy of the
     embedder while each worker loads its own. Safe to call when no model
     has been loaded yet.
+
+    Phase 54.6.305 — move to CPU first so the GPU-side tensors are
+    truly deallocated instead of lingering in PyTorch's caching
+    allocator (which keeps the memory visible to Ollama, forcing the
+    writer model to partial-load).  BGEM3FlagModel wraps a transformer
+    in its ``model`` attribute; the wrapper itself has no ``.to``.
     """
     global _model
     if _model is None:
         return
+    try:
+        inner = getattr(_model, "model", None)
+        if inner is not None:
+            to_cpu = getattr(inner, "to", None)
+            if callable(to_cpu):
+                to_cpu("cpu")
+        else:
+            to_cpu = getattr(_model, "to", None)
+            if callable(to_cpu):
+                to_cpu("cpu")
+    except Exception:
+        pass
     try:
         del _model
     finally:
@@ -53,7 +71,10 @@ def release_model() -> None:
     try:
         import gc, torch
         gc.collect()
+        gc.collect()
         if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
     except Exception:
         pass

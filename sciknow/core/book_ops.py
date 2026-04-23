@@ -2850,10 +2850,14 @@ def _generate_step_back_query(query: str, model: str | None = None) -> str | Non
     swaps cost ~2 minutes — far more than the milliseconds the fast
     model saves on a 1-line query.
 
-    Using the main model means zero swaps: the main model is already
-    loaded for the writer, the 1-line step-back query takes <1 second
-    once warm, and the writer reuses the same hot model immediately
-    after.
+    Phase 54.6.305 — prefer ``book_write_model`` over ``llm_model``
+    when the caller is autowrite. Phase 54.6.243 split the writer
+    (``book_write_model``, e.g. qwen3.6:27b-dense) from the general
+    ``llm_model`` (e.g. qwen3:30b-a3b MoE). The Phase 15.4 comment
+    above assumed step-back and writer shared a model — that stopped
+    being true once the split landed, so every autowrite section was
+    paying a 60s Ollama swap between step-back and writing. Matching
+    the writer re-establishes the zero-swap guarantee.
 
     The caller can still pass an explicit `model=` to override.
     """
@@ -2864,7 +2868,7 @@ def _generate_step_back_query(query: str, model: str | None = None) -> str | Non
     try:
         raw = llm_complete(
             sys_p, usr_p,
-            model=model or settings.llm_model,  # main model, not fast
+            model=model or settings.book_write_model or settings.llm_model,
             # Phase 54.6.30 — standardise on 16384 across the autowrite
             # call chain so this utility (step-back query) doesn't
             # trigger an Ollama model reload when the main write pass
@@ -2912,29 +2916,44 @@ def _retrieve_with_step_back(
     from sciknow.retrieval import context_builder, hybrid_search, reranker
     from sciknow.rag.prompts import format_sources
 
+    # Phase 54.6.305 — generate the step-back query BEFORE loading the
+    # embedders.  Pre-fix order was search(concrete) → step-back →
+    # search(sb_query), which forced Ollama to partial-load the
+    # step-back model on top of the embedders already holding 10 GB
+    # (bge-m3 2 GB + Qwen3-Embedding-4B 8 GB on dual-embedder setups),
+    # leaving <14 GB for an 18-22 GB model → CPU offload → multi-minute
+    # hangs on a 24 GB card.  Doing step-back first keeps the writer
+    # model resident (from the autowrite warmup), runs the 1-line
+    # rewrite at full GPU speed (~1 s), and THEN the hybrid_search.search
+    # call triggers the preflight cascade that unloads the writer to make
+    # room for the embedders.  Writer reloads once, after _release_gpu_models.
+    sb_query: str | None = None
+    if use_step_back:
+        sb_query = _generate_step_back_query(query, model=model)
+        if sb_query and sb_query.lower() == query.lower():
+            sb_query = None
+
     candidates = hybrid_search.search(
         query=query, qdrant_client=qdrant, session=session,
         candidate_k=candidate_k, year_from=year_from, year_to=year_to,
         topic_cluster=topic_cluster, use_query_expansion=use_query_expansion,
     )
 
-    if use_step_back:
-        sb_query = _generate_step_back_query(query, model=model)
-        if sb_query and sb_query.lower() != query.lower():
-            logger.info("Step-back query: %r → %r", query, sb_query)
-            sb_candidates = hybrid_search.search(
-                query=sb_query, qdrant_client=qdrant, session=session,
-                candidate_k=max(candidate_k // 2, 10),
-                year_from=year_from, year_to=year_to,
-                topic_cluster=topic_cluster,
-                use_query_expansion=False,  # already abstract; don't expand again
-            )
-            # Union by chunk_id, preserving the concrete-query candidates first.
-            seen = {c.chunk_id for c in candidates}
-            for c in sb_candidates:
-                if c.chunk_id not in seen:
-                    candidates.append(c)
-                    seen.add(c.chunk_id)
+    if sb_query:
+        logger.info("Step-back query: %r → %r", query, sb_query)
+        sb_candidates = hybrid_search.search(
+            query=sb_query, qdrant_client=qdrant, session=session,
+            candidate_k=max(candidate_k // 2, 10),
+            year_from=year_from, year_to=year_to,
+            topic_cluster=topic_cluster,
+            use_query_expansion=False,  # already abstract; don't expand again
+        )
+        # Union by chunk_id, preserving the concrete-query candidates first.
+        seen = {c.chunk_id for c in candidates}
+        for c in sb_candidates:
+            if c.chunk_id not in seen:
+                candidates.append(c)
+                seen.add(c.chunk_id)
 
     if not candidates:
         _release_gpu_models()
@@ -4191,8 +4210,19 @@ def _autowrite_section_body(
     # pay cold-start latency. Best-effort; silently continues if the
     # Ollama server is unreachable (autowrite will fail naturally on
     # the real call with a clearer error).
+    #
+    # Phase 54.6.305 — resolve to ``book_write_model`` when no explicit
+    # model is passed. Previously this fell back to ``llm_model`` (the
+    # MoE default), which at keep_alive=-1 pinned the *wrong* ~18 GB
+    # model in VRAM. The real write call a few lines later then
+    # resolves to ``book_write_model`` (via line ~3108 / 4348) and
+    # either swaps (wasteful) or runs out of VRAM when the embedder
+    # loads for retrieval (OOM at SentenceTransformer.to('cuda')).
+    # Pinning the right model up front avoids both traps and matches
+    # the writer/scorer/verifier model resolution used elsewhere.
     from sciknow.config import settings as _s
-    _llm_warm_up(model=model or _s.llm_model, num_ctx=16384, num_batch=1024)
+    _warm_model = model or _s.book_write_model or _s.llm_model
+    _llm_warm_up(model=_warm_model, num_ctx=16384, num_batch=1024)
 
     # Phase 54.6.59 — scorer-role resolution. Explicit `--model` beats
     # everything (the user asked for one model end-to-end). Otherwise,
@@ -4570,6 +4600,16 @@ def _autowrite_section_body(
         kinds=("knowledge", "idea", "decision", "paper", "episode"),
         return_dicts=True,
     )
+    # Phase 54.6.305 — the lessons fetch embeds `_lessons_query` through
+    # the same bge-m3 + dense-embedder path retrieval uses, which
+    # **reloads** both embedders into PyTorch after the
+    # _retrieve_with_step_back release.  Without this second release,
+    # ~9 GB of dense-embedder tensors linger in the Python CUDA cache
+    # and Ollama partial-loads the writer (vram=12.6 GB / total=22 GB)
+    # when it reloads for the writing stage, dropping decode from
+    # 30+ t/s to ~4 t/s.  This call returns the GPU to a clean state
+    # so the writer gets the full 22 GB it needs for 16k context.
+    _release_gpu_models()
     if relevant_lessons:
         by_kind: dict[str, int] = {}
         for l in relevant_lessons:

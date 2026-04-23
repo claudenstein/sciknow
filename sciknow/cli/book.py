@@ -1524,7 +1524,7 @@ def plan(
             console.print(f"[red]Book not found:[/red] {book_title}")
             raise typer.Exit(1)
 
-        book_id, b_title, b_desc, b_status, b_created, b_plan = book
+        book_id, b_title, b_desc, b_status, b_created, b_plan, _b_type = book
 
         # If plan exists and not editing, just show it
         if b_plan and not edit:
@@ -2898,7 +2898,7 @@ def autowrite(
             console.print(f"[red]Book not found:[/red] {book_title}")
             raise typer.Exit(1)
 
-        book_id, b_title, b_desc, b_status, b_created, b_plan = book
+        book_id, b_title, b_desc, b_status, b_created, b_plan, _b_type = book
 
         if not b_plan:
             console.print(

@@ -94,6 +94,18 @@ def _get_embed_model():
         from FlagEmbedding import BGEM3FlagModel
         from sciknow.config import settings
         from sciknow.retrieval.device import load_with_cpu_fallback
+        # Phase 54.6.305 — preflight first so the Ollama releaser unloads
+        # any resident LLM. On a 24 GB card, qwen3.6:27b-dense pins
+        # ~21.75 GB (17.6 GB weights + 4 GB KV at 16k ctx), leaving only
+        # ~2 GB free — bge-m3 would then hit the Phase 15.2 CPU fallback
+        # and retrieval slows 50-70× (see release_llm() docstring).
+        # Preflight trades a ~10s LLM cold-reload at the next write call
+        # for keeping bge-m3 on GPU through every section in the chapter.
+        try:
+            from sciknow.core.vram_budget import preflight as _preflight
+            _preflight(2500, reason="bge-m3 query embedder", raise_on_fail=False)
+        except Exception:  # pragma: no cover — vram_budget optional
+            pass
         # Phase 15.2 — falls back to CPU when the GPU is mostly full of LLM.
         _embed_model = load_with_cpu_fallback(
             BGEM3FlagModel, settings.embedding_model, use_fp16=True,
@@ -119,30 +131,99 @@ def _get_dense_embed_model():
     if _dense_embed_model is None:
         import torch as _torch
         from sentence_transformers import SentenceTransformer
-        _dense_embed_model = SentenceTransformer(
-            tag, device="cuda", trust_remote_code=True,
-            model_kwargs={"torch_dtype": _torch.bfloat16},
-        )
+        # Phase 54.6.305 — this is the path that autowrite was OOMing on:
+        # Qwen3-Embedding-4B in BF16 is ~8 GB resident; on a 24 GB card
+        # with qwen3.6:27b-dense pinned at ~21.75 GB, only ~2 GB is free
+        # and SentenceTransformer(..., device='cuda') hard-failed with
+        # `torch.OutOfMemoryError: Tried to allocate 742.00 MiB`.  Call
+        # preflight to trigger the Ollama releaser before loading, then
+        # fall back to CPU if even after the release we still can't fit
+        # (shouldn't happen with a single 27B LLM, but keeps us alive on
+        # smaller cards).
+        device = "cuda"
+        try:
+            from sciknow.core.vram_budget import preflight as _preflight
+            _preflight(9000, reason=f"dense embedder {tag}", raise_on_fail=False)
+        except Exception:  # pragma: no cover
+            pass
+        try:
+            _dense_embed_model = SentenceTransformer(
+                tag, device=device, trust_remote_code=True,
+                model_kwargs={"torch_dtype": _torch.bfloat16},
+            )
+        except Exception as exc:  # pragma: no cover — best-effort fallback
+            msg = str(exc).lower()
+            if "out of memory" in msg or "cuda" in msg:
+                logger.warning(
+                    "dense embedder %s failed to load on cuda (%s) — "
+                    "retrying on CPU; per-query retrieval will be slower",
+                    tag, type(exc).__name__,
+                )
+                try:
+                    _torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                _dense_embed_model = SentenceTransformer(
+                    tag, device="cpu", trust_remote_code=True,
+                    model_kwargs={"torch_dtype": _torch.bfloat16},
+                )
+            else:
+                raise
     return _dense_embed_model
 
 
 def release_embed_model() -> None:
-    """Drop the cached query embedding model(s) and free VRAM."""
+    """Drop the cached query embedding model(s) and free VRAM.
+
+    Phase 54.6.305 — previously we only set the globals to None and
+    called ``torch.cuda.empty_cache()``. On the Qwen3-Embedding-4B
+    dual-embedder path (~8 GB in BF16) that was not enough: PyTorch
+    retained the tensor memory inside the caching allocator so Ollama
+    saw only ~14 GB free and partial-loaded the 22 GB writer model
+    with ~10 GB spilled to CPU (decode dropped from 30+ t/s to ~4 t/s).
+    The fix: move each model to CPU before dropping the reference, so
+    the GPU-side tensors are actually deallocated; run gc.collect()
+    twice (the SentenceTransformer object graph has cycles through its
+    tokenizer wrappers and needs two passes); then empty_cache +
+    synchronize + empty_cache a second time to encourage the allocator
+    to release reserved-but-unused blocks back to the driver.
+    """
     global _embed_model, _dense_embed_model
+    try:
+        import gc, torch
+    except Exception:
+        gc = None  # type: ignore[assignment]
+        torch = None  # type: ignore[assignment]
+
     for name in ("_embed_model", "_dense_embed_model"):
-        if globals().get(name) is None:
+        model = globals().get(name)
+        if model is None:
             continue
+        try:
+            to_cpu = getattr(model, "to", None)
+            if callable(to_cpu):
+                to_cpu("cpu")
+        except Exception:
+            pass
         try:
             globals()[name] = None
         except Exception:
             pass
-    try:
-        import gc, torch
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    except Exception:
-        pass
+        del model
+    if gc is not None:
+        try:
+            gc.collect()
+            gc.collect()
+        except Exception:
+            pass
+    if torch is not None:
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
 
 
 def _embed_query(query: str) -> tuple[list[float], SparseVector]:

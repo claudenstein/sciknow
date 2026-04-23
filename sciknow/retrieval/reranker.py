@@ -211,10 +211,23 @@ def _get_reranker():
 
 
 def release_reranker() -> None:
-    """Drop the cached reranker model and free VRAM."""
+    """Drop the cached reranker model and free VRAM.
+
+    Phase 54.6.305 — move the reranker to CPU before dropping so the
+    GPU tensors are actually deallocated.  Without the explicit ``.to('cpu')``
+    PyTorch's caching allocator keeps the memory reserved and visible to
+    other processes (Ollama) which then partial-loads the writer model.
+    Same rationale as the dense-embedder release fix in hybrid_search.
+    """
     global _reranker
     if _reranker is None:
         return
+    try:
+        to_cpu = getattr(_reranker, "to", None)
+        if callable(to_cpu):
+            to_cpu("cpu")
+    except Exception:
+        pass
     try:
         del _reranker
     finally:
@@ -222,7 +235,10 @@ def release_reranker() -> None:
     try:
         import gc, torch
         gc.collect()
+        gc.collect()
         if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
     except Exception:
         pass
