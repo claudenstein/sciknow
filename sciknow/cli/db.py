@@ -3297,6 +3297,41 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
                 + Text(f"   ×{tf['count']}", style=C_ERR),
             )
 
+    # Phase 54.6.294 — slow-ingest leaderboard. Shows the top-5 docs
+    # by total ingest wall-clock so the operator can identify
+    # outlier PDFs eating pipeline time.  Each row shows the
+    # dominant stage for that doc as a compact tag.
+    slow_docs = snap.get("slow_docs") or []
+    if slow_docs:
+        footer_tbl.add_row("")
+        footer_tbl.add_row(
+            Text("slow docs  ", style=C_DIM)
+            + Text("(top 5 by total wall-clock)", style=C_DIM),
+        )
+        for d in slow_docs:
+            total_s = (d.get("total_ms", 0) or 0) / 1000
+            title = (d.get("title") or "?")[:55]
+            stage_ms = d.get("stage_ms") or {}
+            if stage_ms:
+                dom_stage = max(stage_ms, key=stage_ms.get)
+                dom_ms = stage_ms[dom_stage]
+                dom_pct = (dom_ms / max(1, d["total_ms"])) * 100
+                dom_tag = f"{dom_stage}·{dom_pct:.0f}%"
+            else:
+                dom_tag = "?"
+            colour = (
+                C_ERR if total_s > 600 else
+                C_WARN if total_s > 120 else C_DIM
+            )
+            row = Table.grid(padding=(0, 1), expand=True)
+            row.add_column(width=9, justify="right", style=colour)
+            row.add_column(width=15, style=C_DIM)
+            row.add_column(ratio=1, style=C_VALUE)
+            row.add_row(
+                f"{total_s:.0f}s", dom_tag, title,
+            )
+            footer_tbl.add_row(row)
+
     # Phase 54.6.236 — system summary footer bundling
     # cost + visuals coverage + RAPTOR shape. Uses empty space in
     # the pipeline panel rather than adding a new layout row.

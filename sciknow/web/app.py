@@ -20995,6 +20995,8 @@ function renderMonitor(snap) {{
   const seccovByBackend = snap.section_coverage_by_backend || [];
   // Phase 54.6.293 — cached sidecar integrity audit.
   const sidecarAudit = snap.sidecar_audit || {{}};
+  // Phase 54.6.294 — top-N slow ingest docs.
+  const slowDocs = snap.slow_docs || [];
   // Phase 54.6.284 — retraction detail (counts + recent list).
   const retractions = snap.retractions || {{}};
   // Phase 54.6.244 additions
@@ -22080,6 +22082,58 @@ function renderMonitor(snap) {{
         + '</td><td>' + _fmtMs(row.p50_ms) + '</td><td>' + _fmtMs(row.p95_ms)
         + '</td><td>' + _fmtMs(row.mean_ms) + '</td>'
         + '<td>' + deltaCell + '</td></tr>';
+    }}
+    html += '</table>';
+    sections.push(html);
+  }}
+
+  // Phase 54.6.294 — slow-ingest leaderboard.  Top N docs by total
+  // wall-clock with per-stage breakdown so operators can see
+  // which stage dominated (usually convert, sometimes embedding
+  // on very-long docs).  Silent when the leaderboard is empty.
+  if (slowDocs.length) {{
+    let html = '<h4>Slow ingest (top ' + slowDocs.length + ')</h4>'
+      + '<table class="stats-table" style="width:100%;font-size:0.9em;">'
+      + '<tr><th style="width:5em;">Total</th><th>Title</th>'
+      + '<th title="Fraction of wall-clock in each pipeline stage">Stage breakdown</th></tr>';
+    for (const d of slowDocs) {{
+      const totalS = (d.total_ms || 0) / 1000;
+      const col = totalS > 600 ? '#c33'
+        : totalS > 120 ? '#b70' : 'var(--fg-muted)';
+      const totalStr = totalS >= 60
+        ? (totalS / 60).toFixed(1) + ' min'
+        : totalS.toFixed(0) + ' s';
+      const stages = d.stage_ms || {{}};
+      // Mini stacked bar per stage
+      const stagePalette = {{
+        convert: '#6aa', metadata: '#7a5',
+        chunking: '#38a', embedding: '#a58',
+      }};
+      let bar = '<div style="display:flex;height:0.8em;border-radius:3px;overflow:hidden;'
+        + 'min-width:120px;">';
+      const stageKeys = Object.keys(stages).sort((a, b) => stages[b] - stages[a]);
+      for (const k of stageKeys) {{
+        const pct = d.total_ms ? (stages[k] / d.total_ms * 100) : 0;
+        const c = stagePalette[k] || '#666';
+        bar += '<div style="background:' + c + ';width:' + pct + '%;" '
+          + 'title="' + _escHTML(k) + ': ' + (stages[k] / 1000).toFixed(1)
+          + 's (' + pct.toFixed(0) + '%)"></div>';
+      }}
+      bar += '</div>';
+      // Legend: list the stages with their seconds
+      const legendBits = stageKeys.map(k => {{
+        const c = stagePalette[k] || '#666';
+        return '<span style="margin-right:0.6em;font-size:0.85em;">'
+          + '<span style="display:inline-block;width:0.65em;height:0.65em;background:'
+          + c + ';margin-right:0.2em;vertical-align:middle;"></span>'
+          + _escHTML(k) + ' ' + (stages[k] / 1000).toFixed(1) + 's</span>';
+      }}).join('');
+      html += '<tr><td style="color:' + col + ';font-weight:bold;">'
+        + _escHTML(totalStr) + '</td>'
+        + '<td>' + _escHTML((d.title || '?').slice(0, 80)) + '</td>'
+        + '<td>' + bar
+        + '<div style="color:var(--fg-muted);margin-top:0.2em;">' + legendBits + '</div>'
+        + '</td></tr>';
     }}
     html += '</table>';
     sections.push(html);

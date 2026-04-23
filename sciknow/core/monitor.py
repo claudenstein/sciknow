@@ -1229,6 +1229,76 @@ def _section_coverage_by_backend(session) -> list[dict]:
     return out
 
 
+def _slow_docs_leaderboard(session, top_n: int = 5) -> list[dict]:
+    """Phase 54.6.294 — top-N docs by total ingestion wall-clock.
+
+    Sums ``ingestion_jobs.duration_ms`` per document across every
+    stage (convert + metadata + chunking + embedding) and returns
+    the worst offenders.  Identifies outlier PDFs that eat pipeline
+    time — e.g. a 300-page scan-only PDF that takes 20× longer than
+    a typical paper through MinerU.
+
+    Includes the per-stage breakdown so operators can see which
+    stage dominated (usually convert, occasionally embedding on
+    very-long docs).
+
+    Returns::
+
+        [
+          {
+            "document_id": str,
+            "title":       str | None,
+            "total_ms":    int,      # sum across stages
+            "stage_ms":    {"convert": 900_000, "embedding": 200_000, …},
+          },
+          ...
+        ]
+
+    Sorted descending by ``total_ms``.  Silent (empty list) when
+    ``ingestion_jobs`` has no completed rows.
+    """
+    from sqlalchemy import text as _text
+    try:
+        rows = _text
+        rows = session.execute(_text("""
+            SELECT
+              j.document_id,
+              pm.title,
+              j.stage,
+              SUM(j.duration_ms) AS stage_ms
+            FROM ingestion_jobs j
+            LEFT JOIN paper_metadata pm ON pm.document_id = j.document_id
+            WHERE j.document_id IS NOT NULL
+              AND j.status = 'completed'
+              AND j.duration_ms > 0
+            GROUP BY j.document_id, pm.title, j.stage
+        """)).fetchall()
+    except Exception:
+        return []
+
+    # Fold into per-doc dicts.
+    by_doc: dict[str, dict] = {}
+    for doc_id, title, stage, stage_ms in rows:
+        doc_id = str(doc_id)
+        entry = by_doc.setdefault(
+            doc_id,
+            {
+                "document_id": doc_id,
+                "title": title,
+                "total_ms": 0,
+                "stage_ms": {},
+            },
+        )
+        ms = _safe_int(stage_ms)
+        entry["stage_ms"][stage] = ms
+        entry["total_ms"] += ms
+
+    ranked = sorted(
+        by_doc.values(), key=lambda e: e["total_ms"], reverse=True,
+    )[:max(0, int(top_n))]
+    return ranked
+
+
 def _retraction_detail(session, limit: int = 20) -> dict:
     """Phase 54.6.284 — paper-level retraction / correction detail.
 
@@ -3570,6 +3640,10 @@ def collect_monitor_snapshot(
         sidecar_audit = _safe_db(
             session, _sidecar_audit_cached, default={},
         )
+        # 54.6.294 — top N docs by total ingestion wall-clock.
+        slow_docs = _safe_db(
+            session, _slow_docs_leaderboard, default=[],
+        )
         # 54.6.237 — trend batch
         growth = _safe_db(session, _corpus_growth_rate, default={})
         book_act = _safe_db(session, _book_activity, default={})
@@ -3654,6 +3728,9 @@ def collect_monitor_snapshot(
         # is False when dual-embedder isn't configured; renderers
         # should show nothing in that case.
         "sidecar_audit": sidecar_audit,
+        # 54.6.294 — top-N slowest docs by total ingestion wall-clock.
+        # Top-5 of the full corpus — identifies outlier PDFs.
+        "slow_docs": slow_docs,
         "bench_freshness": _bench_freshness(
             Path(data_dir) if data_dir else None
         ),

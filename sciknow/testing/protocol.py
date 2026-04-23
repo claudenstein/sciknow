@@ -12045,6 +12045,53 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_294_slow_docs_leaderboard() -> None:
+    """Phase 54.6.294 — top-N slow-ingest leaderboard in the monitor.
+
+    Guards:
+
+      A) `_slow_docs_leaderboard` exists with document_id / title /
+         total_ms / stage_ms fields.
+      B) Snapshot exposes `slow_docs`.
+      C) CLI renders the "slow docs" footer block.
+      D) Web modal renders a "Slow ingest" heading.
+    """
+    import inspect as _inspect
+    from sciknow.core import monitor as _mon
+
+    assert hasattr(_mon, "_slow_docs_leaderboard"), (
+        "54.6.294 _slow_docs_leaderboard helper must exist"
+    )
+    src = _inspect.getsource(_mon._slow_docs_leaderboard)
+    for key in ("document_id", "title", "total_ms", "stage_ms"):
+        assert key in src, (
+            f"54.6.294 helper must populate {key!r}"
+        )
+    assert "ingestion_jobs" in src, (
+        "54.6.294 helper must sum from ingestion_jobs"
+    )
+
+    snap_src = _inspect.getsource(_mon.collect_monitor_snapshot)
+    assert '"slow_docs"' in snap_src, (
+        "54.6.294 snapshot must expose slow_docs"
+    )
+
+    from sciknow.cli import db as _db_cli
+    cli_src = _inspect.getsource(_db_cli._build_monitor_layout)
+    assert "slow_docs" in cli_src and "slow docs" in cli_src, (
+        "54.6.294 CLI must read + render slow_docs"
+    )
+
+    from sciknow.testing.helpers import web_app_full_source
+    web_src = web_app_full_source()
+    assert "snap.slow_docs" in web_src, (
+        "54.6.294 web must read snap.slow_docs"
+    )
+    assert "Slow ingest" in web_src, (
+        "54.6.294 web must render a 'Slow ingest' heading"
+    )
+
+
 def l1_phase54_6_293_sidecar_audit_in_monitor() -> None:
     """Phase 54.6.293 — cached sidecar integrity audit in the monitor
     snapshot + dashboard panels + sidecar_drift alert.
@@ -17023,6 +17070,7 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_291_preflight_event_history,
     l1_phase54_6_292_sidecar_audit_cli,
     l1_phase54_6_293_sidecar_audit_in_monitor,
+    l1_phase54_6_294_slow_docs_leaderboard,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]

@@ -273,6 +273,14 @@ and the web modal renders a "Model swap churn" panel with the last
 over ≥10 min — each swap costs 5-10 s of Ollama cold-load, so
 15/hr = ~3 min of pipeline cold-loads per hour, worth surfacing.
 
+**Phase 54.6.294** adds a **slow-ingest leaderboard** — top-5 docs
+by total ingestion wall-clock with per-stage breakdown. Identifies
+outlier PDFs that eat pipeline time. CLI footer block under the
+stage-timing panel; web modal renders a "Slow ingest" table with
+a stacked stage-duration bar per row + legend (convert / metadata
+/ chunking / embedding). Reveals which stage dominates the outlier
+cost — typically convert at 95%+ for long scans.
+
 **Phase 54.6.293** wires the **sidecar audit into the monitor** —
 `_sidecar_audit_cached` runs the 54.6.292 helper once per 5 min
 (module-level TTL) so every snapshot carries the current healthy/
