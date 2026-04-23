@@ -11969,6 +11969,82 @@ def l1_phase54_6_230_unified_monitor() -> None:
     )
 
 
+def l1_phase54_6_274_reranker_backend_dispatch() -> None:
+    """Phase 54.6.274 — reranker.py dispatches by model tag to support
+    both FlagReranker (bge-*) and sentence-transformers CrossEncoder
+    (Qwen3-Reranker-*).
+
+    Guards:
+
+      A) _Qwen3RerankerAdapter class defined with compute_score API.
+      B) _get_reranker branches on 'Qwen/Qwen3-Reranker' prefix.
+      C) Adapter signature accepts `devices=` (plural) to match
+         load_with_cpu_fallback contract.
+      D) Scientific-literature instruction constant exists.
+    """
+    import inspect as _inspect
+    from sciknow.retrieval import reranker as _rr
+
+    assert hasattr(_rr, "_Qwen3RerankerAdapter"), (
+        "54.6.274 _Qwen3RerankerAdapter must be defined"
+    )
+    adapter_src = _inspect.getsource(_rr._Qwen3RerankerAdapter)
+    assert "def compute_score" in adapter_src, (
+        "54.6.274 adapter must expose compute_score(pairs, normalize=True) "
+        "to match FlagReranker API"
+    )
+    assert "devices=None" in adapter_src or "devices=" in adapter_src, (
+        "54.6.274 adapter __init__ must accept devices= for "
+        "load_with_cpu_fallback compatibility"
+    )
+
+    getter_src = _inspect.getsource(_rr._get_reranker)
+    assert "Qwen/Qwen3-Reranker" in getter_src, (
+        "54.6.274 _get_reranker must branch on Qwen3-Reranker prefix"
+    )
+    assert "FlagReranker" in getter_src, (
+        "54.6.274 _get_reranker must retain the FlagReranker path for bge-*"
+    )
+
+    assert hasattr(_rr, "_QWEN3_RERANK_INSTRUCTION"), (
+        "54.6.274 scientific-literature instruction constant missing"
+    )
+
+
+def l1_phase54_6_275_retrieval_ab_harness() -> None:
+    """Phase 54.6.275 — scripts/bench_retrieval_ab.py A/B harness.
+
+    Guards (script-level; no need for full imports since it spawns
+    as a subprocess in practice):
+
+      A) Script file exists.
+      B) Defines RERANKER_CANDIDATES + EMBEDDER_CANDIDATES lists.
+      C) Exposes --mode reranker and --mode embedder.
+      D) Embedder mode gated by --i-know-it-is-heavy flag.
+      E) Ship-threshold constant is ≥0.03 (per docs RESEARCH_2 §2.2).
+    """
+    from pathlib import Path
+    p = Path("scripts/bench_retrieval_ab.py")
+    assert p.exists(), "54.6.275 bench_retrieval_ab.py must exist"
+    src = p.read_text(encoding="utf-8")
+
+    assert "RERANKER_CANDIDATES: list[str] = [" in src, (
+        "54.6.275 script must declare RERANKER_CANDIDATES constant"
+    )
+    assert "EMBEDDER_CANDIDATES: list[tuple[str, int]]" in src, (
+        "54.6.275 script must declare EMBEDDER_CANDIDATES with dim tuple"
+    )
+    assert '--mode' in src and '"reranker"' in src and '"embedder"' in src, (
+        "54.6.275 script must expose --mode reranker|embedder"
+    )
+    assert '--i-know-it-is-heavy' in src, (
+        "54.6.275 embedder mode must be gated by --i-know-it-is-heavy"
+    )
+    assert "MRR_SHIPPING_DELTA = 0.03" in src, (
+        "54.6.275 must encode the ≥0.03 MRR shipping threshold"
+    )
+
+
 def l1_phase54_6_273_cleanup_downloads_includes_inbox() -> None:
     """Phase 54.6.273 — `sciknow db cleanup-downloads` scans
     data/inbox/ recursively and force-deletes PDFs already 'complete'
@@ -16182,6 +16258,10 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_272_monitor_help_overlay,
     # Phase 54.6.273 — cleanup-downloads also purges processed inbox
     l1_phase54_6_273_cleanup_downloads_includes_inbox,
+    # Phase 54.6.274 — reranker backend dispatch (bge + Qwen3-Reranker)
+    l1_phase54_6_274_reranker_backend_dispatch,
+    # Phase 54.6.275 — retrieval A/B harness script
+    l1_phase54_6_275_retrieval_ab_harness,
 ]
 
 L2_TESTS: list[Callable] = [
