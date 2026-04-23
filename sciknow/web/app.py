@@ -4652,19 +4652,23 @@ async def api_visuals_image(visual_id: str):
                             detail=f"mineru_output dir missing for {doc_id}")
     # The per-doc subfolder is the doc's MinerU slug (arbitrary title string).
     # Usually exactly one; we iterate in case a re-ingest left more than one.
+    #
+    # MinerU backends diverge on the inner folder name:
+    #   * pipeline mode  → `<slug>/auto/images/<sha>.jpg`
+    #   * VLM-Pro (2.5)  → `<slug>/vlm/images/<sha>.jpg`
+    #   * older outputs  → `<slug>/images/<sha>.jpg` (no infix)
+    # Try them in that order; break on first hit.
     candidates = []
     for sub in doc_dir.iterdir():
         if not sub.is_dir():
             continue
-        # Primary layout: <doc_slug>/auto/<asset_path>
-        primary = (sub / "auto" / asset_path).resolve()
-        if primary.is_file() and doc_dir.resolve() in primary.parents:
-            candidates.append(primary)
-            break
-        # Fallback: no auto/ (older MinerU outputs)
-        fallback = (sub / asset_path).resolve()
-        if fallback.is_file() and doc_dir.resolve() in fallback.parents:
-            candidates.append(fallback)
+        for infix in ("auto", "vlm", None):
+            probe = (sub / infix / asset_path) if infix else (sub / asset_path)
+            probe = probe.resolve()
+            if probe.is_file() and doc_dir.resolve() in probe.parents:
+                candidates.append(probe)
+                break
+        if candidates:
             break
     if not candidates:
         raise HTTPException(status_code=404,

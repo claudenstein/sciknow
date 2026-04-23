@@ -273,6 +273,30 @@ and the web modal renders a "Model swap churn" panel with the last
 over ≥10 min — each swap costs 5-10 s of Ollama cold-load, so
 15/hr = ~3 min of pipeline cold-loads per hour, worth surfacing.
 
+**Phase 54.6.303** is a two-part fix: (1) the visuals image
+endpoint (`/api/visuals/image/{id}`) now also probes the `vlm/`
+subfolder when serving figures — MinerU 2.5 VLM-Pro writes
+images under `<doc_slug>/vlm/images/...`, but the handler only
+tried `<doc_slug>/auto/...` (pipeline-mode layout) and the bare
+fallback, so every figure ingested via VLM-Pro 404'd as "image
+unavailable" in the web UI's visuals panel; (2) ships
+`scripts/ollama-override.conf` — a corrected drop-in for
+`/etc/systemd/system/ollama.service.d/override.conf` that fixes
+a stray-space typo (`OLLAMA_F LASH_ATTENTION=1` →
+`OLLAMA_FLASH_ATTENTION=1`) which was silently disabling flash
+attention, and switches `OLLAMA_KV_CACHE_TYPE` from `q8_0` to
+`q4_0` to match the 4090 throughput benchmark posted by
+`@Punch_Taylor` (43.1 tok/s on Qwen3.6-27B Q4_K_M with
+`-fa on --cache-type-k q4_0 --cache-type-v q4_0`). Apply with
+`sudo cp scripts/ollama-override.conf /etc/systemd/system/ollama.service.d/override.conf && sudo systemctl daemon-reload && sudo systemctl restart ollama`.
+Note on the third complaint ("no charts, 'no visuals found'"):
+MinerU 2.5 VLM-Pro doesn't emit a separate `chart` block type
+— plots come through as `image` and land in the `figure` kind.
+The chart filter showing 0 results is a property of the
+backend, not a bug; switch to `PDF_CONVERTER_BACKEND=mineru`
+(pipeline mode) and re-run `db extract-visuals --force` if a
+distinct chart classification is needed.
+
 **Phase 54.6.302** adds a **per-chapter book-writing velocity panel**.
 CLI gets an 8-block progress sparkline inline with the "book" footer
 (one block per chapter, height encodes completion %, colour green ≥80 %
