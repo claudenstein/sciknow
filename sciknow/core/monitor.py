@@ -590,6 +590,49 @@ def _build_llm_section(
     }
 
 
+# Phase 54.6.293 — time-based cache for the sidecar audit so the
+# monitor can surface it on every snapshot without paying the
+# ~0.6 s Qdrant scroll each time.  Module-level, per-process —
+# same lifetime convention as the other ring buffers in this file.
+_SIDECAR_AUDIT_CACHE: dict = {"at": 0.0, "result": None}
+_SIDECAR_AUDIT_TTL_S: float = 300.0   # 5 min — audit is read-only,
+                                      # refreshes on the N-th snapshot
+                                      # after TTL expiry
+
+
+def _sidecar_audit_cached(session) -> dict:
+    """Cached wrapper around ``_sidecar_integrity_audit``.
+
+    Returns the last computed result when age < TTL.  First call
+    (or post-TTL call) runs the audit inline and caches.  The
+    result dict carries an ``age_s`` key so renderers can show
+    "audit 42 s old" vs "audit 4 min old".
+
+    Safe during active ingestion — the audit is read-only.
+    """
+    import time as _time
+    now = _time.monotonic()
+    cached = _SIDECAR_AUDIT_CACHE.get("result")
+    cached_at = _SIDECAR_AUDIT_CACHE.get("at") or 0.0
+    if cached is not None and (now - cached_at) < _SIDECAR_AUDIT_TTL_S:
+        out = dict(cached)
+        out["age_s"] = round(now - cached_at, 1)
+        out["from_cache"] = True
+        return out
+    # Fresh audit.
+    try:
+        fresh = _sidecar_integrity_audit(session)
+    except Exception as exc:
+        logger.warning("sidecar audit failed: %s", exc)
+        fresh = {"enabled": True, "error": str(exc)}
+    _SIDECAR_AUDIT_CACHE["result"] = fresh
+    _SIDECAR_AUDIT_CACHE["at"] = now
+    out = dict(fresh)
+    out["age_s"] = 0.0
+    out["from_cache"] = False
+    return out
+
+
 def _sidecar_integrity_audit(session, *, limit_problems: int = 20) -> dict:
     """Phase 54.6.292 — per-document integrity check across the
     PG chunks table, the prod Qdrant collection, and the dual-
@@ -1918,6 +1961,32 @@ def _build_alerts(snap: dict) -> list[dict]:
             ),
         })
 
+    # Phase 54.6.293 — sidecar integrity alert.  Fires warn whenever
+    # any critical bucket is non-zero (sidecar_missing, _partial,
+    # _orphan, prod_missing, prod_partial).  prod_orphan is NOT
+    # critical — RAPTOR nodes legitimately live only in prod.
+    audit = snap.get("sidecar_audit") or {}
+    if audit.get("enabled") and not audit.get("error"):
+        critical = (
+            (audit.get("sidecar_missing", 0) or 0)
+            + (audit.get("sidecar_partial", 0) or 0)
+            + (audit.get("sidecar_orphan", 0) or 0)
+            + (audit.get("prod_missing", 0) or 0)
+            + (audit.get("prod_partial", 0) or 0)
+        )
+        if critical > 0:
+            alerts.append({
+                "severity": "warn",
+                "code": "sidecar_drift",
+                "message": (
+                    f"sidecar audit: {critical} doc(s) out of "
+                    f"{audit.get('n_docs', 0)} mismatched "
+                    f"(missing {audit.get('sidecar_missing', 0)}, "
+                    f"partial {audit.get('sidecar_partial', 0)}, "
+                    f"orphan {audit.get('sidecar_orphan', 0)})"
+                ),
+            })
+
     # Phase 54.6.289 — Ollama model-swap churn alert.  Fires when
     # the observed swap rate is ≥15/hr over a window of ≥10 minutes
     # (below that the rate is noisy — swaps at session start often
@@ -2147,6 +2216,9 @@ def _build_alerts(snap: dict) -> list[dict]:
         "model_thrash":    (
             "grep -E 'LLM_MODEL|BOOK_WRITE_MODEL|AUTOWRITE_SCORER' "
             ".env  # consider unifying per-role overrides"
+        ),
+        "sidecar_drift":   (
+            "sciknow db audit-sidecar  # per-doc mismatch detail"
         ),
         "ram_pressure":    "ps axu --sort=-%mem | head",
         "host_overload":   "uptime; top -b -n 1 | head -20",
@@ -3493,6 +3565,11 @@ def collect_monitor_snapshot(
         retractions = _safe_db(
             session, _retraction_detail, default={},
         )
+        # 54.6.293 — cached per-doc sidecar integrity audit.  Runs
+        # inline on first call + every 5 min; no-op on cache hits.
+        sidecar_audit = _safe_db(
+            session, _sidecar_audit_cached, default={},
+        )
         # 54.6.237 — trend batch
         growth = _safe_db(session, _corpus_growth_rate, default={})
         book_act = _safe_db(session, _book_activity, default={})
@@ -3573,6 +3650,10 @@ def collect_monitor_snapshot(
         # the operator to review.  Behind the "retracted_papers"
         # info-level alert.
         "retractions": retractions,
+        # 54.6.293 — sidecar audit result (time-cached).  ``enabled``
+        # is False when dual-embedder isn't configured; renderers
+        # should show nothing in that case.
+        "sidecar_audit": sidecar_audit,
         "bench_freshness": _bench_freshness(
             Path(data_dir) if data_dir else None
         ),

@@ -273,6 +273,16 @@ and the web modal renders a "Model swap churn" panel with the last
 over ≥10 min — each swap costs 5-10 s of Ollama cold-load, so
 15/hr = ~3 min of pipeline cold-loads per hour, worth surfacing.
 
+**Phase 54.6.293** wires the **sidecar audit into the monitor** —
+`_sidecar_audit_cached` runs the 54.6.292 helper once per 5 min
+(module-level TTL) so every snapshot carries the current healthy/
+total ratio without paying the 0.6 s Qdrant scroll each time. CLI
+gets a `sidecar N/N ✓ age Xs` row in the corpus panel; web modal
+gets a "Sidecar integrity" banner with drift counts + DB/prod/
+sidecar totals. `sidecar_drift` alert fires when any critical
+bucket is non-zero, with `sciknow db audit-sidecar` as the
+suggested-fix command.
+
 **Phase 54.6.292** adds a **per-doc sidecar integrity audit** —
 `sciknow db audit-sidecar` cross-checks every complete document's
 chunk count against both Qdrant collections (prod + dual-embedder

@@ -1991,6 +1991,8 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     seccov = snap.get("section_coverage") or {}
     # 54.6.287 — per-converter-backend section coverage.
     seccov_by_backend = snap.get("section_coverage_by_backend") or []
+    # 54.6.293 — cached sidecar integrity audit.
+    sidecar_audit = snap.get("sidecar_audit") or {}
     bench_fresh = snap.get("bench_freshness") or {}
     # 54.6.250 — backup freshness: compact "backup Nd" marker
     backup_fresh = snap.get("backup_freshness") or {}
@@ -2640,6 +2642,41 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
                 Text("  by backend", style=C_DIM),
                 Text.from_markup(" · ".join(parts)),
             )
+
+    # Phase 54.6.293 — cached sidecar integrity one-liner.  Quiet
+    # when dual-embedder isn't active.  When active: "sidecar N/N
+    # ✓" in green, or a coloured mismatch count.
+    if sidecar_audit.get("enabled") and not sidecar_audit.get("error"):
+        n_docs = sidecar_audit.get("n_docs", 0)
+        healthy_n = sidecar_audit.get("healthy", 0)
+        critical = (
+            (sidecar_audit.get("sidecar_missing", 0) or 0)
+            + (sidecar_audit.get("sidecar_partial", 0) or 0)
+            + (sidecar_audit.get("sidecar_orphan", 0) or 0)
+            + (sidecar_audit.get("prod_missing", 0) or 0)
+            + (sidecar_audit.get("prod_partial", 0) or 0)
+        )
+        age = sidecar_audit.get("age_s", 0) or 0
+        age_str = (
+            f"{age:.0f}s" if age < 60 else f"{age / 60:.0f}m"
+        )
+        if n_docs > 0:
+            if critical == 0:
+                val = Text()
+                val.append(
+                    f"{healthy_n:,}/{n_docs:,} ✓", style=C_OK,
+                )
+                val.append(f"  age {age_str}", style=C_DIM)
+            else:
+                val = Text()
+                val.append(
+                    f"{healthy_n:,}/{n_docs:,}", style=C_ERR,
+                )
+                val.append(
+                    f"  {critical} drift", style=C_ERR,
+                )
+                val.append(f"  age {age_str}", style=C_DIM)
+            corpus_tbl.add_row(Text("sidecar", style=C_DIM), val)
 
     # Phase 54.6.280 — citation graph health. Three compact rows
     # surfacing internal coverage (how many cited refs are in the

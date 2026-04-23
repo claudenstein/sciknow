@@ -12045,6 +12045,68 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_293_sidecar_audit_in_monitor() -> None:
+    """Phase 54.6.293 — cached sidecar integrity audit in the monitor
+    snapshot + dashboard panels + sidecar_drift alert.
+
+    Guards:
+
+      A) `_sidecar_audit_cached` helper exists with TTL-based cache
+         and ``age_s`` / ``from_cache`` metadata.
+      B) collect_monitor_snapshot exposes `sidecar_audit`.
+      C) `_build_alerts` emits sidecar_drift when critical buckets
+         are non-zero.
+      D) CLI renders the `sidecar N/N ✓` row in the corpus panel.
+      E) Web renderMonitor renders a `Sidecar integrity` heading
+         + drift counts.
+    """
+    import inspect as _inspect
+    from sciknow.core import monitor as _mon
+
+    assert hasattr(_mon, "_sidecar_audit_cached"), (
+        "54.6.293 _sidecar_audit_cached helper must exist"
+    )
+    src = _inspect.getsource(_mon._sidecar_audit_cached)
+    assert "_SIDECAR_AUDIT_CACHE" in src or "SIDECAR_AUDIT" in src, (
+        "54.6.293 cached helper must use a module-level cache"
+    )
+    assert "age_s" in src and "from_cache" in src, (
+        "54.6.293 cached helper must stamp age_s + from_cache"
+    )
+    assert "_SIDECAR_AUDIT_TTL_S" in _inspect.getsource(_mon) or \
+           "TTL" in src, (
+        "54.6.293 cache must have a TTL constant"
+    )
+
+    snap_src = _inspect.getsource(_mon.collect_monitor_snapshot)
+    assert '"sidecar_audit"' in snap_src, (
+        "54.6.293 snapshot must expose sidecar_audit"
+    )
+    assert "_sidecar_audit_cached" in snap_src, (
+        "54.6.293 snapshot must call the cached helper"
+    )
+
+    alerts_src = _inspect.getsource(_mon._build_alerts)
+    assert "sidecar_drift" in alerts_src, (
+        "54.6.293 _build_alerts must emit sidecar_drift"
+    )
+
+    from sciknow.cli import db as _db_cli
+    cli_src = _inspect.getsource(_db_cli._build_monitor_layout)
+    assert "sidecar_audit" in cli_src, (
+        "54.6.293 CLI must read snap['sidecar_audit']"
+    )
+
+    from sciknow.testing.helpers import web_app_full_source
+    web_src = web_app_full_source()
+    assert "snap.sidecar_audit" in web_src, (
+        "54.6.293 web must read snap.sidecar_audit"
+    )
+    assert "Sidecar integrity" in web_src, (
+        "54.6.293 web must render a 'Sidecar integrity' heading"
+    )
+
+
 def l1_phase54_6_292_sidecar_audit_cli() -> None:
     """Phase 54.6.292 — per-document sidecar integrity audit + CLI.
 
@@ -16960,6 +17022,7 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_290_vram_budget_preflight,
     l1_phase54_6_291_preflight_event_history,
     l1_phase54_6_292_sidecar_audit_cli,
+    l1_phase54_6_293_sidecar_audit_in_monitor,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]
