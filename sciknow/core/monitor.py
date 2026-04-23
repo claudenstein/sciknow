@@ -633,6 +633,245 @@ def _sidecar_audit_cached(session) -> dict:
     return out
 
 
+def _sidecar_deep_audit(session, *, uuid_sample: int = 0) -> dict:
+    """Phase 54.6.295 — deeper audit beyond chunk-count parity.
+
+    Extends ``_sidecar_integrity_audit`` with checks the aggregate
+    count-match can't catch:
+
+      * UUID identity per doc.  Same counts on both sides is
+        necessary but not sufficient — a broken write path could
+        leave identical-size point sets with *different* UUIDs,
+        which would mean retrieval picks up sidecar dense vectors
+        paired with the wrong prod payload.
+      * Sidecar payload completeness (document_id + chunk_id +
+        section_type must be present; their absence would break
+        filter pushdown).
+      * Sidecar vector dim sample (confirms the stored vectors
+        match ``settings.dense_embedder_dim`` — a mis-encoded point
+        would pass the count check but fail at query time).
+      * ``chunks.embedding_model`` stamp drift — a change to
+        ``settings.embedding_model`` would leave older rows with
+        the wrong stamp, a silent "some chunks are stale" state.
+      * Untagged prod points classified RAPTOR vs stale.  The
+        count-based audit buckets them as ``untagged_prod`` but
+        doesn't say whether they're legitimate RAPTOR summaries
+        (``node_level`` set) or something else that needs cleanup.
+
+    ``uuid_sample=0`` = check every complete doc (slow, ~30 s on
+    807 docs).  ``uuid_sample=50`` = random 50-doc sample (~2 s).
+    Used for the CLI ``--deep`` path; the routine cached audit
+    skips this.
+
+    Returns::
+
+        {
+          "uuid_sample_checked": int,
+          "uuid_mismatched":     int,   # zero overlap (critical)
+          "uuid_partial":        int,   # partial overlap (critical)
+          "payload_broken":      int,   # sidecar points missing required key
+          "payload_keys_checked": [...],
+          "sidecar_dim_sample":  int,   # points sampled
+          "sidecar_dim_values":  [int], # observed dims (expected [2560])
+          "stamp_drift_count":   int,   # chunks where embedding_model !=
+                                        # settings.embedding_model
+          "stamp_breakdown":     [{"model": str, "n": int}],
+          "untagged_prod":       int,
+          "untagged_raptor":     int,
+          "untagged_stale":      int,   # untagged AND not RAPTOR
+          "stale_sample":        [...],
+        }
+
+    Returns ``{"enabled": False}`` when the dual-embedder isn't
+    configured.
+    """
+    from sqlalchemy import text as _text
+    from sciknow.config import settings
+    from sciknow.storage.qdrant import (
+        get_client as _get_qdrant, PAPERS_COLLECTION,
+    )
+
+    if not getattr(settings, "dense_embedder_model", None):
+        return {"enabled": False}
+
+    try:
+        from sciknow.ingestion.embedder import _sidecar_collection_name
+        sidecar_name = _sidecar_collection_name()
+    except Exception:
+        return {"enabled": True, "error": "sidecar name resolve failed"}
+
+    client = _get_qdrant()
+    try:
+        from qdrant_client.http import models as _qm
+    except Exception:
+        return {"enabled": True, "error": "qdrant_client import failed"}
+
+    out: dict = {"enabled": True}
+
+    # 1. UUID identity per doc (full or sampled).
+    try:
+        doc_rows = session.execute(_text(
+            "SELECT id FROM documents "
+            "WHERE ingestion_status = 'complete'"
+        )).fetchall()
+        doc_ids = [str(r[0]) for r in doc_rows]
+    except Exception:
+        doc_ids = []
+
+    if uuid_sample > 0 and len(doc_ids) > uuid_sample:
+        import random
+        random.seed(42)  # deterministic — same sample every run
+        to_check = random.sample(doc_ids, uuid_sample)
+    else:
+        to_check = doc_ids
+
+    def _ids_for_doc(coll: str, doc_id: str) -> set[str]:
+        ids: set[str] = set()
+        offset = None
+        filt = _qm.Filter(must=[
+            _qm.FieldCondition(
+                key="document_id",
+                match=_qm.MatchValue(value=doc_id),
+            ),
+        ])
+        while True:
+            try:
+                pts, offset = client.scroll(
+                    collection_name=coll, scroll_filter=filt,
+                    limit=256, offset=offset,
+                    with_payload=False, with_vectors=False,
+                )
+            except Exception:
+                return set()
+            ids.update(str(p.id) for p in pts)
+            if not offset:
+                break
+        return ids
+
+    mismatched = 0
+    partial = 0
+    for doc_id in to_check:
+        p_ids = _ids_for_doc(PAPERS_COLLECTION, doc_id)
+        s_ids = _ids_for_doc(sidecar_name, doc_id)
+        if p_ids == s_ids:
+            continue
+        if p_ids.isdisjoint(s_ids):
+            mismatched += 1
+        else:
+            partial += 1
+    out["uuid_sample_checked"] = len(to_check)
+    out["uuid_mismatched"] = mismatched
+    out["uuid_partial"] = partial
+
+    # 2. Sidecar payload completeness.  Single pass over the
+    # sidecar collection; ~0.5 s.
+    required_keys = ("document_id", "chunk_id", "section_type")
+    total_points = 0
+    missing_any = 0
+    offset = None
+    while True:
+        try:
+            pts, offset = client.scroll(
+                collection_name=sidecar_name, limit=5000,
+                offset=offset, with_payload=True, with_vectors=False,
+            )
+        except Exception:
+            break
+        for p in pts:
+            total_points += 1
+            pl = p.payload or {}
+            if any(pl.get(k) in (None, "") for k in required_keys):
+                missing_any += 1
+        if not offset:
+            break
+    out["payload_keys_checked"] = list(required_keys)
+    out["payload_broken"] = missing_any
+
+    # 3. Sidecar vector dim sample.
+    try:
+        pts, _ = client.scroll(
+            collection_name=sidecar_name, limit=20,
+            with_vectors=True, with_payload=False,
+        )
+    except Exception:
+        pts = []
+    dims = set()
+    for p in pts:
+        v = p.vector
+        vec = v.get("dense", v) if isinstance(v, dict) else v
+        try:
+            dims.add(len(vec))
+        except TypeError:
+            pass
+    out["sidecar_dim_sample"] = len(pts)
+    out["sidecar_dim_values"] = sorted(dims)
+
+    # 4. embedding_model stamp drift in chunks table.
+    try:
+        rows = session.execute(_text(
+            "SELECT COALESCE(embedding_model, '<null>'), COUNT(*) "
+            "FROM chunks GROUP BY embedding_model"
+        )).fetchall()
+    except Exception:
+        rows = []
+    current_model = settings.embedding_model
+    drift = 0
+    breakdown = []
+    for model, n in rows:
+        breakdown.append({"model": str(model), "n": _safe_int(n)})
+        if str(model) != current_model:
+            drift += _safe_int(n)
+    out["stamp_drift_count"] = drift
+    out["stamp_breakdown"] = breakdown
+    out["current_embedding_model"] = current_model
+
+    # 5. Untagged prod classification: RAPTOR vs stale.
+    try:
+        valid_docs = {str(r[0]) for r in session.execute(_text(
+            "SELECT id FROM documents"
+        )).fetchall()}
+    except Exception:
+        valid_docs = set()
+    untagged_count = 0
+    raptor_count = 0
+    stale_count = 0
+    stale_samples: list[dict] = []
+    offset = None
+    while True:
+        try:
+            pts, offset = client.scroll(
+                collection_name=PAPERS_COLLECTION, limit=5000,
+                offset=offset, with_payload=True, with_vectors=False,
+            )
+        except Exception:
+            break
+        for p in pts:
+            pl = p.payload or {}
+            did = pl.get("document_id") or ""
+            if did and did in valid_docs:
+                continue  # normal chunk, skip
+            untagged_count += 1
+            if pl.get("node_level") is not None:
+                raptor_count += 1
+            else:
+                stale_count += 1
+                if len(stale_samples) < 5:
+                    stale_samples.append({
+                        "point_id": str(p.id),
+                        "document_id": pl.get("document_id"),
+                        "section_type": pl.get("section_type"),
+                        "node_level": pl.get("node_level"),
+                    })
+        if not offset:
+            break
+    out["untagged_prod"] = untagged_count
+    out["untagged_raptor"] = raptor_count
+    out["untagged_stale"] = stale_count
+    out["stale_sample"] = stale_samples
+
+    return out
+
+
 def _sidecar_integrity_audit(session, *, limit_problems: int = 20) -> dict:
     """Phase 54.6.292 — per-document integrity check across the
     PG chunks table, the prod Qdrant collection, and the dual-

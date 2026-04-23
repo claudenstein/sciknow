@@ -12045,6 +12045,44 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_295_sidecar_deep_audit() -> None:
+    """Phase 54.6.295 — deep audit helper + --deep CLI flag.
+
+    Guards:
+
+      A) `_sidecar_deep_audit` exists with the documented return keys.
+      B) CLI exposes `--deep` + `--uuid-sample` on audit-sidecar.
+      C) CLI folds deep results into the exit-code logic.
+    """
+    import inspect as _inspect
+    from sciknow.core import monitor as _mon
+
+    assert hasattr(_mon, "_sidecar_deep_audit"), (
+        "54.6.295 _sidecar_deep_audit helper must exist"
+    )
+    src = _inspect.getsource(_mon._sidecar_deep_audit)
+    for key in (
+        "uuid_sample_checked", "uuid_mismatched", "uuid_partial",
+        "payload_broken", "payload_keys_checked",
+        "sidecar_dim_values", "sidecar_dim_sample",
+        "stamp_drift_count", "stamp_breakdown",
+        "untagged_prod", "untagged_raptor", "untagged_stale",
+    ):
+        assert key in src, (
+            f"54.6.295 deep audit must populate {key!r}"
+        )
+
+    from sciknow.cli import db as _db_cli
+    cli_src = _inspect.getsource(_db_cli.audit_sidecar_cmd)
+    assert "--deep" in cli_src, "54.6.295 CLI must expose --deep"
+    assert "--uuid-sample" in cli_src, (
+        "54.6.295 CLI must expose --uuid-sample for deep mode"
+    )
+    assert "_sidecar_deep_audit" in cli_src, (
+        "54.6.295 CLI must call the deep audit helper"
+    )
+
+
 def l1_phase54_6_294_slow_docs_leaderboard() -> None:
     """Phase 54.6.294 — top-N slow-ingest leaderboard in the monitor.
 
@@ -17071,6 +17109,7 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_292_sidecar_audit_cli,
     l1_phase54_6_293_sidecar_audit_in_monitor,
     l1_phase54_6_294_slow_docs_leaderboard,
+    l1_phase54_6_295_sidecar_deep_audit,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]

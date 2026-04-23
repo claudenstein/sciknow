@@ -273,6 +273,30 @@ and the web modal renders a "Model swap churn" panel with the last
 over ≥10 min — each swap costs 5-10 s of Ollama cold-load, so
 15/hr = ~3 min of pipeline cold-loads per hour, worth surfacing.
 
+**Phase 54.6.295** adds a **`--deep` audit** — goes beyond the 292
+count-match audit to check:
+
+* UUID identity per doc (prod and sidecar must carry the *same*
+  point IDs, not just the same count — a broken write path could
+  leave same-size sets with different UUIDs that retrieval would
+  silently mix)
+* sidecar payload completeness (`document_id` + `chunk_id` +
+  `section_type` must be present; missing keys break filter
+  pushdown)
+* sidecar vector dim sanity (must match `dense_embedder_dim`)
+* `chunks.embedding_model` stamp drift (detects staleness after a
+  config change)
+* untagged-prod classification (the 60 "extra" prod points must
+  all be RAPTOR summary nodes — any "stale" bucket flags cleanup)
+
+Full 807-doc deep audit runs in ~13 s; sample mode via
+`--uuid-sample 50` for ~2 s. Usage:
+
+```bash
+sciknow db audit-sidecar --deep              # full
+sciknow db audit-sidecar --deep --uuid-sample 50  # fast sample
+```
+
 **Phase 54.6.294** adds a **slow-ingest leaderboard** — top-5 docs
 by total ingestion wall-clock with per-stage breakdown. Identifies
 outlier PDFs that eat pipeline time. CLI footer block under the

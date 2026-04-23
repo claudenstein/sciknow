@@ -1318,6 +1318,20 @@ def audit_sidecar_cmd(
              "live only in prod. Destructive; Qdrant deletion is "
              "atomic per doc but not reversible.",
     ),
+    deep: bool = typer.Option(
+        False, "--deep",
+        help="Phase 54.6.295 — run the deeper audit in addition to "
+             "the count-based one: UUID identity per doc, sidecar "
+             "payload completeness, vector dim sanity, embedding_model "
+             "stamp drift, and untagged-prod RAPTOR classification. "
+             "Slower (~30 s on 807 docs vs 0.6 s for the fast audit).",
+    ),
+    uuid_sample: int = typer.Option(
+        0, "--uuid-sample",
+        help="With --deep: cap the per-doc UUID identity check to N "
+             "randomly-sampled docs (seeded for determinism). 0 means "
+             "check every complete doc.",
+    ),
 ):
     """Phase 54.6.292 — per-document integrity audit across the PG
     chunks table, the prod Qdrant collection, and the dual-embedder
@@ -1362,11 +1376,17 @@ def audit_sidecar_cmd(
     preflight(qdrant=True)
 
     import json as _json
-    from sciknow.core.monitor import _sidecar_integrity_audit
+    from sciknow.core.monitor import (
+        _sidecar_integrity_audit, _sidecar_deep_audit,
+    )
     from sciknow.storage.db import get_session
 
     with get_session() as session:
         report = _sidecar_integrity_audit(session, limit_problems=limit)
+        if deep and report.get("enabled"):
+            report["deep"] = _sidecar_deep_audit(
+                session, uuid_sample=max(0, int(uuid_sample)),
+            )
 
     if json_out:
         console.print(_json.dumps(report, indent=2, default=str))
@@ -1473,6 +1493,111 @@ def audit_sidecar_cmd(
                 str(r["sidecar"]),
             )
         console.print(tbl)
+
+    # Phase 54.6.295 — render the --deep audit block when present.
+    deep_report = report.get("deep")
+    if deep_report and deep_report.get("enabled"):
+        deep_rows = _Table.grid(padding=(0, 2), expand=False)
+        deep_rows.add_column(style="dim", width=28)
+        deep_rows.add_column(justify="right")
+
+        # UUID identity
+        checked = deep_report.get("uuid_sample_checked", 0)
+        mm = deep_report.get("uuid_mismatched", 0)
+        pp = deep_report.get("uuid_partial", 0)
+        uuid_ok = mm == 0 and pp == 0
+        uuid_colour = "bright_green" if uuid_ok else "bright_red"
+        deep_rows.add_row(
+            "uuid identity (sample)",
+            f"[{uuid_colour}]{checked} docs · mm {mm} · partial {pp}[/{uuid_colour}]",
+        )
+
+        # Payload completeness
+        broken = deep_report.get("payload_broken", 0)
+        payload_colour = "bright_green" if broken == 0 else "bright_red"
+        deep_rows.add_row(
+            "payload broken (sidecar)",
+            f"[{payload_colour}]{broken}[/{payload_colour}]",
+        )
+
+        # Vector dim
+        dims = deep_report.get("sidecar_dim_values", []) or []
+        sample = deep_report.get("sidecar_dim_sample", 0) or 0
+        expected_dim = int(getattr(
+            __import__("sciknow.config", fromlist=["settings"]).settings,
+            "dense_embedder_dim", 2560,
+        ))
+        dim_ok = dims == [expected_dim]
+        dim_colour = "bright_green" if dim_ok else "bright_red"
+        deep_rows.add_row(
+            "vector dim (sampled)",
+            f"[{dim_colour}]{dims} / expected [{expected_dim}] "
+            f"(n={sample})[/{dim_colour}]",
+        )
+
+        # embedding_model stamp drift
+        drift = deep_report.get("stamp_drift_count", 0)
+        drift_colour = "bright_green" if drift == 0 else "yellow"
+        deep_rows.add_row(
+            "stamp drift (chunks)",
+            f"[{drift_colour}]{drift}[/{drift_colour}]",
+        )
+
+        # Untagged prod classification
+        u = deep_report.get("untagged_prod", 0)
+        raptor = deep_report.get("untagged_raptor", 0)
+        stale = deep_report.get("untagged_stale", 0)
+        raptor_colour = (
+            "dim" if stale == 0 else "yellow"
+        )
+        deep_rows.add_row(
+            "untagged prod",
+            f"[{raptor_colour}]{u} (raptor {raptor} · stale {stale})[/{raptor_colour}]",
+        )
+
+        console.print(_Panel(
+            deep_rows,
+            title="[bold]deep audit (--deep)[/bold]",
+            title_align="left",
+            border_style=(
+                "bright_green" if (uuid_ok and broken == 0 and dim_ok
+                                   and drift == 0 and stale == 0)
+                else "yellow"
+            ),
+            box=_box.ROUNDED, padding=(0, 1),
+        ))
+
+        # Stale-sample table when present
+        stale_sample = deep_report.get("stale_sample") or []
+        if stale_sample:
+            tbl = _Table(title="stale untagged prod (sample)")
+            tbl.add_column("point_id", style="cyan")
+            tbl.add_column("section_type")
+            tbl.add_column("document_id")
+            tbl.add_column("node_level")
+            for s in stale_sample:
+                tbl.add_row(
+                    str(s.get("point_id", ""))[:10],
+                    str(s.get("section_type", "")),
+                    str(s.get("document_id", "")),
+                    str(s.get("node_level", "")),
+                )
+            console.print(tbl)
+
+        # Stamp-breakdown table when drift is non-zero
+        if drift > 0:
+            tbl = _Table(title="chunks.embedding_model breakdown")
+            tbl.add_column("model", style="cyan")
+            tbl.add_column("n", justify="right")
+            for row in deep_report.get("stamp_breakdown", []) or []:
+                tbl.add_row(row.get("model", ""), f"{row.get('n', 0):,}")
+            console.print(tbl)
+
+        # Fold deep results into any_critical so exit-code reflects
+        # deeper problems as well.
+        if mm or pp or broken or not dim_ok or drift or stale:
+            any_critical += (mm + pp + broken + drift + stale +
+                              (0 if dim_ok else 1))
 
     if fix_orphans and report.get("sidecar_orphan", 0) > 0:
         orphan_rows = (report.get("problems") or {}).get(
