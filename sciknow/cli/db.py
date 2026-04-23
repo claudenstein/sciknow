@@ -2120,6 +2120,8 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     seccov_by_backend = snap.get("section_coverage_by_backend") or []
     # 54.6.293 — cached sidecar integrity audit.
     sidecar_audit = snap.get("sidecar_audit") or {}
+    # 54.6.298 — per-field enrichment coverage.
+    enrichment = snap.get("enrichment") or {}
     bench_fresh = snap.get("bench_freshness") or {}
     # 54.6.250 — backup freshness: compact "backup Nd" marker
     backup_fresh = snap.get("backup_freshness") or {}
@@ -2607,6 +2609,42 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
             Text("metadata src", style=C_DIM),
             Text(src_str, style=colour),
         )
+
+    # Phase 54.6.298 — per-field enrichment coverage.  Compact row:
+    # "doi 73% · abst 30% · auth 86%".  Silent when total == 0.
+    # Colour per-field: green ≥80 % present, yellow 50-80 %, red <50 %.
+    if enrichment.get("total"):
+        priority_fields = ("doi", "abstract", "authors")
+        by_name = {f["name"]: f for f in enrichment.get("fields") or []}
+        parts = []
+        worst_colour = C_OK
+        for name in priority_fields:
+            f = by_name.get(name)
+            if f is None:
+                continue
+            pct_present = 100.0 - f["pct_missing"]
+            c = (
+                C_OK if pct_present >= 80 else
+                C_WARN if pct_present >= 50 else C_ERR
+            )
+            if c == C_ERR:
+                worst_colour = C_ERR
+            elif c == C_WARN and worst_colour != C_ERR:
+                worst_colour = C_WARN
+            # Short label: doi/abst/auth
+            short = {"abstract": "abst", "authors": "auth"}.get(name, name)
+            parts.append((short, int(round(pct_present)), c))
+        if parts:
+            bits = Text()
+            for i, (lbl, pct, c) in enumerate(parts):
+                if i:
+                    bits.append(" · ", style=C_DIM)
+                bits.append(f"{lbl} ", style=C_DIM)
+                bits.append(f"{pct}%", style=c)
+            corpus_tbl.add_row(
+                Text("enrich", style=C_DIM),
+                bits,
+            )
     if paper_types:
         top = paper_types[0]
         total_pt = sum(p["n"] for p in paper_types)

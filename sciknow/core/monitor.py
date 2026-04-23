@@ -2369,6 +2369,25 @@ def _build_alerts(snap: dict) -> list[dict]:
             ),
         })
 
+    # Phase 54.6.298 — enrichment gap alert.  Fires info when any
+    # actionable field (doi/abstract/authors/title/journal) is
+    # missing on >50% of complete docs — actionable because
+    # `sciknow db enrich` fills most of these from external sources
+    # (Crossref / OpenAlex / arXiv).  Info-level, not warn, because
+    # this is a "work remains" signal, not a failure.
+    enr = snap.get("enrichment") or {}
+    worst = enr.get("worst_pct", 0) or 0
+    worst_field = enr.get("worst_field")
+    if worst >= 50 and worst_field:
+        alerts.append({
+            "severity": "info",
+            "code": "enrichment_gap",
+            "message": (
+                f"metadata gap: {worst}% of complete docs missing "
+                f"{worst_field} — run `sciknow db enrich`"
+            ),
+        })
+
     # Phase 54.6.296 — missing payload-index alert.  Fires warn when
     # any expected payload index is missing on any collection.
     # Filter pushdown without indexes is a full scan — 100× slower
@@ -2655,6 +2674,10 @@ def _build_alerts(snap: dict) -> list[dict]:
         "payload_index_missing": (
             "sciknow db init  # idempotent; re-creates missing "
             "payload indexes"
+        ),
+        "enrichment_gap": (
+            "sciknow db enrich  # fills DOI/abstract/authors from "
+            "Crossref / OpenAlex / arXiv"
         ),
         "ram_pressure":    "ps axu --sort=-%mem | head",
         "host_overload":   "uptime; top -b -n 1 | head -20",
@@ -3306,6 +3329,100 @@ def _stuck_job(session) -> dict:
     except Exception:
         pass
     return out
+
+
+def _enrichment_progress(session) -> dict:
+    """Phase 54.6.298 — per-field metadata coverage across all
+    complete documents.
+
+    Directly answers "how much work remains for `sciknow db enrich`?"
+    in one glance.  Missing-abstract counts are especially important
+    because abstracts feed both the dedicated abstracts Qdrant
+    collection and, when ``enable_colbert_abstracts`` is on, the
+    ColBERT late-interaction reranker — so a missing abstract
+    silently reduces retrieval quality for that doc.
+
+    Returns::
+
+        {
+          "total": int,                      # complete docs
+          "fields": [
+            {"name": "doi",       "missing": int, "pct_missing": float},
+            {"name": "abstract",  ...},
+            {"name": "authors",   ...},
+            {"name": "year",      ...},
+            {"name": "title",     ...},
+            {"name": "journal",   ...},
+          ],
+          "worst_field": "abstract",         # field with highest pct_missing
+          "worst_pct":    71.3,
+        }
+
+    Silent (zero counts) when ``paper_metadata`` / ``documents``
+    tables are empty.
+    """
+    from sqlalchemy import text
+    try:
+        row = session.execute(text("""
+            SELECT
+              COUNT(*) AS total,
+              COUNT(*) FILTER (WHERE pm.doi IS NULL OR pm.doi = '')
+                  AS missing_doi,
+              COUNT(*) FILTER (WHERE pm.abstract IS NULL OR pm.abstract = '')
+                  AS missing_abstract,
+              COUNT(*) FILTER (WHERE pm.authors IS NULL
+                               OR jsonb_array_length(pm.authors) = 0)
+                  AS missing_authors,
+              COUNT(*) FILTER (WHERE pm.year IS NULL)
+                  AS missing_year,
+              COUNT(*) FILTER (WHERE pm.title IS NULL OR pm.title = '')
+                  AS missing_title,
+              COUNT(*) FILTER (WHERE pm.journal IS NULL OR pm.journal = '')
+                  AS missing_journal
+            FROM paper_metadata pm
+            JOIN documents d ON d.id = pm.document_id
+            WHERE d.ingestion_status = 'complete'
+        """)).fetchone()
+    except Exception:
+        return {"total": 0, "fields": [],
+                "worst_field": None, "worst_pct": 0.0}
+
+    total = _safe_int(row[0]) if row else 0
+    if total == 0:
+        return {"total": 0, "fields": [],
+                "worst_field": None, "worst_pct": 0.0}
+
+    labels = (
+        ("doi", row[1]),
+        ("abstract", row[2]),
+        ("authors", row[3]),
+        ("year", row[4]),
+        ("title", row[5]),
+        ("journal", row[6]),
+    )
+    fields: list[dict] = []
+    for name, missing in labels:
+        m = _safe_int(missing)
+        fields.append({
+            "name": name,
+            "missing": m,
+            "pct_missing": round(m / total * 100, 1),
+        })
+
+    # Identify the field with the highest missing rate — drives the
+    # "fix this first" hint in the CLI.  `year` is excluded from the
+    # worst-field computation because it's often legitimately unknown
+    # (preprints, working papers), so even if it's the highest-% it's
+    # not necessarily actionable.
+    actionable = [f for f in fields if f["name"] != "year"]
+    actionable.sort(key=lambda f: f["pct_missing"], reverse=True)
+    worst = actionable[0] if actionable else None
+    return {
+        "total": total,
+        "fields": fields,
+        "worst_field": worst["name"] if worst else None,
+        "worst_pct": worst["pct_missing"] if worst else 0.0,
+    }
 
 
 def _metadata_quality(session) -> dict:
@@ -3979,6 +4096,10 @@ def collect_monitor_snapshot(
         # 54.6.234 — host load + stuck-job + content quality
         stuck_job = _safe_db(session, _stuck_job, default={})
         meta_quality = _safe_db(session, _metadata_quality, default={})
+        # 54.6.298 — per-field enrichment coverage.
+        enrichment = _safe_db(
+            session, _enrichment_progress, default={},
+        )
         # 54.6.235 — year histogram + embeddings coverage
         year_hist = _safe_db(session, _year_histogram, default=[])
         embed_cov = _safe_db(session, _embeddings_coverage, default={})
@@ -4065,6 +4186,9 @@ def collect_monitor_snapshot(
         "host": _host_load(),
         "stuck_job": stuck_job,
         "meta_quality": meta_quality,
+        # 54.6.298 — per-field metadata-enrichment coverage for
+        # "how much work remains for sciknow db enrich?".
+        "enrichment": enrichment,
         # 54.6.235 additions
         "year_histogram": year_hist,
         "embeddings_coverage": embed_cov,

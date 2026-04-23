@@ -12045,6 +12045,63 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_298_enrichment_coverage() -> None:
+    """Phase 54.6.298 — per-field metadata enrichment coverage panel.
+
+    Guards:
+
+      A) `_enrichment_progress` helper exists with per-field missing
+         counts + pct_missing + worst_field.
+      B) Snapshot exposes `enrichment`.
+      C) `_build_alerts` emits `enrichment_gap` when worst_pct ≥ 50.
+      D) CLI renders the 'enrich' row.
+      E) Web modal renders a 'Metadata enrichment coverage' section.
+    """
+    import inspect as _inspect
+    from sciknow.core import monitor as _mon
+
+    assert hasattr(_mon, "_enrichment_progress"), (
+        "54.6.298 _enrichment_progress helper must exist"
+    )
+    src = _inspect.getsource(_mon._enrichment_progress)
+    for key in (
+        "doi", "abstract", "authors", "year", "title", "journal",
+        "worst_field", "worst_pct", "pct_missing", "missing",
+    ):
+        assert key in src, f"54.6.298 helper must cover {key!r}"
+    assert "JOIN documents d" in src, (
+        "54.6.298 helper must restrict to complete docs"
+    )
+
+    snap_src = _inspect.getsource(_mon.collect_monitor_snapshot)
+    assert '"enrichment"' in snap_src, (
+        "54.6.298 snapshot must expose enrichment"
+    )
+
+    alerts_src = _inspect.getsource(_mon._build_alerts)
+    assert "enrichment_gap" in alerts_src, (
+        "54.6.298 _build_alerts must emit enrichment_gap"
+    )
+
+    from sciknow.cli import db as _db_cli
+    cli_src = _inspect.getsource(_db_cli._build_monitor_layout)
+    assert "enrichment" in cli_src, (
+        "54.6.298 CLI must read snap['enrichment']"
+    )
+    assert '"enrich"' in cli_src, (
+        "54.6.298 CLI must render an 'enrich' row label"
+    )
+
+    from sciknow.testing.helpers import web_app_full_source
+    web_src = web_app_full_source()
+    assert "snap.enrichment" in web_src, (
+        "54.6.298 web must read snap.enrichment"
+    )
+    assert "Metadata enrichment coverage" in web_src, (
+        "54.6.298 web must render the 'Metadata enrichment coverage' heading"
+    )
+
+
 def l1_phase54_6_297_book_outline_model() -> None:
     """Phase 54.6.297 — BOOK_OUTLINE_MODEL plumbing + A/B harness.
 
@@ -17234,6 +17291,7 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_295_sidecar_deep_audit,
     l1_phase54_6_296_payload_index_health,
     l1_phase54_6_297_book_outline_model,
+    l1_phase54_6_298_enrichment_coverage,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]

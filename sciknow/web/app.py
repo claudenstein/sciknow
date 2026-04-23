@@ -21008,6 +21008,8 @@ function renderMonitor(snap) {{
   const seccovByBackend = snap.section_coverage_by_backend || [];
   // Phase 54.6.293 — cached sidecar integrity audit.
   const sidecarAudit = snap.sidecar_audit || {{}};
+  // Phase 54.6.298 — per-field enrichment coverage.
+  const enrichment = snap.enrichment || {{}};
   // Phase 54.6.294 — top-N slow ingest docs.
   const slowDocs = snap.slow_docs || [];
   // Phase 54.6.296 — per-collection payload-index health check.
@@ -21692,6 +21694,44 @@ function renderMonitor(snap) {{
           + '<td><strong>' + _fmtNum(p.n) + '</strong></td></tr>';
       }});
       html += '</table>';
+    }}
+    sections.push(html);
+  }}
+
+  // Phase 54.6.298 — per-field enrichment coverage.  Stacked bar
+  // per field + headline; a "Run enrich" suggestion when any
+  // actionable field is above the alert threshold.
+  if (enrichment && (enrichment.total || 0) > 0) {{
+    const total = enrichment.total;
+    const fields = enrichment.fields || [];
+    const worstPct = enrichment.worst_pct || 0;
+    const worstField = enrichment.worst_field;
+    let html = '<h4>Metadata enrichment coverage</h4>'
+      + '<table class="stats-table" style="width:100%;font-size:0.9em;">'
+      + '<tr><th style="width:6em;">Field</th><th>Coverage</th>'
+      + '<th style="width:6em;text-align:right;">Present</th>'
+      + '<th style="width:6em;text-align:right;">Missing</th></tr>';
+    for (const f of fields) {{
+      const pctPresent = 100 - f.pct_missing;
+      const col = pctPresent >= 80 ? '#080'
+        : pctPresent >= 50 ? '#b70' : '#c33';
+      const bar = '<div style="display:flex;height:0.9em;border-radius:3px;overflow:hidden;background:#eee;">'
+        + '<div style="background:' + col + ';width:' + pctPresent.toFixed(1) + '%;"></div>'
+        + '</div>';
+      html += '<tr><td><code>' + _escHTML(f.name) + '</code></td>'
+        + '<td>' + bar + '</td>'
+        + '<td style="text-align:right;color:' + col + ';">'
+        + pctPresent.toFixed(0) + '%</td>'
+        + '<td style="text-align:right;color:var(--fg-muted);">'
+        + _fmtNum(f.missing) + '</td></tr>';
+    }}
+    html += '</table>';
+    if (worstField && worstPct >= 50) {{
+      html += '<div class="u-muted" style="margin-top:0.4em;">'
+        + '<strong>' + worstPct.toFixed(0) + '%</strong> of docs missing '
+        + '<code>' + _escHTML(worstField) + '</code> — run '
+        + '<code>sciknow db enrich</code> to fill from Crossref / OpenAlex / arXiv.'
+        + '</div>';
     }}
     sections.push(html);
   }}

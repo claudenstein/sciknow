@@ -273,6 +273,16 @@ and the web modal renders a "Model swap churn" panel with the last
 over ≥10 min — each swap costs 5-10 s of Ollama cold-load, so
 15/hr = ~3 min of pipeline cold-loads per hour, worth surfacing.
 
+**Phase 54.6.298** adds a **metadata-enrichment coverage** panel —
+per-field missing counts (DOI / abstract / authors / year / title /
+journal) across all complete documents. Surfaces a compact
+`enrich  doi 73% · abst 30% · auth 86%` row in the CLI corpus
+panel and a full Coverage table + stacked bars in the web modal.
+`enrichment_gap` info-level alert fires when any actionable field
+(excluding year) is missing on >50% of docs, with `sciknow db
+enrich` as the suggested fix. Live corpus: 70.5% missing abstract
+— big gap for ColBERT / abstracts collection quality.
+
 **Phase 54.6.297** adds a **`BOOK_OUTLINE_MODEL`** per-role override
 (mirroring the `BOOK_WRITE_MODEL` / `BOOK_REVIEW_MODEL` /
 `AUTOWRITE_SCORER_MODEL` precedent). Both surfaces resolve the
