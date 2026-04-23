@@ -61,6 +61,23 @@ class Settings(BaseSettings):
     # Ollama
     ollama_host: str = "http://localhost:11434"
 
+    # Phase 54.6.304 — optional llama-server side-process for the
+    # book-writer hot path. When `llamacpp_book_writer_enabled` is True
+    # AND the LLM call's chosen model matches `book_write_model`, the
+    # rag.llm dispatcher routes to sciknow.rag.llamacpp instead of the
+    # Ollama client. Everything else keeps using Ollama unchanged.
+    # The side process must be started out-of-band — see
+    # scripts/llama_server_book_writer.sh and docs/LLAMACPP_BOOK_WRITER.md.
+    # The dispatcher checks /health before each call and falls back to
+    # Ollama (logging a one-line WARNING) if the server is down — so a
+    # forgotten "start the server" doesn't break user workflows.
+    llamacpp_base_url: str = "http://localhost:8080"
+    llamacpp_book_writer_enabled: bool = False
+    # Alias the llama-server registers for the book-writer GGUF.
+    # Must match the --alias flag used at startup; defaults to the
+    # Ollama-style name so configs stay symmetric across backends.
+    llamacpp_model_alias: str = "qwen3.6:27b-dense"
+
     # Models
     embedding_model: str = "BAAI/bge-m3"
     embedding_dim: int = 1024

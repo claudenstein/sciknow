@@ -181,6 +181,35 @@ def stream(
     """
     client = _get_client()
     chosen_model = model or settings.llm_model
+
+    # Phase 54.6.304 — book-writer hot-path dispatcher. If the
+    # llama-server side process is enabled AND this call is for the
+    # designated book-writer model AND it isn't a JSON-schema call
+    # (the llama.cpp backend doesn't implement format= yet) AND the
+    # server is actually up, route to the llama.cpp backend. On any
+    # of those conditions failing, we fall through to Ollama with a
+    # one-line WARNING so the user notices the fallback.
+    if (
+        settings.llamacpp_book_writer_enabled
+        and settings.book_write_model
+        and chosen_model == settings.book_write_model
+        and format is None
+    ):
+        from sciknow.rag import llamacpp as _llamacpp
+        if _llamacpp.is_running():
+            yield from _llamacpp.stream(
+                system, user, model=chosen_model,
+                temperature=temperature, num_ctx=num_ctx,
+                num_batch=num_batch, num_predict=num_predict,
+                keep_alive=keep_alive, format=format, think=think,
+                top_p=top_p, top_k=top_k,
+            )
+            return
+        logger.warning(
+            "llama-server enabled for book-writer but unreachable at %s — "
+            "falling back to Ollama for this call", settings.llamacpp_base_url,
+        )
+
     t0 = time.monotonic()
     logger.info(
         f"LLM stream  model={chosen_model}  system={len(system)}c  "
