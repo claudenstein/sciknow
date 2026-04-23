@@ -2593,6 +2593,32 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     else:
         gpu_tbl.add_row(Text("◎ ollama: no models loaded", style=C_DIM))
 
+    # Phase 54.6.291 — VRAM preflight summary chip.  Shows recent
+    # pressure: "preflight 2/8 tight · 12.3G freed".  Quiet until
+    # the session has seen at least one preflight.
+    preflight_summary = snap.get("vram_preflight") or {}
+    if preflight_summary.get("count"):
+        total = preflight_summary.get("count", 0)
+        tight = preflight_summary.get("tight_count", 0)
+        failed = preflight_summary.get("failed_count", 0)
+        freed_gb = (
+            preflight_summary.get("total_freed_mb", 0) / 1024.0
+        )
+        colour = C_OK if failed == 0 else C_ERR
+        tight_colour = (
+            C_DIM if tight == 0 else
+            C_WARN if tight < total // 2 else C_ERR
+        )
+        chip = Text()
+        chip.append("⚡ preflight  ", style=C_DIM)
+        chip.append(f"{tight}/{total}", style=tight_colour)
+        chip.append(" tight", style=C_DIM)
+        if freed_gb >= 0.1:
+            chip.append(f"  freed {freed_gb:.1f}G", style=colour)
+        if failed:
+            chip.append(f"  ✗{failed}", style=C_ERR)
+        gpu_tbl.add_row(chip)
+
     # Phase 54.6.289 — model-swap churn indicator.  Quiet until we
     # have ≥1 swap event in the session buffer.  Yellow ≥5/hr, red
     # ≥15/hr (same threshold as the model_thrash alert).

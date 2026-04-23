@@ -273,6 +273,15 @@ and the web modal renders a "Model swap churn" panel with the last
 over ≥10 min — each swap costs 5-10 s of Ollama cold-load, so
 15/hr = ~3 min of pipeline cold-loads per hour, worth surfacing.
 
+**Phase 54.6.291** adds **preflight event history** to the monitor —
+every call to `vram_budget.preflight()` records a ring-buffer entry
+with reason / need / before-and-after free / which releasers fired /
+whether the budget was met. CLI shows a `⚡ preflight N/M tight · X.Y
+GB freed` chip in the GPU/Ollama panel; the web modal gets a "VRAM
+preflight" panel with the last 10 events. Makes the 54.6.290 subsystem
+self-reporting — operators can confirm the cascade is actually firing
+and reclaiming the VRAM it promised.
+
 **Phase 54.6.290** adds a **VRAM preflight + releaser registry** —
 the **proactive** counterpart to 54.6.286's reactive headroom alert.
 Before loading any heavy model the pipeline calls

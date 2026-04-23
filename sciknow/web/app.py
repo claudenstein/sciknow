@@ -21822,6 +21822,57 @@ function renderMonitor(snap) {{
     sections.push('<p class="u-note">Ollama: no models resident right now.</p>');
   }}
 
+  // Phase 54.6.291 — VRAM preflight history panel.  Shows the
+  // ring-buffer of preflight events from vram_budget so the
+  // operator can verify the dual-embedder + MinerU-VLM preflight
+  // is firing and actually reclaiming VRAM.  Silent when the
+  // buffer is empty (fresh process / no ingest yet).
+  const preflight = snap.vram_preflight || {{}};
+  if (preflight.count) {{
+    const tight = preflight.tight_count || 0;
+    const failed = preflight.failed_count || 0;
+    const freedGb = (preflight.total_freed_mb || 0) / 1024;
+    const banner = '<div style="display:flex;gap:1.5em;flex-wrap:wrap;padding:0.5em 0.75em;'
+      + 'background:var(--bg-alt, #f5f5f5);border-radius:4px;margin-bottom:0.5em;">'
+      + '<div><strong>Events</strong>: ' + preflight.count + '</div>'
+      + '<div><strong>Tight</strong>: <span style="color:'
+      + (tight === 0 ? 'var(--fg-muted)'
+         : tight < preflight.count / 2 ? '#b70' : '#c33')
+      + ';">' + tight + '</span></div>'
+      + '<div><strong>Failed</strong>: <span style="color:'
+      + (failed ? '#c33' : '#080') + ';">' + failed + '</span></div>'
+      + '<div><strong>Freed</strong>: ' + freedGb.toFixed(2) + ' GB</div>'
+      + '</div>';
+    let html = '<h4>VRAM preflight</h4>' + banner;
+    const events = preflight.events || [];
+    if (events.length) {{
+      html += '<table class="stats-table" style="width:100%;font-size:0.85em;">'
+        + '<tr><th>When</th><th>Reason</th><th>Need</th>'
+        + '<th>Before → After</th><th>Releasers</th>'
+        + '<th>Budget met</th></tr>';
+      for (const ev of events.slice().reverse()) {{
+        const dt = new Date((ev.t || 0) * 1000).toLocaleTimeString();
+        const need = (ev.need_mb || 0).toLocaleString() + ' MB';
+        const ba = (ev.started_free_mb || 0).toLocaleString()
+          + ' → ' + (ev.ended_free_mb || 0).toLocaleString() + ' MB';
+        const fired = (ev.fired || []).length
+          ? (ev.fired || []).map(x => '<code>' + _escHTML(x) + '</code>').join(' ')
+          : '<span class="u-muted">—</span>';
+        const met = ev.met_budget
+          ? '<span style="color:#080;">✓</span>'
+          : '<span style="color:#c33;">✗</span>';
+        html += '<tr><td>' + _escHTML(dt) + '</td>'
+          + '<td>' + _escHTML(ev.reason || '') + '</td>'
+          + '<td>' + _escHTML(need) + '</td>'
+          + '<td>' + _escHTML(ba) + '</td>'
+          + '<td>' + fired + '</td>'
+          + '<td>' + met + '</td></tr>';
+      }}
+      html += '</table>';
+    }}
+    sections.push(html);
+  }}
+
   // Phase 54.6.289 — model-swap churn panel.  Lists the last few
   // observed swaps so the operator can see *which* roles are
   // thrashing.  Silent when the session buffer is empty.

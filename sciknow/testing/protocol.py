@@ -12045,6 +12045,78 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_291_preflight_event_history() -> None:
+    """Phase 54.6.291 — VRAM preflight event ring buffer + dashboard
+    panels.
+
+    Guards:
+
+      A) vram_budget has _PREFLIGHT_EVENTS + preflight_events() +
+         _record_preflight_event.
+      B) preflight() records a ring entry on every call (tight and
+         non-tight), with started_free / ended_free / fired / tight /
+         met_budget fields.
+      C) core.monitor has `_summarize_preflight_events` and the
+         snapshot exposes `vram_preflight` with count/tight_count/
+         failed_count/total_freed_mb keys.
+      D) CLI renders the "⚡ preflight …" chip.
+      E) Web modal renders a "VRAM preflight" heading + events table.
+    """
+    import inspect as _inspect
+    from sciknow.core import vram_budget as _vb
+
+    for name in (
+        "_PREFLIGHT_EVENTS", "preflight_events",
+        "_record_preflight_event", "clear_preflight_events",
+    ):
+        assert hasattr(_vb, name), f"54.6.291 missing {name}"
+
+    pre_src = _inspect.getsource(_vb.preflight)
+    for key in (
+        "started_free", "ended_free_mb",
+        "fired", "tight", "met_budget",
+        "_record_preflight_event",
+    ):
+        assert key in pre_src, (
+            f"54.6.291 preflight() must set / record {key!r}"
+        )
+
+    from sciknow.core import monitor as _mon
+    assert hasattr(_mon, "_summarize_preflight_events"), (
+        "54.6.291 monitor must expose _summarize_preflight_events"
+    )
+    summ_src = _inspect.getsource(_mon._summarize_preflight_events)
+    for key in (
+        "tight_count", "cascade_count", "failed_count",
+        "total_freed_mb", "last_event_age_s",
+    ):
+        assert key in summ_src, (
+            f"54.6.291 summarize must populate {key!r}"
+        )
+    snap_src = _inspect.getsource(_mon.collect_monitor_snapshot)
+    assert '"vram_preflight"' in snap_src, (
+        "54.6.291 snapshot must expose vram_preflight key"
+    )
+
+    from sciknow.cli import db as _db_cli
+    cli_src = _inspect.getsource(_db_cli._build_monitor_layout)
+    assert "preflight_summary" in cli_src or "vram_preflight" in cli_src, (
+        "54.6.291 CLI must read snap['vram_preflight']"
+    )
+    assert "preflight" in cli_src, (
+        "54.6.291 CLI must render the preflight chip"
+    )
+
+    from sciknow.testing.helpers import web_app_full_source
+    web_src = web_app_full_source()
+    assert "snap.vram_preflight" in web_src, (
+        "54.6.291 web must read snap.vram_preflight"
+    )
+    assert "VRAM preflight" in web_src, (
+        "54.6.291 web must render a 'VRAM preflight' heading"
+    )
+
+
 def l1_phase54_6_290_vram_budget_preflight() -> None:
     """Phase 54.6.290 — VRAM preflight + releaser registry.
 
@@ -16837,6 +16909,7 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_288_stage_timing_regression,
     l1_phase54_6_289_model_swap_counter,
     l1_phase54_6_290_vram_budget_preflight,
+    l1_phase54_6_291_preflight_event_history,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]

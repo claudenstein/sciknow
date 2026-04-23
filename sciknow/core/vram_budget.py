@@ -64,6 +64,14 @@ logger = logging.getLogger(__name__)
 # pdf_converter, rag.llm) — each assigns its own priority.
 _RELEASERS: list[tuple[int, str, Callable[[], int]]] = []
 
+# Phase 54.6.291 — preflight event ring buffer.  Same lifetime +
+# shape as the GPU trend + model-swap ring: module-level, per-
+# process, lost on restart.  Read via ``preflight_events()`` from
+# core.monitor so the dashboard can render "how often is the
+# preflight actually saving us from an OOM?" without scraping logs.
+_PREFLIGHT_EVENTS: list[dict] = []
+_PREFLIGHT_EVENTS_MAX = 50
+
 
 def register_releaser(
     name: str, fn: Callable[[], int], *, priority: int = 50,
@@ -198,6 +206,25 @@ def kill_our_gpu_children(
     return killed
 
 
+def _record_preflight_event(ev: dict) -> None:
+    """Append to the ring buffer, trimming to keep memory bounded."""
+    _PREFLIGHT_EVENTS.append(ev)
+    if len(_PREFLIGHT_EVENTS) > _PREFLIGHT_EVENTS_MAX:
+        del _PREFLIGHT_EVENTS[:-_PREFLIGHT_EVENTS_MAX]
+
+
+def preflight_events() -> list[dict]:
+    """Return a copy of the current preflight ring buffer (newest-
+    last).  Consumed by ``core.monitor.collect_monitor_snapshot`` so
+    the dashboard can show how often budget pressure fires."""
+    return list(_PREFLIGHT_EVENTS)
+
+
+def clear_preflight_events() -> None:
+    """Test-only reset for the ring buffer."""
+    _PREFLIGHT_EVENTS.clear()
+
+
 def preflight(
     need_mb: int,
     reason: str = "",
@@ -215,29 +242,49 @@ def preflight(
     When ``release=False`` this is a pure observation — useful when
     the caller wants to know the gap without actually tearing down
     caches (e.g. for a dry-run log).
+
+    Every call is recorded into the module-level ring buffer so the
+    dashboard can render preflight pressure over the session.
     """
-    free = free_vram_mb(device)
-    if free >= need_mb:
+    import time as _time
+    started_at = _time.time()
+    started_free = free_vram_mb(device)
+    ev: dict = {
+        "t": started_at,
+        "reason": reason or "",
+        "need_mb": int(need_mb),
+        "started_free_mb": started_free,
+        "ended_free_mb": started_free,
+        "fired": [],                    # releaser names actually invoked
+        "tight": started_free < need_mb,  # true = cascade needed
+        "met_budget": started_free >= need_mb,
+    }
+
+    if started_free >= need_mb:
         logger.debug(
             "vram preflight OK: %d MB free ≥ %d MB needed for %s",
-            free, need_mb, reason or "<unspecified>",
+            started_free, need_mb, reason or "<unspecified>",
         )
-        return free
+        _record_preflight_event(ev)
+        return started_free
 
     if not release or not _RELEASERS:
+        ev["met_budget"] = False
+        _record_preflight_event(ev)
         if raise_on_fail:
             raise RuntimeError(
-                f"vram preflight: {free} MB free, need {need_mb} MB "
-                f"for {reason!r}"
+                f"vram preflight: {started_free} MB free, need "
+                f"{need_mb} MB for {reason!r}"
             )
-        return free
+        return started_free
 
     logger.info(
         "vram preflight: need %d MB for %s, only %d MB free — "
         "firing releasers",
-        need_mb, reason or "<unspecified>", free,
+        need_mb, reason or "<unspecified>", started_free,
     )
 
+    free = started_free
     for _priority, name, fn in _RELEASERS:
         if free >= need_mb:
             break
@@ -255,7 +302,12 @@ def preflight(
             "(now %d MB free)",
             name, reported, actual_delta, new_free,
         )
+        ev["fired"].append(name)
         free = new_free
+
+    ev["ended_free_mb"] = free
+    ev["met_budget"] = free >= need_mb
+    _record_preflight_event(ev)
 
     if free < need_mb and raise_on_fail:
         raise RuntimeError(

@@ -590,6 +590,60 @@ def _build_llm_section(
     }
 
 
+def _summarize_preflight_events(events: list[dict]) -> dict:
+    """Phase 54.6.291 — roll up the vram_budget preflight ring buffer
+    into a dashboard-friendly summary.
+
+    Input: list of {t, reason, need_mb, started_free_mb,
+    ended_free_mb, fired, tight, met_budget} entries, newest last.
+
+    Output::
+
+        {
+          "events": [...last 10, newest last...],
+          "count":             int,  # total recorded
+          "tight_count":       int,  # preflights where started_free < need
+          "cascade_count":     int,  # preflights that fired at least 1 releaser
+          "failed_count":      int,  # preflights that couldn't meet budget
+          "last_event_age_s":  float | None,
+          "total_freed_mb":    int,  # sum of ended_free - started_free on tight events
+        }
+    """
+    import time as _time
+    if not events:
+        return {
+            "events": [], "count": 0, "tight_count": 0,
+            "cascade_count": 0, "failed_count": 0,
+            "last_event_age_s": None, "total_freed_mb": 0,
+        }
+    tight = sum(1 for e in events if e.get("tight"))
+    cascade = sum(1 for e in events if e.get("fired"))
+    failed = sum(1 for e in events if not e.get("met_budget"))
+    # Sum over tight events of the actual VRAM reclaimed by the
+    # cascade (end - start).  Ignores non-tight events where the
+    # starting free already met budget.
+    total_freed = 0
+    for e in events:
+        if e.get("tight"):
+            delta = (
+                int(e.get("ended_free_mb") or 0)
+                - int(e.get("started_free_mb") or 0)
+            )
+            if delta > 0:
+                total_freed += delta
+    now = _time.time()
+    last_t = events[-1].get("t", 0)
+    return {
+        "events": events[-10:],
+        "count": len(events),
+        "tight_count": tight,
+        "cascade_count": cascade,
+        "failed_count": failed,
+        "last_event_age_s": round(now - last_t, 1) if last_t else None,
+        "total_freed_mb": total_freed,
+    }
+
+
 def _model_swap_snapshot() -> dict:
     """Return rate + recent events for the Ollama model-swap buffer.
 
@@ -3288,6 +3342,14 @@ def collect_monitor_snapshot(
     # rolling buffer per worker.
     gpu_info = _gpu_info()
     _record_gpu_sample(gpu_info)
+    # Phase 54.6.291 — preflight event summary.  Lives in the same
+    # process so the buffer is only populated when ingestion ran in
+    # this process (the CLI `ingest` command + the web worker).  Cross-
+    # process reads — e.g. `sciknow db monitor --watch` over SSH
+    # while ingest runs elsewhere — will see an empty list; that's
+    # fine, the log file is the authoritative cross-process source.
+    from sciknow.core.vram_budget import preflight_events as _pre_events
+    _preflight_events = _pre_events()
     # 54.6.245 — cache the installed-tags list once per snapshot so
     # we don't round-trip to Ollama twice.
     _installed_ollama = _ollama_installed_models()
@@ -3389,6 +3451,10 @@ def collect_monitor_snapshot(
         "qdrant": _qdrant_collections(),
         "gpu": gpu_info,
         "gpu_trend": _gpu_trend_snapshot(),
+        # 54.6.291 — VRAM preflight observability (see vram_budget).
+        # Dict: {events, count, tight_count, budget_met_count,
+        # releasers_fired_count}.  Populated per-process.
+        "vram_preflight": _summarize_preflight_events(_preflight_events),
         "storage": {
             "disk": _disk_usage(Path(data_dir) if data_dir else None),
             "pg_database_mb": pg_db_size_mb,
