@@ -706,6 +706,69 @@ def _raptor_tree_shape(session) -> dict:
     return out
 
 
+def _retraction_detail(session, limit: int = 20) -> dict:
+    """Phase 54.6.284 — paper-level retraction / correction detail.
+
+    The existing alert at code ``retracted_papers`` surfaces a
+    count but no detail.  Policy (Phase 54.6.276) is to flag —
+    not auto-exclude — retracted papers, which means the operator
+    needs to eyeball the list and decide per-case whether to keep
+    using the paper (historical context) or drop it (bad data).
+
+    Returns::
+
+        {
+          "counts":  {"retracted": 3, "corrected": 2, ...},
+          "recent":  [
+            {"document_id", "title", "doi", "year",
+             "status", "checked_at"},
+            ...  # capped at ``limit``, newest-checked first
+          ],
+        }
+
+    Only non-``none`` statuses are returned in ``recent``.  When
+    the retraction_status column doesn't exist (pre-Phase-54.6.276
+    install) the helper returns an empty dict silently.
+    """
+    from sqlalchemy import text
+    try:
+        counts_rows = session.execute(text("""
+            SELECT retraction_status, COUNT(*)
+            FROM paper_metadata
+            WHERE retraction_status IS NOT NULL
+            GROUP BY retraction_status
+        """)).fetchall()
+    except Exception:
+        return {}
+    counts = {r[0]: _safe_int(r[1]) for r in counts_rows}
+    try:
+        recent_rows = session.execute(text("""
+            SELECT pm.document_id, pm.title, pm.doi, pm.year,
+                   pm.retraction_status, pm.retraction_checked_at
+            FROM paper_metadata pm
+            WHERE pm.retraction_status IS NOT NULL
+              AND pm.retraction_status NOT IN ('none', '')
+            ORDER BY pm.retraction_checked_at DESC NULLS LAST
+            LIMIT :lim
+        """), {"lim": int(limit)}).fetchall()
+    except Exception:
+        recent_rows = []
+    recent = [
+        {
+            "document_id": str(r[0]),
+            "title": (r[1] or "")[:160],
+            "doi": r[2],
+            "year": _safe_int(r[3]) if r[3] is not None else None,
+            "status": r[4],
+            "checked_at": (
+                r[5].isoformat() if r[5] is not None else None
+            ),
+        }
+        for r in recent_rows
+    ]
+    return {"counts": counts, "recent": recent}
+
+
 def _section_coverage(session) -> dict:
     """Phase 54.6.282 — distribution of chunks across canonical
     section types.
@@ -2841,6 +2904,10 @@ def collect_monitor_snapshot(
         section_coverage = _safe_db(
             session, _section_coverage, default={},
         )
+        # 54.6.284 — retraction detail (titles/DOIs behind the alert).
+        retractions = _safe_db(
+            session, _retraction_detail, default={},
+        )
         # 54.6.237 — trend batch
         growth = _safe_db(session, _corpus_growth_rate, default={})
         book_act = _safe_db(session, _book_activity, default={})
@@ -2903,6 +2970,10 @@ def collect_monitor_snapshot(
         # flags a chunker regression or a new heading style the
         # regex patterns don't cover.
         "section_coverage": section_coverage,
+        # 54.6.284 — retraction detail: counts + newest N items for
+        # the operator to review.  Behind the "retracted_papers"
+        # info-level alert.
+        "retractions": retractions,
         "bench_freshness": _bench_freshness(
             Path(data_dir) if data_dir else None
         ),

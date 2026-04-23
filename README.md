@@ -232,6 +232,13 @@ operations that log there (web-UI runs today). Makes "did autowrite
 run today?" and "when did wiki compile stall?" answerable at a
 glance without SQL.
 
+**Phase 54.6.284** adds a **retraction detail panel** to the web
+modal — the operator can see titles / DOIs / years / statuses
+behind the existing `retracted_papers` info alert. Per Phase
+54.6.276 policy, retracted and corrected papers stay flagged but
+are not auto-excluded (they may be in the corpus for good reason;
+the operator decides per-case). DOI cells link to doi.org.
+
 ```bash
 uv run sciknow db monitor              # one shot, full layout
 uv run sciknow db monitor --watch 5    # btop-style in-place refresh

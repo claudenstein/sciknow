@@ -12045,6 +12045,43 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_284_retraction_detail() -> None:
+    """Phase 54.6.284 — retraction detail behind the existing
+    `retracted_papers` alert.
+
+    Guards:
+
+      A) `_retraction_detail` exists returning counts + recent list.
+      B) collect_monitor_snapshot wires `retractions` into snap.
+      C) Web modal renders a 'Retracted / corrected papers' panel.
+    """
+    import inspect as _inspect
+    from sciknow.core import monitor as _mon
+
+    assert hasattr(_mon, "_retraction_detail"), (
+        "54.6.284 _retraction_detail helper must exist"
+    )
+    helper_src = _inspect.getsource(_mon._retraction_detail)
+    for key in ("counts", "recent", "retraction_status", "document_id"):
+        assert key in helper_src, (
+            f"54.6.284 _retraction_detail must populate {key!r}"
+        )
+
+    snap_src = _inspect.getsource(_mon.collect_monitor_snapshot)
+    assert '"retractions"' in snap_src, (
+        "54.6.284 snapshot must expose retractions"
+    )
+
+    from sciknow.testing.helpers import web_app_full_source
+    web_src = web_app_full_source()
+    assert "snap.retractions" in web_src, (
+        "54.6.284 web must read snap.retractions"
+    )
+    assert "Retracted / corrected papers" in web_src, (
+        "54.6.284 web must render the retraction heading"
+    )
+
+
 def l1_phase54_6_283_llm_usage_heatmap() -> None:
     """Phase 54.6.283 — per-day × per-op LLM usage heatmap.
 
@@ -16472,6 +16509,7 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_281_inbox_age_histogram,
     l1_phase54_6_282_section_coverage,
     l1_phase54_6_283_llm_usage_heatmap,
+    l1_phase54_6_284_retraction_detail,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]

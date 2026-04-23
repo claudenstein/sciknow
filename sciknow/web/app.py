@@ -20991,6 +20991,8 @@ function renderMonitor(snap) {{
   const cgraph = snap.citation_graph || {{}};
   // Phase 54.6.282 — chunker section-type coverage.
   const seccov = snap.section_coverage || {{}};
+  // Phase 54.6.284 — retraction detail (counts + recent list).
+  const retractions = snap.retractions || {{}};
   // Phase 54.6.244 additions
   const funnel = snap.ingest_funnel || [];
   const hourlyFails = snap.pipeline_hourly_failures || [];
@@ -21447,6 +21449,47 @@ function renderMonitor(snap) {{
       + '<div><strong>Words</strong>: ' + _fmtNum(bookAct.total_words || 0) + '</div>'
       + '<div><strong>Updated</strong>: <code>' + lastUp + '</code></div>'
       + '</div>');
+  }}
+
+  // Phase 54.6.284 — retraction detail.  Title list behind the
+  // existing `retracted_papers` info alert.  Per 54.6.276 policy,
+  // these are flagged not excluded — the operator decides per-case.
+  if (retractions && (retractions.recent || []).length) {{
+    const counts = retractions.counts || {{}};
+    const rec = retractions.recent || [];
+    const badge = (s, n, col) => '<span style="background:' + col
+      + ';color:#fff;padding:0.1em 0.5em;border-radius:3px;font-size:0.85em;margin-right:0.4em;">'
+      + _escHTML(s) + ' · ' + n + '</span>';
+    let head = '<h4>Retracted / corrected papers</h4>'
+      + '<div style="margin-bottom:0.5em;">';
+    if (counts.retracted) head += badge('retracted', counts.retracted, '#c33');
+    if (counts.corrected) head += badge('corrected', counts.corrected, '#b70');
+    for (const k of Object.keys(counts)) {{
+      if (k === 'retracted' || k === 'corrected' || k === 'none') continue;
+      head += badge(k, counts[k], '#888');
+    }}
+    head += '<span class="u-muted" style="font-size:0.85em;">'
+      + '(flagged, not auto-excluded — review per-case)</span></div>';
+    let table = '<table class="stats-table" style="width:100%;font-size:0.9em;">'
+      + '<tr><th style="width:5em;">Status</th><th>Title</th>'
+      + '<th style="width:6em;">Year</th><th style="width:8em;">DOI</th></tr>';
+    for (const r of rec) {{
+      const sc = r.status === 'retracted' ? '#c33'
+        : r.status === 'corrected' ? '#b70' : '#666';
+      const doiLink = r.doi
+        ? '<a href="https://doi.org/' + encodeURIComponent(r.doi)
+          + '" target="_blank" rel="noopener">' + _escHTML(r.doi.slice(0, 25))
+          + '…</a>'
+        : '<span class="u-muted">—</span>';
+      table += '<tr><td><span style="color:' + sc + ';font-weight:bold;">'
+        + _escHTML(r.status) + '</span></td>'
+        + '<td>' + _escHTML(r.title || '(no title)') + '</td>'
+        + '<td class="u-muted">' + (r.year !== null && r.year !== undefined
+          ? _escHTML(String(r.year)) : '—') + '</td>'
+        + '<td style="font-size:0.85em;">' + doiLink + '</td></tr>';
+    }}
+    table += '</table>';
+    sections.push(head + table);
   }}
 
   // Phase 54.6.282 — chunker section-type coverage. Horizontal
