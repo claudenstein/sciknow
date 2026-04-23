@@ -21889,6 +21889,56 @@ function renderMonitor(snap) {{
     sections.push(html);
   }}
 
+  // Phase 54.6.283 — LLM role-usage heatmap.  Days along the x-axis,
+  // top-N operations along y.  Cell colour scales with call count
+  // (log-ish ramp to keep small counts visible alongside spikes).
+  // Silent when no rows in llm_usage_log (fresh install / CLI-only
+  // usage that isn't logged).
+  const llmByDay = ((snap.llm || {{}}).usage_by_day) || {{}};
+  if (llmByDay.operations && llmByDay.operations.length) {{
+    const days = llmByDay.days || [];
+    const ops = llmByDay.operations || [];
+    const grid = llmByDay.grid || {{}};
+    const maxCalls = llmByDay.max_calls || 1;
+    const shortDay = (d) => (d || '').slice(5);  // MM-DD
+    // Log-scale intensity so 1 call is visibly distinct from 0
+    // while 100-call spikes don't wash everything else out.
+    const cellColour = (n) => {{
+      if (!n) return '';
+      const t = Math.log(1 + n) / Math.log(1 + maxCalls);
+      // Green ramp 0 → dark green.
+      const g = 180 - Math.round(120 * t);
+      const a = 0.2 + 0.7 * t;
+      return 'background:rgba(0,' + g + ',0,' + a.toFixed(2) + ');';
+    }};
+    let html = '<h4>LLM usage heatmap</h4>'
+      + '<table class="stats-table" style="width:100%;font-size:0.85em;">'
+      + '<tr><th style="text-align:left;">Operation</th>';
+    for (const d of days) {{
+      html += '<th style="text-align:center;font-weight:normal;">'
+        + _escHTML(shortDay(d)) + '</th>';
+    }}
+    html += '<th style="text-align:right;">Total</th></tr>';
+    for (const op of ops) {{
+      const row = grid[op] || {{}};
+      let total = 0;
+      html += '<tr><td><code>' + _escHTML(op) + '</code></td>';
+      for (const d of days) {{
+        const n = row[d] || 0;
+        total += n;
+        const style = cellColour(n);
+        const tt = n ? _escHTML(op) + ' · ' + _escHTML(d)
+          + ' · ' + n + ' calls' : '';
+        html += '<td style="text-align:center;' + style + '" '
+          + 'title="' + tt + '">' + (n || '') + '</td>';
+      }}
+      html += '<td style="text-align:right;"><strong>'
+        + _fmtNum(total) + '</strong></td></tr>';
+    }}
+    html += '</table>';
+    sections.push(html);
+  }}
+
   // LLM usage
   if (llmUsage.length) {{
     let html = '<h4>LLM usage (last window)</h4><table class="stats-table" style="width:100%;">'

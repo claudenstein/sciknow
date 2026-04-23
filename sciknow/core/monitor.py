@@ -2474,6 +2474,97 @@ def _recent_activity(session, limit: int = 15) -> list[dict]:
     ]
 
 
+def _llm_usage_by_day(session, days: int = 7) -> dict:
+    """Phase 54.6.283 — per-day × per-operation LLM call grid for a
+    heatmap rendering.
+
+    Complements ``_llm_usage`` (which aggregates over the whole
+    window).  Answers "did autowrite run today?  when did wiki
+    compile stall?" at a glance.  Returns::
+
+        {
+          "days": ["2026-04-17", ..., "2026-04-23"],  # ascending
+          "operations": ["autowrite_writer", ...],    # top N by total
+          "grid":  {"autowrite_writer": {"2026-04-17": 12, ...}},
+          "max_calls": int,   # for colour scaling in the renderer
+        }
+
+    Days with zero activity still appear in the ``days`` list so
+    the heatmap has a consistent column count (a gap in activity
+    is itself information).  Operations capped at top 12 to keep
+    the grid legible — the long tail rolls up into ``(other)``.
+    """
+    from sqlalchemy import text
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    since_iso = since.isoformat()
+    try:
+        rows = session.execute(text("""
+            SELECT
+                to_char(date_trunc('day', started_at), 'YYYY-MM-DD')
+                    AS day,
+                operation,
+                COUNT(*) AS n
+            FROM llm_usage_log
+            WHERE started_at >= CAST(:since AS timestamptz)
+            GROUP BY day, operation
+            ORDER BY day ASC
+        """), {"since": since_iso}).fetchall()
+    except Exception:
+        return {}
+    # Build the continuous day axis (ascending, inclusive of today).
+    day_axis: list[str] = []
+    cursor = since.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0,
+    )
+    while cursor <= end:
+        day_axis.append(cursor.strftime("%Y-%m-%d"))
+        cursor = cursor + timedelta(days=1)
+
+    # Accumulate.  op_totals rolls each op's counts so we can pick
+    # the top N and merge the tail into a (other) bucket.
+    op_totals: dict[str, int] = {}
+    grid: dict[str, dict[str, int]] = {}
+    for day, op, n in rows:
+        op = op or "unknown"
+        op_totals[op] = op_totals.get(op, 0) + int(n or 0)
+        grid.setdefault(op, {})[day] = int(n or 0)
+
+    TOP_N = 12
+    sorted_ops = sorted(
+        op_totals.items(), key=lambda kv: kv[1], reverse=True,
+    )
+    top_ops = [op for op, _ in sorted_ops[:TOP_N]]
+    tail_ops = [op for op, _ in sorted_ops[TOP_N:]]
+    if tail_ops:
+        merged: dict[str, int] = {}
+        for op in tail_ops:
+            for day, n in grid.pop(op, {}).items():
+                merged[day] = merged.get(day, 0) + n
+        if merged:
+            grid["(other)"] = merged
+            top_ops.append("(other)")
+
+    # Dense grid (zero-fill missing days) for renderer convenience.
+    dense: dict[str, dict[str, int]] = {}
+    max_calls = 0
+    for op in top_ops:
+        row = {}
+        for day in day_axis:
+            v = grid.get(op, {}).get(day, 0)
+            row[day] = v
+            if v > max_calls:
+                max_calls = v
+        dense[op] = row
+
+    return {
+        "days": day_axis,
+        "operations": top_ops,
+        "grid": dense,
+        "max_calls": max_calls,
+    }
+
+
 def _llm_usage(session, days: int = 7) -> list[dict]:
     from sqlalchemy import text
     since_iso = (
@@ -2713,6 +2804,11 @@ def collect_monitor_snapshot(
         llm_usage = _safe_db(
             session, _llm_usage, days=llm_usage_days, default=[],
         )
+        # 54.6.283 — per-day × per-op grid for the heatmap renderer.
+        llm_usage_by_day = _safe_db(
+            session, _llm_usage_by_day,
+            days=llm_usage_days, default={},
+        )
         # 54.6.232 — operational additions
         rates = _safe_db(session, _ingest_rates_and_eta, default={})
         queue_states = _safe_db(session, _ingest_queue_states, default={})
@@ -2852,6 +2948,8 @@ def collect_monitor_snapshot(
             "usage_last_days": llm_usage,
             "usage_window_days": llm_usage_days,
             "loaded_models": _ollama_loaded_models(),
+            # 54.6.283 — per-day × per-op grid for heatmap rendering.
+            "usage_by_day": llm_usage_by_day,
         },
         "qdrant": _qdrant_collections(),
         "gpu": gpu_info,

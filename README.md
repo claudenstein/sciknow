@@ -224,6 +224,14 @@ high `unknown` percentage flags either a chunker regression or a
 converter class that's losing heading structure — check the
 `converter_backend` mix when the number climbs above 70 %.
 
+**Phase 54.6.283** adds an **LLM role-usage heatmap** to the web
+modal: rows=operations (autowrite_writer, wiki_compile, extract_kg,
+…), columns=days over the monitor window, cell colour = call count
+on a log ramp. Built from `llm_usage_log` so it only lights up for
+operations that log there (web-UI runs today). Makes "did autowrite
+run today?" and "when did wiki compile stall?" answerable at a
+glance without SQL.
+
 ```bash
 uv run sciknow db monitor              # one shot, full layout
 uv run sciknow db monitor --watch 5    # btop-style in-place refresh

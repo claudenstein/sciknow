@@ -12045,6 +12045,46 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_283_llm_usage_heatmap() -> None:
+    """Phase 54.6.283 — per-day × per-op LLM usage heatmap.
+
+    Guards:
+
+      A) `_llm_usage_by_day` exists with the documented return shape.
+      B) collect_monitor_snapshot wires usage_by_day under snap['llm'].
+      C) Web renderMonitor reads snap.llm.usage_by_day and renders a
+         'LLM usage heatmap' section.
+    """
+    import inspect as _inspect
+    from sciknow.core import monitor as _mon
+
+    assert hasattr(_mon, "_llm_usage_by_day"), (
+        "54.6.283 core.monitor._llm_usage_by_day helper must exist"
+    )
+    helper_src = _inspect.getsource(_mon._llm_usage_by_day)
+    for key in ("days", "operations", "grid", "max_calls"):
+        assert key in helper_src, (
+            f"54.6.283 _llm_usage_by_day must populate {key!r}"
+        )
+    assert "date_trunc('day'" in helper_src, (
+        "54.6.283 helper must group by per-day truncation"
+    )
+
+    snap_src = _inspect.getsource(_mon.collect_monitor_snapshot)
+    assert '"usage_by_day"' in snap_src, (
+        "54.6.283 snapshot must expose llm.usage_by_day"
+    )
+
+    from sciknow.testing.helpers import web_app_full_source
+    web_src = web_app_full_source()
+    assert "usage_by_day" in web_src, (
+        "54.6.283 web modal must read llm.usage_by_day"
+    )
+    assert "LLM usage heatmap" in web_src, (
+        "54.6.283 web modal must render an 'LLM usage heatmap' heading"
+    )
+
+
 def l1_phase54_6_282_section_coverage() -> None:
     """Phase 54.6.282 — section-type coverage panel surfaces chunker
     health in both the CLI monitor and the web modal.
@@ -16431,6 +16471,7 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_280_citation_graph_panel,
     l1_phase54_6_281_inbox_age_histogram,
     l1_phase54_6_282_section_coverage,
+    l1_phase54_6_283_llm_usage_heatmap,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]
