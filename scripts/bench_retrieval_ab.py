@@ -227,7 +227,7 @@ def _sidecar_collection_name(embedder_tag: str) -> str:
     return f"{prefix}_ab_{_safe_tag_slug(embedder_tag)}_papers"
 
 
-def _ab_reembed_corpus(embedder_tag: str, dim: int, batch_size: int = 16) -> str:
+def _ab_reembed_corpus(embedder_tag: str, dim: int, batch_size: int = 8) -> str:
     """Create <sidecar>_papers, batch-embed every chunk with the
     candidate dense embedder (sentence-transformers), and upsert with
     the SAME qdrant_point_id as the prod collection so probe records
@@ -235,7 +235,24 @@ def _ab_reembed_corpus(embedder_tag: str, dim: int, batch_size: int = 16) -> str
 
     Idempotent: drops any pre-existing sidecar before recreating. The
     baseline bge-m3 collection is never touched.
+
+    54.6.276.1 — batch_size dropped 16 → 8 and max_length capped at
+    2048 to prevent long-chunk OOMs on a 24 GB 3090. Attention is
+    O(N²) in sequence length and sciknow chunks can be up to 8k
+    tokens; a single outlier chunk in a batch of 16 balloons
+    activations past available VRAM even with BF16 weights.
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments is set before
+    importing torch to defrag the allocator.
     """
+    # Set BEFORE torch is imported in this process (already imported
+    # at this point, but the env var can still help future allocs
+    # via cudaMallocAsync). Safer to set at process start, but
+    # setting here avoids requiring the caller to do it.
+    import os as _os
+    _os.environ.setdefault(
+        "PYTORCH_CUDA_ALLOC_CONF",
+        "expandable_segments:True",
+    )
     from sqlalchemy import text as sql_text
     from qdrant_client.models import (
         Distance, VectorParams, PointStruct,
@@ -261,8 +278,17 @@ def _ab_reembed_corpus(embedder_tag: str, dim: int, batch_size: int = 16) -> str
     # Load the embedder. Qwen3-Embedding accepts a scientific-literature
     # instruction for queries but documents don't get prefixed, so we
     # encode raw chunk text during ingest.
-    console.print(f"  [dim]loading {embedder_tag}… (may download ~8 GB on first run)[/dim]")
-    model = SentenceTransformer(embedder_tag, device="cuda", trust_remote_code=True)
+    # BF16 is mandatory — the default FP32 load takes 16 GB weights +
+    # 6 GB activations and OOMs on a 24 GB 3090 even when VRAM is
+    # otherwise free. BF16 halves the weight footprint (~8 GB) so we
+    # have ~16 GB for activations + KV. Model's native precision is
+    # BF16 per the HF model card.
+    console.print(f"  [dim]loading {embedder_tag} in BF16…[/dim]")
+    import torch as _torch
+    model = SentenceTransformer(
+        embedder_tag, device="cuda", trust_remote_code=True,
+        model_kwargs={"torch_dtype": _torch.bfloat16},
+    )
 
     # Fetch every chunk + its prod qdrant_point_id
     with get_session() as s:
@@ -274,13 +300,17 @@ def _ab_reembed_corpus(embedder_tag: str, dim: int, batch_size: int = 16) -> str
     total = len(rows)
     console.print(f"  [dim]embedding {total} chunks in batches of {batch_size}[/dim]")
 
+    # Safety rail: cap per-chunk tokens so outliers don't OOM the
+    # batch. Sciknow chunks are usually 500-2500 tokens; a cap at
+    # 2048 truncates only the top 10 % or so, well below the
+    # information loss threshold. Qwen3's context is 32k so this
+    # is purely defensive.
+    model.max_seq_length = 2048
+
     t0 = time.monotonic()
     for i in range(0, total, batch_size):
         batch = rows[i:i + batch_size]
         texts = [r[1] for r in batch]
-        # Truncate very long chunks at model's max context to avoid OOM.
-        # Qwen3-Embedding handles 32k tokens but SciKnow chunks are
-        # typically 500-2500 tokens, so this is a safety rail.
         emb = model.encode(
             texts, batch_size=batch_size, convert_to_numpy=True,
             normalize_embeddings=True, show_progress_bar=False,
@@ -353,7 +383,184 @@ def _find_rank(
     return 0
 
 
-def run_embedder_ab() -> dict:
+def run_hybrid_ab(skip_embed: bool = False) -> dict:
+    """Phase 54.6.277 — FULL-STACK A/B of the retrieval fusion.
+
+    Baseline:  RRF(bge-dense prod,   bge-sparse prod, FTS) → top-k
+    Candidate: RRF(Qwen3-dense sidecar, bge-sparse prod, FTS) → top-k
+
+    Same probe set, same RRF weights as prod (1.0, 1.0, 0.5), same
+    candidate_k=50, no reranker. The single difference is where the
+    dense vectors come from — so any lift is attributable to Qwen3
+    beating bge-m3 on the dense leg *after* fusion with sparse+FTS
+    already rescues some queries.
+
+    This answers a question dense-only A/B cannot: does the +0.039
+    MRR seen in dense-only retrieval (54.6.275.1) survive the
+    full hybrid fusion, or does bge-m3's sparse leg already catch
+    the queries where its dense leg was weak?
+    """
+    from sciknow.testing.retrieval_eval import load_probe_set
+    from sciknow.storage.qdrant import get_client
+    from sciknow.storage.db import get_session
+    from sciknow.retrieval.hybrid_search import (
+        _postgres_fts, _rrf_merge, PAPERS_COLLECTION,
+    )
+    from sentence_transformers import SentenceTransformer
+    from FlagEmbedding import BGEM3FlagModel
+    from sciknow.retrieval.device import load_with_cpu_fallback
+
+    records = load_probe_set()
+    if not records:
+        console.print("[red]No probe set found.[/red] Run "
+                      "`uv run sciknow bench retrieval-gen` first.")
+        sys.exit(2)
+
+    baseline_tag, _ = EMBEDDER_CANDIDATES[0]
+    candidate_tag, candidate_dim = EMBEDDER_CANDIDATES[1]
+
+    console.print(
+        f"[bold]Retrieval A/B — hybrid mode[/bold]  "
+        f"probe={len(records)} queries\n"
+        f"  baseline:  RRF([cyan]bge-dense[/cyan], [cyan]bge-sparse[/cyan], FTS) → top-10\n"
+        f"  candidate: RRF([cyan]Qwen3-dense[/cyan], [cyan]bge-sparse[/cyan], FTS) → top-10\n"
+        f"  weights: (1.0, 1.0, 0.5) — same as prod"
+    )
+
+    # Reuse sidecar from prior --mode embedder run (skip re-embed
+    # unless user explicitly overrides).
+    sidecar = _sidecar_collection_name(candidate_tag)
+    client = get_client()
+    if skip_embed:
+        if client.collection_exists(sidecar):
+            info = client.get_collection(sidecar)
+            console.print(
+                f"  [yellow]--skip-embed[/yellow] → reusing sidecar "
+                f"{sidecar} ({info.points_count} points)"
+            )
+        else:
+            console.print(
+                f"  [red]sidecar {sidecar} missing[/red]; must "
+                "re-embed. Drop --skip-embed or run `--mode embedder` first."
+            )
+            sys.exit(2)
+    else:
+        sidecar = _ab_reembed_corpus(candidate_tag, candidate_dim)
+
+    # Load both query embedders concurrently.
+    console.print("\n[dim]loading bge-m3 (dense + sparse) query embedder…[/dim]")
+    bge = load_with_cpu_fallback(BGEM3FlagModel, baseline_tag, use_fp16=True)
+    console.print("[dim]loading Qwen3 dense query embedder (BF16)…[/dim]")
+    import torch as _torch
+    qwen = SentenceTransformer(
+        candidate_tag, device="cuda", trust_remote_code=True,
+        model_kwargs={"torch_dtype": _torch.bfloat16},
+    )
+
+    # Shared RRF weights — match hybrid_search.py default.
+    WEIGHTS = [1.0, 1.0, 0.5]
+    TOP_POOL = 50
+
+    ranks_base: list[int] = []
+    ranks_cand: list[int] = []
+    lat_base: list[float] = []
+    lat_cand: list[float] = []
+
+    total_probes = len(records)
+    with get_session() as session:
+        for i, rec in enumerate(records):
+            q = rec["question"]
+            src_qpid = rec.get("source_qdrant_point_id", "")
+            src_cid = rec.get("source_chunk_id", "")
+
+            # Encode once with each model.
+            try:
+                bge_out = bge.encode(
+                    [q], batch_size=1, max_length=512,
+                    return_dense=True, return_sparse=True,
+                    return_colbert_vecs=False,
+                )
+                bge_dense = bge_out["dense_vecs"][0].tolist()
+                bge_lw = bge_out["lexical_weights"][0]
+                qwen_dense = _ab_embed_query(qwen, q, is_qwen3=True)
+            except Exception as exc:
+                console.print(f"[dim]probe {i} encode failed: {exc}[/dim]")
+                continue
+
+            # Build Qdrant sparse vector for the bge leg (same as prod
+            # _qdrant_sparse plumbing).
+            from qdrant_client.models import SparseVector
+            sparse_vec = SparseVector(
+                indices=[int(k) for k in bge_lw.keys()],
+                values=[float(v) for v in bge_lw.values()],
+            )
+
+            # ── Baseline: bge-dense + bge-sparse + FTS ───────────────
+            t0 = time.monotonic()
+            try:
+                dense_ids_b = _ab_dense_search(
+                    client, PAPERS_COLLECTION, bge_dense, TOP_POOL,
+                )
+                sparse_resp = client.query_points(
+                    collection_name=PAPERS_COLLECTION, query=sparse_vec,
+                    using="sparse", limit=TOP_POOL, with_payload=False,
+                )
+                sparse_ids = [str(p.id) for p in sparse_resp.points]
+                fts_ids = _postgres_fts(
+                    session, q, TOP_POOL, None, None, None, None, None,
+                )
+                merged_b = _rrf_merge(
+                    [dense_ids_b, sparse_ids, fts_ids], weights=WEIGHTS,
+                )[:TOP_POOL]
+                ids_b = [pid for pid, _ in merged_b]
+                lat_base.append((time.monotonic() - t0) * 1000)
+            except Exception as exc:
+                console.print(f"[dim]probe {i} baseline failed: {exc}[/dim]")
+                continue
+
+            # ── Candidate: Qwen3-dense + bge-sparse + FTS ────────────
+            t0 = time.monotonic()
+            try:
+                dense_ids_q = _ab_dense_search(
+                    client, sidecar, qwen_dense, TOP_POOL,
+                )
+                # sparse_ids + fts_ids unchanged — don't re-query
+                merged_c = _rrf_merge(
+                    [dense_ids_q, sparse_ids, fts_ids], weights=WEIGHTS,
+                )[:TOP_POOL]
+                ids_c = [pid for pid, _ in merged_c]
+                lat_cand.append((time.monotonic() - t0) * 1000)
+            except Exception as exc:
+                console.print(f"[dim]probe {i} candidate failed: {exc}[/dim]")
+                continue
+
+            ranks_base.append(_find_rank(ids_b, src_qpid, src_cid))
+            ranks_cand.append(_find_rank(ids_c, src_qpid, src_cid))
+
+            if (i + 1) % 25 == 0:
+                console.print(f"  [dim]{i + 1}/{total_probes} done[/dim]")
+
+    m_base = _metrics_from_ranks(ranks_base)
+    m_cand = _metrics_from_ranks(ranks_cand)
+    if lat_base:
+        lat_base.sort()
+        m_base["latency_p50_ms"] = round(lat_base[len(lat_base) // 2], 1)
+    if lat_cand:
+        lat_cand.sort()
+        m_cand["latency_p50_ms"] = round(lat_cand[len(lat_cand) // 2], 1)
+
+    results = {
+        "RRF(bge-dense, bge-sparse, FTS)":        m_base,
+        "RRF(Qwen3-dense, bge-sparse, FTS)":      m_cand,
+    }
+    return {
+        "mode": "hybrid", "results": results,
+        "sidecar_collection": sidecar,
+        "note": "retrieval-only (no reranker); weights (1.0, 1.0, 0.5)",
+    }
+
+
+def run_embedder_ab(skip_embed: bool = False) -> dict:
     """Three-way A/B: baseline dense (bge-m3 on prod collection) vs
     candidate dense (Qwen3-Embedding-4B on sidecar) vs RRF-fused of
     the two (the 'dual-embedder' architecture).
@@ -363,6 +570,11 @@ def run_embedder_ab() -> dict:
     numbers are directly comparable. This is deliberately different
     from `sciknow bench retrieval` (which benchmarks the full hybrid
     stack).
+
+    ``skip_embed=True`` reuses an existing sidecar collection (e.g.
+    when re-running after regenerating the probe set — the 53-min
+    embed phase doesn't need repeating since chunk IDs haven't
+    changed).
     """
     from sciknow.testing.retrieval_eval import load_probe_set
     from sciknow.storage.qdrant import get_client
@@ -386,8 +598,27 @@ def run_embedder_ab() -> dict:
         f"  candidate: [cyan]{candidate_tag}[/cyan] (sidecar, dim {candidate_dim})\n"
     )
 
-    # Stage 1: re-embed corpus with candidate into sidecar.
-    sidecar = _ab_reembed_corpus(candidate_tag, candidate_dim)
+    # Stage 1: re-embed corpus with candidate into sidecar — unless
+    # --skip-embed was passed AND a healthy sidecar already exists.
+    sidecar = _sidecar_collection_name(candidate_tag)
+    if skip_embed:
+        from sciknow.storage.qdrant import get_client as _gc
+        _c = _gc()
+        if _c.collection_exists(sidecar):
+            info = _c.get_collection(sidecar)
+            count = info.points_count or 0
+            console.print(
+                f"  [yellow]--skip-embed[/yellow] → reusing sidecar "
+                f"{sidecar} ({count} points)"
+            )
+        else:
+            console.print(
+                f"  [red]--skip-embed[/red] requested but sidecar "
+                f"{sidecar} does not exist; re-embedding from scratch."
+            )
+            sidecar = _ab_reembed_corpus(candidate_tag, candidate_dim)
+    else:
+        sidecar = _ab_reembed_corpus(candidate_tag, candidate_dim)
 
     # Stage 2: load the two query embedders concurrently. bge-m3 is
     # the FlagEmbedding-native class; Qwen3 is sentence-transformers.
@@ -398,9 +629,11 @@ def run_embedder_ab() -> dict:
     bge = load_with_cpu_fallback(
         BGEM3FlagModel, baseline_tag, use_fp16=True,
     )
-    console.print("[dim]loading Qwen3 query embedder…[/dim]")
+    console.print("[dim]loading Qwen3 query embedder (BF16)…[/dim]")
+    import torch as _torch
     qwen = SentenceTransformer(
         candidate_tag, device="cuda", trust_remote_code=True,
+        model_kwargs={"torch_dtype": _torch.bfloat16},
     )
 
     # Stage 3: run the probe set through each of the three scenarios.
@@ -578,11 +811,23 @@ def _render_results(result: dict) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
-        "--mode", choices=["reranker", "embedder"], default="reranker",
+        "--mode", choices=["reranker", "embedder", "hybrid"],
+        default="reranker",
+        help="reranker: swap rerankers on identical candidates (cheap). "
+             "embedder: dense-only retrieval A/B on sidecar collection. "
+             "hybrid (54.6.277): FULL-STACK A/B — bge-dense vs Qwen3-dense "
+             "with bge-sparse + FTS unchanged, no reranker. The right "
+             "test for the 'does dual-embedder help in prod?' question.",
     )
     p.add_argument(
         "--i-know-it-is-heavy", action="store_true",
         help="Required with --mode embedder; prevents accidental invocation.",
+    )
+    p.add_argument(
+        "--skip-embed", action="store_true",
+        help="Embedder-mode only: reuse an existing sidecar Qdrant "
+             "collection (skip the 30-60 min re-embed). Use after "
+             "regenerating the probe set with no corpus changes.",
     )
     args = p.parse_args()
 
@@ -595,8 +840,10 @@ def main() -> None:
 
     if args.mode == "reranker":
         result = run_reranker_ab()
-    else:
-        result = run_embedder_ab()
+    elif args.mode == "embedder":
+        result = run_embedder_ab(skip_embed=args.skip_embed)
+    else:  # hybrid
+        result = run_hybrid_ab(skip_embed=args.skip_embed)
 
     _render_results(result)
 
