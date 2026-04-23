@@ -82,9 +82,13 @@ def _rrf_merge(
 # ── Query embedding ────────────────────────────────────────────────────────────
 
 _embed_model = None
+_dense_embed_model = None
 
 
 def _get_embed_model():
+    """bge-m3 — primary embedder, always used for sparse (+ ColBERT on
+    abstracts). Provides dense output too; only consulted when
+    ``settings.dense_embedder_model`` is unset."""
     global _embed_model
     if _embed_model is None:
         from FlagEmbedding import BGEM3FlagModel
@@ -97,15 +101,41 @@ def _get_embed_model():
     return _embed_model
 
 
+def _get_dense_embed_model():
+    """Phase 54.6.279 — lazy-load the dense-only embedder when the
+    dual-embedder split is active. Returns ``None`` when unset, which
+    signals the single-embedder path (bge-m3 supplies dense).
+
+    Model is sentence-transformers / CrossEncoder-family, loaded in
+    BF16 for the Qwen3-Embedding-4B case (FP32 OOMs on 24 GB with
+    the LLM co-resident). Kept resident like the bge-m3 embedder so
+    per-query cost stays at one forward pass.
+    """
+    from sciknow.config import settings
+    tag = getattr(settings, "dense_embedder_model", None)
+    if not tag or tag == settings.embedding_model:
+        return None  # Single-embedder mode — bge-m3 path.
+    global _dense_embed_model
+    if _dense_embed_model is None:
+        import torch as _torch
+        from sentence_transformers import SentenceTransformer
+        _dense_embed_model = SentenceTransformer(
+            tag, device="cuda", trust_remote_code=True,
+            model_kwargs={"torch_dtype": _torch.bfloat16},
+        )
+    return _dense_embed_model
+
+
 def release_embed_model() -> None:
-    """Drop the cached query embedding model and free VRAM."""
-    global _embed_model
-    if _embed_model is None:
-        return
-    try:
-        del _embed_model
-    finally:
-        _embed_model = None
+    """Drop the cached query embedding model(s) and free VRAM."""
+    global _embed_model, _dense_embed_model
+    for name in ("_embed_model", "_dense_embed_model"):
+        if globals().get(name) is None:
+            continue
+        try:
+            globals()[name] = None
+        except Exception:
+            pass
     try:
         import gc, torch
         gc.collect()
@@ -116,7 +146,15 @@ def release_embed_model() -> None:
 
 
 def _embed_query(query: str) -> tuple[list[float], SparseVector]:
+    """Produce query-side (dense, sparse). Sparse always comes from
+    bge-m3 (prod's sparse collection is keyed on bge-m3 lexical
+    weights). Dense comes from either bge-m3 (single-embedder mode)
+    or the configured dense embedder (Phase 54.6.279 dual mode).
+    """
     model = _get_embed_model()
+    # Sparse always via bge-m3 (matches ingest-side sparse vectors).
+    # We also get bge-m3 dense for free here; it's discarded when
+    # the dual-embedder path overrides it below.
     output = model.encode(
         [query],
         batch_size=1,
@@ -125,13 +163,30 @@ def _embed_query(query: str) -> tuple[list[float], SparseVector]:
         return_sparse=True,
         return_colbert_vecs=False,
     )
-    dense = output["dense_vecs"][0].tolist()
     lw = output["lexical_weights"][0]
     sparse = SparseVector(
         indices=[int(k) for k in lw.keys()],
         values=[float(v) for v in lw.values()],
     )
-    return dense, sparse
+
+    dense_model = _get_dense_embed_model()
+    if dense_model is None:
+        # Single-embedder path — use bge-m3 dense output.
+        return output["dense_vecs"][0].tolist(), sparse
+
+    # Dual-embedder path — dense from Qwen3 (or other configured
+    # embedder). Apply the HF model card's query-instruction prefix
+    # for best accuracy (the same pattern the A/B harness used).
+    instruction = (
+        "Given a scientific literature search query, retrieve "
+        "relevant passages that answer the query"
+    )
+    prompt = f"Instruct: {instruction}\nQuery: {query}"
+    dense_arr = dense_model.encode(
+        [prompt], convert_to_numpy=True, normalize_embeddings=True,
+        show_progress_bar=False,
+    )
+    return dense_arr[0].tolist(), sparse
 
 
 # ── Filter helpers ─────────────────────────────────────────────────────────────
@@ -186,6 +241,28 @@ def _search_params() -> "SearchParams | None":
     )
 
 
+def _dense_collection_name() -> str:
+    """Phase 54.6.279 — the Qdrant collection to query for dense
+    vectors. Falls back to ``PAPERS_COLLECTION`` (the prod primary)
+    when the dual-embedder split is inactive. When active, uses the
+    explicit ``settings.dense_sidecar_collection`` if set, else the
+    conventional ``<qdrant_prefix>_ab_<embedder-slug>_papers`` name
+    the A/B harness writes. Payload filters apply the same as before
+    (``section_type``/``year``/``domain`` live on the sidecar
+    points too via the ingestion pipeline update below)."""
+    from sciknow.config import settings
+    tag = getattr(settings, "dense_embedder_model", None)
+    if not tag or tag == settings.embedding_model:
+        return PAPERS_COLLECTION
+    explicit = getattr(settings, "dense_sidecar_collection", None)
+    if explicit:
+        return explicit
+    from sciknow.core.project import get_active_project
+    prefix = get_active_project().qdrant_prefix
+    slug = tag.replace("/", "_").replace(":", "_").lower()
+    return f"{prefix}_ab_{slug}_papers"
+
+
 def _qdrant_dense(
     client: QdrantClient,
     dense_vec: list[float],
@@ -193,7 +270,7 @@ def _qdrant_dense(
     qdrant_filter: Filter | None,
 ) -> list[str]:
     response = client.query_points(
-        collection_name=PAPERS_COLLECTION,
+        collection_name=_dense_collection_name(),
         query=dense_vec,
         using="dense",
         limit=top_k,

@@ -9727,6 +9727,49 @@ def flag_self_citations_cmd(
     )
 
 
+# ── sync-dense-sidecar (Phase 54.6.279) ───────────────────────────────────────
+
+
+@app.command(name="sync-dense-sidecar")
+def sync_dense_sidecar_cmd() -> None:
+    """Phase 54.6.279 — copy payload from prod papers collection onto
+    the dense sidecar collection.
+
+    Required ONE TIME after enabling the dual-embedder split
+    (``DENSE_EMBEDDER_MODEL=Qwen/Qwen3-Embedding-4B`` in ``.env``)
+    when the sidecar was originally populated by the A/B harness
+    (scripts/bench_retrieval_ab.py), which upserted vectors
+    without payloads to save disk. Retrieval filter pushdown
+    (``year``, ``domain``, ``section_type``) needs the payload, so
+    skipping this step silently returns zero results on any
+    filtered query through the dense leg.
+
+    Idempotent. Chunks written by the post-279 ingestion pipeline
+    include payload from the start, so this is a one-time fixup
+    for existing corpora. Reports matched / missing / skipped.
+    """
+    from sciknow.cli import preflight
+    preflight(qdrant=True)
+
+    from sciknow.storage.qdrant import get_client
+    from sciknow.ingestion.embedder import backfill_sidecar_payload
+    client = get_client()
+    console.print("[bold]Sync dense sidecar payload…[/bold]")
+    result = backfill_sidecar_payload(client)
+    console.print(
+        f"  matched (payload copied): [green]{result['matched']}[/green]  "
+        f"missing from sidecar: [yellow]{result['missing']}[/yellow]  "
+        f"skipped (already had payload): [dim]{result['skipped']}[/dim]"
+    )
+    if result.get("embedded_missing"):
+        console.print(
+            f"  [green]embedded + upserted missing chunks: "
+            f"{result['embedded_missing']}[/green]"
+        )
+    if result.get("note"):
+        console.print(f"  [dim]{result['note']}[/dim]")
+
+
 # ── backfill-institutions (Phase 54.6.221 — roadmap 3.2.4) ────────────────────
 
 

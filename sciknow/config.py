@@ -64,6 +64,22 @@ class Settings(BaseSettings):
     # Models
     embedding_model: str = "BAAI/bge-m3"
     embedding_dim: int = 1024
+    # Phase 54.6.279 — dual-embedder split. When `dense_embedder_model`
+    # is set AND different from `embedding_model`, retrieval uses the
+    # named dense embedder (e.g. Qwen3-Embedding-4B) against a
+    # sidecar Qdrant collection, while bge-m3 continues to provide
+    # sparse + ColBERT vectors from the primary collection. Validated
+    # by the comprehensive A/B bench (docs/PHASE_LOG 54.6.278) with
+    # +0.035 MRR@10 full-stack lift. Unset → single-embedder mode
+    # (pre-279 behaviour unchanged).
+    #
+    # `dense_sidecar_collection` names the Qdrant collection holding
+    # Qwen3 dense vectors. When left at None, the script uses the
+    # convention `<qdrant_prefix>_ab_<slug>_papers` (same as the
+    # A/B harness). Explicit override wins.
+    dense_embedder_model: str | None = None
+    dense_embedder_dim: int = 2560
+    dense_sidecar_collection: str | None = None
     llm_model: str = "qwen2.5:32b-instruct-q4_K_M"
     llm_fast_model: str = "qwen3:30b-a3b"
     # Phase 54.6.55 — optional per-role override for `book review`.
