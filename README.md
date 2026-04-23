@@ -273,6 +273,21 @@ and the web modal renders a "Model swap churn" panel with the last
 over ≥10 min — each swap costs 5-10 s of Ollama cold-load, so
 15/hr = ~3 min of pipeline cold-loads per hour, worth surfacing.
 
+**Phase 54.6.290** adds a **VRAM preflight + releaser registry** —
+the **proactive** counterpart to 54.6.286's reactive headroom alert.
+Before loading any heavy model the pipeline calls
+`vram_budget.preflight(need_mb=…)`, which fires registered releasers
+in priority order (Ollama unload → MinerU-VLM subprocess kill →
+embedder cache drop) until the requested budget is met. Eliminates
+the operational caveat from the 54.6.285 verification where the
+dual-embedder + MinerU-VLM stack OOM'd the 3090. Verified with a
+full end-to-end re-ingest against the default VLM-Pro converter
+starting from 3.5 GB free: ollama unloads, VLM-Pro (vLLM) starts
+cleanly, convert completes, the vLLM subprocess is killed before
+embed, dual-embedder encodes both collections, and the doc re-
+appears in top-5 retrieval results. No OOM, backend stamp
+`mineru-vlm-pro-vllm`, counts match across prod/sidecar/DB.
+
 ```bash
 uv run sciknow db monitor              # one shot, full layout
 uv run sciknow db monitor --watch 5    # btop-style in-place refresh

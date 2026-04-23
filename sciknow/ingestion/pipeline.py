@@ -18,6 +18,13 @@ logger = logging.getLogger("sciknow.pipeline")
 
 from sciknow.config import settings
 from sciknow.ingestion import chunker, embedder, metadata, pdf_converter
+# Phase 54.6.290 — eagerly import rag.llm so its VRAM-budget
+# releaser registers BEFORE the first pipeline.preflight() call.
+# The module previously was imported lazily inside the convert stage,
+# which meant the pre-convert preflight ran without the Ollama
+# releaser in its cascade and couldn't reclaim LLM-held VRAM.
+from sciknow.rag import llm as _rag_llm_preload  # noqa: F401
+from sciknow.core import vram_budget as _vram_budget_preload  # noqa: F401
 from sciknow.storage.db import get_session
 from sciknow.storage.models import (
     Chunk,
@@ -229,24 +236,23 @@ def ingest(
             _set_status(session, doc, "converting")
             t0 = time.monotonic()
 
-            # Phase 54.6.48 — release any Ollama LLMs from VRAM BEFORE the
-            # PDF-convert stage. Pre-fix, release_llm() only ran right
-            # before embedding (stage 4); MinerU's layout/formula models
-            # need ~1-4 GB of VRAM, and if a 22 GB Ollama LLM is resident
-            # (common: user was just using the wiki modal with
-            # keep_alive=-1), MinerU OOMs in stage 1 and every PDF fails
-            # with "CUDA out of memory. Tried to allocate 20.00 MiB" —
-            # exactly the failure pattern the web "download-selected"
-            # button surfaced on 37 Zharkova DOIs. Moving the release
-            # earlier makes ingest robust regardless of whether Ollama
-            # happens to be busy.
+            # Phase 54.6.290 — replace the old Phase-54.6.48 ad-hoc
+            # ``release_llm()`` call with a proper VRAM preflight.  The
+            # preflight releases caches in a registered order (Ollama
+            # → embedders → converter) until the requested budget is
+            # met.  For convert we budget for MinerU-VLM (up to 14 GB
+            # on the VLM-Pro + vllm path); pipeline mode uses ~2.5 GB
+            # but the same preflight handles both — nothing bad
+            # happens when the budget is already satisfied.
             try:
-                from sciknow.rag.llm import release_llm
-                released = release_llm()
-                if released:
-                    logger.info("freed VRAM before PDF convert: %s", released)
+                from sciknow.core.vram_budget import preflight
+                preflight(
+                    need_mb=14_500,
+                    reason="PDF converter (MinerU)",
+                    raise_on_fail=False,
+                )
             except Exception as exc:
-                logger.debug("release_llm pre-convert failed: %s", exc)
+                logger.debug("preflight pre-convert failed: %s", exc)
 
             output_dir = settings.mineru_output_dir / str(doc_id)
             result = pdf_converter.convert(pdf_path, output_dir)
@@ -525,13 +531,21 @@ def ingest(
             # (fast model, held for keep_alive). Unloading is cheap
             # (~50 ms) and idempotent; if no model is loaded, nothing
             # happens.
+            # Phase 54.6.290 — pre-embed preflight.  Dual-embedder
+            # (bge-m3 ~2.3 GB + Qwen3-4B ~8 GB = ~10.5 GB) after a
+            # convert stage that may have left a 13 GB MinerU-VLM
+            # subprocess resident → previously OOM'd.  Preflight
+            # releases ollama + converter in order so the embedders
+            # have clean room to load.
             try:
-                from sciknow.rag.llm import release_llm
-                released = release_llm()
-                if released:
-                    logger.info("freed VRAM before embed: %s", released)
+                from sciknow.core.vram_budget import preflight
+                preflight(
+                    need_mb=10_500,
+                    reason="dual-embedder (bge-m3 + Qwen3-4B)",
+                    raise_on_fail=False,
+                )
             except Exception as exc:
-                logger.debug("release_llm pre-embed failed: %s", exc)
+                logger.debug("preflight pre-embed failed: %s", exc)
 
             _set_status(session, doc, "embedding")
             t0 = time.monotonic()

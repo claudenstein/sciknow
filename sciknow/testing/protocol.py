@@ -12045,6 +12045,72 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_290_vram_budget_preflight() -> None:
+    """Phase 54.6.290 — VRAM preflight + releaser registry.
+
+    Guards:
+
+      A) core.vram_budget module with preflight + register_releaser +
+         free_vram_mb + kill_our_gpu_children.
+      B) release_llm / release_embedders / release_converter are all
+         registered at import time, with the expected priority order
+         (ollama=10 < pdf_converter=20 < embedders=50).
+      C) pipeline.py calls preflight() before both the convert stage
+         and the embed stage.
+      D) pipeline.py eagerly imports rag.llm so ollama_llm registers
+         before the first preflight fires.
+    """
+    import inspect as _inspect
+    from sciknow.core import vram_budget as _vb
+
+    for name in (
+        "preflight", "register_releaser", "free_vram_mb",
+        "kill_our_gpu_children", "registered_releaser_names",
+    ):
+        assert hasattr(_vb, name), f"54.6.290 vram_budget missing {name}"
+
+    # Importing the owner modules registers the releasers.
+    import sciknow.rag.llm  # noqa: F401
+    import sciknow.ingestion.pdf_converter  # noqa: F401
+    import sciknow.ingestion.embedder  # noqa: F401
+    names = _vb.registered_releaser_names()
+    assert names[0] == "ollama_llm", (
+        "54.6.290 ollama_llm must fire first (cheapest to release "
+        "+ fastest to reload). Got: {}".format(names)
+    )
+    assert "pdf_converter" in names and "embedders" in names, (
+        "54.6.290 pdf_converter + embedders releasers must register. "
+        "Got: {}".format(names)
+    )
+
+    from sciknow.ingestion import pipeline as _pipe
+    pipe_src = _inspect.getsource(_pipe)
+    assert "from sciknow.rag import llm as _rag_llm_preload" in pipe_src, (
+        "54.6.290 pipeline.py must eagerly import rag.llm so the "
+        "ollama_llm releaser is registered before the first preflight"
+    )
+    # Find the run function (_run_pipeline / run_pipeline etc.) — the
+    # preflight() calls live inside a generic place, so grep the
+    # module source.
+    assert pipe_src.count("vram_budget") >= 2, (
+        "54.6.290 pipeline must call preflight() at least twice "
+        "(pre-convert + pre-embed)"
+    )
+    assert 'reason="PDF converter' in pipe_src, (
+        "54.6.290 pipeline must preflight before convert"
+    )
+    assert 'reason="dual-embedder' in pipe_src, (
+        "54.6.290 pipeline must preflight before embed"
+    )
+
+    # Converter releaser kills vLLM subprocess via kill_our_gpu_children
+    from sciknow.ingestion import pdf_converter as _pdf
+    rel_src = _inspect.getsource(_pdf.release_converter)
+    assert "kill_our_gpu_children" in rel_src, (
+        "54.6.290 release_converter must kill vLLM subprocess children"
+    )
+
+
 def l1_phase54_6_289_model_swap_counter() -> None:
     """Phase 54.6.289 — Ollama model-swap churn detector.
 
@@ -16770,6 +16836,7 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_287_section_coverage_by_backend,
     l1_phase54_6_288_stage_timing_regression,
     l1_phase54_6_289_model_swap_counter,
+    l1_phase54_6_290_vram_budget_preflight,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]

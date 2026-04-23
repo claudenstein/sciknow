@@ -56,6 +56,52 @@ def release_model() -> None:
         pass
 
 
+def release_dense_embedder() -> None:
+    """Phase 54.6.290 — drop the Qwen3-Embedding-4B cache from the
+    ingest process.  Called from the VRAM preflight releaser so a
+    pre-convert preflight can reclaim ~8 GB without waiting for the
+    process to exit."""
+    global _dense_model_cache
+    if _dense_model_cache is None:
+        return
+    try:
+        del _dense_model_cache
+    finally:
+        _dense_model_cache = None
+    try:
+        import gc, torch
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+def release_embedders() -> int:
+    """Phase 54.6.290 — release both bge-m3 and the Qwen3 dense
+    sidecar model at once.  Returns approximate MB freed for
+    logging (authoritative number comes from nvidia-smi after)."""
+    freed_approx = 0
+    if _model is not None:
+        release_model()
+        freed_approx += 2300  # bge-m3 FP16 footprint
+    if _dense_model_cache is not None:
+        release_dense_embedder()
+        freed_approx += 8000  # Qwen3-Embedding-4B BF16 footprint
+    return freed_approx
+
+
+# Register with the VRAM budget module so preflight() can fire this
+# during a cascade (e.g. a reranker-load preflight will drop embedders
+# ahead of the 8 GB reranker weights).  priority=50 (default) → last
+# resort; embedders are the thing the embed stage *needs*.
+try:
+    from sciknow.core.vram_budget import register_releaser as _register
+    _register("embedders", release_embedders, priority=50)
+except ImportError:  # pragma: no cover
+    pass
+
+
 def _to_sparse(lexical_weights: dict) -> SparseVector:
     indices = []
     values = []

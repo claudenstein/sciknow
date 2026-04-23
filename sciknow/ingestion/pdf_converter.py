@@ -219,6 +219,94 @@ def _get_models() -> dict:
     return _models
 
 
+def release_converter() -> int:
+    """Phase 54.6.290 — drop every converter-owned GPU reference.
+
+    Called between convert and embed so the ~13-14 GB that MinerU-
+    VLM's vLLM subprocess holds gets reclaimed before the dual-
+    embedder loads bge-m3 + Qwen3-4B (~10 GB combined).  Without
+    this the three stack to ~24 GB and OOM a 3090.
+
+    Drops:
+
+      * ``_models`` (Marker cache, ~2 GB when loaded).
+      * Any MinerU-owned in-process caches we can reach through
+        public attributes (best-effort — package internals aren't
+        stable).
+      * Child subprocesses with ``vllm`` / ``mineru`` in their
+        cmdline (that's how MinerU 2.5-Pro VLM runs by default).
+
+    Returns an approximate MB-freed figure for logging; the
+    authoritative post-state comes from ``vram_budget.free_vram_mb``.
+    Never raises — a missing subprocess, import error, or
+    permission denied degrades silently so the pipeline doesn't
+    fail just because cleanup didn't land.
+    """
+    import gc
+    freed_approx = 0
+
+    global _models
+    if _models is not None:
+        try:
+            del _models
+        except Exception:
+            pass
+        _models = None
+        freed_approx += 2000  # Marker model dict approx
+
+    # Best-effort: many MinerU versions hang a `_model_cache` off the
+    # top-level module.  Drop it if present.  Package-private, so
+    # wrap in try/except for future-proofing.
+    try:
+        import mineru as _mineru_pkg
+        for attr in list(vars(_mineru_pkg).keys()):
+            if attr.startswith("_cache") or attr.endswith("_cache"):
+                try:
+                    setattr(_mineru_pkg, attr, None)
+                except Exception:
+                    pass
+    except ImportError:
+        pass
+
+    # Kill the vLLM subprocess that mineru spawns for the VLM
+    # backend.  This is the big win — ~13 GB reclaimed.
+    try:
+        from sciknow.core.vram_budget import kill_our_gpu_children
+        killed = kill_our_gpu_children(
+            name_filter=("vllm", "mineru"),
+        )
+        if killed:
+            freed_approx += killed * 6000  # ballpark per subprocess
+    except Exception:
+        pass
+
+    # Final gc + empty_cache so torch gives memory back to the
+    # driver rather than holding it in its own allocator.
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+    except Exception:
+        pass
+
+    return freed_approx
+
+
+# Register the releaser with the vram_budget module so preflight()
+# can drop the converter automatically when embed-side preflights
+# need room.  priority=20 places it after the cheap Ollama unload
+# (priority=10) but before the embed-side cache drop (priority=50).
+# That's exactly what the embed preflight needs: "kill the MinerU
+# subprocess before I tear down the thing I'm trying to load".
+try:
+    from sciknow.core.vram_budget import register_releaser as _register
+    _register("pdf_converter", release_converter, priority=20)
+except ImportError:  # pragma: no cover — should never happen
+    pass
+
+
 def _marker_config() -> dict:
     """Marker runtime tuning knobs driven by settings.
 

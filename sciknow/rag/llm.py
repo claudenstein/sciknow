@@ -71,6 +71,33 @@ def release_llm(models: list[str] | None = None) -> list[str]:
     return released
 
 
+def _release_llm_for_preflight() -> int:
+    """Phase 54.6.290 — VRAM-budget releaser adapter.
+
+    The preflight registry expects ``() -> int (mb_freed)``; release_llm
+    returns a name list.  This adapter wraps it and returns a coarse
+    MB estimate (7000 per unloaded model — qwen3:30b fits that
+    envelope; smaller models over-report by a couple GB, which just
+    makes the subsequent preflight check pessimistic → safe).
+    """
+    try:
+        names = release_llm()
+    except Exception as exc:
+        logger.debug("release_llm for preflight failed: %s", exc)
+        return 0
+    return len(names) * 7000
+
+
+try:
+    from sciknow.core.vram_budget import register_releaser as _register
+    # priority=10 → fires FIRST in the preflight cascade.  Ollama
+    # unload is a sub-second HTTP call and its models reload on
+    # demand, so dropping them has the lowest operational cost.
+    _register("ollama_llm", _release_llm_for_preflight, priority=10)
+except ImportError:  # pragma: no cover
+    pass
+
+
 def warm_up(
     model: str | None = None,
     num_ctx: int = 16384,
