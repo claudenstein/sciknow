@@ -12045,6 +12045,70 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_301_retrieval_latency_buffer() -> None:
+    """Phase 54.6.301 — retrieval latency ring buffer + dashboard panel.
+
+    Guards:
+
+      A) hybrid_search exposes `_SEARCH_EVENTS` + search_events() +
+         clear_search_events().
+      B) The search() function records per-leg timings + emits a
+         ring event at return time.
+      C) core.monitor has `_summarize_search_events` and the snapshot
+         exposes `retrieval_latency`.
+      D) CLI renders a 'search latency' row.
+      E) Web modal renders a 'Retrieval latency' heading.
+    """
+    import inspect as _inspect
+    from sciknow.retrieval import hybrid_search as _hs
+
+    for name in (
+        "_SEARCH_EVENTS", "search_events",
+        "_record_search_event", "clear_search_events",
+    ):
+        assert hasattr(_hs, name), f"54.6.301 missing {name}"
+
+    search_src = _inspect.getsource(_hs.search)
+    for key in (
+        "_dense_ms", "_sparse_ms", "_fts_ms", "_embed_ms",
+        "_record_search_event", "total_ms",
+    ):
+        assert key in search_src, (
+            f"54.6.301 search() must compute/record {key!r}"
+        )
+
+    from sciknow.core import monitor as _mon
+    assert hasattr(_mon, "_summarize_search_events"), (
+        "54.6.301 monitor must expose _summarize_search_events"
+    )
+    summ_src = _inspect.getsource(_mon._summarize_search_events)
+    for key in (
+        "p50_ms", "p95_ms", "avg_ms", "per_leg_p50",
+    ):
+        assert key in summ_src, (
+            f"54.6.301 summarize must populate {key!r}"
+        )
+    snap_src = _inspect.getsource(_mon.collect_monitor_snapshot)
+    assert '"retrieval_latency"' in snap_src, (
+        "54.6.301 snapshot must expose retrieval_latency"
+    )
+
+    from sciknow.cli import db as _db_cli
+    cli_src = _inspect.getsource(_db_cli._build_monitor_layout)
+    assert "retrieval_latency" in cli_src, (
+        "54.6.301 CLI must read snap['retrieval_latency']"
+    )
+
+    from sciknow.testing.helpers import web_app_full_source
+    web_src = web_app_full_source()
+    assert "snap.retrieval_latency" in web_src, (
+        "54.6.301 web must read snap.retrieval_latency"
+    )
+    assert "Retrieval latency" in web_src, (
+        "54.6.301 web must render 'Retrieval latency' heading"
+    )
+
+
 def l1_phase54_6_299_hnsw_drift_check() -> None:
     """Phase 54.6.299 — Qdrant HNSW / quantization drift check +
     tuned sidecar creation.
@@ -17357,6 +17421,7 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_297_book_outline_model,
     l1_phase54_6_298_enrichment_coverage,
     l1_phase54_6_299_hnsw_drift_check,
+    l1_phase54_6_301_retrieval_latency_buffer,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]

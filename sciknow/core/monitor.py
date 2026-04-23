@@ -1266,6 +1266,56 @@ def _sidecar_integrity_audit(session, *, limit_problems: int = 20) -> dict:
     }
 
 
+def _summarize_search_events(events: list[dict]) -> dict:
+    """Phase 54.6.301 — roll up hybrid_search.search() ring buffer
+    into dashboard-friendly stats.
+
+    Input events come from ``retrieval.hybrid_search.search_events()``
+    (one per search() call, newest last).  Summary computes:
+
+      * ``count``        total events in window
+      * ``p50_ms``       median total_ms
+      * ``p95_ms``       95th-percentile total_ms
+      * ``avg_ms``       mean total_ms
+      * ``last_event_age_s``  wall-clock age of the newest event
+      * ``per_leg_p50``  {embed, dense, sparse, fts, fuse} medians
+      * ``events``       newest 10 entries (unchanged shape)
+
+    Silent (zeroed counts) when the buffer is empty.
+    """
+    import statistics
+    import time as _time
+    if not events:
+        return {
+            "count": 0, "p50_ms": 0, "p95_ms": 0, "avg_ms": 0,
+            "last_event_age_s": None,
+            "per_leg_p50": {},
+            "events": [],
+        }
+    totals = sorted(e.get("total_ms", 0) for e in events)
+    p50 = statistics.median(totals)
+    p95_idx = min(len(totals) - 1, int(len(totals) * 0.95))
+    p95 = totals[p95_idx]
+    avg = sum(totals) / len(totals)
+    per_leg: dict[str, int] = {}
+    for leg in ("embed_ms", "dense_ms", "sparse_ms",
+                "fts_ms", "fuse_ms"):
+        vals = sorted(e.get(leg, 0) for e in events)
+        if vals:
+            per_leg[leg.replace("_ms", "")] = int(statistics.median(vals))
+    now = _time.time()
+    last_t = events[-1].get("t", 0)
+    return {
+        "count": len(events),
+        "p50_ms": int(p50),
+        "p95_ms": int(p95),
+        "avg_ms": int(avg),
+        "last_event_age_s": round(now - last_t, 1) if last_t else None,
+        "per_leg_p50": per_leg,
+        "events": events[-10:],
+    }
+
+
 def _summarize_preflight_events(events: list[dict]) -> dict:
     """Phase 54.6.291 — roll up the vram_budget preflight ring buffer
     into a dashboard-friendly summary.
@@ -4311,6 +4361,15 @@ def collect_monitor_snapshot(
     # fine, the log file is the authoritative cross-process source.
     from sciknow.core.vram_budget import preflight_events as _pre_events
     _preflight_events = _pre_events()
+    # Phase 54.6.301 — retrieval latency ring buffer (per-process,
+    # session-lived; cross-process readers see an empty list).
+    try:
+        from sciknow.retrieval.hybrid_search import (
+            search_events as _search_events,
+        )
+        _search_events_list = _search_events()
+    except Exception:
+        _search_events_list = []
     # 54.6.245 — cache the installed-tags list once per snapshot so
     # we don't round-trip to Ollama twice.
     _installed_ollama = _ollama_installed_models()
@@ -4430,6 +4489,13 @@ def collect_monitor_snapshot(
         # Dict: {events, count, tight_count, budget_met_count,
         # releasers_fired_count}.  Populated per-process.
         "vram_preflight": _summarize_preflight_events(_preflight_events),
+        # 54.6.301 — hybrid retrieval latency summary.  Per-process
+        # session buffer; count == 0 on a monitor-only process (web
+        # server and CLI ingest populate it; `db monitor` in a
+        # separate shell sees zero).
+        "retrieval_latency": _summarize_search_events(
+            _search_events_list,
+        ),
         "storage": {
             "disk": _disk_usage(Path(data_dir) if data_dir else None),
             "pg_database_mb": pg_db_size_mb,

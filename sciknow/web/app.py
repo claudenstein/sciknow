@@ -21016,6 +21016,8 @@ function renderMonitor(snap) {{
   const qdrantIndexes = snap.qdrant_indexes || {{}};
   // Phase 54.6.299 — HNSW / quantization drift check.
   const qdrantHnsw = snap.qdrant_hnsw || {{}};
+  // Phase 54.6.301 — retrieval latency summary.
+  const retrievalLat = snap.retrieval_latency || {{}};
   // Phase 54.6.284 — retraction detail (counts + recent list).
   const retractions = snap.retractions || {{}};
   // Phase 54.6.244 additions
@@ -21918,6 +21920,88 @@ function renderMonitor(snap) {{
     sections.push(html);
   }} else {{
     sections.push('<p class="u-note">Ollama: no models resident right now.</p>');
+  }}
+
+  // Phase 54.6.301 — retrieval latency panel.  Session ring buffer
+  // populated by hybrid_search.search() in-process; empty when the
+  // reader hasn't run retrieval yet.  Per-leg p50 bars let the
+  // operator see which stage dominates (usually dense on a large
+  // corpus; FTS on heavy BM25 queries).
+  if (retrievalLat && (retrievalLat.count || 0) > 0) {{
+    const p50 = retrievalLat.p50_ms || 0;
+    const p95 = retrievalLat.p95_ms || 0;
+    const avg = retrievalLat.avg_ms || 0;
+    const n = retrievalLat.count;
+    const legs = retrievalLat.per_leg_p50 || {{}};
+    const p95Col = p95 < 800 ? '#080' : p95 < 2000 ? '#b70' : '#c33';
+    const banner = '<div style="display:flex;gap:1.5em;flex-wrap:wrap;padding:0.5em 0.75em;'
+      + 'background:var(--bg-alt, #f5f5f5);border-radius:4px;margin-bottom:0.5em;">'
+      + '<div><strong>n</strong>: ' + n + '</div>'
+      + '<div><strong>p50</strong>: ' + p50 + ' ms</div>'
+      + '<div><strong>p95</strong>: <span style="color:' + p95Col + ';font-weight:bold;">'
+      + p95 + ' ms</span></div>'
+      + '<div><strong>avg</strong>: ' + avg + ' ms</div>'
+      + '</div>';
+    // Per-leg medians as a stacked breakdown — percentages of p50.
+    let legRows = '';
+    if (Object.keys(legs).length) {{
+      const order = ['embed', 'dense', 'sparse', 'fts', 'fuse'];
+      const legPalette = {{
+        embed: '#6aa', dense: '#38a', sparse: '#7a5',
+        fts: '#a58', fuse: '#888',
+      }};
+      let bar = '<div style="display:flex;height:0.9em;border-radius:3px;overflow:hidden;">';
+      const total = order.reduce((s, k) => s + (legs[k] || 0), 0) || 1;
+      for (const k of order) {{
+        const v = legs[k] || 0;
+        const pct = (v / total) * 100;
+        const col = legPalette[k] || '#666';
+        bar += '<div style="background:' + col + ';width:' + pct + '%;" '
+          + 'title="' + k + ' p50: ' + v + ' ms (' + pct.toFixed(0) + '%)"></div>';
+      }}
+      bar += '</div>';
+      const legend = order.map(k => {{
+        const v = legs[k] || 0;
+        const col = legPalette[k] || '#666';
+        return '<span style="margin-right:0.8em;font-size:0.85em;">'
+          + '<span style="display:inline-block;width:0.65em;height:0.65em;background:'
+          + col + ';margin-right:0.2em;vertical-align:middle;"></span>'
+          + k + ' ' + v + ' ms</span>';
+      }}).join('');
+      legRows = '<div style="margin-bottom:0.5em;">'
+        + '<div style="font-size:0.9em;margin-bottom:0.3em;"><strong>Per-leg p50 breakdown</strong></div>'
+        + bar
+        + '<div style="color:var(--fg-muted);margin-top:0.2em;">' + legend + '</div>'
+        + '</div>';
+    }}
+    // Per-event table
+    const events = retrievalLat.events || [];
+    let eventsTable = '';
+    if (events.length) {{
+      eventsTable = '<table class="stats-table" style="width:100%;font-size:0.85em;">'
+        + '<tr><th>When</th><th style="text-align:right;">Total</th>'
+        + '<th style="text-align:right;">Embed</th>'
+        + '<th style="text-align:right;">Dense</th>'
+        + '<th style="text-align:right;">Sparse</th>'
+        + '<th style="text-align:right;">FTS</th>'
+        + '<th style="text-align:right;">Fuse</th>'
+        + '<th style="text-align:right;">Cands</th>'
+        + '<th>Filtered</th></tr>';
+      for (const e of events.slice().reverse()) {{
+        const dt = new Date((e.t || 0) * 1000).toLocaleTimeString();
+        eventsTable += '<tr><td>' + _escHTML(dt) + '</td>'
+          + '<td style="text-align:right;font-weight:bold;">' + (e.total_ms || 0) + ' ms</td>'
+          + '<td style="text-align:right;" class="u-muted">' + (e.embed_ms || 0) + '</td>'
+          + '<td style="text-align:right;" class="u-muted">' + (e.dense_ms || 0) + '</td>'
+          + '<td style="text-align:right;" class="u-muted">' + (e.sparse_ms || 0) + '</td>'
+          + '<td style="text-align:right;" class="u-muted">' + (e.fts_ms || 0) + '</td>'
+          + '<td style="text-align:right;" class="u-muted">' + (e.fuse_ms || 0) + '</td>'
+          + '<td style="text-align:right;">' + (e.candidates || 0) + '</td>'
+          + '<td class="u-muted">' + (e.filtered ? 'yes' : '—') + '</td></tr>';
+      }}
+      eventsTable += '</table>';
+    }}
+    sections.push('<h4>Retrieval latency</h4>' + banner + legRows + eventsTable);
   }}
 
   // Phase 54.6.291 — VRAM preflight history panel.  Shows the

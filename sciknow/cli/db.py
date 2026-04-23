@@ -2091,6 +2091,8 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     qdrant_indexes = snap.get("qdrant_indexes") or {}
     # 54.6.299 — HNSW / quantization drift.
     qdrant_hnsw = snap.get("qdrant_hnsw") or {}
+    # 54.6.301 — retrieval latency summary.
+    retrieval_latency = snap.get("retrieval_latency") or {}
     backends = snap.get("converter_backends") or []
     pipeline = snap.get("pipeline") or {}
     timing = pipeline.get("stage_timing") or []
@@ -3201,6 +3203,31 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
                 points_col = points_str
             row.add_row(label_rendered, points_col)
             right_tbl.add_row(row)
+
+    # Phase 54.6.301 — retrieval latency chip.  Quiet when no
+    # searches have run in the session.  Colour tightens past the
+    # warn/crit thresholds: green <800ms p95, yellow 800-2000ms,
+    # red >2000ms (same ballpark as the rest of the reactive
+    # dashboard).
+    if retrieval_latency.get("count"):
+        n = retrieval_latency.get("count", 0)
+        p50 = retrieval_latency.get("p50_ms", 0)
+        p95 = retrieval_latency.get("p95_ms", 0)
+        colour = (
+            C_OK if p95 < 800 else
+            C_WARN if p95 < 2000 else C_ERR
+        )
+        right_tbl.add_row("")
+        row = Table.grid(padding=(0, 1), expand=True)
+        row.add_column(ratio=3, style=C_DIM)
+        row.add_column(justify="right", ratio=1)
+        row.add_row(
+            "search latency",
+            Text(f"p50 {p50}ms · p95 ", style=C_DIM)
+            + Text(f"{p95}ms", style=colour)
+            + Text(f"  n={n}", style=C_DIM),
+        )
+        right_tbl.add_row(row)
 
     # Phase 54.6.299 — HNSW/quantization drift one-liner.  Only
     # fires for papers-class collections that should be on tuned

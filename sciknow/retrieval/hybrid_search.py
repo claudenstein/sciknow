@@ -901,6 +901,37 @@ def expand_query(query: str) -> str:
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
+# Phase 54.6.301 — retrieval-latency ring buffer.  Module-level,
+# per-process, capped at 60 entries — same shape as the 54.6.237
+# GPU trend + 54.6.289 model-swap + 54.6.291 preflight buffers.
+# Lost on restart, cross-process reads see only events the reader
+# process itself generated.  Read via ``retrieval_trend()`` from
+# core.monitor so the dashboard surfaces p50/p95 + recent count
+# without piping through the CLI.
+_SEARCH_EVENTS_MAX = 60
+_SEARCH_EVENTS: list[dict] = []
+
+
+def _record_search_event(ev: dict) -> None:
+    """Append to the module-level search ring buffer, trimming to
+    keep memory bounded.  Called by ``search()`` at return-time."""
+    _SEARCH_EVENTS.append(ev)
+    if len(_SEARCH_EVENTS) > _SEARCH_EVENTS_MAX:
+        del _SEARCH_EVENTS[:-_SEARCH_EVENTS_MAX]
+
+
+def search_events() -> list[dict]:
+    """Return a copy of the current search ring (newest last).
+    Consumed by ``core.monitor.collect_monitor_snapshot`` so the
+    dashboard can show retrieval-latency pressure."""
+    return list(_SEARCH_EVENTS)
+
+
+def clear_search_events() -> None:
+    """Test-only reset for the ring buffer."""
+    _SEARCH_EVENTS.clear()
+
+
 def search(
     query: str,
     qdrant_client: QdrantClient,
@@ -923,6 +954,14 @@ def search(
     weights = (dense_weight, sparse_weight, fts_weight)
     """
     from sciknow.config import settings
+    import time as _time
+
+    # Phase 54.6.301 — record per-leg timings so the monitor can
+    # surface retrieval latency distribution.  Timings are taken
+    # around the dense/sparse/fts calls + the fuse+hydrate tail
+    # (boosts are cheap, lumped into "fuse").
+    _t0 = _time.monotonic()
+    _dense_ms = _sparse_ms = _fts_ms = _fuse_ms = 0
 
     # Phase 52 — sanitise the incoming query before embedding. Defends
     # against the "MCP client leaks a 2000-char system prompt in
@@ -940,16 +979,28 @@ def search(
     if use_query_expansion:
         effective_query = expand_query(effective_query)
 
+    _embed_t0 = _time.monotonic()
     dense_vec, sparse_vec = _embed_query(effective_query)
+    _embed_ms = int((_time.monotonic() - _embed_t0) * 1000)
+
     qdrant_filter = _build_qdrant_filter(
         year_from, year_to, domain, section, topic_cluster,
         has_table=has_table, has_equation=has_equation,
     )
 
+    _leg_t0 = _time.monotonic()
     dense_ids  = _qdrant_dense(qdrant_client, dense_vec, candidate_k, qdrant_filter)
-    sparse_ids = _qdrant_sparse(qdrant_client, sparse_vec, candidate_k, qdrant_filter)
-    fts_ids    = _postgres_fts(session, query, candidate_k, year_from, year_to, domain, section, topic_cluster)
+    _dense_ms = int((_time.monotonic() - _leg_t0) * 1000)
 
+    _leg_t0 = _time.monotonic()
+    sparse_ids = _qdrant_sparse(qdrant_client, sparse_vec, candidate_k, qdrant_filter)
+    _sparse_ms = int((_time.monotonic() - _leg_t0) * 1000)
+
+    _leg_t0 = _time.monotonic()
+    fts_ids    = _postgres_fts(session, query, candidate_k, year_from, year_to, domain, section, topic_cluster)
+    _fts_ms = int((_time.monotonic() - _leg_t0) * 1000)
+
+    _fuse_t0 = _time.monotonic()
     merged = _rrf_merge(
         [dense_ids, sparse_ids, fts_ids],
         weights=list(weights),
@@ -984,4 +1035,27 @@ def search(
     # COCITE_BOOST_FACTOR=0.0 in .env to disable if it regresses MRR
     # on a corpus with dense in-corpus citations.
     cocite_boost = getattr(settings, "cocite_boost_factor", 0.1)
-    return _apply_cocite_boost(candidates, session, boost_factor=cocite_boost)
+    final = _apply_cocite_boost(candidates, session, boost_factor=cocite_boost)
+
+    # Phase 54.6.301 — emit the latency event to the ring buffer.
+    # total_ms covers everything this function owns: sanitize +
+    # embed + three legs + fuse + hydrate + boosts.
+    _total_ms = int((_time.monotonic() - _t0) * 1000)
+    _fuse_ms = _total_ms - _dense_ms - _sparse_ms - _fts_ms - _embed_ms
+    _record_search_event({
+        "t": _time.time(),
+        "total_ms": _total_ms,
+        "embed_ms": _embed_ms,
+        "dense_ms": _dense_ms,
+        "sparse_ms": _sparse_ms,
+        "fts_ms": _fts_ms,
+        "fuse_ms": max(0, _fuse_ms),
+        "candidates": len(final),
+        "candidate_k": int(candidate_k),
+        "query_len": len(query or ""),
+        "filtered": bool(
+            year_from or year_to or domain or section or topic_cluster
+            or has_table is not None or has_equation is not None
+        ),
+    })
+    return final

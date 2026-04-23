@@ -273,6 +273,17 @@ and the web modal renders a "Model swap churn" panel with the last
 over ≥10 min — each swap costs 5-10 s of Ollama cold-load, so
 15/hr = ~3 min of pipeline cold-loads per hour, worth surfacing.
 
+**Phase 54.6.301** adds **retrieval query-latency instrumentation**
+— every `hybrid_search.search()` call records into a 60-entry
+session ring buffer (same shape as the GPU-trend / model-swap /
+preflight buffers). Per-leg timing: embed / dense / sparse / fts /
+fuse. Monitor exposes p50 / p95 / avg over the window + a
+per-leg breakdown. CLI gets a `search latency p50/p95` row in the
+qdrant panel; web modal gets a "Retrieval latency" panel with
+per-leg stacked bar + last-10-events table. Completes the
+retrieval observability trio (54.6.296 payload indexes +
+54.6.299 HNSW tuning + 54.6.301 timing).
+
 **Phase 54.6.299** adds **Qdrant HNSW / quantization drift check**
 + fixes a second dual-embedder sidecar bug found while building it.
 The sidecar was being created with Qdrant's default HNSW config
