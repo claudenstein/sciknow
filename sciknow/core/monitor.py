@@ -524,6 +524,98 @@ def _gpu_trend_snapshot() -> dict:
     }
 
 
+# Phase 54.6.289 — Ollama model-swap ring buffer.  Same shape as
+# _GPU_TREND: module-level, per-process, lost on restart.  We only
+# record *transitions* (the set of loaded model names changed vs the
+# previous snapshot) — not every snapshot — so a stable "this model
+# has been loaded for 10 minutes" run produces a single entry.
+_MODEL_SWAP_MAX = 60
+_MODEL_SWAP_EVENTS: list[dict] = []
+_LAST_LOADED_SET: set[str] | None = None
+
+
+def _record_model_swap(loaded: list[dict]) -> None:
+    """Append a swap event when the loaded-model set changes.
+
+    ``loaded`` is whatever ``ollama ps`` returned this tick — list of
+    {name, vram_mb, expires_at, …}.  An empty list is a valid state
+    ("no models loaded right now") and can trigger a swap event on
+    the transition in or out.
+
+    Swap events carry ``added`` + ``removed`` name lists so renderers
+    can show "+qwen3:30b  -gemma3:27b".  A snapshot where the set is
+    unchanged is a no-op (doesn't append).
+    """
+    global _LAST_LOADED_SET
+    import time as _time
+    current = {str((m or {}).get("name") or "") for m in (loaded or [])}
+    current.discard("")
+    if _LAST_LOADED_SET is None:
+        _LAST_LOADED_SET = current
+        return  # seed call; no swap signal yet
+    if current == _LAST_LOADED_SET:
+        return
+    _MODEL_SWAP_EVENTS.append({
+        "t": _time.time(),
+        "added":   sorted(current - _LAST_LOADED_SET),
+        "removed": sorted(_LAST_LOADED_SET - current),
+        "loaded":  sorted(current),
+    })
+    _LAST_LOADED_SET = current
+    if len(_MODEL_SWAP_EVENTS) > _MODEL_SWAP_MAX:
+        del _MODEL_SWAP_EVENTS[:-_MODEL_SWAP_MAX]
+
+
+def _build_llm_section(
+    llm_usage: list[dict],
+    llm_usage_days: int,
+    llm_usage_by_day: dict,
+) -> dict:
+    """Assemble the snap['llm'] subtree.
+
+    Records one model-swap tick here (inside the collector, not
+    inside _ollama_loaded_models, to keep that function pure) so
+    the ring buffer advances on every snapshot call.
+    """
+    loaded = _ollama_loaded_models()
+    _record_model_swap(loaded)
+    return {
+        "usage_last_days": llm_usage,
+        "usage_window_days": llm_usage_days,
+        "loaded_models": loaded,
+        # 54.6.283 — per-day × per-op grid for heatmap rendering.
+        "usage_by_day": llm_usage_by_day,
+        # 54.6.289 — model-swap counter for pipeline-churn detection.
+        "swap_trend": _model_swap_snapshot(),
+    }
+
+
+def _model_swap_snapshot() -> dict:
+    """Return rate + recent events for the Ollama model-swap buffer.
+
+    ``swaps_per_hour`` extrapolates from the window actually observed
+    (not from a hardcoded denominator), so a 5-minute session that
+    saw 2 swaps reports 24/hr rather than 2/hr.  Caller renders this
+    as a warning signal for pipeline churn.
+    """
+    import time as _time
+    if not _MODEL_SWAP_EVENTS:
+        return {
+            "events": [], "swap_count": 0,
+            "swaps_per_hour": 0.0, "window_s": 0,
+        }
+    now = _time.time()
+    first_t = _MODEL_SWAP_EVENTS[0]["t"]
+    window_s = max(1, int(now - first_t))
+    rate = len(_MODEL_SWAP_EVENTS) * 3600.0 / window_s
+    return {
+        "events": list(_MODEL_SWAP_EVENTS[-10:]),  # newest 10
+        "swap_count": len(_MODEL_SWAP_EVENTS),
+        "swaps_per_hour": round(rate, 1),
+        "window_s": window_s,
+    }
+
+
 def _model_assignments() -> dict:
     """Phase 54.6.236 — which LLM each stage uses.
 
@@ -1603,6 +1695,26 @@ def _build_alerts(snap: dict) -> list[dict]:
             ),
         })
 
+    # Phase 54.6.289 — Ollama model-swap churn alert.  Fires when
+    # the observed swap rate is ≥15/hr over a window of ≥10 minutes
+    # (below that the rate is noisy — swaps at session start often
+    # come from cold-load transitions).  A swap costs 5-10s of
+    # Ollama load time, so 15/hr = 2.5 minutes of pipeline cold-loads
+    # per hour — a real drag worth surfacing.
+    swap_trend = (snap.get("llm") or {}).get("swap_trend") or {}
+    swap_rate = swap_trend.get("swaps_per_hour") or 0
+    swap_window_s = swap_trend.get("window_s") or 0
+    if swap_rate >= 15 and swap_window_s >= 600:
+        alerts.append({
+            "severity": "warn",
+            "code": "model_thrash",
+            "message": (
+                f"Ollama model swaps {swap_rate:.0f}/hr "
+                f"({swap_trend.get('swap_count', 0)} events over "
+                f"{swap_window_s // 60} min) — consider unifying roles"
+            ),
+        })
+
     # Phase 54.6.288 — stage-timing regression alert.  Fires warn
     # per stage when p95 jumped ≥50 % vs the preceding 7-day window
     # (well above the 30 % "flagged in panel" threshold, so only
@@ -1808,6 +1920,10 @@ def _build_alerts(snap: dict) -> list[dict]:
         ),
         "stage_slowdown":  (
             "sciknow db failures  # inspect recent per-doc timing"
+        ),
+        "model_thrash":    (
+            "grep -E 'LLM_MODEL|BOOK_WRITE_MODEL|AUTOWRITE_SCORER' "
+            ".env  # consider unifying per-role overrides"
         ),
         "ram_pressure":    "ps axu --sort=-%mem | head",
         "host_overload":   "uptime; top -b -n 1 | head -20",
@@ -3267,13 +3383,9 @@ def collect_monitor_snapshot(
         "active_jobs": _read_web_jobs_pulse(
             Path(data_dir) if data_dir else None
         ),
-        "llm": {
-            "usage_last_days": llm_usage,
-            "usage_window_days": llm_usage_days,
-            "loaded_models": _ollama_loaded_models(),
-            # 54.6.283 — per-day × per-op grid for heatmap rendering.
-            "usage_by_day": llm_usage_by_day,
-        },
+        "llm": _build_llm_section(
+            llm_usage, llm_usage_days, llm_usage_by_day,
+        ),
         "qdrant": _qdrant_collections(),
         "gpu": gpu_info,
         "gpu_trend": _gpu_trend_snapshot(),

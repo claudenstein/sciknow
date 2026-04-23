@@ -21822,6 +21822,43 @@ function renderMonitor(snap) {{
     sections.push('<p class="u-note">Ollama: no models resident right now.</p>');
   }}
 
+  // Phase 54.6.289 — model-swap churn panel.  Lists the last few
+  // observed swaps so the operator can see *which* roles are
+  // thrashing.  Silent when the session buffer is empty.
+  const swapTrend = ((snap.llm || {{}}).swap_trend) || {{}};
+  if (swapTrend.swap_count) {{
+    const rate = swapTrend.swaps_per_hour || 0;
+    const rateCol = rate >= 15 ? '#c33'
+      : rate >= 5 ? '#b70' : 'var(--fg-muted)';
+    let html = '<h4>Model swap churn</h4>'
+      + '<div style="margin-bottom:0.5em;">'
+      + '<strong style="color:' + rateCol + ';">' + rate.toFixed(1)
+      + ' swaps/hour</strong>'
+      + ' <span class="u-muted">· ' + swapTrend.swap_count
+      + ' events in the last ' + Math.round((swapTrend.window_s || 0) / 60)
+      + 'm (session buffer · lost on web restart)</span></div>';
+    const events = swapTrend.events || [];
+    if (events.length) {{
+      html += '<table class="stats-table" style="width:100%;font-size:0.9em;">'
+        + '<tr><th>When</th><th>Added</th><th>Removed</th><th>Resident after</th></tr>';
+      for (const ev of events.slice().reverse()) {{
+        const dt = new Date((ev.t || 0) * 1000).toLocaleTimeString();
+        const addedCell = (ev.added || [])
+          .map(x => '<code style="color:#080;">+' + _escHTML(x) + '</code>').join(' ');
+        const removedCell = (ev.removed || [])
+          .map(x => '<code style="color:#c33;">-' + _escHTML(x) + '</code>').join(' ');
+        const residentCell = (ev.loaded || [])
+          .map(x => '<code class="u-muted">' + _escHTML(x) + '</code>').join(' ') || '<span class="u-muted">∅</span>';
+        html += '<tr><td>' + _escHTML(dt) + '</td>'
+          + '<td>' + (addedCell || '<span class="u-muted">—</span>') + '</td>'
+          + '<td>' + (removedCell || '<span class="u-muted">—</span>') + '</td>'
+          + '<td>' + residentCell + '</td></tr>';
+      }}
+      html += '</table>';
+    }}
+    sections.push(html);
+  }}
+
   // Phase 54.6.246 — active web jobs panel. Inside the web process
   // this is the authoritative in-memory list (same data /api/monitor
   // returns); inside the CLI it comes from the cross-process pulse

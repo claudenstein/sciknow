@@ -2593,6 +2593,26 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     else:
         gpu_tbl.add_row(Text("◎ ollama: no models loaded", style=C_DIM))
 
+    # Phase 54.6.289 — model-swap churn indicator.  Quiet until we
+    # have ≥1 swap event in the session buffer.  Yellow ≥5/hr, red
+    # ≥15/hr (same threshold as the model_thrash alert).
+    swap_trend = (snap.get("llm") or {}).get("swap_trend") or {}
+    if swap_trend.get("swap_count"):
+        rate = swap_trend.get("swaps_per_hour") or 0.0
+        colour = (
+            C_ERR if rate >= 15 else
+            C_WARN if rate >= 5 else C_DIM
+        )
+        chip = Text()
+        chip.append("↯ swaps  ", style=C_DIM)
+        chip.append(f"{rate:.1f}/hr", style=colour)
+        chip.append(
+            f"  ({swap_trend['swap_count']} events over "
+            f"{(swap_trend.get('window_s', 0)) // 60}m)",
+            style=C_DIM,
+        )
+        gpu_tbl.add_row(chip)
+
     # Storage block — compact one-liner rows. Shows the top-level
     # paths that can surprise you (mineru_output balloons during
     # re-ingest) plus pg DB size.

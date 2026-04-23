@@ -12045,6 +12045,71 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_289_model_swap_counter() -> None:
+    """Phase 54.6.289 — Ollama model-swap churn detector.
+
+    Guards:
+
+      A) Module-level ring buffer + recorder + snapshot helper.
+      B) collect_monitor_snapshot routes through `_build_llm_section`
+         so the swap tick advances on every snapshot call.
+      C) snap['llm'] carries `swap_trend` with the documented keys.
+      D) `_build_alerts` emits `model_thrash` when rate is high.
+      E) CLI renders the swap chip in the GPU/Ollama panel.
+      F) Web modal renders a 'Model swap churn' panel.
+    """
+    import inspect as _inspect
+    from sciknow.core import monitor as _mon
+
+    for name in (
+        "_record_model_swap",
+        "_model_swap_snapshot",
+        "_MODEL_SWAP_EVENTS",
+        "_build_llm_section",
+    ):
+        assert hasattr(_mon, name), f"54.6.289 missing {name}"
+
+    rec_src = _inspect.getsource(_mon._record_model_swap)
+    for key in ("added", "removed", "loaded"):
+        assert key in rec_src, (
+            f"54.6.289 _record_model_swap must populate {key!r}"
+        )
+
+    snap_helper_src = _inspect.getsource(_mon._model_swap_snapshot)
+    for key in ("events", "swap_count", "swaps_per_hour", "window_s"):
+        assert key in snap_helper_src, (
+            f"54.6.289 _model_swap_snapshot must expose {key!r}"
+        )
+
+    llm_section_src = _inspect.getsource(_mon._build_llm_section)
+    assert "_record_model_swap" in llm_section_src, (
+        "54.6.289 _build_llm_section must advance the swap ring each tick"
+    )
+    assert "swap_trend" in llm_section_src, (
+        "54.6.289 snap['llm'] must carry the swap_trend key"
+    )
+
+    alerts_src = _inspect.getsource(_mon._build_alerts)
+    assert "model_thrash" in alerts_src, (
+        "54.6.289 _build_alerts must emit model_thrash"
+    )
+
+    from sciknow.cli import db as _db_cli
+    cli_src = _inspect.getsource(_db_cli._build_monitor_layout)
+    assert 'snap.get("llm")' in cli_src and "swap_trend" in cli_src, (
+        "54.6.289 CLI must render the swap chip"
+    )
+
+    from sciknow.testing.helpers import web_app_full_source
+    web_src = web_app_full_source()
+    assert "swap_trend" in web_src, (
+        "54.6.289 web modal must read snap.llm.swap_trend"
+    )
+    assert "Model swap churn" in web_src, (
+        "54.6.289 web modal must render the 'Model swap churn' heading"
+    )
+
+
 def l1_phase54_6_288_stage_timing_regression() -> None:
     """Phase 54.6.288 — week-over-week p95 regression detector.
 
@@ -12293,8 +12358,12 @@ def l1_phase54_6_283_llm_usage_heatmap() -> None:
         "54.6.283 helper must group by per-day truncation"
     )
 
+    # 54.6.289 moved the llm subtree into _build_llm_section; check
+    # both locations so either arrangement passes.
     snap_src = _inspect.getsource(_mon.collect_monitor_snapshot)
-    assert '"usage_by_day"' in snap_src, (
+    llm_section_src = _inspect.getsource(_mon._build_llm_section) \
+        if hasattr(_mon, "_build_llm_section") else ""
+    assert '"usage_by_day"' in snap_src + llm_section_src, (
         "54.6.283 snapshot must expose llm.usage_by_day"
     )
 
@@ -16700,6 +16769,7 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_286_vram_headroom_watchdog,
     l1_phase54_6_287_section_coverage_by_backend,
     l1_phase54_6_288_stage_timing_regression,
+    l1_phase54_6_289_model_swap_counter,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]

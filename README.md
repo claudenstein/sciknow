@@ -264,6 +264,15 @@ fires at ≥+50 %, flagging real slowdowns (vs the ±30 % "show in
 panel only" threshold). Catches silent regressions like "embedding
 got 2× slower after we flipped `dense_embedder_model`".
 
+**Phase 54.6.289** adds an **Ollama model-swap counter** — records
+every transition in the set of loaded Ollama model names into an
+in-process ring buffer (same lifetime as the GPU trend). The CLI
+gets a compact `↯ swaps N.N/hr` chip next to the Ollama mini-list
+and the web modal renders a "Model swap churn" panel with the last
+10 add/remove events. `model_thrash` alert fires at ≥15 swaps/hr
+over ≥10 min — each swap costs 5-10 s of Ollama cold-load, so
+15/hr = ~3 min of pipeline cold-loads per hour, worth surfacing.
+
 ```bash
 uv run sciknow db monitor              # one shot, full layout
 uv run sciknow db monitor --watch 5    # btop-style in-place refresh
