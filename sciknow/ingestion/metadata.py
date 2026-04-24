@@ -230,6 +230,17 @@ _GARBAGE_AUTHOR_RE = re.compile(
     r'(^administrator$)'
     r'|(^admin$)'
     r'|(^user$)'
+    r'|(^users?$)'
+    # Phase 54.6.313f — Spanish / Portuguese / German / French equivalents
+    # of "user" / "admin" that shipped as PDF Info authors from
+    # system-locale MS Word / Adobe installs.
+    r'|(^usuari[oa]s?$)'      # Spanish "user"
+    r'|(^utilisateur$)'       # French "user"
+    r'|(^benutzer$)'          # German "user"
+    r'|(^utente$)'            # Italian "user"
+    r'|(^usuário$)'           # Portuguese "user"
+    r'|(^propietari[oa]$)'    # Spanish "owner"
+    r'|(^asus$|^dell$|^hp$|^lenovo$|^acer$|^toshiba$)'  # OEM defaults
     r'|(^owner$)'
     r'|(publishing)'          # "IOP Publishing", "Elsevier Publishing"
     r'|(^unknown$)'
@@ -649,7 +660,13 @@ def search_crossref_by_title(
         # (truncated / noisy / slightly different between sources).
         "select": "DOI,title,author,issued,abstract",
     }
-    if first_author:
+    # Phase 54.6.313f — skip `query.author` when the DB first_author
+    # looks like a garbage / system artefact ("Usuario", "hy", "admin",
+    # "Print KDP", publisher boilerplate). Passing those as a Crossref
+    # filter skews the search toward unrelated papers whose author
+    # names happen to contain those short tokens. The author is still
+    # used downstream as an *accept* signal — just not as a *filter*.
+    if first_author and not _is_garbage_author(first_author) and len(first_author.strip()) >= 3:
         params["query.author"] = first_author
 
     url = "https://api.crossref.org/works"
@@ -745,7 +762,11 @@ def search_openalex_by_title(
         "select": "doi,title,authorships,publication_year,primary_location,abstract_inverted_index",
         "mailto": settings.crossref_email,
     }
-    if first_author:
+    # Phase 54.6.313f — same garbage-author guard as Crossref. When the
+    # DB first_author is "Usuario" / "hy" / "admin" / publisher
+    # boilerplate, concatenating it into the free-text search poisons
+    # the results just like query.author did on the Crossref side.
+    if first_author and not _is_garbage_author(first_author) and len(first_author.strip()) >= 3:
         # OpenAlex author filter is approximate; just add to the text search
         params["search"] = f"{title} {first_author}"
 
