@@ -273,6 +273,46 @@ and the web modal renders a "Model swap churn" panel with the last
 over ≥10 min — each swap costs 5-10 s of Ollama cold-load, so
 15/hr = ~3 min of pipeline cold-loads per hour, worth surfacing.
 
+**Phase 54.6.309** ships a four-feature book-UX drop:
+
+1. **Global per-book bibliography + "Bibliography" pseudo-chapter.**
+   Every draft's local `[1]...[N]` citations are now remapped on
+   render to a single, per-book numbering — ordered by first
+   appearance when walking chapters in reading order. The sidebar
+   grows a synthetic Bibliography chapter at the end (no `Ch.N:`
+   prefix, non-deletable) that lists every cited publication once.
+   The right-panel Sources list for each draft shows only the
+   entries cited in THAT draft, but numbered globally so the
+   anchors line up with the body. Implementation lives in
+   `sciknow/core/bibliography.py::BookBibliography.from_book` and
+   honours the `custom_metadata.is_active` version flag (see #3).
+2. **"Visuals" tab in the right banner.** New right-panel segmented-
+   control entry runs `retrieval/visuals_ranker.rank_visuals`
+   against the open draft's prose (sentence = first 2.5 KB) and
+   lists the top-12 figures/tables/charts from the corpus as a
+   thumbnail grid. Composite score + "cited" flag (same-paper
+   bonus) render inline; an **Insert** button appends
+   `![caption](/api/visuals/image/<id>)` + caption to the draft
+   body via the edit-in-place textarea (or the edit endpoint when
+   the editor is closed). Lazy-loaded on first tab activation.
+3. **Draft version browser with scores + active toggle.** The
+   History panel (toolbar → History) now renders a richer version
+   list: word count, `final_overall` autowrite score, model used,
+   review/active tags, and a **Make active** button per row. Clicks
+   flip `drafts.custom_metadata.is_active` so the reader and the
+   global bibliography both pick that version up; siblings in the
+   same `(chapter_id, section_type)` group are cleared in one
+   transaction. `POST /api/draft/{id}/activate` is the API.
+4. **`db expand-author-refs` — expand corpus by an author's
+   references.** New CLI + web flow that picks an existing corpus
+   author, aggregates every paper they cited across all their
+   corpus works (including self-cites), dedupes by DOI/title, ranks
+   by citation frequency, and lands in the existing cherry-pick
+   candidates modal before download. Web entry: Corpus menu →
+   **Expand by author's references**. Backend: `POST /api/corpus/
+   expand-author-refs/preview` + re-uses `/api/corpus/expand-author/
+   download-selected` for the download phase.
+
 **Phase 54.6.303** is a two-part fix: (1) the visuals image
 endpoint (`/api/visuals/image/{id}`) now also probes the `vlm/`
 subfolder when serving figures — MinerU 2.5 VLM-Pro writes

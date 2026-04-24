@@ -7807,6 +7807,495 @@ def expand_author(
         )
 
 
+@app.command(name="expand-author-refs")
+def expand_author_refs_cmd(
+    author: str = typer.Option(
+        None, "--author",
+        help="Author display name (surname suffices; uses the corpus's own stored authors list). "
+             "If omitted, the command prompts with the top-cited corpus authors.",
+    ),
+    top_authors: int = typer.Option(
+        20, "--top-authors",
+        help="When --author is omitted, how many top-represented corpus authors to show for picking.",
+    ),
+    min_mentions: int = typer.Option(
+        1, "--min-mentions",
+        help="Drop references cited fewer times than this across the author's works (1 = keep even one-offs).",
+    ),
+    limit: int = typer.Option(
+        0, "--limit",
+        help="Max references to consider after ranking (0 = no cap).",
+    ),
+    include_in_corpus: bool = typer.Option(
+        False, "--include-in-corpus/--skip-in-corpus",
+        help="Keep references whose DOI is already in the corpus (useful as a preview of the author's reading list). Default skips them.",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Show the ranked shortlist and exit without downloading — always inspect first.",
+    ),
+    relevance: bool = typer.Option(
+        True, "--relevance/--no-relevance",
+        help="Filter candidates by semantic relevance to the corpus before downloading.",
+    ),
+    relevance_query: str = typer.Option(
+        "", "--relevance-query", "-q",
+        help="Free-text topic anchor for the relevance filter. Default: corpus centroid.",
+    ),
+    relevance_threshold: float = typer.Option(
+        0.0, "--relevance-threshold",
+        help="Cosine similarity threshold (0 = EXPAND_RELEVANCE_THRESHOLD from .env).",
+    ),
+    download_dir: Path = typer.Option(
+        None, "--download-dir", "-d",
+        help="Directory where new PDFs are saved before ingestion (default: <project data>/downloads).",
+    ),
+    workers: int = typer.Option(
+        0, "--workers", "-w",
+        help="Parallel ingestion worker subprocesses (0 = INGEST_WORKERS from .env).",
+    ),
+    ingest: bool = typer.Option(
+        True, "--ingest/--no-ingest",
+        help="Ingest downloaded PDFs immediately.",
+    ),
+):
+    """Expand the catalog with every paper cited by a given author's corpus works.
+
+    This is different from:
+      - ``db expand``         — follows references in ALL corpus papers.
+      - ``db expand-author``  — downloads the author's OWN bibliography.
+
+    ``expand-author-refs`` targets the *reading list* of one author: it
+    enumerates every paper they cited (including self-citations — their
+    own prior work) across all of the author's works that sciknow has
+    already ingested, then ranks references by how often that author
+    cited them. The intuition is that an author's citation network is a
+    high-signal view of the literature they consider important, so
+    downloading the union of their references often fills gaps in your
+    corpus that neither a forward-citation walk (``db expand``) nor
+    downloading their oeuvre (``db expand-author``) would catch.
+
+    Flow:
+      1. Resolve the author against ``paper_metadata.authors`` (JSONB).
+      2. Fetch all citations from ``citations`` whose ``citing_document_id``
+         is one of the author's papers — including self-cites.
+      3. Dedupe by DOI (falling back to normalised title) and rank by
+         citation frequency within the author's oeuvre (ties broken by
+         most-recent cited_year).
+      4. Skip references already in the corpus unless ``--include-in-corpus``.
+      5. Optionally apply the relevance filter (same as ``db expand``).
+      6. Print shortlist; stop on ``--dry-run``.
+      7. Download via the 6-source OA pipeline; ingest with the usual
+         worker pool.
+
+    Examples:
+
+      sciknow db expand-author-refs --author "Zharkova"
+
+      sciknow db expand-author-refs                          # interactive picker
+
+      sciknow db expand-author-refs --author "Vinós" --min-mentions 2 --dry-run
+
+      sciknow db expand-author-refs --author "Mörner" -q "solar forcing climate"
+    """
+    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from sciknow.cli import preflight
+    preflight()
+
+    from sciknow.config import settings
+    from sciknow.ingestion.downloader import find_and_download
+    from sciknow.ingestion.references import Reference
+    from sciknow.storage.db import get_session
+    from sqlalchemy import text as sql_text
+
+    if download_dir is None:
+        download_dir = settings.data_dir / "downloads"
+
+    # ── Step 1: resolve author ───────────────────────────────────────────────
+    with get_session() as session:
+        # Flatten paper_metadata.authors into a (surname_lower -> {display, count})
+        # map. JSONB jsonb_array_elements is the canonical way.
+        rows = session.execute(sql_text("""
+            SELECT auth->>'name' AS author_name, COUNT(*) AS n_papers
+              FROM paper_metadata,
+                   jsonb_array_elements(COALESCE(authors, '[]'::jsonb)) AS auth
+             WHERE auth ? 'name'
+             GROUP BY author_name
+             ORDER BY n_papers DESC
+             LIMIT :lim
+        """), {"lim": int(top_authors) * 6}).fetchall()
+    if not rows:
+        console.print(
+            "[yellow]No authors on any corpus paper. Ingest something first.[/yellow]"
+        )
+        raise typer.Exit(0)
+
+    def _surname(name: str) -> str:
+        # APA-ish: last whitespace token, strip punctuation/initials.
+        import re as _re
+        parts = [p for p in _re.split(r"[,;\s]+", (name or "").strip()) if p]
+        if not parts:
+            return ""
+        last = parts[-1] if "," not in (name or "") else parts[0]
+        return _re.sub(r"[^A-Za-zÀ-ſ]", "", last).lower()
+
+    corpus_authors: list[dict] = []
+    seen_surnames: set[str] = set()
+    for r in rows:
+        name, n = r[0] or "", int(r[1] or 0)
+        sn = _surname(name)
+        if not sn or sn in seen_surnames:
+            # Aggregate by surname so "Vinós" and "Vinos" don't split
+            for a in corpus_authors:
+                if a["surname"] == sn:
+                    a["n_papers"] += n
+                    break
+            continue
+        seen_surnames.add(sn)
+        corpus_authors.append({"display": name, "surname": sn, "n_papers": n})
+
+    corpus_authors.sort(key=lambda a: -a["n_papers"])
+    corpus_authors = corpus_authors[:top_authors]
+
+    if not author:
+        console.print(
+            f"\n[bold]Top {len(corpus_authors)} author(s) in the corpus (by paper count):[/bold]\n"
+        )
+        for i, a in enumerate(corpus_authors, 1):
+            console.print(
+                f"  [cyan]{i:>2}.[/cyan] {a['display']:<40} "
+                f"[dim]({a['n_papers']} paper(s))[/dim]"
+            )
+        console.print()
+        pick = typer.prompt("Pick an author (number or surname)", default="1").strip()
+        try:
+            idx = int(pick) - 1
+            if idx < 0 or idx >= len(corpus_authors):
+                raise ValueError
+            author = corpus_authors[idx]["display"]
+        except ValueError:
+            author = pick
+
+    target_surname = _surname(author)
+    if not target_surname:
+        console.print(f"[red]Could not derive a surname from {author!r}.[/red]")
+        raise typer.Exit(2)
+
+    # ── Step 2: find the author's papers in the corpus ───────────────────────
+    with get_session() as session:
+        paper_rows = session.execute(sql_text("""
+            SELECT pm.document_id::text, pm.title, pm.year, pm.doi
+              FROM paper_metadata pm,
+                   jsonb_array_elements(COALESCE(pm.authors, '[]'::jsonb)) AS auth
+             WHERE auth ? 'name'
+               AND LOWER(regexp_replace(
+                     split_part(auth->>'name', ' ',
+                       cardinality(regexp_split_to_array(auth->>'name', '\s+'))),
+                     '[^A-Za-zÀ-ſ]', '', 'g'
+                   )) = :sn
+        """), {"sn": target_surname}).fetchall()
+
+    if not paper_rows:
+        console.print(
+            f"[yellow]No corpus papers found for surname {target_surname!r}. "
+            f"Try `sciknow catalog stats --authors` to see who's in the corpus.[/yellow]"
+        )
+        raise typer.Exit(0)
+
+    paper_ids = [r[0] for r in paper_rows]
+    console.print(
+        f"\n[bold]{len(paper_rows)} corpus paper(s) with surname "
+        f"'{target_surname}':[/bold]"
+    )
+    for r in paper_rows[:10]:
+        console.print(
+            f"  [dim]{(r[3] or '?')[:40]:<40}[/dim] "
+            f"[cyan]({r[2] or 'n.d.'})[/cyan] {(r[1] or '(untitled)')[:60]}"
+        )
+    if len(paper_rows) > 10:
+        console.print(f"  [dim]… and {len(paper_rows) - 10} more[/dim]")
+
+    # ── Step 3: fetch references from those papers' citations table ──────────
+    with get_session() as session:
+        cite_rows = session.execute(sql_text("""
+            SELECT cited_doi, cited_title, cited_authors, cited_year,
+                   is_self_cite
+              FROM citations
+             WHERE citing_document_id = ANY(CAST(:ids AS uuid[]))
+        """), {"ids": paper_ids}).fetchall()
+
+    if not cite_rows:
+        console.print(
+            "[yellow]No citations found for those papers. Run "
+            "`sciknow db link-citations` to populate the table.[/yellow]"
+        )
+        raise typer.Exit(0)
+
+    # ── Step 4: dedup + rank by mention frequency ────────────────────────────
+    from sciknow.ingestion.references import normalise_title_for_dedup
+    agg: dict[str, dict] = {}
+    for r in cite_rows:
+        cited_doi, cited_title, cited_authors, cited_year, is_self = r
+        key = (cited_doi or "").lower().strip()
+        if not key:
+            key = "title:" + normalise_title_for_dedup(cited_title or "")
+        if not key or key == "title:":
+            continue
+        if key not in agg:
+            agg[key] = {
+                "doi": cited_doi or None,
+                "title": cited_title or None,
+                "authors": list(cited_authors or []),
+                "year": cited_year,
+                "mentions": 0,
+                "self_cites": 0,
+            }
+        agg[key]["mentions"] += 1
+        if is_self:
+            agg[key]["self_cites"] += 1
+        # Keep earliest-seen non-empty fields for the metadata.
+        if not agg[key]["title"] and cited_title:
+            agg[key]["title"] = cited_title
+        if not agg[key]["year"] and cited_year:
+            agg[key]["year"] = cited_year
+
+    # Filter by min_mentions.
+    shortlist = [v for v in agg.values() if v["mentions"] >= min_mentions]
+    # Rank: more mentions first; ties broken by more-recent year.
+    shortlist.sort(key=lambda v: (-v["mentions"], -(v["year"] or 0)))
+
+    # ── Step 5: drop already-in-corpus by DOI ────────────────────────────────
+    dropped_in_corpus = 0
+    if not include_in_corpus:
+        with get_session() as session:
+            ex = session.execute(sql_text("""
+                SELECT LOWER(doi) FROM paper_metadata WHERE doi IS NOT NULL
+            """)).fetchall()
+            existing_dois = {r[0] for r in ex}
+        before = len(shortlist)
+        shortlist = [
+            v for v in shortlist
+            if not (v["doi"] and v["doi"].lower() in existing_dois)
+        ]
+        dropped_in_corpus = before - len(shortlist)
+
+    if limit and limit > 0:
+        shortlist = shortlist[:limit]
+
+    if not shortlist:
+        console.print(
+            "[yellow]No references left after filtering. Try --min-mentions 1 "
+            "or --include-in-corpus for an audit view.[/yellow]"
+        )
+        raise typer.Exit(0)
+
+    console.print(
+        f"\n[bold]{len(shortlist)} unique reference(s)[/bold] cited at least "
+        f"{min_mentions}× by {author}"
+        + (f" · [dim]dropped {dropped_in_corpus} already in corpus[/dim]" if dropped_in_corpus else "")
+    )
+
+    # Build Reference objects for download.
+    candidates: list[Reference] = []
+    for v in shortlist:
+        candidates.append(Reference(
+            raw_text=(v["title"] or v["doi"] or "") or "",
+            doi=v["doi"],
+            title=v["title"],
+            year=v["year"],
+            authors=[a if isinstance(a, str) else str(a) for a in (v["authors"] or [])],
+        ))
+
+    # ── Step 6: optional relevance filter ────────────────────────────────────
+    if relevance and candidates:
+        try:
+            from sciknow.retrieval.relevance import (
+                compute_corpus_centroid, embed_query, score_candidates,
+                score_histogram,
+            )
+            eff_threshold = relevance_threshold if relevance_threshold > 0 else getattr(
+                settings, "expand_relevance_threshold", 0.55
+            )
+            console.print(
+                f"\n[dim]Applying relevance filter "
+                f"(threshold={eff_threshold:.2f})…[/dim]"
+            )
+            anchor_vec = (
+                embed_query(relevance_query) if relevance_query
+                else compute_corpus_centroid()
+            )
+            titles = [c.title or "" for c in candidates]
+            scores = score_candidates(titles, anchor_vec)
+            kept = [(c, s) for c, s in zip(candidates, scores) if s >= eff_threshold]
+            dropped = len(candidates) - len(kept)
+
+            hist = score_histogram(scores, bins=10)
+            if hist:
+                console.print("[dim]Relevance score distribution:[/dim]")
+                max_count = max(c for _, _, c in hist) or 1
+                for lo, hi, c in hist:
+                    bar = int(40 * c / max_count)
+                    mark = "▶ " if lo <= eff_threshold < hi else "  "
+                    console.print(
+                        f"  {mark}[dim]{lo:.2f}-{hi:.2f}[/dim] "
+                        f"{'█' * bar} {c}"
+                    )
+                console.print(
+                    f"  [green]kept {len(kept)}[/green]  "
+                    f"[red]dropped {dropped}[/red]  (cut at {eff_threshold:.2f})"
+                )
+            candidates = [c for c, _ in sorted(kept, key=lambda x: x[1], reverse=True)]
+        except Exception as exc:
+            console.print(
+                f"[yellow]⚠ Relevance filter failed ({type(exc).__name__}: {exc}); "
+                f"continuing without it. Use --no-relevance to skip explicitly.[/yellow]"
+            )
+
+    if not candidates:
+        console.print("[yellow]Nothing to download after relevance filter.[/yellow]")
+        raise typer.Exit(0)
+
+    # ── Step 7: preview / confirm ────────────────────────────────────────────
+    console.print(
+        f"\n[bold]Top {min(len(candidates), 30)} reference(s) "
+        f"(ranked by citation frequency):[/bold]"
+    )
+    for ref in candidates[:30]:
+        yr = f"({ref.year})" if ref.year else "(n.d.)"
+        # Pull the mention count back out for display.
+        key = (ref.doi or "").lower().strip() or ("title:" + normalise_title_for_dedup(ref.title or ""))
+        m = agg.get(key, {}).get("mentions", 0)
+        sc = agg.get(key, {}).get("self_cites", 0)
+        self_tag = f" [red]self:{sc}[/red]" if sc else ""
+        console.print(
+            f"  [cyan]×{m:>3}[/cyan]{self_tag}  "
+            f"[dim]{(ref.doi or '?')[:40]:<40}[/dim] "
+            f"[cyan]{yr}[/cyan] {(ref.title or '')[:60]}"
+        )
+    if len(candidates) > 30:
+        console.print(f"  [dim]… and {len(candidates) - 30} more[/dim]")
+
+    if dry_run:
+        console.print(
+            "\n[yellow]Dry run — exiting without downloading. "
+            "Re-run without --dry-run to fetch.[/yellow]"
+        )
+        raise typer.Exit(0)
+
+    if not typer.confirm(
+        f"\nDownload + ingest these {len(candidates)} paper(s)?",
+        default=True,
+    ):
+        console.print("[yellow]Cancelled.[/yellow]")
+        raise typer.Exit(0)
+
+    # ── Step 8: download + ingest (same pipeline as expand-author) ───────────
+    download_dir.mkdir(parents=True, exist_ok=True)
+    no_oa_cache_file = download_dir / ".no_oa_cache"
+    no_oa_cache: set[str] = (
+        set(no_oa_cache_file.read_text().splitlines())
+        if no_oa_cache_file.exists() else set()
+    )
+
+    dl_workers = max(1, getattr(settings, "expand_download_workers", 4))
+    downloaded = failed_dl = 0
+    to_ingest: list[tuple[str, str, Path]] = []
+
+    def _download_one(ref):
+        ref_key = (ref.doi or "").lower()
+        safe_name = (ref.doi or "unknown").replace("/", "_").replace(":", "_")
+        dest = download_dir / f"{safe_name}.pdf"
+        title = (ref.title or "")[:80]
+        if ref_key in no_oa_cache:
+            return ("cached", ref_key, title, dest, None)
+        if dest.exists():
+            return ("exists", ref_key, title, dest, None)
+        ok, source = find_and_download(
+            doi=ref.doi, arxiv_id=None,
+            dest_path=dest, email=settings.crossref_email,
+        )
+        return ("downloaded" if ok else "no_oa", ref_key, title, dest, source)
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task(
+            f"Downloading ({dl_workers} workers)", total=len(candidates)
+        )
+        with ThreadPoolExecutor(max_workers=dl_workers) as pool:
+            futs = {pool.submit(_download_one, ref): ref for ref in candidates}
+            for fut in as_completed(futs):
+                ref = futs[fut]
+                try:
+                    status, ref_key, title, dest, source = fut.result()
+                except Exception:
+                    failed_dl += 1
+                    progress.advance(task)
+                    continue
+                label_short = (ref.title or ref.doi or "")[:40]
+                if status == "downloaded":
+                    downloaded += 1
+                    progress.update(task, description=f"[green]↓ {source}[/green] {label_short}")
+                    to_ingest.append((ref_key, title, dest))
+                elif status == "exists":
+                    to_ingest.append((ref_key, title, dest))
+                elif status == "no_oa":
+                    failed_dl += 1
+                    with no_oa_cache_file.open("a") as f:
+                        f.write(ref_key + "\n")
+                    try:
+                        from sciknow.core.pending_ops import record_failure
+                        record_failure(
+                            doi=ref.doi or "", title=ref.title or "",
+                            authors=list(ref.authors or []),
+                            year=ref.year, arxiv_id=None,
+                            source_method="expand-author-refs",
+                            source_query=author,
+                            reason="no_oa",
+                        )
+                    except Exception:
+                        pass
+                else:
+                    failed_dl += 1
+                progress.advance(task)
+
+    console.print(
+        f"\n[bold]Download summary:[/bold] "
+        f"[green]✓ {downloaded} new[/green]  "
+        f"[red]✗ {failed_dl} no OA PDF[/red]"
+    )
+
+    # Hand off to the existing ingest pipeline via subprocess so the same
+    # worker pool / progress display users see for `db expand`.
+    if ingest and to_ingest:
+        import subprocess
+        wc = workers if workers > 0 else getattr(settings, "ingest_workers", 2)
+        console.print(
+            f"\n[bold]Ingesting {len(to_ingest)} PDF(s) with {wc} worker(s)…[/bold]"
+        )
+        cmd = [
+            "sciknow", "ingest", "directory", str(download_dir),
+            "--workers", str(wc),
+        ]
+        try:
+            subprocess.run(cmd, check=False)
+        except FileNotFoundError:
+            # Fall back to the uv-invoked module path if the `sciknow` shim
+            # isn't on PATH (user running the CLI from the repo venv).
+            subprocess.run(
+                ["uv", "run", "sciknow", "ingest", "directory",
+                 str(download_dir), "--workers", str(wc)],
+                check=False,
+            )
+
+
 @app.command(name="download-dois")
 def download_dois(
     dois: str = typer.Option(

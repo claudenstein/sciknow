@@ -30,6 +30,12 @@ from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Stre
 from sqlalchemy import text
 
 from sciknow.storage.db import get_session
+from sciknow.core.bibliography import (
+    BookBibliography,
+    BIBLIOGRAPHY_PSEUDO_ID,
+    BIBLIOGRAPHY_TITLE,
+    render_bibliography_markdown,
+)
 
 logger = logging.getLogger("sciknow.web")
 
@@ -503,6 +509,11 @@ def _get_book_data():
             WHERE bc.book_id = :bid ORDER BY bc.number
         """), {"bid": _book_id}).fetchall()
 
+        # Phase 54.6.309 — keep the tuple shape (14 columns) but push an
+        # ``is_active`` sort key into ORDER BY so a user-pinned version
+        # beats MAX(version). The downstream collapse in _render_book
+        # already picks the first row per (chapter, section), so this
+        # ordering is enough — no consumer needs to read the flag.
         drafts = session.execute(text("""
             SELECT d.id::text, d.title, d.section_type, d.content,
                    d.word_count, d.sources, d.version, d.summary,
@@ -512,7 +523,10 @@ def _get_book_data():
             FROM drafts d
             LEFT JOIN book_chapters bc ON bc.id = d.chapter_id
             WHERE d.book_id = :bid
-            ORDER BY bc.number, d.section_type, d.version DESC
+            ORDER BY bc.number,
+                     d.section_type,
+                     COALESCE((d.custom_metadata->>'is_active')::boolean, FALSE) DESC,
+                     d.version DESC
         """), {"bid": _book_id}).fetchall()
 
         gaps = session.execute(text("""
@@ -1203,13 +1217,46 @@ async def api_section(draft_id: str):
         if key not in chapter_drafts:
             chapter_drafts[key] = []
         existing = [x for x in chapter_drafts[key] if x[2] == d[2]]
-        if not existing or (d[6] or 1) > (existing[0][6] or 1):
-            chapter_drafts[key] = [x for x in chapter_drafts[key] if x[2] != d[2]]
+        # Phase 54.6.309 — first-seen wins; the SELECT already orders
+        # active-first then MAX(version), see _get_book_data.
+        if not existing:
             chapter_drafts[key].append(d)
 
     # Phase 27 — chapter_id → sections JSONB lookup so the display
     # title can be derived from the meta even if drafts.title is stale.
     chapter_sections_by_id = {ch[0]: ch[6] for ch in chapters}
+
+    # Phase 54.6.309 — synthetic Bibliography pseudo-chapter.
+    if draft_id == BIBLIOGRAPHY_PSEUDO_ID:
+        try:
+            with get_session() as _session:
+                _bib = BookBibliography.from_book(_session, _book_id)
+        except Exception as exc:
+            logger.warning("bibliography rebuild failed: %s", exc)
+            _bib = BookBibliography()
+        _md = render_bibliography_markdown(_bib)
+        _bib_ch_num = (chapters[-1][1] if chapters else 0) + 1 if chapters else 1
+        return {
+            "id": BIBLIOGRAPHY_PSEUDO_ID,
+            "title": BIBLIOGRAPHY_TITLE,
+            "display_title": BIBLIOGRAPHY_TITLE,
+            "section_type": "bibliography",
+            "content_html": _md_to_html(_md),
+            "content_raw": _md,
+            "word_count": sum(len((s or "").split()) for s in _bib.global_sources),
+            "version": 1,
+            "review_feedback": "",
+            "review_html": "<em>The bibliography is auto-generated and not reviewed.</em>",
+            "sources_html": _render_sources(_bib.global_sources),
+            "sources": list(_bib.global_sources),
+            "comments_html": "",
+            "chapter_id": BIBLIOGRAPHY_PSEUDO_ID,
+            "chapter_num": _bib_ch_num,
+            "chapter_title": BIBLIOGRAPHY_TITLE,
+            "status": "drafted",
+            "target_words": None,
+            "is_bibliography": True,
+        }
 
     active = draft_map.get(draft_id)
     if not active:
@@ -1218,6 +1265,23 @@ async def api_section(draft_id: str):
     # Group comments for this draft
     active_comments = [c for c in comments if c[1] == draft_id]
     sources = json.loads(active[5]) if isinstance(active[5], str) else (active[5] or [])
+
+    # Phase 54.6.309 — apply the global bibliography renumbering so the
+    # fetched content + right-panel list match what the reader would
+    # show on a full page reload.
+    try:
+        with get_session() as _session:
+            _bib = BookBibliography.from_book(_session, _book_id)
+        _remapped_content = _bib.remap_content(draft_id, active[3] or "")
+        _cited_globals = _bib.cited_sources_for_draft(draft_id)
+        if _cited_globals:
+            sources_for_panel = _cited_globals
+        else:
+            sources_for_panel = sources
+    except Exception as _exc:
+        logger.warning("global renumber failed (draft %s): %s", draft_id, _exc)
+        _remapped_content = active[3] or ""
+        sources_for_panel = sources
 
     # Phase 22 — fetch the section's word target so the GUI can render
     # a progress bar in the subtitle. The target lives on the draft's
@@ -1272,14 +1336,14 @@ async def api_section(draft_id: str):
         "title": active[1],
         "display_title": display_title,
         "section_type": active[2],
-        "content_html": _md_to_html(active[3] or ""),
-        "content_raw": active[3] or "",
+        "content_html": _md_to_html(_remapped_content),
+        "content_raw": _remapped_content,
         "word_count": active[4] or 0,
         "version": active[6] or 1,
         "review_feedback": active[8] or "",
         "review_html": _md_to_html(active[8]) if active[8] else "<em>No review yet.</em>",
-        "sources_html": _render_sources(sources),
-        "sources": sources,
+        "sources_html": _render_sources(sources_for_panel),
+        "sources": sources_for_panel,
         "comments_html": _render_comments(active_comments),
         "chapter_id": active[9],
         "chapter_num": active[12],
@@ -1300,8 +1364,8 @@ async def api_chapters():
         if key not in chapter_drafts:
             chapter_drafts[key] = []
         existing = [x for x in chapter_drafts[key] if x[2] == d[2]]
-        if not existing or (d[6] or 1) > (existing[0][6] or 1):
-            chapter_drafts[key] = [x for x in chapter_drafts[key] if x[2] != d[2]]
+        # Phase 54.6.309 — first-seen wins (see _get_book_data).
+        if not existing:
             chapter_drafts[key].append(d)
 
     result = []
@@ -1333,6 +1397,39 @@ async def api_chapters():
             # slug list) is kept for the sidebar / heatmap code that
             # only needs slugs, so existing renderers don't break.
             "sections_meta": template_dicts,
+        })
+
+    # Phase 54.6.309 — synthetic Bibliography pseudo-chapter appended at
+    # the end. Survives sidebar rebuilds after writes/revises. The JS
+    # renderer uses `is_bibliography` to skip the delete button + the
+    # "Ch.N:" prefix.
+    if result:
+        try:
+            with get_session() as _bib_session:
+                _bib = BookBibliography.from_book(_bib_session, _book_id)
+        except Exception as exc:
+            logger.warning("bibliography fetch failed: %s", exc)
+            _bib = BookBibliography()
+        _bib_ch_num = int(result[-1]["num"] or len(result)) + 1
+        result.append({
+            "id": BIBLIOGRAPHY_PSEUDO_ID,
+            "num": _bib_ch_num,
+            "title": BIBLIOGRAPHY_TITLE,
+            "description": "All publications cited across the book, numbered once.",
+            "topic_query": "",
+            "sections": [{
+                "id": BIBLIOGRAPHY_PSEUDO_ID,
+                "type": "bibliography",
+                "version": 1,
+                "words": sum(len((s or "").split()) for s in _bib.global_sources),
+            }],
+            "sections_template": ["bibliography"],
+            "sections_meta": [{
+                "slug": "bibliography",
+                "title": BIBLIOGRAPHY_TITLE,
+                "plan": "Auto-generated — do not edit by hand.",
+            }],
+            "is_bibliography": True,
         })
 
     return {"chapters": result, "gaps_count": len([g for g in gaps if g[3] == "open"])}
@@ -1371,9 +1468,11 @@ async def api_dashboard():
             continue
         if ch_id not in ch_section_drafts:
             ch_section_drafts[ch_id] = {}
-        # Keep only the latest version per section_type
+        # Phase 54.6.309 — _get_book_data sorts active-first then highest-
+        # version within each (chapter, section) group, so the first row
+        # seen is the one to display. No more MAX(version) compare.
         existing = ch_section_drafts[ch_id].get(sec_type)
-        if not existing or (version or 1) > existing["version"]:
+        if not existing:
             ch_section_drafts[ch_id][sec_type] = {
                 "id": draft_id, "version": version or 1, "words": wc or 0,
                 "has_review": bool(review_fb),
@@ -1518,7 +1617,15 @@ async def api_dashboard():
 
 @app.get("/api/versions/{draft_id}")
 async def api_versions(draft_id: str):
-    """Return the version chain for a draft (all versions of the same section)."""
+    """Return the version chain for a draft (all versions of the same section).
+
+    Phase 54.6.309 — each version now carries its ``final_overall`` score
+    (autowrite) and an ``is_active`` flag so the Versions panel can show
+    scores next to each version and mark which one the reader is
+    currently displaying. The active rule is the same one used by the
+    main reader collapse: explicit ``custom_metadata.is_active = true``
+    wins; otherwise the highest version is active.
+    """
     with get_session() as session:
         # Find the draft to get its chapter_id and section_type
         draft = session.execute(text("""
@@ -1530,21 +1637,75 @@ async def api_versions(draft_id: str):
 
         ch_id, sec_type, book_id = draft
 
-        # Get all drafts for this chapter + section_type (all versions)
+        # Get all drafts for this chapter + section_type (all versions).
+        # Pull final_overall + is_active out of custom_metadata so the
+        # panel can render scores and the active marker in one payload.
         rows = session.execute(text("""
             SELECT d.id::text, d.version, d.word_count, d.created_at,
-                   d.parent_draft_id::text, d.review_feedback IS NOT NULL as has_review
+                   d.parent_draft_id::text,
+                   d.review_feedback IS NOT NULL AS has_review,
+                   (d.custom_metadata->>'final_overall')::float AS final_overall,
+                   (d.custom_metadata->>'is_active')::boolean AS is_active,
+                   d.model_used
             FROM drafts d
             WHERE d.chapter_id::text = :cid AND d.section_type = :st AND d.book_id::text = :bid
             ORDER BY d.version ASC
         """), {"cid": ch_id, "st": sec_type, "bid": book_id}).fetchall()
 
-    return {"versions": [
+    versions = [
         {"id": r[0], "version": r[1], "word_count": r[2] or 0,
          "created_at": str(r[3]) if r[3] else "", "parent_id": r[4],
-         "has_review": bool(r[5])}
+         "has_review": bool(r[5]),
+         "final_overall": float(r[6]) if r[6] is not None else None,
+         "is_active": bool(r[7]) if r[7] is not None else False,
+         "model_used": r[8] or ""}
         for r in rows
-    ]}
+    ]
+    # If no version carries an explicit is_active flag, mark the
+    # highest-version one active so the UI has a sensible default.
+    if versions and not any(v["is_active"] for v in versions):
+        versions_sorted = sorted(versions, key=lambda v: v["version"] or 0, reverse=True)
+        versions_sorted[0]["is_active"] = True
+
+    return {"versions": versions}
+
+
+@app.post("/api/draft/{draft_id}/activate")
+async def api_activate_draft(draft_id: str):
+    """Phase 54.6.309 — mark one version as the active draft for its
+    (chapter_id, section_type) group. Clears ``is_active`` on siblings
+    in the same group so there's at most one active version per section.
+
+    Body: empty. Returns the new active draft id.
+    """
+    with get_session() as session:
+        row = session.execute(text("""
+            SELECT d.chapter_id::text, d.section_type, d.book_id::text
+            FROM drafts d WHERE d.id::text = :did
+        """), {"did": draft_id}).fetchone()
+        if not row:
+            raise HTTPException(404, "Draft not found")
+        ch_id, sec_type, book_id = row
+
+        # Clear is_active on all siblings in the same (chapter, section)
+        # group, then set it on the target. The || merge preserves other
+        # keys (score_history, target_words, …).
+        session.execute(text("""
+            UPDATE drafts
+               SET custom_metadata = custom_metadata - 'is_active'
+             WHERE chapter_id::text = :cid
+               AND section_type = :st
+               AND book_id::text = :bid
+               AND id::text <> :did
+        """), {"cid": ch_id, "st": sec_type, "bid": book_id, "did": draft_id})
+        session.execute(text("""
+            UPDATE drafts
+               SET custom_metadata = custom_metadata || '{"is_active": true}'::jsonb
+             WHERE id::text = :did
+        """), {"did": draft_id})
+        session.commit()
+
+    return JSONResponse({"ok": True, "active_draft_id": draft_id})
 
 
 @app.get("/api/diff/{old_id}/{new_id}")
@@ -1715,6 +1876,17 @@ async def update_chapter_sections(chapter_id: str, request: Request):
 @app.delete("/api/chapters/{chapter_id}")
 async def delete_chapter(chapter_id: str):
     """Delete a chapter (drafts are preserved but unlinked)."""
+    # Phase 54.6.309 — refuse to "delete" the synthetic Bibliography
+    # chapter. It's derived from draft.sources at render time, so there
+    # is nothing to delete — suppress with a 400 rather than no-op so
+    # the UI surfaces the cause.
+    if chapter_id == BIBLIOGRAPHY_PSEUDO_ID:
+        raise HTTPException(
+            400,
+            "The Bibliography is auto-generated from cited sources and "
+            "cannot be deleted. It disappears automatically if no draft "
+            "has any citations."
+        )
     with get_session() as session:
         session.execute(text(
             "UPDATE drafts SET chapter_id = NULL WHERE chapter_id::text = :cid"
@@ -2783,8 +2955,9 @@ async def corkboard_data():
             continue
         if ch_id not in ch_sections:
             ch_sections[ch_id] = {}
+        # Phase 54.6.309 — see comment in dashboard builder above.
         existing = ch_sections[ch_id].get(sec_type)
-        if not existing or (version or 1) > existing["version"]:
+        if not existing:
             ch_sections[ch_id][sec_type] = {
                 "draft_id": draft_id, "version": version or 1,
                 "words": wc or 0, "summary": (summary or "")[:200],
@@ -4485,6 +4658,115 @@ async def api_visuals_search(q: str, kind: str = "", k: int = 10):
     return JSONResponse({"hits": out, "total": len(out)})
 
 
+@app.get("/api/visuals/suggestions")
+async def api_visuals_suggestions(draft_id: str, limit: int = 10):
+    """Phase 54.6.309 — visual suggestions for the right-panel "Visuals"
+    tab.
+
+    Given the draft currently open in the reader, fetch the top-``limit``
+    ranked visuals (figures/tables/charts) from the corpus whose content
+    best matches the draft's prose. Uses ``rank_visuals`` so the ranking
+    matches what the writer agent sees when auto-inserting figures.
+
+    The bibliography pseudo-draft id returns an empty list (there's no
+    prose to rank against). An empty corpus / non-embedded visuals
+    collection also returns [] with ``note`` explaining what to run.
+    """
+    limit = max(1, min(int(limit), 30))
+    if draft_id == BIBLIOGRAPHY_PSEUDO_ID:
+        return JSONResponse({
+            "draft_id": draft_id,
+            "hits": [],
+            "note": "The bibliography has no prose to match visuals against.",
+        })
+
+    from sciknow.retrieval.visuals_ranker import rank_visuals
+
+    with get_session() as session:
+        row = session.execute(text("""
+            SELECT d.content, d.section_type, d.sources
+            FROM drafts d
+            WHERE d.id::text = :did
+        """), {"did": draft_id}).fetchone()
+    if not row:
+        raise HTTPException(404, "Draft not found")
+    content, section_type, sources_raw = row
+    content = (content or "").strip()
+    if not content:
+        return JSONResponse({
+            "draft_id": draft_id,
+            "hits": [],
+            "note": "This draft has no prose yet; write something first.",
+        })
+
+    # Collect DOIs/titles already cited so rank_visuals can apply the
+    # same-paper bonus. We don't have a fast "source string → document_id"
+    # index at the web layer, so we resolve by normalized title against
+    # paper_metadata.
+    cited_doc_ids: list[str] = []
+    try:
+        if sources_raw:
+            raw = sources_raw if isinstance(sources_raw, list) else (
+                json.loads(sources_raw) if isinstance(sources_raw, str) else []
+            )
+            import re as _re
+            titles = []
+            for s in raw or []:
+                m = _re.search(r"\(\d{4}(?:-\d{2}-\d{2})?\)\.\s+([^.]+)\.", s or "")
+                if m:
+                    titles.append(m.group(1).strip())
+            if titles:
+                with get_session() as session:
+                    placeholders = ", ".join(f":t{i}" for i in range(len(titles)))
+                    params = {f"t{i}": t for i, t in enumerate(titles)}
+                    rows = session.execute(text(f"""
+                        SELECT document_id::text
+                        FROM paper_metadata
+                        WHERE title IN ({placeholders})
+                    """), params).fetchall()
+                    cited_doc_ids = [r[0] for r in rows if r[0]]
+    except Exception as exc:
+        logger.debug("cited-doc resolution failed: %s", exc)
+
+    # Use up to the first ~2500 chars of prose as the ranking query.
+    sentence = content[:2500]
+    try:
+        ranked = rank_visuals(
+            sentence,
+            cited_doc_ids=cited_doc_ids,
+            section_type=section_type,
+            candidate_k=max(limit * 3, 15),
+            top_k=limit,
+        )
+    except Exception as exc:
+        logger.warning("rank_visuals failed: %s", exc)
+        return JSONResponse({
+            "draft_id": draft_id, "hits": [],
+            "note": f"Ranker error: {exc}",
+        })
+
+    hits = []
+    for rv in ranked:
+        cap = (rv.ai_caption or "").strip() or "(no caption)"
+        # Image URL only for kinds that have a rendered image.
+        img_url = None
+        if rv.kind in ("figure", "chart", "table"):
+            img_url = f"/api/visuals/image/{rv.visual_id}"
+        hits.append({
+            "visual_id": rv.visual_id,
+            "document_id": rv.document_id,
+            "kind": rv.kind,
+            "figure_num": rv.figure_num,
+            "caption": cap[:400],
+            "paper_title": rv.paper_title,
+            "image_url": img_url,
+            "composite_score": rv.composite_score,
+            "same_paper": rv.same_paper,
+        })
+
+    return JSONResponse({"draft_id": draft_id, "hits": hits})
+
+
 @app.get("/debug/equations")
 async def debug_equations(limit: int = 60):
     """Phase 54.6.107 — self-contained equation-render diagnostic.
@@ -5293,6 +5575,179 @@ async def api_corpus_agentic_preview(
     except Exception as exc:
         return JSONResponse({"error": str(exc)[:500]}, status_code=500)
     return JSONResponse(result)
+
+
+@app.get("/api/corpus/authors/top")
+async def api_corpus_authors_top(limit: int = 40):
+    """Phase 54.6.309 — list the top corpus authors by paper count, so
+    the expand-author-refs picker doesn't have to spawn the CLI just to
+    build its dropdown. Surname collisions are aggregated client-side.
+    """
+    lim = max(5, min(int(limit), 200))
+    with get_session() as session:
+        rows = session.execute(text("""
+            SELECT auth->>'name' AS author_name, COUNT(*) AS n_papers
+              FROM paper_metadata,
+                   jsonb_array_elements(COALESCE(authors, '[]'::jsonb)) AS auth
+             WHERE auth ? 'name'
+             GROUP BY author_name
+             ORDER BY n_papers DESC
+             LIMIT :lim
+        """), {"lim": lim}).fetchall()
+    return JSONResponse({"authors": [
+        {"name": r[0], "n_papers": int(r[1] or 0)} for r in rows
+    ]})
+
+
+@app.post("/api/corpus/expand-author-refs/preview")
+async def api_corpus_expand_author_refs_preview(
+    author: str = Form(...),
+    min_mentions: int = Form(1),
+    limit: int = Form(0),
+    include_in_corpus: bool = Form(False),
+    relevance_query: str = Form(""),
+):
+    """Phase 54.6.309 — preview the references cited by ``author``'s corpus
+    works. Same output shape as the existing expand-author preview so
+    the GUI's cherry-pick candidates modal renders it without changes.
+
+    The response sorts by the in-corpus mention count descending; ties
+    broken by cited_year descending. Each candidate carries an
+    ``author_mentions`` count and ``self_cite_count`` so the UI can
+    surface "cited 5× (2 self)" badges.
+    """
+    import re as _re
+    from sciknow.ingestion.references import normalise_title_for_dedup
+
+    author = (author or "").strip()
+    if not author:
+        raise HTTPException(400, "author required")
+
+    def _surname(name: str) -> str:
+        parts = [p for p in _re.split(r"[,;\s]+", (name or "").strip()) if p]
+        if not parts:
+            return ""
+        last = parts[-1] if "," not in (name or "") else parts[0]
+        return _re.sub(r"[^A-Za-zÀ-ſ]", "", last).lower()
+
+    surname = _surname(author)
+    if not surname:
+        raise HTTPException(400, "could not derive a surname")
+
+    with get_session() as session:
+        paper_rows = session.execute(text("""
+            SELECT pm.document_id::text, pm.title, pm.year, pm.doi
+              FROM paper_metadata pm,
+                   jsonb_array_elements(COALESCE(pm.authors, '[]'::jsonb)) AS auth
+             WHERE auth ? 'name'
+               AND LOWER(regexp_replace(
+                     split_part(auth->>'name', ' ',
+                       cardinality(regexp_split_to_array(auth->>'name', '\s+'))),
+                     '[^A-Za-zÀ-ſ]', '', 'g'
+                   )) = :sn
+        """), {"sn": surname}).fetchall()
+
+    if not paper_rows:
+        return JSONResponse({
+            "author": author, "surname": surname,
+            "n_author_papers": 0, "candidates": [],
+            "note": f"No corpus papers found for surname '{surname}'.",
+        })
+
+    paper_ids = [r[0] for r in paper_rows]
+    with get_session() as session:
+        cite_rows = session.execute(text("""
+            SELECT cited_doi, cited_title, cited_authors, cited_year,
+                   is_self_cite
+              FROM citations
+             WHERE citing_document_id = ANY(CAST(:ids AS uuid[]))
+        """), {"ids": paper_ids}).fetchall()
+
+    if not cite_rows:
+        return JSONResponse({
+            "author": author, "surname": surname,
+            "n_author_papers": len(paper_rows), "candidates": [],
+            "note": "No citations for those papers. Run `sciknow db link-citations` first.",
+        })
+
+    agg: dict[str, dict] = {}
+    for r in cite_rows:
+        cited_doi, cited_title, cited_authors, cited_year, is_self = r
+        key = (cited_doi or "").lower().strip()
+        if not key:
+            key = "title:" + normalise_title_for_dedup(cited_title or "")
+        if not key or key == "title:":
+            continue
+        a = agg.setdefault(key, {
+            "doi": cited_doi or None, "title": cited_title or None,
+            "authors": list(cited_authors or []), "year": cited_year,
+            "mentions": 0, "self_cites": 0,
+        })
+        a["mentions"] += 1
+        if is_self:
+            a["self_cites"] += 1
+        if not a["title"] and cited_title:
+            a["title"] = cited_title
+        if not a["year"] and cited_year:
+            a["year"] = cited_year
+
+    shortlist = [v for v in agg.values() if v["mentions"] >= min_mentions]
+    shortlist.sort(key=lambda v: (-v["mentions"], -(v["year"] or 0)))
+
+    dropped_in_corpus = 0
+    if not include_in_corpus:
+        with get_session() as session:
+            ex = session.execute(text(
+                "SELECT LOWER(doi) FROM paper_metadata WHERE doi IS NOT NULL"
+            )).fetchall()
+            existing = {r[0] for r in ex}
+        before = len(shortlist)
+        shortlist = [
+            v for v in shortlist
+            if not (v["doi"] and v["doi"].lower() in existing)
+        ]
+        dropped_in_corpus = before - len(shortlist)
+
+    if limit and limit > 0:
+        shortlist = shortlist[:limit]
+
+    # Optional relevance score (same anchor as expand-author's preview).
+    relevance_scores: list[float] = []
+    if relevance_query.strip() and shortlist:
+        try:
+            from sciknow.retrieval.relevance import (
+                compute_corpus_centroid, embed_query, score_candidates,
+            )
+            anchor = embed_query(relevance_query.strip()) if relevance_query.strip() else compute_corpus_centroid()
+            titles = [v["title"] or "" for v in shortlist]
+            relevance_scores = list(score_candidates(titles, anchor))
+        except Exception as exc:
+            logger.warning("expand-author-refs relevance scoring failed: %s", exc)
+            relevance_scores = []
+
+    # Shape matches expand-author preview so the existing download-
+    # selected endpoint and cherry-pick modal can consume it unchanged.
+    candidates_out = []
+    for i, v in enumerate(shortlist):
+        rscore = relevance_scores[i] if i < len(relevance_scores) else None
+        candidates_out.append({
+            "doi": v["doi"],
+            "title": v["title"] or "",
+            "year": v["year"],
+            "authors": [a if isinstance(a, str) else str(a) for a in (v["authors"] or [])],
+            "author_mentions": v["mentions"],
+            "self_cite_count": v["self_cites"],
+            "relevance_score": rscore,
+        })
+
+    return JSONResponse({
+        "author": author,
+        "surname": surname,
+        "n_author_papers": len(paper_rows),
+        "n_unique_references": len(shortlist),
+        "dropped_in_corpus": dropped_in_corpus,
+        "candidates": candidates_out,
+    })
 
 
 @app.post("/api/corpus/expand-oeuvre/preview")
@@ -7077,9 +7532,11 @@ def _render_book(book, chapters, drafts, gaps, comments,
         key = ch_id or "__none__"
         if key not in chapter_drafts:
             chapter_drafts[key] = []
+        # Phase 54.6.309 — the SELECT already sorts is_active first then
+        # MAX(version), so the first row per section is the one to
+        # display. Skip any later ones instead of comparing versions.
         existing = [x for x in chapter_drafts[key] if x[2] == sec_type]
-        if not existing or (version or 1) > (existing[0][6] or 1):
-            chapter_drafts[key] = [x for x in chapter_drafts[key] if x[2] != sec_type]
+        if not existing:
             chapter_drafts[key].append(d)
 
     draft_comments = {}
@@ -7099,12 +7556,13 @@ def _render_book(book, chapters, drafts, gaps, comments,
         plan_by_slug = {s["slug"]: s["plan"] for s in template_dicts}
 
         # Build a slug → draft index for quick lookup. Multiple drafts
-        # per slug are reduced to the highest-version one above.
+        # per slug are reduced to the first-seen (active / highest-version)
+        # by the Phase 54.6.309 ORDER BY in _get_book_data.
         draft_by_slug: dict[str, tuple] = {}
         for d in ch_ds:
             slug = _normalize_section(d[2] or "")
             existing = draft_by_slug.get(slug)
-            if not existing or (d[6] or 1) > (existing[6] or 1):
+            if not existing:
                 draft_by_slug[slug] = d
 
         # Phase 21 — sections list now reflects the FULL chapter
@@ -7162,8 +7620,48 @@ def _render_book(book, chapters, drafts, gaps, comments,
             "sections_meta": template_dicts,
         })
 
+    # Phase 54.6.309 — compute the book-wide global bibliography so the
+    # active draft renders with global [N] numbers and the right panel
+    # shows a deduped, cross-chapter source list. Also powers the
+    # synthetic Bibliography chapter appended below.
+    try:
+        with get_session() as _bib_session:
+            _bib = BookBibliography.from_book(_bib_session, _book_id)
+    except Exception as _bib_exc:
+        logger.warning("global bibliography build failed: %s", _bib_exc)
+        _bib = BookBibliography()
+
+    if chapters:
+        _bib_ch_num = int(chapters[-1][1] or len(chapters)) + 1
+        _bib_word_count = sum(len((s or "").split()) for s in _bib.global_sources)
+        sidebar_items.append({
+            "num": _bib_ch_num,
+            "title": BIBLIOGRAPHY_TITLE,
+            "id": BIBLIOGRAPHY_PSEUDO_ID,
+            "description": "All publications cited across the book, numbered once.",
+            "topic_query": "",
+            "sections": [{
+                "id": BIBLIOGRAPHY_PSEUDO_ID,
+                "type": "bibliography",
+                "title": BIBLIOGRAPHY_TITLE,
+                "plan": "Auto-generated from every draft's citations.",
+                "version": 1,
+                "words": _bib_word_count,
+                "status": "drafted",
+            }],
+            "sections_template": ["bibliography"],
+            "sections_meta": [{
+                "slug": "bibliography",
+                "title": BIBLIOGRAPHY_TITLE,
+                "plan": "Auto-generated — do not edit by hand.",
+            }],
+            "is_bibliography": True,
+        })
+
     active_draft = None
-    if focus_draft:
+    if focus_draft == BIBLIOGRAPHY_PSEUDO_ID:
+        active_draft = None  # handled in the bibliography branch below
+    elif focus_draft:
         active_draft = draft_map.get(focus_draft)
     elif drafts:
         active_draft = drafts[0]
@@ -7174,7 +7672,13 @@ def _render_book(book, chapters, drafts, gaps, comments,
     active_review = ""
     active_id = ""
     active_title = ""
-    if active_draft:
+    if focus_draft == BIBLIOGRAPHY_PSEUDO_ID:
+        # Synthetic Bibliography pseudo-chapter view.
+        active_id = BIBLIOGRAPHY_PSEUDO_ID
+        active_title = BIBLIOGRAPHY_TITLE
+        active_html = _md_to_html(render_bibliography_markdown(_bib))
+        active_sources = list(_bib.global_sources)
+    elif active_draft:
         active_id = active_draft[0]
         # Phase 27 — derive the display title from the chapter sections
         # meta on read so a renamed section shows the new title in the
@@ -7189,8 +7693,18 @@ def _render_book(book, chapters, drafts, gaps, comments,
             chapter_title=active_draft[13],
             chapter_sections_raw=sections_raw_for_active,
         )
-        active_html = _md_to_html(active_draft[3] or "")
-        active_sources = json.loads(active_draft[5]) if isinstance(active_draft[5], str) else (active_draft[5] or [])
+        # Phase 54.6.309 — remap [N] markers in the draft body to global
+        # bibliography numbers before rendering.
+        _raw_content = active_draft[3] or ""
+        _remapped = _bib.remap_content(active_id, _raw_content)
+        active_html = _md_to_html(_remapped)
+        # Right panel shows only sources cited in THIS draft but with
+        # their global [N] prefixes so the anchors match the body.
+        _cited = _bib.cited_sources_for_draft(active_id)
+        if _cited:
+            active_sources = _cited
+        else:
+            active_sources = json.loads(active_draft[5]) if isinstance(active_draft[5], str) else (active_draft[5] or [])
         active_review = active_draft[8] or ""
         active_comments = draft_comments.get(active_id, [])
     else:
@@ -7314,7 +7828,18 @@ def _render_sidebar(items, active_id):
         ch_id = _esc(str(ch["id"]))
         ch_num = int(ch["num"]) if ch["num"] is not None else 0
         ch_title = _esc(ch["title"] or "")
-        out += f'<div class="ch-group" data-ch-id="{ch_id}" data-ch-num="{ch_num}">'
+        # Phase 54.6.309 — bibliography pseudo-chapter gets its own CSS
+        # hook, no "Ch.N:" prefix, and no delete button (auto-generated).
+        is_bib = bool(ch.get("is_bibliography"))
+        extra_cls = " ch-group--bibliography" if is_bib else ""
+        title_prefix = "" if is_bib else f"Ch.{ch_num}: "
+        delete_btn = (
+            "" if is_bib else
+            '<button onclick="event.stopPropagation();deleteChapter('
+            'this.closest(&quot;.ch-group&quot;).dataset.chId)" '
+            'title="Delete chapter">✗</button>'
+        )
+        out += f'<div class="ch-group{extra_cls}" data-ch-id="{ch_id}" data-ch-num="{ch_num}">'
         # Phase 14.2 — chapter title is clickable to SELECT the chapter.
         # Phase 23 — chevron at the start toggles collapse/expand of
         # the chapter's sections (event.stopPropagation so it doesn't
@@ -7326,10 +7851,8 @@ def _render_sidebar(items, active_id):
             f'<button class="ch-toggle" '
             f'onclick="event.stopPropagation();toggleChapter(this.closest(&quot;.ch-group&quot;))" '
             f'title="Collapse or expand sections">\u25be</button>'
-            f'<span class="ch-title-text">Ch.{ch_num}: {ch_title}</span>'
-            f'<span class="ch-actions">'
-            f'<button onclick="event.stopPropagation();deleteChapter(this.closest(&quot;.ch-group&quot;).dataset.chId)" title="Delete chapter">\u2717</button>'
-            f'</span></div>'
+            f'<span class="ch-title-text">{title_prefix}{ch_title}</span>'
+            f'<span class="ch-actions">{delete_btn}</span></div>'
         )
 
         # Phase 22 — chapter completion progress bar. Counts only
@@ -8934,6 +9457,64 @@ body.sidebar-rail .sidebar-rail-btn {{ color: var(--accent); border-color: var(-
 .panel h3 {{ font-size: 11px; margin: 8px 0 6px; color: var(--fg-faint);
              text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }}
 .panel ol {{ padding-left: 20px; }} .panel li {{ margin-bottom: 4px; font-size: 12px; }}
+
+/* Phase 54.6.309 — Visual suggestions pane. Grid of thumbnails +
+   captions, each with an Insert button. Image thumbnails are lazy-
+   loaded from /api/visuals/image/<id>, so the pane stays responsive
+   even with a corpus of thousands of figures. */
+.panel-visuals-head {{
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 0 10px; border-bottom: 1px solid var(--border);
+  margin-bottom: 10px;
+}}
+.panel-visuals-hint {{
+  font-size: 11px; color: var(--fg-faint); line-height: 1.3;
+}}
+ul.visual-suggestions {{
+  list-style: none; padding: 0; margin: 0;
+  display: flex; flex-direction: column; gap: 10px;
+}}
+.visual-row {{
+  display: flex; gap: 10px; align-items: flex-start;
+  padding: 8px; border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--bg-subtle);
+  transition: border-color var(--t-fast), background var(--t-fast);
+}}
+.visual-row:hover {{
+  border-color: var(--accent); background: var(--accent-light);
+}}
+.visual-thumb {{
+  flex: 0 0 96px; width: 96px; height: 72px;
+  object-fit: cover; border-radius: var(--r-sm);
+  background: var(--bg); border: 1px solid var(--border);
+}}
+.visual-thumb--text {{
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; color: var(--fg-faint); font-family: var(--font-mono);
+}}
+.visual-meta {{ flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }}
+.visual-caption {{
+  font-size: 12px; line-height: 1.35;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  overflow: hidden;
+}}
+.visual-sub {{
+  display: flex; flex-wrap: wrap; gap: 4px 8px;
+  font-size: 10px; color: var(--fg-faint);
+}}
+.visual-src {{ max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.visual-tag {{
+  padding: 1px 5px; border-radius: 10px; background: var(--border);
+  color: var(--fg-muted); font-family: var(--font-mono); font-size: 9px;
+  text-transform: uppercase; letter-spacing: 0.04em;
+}}
+.visual-tag--same {{ background: var(--accent); color: white; }}
+.visual-score {{ font-family: var(--font-mono); font-size: 10px; }}
+.visual-insert {{ align-self: flex-start; font-size: 11px; padding: 3px 8px; }}
+
+/* Phase 54.6.309 — bibliography pseudo-chapter visual hint. */
+.ch-group--bibliography {{ border-top: 1px dashed var(--border); margin-top: 8px; padding-top: 4px; }}
+.ch-group--bibliography .ch-title-text {{ font-style: italic; color: var(--fg-muted); }}
 /* Phase 54.6.164 — collapsible left / right columns. Hide state is a
    body class so a fixed-position peek button can be a sibling of
    .app-body and still toggle visibility via the same class. */
@@ -9507,6 +10088,22 @@ body.panel-hidden   .col-peek-panel   {{ display: block; }}
                   border: 1px solid var(--border); background: var(--bg); }}
 .version-badge:hover {{ background: var(--accent-light); }}
 .version-badge.selected {{ background: var(--accent); color: white; border-color: var(--accent); }}
+/* Phase 54.6.309 — richer version-history rows with score + active marker */
+.version-list {{ display: flex; flex-direction: column; gap: 4px; padding: 6px 14px 10px; }}
+.version-row {{ display: flex; align-items: center; gap: 8px; padding: 4px 6px;
+                border: 1px solid transparent; border-radius: var(--r-sm); }}
+.version-row:hover {{ background: var(--accent-light); }}
+.version-row--active {{ border-color: var(--accent); background: var(--accent-light); }}
+.version-meta {{ flex: 1; font-size: 11px; color: var(--fg-muted); display: flex;
+                 align-items: center; gap: 6px; flex-wrap: wrap; }}
+.version-score {{ font-family: var(--font-mono); font-size: 12px; font-weight: 600;
+                   color: var(--accent); min-width: 36px; text-align: right; }}
+.version-score--na {{ color: var(--fg-faint); }}
+.version-tag {{ font-size: 10px; padding: 1px 5px; border-radius: 10px;
+                background: var(--border); color: var(--fg-muted);
+                font-family: var(--font-mono); text-transform: lowercase;
+                letter-spacing: 0.03em; }}
+.version-tag--active {{ background: var(--accent); color: white; }}
 .diff-view {{ padding: 16px; max-height: 500px; overflow-y: auto; font-size: 14px; line-height: 1.7; }}
 .diff-del {{ background: #fdd; color: #900; text-decoration: line-through; padding: 1px 2px; }}
 .diff-ins {{ background: #dfd; color: #060; padding: 1px 2px; }}
@@ -10300,6 +10897,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         <button role="menuitem" onclick="openCorpusModal('corp-enrich')" title="Fill missing DOIs via Crossref/OpenAlex/arXiv title search + persist OpenAlex extras (concepts/funders/grants/ROR). Mirrors `sciknow db enrich`."><svg class="icon"><use href="#i-search"/></svg> Enrich metadata</button>
         <button role="menuitem" onclick="openCorpusModal('corp-cites')" title="Outbound reference crawl — follow citations IN your papers to discover new work. RRF + MMR diversity + citation-context signals. Mirrors `sciknow db expand`."><svg class="icon"><use href="#i-globe"/></svg> Expand (citations)</button>
         <button role="menuitem" onclick="openCorpusModal('corp-author')" title="Fetch every paper by a named author via OpenAlex. Use when you want an author's full bibliography regardless of current citations. Mirrors `sciknow db expand-author`."><svg class="icon"><use href="#i-user"/></svg> Expand by author</button>
+        <button role="menuitem" onclick="openExpandAuthorRefs()" title="Phase 54.6.309 — pick an existing author from the corpus. Aggregates every paper they cited across all their works (including self-cites), ranks by citation frequency, and lands in the cherry-pick modal before download. Mirrors `sciknow db expand-author-refs`."><svg class="icon"><use href="#i-user"/></svg> Expand by author's references</button>
         <button role="menuitem" onclick="openCorpusModal('corp-inbound')" title="Forward-in-time mirror of Expand: find papers that CITE your corpus. Mirrors `sciknow db expand-inbound`."><svg class="icon"><use href="#i-inbox"/></svg> Inbound cites</button>
         <button role="menuitem" onclick="openCorpusModal('corp-topic')" title="OpenAlex free-text topic search ranked by citation count. Good for kickstarting a new project."><svg class="icon"><use href="#i-tag"/></svg> Topic search</button>
         <button role="menuitem" onclick="openCorpusModal('corp-coauth')" title="Find people who coauthored with your corpus's authors. Useful for invisible-college expansion."><svg class="icon"><use href="#i-users"/></svg> Coauthors</button>
@@ -10554,6 +11152,9 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button class="panel-seg-btn" role="tab" aria-selected="false"
               data-ctx="comments" onclick="switchContextTab('comments')"
               title="Per-draft comments. Supports resolve + Markdown.">Comments</button>
+      <button class="panel-seg-btn" role="tab" aria-selected="false"
+              data-ctx="visuals" onclick="switchContextTab('visuals')"
+              title="Figures, tables and charts from the corpus, ranked by relevance to this draft. Click an image to insert it into the text.">Visuals</button>
     </div>
     <button class="col-hide-btn col-hide-btn--icon" onclick="toggleColumn('panel')"
             title="Hide this column. A peek button at the right edge brings it back. Auto-hide preference lives in Book Settings → View."
@@ -10579,6 +11180,20 @@ body.task-bar-open {{ padding-top: 40px; }}
       <button type="submit"
               title="Save the comment to this draft. Resolved comments get struck through via the Resolve button on each saved comment.">Add Comment</button>
     </form>
+  </div>
+
+  <!-- Phase 54.6.309 — Visuals suggestions pane. Ranked list of
+       figures/tables/charts from the corpus whose content matches the
+       current draft. Filled lazily when the tab is first opened (or
+       on explicit Refresh) so the ranker cost isn't paid on every
+       navigation. -->
+  <div class="panel-pane" id="panel-pane-visuals" role="tabpanel">
+    <div class="panel-visuals-head">
+      <button class="btn-sm" id="visuals-refresh-btn" onclick="refreshVisualSuggestions()"
+              title="Re-rank visual suggestions against the current draft. The ranker runs a cross-encoder on up to 15 candidates so this takes ~1s.">Refresh</button>
+      <span class="panel-visuals-hint">Click a figure to insert an image reference at the end of the draft.</span>
+    </div>
+    <div id="panel-visuals"><em>Open this tab to load suggestions.</em></div>
   </div>
 </aside>
 
@@ -13677,6 +14292,8 @@ const ACTIONS = {{
 
   // Cluster 5 — version history + snapshot bundle/draft restore.
   'select-version': (el) => selectVersion(el.dataset.versionId),
+  // Phase 54.6.309 — pin a version as the one the reader displays.
+  'activate-version': (el) => activateVersion(el.dataset.draftId),
   'restore-bundle': (el) => restoreBundle(el.dataset.snapshotId, el.dataset.scope),
   'diff-snapshot': (el) => diffSnapshot(el.dataset.snapshotId),
   'restore-snapshot': (el) => restoreSnapshot(el.dataset.snapshotId),
@@ -16734,22 +17351,43 @@ function rebuildSidebar(chapters, activeId) {{
   let html = '';
   chapters.forEach(ch => {{
     const safeTitle = escapeHtml(ch.title || '');
-    html += '<div class="ch-group" data-ch-id="' + ch.id + '">';
+    // Phase 54.6.309 — bibliography pseudo-chapter: no "Ch.N:" prefix,
+    // no delete button, not draggable.
+    const isBib = !!ch.is_bibliography;
+    const extraCls = isBib ? ' ch-group--bibliography' : '';
+    html += '<div class="ch-group' + extraCls + '" data-ch-id="' + ch.id + '">';
     // Phase 23 — chevron toggle at the start of the chapter title.
     // Phase 33 — chapter title is draggable for reordering (mirrors
     // section drag-drop from Phase 26 but operates on ch-group).
-    html += '<div class="ch-title clickable" draggable="true" ' +
-      'data-ch-id="' + ch.id + '" ' +
-      'ondragstart="chDragStart(event,\\\'' + ch.id + '\\\')" ' +
-      'ondragover="chDragOver(event)" ' +
-      'ondrop="chDrop(event,\\\'' + ch.id + '\\\')" ' +
-      'ondragend="chDragEnd(event)" ' +
-      'onclick="selectChapter(this.parentElement)">' +
-      '<button class="ch-toggle" ' +
-      'onclick="event.stopPropagation();toggleChapter(this.closest(\\'.ch-group\\'))" ' +
-      'title="Collapse or expand sections">\\u25be</button>' +
-      'Ch.' + ch.num + ': ' + safeTitle +
-      '<span class="ch-actions"><button onclick="event.stopPropagation();deleteChapter(\\\'' + ch.id + '\\\')" title="Delete chapter">\\u2717</button></span></div>';
+    const titleText = isBib ? safeTitle : ('Ch.' + ch.num + ': ' + safeTitle);
+    const deleteBtn = isBib
+      ? ''
+      : '<span class="ch-actions"><button onclick="event.stopPropagation();deleteChapter(\\\'' + ch.id + '\\\')" title="Delete chapter">\\u2717</button></span>';
+    if (isBib) {{
+      // Non-draggable, synthetic pseudo-chapter.
+      html += '<div class="ch-title clickable" ' +
+        'data-ch-id="' + ch.id + '" ' +
+        'onclick="selectChapter(this.parentElement)">' +
+        '<button class="ch-toggle" ' +
+        'onclick="event.stopPropagation();toggleChapter(this.closest(\\'.ch-group\\'))" ' +
+        'title="Collapse or expand sections">\\u25be</button>' +
+        titleText + deleteBtn + '</div>';
+    }} else {{
+      // Regular chapter — draggable. Keep the literal markup
+      // `ch-title clickable" draggable="true"` intact; the
+      // l1_phase33_keyboard_shortcuts test greps for this substring.
+      html += '<div class="ch-title clickable" draggable="true" ' +
+        'data-ch-id="' + ch.id + '" ' +
+        'ondragstart="chDragStart(event,\\\'' + ch.id + '\\\')" ' +
+        'ondragover="chDragOver(event)" ' +
+        'ondrop="chDrop(event,\\\'' + ch.id + '\\\')" ' +
+        'ondragend="chDragEnd(event)" ' +
+        'onclick="selectChapter(this.parentElement)">' +
+        '<button class="ch-toggle" ' +
+        'onclick="event.stopPropagation();toggleChapter(this.closest(\\'.ch-group\\'))" ' +
+        'title="Collapse or expand sections">\\u25be</button>' +
+        titleText + deleteBtn + '</div>';
+    }}
 
     // Phase 21 — render the FULL section template, not just sections
     // with drafts. Empty slots become "Write" CTAs; orphan drafts
@@ -17332,16 +17970,55 @@ async function showVersions() {{
   const timeline = document.getElementById('version-timeline');
   const diffView = document.getElementById('diff-view');
   panel.style.display = 'block';
-  diffView.innerHTML = '<p class="u-dim">Select two versions to compare.</p>';
+  diffView.innerHTML = '<p class="u-dim">Click a version to preview. Select two to compare. Use <strong>Make active</strong> to pin the version the reader displays.</p>';
   selectedVersions = [];
 
-  let html = '';
+  // Phase 54.6.309 — richer version rows: score + active marker +
+  // "Make active" button. Score comes from custom_metadata.final_overall
+  // (autowrite). Active marker shows which version the reader is on.
+  let html = '<div class="version-list">';
   versionData.forEach(v => {{
-    const review = v.has_review ? ' \\u2713' : '';
-    html += '<span class="version-badge" data-vid="' + v.id + '" data-action="select-version" data-version-id="' + v.id + '">' +
-      'v' + v.version + ' (' + v.word_count + 'w)' + review + '</span>';
+    const review = v.has_review ? ' <span class="version-tag" title="Has review feedback">rev\\u2713</span>' : '';
+    const active = v.is_active ? ' <span class="version-tag version-tag--active" title="Currently displayed in the reader.">active</span>' : '';
+    const score = (v.final_overall != null)
+      ? '<span class="version-score" title="Autowrite final_overall score (0–1).">' + (v.final_overall).toFixed(2) + '</span>'
+      : '<span class="version-score version-score--na" title="Not autowrite-scored.">—</span>';
+    const model = v.model_used ? ' <span class="version-tag" title="Writer model">' + escapeHtml(v.model_used) + '</span>' : '';
+    const makeActiveBtn = v.is_active
+      ? ''
+      : '<button class="btn-sm" data-action="activate-version" data-draft-id="' + v.id + '" title="Make this the version shown by the reader. Global citation numbering + right-panel sources refresh to match.">Make active</button>';
+    html += '<div class="version-row' + (v.is_active ? ' version-row--active' : '') + '">' +
+      '<span class="version-badge" data-vid="' + v.id + '" data-action="select-version" data-version-id="' + v.id + '">' +
+        'v' + v.version + '</span>' +
+      '<span class="version-meta">' + (v.word_count || 0) + 'w' + review + active + model + '</span>' +
+      score +
+      makeActiveBtn +
+    '</div>';
   }});
+  html += '</div>';
   timeline.innerHTML = html;
+}}
+
+// Phase 54.6.309 — flip the active flag on one version; reload the reader
+// so the pinned version is what shows up (globalised citations, sources,
+// scores all follow).
+async function activateVersion(draftId) {{
+  if (!draftId) return;
+  try {{
+    const r = await fetch('/api/draft/' + encodeURIComponent(draftId) + '/activate', {{method: 'POST'}});
+    if (!r.ok) {{
+      const msg = await r.text();
+      alert('Could not activate: ' + msg);
+      return;
+    }}
+    // Reload list + navigate to the new active draft.
+    await showVersions();
+    if (typeof loadSection === 'function') {{
+      loadSection(draftId);
+    }}
+  }} catch (e) {{
+    alert('Error activating version: ' + e);
+  }}
 }}
 
 async function selectVersion(vid) {{
@@ -23174,6 +23851,80 @@ function eapToggleAuthor(shortId) {{
   if (cntEl) cntEl.textContent = String(_eapAuthorSelection.size);
 }}
 
+// Phase 54.6.309 — expand-by-author-references entry point.
+// Loads the top corpus authors, prompts the user to pick one, then
+// calls /api/corpus/expand-author-refs/preview and lands in the
+// shared candidates modal — download routes through the existing
+// /api/corpus/expand-author/download-selected endpoint.
+async function openExpandAuthorRefs() {{
+  let author = '';
+  try {{
+    const r = await fetch('/api/corpus/authors/top?limit=30');
+    if (r.ok) {{
+      const data = await r.json();
+      const authors = data.authors || [];
+      if (authors.length) {{
+        const list = authors
+          .map((a, i) => `${{i + 1}}. ${{a.name}}  (${{a.n_papers}} papers)`)
+          .join('\\n');
+        const pick = prompt(
+          'Expand by author references — aggregates every paper cited by one author\\'s corpus works.\\n\\n' +
+          'Top authors in the corpus:\\n' + list + '\\n\\n' +
+          'Type a row number, a surname, or paste a full name:',
+          '1'
+        );
+        if (!pick) return;
+        const trimmed = pick.trim();
+        const asNum = parseInt(trimmed, 10);
+        if (!isNaN(asNum) && asNum >= 1 && asNum <= authors.length) {{
+          author = authors[asNum - 1].name;
+        }} else {{
+          author = trimmed;
+        }}
+      }}
+    }}
+  }} catch (e) {{}}
+  if (!author) {{
+    author = prompt('Author name (surname is fine):', '') || '';
+    if (!author) return;
+  }}
+
+  _eapResetModal(
+    '&#128218; Expand by author references &mdash; Preview',
+    `Aggregating references cited by ${{_escHtml(author)}}…`,
+    '(reads the local citations table — typically <1s)'
+  );
+  const fd = new FormData();
+  fd.append('author', author);
+  fd.append('min_mentions', '1');
+  try {{
+    const res = await fetch('/api/corpus/expand-author-refs/preview', {{
+      method: 'POST', body: fd,
+    }});
+    if (!res.ok) {{
+      _eapShowError('HTTP ' + res.status + ': ' + await res.text());
+      return;
+    }}
+    const data = await res.json();
+    _eapCandidates = data.candidates || [];
+    _eapSelected = new Set();
+    _eapCandidates.forEach(c => {{ if (c.doi) _eapSelected.add(c.doi); }});
+    document.getElementById('eap-info').innerHTML =
+      `Author <strong>${{_escHtml(data.author || author)}}</strong> · `
+      + `<strong>${{data.n_author_papers || 0}}</strong> corpus paper(s) · `
+      + `<strong>${{data.n_unique_references || 0}}</strong> unique reference(s) · `
+      + `dropped <strong>${{data.dropped_in_corpus || 0}}</strong> already in corpus.`
+      + (data.note ? `<br><em>${{_escHtml(data.note)}}</em>` : '');
+    document.getElementById('eap-loading').style.display = 'none';
+    document.getElementById('eap-content').style.display = 'block';
+    if (typeof eapRender === 'function') {{
+      try {{ eapRender(); }} catch (e) {{}}
+    }}
+  }} catch (e) {{
+    _eapShowError(String(e));
+  }}
+}}
+
 async function eapRequeryWithSelected() {{
   if (!_eapAuthorSelection.size) {{
     alert('Tick at least one author row first.');
@@ -27419,7 +28170,7 @@ document.addEventListener('input', function (e) {{
 // / comments is visible at a time; last choice is remembered in
 // localStorage so switching drafts keeps the user's rail preference.
 function switchContextTab(name) {{
-  const panes = ['sources', 'review', 'comments'];
+  const panes = ['sources', 'review', 'comments', 'visuals'];
   if (!panes.includes(name)) name = 'sources';
   panes.forEach(n => {{
     const btn = document.querySelector('.panel-seg-btn[data-ctx="' + n + '"]');
@@ -27432,6 +28183,116 @@ function switchContextTab(name) {{
     if (pane) pane.classList.toggle('is-active', on);
   }});
   try {{ localStorage.setItem('sciknow.ui.contextTab', name); }} catch (e) {{}}
+  // Phase 54.6.309 — lazy-load the visuals pane on first open for the
+  // currently-displayed draft so the ranker cost is only paid once.
+  if (name === 'visuals') {{
+    const pane = document.getElementById('panel-visuals');
+    if (pane && pane.dataset.loadedFor !== ((typeof currentDraftId !== 'undefined' ? currentDraftId : '') || '')) {{
+      refreshVisualSuggestions();
+    }}
+  }}
+}}
+
+// Phase 54.6.309 — fetch + render visual suggestions for the current
+// draft. Handles the bibliography pseudo-draft (empty note) and empty
+// corpus cleanly. Clicking a suggestion dispatches insertVisualAtCaret
+// which appends the image + caption to the end of the draft body.
+async function refreshVisualSuggestions() {{
+  const pane = document.getElementById('panel-visuals');
+  const btn = document.getElementById('visuals-refresh-btn');
+  const did = (typeof currentDraftId !== 'undefined' ? currentDraftId : '') || '';
+  if (!pane) return;
+  if (!did) {{
+    pane.innerHTML = '<em>Open a drafted section first.</em>';
+    return;
+  }}
+  if (btn) {{ btn.disabled = true; btn.textContent = 'Ranking…'; }}
+  pane.innerHTML = '<em>Ranking visuals against this draft…</em>';
+  try {{
+    const res = await fetch('/api/visuals/suggestions?draft_id=' + encodeURIComponent(did) + '&limit=12');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    pane.dataset.loadedFor = did;
+    if (data.note && (!data.hits || data.hits.length === 0)) {{
+      pane.innerHTML = '<em>' + escapeHtml(data.note) + '</em>';
+      return;
+    }}
+    if (!data.hits || data.hits.length === 0) {{
+      pane.innerHTML = '<em>No visual suggestions yet. Run <code>sciknow db extract-visuals</code> and <code>sciknow db embed-visuals</code> to populate.</em>';
+      return;
+    }}
+    let html = '<ul class="visual-suggestions">';
+    data.hits.forEach((v, i) => {{
+      const cap = escapeHtml(v.caption || '(no caption)');
+      const paperTitle = escapeHtml(v.paper_title || '');
+      const kind = escapeHtml(v.kind || '');
+      const figNum = escapeHtml(v.figure_num || '');
+      const score = (v.composite_score || 0).toFixed(2);
+      const samePaper = v.same_paper
+        ? '<span class="visual-tag visual-tag--same" title="Comes from a paper already cited by this draft.">cited</span>'
+        : '';
+      const img = v.image_url
+        ? '<img class="visual-thumb" loading="lazy" src="' + escapeHtml(v.image_url) + '" alt="' + cap + '" title="' + cap + '">'
+        : '<div class="visual-thumb visual-thumb--text" title="No rendered image for this kind (' + kind + ').">[' + kind + ']</div>';
+      html += '<li class="visual-row" data-visual-id="' + escapeHtml(v.visual_id) + '">' +
+        img +
+        '<div class="visual-meta">' +
+          '<div class="visual-caption">' + cap + '</div>' +
+          '<div class="visual-sub"><span class="visual-src" title="' + paperTitle + '">' + paperTitle + '</span> ' +
+          '<span class="visual-tag">' + kind + (figNum ? ' ' + figNum : '') + '</span> ' +
+          samePaper +
+          '<span class="visual-score" title="Composite ranker score (caption + mention + same-paper + section prior).">score ' + score + '</span></div>' +
+          '<button class="visual-insert btn-sm" onclick="insertVisualIntoDraft(\\'' + v.visual_id + '\\')" title="Append an image reference + caption to the end of this draft. The image is served from /api/visuals/image/{{id}}.">Insert</button>' +
+        '</div>' +
+      '</li>';
+    }});
+    html += '</ul>';
+    pane.innerHTML = html;
+  }} catch (e) {{
+    pane.innerHTML = '<em>Failed to load suggestions: ' + escapeHtml(String(e)) + '</em>';
+  }} finally {{
+    if (btn) {{ btn.disabled = false; btn.textContent = 'Refresh'; }}
+  }}
+}}
+
+// Append an image reference for ``visualId`` to the draft body via the
+// existing edit-in-place flow. If the draft is currently in edit mode
+// we insert at the end of the textarea (caret would be preferable but
+// the textarea is uncontrolled); otherwise we PATCH the content.
+async function insertVisualIntoDraft(visualId) {{
+  const did = (typeof currentDraftId !== 'undefined' ? currentDraftId : '') || '';
+  if (!did || !visualId) return;
+  // Grab the suggestion row so we can pull its caption for the alt text.
+  const row = document.querySelector('.visual-row[data-visual-id="' + visualId + '"] .visual-caption');
+  const caption = (row ? row.textContent : '').trim() || ('Visual ' + visualId.slice(0, 8));
+  const safeCap = caption.replace(/\\|/g, '\\\\|').slice(0, 200);
+  const snippet = '\\n\\n![' + safeCap + '](/api/visuals/image/' + visualId + ')\\n\\n*' + safeCap + '*\\n';
+  // If the editor is visible, append to the textarea and save.
+  const ta = document.getElementById('edit-area');
+  const editor = document.getElementById('edit-view');
+  if (editor && editor.style.display !== 'none' && ta) {{
+    ta.value = (ta.value || '') + snippet;
+    if (typeof edPreview === 'function') {{ try {{ edPreview(); }} catch (e) {{}} }}
+    if (typeof edSave === 'function') {{
+      try {{ await edSave(); }} catch (e) {{}}
+    }}
+    return;
+  }}
+  // Otherwise PATCH the draft's raw content via the edit endpoint.
+  try {{
+    const curRes = await fetch('/api/section/' + encodeURIComponent(did));
+    if (!curRes.ok) throw new Error('could not read current draft');
+    const cur = await curRes.json();
+    const next = (cur.content_raw || '') + snippet;
+    const fd = new FormData();
+    fd.append('content', next);
+    const r = await fetch('/edit/' + encodeURIComponent(did), {{method: 'POST', body: fd}});
+    if (!r.ok) throw new Error('edit failed (HTTP ' + r.status + ')');
+    // Re-render.
+    if (typeof loadSection === 'function') loadSection(did);
+  }} catch (e) {{
+    alert('Could not insert visual: ' + e);
+  }}
 }}
 
 document.addEventListener('DOMContentLoaded', function () {{
