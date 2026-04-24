@@ -573,3 +573,173 @@ def list_velocity_cmd():
             (w.note or "")[:80],
         )
     console.print(table)
+
+
+# ── Phase 54.6.316 — `sciknow watch study` ────────────────────────────
+# Clone a watched repo into a local research scratch dir, scaffold a
+# memo under `docs/research/<slug>.md`, and print a concise summary.
+# Intended to be run by a human (or an agent) after `sciknow watch add`
+# to kick off the actual code-reading pass. The memo is a stub + file
+# inventory + detected stack — the "what can we learn" section is left
+# to the reader (or the next agent hop) to fill in.
+
+
+@app.command()
+def study(
+    url: str = typer.Argument(
+        ..., help="GitHub URL OR owner/repo key already on the watchlist."
+    ),
+    depth: int = typer.Option(
+        1, "--depth", help="git clone --depth; 1 is enough for a read-through."
+    ),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Re-clone even if the scratch dir already exists.",
+    ),
+):
+    """Clone a watched repo + scaffold a research memo.
+
+    Usage::
+
+        sciknow watch add https://github.com/huggingface/ml-intern --note "..."
+        sciknow watch study huggingface/ml-intern
+
+    Writes:
+      data/research/<owner>__<repo>/   — shallow clone scratch dir
+      docs/research/<owner>__<repo>.md — memo stub (README excerpt +
+                                         file inventory + stack notes)
+
+    The memo is deliberately a stub — the "What could sciknow learn?"
+    section is left empty for the reader (or the next agent hop) to fill
+    in after reading the code.
+    """
+    import subprocess
+    from pathlib import Path as _P
+    from sciknow.config import settings
+
+    # Resolve URL from either form
+    u = url.strip()
+    if u.startswith("http"):
+        try:
+            owner, repo = wl.parse_github_url(u)
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(2)
+    elif "/" in u and not u.startswith("/"):
+        owner, _, repo = u.partition("/")
+        u = f"https://github.com/{owner}/{repo}"
+    else:
+        console.print("[red]Provide either a full github URL or owner/repo[/red]")
+        raise typer.Exit(2)
+
+    slug = f"{owner}__{repo}"
+    scratch = settings.data_dir / "research" / slug
+    memo = _P("docs/research") / f"{slug}.md"
+    memo.parent.mkdir(parents=True, exist_ok=True)
+
+    # Clone (shallow) unless dir exists
+    if scratch.exists():
+        if force:
+            import shutil
+            shutil.rmtree(scratch)
+        else:
+            console.print(f"[dim]scratch exists — skipping clone: {scratch}[/dim]")
+    if not scratch.exists():
+        scratch.parent.mkdir(parents=True, exist_ok=True)
+        console.print(f"cloning [cyan]{u}[/cyan] → {scratch}")
+        r = subprocess.run(
+            ["git", "clone", "--depth", str(depth), u, str(scratch)],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            console.print(f"[red]git clone failed:[/red]\n{r.stderr}")
+            raise typer.Exit(1)
+
+    # Walk the tree to build an inventory (cap at 200 files so the memo
+    # stays readable on huge repos).
+    skip_dirs = {".git", "node_modules", "__pycache__", "dist", "build",
+                 ".venv", "venv", ".next", ".cache"}
+    files: list[tuple[str, int]] = []
+    for p in scratch.rglob("*"):
+        if not p.is_file():
+            continue
+        if any(part in skip_dirs for part in p.parts):
+            continue
+        try:
+            size = p.stat().st_size
+        except OSError:
+            continue
+        files.append((str(p.relative_to(scratch)), size))
+    files.sort()
+
+    # Detect stack
+    stack_sig = {
+        "Python":  any(f.endswith(".py") for f, _ in files),
+        "TypeScript/JavaScript": any(f.endswith((".ts", ".tsx", ".js", ".jsx")) for f, _ in files),
+        "Rust":    any(f.endswith(".rs") for f, _ in files),
+        "Go":      any(f.endswith(".go") for f, _ in files),
+        "pyproject.toml": any(f == "pyproject.toml" for f, _ in files),
+        "package.json": any(f == "package.json" for f, _ in files),
+        "Cargo.toml": any(f == "Cargo.toml" for f, _ in files),
+        "Dockerfile": any(f.endswith("Dockerfile") for f, _ in files),
+    }
+    detected_stack = [k for k, v in stack_sig.items() if v]
+
+    # Read README (first one we find)
+    readme_text = ""
+    for candidate in ("README.md", "README.rst", "README", "readme.md"):
+        p = scratch / candidate
+        if p.exists():
+            try:
+                readme_text = p.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                readme_text = ""
+            break
+
+    # Build the memo
+    lines: list[str] = [
+        f"# {owner}/{repo} — research memo",
+        "",
+        f"**URL**: <{u}>",
+        f"**Clone scratch**: `{scratch}`",
+        f"**Cloned**: {wl._ts()}",
+        f"**Stack detected**: {', '.join(detected_stack) or 'unknown'}",
+        f"**File count** (excl. vendor/build): {len(files)}",
+        "",
+        "## README (first 2000 chars)",
+        "",
+        "```markdown",
+        (readme_text[:2000] or "(no README found)").rstrip(),
+        "```",
+        "",
+        "## File inventory (top 50 by path)",
+        "",
+    ]
+    for f, size in files[:50]:
+        lines.append(f"- `{f}` ({size} bytes)")
+    if len(files) > 50:
+        lines.append(f"- … and {len(files) - 50} more files.")
+
+    lines += [
+        "",
+        "## What could sciknow learn?",
+        "",
+        "*(To be filled in after reading the code. Candidate hooks:*",
+        "*sciknow's ingest / retrieval / wiki / book-writer / autowrite /*",
+        "*monitor pipelines. Look for new sources, new matching algorithms,*",
+        "*new prompt patterns, new agent architectures, or new GUI ideas.)*",
+        "",
+        "## Relevance verdict",
+        "",
+        "- [ ] high — implement / port",
+        "- [ ] medium — useful reference",
+        "- [ ] low — skim only",
+        "- [ ] not applicable",
+        "",
+    ]
+
+    memo.write_text("\n".join(lines), encoding="utf-8")
+    console.print(
+        f"[green]✓ memo scaffolded[/green] → {memo}  "
+        f"[dim]({len(files)} files, {', '.join(detected_stack) or 'no stack'})[/dim]"
+    )
