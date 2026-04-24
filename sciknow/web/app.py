@@ -6204,47 +6204,84 @@ async def api_corpus_expand_author_refs_preview(
                                            or len((v.get("title") or "").strip()) < 5)]
     if needs_resolve:
         import concurrent.futures as _cf
+        import html as _html
         import httpx as _httpx
         from sciknow.config import settings as _settings
 
-        def _fetch(doi: str) -> dict | None:
-            try:
-                url = f"https://api.crossref.org/works/{doi}"
-                headers = {"User-Agent": f"sciknow/0.1 (mailto:{_settings.crossref_email})"}
-                with _httpx.Client(timeout=10) as client:
-                    r = client.get(url, headers=headers)
-                if r.status_code != 200:
-                    return None
-                d = (r.json() or {}).get("message") or {}
-                title_list = d.get("title") or []
-                authors = d.get("author") or []
-                issued = (d.get("issued") or {}).get("date-parts") or []
-                year = int(issued[0][0]) if issued and issued[0] else None
-                return {
-                    "title": title_list[0] if title_list else "",
-                    "authors": [f"{(a.get('given') or '').strip()} {(a.get('family') or '').strip()}".strip()
-                                for a in authors],
-                    "year": year,
-                }
-            except Exception:
+        def _fetch(doi_in: str) -> dict | None:
+            # Phase 54.6.315b — three real-world DOI gotchas:
+            # 1. AMS-style DOIs stored HTML-encoded in the DB
+            #    (`…079&lt;0061:apgtwa&gt;2.0.co;2`) — unescape first.
+            # 2. Some older Springer/Nature DOIs (10.1007/s005850050897)
+            #    resolve via 301 redirect, not direct 200 — opt into
+            #    follow_redirects so httpx chases the redirect.
+            # 3. JATS XML tags in Crossref titles & abstracts; strip
+            #    them out before returning.
+            import time as _time
+            doi = _html.unescape((doi_in or "").strip())
+            if not doi:
                 return None
+            url = f"https://api.crossref.org/works/{doi}"
+            headers = {"User-Agent": f"sciknow/0.1 (mailto:{_settings.crossref_email})"}
+            # Retry once on transient failure. Crossref's polite pool
+            # occasionally 5xx's or socket-drops under parallel load;
+            # a single 1 s backoff retry rescues those rows.
+            for attempt in range(2):
+                try:
+                    with _httpx.Client(timeout=20, follow_redirects=True) as client:
+                        r = client.get(url, headers=headers)
+                    if r.status_code != 200:
+                        if attempt == 0 and r.status_code in (429, 500, 502, 503, 504):
+                            _time.sleep(1.0)
+                            continue
+                        return None
+                    d = (r.json() or {}).get("message") or {}
+                    title_list = d.get("title") or []
+                    raw_title = title_list[0] if title_list else ""
+                    clean_title = re.sub(r"<[^>]+>", "", raw_title).strip()
+                    authors = d.get("author") or []
+                    issued = (d.get("issued") or {}).get("date-parts") or []
+                    year = int(issued[0][0]) if issued and issued[0] else None
+                    return {
+                        "title": clean_title,
+                        "authors": [f"{(a.get('given') or '').strip()} {(a.get('family') or '').strip()}".strip()
+                                    for a in authors],
+                        "year": year,
+                    }
+                except Exception:
+                    if attempt == 0:
+                        _time.sleep(1.0)
+                        continue
+                    return None
+            return None
 
+        # Larger timeout window — one slow request should never starve
+        # the whole preview. 8 workers × 20 s per request × 63 rows is
+        # still ~16 s wall-clock worst case with good parallelism.
         with _cf.ThreadPoolExecutor(max_workers=8) as pool:
             fut_map = {pool.submit(_fetch, v["doi"]): v for v in needs_resolve}
-            for fut in _cf.as_completed(fut_map, timeout=60):
-                v = fut_map[fut]
-                try:
-                    res = fut.result()
-                except Exception:
-                    res = None
-                if not res:
-                    continue
-                if not v.get("title") and res.get("title"):
-                    v["title"] = res["title"]
-                if not v.get("year") and res.get("year"):
-                    v["year"] = res["year"]
-                if (not v.get("authors") or v.get("authors") == []) and res.get("authors"):
-                    v["authors"] = res["authors"]
+            try:
+                for fut in _cf.as_completed(fut_map, timeout=180):
+                    v = fut_map[fut]
+                    try:
+                        res = fut.result()
+                    except Exception:
+                        res = None
+                    if not res:
+                        continue
+                    if not v.get("title") and res.get("title"):
+                        v["title"] = res["title"]
+                    if not v.get("year") and res.get("year"):
+                        v["year"] = res["year"]
+                    if (not v.get("authors") or v.get("authors") == []) and res.get("authors"):
+                        v["authors"] = res["authors"]
+            except _cf.TimeoutError:
+                logger.warning(
+                    "expand-author-refs resolve timed out after 180s; "
+                    "%d/%d candidates may still be (untitled)",
+                    sum(1 for f in fut_map if not f.done()),
+                    len(fut_map),
+                )
 
     # Relevance score. Phase 54.6.315 — auto-compute against the
     # corpus centroid even when relevance_query is empty, so the
