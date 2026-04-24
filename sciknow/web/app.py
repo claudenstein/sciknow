@@ -6191,14 +6191,76 @@ async def api_corpus_expand_author_refs_preview(
     if limit and limit > 0:
         shortlist = shortlist[:limit]
 
-    # Optional relevance score (same anchor as expand-author's preview).
+    # Phase 54.6.315 — resolve title/authors/year via Crossref for
+    # candidates whose `citations` row stored only a DOI. This was
+    # the missing field the user was seeing as "(untitled)" rows in
+    # the cherry-pick modal: reference extraction for some citing
+    # papers (notably V.V. Zharkova's) captured DOIs but never
+    # resolved the downstream metadata, and the preview had no
+    # fallback. Parallel HTTP with a shared rate limiter keeps this
+    # well inside Crossref's 50 RPS polite pool.
+    needs_resolve = [v for v in shortlist
+                     if v.get("doi") and (not v.get("title")
+                                           or len((v.get("title") or "").strip()) < 5)]
+    if needs_resolve:
+        import concurrent.futures as _cf
+        import httpx as _httpx
+        from sciknow.config import settings as _settings
+
+        def _fetch(doi: str) -> dict | None:
+            try:
+                url = f"https://api.crossref.org/works/{doi}"
+                headers = {"User-Agent": f"sciknow/0.1 (mailto:{_settings.crossref_email})"}
+                with _httpx.Client(timeout=10) as client:
+                    r = client.get(url, headers=headers)
+                if r.status_code != 200:
+                    return None
+                d = (r.json() or {}).get("message") or {}
+                title_list = d.get("title") or []
+                authors = d.get("author") or []
+                issued = (d.get("issued") or {}).get("date-parts") or []
+                year = int(issued[0][0]) if issued and issued[0] else None
+                return {
+                    "title": title_list[0] if title_list else "",
+                    "authors": [f"{(a.get('given') or '').strip()} {(a.get('family') or '').strip()}".strip()
+                                for a in authors],
+                    "year": year,
+                }
+            except Exception:
+                return None
+
+        with _cf.ThreadPoolExecutor(max_workers=8) as pool:
+            fut_map = {pool.submit(_fetch, v["doi"]): v for v in needs_resolve}
+            for fut in _cf.as_completed(fut_map, timeout=60):
+                v = fut_map[fut]
+                try:
+                    res = fut.result()
+                except Exception:
+                    res = None
+                if not res:
+                    continue
+                if not v.get("title") and res.get("title"):
+                    v["title"] = res["title"]
+                if not v.get("year") and res.get("year"):
+                    v["year"] = res["year"]
+                if (not v.get("authors") or v.get("authors") == []) and res.get("authors"):
+                    v["authors"] = res["authors"]
+
+    # Relevance score. Phase 54.6.315 — auto-compute against the
+    # corpus centroid even when relevance_query is empty, so the
+    # cherry-pick modal always shows a meaningful Score column (the
+    # sister expand-author preview already does this via score_relevance=True).
     relevance_scores: list[float] = []
-    if relevance_query.strip() and shortlist:
+    if shortlist:
         try:
             from sciknow.retrieval.relevance import (
                 compute_corpus_centroid, embed_query, score_candidates,
             )
-            anchor = embed_query(relevance_query.strip()) if relevance_query.strip() else compute_corpus_centroid()
+            anchor = (
+                embed_query(relevance_query.strip())
+                if relevance_query.strip()
+                else compute_corpus_centroid()
+            )
             titles = [v["title"] or "" for v in shortlist]
             relevance_scores = list(score_candidates(titles, anchor))
         except Exception as exc:
