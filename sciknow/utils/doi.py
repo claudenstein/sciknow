@@ -6,9 +6,13 @@ _DOI_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# arXiv ID patterns: old (hep-ph/9901001) and new (2301.00001 or 2301.00001v2)
+# arXiv ID patterns: old (hep-ph/9901001 or astro-ph/0207637v1) and new
+# (2301.00001 or 2301.00001v2). The OLD pattern must allow a trailing
+# version suffix — "astro-ph/0207637v1" is a valid arXiv ID and is
+# exactly what shows up in DB rows whose title was set from the
+# PDF's first-line arXiv stamp.
 _ARXIV_NEW = re.compile(r'\b(\d{4}\.\d{4,5}(?:v\d+)?)\b')
-_ARXIV_OLD = re.compile(r'\b([a-z\-]+/\d{7})\b', re.IGNORECASE)
+_ARXIV_OLD = re.compile(r'\b([a-z\-]+/\d{7}(?:v\d+)?)\b', re.IGNORECASE)
 
 
 def extract_doi(text: str) -> str | None:
