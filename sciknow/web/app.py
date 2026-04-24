@@ -1647,7 +1647,9 @@ async def api_versions(draft_id: str):
                    (d.custom_metadata->>'final_overall')::float AS final_overall,
                    (d.custom_metadata->>'is_active')::boolean AS is_active,
                    d.model_used,
-                   d.custom_metadata->>'version_name' AS version_name
+                   d.custom_metadata->>'version_name' AS version_name,
+                   d.custom_metadata->>'version_description' AS version_description,
+                   d.updated_at
             FROM drafts d
             WHERE d.chapter_id::text = :cid AND d.section_type = :st AND d.book_id::text = :bid
             ORDER BY d.version ASC
@@ -1655,12 +1657,15 @@ async def api_versions(draft_id: str):
 
     versions = [
         {"id": r[0], "version": r[1], "word_count": r[2] or 0,
-         "created_at": str(r[3]) if r[3] else "", "parent_id": r[4],
+         "created_at": r[3].isoformat() if r[3] else "",
+         "parent_id": r[4],
          "has_review": bool(r[5]),
          "final_overall": float(r[6]) if r[6] is not None else None,
          "is_active": bool(r[7]) if r[7] is not None else False,
          "model_used": r[8] or "",
-         "version_name": r[9] or ""}
+         "version_name": r[9] or "",
+         "version_description": r[10] or "",
+         "updated_at": r[11].isoformat() if r[11] else ""}
         for r in rows
     ]
     # If no version carries an explicit is_active flag, mark the
@@ -1806,6 +1811,35 @@ async def api_draft_rename_version(draft_id: str, name: str = Form("")):
             session.execute(text("""
                 UPDATE drafts
                    SET custom_metadata = custom_metadata - 'version_name'
+                 WHERE id::text = :did
+            """), {"did": draft_id})
+        session.commit()
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/draft/{draft_id}/version-description")
+async def api_draft_version_description(
+    draft_id: str, description: str = Form("")
+):
+    """Phase 54.6.314 — edit a version's short description. Stored in
+    ``custom_metadata.version_description``. Pass an empty string to
+    clear it. Capped at 500 chars (the field is meant for one-line
+    notes like "pre-review polish" or "Jane's edits, round 2"; longer
+    notes belong in the per-draft Comments surface)."""
+    with get_session() as session:
+        trimmed = (description or "").strip()[:500]
+        if trimmed:
+            session.execute(text("""
+                UPDATE drafts
+                   SET custom_metadata = COALESCE(custom_metadata, '{}'::jsonb)
+                                         || jsonb_build_object('version_description',
+                                                                 CAST(:d AS text))
+                 WHERE id::text = :did
+            """), {"did": draft_id, "d": trimmed})
+        else:
+            session.execute(text("""
+                UPDATE drafts
+                   SET custom_metadata = custom_metadata - 'version_description'
                  WHERE id::text = :did
             """), {"did": draft_id})
         session.commit()
@@ -10666,6 +10700,14 @@ body.panel-hidden   .col-peek-panel   {{ display: block; }}
 }}
 .version-name {{ font-size: 12px; color: var(--fg); font-style: italic; }}
 .version-name--empty {{ color: var(--fg-faint); font-style: normal; }}
+.version-row {{ flex-direction: column; align-items: stretch; gap: 4px; padding: 8px 10px; }}
+.version-row-top {{ display: flex; align-items: center; gap: 8px; }}
+.version-row-meta {{ display: flex; align-items: center; gap: 10px;
+  font-size: 11px; color: var(--fg-muted); padding-left: 2px; }}
+.version-stamp {{ font-family: var(--font-mono); font-size: 10px; color: var(--fg-faint); }}
+.version-desc {{ color: var(--fg-muted); font-size: 11px; }}
+.version-desc--empty {{ color: var(--fg-faint); font-style: italic; }}
+.version-desc-wrap:hover {{ color: var(--accent); }}
 .editor-toolbar button b,
 .editor-toolbar button em {{
   font-family: var(--font-serif); font-size: 14px;
@@ -14105,10 +14147,13 @@ body.task-bar-open {{ padding-top: 40px; }}
           </div>
         </div>
 
-        <!-- Phase 54.6.312 — Expand-by-author's references. Same pipeline
-             as openExpandAuthorRefs() from the global menu, hosted inside
-             the Corpus modal so users don't have to dig through the
-             top-bar dropdown. -->
+        <!-- Phase 54.6.312 — Expand-by-author's references.
+             Phase 54.6.314 — live-autocomplete author picker copied
+             from corp-author-pane (different IDs: tl-earef-* so they
+             coexist). Same /api/catalog/authors backend feeds it.
+             Clicking a row fills the selection state; "Preview
+             references" calls the existing openExpandAuthorRefs()
+             flow with the pre-selected author name. -->
         <div class="u-hidden-card" id="corp-author-refs-pane">
           <div class="u-note-md">
             Aggregate every paper <strong>cited by</strong> one author's
@@ -14117,13 +14162,34 @@ body.task-bar-open {{ padding-top: 40px; }}
             ingest via the shared expand-author pipeline. Mirrors
             <code>sciknow db expand-author-refs</code>.
           </div>
+          <div class="field u-row-end">
+            <div class="u-flex-3">
+              <label>Search author</label>
+              <input type="text" id="tl-earef-q"
+                     placeholder="Type a name — e.g. Solanki, Lockwood…"
+                     oninput="onExpandAuthorRefsSearchInput(event)"
+                     onkeydown="if(event.key==='Enter'){{event.preventDefault();onExpandAuthorRefsSearchInput(event);}}"
+                     title="Search corpus authors by name (same backend as 'Expand by author'). Click a row to select.">
+            </div>
+            <div class="u-flex-2">
+              <label>Min mentions</label>
+              <input type="number" id="tl-earef-min" value="1" min="1"
+                     title="Only include references cited at least this many times across the author's corpus papers. Raise to trim the long tail of single-cite references.">
+            </div>
+          </div>
+          <div id="tl-earef-results"
+               style="max-height:260px;overflow:auto;border:1px solid var(--border);
+                      border-radius:4px;margin-top:6px;font-size:12px;display:none;"></div>
+          <div class="u-mt-6 u-small u-muted" id="tl-earef-selected">
+            No author selected yet — search above and click a row.
+          </div>
           <div class="u-row-mt u-flex-raw u-gap-2 u-ai-center u-wrap">
-            <button class="btn-primary" onclick="openExpandAuthorRefs()"
-                    title="Open the author picker. Loads the top corpus authors by citation count so you can pick one quickly; you can also type any surname or full name.">
-              &#128269; Pick author &amp; preview references
+            <button class="btn-primary" onclick="runExpandAuthorRefsPreview()"
+                    title="Aggregate every reference cited by this author's corpus works, rank by citation frequency, and open the cherry-pick preview. No disk writes until you tick rows.">
+              &#128269; Preview references
             </button>
             <span class="u-hint">
-              The picker opens in its own candidates modal so you can filter + multi-select before any disk write.
+              Preview opens the shared candidates modal for multi-select before any download.
             </span>
           </div>
         </div>
@@ -18608,9 +18674,11 @@ async function showVersions() {{
   diffView.innerHTML = '<p class="u-dim">Click a version to preview. Select two to compare. Use <strong>Make active</strong> to pin the version the reader displays.</p>';
   selectedVersions = [];
 
-  // Phase 54.6.309 — richer version rows: score + active marker +
-  // "Make active" button. Score comes from custom_metadata.final_overall
-  // (autowrite). Active marker shows which version the reader is on.
+  // Phase 54.6.314 — version rows show date/time + editable
+  // description. Each row is a two-line layout: the badge/name/meta
+  // cluster on top, the date + description underneath. Clicking the
+  // badge selects the version (single → navigate, two → diff).
+  // Clicking the name renames it; clicking the description edits it.
   let html = '<div class="version-list">';
   versionData.forEach(v => {{
     const review = v.has_review ? ' <span class="version-tag" title="Has review feedback">rev\\u2713</span>' : '';
@@ -18625,17 +18693,73 @@ async function showVersions() {{
     const name = v.version_name
       ? '<span class="version-name" title="User-supplied version label. Click to rename.">' + escapeHtml(v.version_name) + '</span>'
       : '<span class="version-name version-name--empty" title="No name assigned. Click to add.">(unnamed)</span>';
+    const stamp = _formatVersionStamp(v.created_at, v.updated_at);
+    const description = v.version_description
+      ? '<span class="version-desc" title="User-supplied short description. Click to edit.">' + escapeHtml(v.version_description) + '</span>'
+      : '<span class="version-desc version-desc--empty" title="No description. Click to add.">(add a short description…)</span>';
     html += '<div class="version-row' + (v.is_active ? ' version-row--active' : '') + '">' +
-      '<span class="version-badge" data-vid="' + v.id + '" data-action="select-version" data-version-id="' + v.id + '">' +
-        'v' + v.version + '</span>' +
-      '<span onclick="renameVersion(\\'' + v.id + '\\')" style="cursor:pointer;">' + name + '</span>' +
-      '<span class="version-meta">' + (v.word_count || 0) + 'w' + review + active + model + '</span>' +
-      score +
-      makeActiveBtn +
+      '<div class="version-row-top">' +
+        '<span class="version-badge" data-vid="' + v.id + '" data-action="select-version" data-version-id="' + v.id + '" title="Click to navigate to this version. Click a second version to diff the two.">' +
+          'v' + v.version + '</span>' +
+        '<span onclick="renameVersion(\\'' + v.id + '\\')" style="cursor:pointer;">' + name + '</span>' +
+        '<span class="version-meta">' + (v.word_count || 0) + 'w' + review + active + model + '</span>' +
+        score +
+        makeActiveBtn +
+      '</div>' +
+      '<div class="version-row-meta">' +
+        '<span class="version-stamp" title="Created — last-modified timestamps (local time).">' + stamp + '</span>' +
+        '<span class="version-desc-wrap" onclick="editVersionDescription(\\'' + v.id + '\\')" style="cursor:pointer;">' + description + '</span>' +
+      '</div>' +
     '</div>';
   }});
   html += '</div>';
   timeline.innerHTML = html;
+}}
+
+// Phase 54.6.314 — format the version-row timestamps. ISO → local
+// "YYYY-MM-DD HH:MM". If created/updated differ by > 60 s show both.
+function _formatVersionStamp(createdIso, updatedIso) {{
+  const fmt = (iso) => {{
+    if (!iso) return '—';
+    try {{
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return iso;
+      const pad = (n) => String(n).padStart(2, '0');
+      return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
+        + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+    }} catch (e) {{ return iso; }}
+  }};
+  const c = fmt(createdIso);
+  const u = fmt(updatedIso);
+  if (!updatedIso || u === c) return 'created ' + c;
+  // Only surface updated_at when it materially differs from created.
+  try {{
+    const dc = new Date(createdIso);
+    const du = new Date(updatedIso);
+    if (!isNaN(dc.getTime()) && !isNaN(du.getTime())
+        && Math.abs(du.getTime() - dc.getTime()) < 60000) {{
+      return 'created ' + c;
+    }}
+  }} catch (e) {{}}
+  return 'created ' + c + ' · updated ' + u;
+}}
+
+async function editVersionDescription(draftId) {{
+  if (!draftId) return;
+  const current = (versionData.find(v => v.id === draftId) || {{}}).version_description || '';
+  const next = prompt('Short description for this version (empty to clear):', current);
+  if (next === null) return;
+  try {{
+    const fd = new FormData();
+    fd.append('description', next);
+    const res = await fetch('/api/draft/' + encodeURIComponent(draftId) + '/version-description', {{
+      method: 'POST', body: fd,
+    }});
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    await showVersions();
+  }} catch (e) {{
+    alert('Could not update description: ' + e);
+  }}
 }}
 
 async function renameVersion(draftId) {{
@@ -18701,8 +18825,19 @@ async function selectVersion(vid) {{
     const data = await res.json();
     diffView.innerHTML = data.diff_html;
   }} else if (selectedVersions.length === 1) {{
-    // Navigate to that version
-    loadSection(selectedVersions[0]);
+    // Navigate to that version, then RE-show the version panel
+    // (Phase 54.6.314 — loadSection hides version-panel as part of
+    // its "navigate somewhere" cleanup, which otherwise blew the
+    // panel away the moment the user clicked a version badge. Users
+    // reported this as "I can't browse between versions." Keep the
+    // picker alive so browsing across versions is continuous.)
+    await loadSection(selectedVersions[0]);
+    const panel = document.getElementById('version-panel');
+    if (panel) panel.style.display = 'block';
+    // Update selected-badge styling in case the DOM was rebuilt.
+    document.querySelectorAll('.version-badge').forEach(b => {{
+      b.classList.toggle('selected', selectedVersions.includes(b.dataset.vid));
+    }});
   }}
 }}
 
@@ -24393,6 +24528,123 @@ function selectExpandAuthor(author) {{
     + author.name + '</strong>'
     + (author.orcid ? ' <code>' + author.orcid + '</code>' : '')
     + ' — ' + author.n_papers + ' paper(s), ' + author.n_citations + ' citation(s) in this corpus';
+}}
+
+// Phase 54.6.314 — live-autocomplete for the corp-author-refs pane.
+// Parallel to onExpandAuthorSearchInput / runExpandAuthorSearch but
+// with separate IDs (tl-earef-*) and separate in-memory caches so the
+// two panes can coexist.
+let _authorRefsSearchTimer = null;
+let _lastAuthorRefsResults = [];
+
+function onExpandAuthorRefsSearchInput(_event) {{
+  if (_authorRefsSearchTimer) clearTimeout(_authorRefsSearchTimer);
+  _authorRefsSearchTimer = setTimeout(runExpandAuthorRefsSearch, 200);
+}}
+
+async function runExpandAuthorRefsSearch() {{
+  const q = document.getElementById('tl-earef-q').value.trim();
+  const box = document.getElementById('tl-earef-results');
+  try {{
+    const url = '/api/catalog/authors?limit=15'
+              + (q.length >= 2 ? '&q=' + encodeURIComponent(q) : '');
+    const res = await fetch(url);
+    const data = await res.json();
+    const authors = data.authors || [];
+    _lastAuthorRefsResults = authors;
+    if (!authors.length) {{
+      box.style.display = 'block';
+      box.innerHTML = '<div class="u-p-10 u-muted">No authors match.</div>';
+      return;
+    }}
+    const rows = authors.map((a, i) => {{
+      const safe = _escHtml(a.name);
+      const orcidBit = a.orcid
+        ? ` <span class="u-muted">orcid ${{_escHtml(a.orcid)}}</span>`
+        : '';
+      return `<div class="earef-row u-p-6-10 u-click u-border-b" data-idx="${{i}}"
+        onmouseenter="this.style.background='var(--accent-light,#eef2ff)';"
+        onmouseleave="this.style.background='';">
+        <strong>${{safe}}</strong>${{orcidBit}}
+        <div class="u-hint">
+          ${{a.n_papers}} paper${{a.n_papers === 1 ? '' : 's'}} ·
+          ${{a.n_citations}} citation${{a.n_citations === 1 ? '' : 's'}} in corpus
+        </div></div>`;
+    }}).join('');
+    box.innerHTML = rows;
+    box.style.display = 'block';
+    box.querySelectorAll('.earef-row').forEach(row => {{
+      row.addEventListener('click', () => {{
+        const idx = parseInt(row.dataset.idx, 10);
+        const author = _lastAuthorRefsResults[idx];
+        if (author) selectExpandAuthorRefs(author);
+      }});
+    }});
+  }} catch (exc) {{
+    box.style.display = 'block';
+    box.innerHTML = `<div class="u-p-10 u-danger">Search failed: ${{exc}}</div>`;
+  }}
+}}
+
+function selectExpandAuthorRefs(author) {{
+  window._selectedExpandAuthorRefsName = author.name;
+  document.getElementById('tl-earef-q').value = author.name;
+  document.getElementById('tl-earef-results').style.display = 'none';
+  document.getElementById('tl-earef-selected').innerHTML =
+    '<span style="color:var(--success,#059669);">Selected:</span> <strong>'
+    + _escHtml(author.name) + '</strong>'
+    + (author.orcid ? ' <code>' + _escHtml(author.orcid) + '</code>' : '')
+    + ' — ' + author.n_papers + ' paper(s), ' + author.n_citations
+    + ' citation(s) in this corpus';
+}}
+
+// Phase 54.6.314 — run the references preview against the currently
+// selected author (pre-fills the openExpandAuthorRefs picker so it
+// doesn't prompt() a second time).
+async function runExpandAuthorRefsPreview() {{
+  const name = (window._selectedExpandAuthorRefsName
+                || document.getElementById('tl-earef-q').value
+                || '').trim();
+  if (!name) {{
+    alert('Pick an author first — type a name above and click a row.');
+    return;
+  }}
+  const minEl = document.getElementById('tl-earef-min');
+  const minMentions = Math.max(1, parseInt((minEl && minEl.value) || '1', 10) || 1);
+  _eapResetModal(
+    '&#128218; Expand by author references &mdash; Preview',
+    `Aggregating references cited by ${{_escHtml(name)}}…`,
+    '(reads the local citations table — typically <1s)'
+  );
+  const fd = new FormData();
+  fd.append('author', name);
+  fd.append('min_mentions', String(minMentions));
+  try {{
+    const res = await fetch('/api/corpus/expand-author-refs/preview', {{
+      method: 'POST', body: fd,
+    }});
+    if (!res.ok) {{
+      _eapShowError('HTTP ' + res.status + ': ' + await res.text());
+      return;
+    }}
+    const data = await res.json();
+    _eapCandidates = data.candidates || [];
+    _eapSelected = new Set();
+    _eapCandidates.forEach(c => {{ if (c.doi) _eapSelected.add(c.doi); }});
+    document.getElementById('eap-info').innerHTML =
+      `Author <strong>${{_escHtml(data.author || name)}}</strong> · `
+      + `<strong>${{data.n_author_papers || 0}}</strong> corpus paper(s) · `
+      + `<strong>${{data.n_unique_references || 0}}</strong> unique reference(s) · `
+      + `dropped <strong>${{data.dropped_in_corpus || 0}}</strong> already in corpus.`
+      + (data.note ? `<br><em>${{_escHtml(data.note)}}</em>` : '');
+    document.getElementById('eap-loading').style.display = 'none';
+    document.getElementById('eap-content').style.display = 'block';
+    if (typeof eapRender === 'function') {{
+      try {{ eapRender(); }} catch (e) {{}}
+    }}
+  }} catch (e) {{
+    _eapShowError(String(e));
+  }}
 }}
 
 

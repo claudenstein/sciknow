@@ -256,10 +256,16 @@ def _collect_cited_local_nums(content: str) -> list[int]:
 
 
 def render_bibliography_markdown(bib: BookBibliography) -> str:
-    """Render the bibliography pseudo-chapter as Markdown. One entry
-    per line, pre-numbered so it renders cleanly through ``_md_to_html``.
-    The ``[N]`` prefix inside each entry becomes the click target that
-    ``buildPopovers`` already knows how to highlight.
+    """Render the bibliography pseudo-chapter as Markdown.
+
+    Phase 54.6.314 — each entry is now separated by a blank line so
+    the downstream ``_md_to_html`` paragraph-splitter renders one
+    citation per paragraph (i.e. a visible breakline between
+    entries). Previously "\\n".join produced a contiguous numbered
+    list where entries ran straight into each other with no spacing.
+
+    The ``[N]`` prefix inside each entry becomes the click target
+    that ``buildPopovers`` already knows how to highlight.
     """
     if not bib.global_sources:
         return (
@@ -269,4 +275,8 @@ def render_bibliography_markdown(bib: BookBibliography) -> str:
     lines: list[str] = []
     for i, s in enumerate(bib.global_sources, 1):
         lines.append(f"{i}. {s}")
-    return "\n".join(lines)
+    # Double newline = blank line between entries = markdown paragraph
+    # break. _md_to_html treats paragraphs separated by blank lines
+    # as independent <p> blocks, which is the visual breakline the
+    # user asked for in the Bibliography chapter.
+    return "\n\n".join(lines)
