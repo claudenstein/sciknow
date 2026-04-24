@@ -275,10 +275,15 @@ over ≥10 min — each swap costs 5-10 s of Ollama cold-load, so
 
 **Phase 54.6.313** implements the top-ROI DOI recovery strategies
 from `docs/ENRICH_RESEARCH.md` as seven new layers in the `db enrich`
-cascade. **Measured on the full 217-paper no-DOI subset of the
-global-cooling corpus**: the old pipeline (pure Crossref + OpenAlex
-title search) matched 2 papers; the new pipeline matched
-**50 papers** — a **25× improvement** in recovery rate. Breakdown:
+cascade, **plus** a latent bug in the existing Crossref/OpenAlex
+title-search where garbage `first_author` strings (`Usuario` /
+`Propietario` / `Benutzer` / `ASUS` / `hy` …) were being passed as
+search filters and starving the result set. **Measured on the full
+217-paper no-DOI subset of the global-cooling corpus**: the old
+pipeline (pure Crossref + OpenAlex title search) matched 2 papers;
+the new pipeline matched **61 papers** — a **30×+ improvement** in
+recovery rate. Corpus-wide DOI coverage crossed **80 %** (646 / 807)
+as a result. Breakdown of the 61 hits after all iterations:
 
 - **18 via `crossref+recovered_title`** — `recover_title_from_pdf`
   extracts the largest-font line in the top 40% of page 1 and uses
