@@ -12045,6 +12045,121 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_318_decode_vs_wall_split() -> None:
+    """Phase 54.6.318 — dashboard distinguishes decode tok/s from wall-clock tok/s.
+
+    User reported the task-bar showing ~1 t/s for an 18K-token CoV
+    job over 3 h, on a model that benches at 30+ t/s. Resolution
+    was that wall-clock-tps measures *all* of wall-clock including
+    silent prefill, while decode-tps from Ollama's eval_count /
+    eval_duration tells the truth about model throughput.
+
+    Guards:
+      A) `_record_call_stats` + `drain_call_stats` exist in
+         `sciknow.rag.llm` and feed a thread-local buffer.
+      B) `stream()` in rag/llm.py records the final-chunk's
+         `eval_count`, `eval_duration`, `prompt_eval_count`,
+         `prompt_eval_duration`, `load_duration`.
+      C) `_job_decode_stats` computes decode_tps + prefill_tps +
+         prefill_share + calls + load_seconds.
+      D) The pulse + /api/jobs/{id}/stats both expose `decode_stats`.
+      E) `_run_generator_in_thread` drains call-stats per event
+         and folds them onto the job.
+      F) CLI monitor renders the third "bk decode … · prefill …"
+         row when decode_stats.calls > 0.
+    """
+    import inspect as _inspect
+    from sciknow.web import app as _web
+    from sciknow.rag import llm as _llm
+
+    # A) thread-local helpers
+    assert hasattr(_llm, "_record_call_stats"), (
+        "54.6.318 — _record_call_stats helper must exist"
+    )
+    assert hasattr(_llm, "drain_call_stats"), (
+        "54.6.318 — drain_call_stats helper must exist"
+    )
+
+    # B) stream captures the Ollama metrics
+    stream_src = _inspect.getsource(_llm.stream)
+    for field in (
+        "eval_count", "eval_duration", "prompt_eval_count",
+        "prompt_eval_duration", "load_duration",
+    ):
+        assert field in stream_src, (
+            f"54.6.318 — stream() must capture {field!r} from done chunk"
+        )
+    assert "_record_call_stats" in stream_src, (
+        "54.6.318 — stream() must call _record_call_stats on done"
+    )
+
+    # C) helper computes the right shape
+    assert hasattr(_web, "_job_decode_stats"), (
+        "54.6.318 — _job_decode_stats helper must exist"
+    )
+    ds_src = _inspect.getsource(_web._job_decode_stats)
+    for k in ("decode_tps", "prefill_tps", "prefill_share",
+              "load_seconds", "calls"):
+        assert k in ds_src, (
+            f"54.6.318 — _job_decode_stats must populate {k!r}"
+        )
+
+    # Quantitative sanity: CoV-shaped synthetic input matches expectations.
+    job = {"llm_calls": [
+        {"eval_count": 200, "eval_duration_ns": int(200 / 30 * 1e9),
+         "prompt_eval_count": 12000,
+         "prompt_eval_duration_ns": int(12000 / 250 * 1e9),
+         "load_duration_ns": 0}
+    ] * 6}
+    out = _web._job_decode_stats(job)
+    assert abs(out["decode_tps"] - 30.0) < 0.5, (
+        f"54.6.318 — decode_tps math broken; got {out['decode_tps']}"
+    )
+    assert abs(out["prefill_tps"] - 250.0) < 5.0, (
+        f"54.6.318 — prefill_tps math broken; got {out['prefill_tps']}"
+    )
+    assert out["calls"] == 6
+    assert 0.85 < out["prefill_share"] < 0.90, (
+        f"54.6.318 — prefill_share math broken; got {out['prefill_share']}"
+    )
+
+    # D) pulse + stats endpoint
+    pulse_src = _inspect.getsource(_web._write_web_jobs_pulse)
+    assert '"decode_stats"' in pulse_src, (
+        "54.6.318 — pulse payload must include decode_stats"
+    )
+    stats_route_src = _inspect.getsource(_web.api_jobs_stats) if hasattr(
+        _web, "api_jobs_stats"
+    ) else ""
+    if not stats_route_src:
+        # older naming: search the file for the route handler.
+        full = _inspect.getsource(_web)
+        assert '"decode_stats"' in full and '"tps_windows"' in full, (
+            "54.6.318 — /api/jobs/{id}/stats response must include "
+            "decode_stats so the task-bar UI can render the split"
+        )
+
+    # E) runner drains per event
+    runner_src = _inspect.getsource(_web._run_generator_in_thread)
+    assert "drain_call_stats" in runner_src, (
+        "54.6.318 — _run_generator_in_thread must drain LLM call stats"
+    )
+    assert "llm_calls" in runner_src, (
+        "54.6.318 — runner must accumulate llm_calls onto the job"
+    )
+
+    # F) CLI renders the third row
+    from sciknow.cli import db as _db_cli
+    cli_src = _inspect.getsource(_db_cli._build_monitor_layout)
+    assert "decode_stats" in cli_src, (
+        "54.6.318 — CLI monitor must read snap pulse's decode_stats"
+    )
+    assert "prefill_share" in cli_src, (
+        "54.6.318 — CLI must render prefill_share so users see "
+        "the prefill-domination explanation"
+    )
+
+
 def l1_phase54_6_317_dashboard_tps_windows() -> None:
     """Phase 54.6.317 — CLI monitor renders multi-window tok/s MAs.
 
@@ -17644,6 +17759,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_313_enrich_sources_surface,
     # Phase 54.6.317 — CLI monitor multi-window tok/s MAs
     l1_phase54_6_317_dashboard_tps_windows,
+    # Phase 54.6.318 — decode-tps vs wall-tps split + Ollama stats capture
+    l1_phase54_6_318_decode_vs_wall_split,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]

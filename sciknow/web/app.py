@@ -208,6 +208,17 @@ def _create_job(job_type: str) -> tuple[str, asyncio.Queue]:
             # finally block. Capped to avoid log-level bloat.
             "reasoning_trace": [],
             "reasoning_draft_id": None,
+            # Phase 54.6.318 — per-call Ollama stats accumulator.
+            # Each completed LLM call appends:
+            #   {"eval_count": int, "eval_duration_ns": int,
+            #    "prompt_eval_count": int, "prompt_eval_duration_ns": int,
+            #    "load_duration_ns": int, "total_duration_ns": int,
+            #    "model": str}
+            # so the dashboard can compute decode tok/s separately
+            # from wall-clock tok/s — under heavy prefill workloads
+            # (long contexts, multi-question CoV) wall-clock is
+            # dominated by prefill periods that emit no tokens.
+            "llm_calls": [],
         }
         # Phase 54.6.246 — announce the new job to the cross-process
         # pulse so `sciknow db monitor` sees it before the first event.
@@ -229,6 +240,51 @@ def _job_tps(job: dict, *, window_s: float = 3.0) -> float:
     cutoff = now - window_s
     recent = sum(1 for t in ts if t >= cutoff)
     return (recent / window_s) if recent else 0.0
+
+
+def _job_decode_stats(job: dict) -> dict:
+    """Phase 54.6.318 — aggregate Ollama-reported decode + prefill
+    rates across every completed LLM call this job has made so far.
+
+    Distinguishes three rates the user actually cares about:
+
+    - **decode_tps**: tokens emitted / time spent decoding.
+      Reflects raw model throughput. Should match the published
+      benchmark (~30–40 t/s for Qwen3.6-27B Q4_K_M on a 3090).
+    - **prefill_tps**: prompt tokens / time spent prefilling.
+      Typically 5–15× higher than decode (200–500 t/s). Usually
+      irrelevant for total wall-clock unless contexts are huge.
+    - **wall_tps** (= the existing rolling tps): tokens emitted /
+      wall-clock time. Includes all silent prefill / model-load
+      / inter-call gaps. THIS is what looks like "1 t/s" in the
+      task bar when the model is fine but the workload is
+      prefill-dominated.
+
+    Returns:
+      {"decode_tps": float, "prefill_tps": float, "calls": int,
+       "prefill_share": float (0..1, fraction of LLM time spent
+       prefilling vs decoding), "load_seconds": float}
+    """
+    calls = job.get("llm_calls") or []
+    if not calls:
+        return {"decode_tps": 0.0, "prefill_tps": 0.0, "calls": 0,
+                "prefill_share": 0.0, "load_seconds": 0.0}
+    eval_count = sum(c.get("eval_count", 0) for c in calls)
+    eval_dur = sum(c.get("eval_duration_ns", 0) for c in calls) / 1e9
+    pre_count = sum(c.get("prompt_eval_count", 0) for c in calls)
+    pre_dur = sum(c.get("prompt_eval_duration_ns", 0) for c in calls) / 1e9
+    load_dur = sum(c.get("load_duration_ns", 0) for c in calls) / 1e9
+    decode_tps = (eval_count / eval_dur) if eval_dur > 0 else 0.0
+    prefill_tps = (pre_count / pre_dur) if pre_dur > 0 else 0.0
+    total_active = eval_dur + pre_dur
+    prefill_share = (pre_dur / total_active) if total_active > 0 else 0.0
+    return {
+        "decode_tps": round(decode_tps, 2),
+        "prefill_tps": round(prefill_tps, 2),
+        "calls": len(calls),
+        "prefill_share": round(prefill_share, 3),
+        "load_seconds": round(load_dur, 2),
+    }
 
 
 def _job_tps_windows(job: dict) -> dict:
@@ -309,6 +365,13 @@ def _write_web_jobs_pulse() -> None:
                 # Phase 54.6.317 — multi-window MAs so the dashboard
                 # can show 10s / 1m / 5m / 30m bands keyed off elapsed.
                 "tps_windows": _job_tps_windows(j),
+                # Phase 54.6.318 — Ollama-reported decode + prefill
+                # rates. Resolves "the wall-clock tok/s reads 1.0 but
+                # the model is rated 30 t/s" into "decode 31 t/s,
+                # prefill 250 t/s, prefill_share 0.92" — i.e. the
+                # workload is 92% prefill so the wall-clock rate is
+                # decoupled from raw model speed.
+                "decode_stats": _job_decode_stats(j),
                 "target_words": j.get("target_words"),
                 "elapsed_s": max(0.0, now - started),
                 "stream_state": j.get("stream_state"),
@@ -3446,6 +3509,15 @@ def _run_generator_in_thread(job_id: str, generator_fn, loop):
         cancel = job["cancel"]
     gen = generator_fn()
     try:
+        # Phase 54.6.318 — drain any LLM-call stats that buffered up
+        # before the generator yielded its first event (the warm-up
+        # call in book_ops fires before any token event reaches us).
+        from sciknow.rag.llm import drain_call_stats as _drain_llm_calls
+        _drained = _drain_llm_calls()
+        if _drained:
+            with _job_lock:
+                if job_id in _jobs:
+                    _jobs[job_id]["llm_calls"].extend(_drained)
         for event in gen:
             if cancel.is_set():
                 cancel_evt = {"type": "cancelled"}
@@ -3457,6 +3529,22 @@ def _run_generator_in_thread(job_id: str, generator_fn, loop):
             # SSE consumer reading from the queue.
             _observe_event_for_stats(job_id, event)
             loop.call_soon_threadsafe(queue.put_nowait, event)
+            # Phase 54.6.318 — drain any LLM-call stats accumulated
+            # since the last event. Each completed Ollama call within
+            # this event appends a stats dict to the thread-local
+            # buffer; folding them onto the job here keeps the
+            # decode-tps display fresh in step with token events.
+            _drained = _drain_llm_calls()
+            if _drained:
+                with _job_lock:
+                    if job_id in _jobs:
+                        # Cap the list at 200 so very long sessions
+                        # don't grow the job dict without bound.
+                        existing = _jobs[job_id].get("llm_calls") or []
+                        existing.extend(_drained)
+                        if len(existing) > 200:
+                            existing = existing[-200:]
+                        _jobs[job_id]["llm_calls"] = existing
     except Exception as exc:
         logger.exception("Job %s failed", job_id)
         err_evt = {"type": "error", "message": str(exc)}
@@ -7205,6 +7293,12 @@ async def get_job_stats(job_id: str):
             "stream_state": job.get("stream_state", "streaming"),
             "tokens": int(job.get("tokens", 0)),
             "tps": round(tps, 2),
+            # Phase 54.6.318 — surface the Ollama decode/prefill split
+            # to the task-bar consumer too. Browsers can render
+            # "decode 31 t/s · 92% prefill" alongside the 1.0 t/s
+            # wall-clock so users instantly see what's actually slow.
+            "decode_stats": _job_decode_stats(job),
+            "tps_windows": _job_tps_windows(job),
             "elapsed_s": round(elapsed_s, 1),
             "model_name": job.get("model_name"),
             "task_desc": job.get("task_desc") or job.get("type"),

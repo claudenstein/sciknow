@@ -137,6 +137,44 @@ def warm_up(
         return False
 
 
+# Phase 54.6.318 — per-call stats side channel.
+#
+# Ollama chunks the streamed response with the FINAL chunk carrying
+# decode/prefill timing fields (eval_count, eval_duration,
+# prompt_eval_count, prompt_eval_duration, load_duration in ns).
+# Callers (the web job runner, autowrite, CoV, etc.) want to see
+# decode tok/s separately from wall-clock tok/s — under heavy
+# prefill workloads (long contexts, multi-question CoV) the wall-
+# clock rate is dominated by prefill periods that emit no tokens,
+# so the existing 3-second rolling tps reads ~1 t/s while decode
+# is actually running at the model's native speed.
+#
+# We capture the final-chunk stats per call and stash them on a
+# thread-local list. The streamer thread (web/app.py
+# _run_generator_in_thread) drains the list after each yielded
+# event and folds the numbers into the per-job pulse so the CLI +
+# task-bar can show both rates.
+
+import threading as _threading
+
+_call_stats_local = _threading.local()
+
+
+def _record_call_stats(stats: dict) -> None:
+    """Append per-call Ollama stats to the current thread's buffer."""
+    if not hasattr(_call_stats_local, "calls"):
+        _call_stats_local.calls = []
+    _call_stats_local.calls.append(stats)
+
+
+def drain_call_stats() -> list[dict]:
+    """Pop and return all stats accumulated on this thread since the
+    last drain. Called by the web job runner after each event yield."""
+    calls = getattr(_call_stats_local, "calls", [])
+    _call_stats_local.calls = []
+    return calls
+
+
 def stream(
     system: str,
     user: str,
@@ -224,9 +262,47 @@ def stream(
         if think is not None:
             kwargs["think"] = think
         response = client.chat(**kwargs)
+        # Phase 54.6.318 — capture the final chunk's stats. Ollama
+        # streams chunks; the last one carries done=True plus the
+        # native decode/prefill timing fields. We record them all so
+        # the dashboard can compute decode tok/s (prefill-free) and
+        # surface model-load + prefill latency separately.
+        last_stats: dict = {}
         for chunk in response:
             token_count += 1
             yield chunk.message.content
+            # Inspect attribute on the chunk for `done` semantics —
+            # python ollama returns ChatResponse with `done` + timing
+            # fields populated only on the terminal chunk.
+            try:
+                if getattr(chunk, "done", False):
+                    last_stats = {
+                        "model": chosen_model,
+                        "eval_count": int(getattr(chunk, "eval_count", 0) or 0),
+                        "eval_duration_ns": int(getattr(chunk, "eval_duration", 0) or 0),
+                        "prompt_eval_count": int(getattr(chunk, "prompt_eval_count", 0) or 0),
+                        "prompt_eval_duration_ns": int(getattr(chunk, "prompt_eval_duration", 0) or 0),
+                        "load_duration_ns": int(getattr(chunk, "load_duration", 0) or 0),
+                        "total_duration_ns": int(getattr(chunk, "total_duration", 0) or 0),
+                    }
+            except Exception:
+                pass
+        if last_stats and last_stats.get("eval_count"):
+            _record_call_stats(last_stats)
+            # Compute decoded + prefill tok/s for the log line.
+            ed = (last_stats.get("eval_duration_ns") or 0) / 1e9
+            ec = last_stats.get("eval_count") or 0
+            pd = (last_stats.get("prompt_eval_duration_ns") or 0) / 1e9
+            pc = last_stats.get("prompt_eval_count") or 0
+            decode_tps = (ec / ed) if ed > 0 else 0.0
+            prefill_tps = (pc / pd) if pd > 0 else 0.0
+            logger.info(
+                "LLM perf    model=%s  decode=%dtok/%.2fs (%.1f t/s)  "
+                "prefill=%dtok/%.2fs (%.1f t/s)  load=%.2fs",
+                chosen_model, ec, ed, decode_tps,
+                pc, pd, prefill_tps,
+                (last_stats.get("load_duration_ns") or 0) / 1e9,
+            )
     except Exception as exc:
         elapsed = time.monotonic() - t0
         logger.error(

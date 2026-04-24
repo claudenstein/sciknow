@@ -2454,6 +2454,38 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
                             header_text.append(" ↓", style=C_ERR)
                         else:
                             header_text.append(" →", style=C_DIM)
+            # Phase 54.6.318 — third row: Ollama-reported decode +
+            # prefill rates. Critical diagnostic when wall-clock t/s
+            # looks low — if decode_tps is healthy (≥ model's bench
+            # rate), the workload is prefill-dominated, not slow.
+            ds = j.get("decode_stats") or {}
+            if ds.get("calls", 0) > 0:
+                d_tps = float(ds.get("decode_tps") or 0.0)
+                p_tps = float(ds.get("prefill_tps") or 0.0)
+                p_share = float(ds.get("prefill_share") or 0.0)
+                ld = float(ds.get("load_seconds") or 0.0)
+                header_text.append("\n        bk ", style=C_DIM)
+                # Colour decode tps green if ≥ 25 (good for 27B Q4),
+                # red if < 5 (likely CPU offload), dim otherwise.
+                if d_tps >= 25:
+                    d_style = C_OK
+                elif d_tps > 0 and d_tps < 5:
+                    d_style = C_ERR
+                else:
+                    d_style = C_VALUE
+                header_text.append("decode ", style=C_DIM)
+                header_text.append(f"{d_tps:.1f}t/s", style=d_style)
+                header_text.append(" · prefill ", style=C_DIM)
+                header_text.append(f"{p_tps:.0f}t/s", style=C_VALUE)
+                header_text.append(" · ", style=C_DIM)
+                # prefill_share above 80% explains why wall-clock tps is low
+                ps_pct = int(p_share * 100)
+                ps_style = C_WARN if p_share >= 0.80 else C_VALUE
+                header_text.append(f"{ps_pct}% prefill", style=ps_style)
+                header_text.append(" · ", style=C_DIM)
+                header_text.append(f"{ds.get('calls', 0)} call{'s' if ds.get('calls', 0) != 1 else ''}", style=C_VALUE)
+                if ld > 0.5:
+                    header_text.append(f" · load {ld:.1f}s", style=C_DIM)
         if len(active_jobs) > 3:
             header_text.append(
                 f"\n   [dim]…+{len(active_jobs) - 3} more jobs[/dim]",
