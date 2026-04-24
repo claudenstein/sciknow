@@ -5158,10 +5158,15 @@ def enrich(
     from sciknow.storage.models import PaperMetadata
 
     with get_session() as session:
+        # Phase 54.6.313 — also pull documents.original_path so the new
+        # XMP / full-text-regex layers can re-read the PDF when title
+        # search misses. Left-join so papers without a matching document
+        # (shouldn't happen, but…) still flow through title-only layers.
         rows = session.execute(text("""
             SELECT pm.id::text, pm.title, pm.authors, pm.arxiv_id, pm.metadata_source,
-                   pm.year, pm.abstract
+                   pm.year, pm.abstract, d.original_path
             FROM paper_metadata pm
+            LEFT JOIN documents d ON d.id = pm.document_id
             WHERE pm.doi IS NULL AND pm.title IS NOT NULL
             ORDER BY pm.year DESC NULLS LAST, pm.title
         """)).fetchall()
@@ -5185,16 +5190,83 @@ def enrich(
 
     def _lookup(row) -> tuple[str, str, PaperMeta | None, str, int | None]:
         """Pure API lookup — runs in worker thread, never touches the DB.
-        Returns (pm_id, title, meta_or_none, status, year)."""
-        pm_id, title, authors, arxiv_id, _meta_src, pm_year, pm_abstract = row
+        Returns (pm_id, title, meta_or_none, status, year).
 
-        if _is_garbage_title(title) or len(title.strip()) < 15:
-            return pm_id, title, None, "skip", pm_year
+        Phase 54.6.313 cascade (stops at first hit):
+          1. PDF XMP packet (Adobe PRISM/DC embedded DOI — publisher-grade)
+          2. First-3-page regex + Crossref-resolve validation
+          3. Crossref title search (existing)
+          4. OpenAlex title search (existing)
+          5. Semantic Scholar /match (new — purpose-built match endpoint)
+          6. DataCite /dois?query=titles.title (new — PANGAEA/Zenodo/NASA)
+          7. arXiv stub fallback (existing)
+        """
+        pm_id, title, authors, arxiv_id, _meta_src, pm_year, pm_abstract, original_path = row
 
         first_author: str | None = None
         if authors:
             first_author = (authors[0] or {}).get("name")
 
+        # Layers 1 + 2: re-read the PDF if we still have it on disk.
+        # These are *DOI-first* layers — once we have a DOI, the full
+        # Crossref layer resolves the rest of the metadata downstream.
+        # Phase 54.6.313 — runs EVEN for garbage-titled papers, because
+        # papers with "Lightfoot_JBAS" / "Action Plan" / "arXiv:…v1"
+        # style titles are exactly the cases where the PDF holds the
+        # DOI signal that the title can't give us.
+        if original_path:
+            try:
+                from pathlib import Path as _P
+                from sciknow.ingestion.enrich_sources import (
+                    extract_xmp_doi, extract_fulltext_doi,
+                )
+                from sciknow.ingestion.metadata import _layer_crossref
+                pdf = _P(original_path)
+                if pdf.exists():
+                    doi = extract_xmp_doi(pdf)
+                    xmp_hit = bool(doi)
+                    if not doi:
+                        doi = extract_fulltext_doi(
+                            pdf, max_pages=3, validate=True
+                        )
+                    if doi:
+                        stub = PaperMeta(doi=doi)
+                        _layer_crossref(stub)
+                        # Phase 54.6.313 — corroborate against the
+                        # DB title if we have one that's not garbage.
+                        # Catches "inherited XMP" false positives
+                        # (template PDFs, composite/collection PDFs)
+                        # where the embedded DOI refers to some OTHER
+                        # document. If the resolved title disagrees
+                        # sharply with ours, drop the candidate and
+                        # let the title-search layers try.
+                        if stub.title and not _is_garbage_title(title or ""):
+                            from sciknow.ingestion.enrich_sources import (
+                                _loose_title_match as _tmatch,
+                            )
+                            if _tmatch(title, stub.title) < 0.5:
+                                # Let the downstream title-search layers
+                                # try their luck; do NOT return here.
+                                stub = None
+                        if stub is not None:
+                            discovery = (
+                                "xmp_pdf" if xmp_hit else "fulltext_regex"
+                            )
+                            stub.source = (
+                                f"{stub.source}+{discovery}"
+                                if stub.source and stub.source != "unknown"
+                                else discovery
+                            )
+                            return pm_id, title, stub, "ok", pm_year
+            except Exception:
+                pass
+
+        # After the PDF-read layers, title-search is pointless for
+        # garbage titles — don't burn Crossref / OpenAlex / S2 quota.
+        if _is_garbage_title(title) or len(title.strip()) < 15:
+            return pm_id, title, None, "skip", pm_year
+
+        # Layers 3 + 4: existing title-search pipeline.
         meta = search_crossref_by_title(
             title, first_author,
             threshold=threshold,
@@ -5212,6 +5284,88 @@ def enrich(
                 author_threshold=author_threshold,
                 year_tolerance=year_tolerance,
             )
+
+        # Layer 5: Semantic Scholar /match — the purpose-built endpoint.
+        if meta is None:
+            try:
+                from sciknow.ingestion.enrich_sources import (
+                    search_semantic_scholar_match,
+                )
+                from sciknow.ingestion.metadata import _layer_crossref
+                from sciknow.utils.doi import normalize_doi
+                hit = search_semantic_scholar_match(
+                    title, first_author=first_author, year=pm_year,
+                )
+                if hit:
+                    ext = hit.get("externalIds") or {}
+                    doi = ext.get("DOI")
+                    if doi:
+                        stub = PaperMeta(doi=normalize_doi(doi))
+                        _layer_crossref(stub)
+                        if stub.title:
+                            meta = stub
+                        else:
+                            # DOI is good even without Crossref record.
+                            stub.title = hit.get("title") or title
+                            stub.year = hit.get("year")
+                            j = hit.get("journal") or {}
+                            stub.journal = j.get("name") or hit.get("venue")
+                            stub.source = "semantic_scholar_match"
+                            meta = stub
+            except Exception:
+                pass
+
+        # Layer 6: arXiv title-search (new — catches preprints where
+        # the journal-version PDF doesn't print the arXiv ID).
+        if meta is None:
+            try:
+                from sciknow.ingestion.enrich_sources import (
+                    search_arxiv_by_title,
+                )
+                from sciknow.ingestion.metadata import _layer_crossref
+                from sciknow.utils.doi import normalize_doi as _nd
+                hit = search_arxiv_by_title(
+                    title, first_author=first_author, year=pm_year,
+                )
+                if hit:
+                    stub = PaperMeta()
+                    if hit.get("doi"):
+                        stub.doi = _nd(hit["doi"])
+                        _layer_crossref(stub)
+                    if not stub.title:
+                        stub.title = hit.get("title") or title
+                        stub.year = hit.get("year")
+                        stub.arxiv_id = hit.get("arxiv_id")
+                        stub.authors = hit.get("authors") or []
+                        stub.source = "arxiv_title_search"
+                    meta = stub
+            except Exception:
+                pass
+
+        # Layer 7: DataCite (datasets / PANGAEA / Zenodo / NASA).
+        if meta is None:
+            try:
+                from sciknow.ingestion.enrich_sources import (
+                    search_datacite_by_title,
+                )
+                from sciknow.ingestion.metadata import _layer_crossref
+                hit = search_datacite_by_title(
+                    title, first_author=first_author, year=pm_year,
+                )
+                if hit and hit.get("doi"):
+                    stub = PaperMeta(doi=hit["doi"])
+                    # DataCite DOIs don't resolve in Crossref, so populate
+                    # the stub directly.
+                    stub.title = hit.get("title") or title
+                    stub.year = hit.get("year")
+                    stub.journal = hit.get("journal")
+                    stub.authors = hit.get("authors") or []
+                    stub.source = "datacite"
+                    meta = stub
+            except Exception:
+                pass
+
+        # Layer 8: arXiv stub (existing — uses the known arxiv_id).
         if meta is None and arxiv_id:
             stub = PaperMeta(arxiv_id=arxiv_id)
             _layer_arxiv(stub)
@@ -5263,17 +5417,20 @@ def enrich(
                     _emit("⚠", "red", "FAIL", "(lookup exception)", str(exc)[:80])
                     progress.advance(task)
                     continue
-                if shortlist_tsv:
-                    shortlist_rows.append({
-                        "pm_id": pm_id,
-                        "title": title or "",
-                        "year": pm_year,
-                        "status": status,
-                        "matched_doi": (meta.doi if meta else "") or "",
-                        "matched_title": (meta.title if meta else "") or "",
-                        "matched_year": (meta.year if meta else None),
-                        "source": (meta.source if meta else "") or "",
-                    })
+                # Phase 54.6.313 — always capture the source so the
+                # end-of-run per-source breakdown shows users which
+                # layer is paying for itself on their corpus. TSV
+                # dump is still gated on --shortlist-tsv.
+                shortlist_rows.append({
+                    "pm_id": pm_id,
+                    "title": title or "",
+                    "year": pm_year,
+                    "status": status,
+                    "matched_doi": (meta.doi if meta else "") or "",
+                    "matched_title": (meta.title if meta else "") or "",
+                    "matched_year": (meta.year if meta else None),
+                    "source": (meta.source if meta else "") or "",
+                })
 
                 progress.update(task, description=f"[dim]{title[:55]}[/dim]")
                 done_count += 1
@@ -5415,6 +5572,20 @@ def enrich(
         f"[dim]thresholds: title≥{threshold:.2f} single, "
         f"≥{author_threshold:.2f} + author/year dual[/dim]"
     )
+
+    # Phase 54.6.313 — per-source breakdown so the user can see which
+    # enrichment layer is actually paying for itself on this corpus.
+    if shortlist_rows:
+        from collections import Counter
+        src_counter = Counter(
+            (r.get("source") or "") for r in shortlist_rows
+            if r.get("status") == "ok" and r.get("source")
+        )
+        if src_counter:
+            console.print("\n[bold]Per-source hits:[/bold]")
+            for src, n in src_counter.most_common():
+                console.print(f"  [cyan]{src:32}[/cyan] {n}")
+
     if not dry_run and matched:
         console.print(
             f"\nRun [bold]sciknow catalog stats[/bold] to see the updated coverage."

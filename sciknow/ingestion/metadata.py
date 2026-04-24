@@ -97,6 +97,21 @@ def extract(pdf_path: Path, markdown_text: str) -> PaperMeta:
     # Layer 1: embedded PDF metadata
     _layer_pymupdf(pdf_path, meta)
 
+    # Phase 54.6.313 — Layer 1.5: PDF XMP packet. Publishers
+    # (Elsevier, Wiley, Springer, IOP, T&F) stamp the canonical DOI
+    # into the XMP PRISM/DC namespace at copy-edit time. PyMuPDF's
+    # Info dict reader misses these, but the XMP stream is a clean,
+    # near-zero-false-positive signal when present. See
+    # docs/ENRICH_RESEARCH.md §4.
+    if not meta.doi:
+        try:
+            from sciknow.ingestion.enrich_sources import extract_xmp_doi
+            xmp_doi = extract_xmp_doi(pdf_path)
+            if xmp_doi:
+                meta.doi = xmp_doi
+        except Exception:
+            pass
+
     # Scan full text for identifiers if not found in metadata
     scan_text = markdown_text[:8000]
     if not meta.doi:
@@ -105,6 +120,20 @@ def extract(pdf_path: Path, markdown_text: str) -> PaperMeta:
             meta.doi = normalize_doi(doi)
     if not meta.arxiv_id:
         meta.arxiv_id = extract_arxiv_id(scan_text)
+
+    # Phase 54.6.313 — Layer 1.6: first-3-page PDF text regex,
+    # validated against Crossref. Catches DOIs printed in footers
+    # that never made it into the Info dict or XMP (common for
+    # older scans and open-submission preprints). Validation step
+    # rejects OCR-mangled candidates before Crossref gets hit.
+    if not meta.doi:
+        try:
+            from sciknow.ingestion.enrich_sources import extract_fulltext_doi
+            ft_doi = extract_fulltext_doi(pdf_path, max_pages=3, validate=True)
+            if ft_doi:
+                meta.doi = ft_doi
+        except Exception:
+            pass
 
     # Layer 2: Crossref (by DOI)
     if meta.doi:

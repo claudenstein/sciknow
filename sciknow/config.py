@@ -155,6 +155,22 @@ class Settings(BaseSettings):
     # Crossref polite pool
     crossref_email: str = "user@example.com"
 
+    # Phase 54.6.313 — Semantic Scholar Graph API key (optional).
+    # The /graph/v1/paper/search/match endpoint works without a key but
+    # is rate-limited against a global unauth pool; with a key you get
+    # a 1 RPS guarantee (request via the email form linked from
+    # https://api.semanticscholar.org/api-docs/). Empty/missing →
+    # fall back to the unauth pool; the enrich layer handles 429s by
+    # backing off and returning no match instead of crashing.
+    semantic_scholar_api_key: str | None = None
+
+    # Phase 54.6.313 — Unpaywall email for DOI→OA disambiguation.
+    # Only used by the validation helper that fetches the OA HTML
+    # and greps <meta name="citation_doi"> as a ground-truth echo.
+    # Required by Unpaywall's ToS; when unset the validator
+    # silently skips (pipeline still works).
+    unpaywall_email: str | None = None
+
     # Phase 54.6.217 (roadmap 3.0.1 closure) — CORE (core.ac.uk) API
     # key. Free after registering at https://core.ac.uk/services/api;
     # the downloader uses it to query CORE's aggregator of
