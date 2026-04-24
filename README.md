@@ -274,16 +274,16 @@ over ≥10 min — each swap costs 5-10 s of Ollama cold-load, so
 15/hr = ~3 min of pipeline cold-loads per hour, worth surfacing.
 
 **Phase 54.6.313** implements the top-ROI DOI recovery strategies
-from `docs/ENRICH_RESEARCH.md` as seven new layers in the `db enrich`
+from `docs/ENRICH_RESEARCH.md` as nine new layers in the `db enrich`
 cascade, **plus** a latent bug in the existing Crossref/OpenAlex
 title-search where garbage `first_author` strings (`Usuario` /
 `Propietario` / `Benutzer` / `ASUS` / `hy` …) were being passed as
 search filters and starving the result set. **Measured on the full
 217-paper no-DOI subset of the global-cooling corpus**: the old
 pipeline (pure Crossref + OpenAlex title search) matched 2 papers;
-the new pipeline matched **61 papers** — a **30×+ improvement** in
-recovery rate. Corpus-wide DOI coverage crossed **80 %** (646 / 807)
-as a result. Breakdown of the 61 hits after all iterations:
+the new pipeline matched **63 papers** — a **31× improvement** in
+recovery rate. Corpus-wide DOI coverage crossed **80.9 %** (653 / 807)
+as a result. Breakdown of the 63 hits after all iterations:
 
 - **18 via `crossref+recovered_title`** — `recover_title_from_pdf`
   extracts the largest-font line in the top 40% of page 1 and uses
@@ -297,13 +297,29 @@ as a result. Breakdown of the 61 hits after all iterations:
 - **11 via `crossref+fulltext_regex`** — regex scan of the first 3
   pages for `10.xxxx/yyyy` patterns, each candidate validated via
   Crossref `/works/{doi}` to reject OCR-mangled strings.
+- **6 via `crossref+filename_doi`** — the downloader persists DOI-
+  fetched PDFs as `10.xxxx_suffix.pdf`; the filename is parsed and
+  validated against Crossref before acceptance. Cheapest + highest-
+  precision signal; runs first in the PDF-read layer order.
 - **5 via `arxiv_id_in_title`** — fast path for rows whose DB title
   is literally an arXiv stamp (`arXiv:astro-ph/0207637v1  29 Jul
   2002`). The `_ARXIV_OLD` regex needed a `(?:v\d+)?` tweak to
   accept the version suffix — that fix caught 5 rows the cascade
-  had been silently dropping.
+  had been silently dropping. (3 of these subsequently got full
+  journal-version DOIs via Crossref in a later pass; 2 carry
+  arXiv-issued DataCite DOIs under the 10.48550/arxiv prefix.)
 - **2 via bare `crossref`** — the baseline title-search path.
-- **1 via `datacite`** — PANGAEA/Zenodo/NASA DOIs for datasets.
+- **3 via `datacite`** — DOIs under 10.48550/arxiv / PANGAEA /
+  Zenodo / NASA prefixes.
+
+An optional `--llm-fallback` flag adds one more layer: when every
+other source misses and the DB title is still garbage, ship the
+PDF's first 3 pages to `settings.llm_fast_model` with a narrow
+"return only the title" prompt and retry the title-search cascade.
+Slow (~5–15 s per row); off by default because it added 0 matches
+on this corpus (the residuals are genuinely not in any DOI index),
+but useful on other corpora with mainstream papers having garbled
+DB titles.
 
 New layers also wired but low-volume on this corpus: Semantic
 Scholar `/graph/v1/paper/search/match` (with process-wide token
