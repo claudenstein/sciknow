@@ -12045,6 +12045,58 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_317_dashboard_tps_windows() -> None:
+    """Phase 54.6.317 — CLI monitor renders multi-window tok/s MAs.
+
+    Guards:
+
+      A) ``_job_tps_windows`` exists in the web app and returns a dict
+         keyed on the four standard windows (w10s / w1m / w5m / w30m).
+      B) The web-jobs pulse payload includes ``tps_windows``.
+      C) The CLI monitor layout reads ``tps_windows`` and renders an
+         "MA " line keyed on elapsed (10s always, 1m at 60s+, 5m at
+         300s+, 30m at 1800s+).
+    """
+    import inspect as _inspect
+    from sciknow.web import app as _web
+
+    # A) helper exists with the right shape
+    assert hasattr(_web, "_job_tps_windows"), (
+        "54.6.317 — _job_tps_windows must exist in sciknow.web.app"
+    )
+    src = _inspect.getsource(_web._job_tps_windows)
+    for tag in ("w10s", "w1m", "w5m", "w30m"):
+        assert tag in src, (
+            f"54.6.317 — _job_tps_windows must populate {tag!r}"
+        )
+
+    # B) pulse payload carries tps_windows
+    pulse_src = _inspect.getsource(_web._write_web_jobs_pulse)
+    assert '"tps_windows"' in pulse_src, (
+        "54.6.317 — pulse payload must include tps_windows so the CLI "
+        "monitor can read multi-window MAs without a second source"
+    )
+
+    # C) CLI dashboard renders the MA line
+    from sciknow.cli import db as _db_cli
+    cli_src = _inspect.getsource(_db_cli._build_monitor_layout)
+    assert "tps_windows" in cli_src, (
+        "54.6.317 — CLI monitor must consume snap pulse's tps_windows"
+    )
+    assert '"w10s"' in cli_src or "w10s" in cli_src, (
+        "54.6.317 — CLI monitor must reference the w10s window"
+    )
+    assert "elapsed >= 60" in cli_src, (
+        "54.6.317 — CLI must gate the 1m MA on elapsed >= 60s"
+    )
+    assert "elapsed >= 300" in cli_src, (
+        "54.6.317 — CLI must gate the 5m MA on elapsed >= 300s"
+    )
+    assert "elapsed >= 1800" in cli_src, (
+        "54.6.317 — CLI must gate the 30m MA on elapsed >= 1800s"
+    )
+
+
 def l1_phase54_6_313_enrich_sources_surface() -> None:
     """Phase 54.6.313 — new db-enrich sources and cascade wiring.
 
@@ -17590,6 +17642,8 @@ L1_TESTS: list[Callable] = [
     # Phase 54.6.313 — new db-enrich sources (XMP / fulltext regex /
     # title recovery / S2 /match / Europe PMC / arXiv title / DataCite)
     l1_phase54_6_313_enrich_sources_surface,
+    # Phase 54.6.317 — CLI monitor multi-window tok/s MAs
+    l1_phase54_6_317_dashboard_tps_windows,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]

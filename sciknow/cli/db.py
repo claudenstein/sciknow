@@ -2421,6 +2421,39 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
             )
             header_text.append_text(Text.from_markup(tps_style))
             header_text.append(f" · {elapsed_str}", style=C_VALUE)
+            # Phase 54.6.317 — multi-window moving averages on a second
+            # row. Window list is keyed off elapsed so we never render
+            # an MA window the job hasn't lived long enough to fill.
+            wins = j.get("tps_windows") or {}
+            ma_parts: list[tuple[str, float]] = []
+            ma_parts.append(("10s", wins.get("w10s", 0.0)))
+            if elapsed >= 60:
+                ma_parts.append(("1m", wins.get("w1m", 0.0)))
+            if elapsed >= 300:
+                ma_parts.append(("5m", wins.get("w5m", 0.0)))
+            if elapsed >= 1800:
+                ma_parts.append(("30m", wins.get("w30m", 0.0)))
+            if ma_parts and elapsed >= 10:
+                header_text.append("\n        MA ", style=C_DIM)
+                for i, (label, val) in enumerate(ma_parts):
+                    if i:
+                        header_text.append(" · ", style=C_DIM)
+                    header_text.append(f"{label} ", style=C_DIM)
+                    header_text.append(f"{val:.1f}", style=C_VALUE)
+                # Trend arrow: instantaneous (10s) vs the longest
+                # window we're showing — gives a quick "speeding up /
+                # slowing down" cue.
+                if len(ma_parts) >= 2:
+                    fast = ma_parts[0][1]
+                    slow = ma_parts[-1][1]
+                    if slow > 0.5:
+                        ratio = fast / slow
+                        if ratio >= 1.10:
+                            header_text.append(" ↑", style=C_OK)
+                        elif ratio <= 0.90:
+                            header_text.append(" ↓", style=C_ERR)
+                        else:
+                            header_text.append(" →", style=C_DIM)
         if len(active_jobs) > 3:
             header_text.append(
                 f"\n   [dim]…+{len(active_jobs) - 3} more jobs[/dim]",

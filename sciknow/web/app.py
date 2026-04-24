@@ -188,8 +188,10 @@ def _create_job(job_type: str) -> tuple[str, asyncio.Queue]:
             # written to a TIMESTAMPTZ column.
             "started_wall": datetime.now(timezone.utc),
             "tokens": 0,
-            # 200-token rolling window is enough for ~30s of fast LLMs
-            "token_timestamps": deque(maxlen=200),
+            # Phase 54.6.317 — bumped to 20000 so multi-window MAs
+            # (10s / 1m / 5m / 30m) have enough history for the slow
+            # tail. ~160 KB worst case per job, negligible.
+            "token_timestamps": deque(maxlen=20000),
             "model_name": None,
             "task_desc": job_type,
             "target_words": None,
@@ -227,6 +229,39 @@ def _job_tps(job: dict, *, window_s: float = 3.0) -> float:
     cutoff = now - window_s
     recent = sum(1 for t in ts if t >= cutoff)
     return (recent / window_s) if recent else 0.0
+
+
+def _job_tps_windows(job: dict) -> dict:
+    """Phase 54.6.317 — rolling tokens-per-second over four standard
+    windows: 10 s (instantaneous-ish), 1 min, 5 min, 30 min. Each
+    window is normalised by its own duration so values are directly
+    comparable.
+
+    The CLI dashboard picks which windows to show based on how long
+    the job has been running:
+
+    - elapsed <    1 min: only ``w10s`` is meaningful; longer windows
+                          would just be the same number with lower
+                          resolution (a window can't "average" data it
+                          doesn't have yet).
+    - elapsed >=   1 min: add ``w1m``.
+    - elapsed >=   5 min: add ``w5m``.
+    - elapsed >=  30 min: add ``w30m``.
+
+    Returns a dict ``{"w10s": float, "w1m": float, "w5m": float, "w30m": float}``.
+    Zeros for windows with no data are kept in the response so the
+    consumer always sees the same shape.
+    """
+    ts = job.get("token_timestamps") or deque()
+    if not ts:
+        return {"w10s": 0.0, "w1m": 0.0, "w5m": 0.0, "w30m": 0.0}
+    now = time.monotonic()
+    out: dict[str, float] = {}
+    for tag, secs in (("w10s", 10.0), ("w1m", 60.0), ("w5m", 300.0), ("w30m", 1800.0)):
+        cutoff = now - secs
+        n = sum(1 for t in ts if t >= cutoff)
+        out[tag] = round(n / secs, 2) if n else 0.0
+    return out
 
 
 def _write_web_jobs_pulse() -> None:
@@ -271,6 +306,9 @@ def _write_web_jobs_pulse() -> None:
                 "model": j.get("model_name"),
                 "tokens": j.get("tokens", 0),
                 "tps": round(_job_tps(j), 2),
+                # Phase 54.6.317 — multi-window MAs so the dashboard
+                # can show 10s / 1m / 5m / 30m bands keyed off elapsed.
+                "tps_windows": _job_tps_windows(j),
                 "target_words": j.get("target_words"),
                 "elapsed_s": max(0.0, now - started),
                 "stream_state": j.get("stream_state"),
