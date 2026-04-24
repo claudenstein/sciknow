@@ -273,6 +273,42 @@ and the web modal renders a "Model swap churn" panel with the last
 over ≥10 min — each swap costs 5-10 s of Ollama cold-load, so
 15/hr = ~3 min of pipeline cold-loads per hour, worth surfacing.
 
+**Phase 54.6.313** implements the top-ROI DOI recovery strategies
+from `docs/ENRICH_RESEARCH.md` as five new layers in the `db enrich`
+cascade. **Measured on a 217-paper no-DOI subset of the global-
+cooling corpus**: the old pipeline (pure Crossref + OpenAlex title
+search) matched 2 papers; the new pipeline matched **45 papers** — a
+22× improvement in recovery rate. Breakdown of the 45 hits:
+
+- **18 via `crossref+recovered_title`** — `recover_title_from_pdf`
+  extracts the largest-font line in the top 40% of page 1 and uses
+  it as a search title for rows whose DB `title` was a garbage
+  artefact like `iau1200511a`, `Mishev-2.dvi`, or `qjpaper.dvi`.
+  Then the existing Crossref title-search resolves it.
+- **13 via `crossref+xmp_pdf`** — parses the Adobe PRISM/DC
+  namespace in the PDF's XMP packet (Elsevier/Wiley/Springer/IOP
+  stamp `prism:doi` at copy-edit time). Near-zero false positives
+  with a title-corroboration gate for inherited-XMP cases.
+- **11 via `crossref+fulltext_regex`** — regex scan of the first 3
+  pages for `10.xxxx/yyyy` patterns, each candidate validated via
+  Crossref `/works/{doi}` to reject OCR-mangled strings.
+- **2 via bare `crossref`** — the baseline title-search path.
+- **1 via `datacite`** — PANGAEA/Zenodo/NASA DOIs for datasets.
+
+New layers also wired but low-volume on this corpus: Semantic
+Scholar `/graph/v1/paper/search/match` (with process-wide token
+bucket for 1-RPS unauth pool + exp. backoff on 429; supports
+`SEMANTIC_SCHOLAR_API_KEY`), arXiv title+author search via the Atom
+API, and Europe PMC title search for the climate-health /
+agricultural-science overlap.
+
+All new code is in `sciknow/ingestion/enrich_sources.py`; the
+cascade wiring is in `sciknow/cli/db.py::enrich._lookup`. The
+enrich row lookup now LEFT-JOINs `documents.original_path` so the
+PDF-read layers can read the file. End-of-run prints a per-source
+hit breakdown so the user can see which layer pays for itself on
+their corpus.
+
 **Phase 54.6.312** is a GUI polish drop addressing five user reports
 against the 54.6.309 bibliography / visuals-panel work:
 

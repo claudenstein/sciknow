@@ -452,7 +452,98 @@ def search_datacite_by_title(
     return None
 
 
-# ── 6. arXiv title-search (preprints) ──────────────────────────────────
+# ── 6. Europe PMC (life-sci / climate-health) ──────────────────────────
+
+def search_europepmc_by_title(
+    title: str,
+    *,
+    first_author: str | None = None,
+    year: int | None = None,
+    timeout: float = 15.0,
+) -> dict | None:
+    """Search Europe PMC REST for title matches.
+
+    Europe PMC indexes 33M life-science records (PubMed + Agricola +
+    patents + full-text OA). Strong coverage for anything in the
+    climate-health overlap, the agricultural-science periphery, and
+    the WHO / FAO grey-literature space. Free, no auth.
+
+    Returns:
+        Dict with {doi, pmid, pmcid, title, year, authors, journal}
+        or None on miss.
+    """
+    if not title or len(title.strip()) < 10:
+        return None
+
+    # Europe PMC's Lucene-ish query DSL: TITLE:"<phrase>" for title
+    # field search. The phrase form is tolerant because the field is
+    # already tokenised; no need for our own OR-expansion.
+    safe_title = title.replace('"', " ").strip()
+    params = {
+        "query": f'TITLE:"{safe_title[:200]}"',
+        "format": "json",
+        "pageSize": 10,
+        "resultType": "core",  # full record, incl. DOI/PMID/authors
+    }
+    headers = {"User-Agent": f"sciknow/0.1 (mailto:{settings.crossref_email})"}
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.get(
+                "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+                params=params, headers=headers,
+            )
+        if resp.status_code != 200:
+            return None
+        body = resp.json() or {}
+    except Exception as exc:
+        logger.debug("Europe PMC network error: %s", exc)
+        return None
+
+    hits = (body.get("resultList") or {}).get("result") or []
+    for h in hits:
+        h_title = (h.get("title") or "").strip().rstrip(".")
+        if not h_title:
+            continue
+        if _loose_title_match(title, h_title) < 0.85:
+            continue
+        h_year = None
+        try:
+            h_year = int(str(h.get("pubYear") or "")[:4])
+        except Exception:
+            pass
+        if year and h_year and abs(h_year - int(year)) > 1:
+            continue
+        if first_author:
+            surnames_ours = _surnames_set(first_author)
+            surnames_hit: set[str] = set()
+            # authorString is "Surname F1, Surname F2, …"
+            for seg in (h.get("authorString") or "").split(","):
+                surnames_hit |= _surnames_set(seg.strip())
+            if surnames_ours and surnames_hit and not (surnames_ours & surnames_hit):
+                continue
+        doi = (h.get("doi") or "").strip()
+        try:
+            doi = normalize_doi(doi) if doi else None
+        except Exception:
+            doi = None
+        return {
+            "doi": doi,
+            "pmid": h.get("pmid"),
+            "pmcid": h.get("pmcid"),
+            "title": h_title,
+            "year": h_year,
+            "authors": [
+                {"name": seg.strip()}
+                for seg in (h.get("authorString") or "").split(",")
+                if seg.strip()
+            ],
+            "journal": h.get("journalTitle"),
+            "source_id": h.get("source"),   # e.g. MED, PMC, AGR
+        }
+    return None
+
+
+# ── 7. arXiv title-search (preprints) ──────────────────────────────────
 
 def search_arxiv_by_title(
     title: str,

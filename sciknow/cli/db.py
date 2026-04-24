@@ -5338,6 +5338,32 @@ def enrich(
             except Exception:
                 pass
 
+        # Layer 5.5: Europe PMC (life-sci, climate-health, WHO/FAO
+        # grey-literature). Free, no auth, well-indexed titles.
+        if meta is None:
+            try:
+                from sciknow.ingestion.enrich_sources import (
+                    search_europepmc_by_title,
+                )
+                from sciknow.ingestion.metadata import _layer_crossref
+                hit = search_europepmc_by_title(
+                    search_title, first_author=first_author, year=pm_year,
+                )
+                if hit:
+                    stub = PaperMeta()
+                    if hit.get("doi"):
+                        stub.doi = hit["doi"]
+                        _layer_crossref(stub)
+                    if not stub.title:
+                        stub.title = hit.get("title") or search_title
+                        stub.year = hit.get("year")
+                        stub.journal = hit.get("journal")
+                        stub.authors = hit.get("authors") or []
+                        stub.source = "europepmc"
+                    meta = stub
+            except Exception:
+                pass
+
         # Layer 6: arXiv title-search (new — catches preprints where
         # the journal-version PDF doesn't print the arXiv ID).
         if meta is None:
