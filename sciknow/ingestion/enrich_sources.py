@@ -763,6 +763,86 @@ def search_openlibrary_by_title(
     return None
 
 
+# ── 8.5. LLM-assisted title recovery (last-resort) ──────────────────────
+
+def llm_recover_title(
+    pdf_path: Path | str,
+    *,
+    max_chars: int = 3500,
+) -> str | None:
+    """Ollama-based title recovery when geometric layout fails.
+
+    Extracts the first ``max_chars`` of the PDF as text and asks the
+    fast LLM to return the paper's canonical title. Does NOT touch
+    abstract/authors/year — those are recovered by the normal
+    metadata pipeline once we have a title and hit Crossref. Keeping
+    the prompt narrow (title-only) minimises hallucination + tokens.
+
+    Returns:
+        Cleaned title string (or None on failure / hallucinated garbage).
+    """
+    try:
+        doc = pymupdf.open(str(pdf_path))
+        text = ""
+        for i in range(min(3, doc.page_count)):
+            try:
+                text += doc.load_page(i).get_text("text") + "\n"
+            except Exception:
+                pass
+        doc.close()
+        if not text.strip():
+            return None
+        text = text[:max_chars]
+    except Exception as exc:
+        logger.debug("llm_recover_title: PDF open failed: %s", exc)
+        return None
+
+    try:
+        import ollama
+    except ImportError:
+        return None
+
+    prompt = (
+        "You will be given the first few pages of a scientific paper. "
+        "Return ONLY the paper's title as a single line of text — no "
+        "JSON, no labels, no quotes, no author names, no year, no "
+        "journal. If you cannot identify a clear title (e.g. the text "
+        "is a blog post, a government report, a letter, or otherwise "
+        "untitled), return exactly the string NO_TITLE.\n\n"
+        "Text:\n" + text
+    )
+    try:
+        client = ollama.Client(
+            host=settings.ollama_host, timeout=45
+        )
+        response = client.chat(
+            model=settings.llm_fast_model,
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0, "num_predict": 120},
+            keep_alive=-1,
+        )
+        raw = (response.message.content or "").strip()
+    except Exception as exc:
+        logger.debug("llm_recover_title: Ollama call failed: %s", exc)
+        return None
+
+    if not raw or raw == "NO_TITLE":
+        return None
+    # Strip common wrappers the model sometimes emits despite the prompt.
+    raw = raw.strip('"\'*_#').strip()
+    # One line only — in case the model wrote "Title: X" or similar.
+    raw = raw.split("\n", 1)[0].strip()
+    raw = re.sub(r"^(?i)title[:\s]+", "", raw).strip()
+    if len(raw) < 10 or len(raw) > 300:
+        return None
+    # Reject obviously-hallucinated outputs.
+    lowered = raw.lower()
+    for bad in ("no title", "unknown", "not applicable", "n/a"):
+        if bad in lowered:
+            return None
+    return raw
+
+
 # ── 8. Title-recovery from PDF (fallback for garbage-titled rows) ───────
 
 def recover_title_from_pdf(

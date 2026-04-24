@@ -5117,6 +5117,13 @@ def enrich(
     shortlist_tsv: Path = typer.Option(None, "--shortlist-tsv",
                                         help="Dump every paper + its best candidate + all three signals to this "
                                              "TSV for HITL review. Useful for tuning thresholds or manual DOI entry."),
+    llm_fallback: bool = typer.Option(False, "--llm-fallback",
+                                       help="Phase 54.6.313h — last-resort: when every other layer misses, "
+                                            "feed the PDF's first 3 pages to the fast LLM (settings.llm_fast_model) "
+                                            "and ask for the paper's title, then retry title-search. Slow "
+                                            "(~5–15 s per row); off by default. Use after a normal enrich pass "
+                                            "to chase the long tail of papers whose garbage DB titles hid a "
+                                            "recoverable one."),
     limit:     int   = typer.Option(0,      "--limit",     help="Max papers to process (0 = all)."),
     delay:     float = typer.Option(0.2,    "--delay",     help="Seconds between Crossref API calls (be polite)."),
 ):
@@ -5296,6 +5303,7 @@ def enrich(
         # proper title visible but the DB row never got it.
         search_title = title
         recovered_title: str | None = None
+        llm_recovered: bool = False
         if original_path and (_is_garbage_title(title) or len(title.strip()) < 15):
             try:
                 from pathlib import Path as _P
@@ -5310,6 +5318,29 @@ def enrich(
                         search_title = cand
             except Exception:
                 pass
+
+            # Phase 54.6.313h — LLM fallback: if the geometric layout
+            # heuristic didn't produce a usable title (returns None or
+            # a still-garbage string), and --llm-fallback is on, ask
+            # the fast LLM. Slow but catches cases where the real
+            # title is scattered across multiple lines or buried in
+            # body text.
+            if (llm_fallback and not recovered_title
+                    and (_is_garbage_title(search_title) or len(search_title.strip()) < 15)):
+                try:
+                    from pathlib import Path as _P
+                    from sciknow.ingestion.enrich_sources import (
+                        llm_recover_title,
+                    )
+                    pdf = _P(original_path)
+                    if pdf.exists():
+                        cand = llm_recover_title(pdf)
+                        if cand and not _is_garbage_title(cand):
+                            recovered_title = cand
+                            search_title = cand
+                            llm_recovered = True
+                except Exception:
+                    pass
 
         if (_is_garbage_title(search_title) or len(search_title.strip()) < 15):
             return pm_id, title, None, "skip", pm_year
@@ -5448,14 +5479,16 @@ def enrich(
             if stub.title:
                 meta = stub
 
-        # Annotate the source with "+recovered_title" so the per-source
-        # breakdown attributes hits correctly when title-recovery was
-        # in the chain.
+        # Annotate the source with "+recovered_title" (or
+        # "+llm_recovered_title") so the per-source breakdown
+        # attributes hits correctly when title-recovery was in the
+        # chain.
         if meta is not None and recovered_title:
+            tag = "llm_recovered_title" if llm_recovered else "recovered_title"
             if meta.source and meta.source != "unknown":
-                meta.source = f"{meta.source}+recovered_title"
+                meta.source = f"{meta.source}+{tag}"
             else:
-                meta.source = "recovered_title"
+                meta.source = tag
 
         return pm_id, title, meta, "ok" if meta else "no_match", pm_year
 
