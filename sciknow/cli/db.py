@@ -5232,17 +5232,25 @@ def enrich(
         # papers with "Lightfoot_JBAS" / "Action Plan" / "arXiv:…v1"
         # style titles are exactly the cases where the PDF holds the
         # DOI signal that the title can't give us.
+        # Phase 54.6.313g — filename-encoded DOI is the cheapest +
+        # highest-precision signal for sciknow-downloaded papers
+        # (downloader persists as `10.xxxx_suffix.pdf`). Validated
+        # against Crossref before acceptance.
         if original_path:
             try:
                 from pathlib import Path as _P
                 from sciknow.ingestion.enrich_sources import (
-                    extract_xmp_doi, extract_fulltext_doi,
+                    extract_xmp_doi, extract_fulltext_doi, extract_filename_doi,
                 )
                 from sciknow.ingestion.metadata import _layer_crossref
                 pdf = _P(original_path)
                 if pdf.exists():
-                    doi = extract_xmp_doi(pdf)
-                    xmp_hit = bool(doi)
+                    doi = extract_filename_doi(pdf, validate=True)
+                    fname_hit = bool(doi)
+                    xmp_hit = False
+                    if not doi:
+                        doi = extract_xmp_doi(pdf)
+                        xmp_hit = bool(doi)
                     if not doi:
                         doi = extract_fulltext_doi(
                             pdf, max_pages=3, validate=True
@@ -5268,7 +5276,8 @@ def enrich(
                                 stub = None
                         if stub is not None:
                             discovery = (
-                                "xmp_pdf" if xmp_hit else "fulltext_regex"
+                                "filename_doi" if fname_hit else
+                                ("xmp_pdf" if xmp_hit else "fulltext_regex")
                             )
                             stub.source = (
                                 f"{stub.source}+{discovery}"

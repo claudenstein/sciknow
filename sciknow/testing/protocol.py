@@ -12076,6 +12076,7 @@ def l1_phase54_6_313_enrich_sources_surface() -> None:
 
     # A) adapters exist
     for name in (
+        "extract_filename_doi",
         "extract_xmp_doi",
         "extract_fulltext_doi",
         "validate_doi_resolves",
@@ -12102,6 +12103,7 @@ def l1_phase54_6_313_enrich_sources_surface() -> None:
     # C) CLI _lookup references every new layer
     enrich_src = _inspect.getsource(_db_cli.enrich)
     for layer in (
+        "extract_filename_doi",
         "extract_xmp_doi",
         "extract_fulltext_doi",
         "recover_title_from_pdf",
@@ -12126,7 +12128,7 @@ def l1_phase54_6_313_enrich_sources_surface() -> None:
 
     # E) source tag surfaced
     for tag in ("xmp_pdf", "fulltext_regex", "recovered_title",
-                "arxiv_id_in_title"):
+                "arxiv_id_in_title", "filename_doi"):
         assert tag in enrich_src, (
             f"54.6.313 CLI enrich must tag meta.source with {tag!r} "
             "so the per-source breakdown attributes hits correctly"

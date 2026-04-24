@@ -126,6 +126,58 @@ def extract_xmp_doi(pdf_path: Path | str) -> str | None:
     return None
 
 
+# ── 1.5. Filename-encoded DOI ───────────────────────────────────────────
+
+# The sciknow downloader persists PDFs as ``<doi_slashes_to_underscores>.pdf``
+# for papers fetched by DOI, so many on-disk files encode the
+# canonical DOI directly in the filename — faster + more reliable than
+# reading the XMP or first-3-page body when present. We still validate
+# the candidate against Crossref before accepting, to kill any
+# renamed-by-hand / OCR-mangled filenames.
+_FILENAME_DOI_RE = re.compile(
+    r"(10\.\d{4,5})[_\-](.+?)(?:\.pdf)?$",
+    re.IGNORECASE,
+)
+
+
+def extract_filename_doi(
+    pdf_path: Path | str,
+    *,
+    validate: bool = True,
+) -> str | None:
+    """Recover a DOI from the PDF's filename when the sciknow downloader
+    persisted it as ``10.NNNN_suffix.pdf``.
+
+    Returns:
+        Normalised DOI (validated via Crossref when ``validate=True``)
+        or None.
+    """
+    try:
+        from pathlib import Path as _P
+        fn = _P(str(pdf_path)).name
+    except Exception:
+        return None
+    m = _FILENAME_DOI_RE.search(fn)
+    if not m:
+        return None
+    # Reassemble: "10.1017" + "/" + "s1743921311015195"
+    cand = f"{m.group(1)}/{m.group(2).rstrip('.pdf')}".lower()
+    # Normalise common downloader substitutions:
+    #   "_" in the suffix often replaces "/" in multi-part DOIs (10.1017/S174392…)
+    # but that's rare — most are single-slash. Leave as-is and validate.
+    try:
+        cand = normalize_doi(cand)
+    except Exception:
+        return None
+    if not re.match(r"^10\.\d{4,9}/", cand):
+        return None
+    if not validate:
+        return cand
+    if validate_doi_resolves(cand):
+        return cand
+    return None
+
+
 # ── 2. First-3-page regex DOI scrape ────────────────────────────────────
 
 _FULLTEXT_DOI_RE = re.compile(r"\b(10\.\d{4,9}/[-._;()/:\w]+)", re.IGNORECASE)
