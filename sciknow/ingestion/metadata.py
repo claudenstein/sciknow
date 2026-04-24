@@ -178,6 +178,13 @@ _GARBAGE_TITLE_RE = re.compile(
     r'|(^presentation\d*$)'
     r'|(^doi\s*:)'                                      # "doi:10.1016/..."
     r'|(^10\.\d{4,}/)'                                  # bare DOI starting with "10."
+    # Phase 54.6.313i — "._NNNN …" — stripped-prefix DOI (missing
+    # leading "10"). Shows up when the ingest metadata layer chopped
+    # the DOI's first two characters while deriving a title from the
+    # filename. Title-search against such strings is always hopeless;
+    # treat them as garbage so the PDF-read cascade's title-
+    # corroboration gate doesn't reject a validated filename_doi hit.
+    r'|(^\.\d{4,}[\s_/])'
     r'|(^[a-z]{1,6}\d+$)'                               # short codes: "Avery6", "Avery8"
     r'|(^(preprint|draft|confidential|final|version)\s*[\d.]*$)'  # status markers
     r'|(.*_.*_.*)'                                      # 2+ underscores → report/filename code
