@@ -274,11 +274,11 @@ over ≥10 min — each swap costs 5-10 s of Ollama cold-load, so
 15/hr = ~3 min of pipeline cold-loads per hour, worth surfacing.
 
 **Phase 54.6.313** implements the top-ROI DOI recovery strategies
-from `docs/ENRICH_RESEARCH.md` as five new layers in the `db enrich`
-cascade. **Measured on a 217-paper no-DOI subset of the global-
-cooling corpus**: the old pipeline (pure Crossref + OpenAlex title
-search) matched 2 papers; the new pipeline matched **45 papers** — a
-22× improvement in recovery rate. Breakdown of the 45 hits:
+from `docs/ENRICH_RESEARCH.md` as seven new layers in the `db enrich`
+cascade. **Measured on the full 217-paper no-DOI subset of the
+global-cooling corpus**: the old pipeline (pure Crossref + OpenAlex
+title search) matched 2 papers; the new pipeline matched
+**50 papers** — a **25× improvement** in recovery rate. Breakdown:
 
 - **18 via `crossref+recovered_title`** — `recover_title_from_pdf`
   extracts the largest-font line in the top 40% of page 1 and uses
@@ -292,6 +292,11 @@ search) matched 2 papers; the new pipeline matched **45 papers** — a
 - **11 via `crossref+fulltext_regex`** — regex scan of the first 3
   pages for `10.xxxx/yyyy` patterns, each candidate validated via
   Crossref `/works/{doi}` to reject OCR-mangled strings.
+- **5 via `arxiv_id_in_title`** — fast path for rows whose DB title
+  is literally an arXiv stamp (`arXiv:astro-ph/0207637v1  29 Jul
+  2002`). The `_ARXIV_OLD` regex needed a `(?:v\d+)?` tweak to
+  accept the version suffix — that fix caught 5 rows the cascade
+  had been silently dropping.
 - **2 via bare `crossref`** — the baseline title-search path.
 - **1 via `datacite`** — PANGAEA/Zenodo/NASA DOIs for datasets.
 
@@ -300,7 +305,15 @@ Scholar `/graph/v1/paper/search/match` (with process-wide token
 bucket for 1-RPS unauth pool + exp. backoff on 429; supports
 `SEMANTIC_SCHOLAR_API_KEY`), arXiv title+author search via the Atom
 API, and Europe PMC title search for the climate-health /
-agricultural-science overlap.
+agricultural-science overlap. The residual 167 no-matches are
+foreign-language grey literature (Spanish volcanology), AIAA
+conference proceedings, blog posts, and pre-DOI-era works — no DOI
+index carries them.
+
+L1 regression test `l1_phase54_6_313_enrich_sources_surface` pins
+all new source adapters, the cascade wiring, the
+`documents.original_path` JOIN, the source-tagging contract, the
+S2 rate-limiter + backoff, and the XMP title-corroboration gate.
 
 All new code is in `sciknow/ingestion/enrich_sources.py`; the
 cascade wiring is in `sciknow/cli/db.py::enrich._lookup`. The
