@@ -5261,14 +5261,37 @@ def enrich(
             except Exception:
                 pass
 
-        # After the PDF-read layers, title-search is pointless for
-        # garbage titles — don't burn Crossref / OpenAlex / S2 quota.
-        if _is_garbage_title(title) or len(title.strip()) < 15:
+        # After the PDF-read layers, title-search needs a real title.
+        # Phase 54.6.313 — for garbage db titles, try to recover a
+        # better title from the PDF's first-page layout (largest-font
+        # line in the top 40 % of page 1). This lets title-search help
+        # papers like "iau1200511a" / "Mishev-2.dvi" whose PDF has a
+        # proper title visible but the DB row never got it.
+        search_title = title
+        recovered_title: str | None = None
+        if original_path and (_is_garbage_title(title) or len(title.strip()) < 15):
+            try:
+                from pathlib import Path as _P
+                from sciknow.ingestion.enrich_sources import (
+                    recover_title_from_pdf,
+                )
+                pdf = _P(original_path)
+                if pdf.exists():
+                    cand = recover_title_from_pdf(pdf)
+                    if cand and not _is_garbage_title(cand):
+                        recovered_title = cand
+                        search_title = cand
+            except Exception:
+                pass
+
+        if (_is_garbage_title(search_title) or len(search_title.strip()) < 15):
             return pm_id, title, None, "skip", pm_year
 
-        # Layers 3 + 4: existing title-search pipeline.
+        # Layers 3 + 4: existing title-search pipeline. Uses the
+        # PDF-recovered title for garbage-titled rows; otherwise the
+        # DB title as-is.
         meta = search_crossref_by_title(
-            title, first_author,
+            search_title, first_author,
             threshold=threshold,
             year=pm_year,
             our_abstract=pm_abstract,
@@ -5277,7 +5300,7 @@ def enrich(
         )
         if meta is None:
             meta = search_openalex_by_title(
-                title, first_author,
+                search_title, first_author,
                 threshold=threshold,
                 year=pm_year,
                 our_abstract=pm_abstract,
@@ -5294,7 +5317,7 @@ def enrich(
                 from sciknow.ingestion.metadata import _layer_crossref
                 from sciknow.utils.doi import normalize_doi
                 hit = search_semantic_scholar_match(
-                    title, first_author=first_author, year=pm_year,
+                    search_title, first_author=first_author, year=pm_year,
                 )
                 if hit:
                     ext = hit.get("externalIds") or {}
@@ -5325,7 +5348,7 @@ def enrich(
                 from sciknow.ingestion.metadata import _layer_crossref
                 from sciknow.utils.doi import normalize_doi as _nd
                 hit = search_arxiv_by_title(
-                    title, first_author=first_author, year=pm_year,
+                    search_title, first_author=first_author, year=pm_year,
                 )
                 if hit:
                     stub = PaperMeta()
@@ -5333,7 +5356,7 @@ def enrich(
                         stub.doi = _nd(hit["doi"])
                         _layer_crossref(stub)
                     if not stub.title:
-                        stub.title = hit.get("title") or title
+                        stub.title = hit.get("title") or search_title
                         stub.year = hit.get("year")
                         stub.arxiv_id = hit.get("arxiv_id")
                         stub.authors = hit.get("authors") or []
@@ -5350,7 +5373,7 @@ def enrich(
                 )
                 from sciknow.ingestion.metadata import _layer_crossref
                 hit = search_datacite_by_title(
-                    title, first_author=first_author, year=pm_year,
+                    search_title, first_author=first_author, year=pm_year,
                 )
                 if hit and hit.get("doi"):
                     stub = PaperMeta(doi=hit["doi"])
@@ -5371,6 +5394,15 @@ def enrich(
             _layer_arxiv(stub)
             if stub.title:
                 meta = stub
+
+        # Annotate the source with "+recovered_title" so the per-source
+        # breakdown attributes hits correctly when title-recovery was
+        # in the chain.
+        if meta is not None and recovered_title:
+            if meta.source and meta.source != "unknown":
+                meta.source = f"{meta.source}+recovered_title"
+            else:
+                meta.source = "recovered_title"
 
         return pm_id, title, meta, "ok" if meta else "no_match", pm_year
 

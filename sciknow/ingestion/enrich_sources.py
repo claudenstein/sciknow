@@ -620,6 +620,83 @@ def search_openlibrary_by_title(
     return None
 
 
+# ── 8. Title-recovery from PDF (fallback for garbage-titled rows) ───────
+
+def recover_title_from_pdf(
+    pdf_path: Path | str,
+    *,
+    max_pages: int = 2,
+) -> str | None:
+    """Best-effort recovery of a paper title from the first 1–2 pages.
+
+    Papers with garbage db titles like ``iau1200511a`` or ``Mishev-2.dvi``
+    often have the REAL title printed as the largest text block near the
+    top of page 1. We use PyMuPDF's dict layout to find the span with
+    the largest font size in the top third of page 1, then sanity-check.
+
+    Returns:
+        A candidate title string suitable for title-search fuzzy match,
+        or None on no signal.
+    """
+    try:
+        doc = pymupdf.open(str(pdf_path))
+    except Exception:
+        return None
+    try:
+        if doc.page_count == 0:
+            return None
+        best_text = ""
+        best_size = 0.0
+        for pg in range(min(max_pages, doc.page_count)):
+            try:
+                page = doc.load_page(pg)
+                d = page.get_text("dict")
+            except Exception:
+                continue
+            ph = (page.rect.height or 1000)
+            for block in d.get("blocks", []):
+                for line in block.get("lines", []):
+                    # Take the first 40 % of the page (title band).
+                    y = line.get("bbox", [0, 0, 0, 0])[1]
+                    if y > ph * 0.4:
+                        continue
+                    line_text = " ".join(
+                        span.get("text", "") for span in line.get("spans", [])
+                    ).strip()
+                    if len(line_text) < 10:
+                        continue
+                    # Pick the max font size in this line.
+                    sizes = [
+                        float(span.get("size") or 0)
+                        for span in line.get("spans", [])
+                    ]
+                    ms = max(sizes) if sizes else 0.0
+                    if ms > best_size and ms >= 11.0:
+                        best_size = ms
+                        best_text = line_text
+            # Early out if we already have a strong candidate on page 1.
+            if best_text and pg == 0 and best_size >= 13:
+                break
+    finally:
+        doc.close()
+
+    if not best_text:
+        return None
+    # Strip obvious junk prefixes.
+    t = re.sub(r"^\s*\*+\s*", "", best_text).strip()
+    # Reject if looks like a section/boilerplate.
+    lowered = t.lower()
+    for bad in (
+        "abstract", "introduction", "acknowledgements", "references",
+        "figure", "table", "keywords",
+    ):
+        if lowered.startswith(bad):
+            return None
+    if len(t) < 12:
+        return None
+    return t[:300]
+
+
 # ── Helpers ─────────────────────────────────────────────────────────────
 
 def _surnames_set(name: str) -> set[str]:
