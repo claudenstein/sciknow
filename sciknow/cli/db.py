@@ -5207,6 +5207,24 @@ def enrich(
         if authors:
             first_author = (authors[0] or {}).get("name")
 
+        # Phase 54.6.313d — for rows whose db title is literally an
+        # arXiv identifier string ("arXiv:astro-ph/0207637v1  29 Jul 2002"),
+        # extract the arxiv_id and run the arXiv metadata layer directly.
+        # These are guaranteed matches that the title-search path
+        # couldn't touch because the title isn't a title.
+        if not arxiv_id and title:
+            from sciknow.utils.doi import extract_arxiv_id as _eax
+            cand_axid = _eax(title)
+            if cand_axid:
+                try:
+                    stub = PaperMeta(arxiv_id=cand_axid)
+                    _layer_arxiv(stub)
+                    if stub.title:
+                        stub.source = "arxiv_id_in_title"
+                        return pm_id, title, stub, "ok", pm_year
+                except Exception:
+                    pass
+
         # Layers 1 + 2: re-read the PDF if we still have it on disk.
         # These are *DOI-first* layers — once we have a DOI, the full
         # Crossref layer resolves the rest of the metadata downstream.

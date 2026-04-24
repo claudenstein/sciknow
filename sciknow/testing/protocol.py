@@ -12045,6 +12045,110 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_313_enrich_sources_surface() -> None:
+    """Phase 54.6.313 — new db-enrich sources and cascade wiring.
+
+    Guards:
+
+      A) The six source-adapter functions exist in
+         ``sciknow.ingestion.enrich_sources``.
+      B) ``metadata.extract`` runs `extract_xmp_doi` + `extract_fulltext_doi`
+         on the raw PDF path for DOI-less rows (new layers 1.5 + 1.6).
+      C) The enrich CLI ``_lookup`` body references every new layer by
+         name (XMP, fulltext regex, S2 /match, Europe PMC, arXiv title,
+         DataCite, title-recovery, arxiv-id-in-title).
+      D) ``documents.original_path`` is LEFT-JOINed into the enrich
+         row SELECT so the PDF-read layers get the file.
+      E) ``_lookup`` surfaces the DOI-discovery layer in ``meta.source``
+         via the ``xmp_pdf`` / ``fulltext_regex`` / ``recovered_title``
+         / ``arxiv_id_in_title`` tags so the end-of-run per-source
+         breakdown is informative.
+      F) The S2 /match helper has the process-wide token-bucket
+         (``_s2_wait_for_token``) + exponential-backoff 429 loop.
+      G) The title-corroboration gate (``_loose_title_match`` Dice ≥
+         0.5 when the DB title is non-garbage) is present in the
+         PDF-read path to reject inherited-XMP false positives.
+    """
+    import inspect as _inspect
+    from sciknow.ingestion import enrich_sources as _es
+    from sciknow.ingestion import metadata as _md
+    from sciknow.cli import db as _db_cli
+
+    # A) adapters exist
+    for name in (
+        "extract_xmp_doi",
+        "extract_fulltext_doi",
+        "validate_doi_resolves",
+        "search_semantic_scholar_match",
+        "search_europepmc_by_title",
+        "search_arxiv_by_title",
+        "search_datacite_by_title",
+        "search_openlibrary_by_title",
+        "recover_title_from_pdf",
+    ):
+        assert hasattr(_es, name), (
+            f"54.6.313 enrich_sources must export {name!r}"
+        )
+
+    # B) metadata.extract wires XMP + fulltext regex
+    extract_src = _inspect.getsource(_md.extract)
+    assert "extract_xmp_doi" in extract_src, (
+        "54.6.313 metadata.extract must call extract_xmp_doi"
+    )
+    assert "extract_fulltext_doi" in extract_src, (
+        "54.6.313 metadata.extract must call extract_fulltext_doi"
+    )
+
+    # C) CLI _lookup references every new layer
+    enrich_src = _inspect.getsource(_db_cli.enrich)
+    for layer in (
+        "extract_xmp_doi",
+        "extract_fulltext_doi",
+        "recover_title_from_pdf",
+        "search_semantic_scholar_match",
+        "search_europepmc_by_title",
+        "search_arxiv_by_title",
+        "search_datacite_by_title",
+    ):
+        assert layer in enrich_src, (
+            f"54.6.313 CLI enrich._lookup must reference {layer!r}"
+        )
+
+    # D) LEFT JOIN documents.original_path
+    assert "d.original_path" in enrich_src, (
+        "54.6.313 CLI enrich must SELECT documents.original_path "
+        "so PDF-read layers can access the file"
+    )
+    assert "LEFT JOIN documents" in enrich_src, (
+        "54.6.313 CLI enrich must LEFT-JOIN documents (so papers "
+        "without a document row still flow through title-only layers)"
+    )
+
+    # E) source tag surfaced
+    for tag in ("xmp_pdf", "fulltext_regex", "recovered_title",
+                "arxiv_id_in_title"):
+        assert tag in enrich_src, (
+            f"54.6.313 CLI enrich must tag meta.source with {tag!r} "
+            "so the per-source breakdown attributes hits correctly"
+        )
+
+    # F) S2 /match rate-limiter + backoff
+    s2_src = _inspect.getsource(_es.search_semantic_scholar_match)
+    assert "_s2_wait_for_token" in s2_src, (
+        "54.6.313 S2 /match must share a process-wide rate limiter "
+        "(_s2_wait_for_token) so parallel workers don't 429 the unauth pool"
+    )
+    assert "429" in s2_src and "max_retries" in s2_src, (
+        "54.6.313 S2 /match must handle 429 with max_retries + backoff"
+    )
+
+    # G) title-corroboration gate
+    assert "_loose_title_match" in enrich_src, (
+        "54.6.313 CLI enrich must gate XMP/FT hits via "
+        "_loose_title_match to reject inherited-XMP false positives"
+    )
+
+
 def l1_phase54_6_302_chapter_velocity_panel() -> None:
     """Phase 54.6.302 — per-chapter book writing velocity panel.
 
@@ -17481,6 +17585,9 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_299_hnsw_drift_check,
     l1_phase54_6_301_retrieval_latency_buffer,
     l1_phase54_6_302_chapter_velocity_panel,
+    # Phase 54.6.313 — new db-enrich sources (XMP / fulltext regex /
+    # title recovery / S2 /match / Europe PMC / arXiv title / DataCite)
+    l1_phase54_6_313_enrich_sources_surface,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]
