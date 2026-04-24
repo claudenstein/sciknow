@@ -275,15 +275,19 @@ over ≥10 min — each swap costs 5-10 s of Ollama cold-load, so
 
 **Phase 54.6.313** implements the top-ROI DOI recovery strategies
 from `docs/ENRICH_RESEARCH.md` as nine new layers in the `db enrich`
-cascade, **plus** a latent bug in the existing Crossref/OpenAlex
-title-search where garbage `first_author` strings (`Usuario` /
-`Propietario` / `Benutzer` / `ASUS` / `hy` …) were being passed as
-search filters and starving the result set. **Measured on the full
-217-paper no-DOI subset of the global-cooling corpus**: the old
-pipeline (pure Crossref + OpenAlex title search) matched 2 papers;
-the new pipeline matched **63 papers** — a **31× improvement** in
-recovery rate. Corpus-wide DOI coverage crossed **80.9 %** (653 / 807)
-as a result. Breakdown of the 63 hits after all iterations:
+cascade, **plus** three latent bugs: (1) Crossref/OpenAlex title-
+search was passing garbage `first_author` strings (`Usuario` /
+`Propietario` / `Benutzer` / `ASUS` / `hy` …) as search filters and
+starving the result set, (2) `_ARXIV_OLD` regex rejected `v1` suffixes
+so `arXiv:astro-ph/0207637v1` titles couldn't extract the arXiv ID,
+(3) stripped-prefix DOI titles (`.5194 cp 2016 7 supplement`) weren't
+flagged as garbage so the filename-DOI corroboration gate rejected
+otherwise-valid hits. **Measured on the full 217-paper no-DOI subset
+of the global-cooling corpus**: the old pipeline (pure Crossref +
+OpenAlex title search) matched 2 papers; the new pipeline matched
+**65 papers** — a **32.5× improvement** in recovery rate. Corpus-wide
+DOI coverage crossed **81.2 %** (655 / 807) as a result. Breakdown of
+the 65 hits after all iterations:
 
 - **18 via `crossref+recovered_title`** — `recover_title_from_pdf`
   extracts the largest-font line in the top 40% of page 1 and uses
@@ -297,7 +301,7 @@ as a result. Breakdown of the 63 hits after all iterations:
 - **11 via `crossref+fulltext_regex`** — regex scan of the first 3
   pages for `10.xxxx/yyyy` patterns, each candidate validated via
   Crossref `/works/{doi}` to reject OCR-mangled strings.
-- **6 via `crossref+filename_doi`** — the downloader persists DOI-
+- **8 via `crossref+filename_doi`** — the downloader persists DOI-
   fetched PDFs as `10.xxxx_suffix.pdf`; the filename is parsed and
   validated against Crossref before acceptance. Cheapest + highest-
   precision signal; runs first in the PDF-read layer order.
