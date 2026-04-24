@@ -273,6 +273,60 @@ and the web modal renders a "Model swap churn" panel with the last
 over ≥10 min — each swap costs 5-10 s of Ollama cold-load, so
 15/hr = ~3 min of pipeline cold-loads per hour, worth surfacing.
 
+**Phase 54.6.312** is a GUI polish drop addressing five user reports
+against the 54.6.309 bibliography / visuals-panel work:
+
+1. **Visual-suggestions panel is now opt-in, persisted, and viewable
+   in gallery or list mode.** The right-panel Visuals tab no longer
+   re-runs the 1–2 s ranker every time the tab is opened — it loads a
+   saved ranking for the current draft if one exists, otherwise shows
+   a hint to click the **Rank** button. Subsequent opens serve the
+   cached payload instantly. A **Re-rank** button recomputes; **Clear**
+   discards the saved blob. Thumbnails are click-to-enlarge (a new
+   lightbox modal overlays the reader). A **Gallery ⇄ List** toggle
+   flips the pane between a grid of larger thumbnails and the
+   original row layout. Backend: `drafts.custom_metadata.visual_suggestions`
+   JSONB blob with `{hits, ranked_at, content_hash}`; `GET /api/visuals/
+   suggestions` reads the cache, `POST` runs + persists,
+   `DELETE` clears. No schema migration.
+2. **Bibliography tools: sanity check + sort + renumber + click-to-preview.**
+   New **Book → Bibliography tools** modal with two actions.
+   `GET /api/bibliography/audit` scans every draft for citations that
+   reference a missing source ("broken refs"), sources never cited in
+   the body ("orphans"), and duplicate-source-at-different-number
+   groups — the typical artefacts of the post-54.6.309 global-renumber
+   churn. `POST /api/bibliography/sort` flattens local→global
+   numbering INTO the stored draft content (rewrites `[N]` markers AND
+   `drafts.sources` so the raw markdown the editor shows matches the
+   reader's numbering; idempotent). Clicking any `[N]` in the reader
+   now opens a rich preview card (title, authors, year, journal,
+   abstract, DOI, open-access URL) via
+   `GET /api/bibliography/citation/<N>`; Shift/Cmd/Ctrl+click keeps
+   the original scroll-to-source behaviour.
+3. **Expand-by-author-references is now a first-class tab in the
+   Corpus modal**, alongside Enrich / Expand-citations / Expand-by-
+   author / Inbound / Topic / Coauthors. The global-menu entry from
+   54.6.309 still works; the new tab gives the feature a stable home
+   inside the Corpus surface so users don't have to know it exists in
+   a separate menu.
+4. **Editor toolbar + named version control.** The markdown editor
+   toolbar grows: strikethrough, inline code, H4, bulleted/numbered
+   lists, quote, horizontal rule, link insert, inline + display math,
+   undo/redo, and two new buttons: **Save as new version…** (prompts
+   for an optional label, creates a fresh `drafts` row at
+   `version=max+1`, marks it active, stores the label in
+   `custom_metadata.version_name`) and **Versions** (opens the History
+   panel inline — same route as the Book-menu History item, but
+   accessible without leaving edit mode). The Versions panel now
+   renders the user-supplied name per row and supports inline rename
+   via `POST /api/draft/{{id}}/rename-version`.
+5. **Research memo**: `docs/ENRICH_RESEARCH.md` documents the six most
+   promising additional DOI/ISBN sources (Semantic Scholar `/match`,
+   Europe PMC, DataCite, OpenLibrary, LoC SRU, PDF XMP+footer-regex)
+   plus the fuzzy-matching signals the current `db enrich` pipeline
+   doesn't yet use. No code change — this is the planning doc for a
+   later implementation phase.
+
 **Phase 54.6.309** ships a four-feature book-UX drop:
 
 1. **Global per-book bibliography + "Bibliography" pseudo-chapter.**

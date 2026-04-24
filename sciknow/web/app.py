@@ -1646,7 +1646,8 @@ async def api_versions(draft_id: str):
                    d.review_feedback IS NOT NULL AS has_review,
                    (d.custom_metadata->>'final_overall')::float AS final_overall,
                    (d.custom_metadata->>'is_active')::boolean AS is_active,
-                   d.model_used
+                   d.model_used,
+                   d.custom_metadata->>'version_name' AS version_name
             FROM drafts d
             WHERE d.chapter_id::text = :cid AND d.section_type = :st AND d.book_id::text = :bid
             ORDER BY d.version ASC
@@ -1658,7 +1659,8 @@ async def api_versions(draft_id: str):
          "has_review": bool(r[5]),
          "final_overall": float(r[6]) if r[6] is not None else None,
          "is_active": bool(r[7]) if r[7] is not None else False,
-         "model_used": r[8] or ""}
+         "model_used": r[8] or "",
+         "version_name": r[9] or ""}
         for r in rows
     ]
     # If no version carries an explicit is_active flag, mark the
@@ -1706,6 +1708,342 @@ async def api_activate_draft(draft_id: str):
         session.commit()
 
     return JSONResponse({"ok": True, "active_draft_id": draft_id})
+
+
+@app.post("/api/draft/{draft_id}/save-as-version")
+async def api_draft_save_as_version(
+    draft_id: str,
+    content: str = Form(...),
+    version_name: str = Form(""),
+):
+    """Phase 54.6.312 — save the editor buffer as a NEW version row
+    instead of overwriting the current draft.
+
+    Creates a fresh ``drafts`` row keyed to the same
+    ``(book_id, chapter_id, section_type)`` as the source draft, with
+    ``version = max(version) + 1`` in that group, ``parent_draft_id``
+    pointing back at the caller's id, and an optional ``version_name``
+    persisted into ``custom_metadata.version_name`` so the Versions
+    panel can surface the user-supplied label (e.g. "before Jane's
+    review", "post-review polish").
+
+    The new version is marked active so the reader immediately shows
+    what the user just saved. The legacy ``/edit/{id}`` path (in-place
+    overwrite) is still there for the autosave loop — this endpoint is
+    the "Save as new version…" button.
+    """
+    with get_session() as session:
+        src = session.execute(text("""
+            SELECT book_id::text, chapter_id::text, section_type, title,
+                   sources, topic, model_used, summary
+            FROM drafts WHERE id::text = :did
+        """), {"did": draft_id}).fetchone()
+        if not src:
+            raise HTTPException(404, "Draft not found")
+        book_id, chapter_id, sec, title, sources, topic, model_used, summary = src
+
+        mv = session.execute(text("""
+            SELECT COALESCE(MAX(version), 0) FROM drafts
+            WHERE book_id::text = :bid AND chapter_id::text = :cid
+              AND section_type = :st
+        """), {"bid": book_id, "cid": chapter_id, "st": sec}).fetchone()
+        next_ver = int((mv and mv[0]) or 0) + 1
+
+        meta = {}
+        if version_name:
+            meta["version_name"] = version_name[:120]
+        meta["is_active"] = True
+
+        wc = len((content or "").split())
+        row = session.execute(text("""
+            INSERT INTO drafts
+              (book_id, chapter_id, section_type, topic, title, content, word_count,
+               sources, model_used, version, summary, parent_draft_id,
+               custom_metadata, status)
+            VALUES
+              (CAST(:bid AS uuid), CAST(:cid AS uuid), :st, :topic, :ttl,
+               :content, :wc,
+               COALESCE(CAST(:sources AS jsonb), '[]'::jsonb), :mu, :ver, :sum,
+               CAST(:parent AS uuid), CAST(:meta AS jsonb), 'drafted')
+            RETURNING id::text
+        """), {
+            "bid": book_id, "cid": chapter_id, "st": sec, "topic": topic,
+            "ttl": title, "content": content, "wc": wc,
+            "sources": json.dumps(sources if isinstance(sources, list) else []),
+            "mu": model_used, "ver": next_ver, "sum": summary,
+            "parent": draft_id, "meta": json.dumps(meta),
+        }).fetchone()
+        new_id = row[0]
+
+        # Clear is_active on every other version in the same group.
+        session.execute(text("""
+            UPDATE drafts
+               SET custom_metadata = custom_metadata - 'is_active'
+             WHERE book_id::text = :bid AND chapter_id::text = :cid
+               AND section_type = :st
+               AND id::text <> :nid
+        """), {"bid": book_id, "cid": chapter_id, "st": sec, "nid": new_id})
+        session.commit()
+
+    return JSONResponse({"ok": True, "new_draft_id": new_id,
+                          "version": next_ver,
+                          "version_name": version_name or None})
+
+
+@app.post("/api/draft/{draft_id}/rename-version")
+async def api_draft_rename_version(draft_id: str, name: str = Form("")):
+    """Rename an existing version (edits ``custom_metadata.version_name``).
+    Pass an empty string to clear the label."""
+    with get_session() as session:
+        if (name or "").strip():
+            session.execute(text("""
+                UPDATE drafts
+                   SET custom_metadata = COALESCE(custom_metadata, '{}'::jsonb)
+                                         || jsonb_build_object('version_name', CAST(:n AS text))
+                 WHERE id::text = :did
+            """), {"did": draft_id, "n": name[:120]})
+        else:
+            session.execute(text("""
+                UPDATE drafts
+                   SET custom_metadata = custom_metadata - 'version_name'
+                 WHERE id::text = :did
+            """), {"did": draft_id})
+        session.commit()
+    return JSONResponse({"ok": True})
+
+
+# ── Bibliography endpoints (Phase 54.6.312) ────────────────────────────
+# The global bibliography is rebuilt on every book-reader load via
+# `BookBibliography.from_book`, so the raw draft content stays in
+# *local* numbering and remap_content projects it to global at render
+# time. These endpoints expose three user-facing operations the UI was
+# missing:
+#
+#   GET  /api/bibliography/audit  — per-draft sanity check (broken refs,
+#                                   orphan sources, duplicates).
+#   POST /api/bibliography/sort   — flatten local→global numbers INTO
+#                                   the stored draft content so the
+#                                   numbers the reader sees match the
+#                                   markdown the editor shows. Reorders
+#                                   draft.sources to global order too.
+#   GET  /api/bibliography/citation/{book_id}/{n}
+#                                — fetch full publication metadata for
+#                                  a global citation number (title,
+#                                  authors, year, journal, doi, abstract,
+#                                  open-access URL) for click-to-preview.
+
+
+@app.get("/api/bibliography/audit")
+async def api_bibliography_audit():
+    """Per-draft sanity check for the book-wide bibliography.
+
+    For each draft, reports:
+      - broken_refs: citation numbers used in the body that have NO
+                     matching entry in the draft's sources array.
+      - orphan_sources: sources listed on the draft but never cited
+                        in its body text.
+      - duplicate_keys: the same publication appearing twice at
+                        different local numbers (after strip ``[N]``).
+
+    The user hits "Sanity check" once after a bibliography churn to see
+    if the rewrite left any draft with references that point at a
+    non-existent paper, which is almost always what "the citations look
+    changed" means in practice.
+    """
+    book, _chapters, _drafts, _gaps, _comments = _get_book_data()
+    if not book:
+        return JSONResponse({"rows": [], "note": "No active book."})
+
+    import re as _re
+    rows: list[dict] = []
+    totals = {"drafts_checked": 0, "broken": 0, "orphans": 0, "dupes": 0}
+
+    with get_session() as session:
+        draft_rows = session.execute(text("""
+            SELECT d.id::text, d.title, d.section_type, d.content, d.sources,
+                   d.version, d.chapter_id::text, d.custom_metadata,
+                   COALESCE(bc.number, 999999) AS ch_num,
+                   bc.title AS ch_title
+            FROM drafts d
+            LEFT JOIN book_chapters bc ON bc.id = d.chapter_id
+            WHERE d.book_id = :bid
+            ORDER BY ch_num, d.section_type, d.version DESC
+        """), {"bid": str(book[0])}).fetchall()
+
+    # Collapse to the active draft per (chapter, section) pair.
+    def _meta_dict(raw):
+        if isinstance(raw, dict): return raw
+        if isinstance(raw, str) and raw:
+            try: return json.loads(raw) or {}
+            except Exception: return {}
+        return {}
+
+    best: dict[tuple, tuple] = {}
+    for r in draft_rows:
+        did, title, sec, content, sources, ver, ch_id, meta, ch_num, ch_title = r
+        key = (ch_id, sec)
+        is_active = bool(_meta_dict(meta).get("is_active"))
+        cur = best.get(key)
+        if cur is None:
+            best[key] = (r, is_active); continue
+        cur_row, cur_active = cur
+        if is_active and not cur_active:
+            best[key] = (r, True)
+        elif is_active == cur_active and (ver or 1) > (cur_row[5] or 1):
+            best[key] = (r, is_active)
+
+    for r, _ in best.values():
+        did, title, sec, content, sources, ver, ch_id, meta, ch_num, ch_title = r
+        src_list = sources if isinstance(sources, list) else []
+        src_by_num: dict[int, str] = {}
+        for s in src_list:
+            m = _re.match(r"^\s*\[(\d+)\]\s*(.*)$", s or "")
+            if not m: continue
+            src_by_num[int(m.group(1))] = m.group(2).strip()
+        cited_nums = set()
+        for m in _re.finditer(r"\[(\d+)\]", content or ""):
+            cited_nums.add(int(m.group(1)))
+        broken = sorted([n for n in cited_nums if n not in src_by_num])
+        orphans = sorted([n for n in src_by_num.keys() if n not in cited_nums])
+        # Duplicate detection: same normalized source body under two nums.
+        seen_bodies: dict[str, list[int]] = {}
+        for n, body in src_by_num.items():
+            key2 = _re.sub(r"\s+", " ", body).lower().strip()[:300]
+            seen_bodies.setdefault(key2, []).append(n)
+        dupes = [nums for nums in seen_bodies.values() if len(nums) > 1]
+        if broken or orphans or dupes:
+            rows.append({
+                "draft_id": did,
+                "title": title,
+                "section_type": sec,
+                "chapter_num": int(ch_num) if ch_num and ch_num != 999999 else None,
+                "chapter_title": ch_title,
+                "broken_refs": broken,
+                "orphan_sources": orphans,
+                "duplicate_groups": dupes,
+            })
+            totals["broken"] += len(broken)
+            totals["orphans"] += len(orphans)
+            totals["dupes"] += len(dupes)
+        totals["drafts_checked"] += 1
+
+    return JSONResponse({"rows": rows, "totals": totals})
+
+
+@app.post("/api/bibliography/sort")
+async def api_bibliography_sort():
+    """Flatten the global bibliography numbering INTO the stored draft
+    content so the editor, markdown, and reader all agree on the same
+    ``[N]`` values.
+
+    Without this, the reader shows the global numbering (via
+    ``BookBibliography.remap_content``) but the raw markdown in the
+    editor still has the original local numbers. Running "Sort" once
+    rewrites each draft's content + sources list so ``[N]`` everywhere
+    means the same paper. Idempotent — re-running after new sections
+    are drafted re-numbers them into the book's reading order.
+    """
+    book, _chapters, _drafts, _gaps, _comments = _get_book_data()
+    if not book:
+        return JSONResponse({"ok": False, "note": "No active book."})
+
+    import re as _re
+    from sciknow.core.bibliography import BookBibliography, _renumber_source_line
+
+    updated = 0
+    with get_session() as session:
+        bib = BookBibliography.from_book(session, book[0])
+        for did, lmap in bib.draft_local_to_global.items():
+            if not lmap: continue
+            row = session.execute(text(
+                "SELECT content, sources FROM drafts WHERE id::text = :did"
+            ), {"did": did}).fetchone()
+            if not row: continue
+            content, sources_raw = row
+            # Rewrite body [N] → [G] via a placeholder two-pass.
+            def _to_ph(match):
+                n = int(match.group(1))
+                g = lmap.get(n)
+                return f"[__CITE_{g}__]" if g is not None else match.group(0)
+            new_content = _re.sub(r"\[(\d+)\]", _to_ph, content or "")
+            new_content = _re.sub(r"\[__CITE_(\d+)__\]", r"[\1]", new_content)
+            # Rewrite the sources list to carry the new global numbers,
+            # sorted ascending so the draft's local sources tab reads
+            # 1,2,3… of the paper's actual global order.
+            src_in = sources_raw if isinstance(sources_raw, list) else []
+            new_sources: list[tuple[int, str]] = []
+            for s in src_in:
+                m = _re.match(r"^\s*\[(\d+)\]\s*", s or "")
+                if not m: continue
+                n = int(m.group(1))
+                g = lmap.get(n)
+                if g is None: continue
+                new_sources.append((g, _renumber_source_line(s, g)))
+            new_sources.sort(key=lambda t: t[0])
+            if new_content != (content or "") or [s for _, s in new_sources] != (src_in or []):
+                session.execute(text("""
+                    UPDATE drafts SET content = :c, sources = CAST(:s AS jsonb)
+                     WHERE id::text = :did
+                """), {"c": new_content,
+                       "s": json.dumps([s for _, s in new_sources]),
+                       "did": did})
+                updated += 1
+        session.commit()
+
+    return JSONResponse({"ok": True, "drafts_updated": updated,
+                          "total_global_sources": len(bib.global_sources)})
+
+
+@app.get("/api/bibliography/citation/{global_num}")
+async def api_bibliography_citation(global_num: int):
+    """Return full metadata for a global citation number — title,
+    authors, year, journal, doi, abstract, best-open-URL — so the
+    reader can render a click-to-preview popover richer than the hover
+    tooltip in ``buildPopovers``.
+    """
+    book, _chapters, _drafts, _gaps, _comments = _get_book_data()
+    if not book:
+        raise HTTPException(404, "No active book.")
+    from sciknow.core.bibliography import BookBibliography, _source_key
+    import re as _re
+    with get_session() as session:
+        bib = BookBibliography.from_book(session, book[0])
+        idx = int(global_num) - 1
+        if idx < 0 or idx >= len(bib.global_sources):
+            raise HTTPException(404, "Citation out of range.")
+        source_line = bib.global_sources[idx]
+        # Attempt to map the source line back to a paper_metadata row.
+        key = _source_key(source_line)
+        # Best-effort: extract the title inside ... (year). Title. journal
+        m = _re.search(r"\(\d{4}(?:-\d{2}-\d{2})?\)\.\s+([^.]+)\.", source_line)
+        title_guess = m.group(1).strip() if m else None
+        meta: dict | None = None
+        if title_guess:
+            mrow = session.execute(text("""
+                SELECT document_id::text, title, authors, year, journal, doi, abstract,
+                       open_access_url, url
+                FROM paper_metadata
+                WHERE lower(title) = lower(:t)
+                LIMIT 1
+            """), {"t": title_guess}).fetchone()
+            if mrow:
+                did, title, authors, year, journal, doi, abstract, oa_url, url = mrow
+                meta = {
+                    "document_id": did,
+                    "title": title,
+                    "authors": authors or [],
+                    "year": year,
+                    "journal": journal,
+                    "doi": doi,
+                    "abstract": (abstract or "")[:1200],
+                    "open_access_url": oa_url or url or (f"https://doi.org/{doi}" if doi else None),
+                }
+    return JSONResponse({
+        "global_num": int(global_num),
+        "source_line": source_line,
+        "key": key,
+        "metadata": meta,
+    })
 
 
 @app.get("/api/diff/{old_id}/{new_id}")
@@ -4658,27 +4996,18 @@ async def api_visuals_search(q: str, kind: str = "", k: int = 10):
     return JSONResponse({"hits": out, "total": len(out)})
 
 
-@app.get("/api/visuals/suggestions")
-async def api_visuals_suggestions(draft_id: str, limit: int = 10):
-    """Phase 54.6.309 — visual suggestions for the right-panel "Visuals"
-    tab.
-
-    Given the draft currently open in the reader, fetch the top-``limit``
-    ranked visuals (figures/tables/charts) from the corpus whose content
-    best matches the draft's prose. Uses ``rank_visuals`` so the ranking
-    matches what the writer agent sees when auto-inserting figures.
-
-    The bibliography pseudo-draft id returns an empty list (there's no
-    prose to rank against). An empty corpus / non-embedded visuals
-    collection also returns [] with ``note`` explaining what to run.
-    """
+def _visuals_rank_for_draft(draft_id: str, limit: int) -> dict:
+    """Shared ranker path for GET(compute=1) / POST. Runs ``rank_visuals``
+    against the draft's prose and returns a dict ready to persist in
+    ``drafts.custom_metadata['visual_suggestions']`` or hand back to the
+    client. The caller is responsible for persisting on write paths."""
     limit = max(1, min(int(limit), 30))
     if draft_id == BIBLIOGRAPHY_PSEUDO_ID:
-        return JSONResponse({
+        return {
             "draft_id": draft_id,
             "hits": [],
             "note": "The bibliography has no prose to match visuals against.",
-        })
+        }
 
     from sciknow.retrieval.visuals_ranker import rank_visuals
 
@@ -4693,16 +5022,12 @@ async def api_visuals_suggestions(draft_id: str, limit: int = 10):
     content, section_type, sources_raw = row
     content = (content or "").strip()
     if not content:
-        return JSONResponse({
+        return {
             "draft_id": draft_id,
             "hits": [],
             "note": "This draft has no prose yet; write something first.",
-        })
+        }
 
-    # Collect DOIs/titles already cited so rank_visuals can apply the
-    # same-paper bonus. We don't have a fast "source string → document_id"
-    # index at the web layer, so we resolve by normalized title against
-    # paper_metadata.
     cited_doc_ids: list[str] = []
     try:
         if sources_raw:
@@ -4728,7 +5053,6 @@ async def api_visuals_suggestions(draft_id: str, limit: int = 10):
     except Exception as exc:
         logger.debug("cited-doc resolution failed: %s", exc)
 
-    # Use up to the first ~2500 chars of prose as the ranking query.
     sentence = content[:2500]
     try:
         ranked = rank_visuals(
@@ -4740,15 +5064,14 @@ async def api_visuals_suggestions(draft_id: str, limit: int = 10):
         )
     except Exception as exc:
         logger.warning("rank_visuals failed: %s", exc)
-        return JSONResponse({
+        return {
             "draft_id": draft_id, "hits": [],
             "note": f"Ranker error: {exc}",
-        })
+        }
 
     hits = []
     for rv in ranked:
         cap = (rv.ai_caption or "").strip() or "(no caption)"
-        # Image URL only for kinds that have a rendered image.
         img_url = None
         if rv.kind in ("figure", "chart", "table"):
             img_url = f"/api/visuals/image/{rv.visual_id}"
@@ -4764,7 +5087,130 @@ async def api_visuals_suggestions(draft_id: str, limit: int = 10):
             "same_paper": rv.same_paper,
         })
 
-    return JSONResponse({"draft_id": draft_id, "hits": hits})
+    return {"draft_id": draft_id, "hits": hits}
+
+
+def _visuals_get_cached(draft_id: str) -> dict | None:
+    """Return the persisted visual-suggestion payload from
+    drafts.custom_metadata['visual_suggestions'], or None if none. The
+    blob includes both the ranked hits and the content-hash signature
+    the ranking was computed against so the UI can flag staleness."""
+    if draft_id == BIBLIOGRAPHY_PSEUDO_ID:
+        return None
+    with get_session() as session:
+        row = session.execute(text("""
+            SELECT d.custom_metadata, d.content
+            FROM drafts d WHERE d.id::text = :did
+        """), {"did": draft_id}).fetchone()
+    if not row:
+        return None
+    meta, content = row
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except Exception:
+            meta = {}
+    blob = (meta or {}).get("visual_suggestions") if isinstance(meta, dict) else None
+    if not isinstance(blob, dict):
+        return None
+    import hashlib as _h
+    cur_hash = _h.md5((content or "").encode("utf-8", errors="ignore")).hexdigest()
+    blob = dict(blob)
+    blob["stale"] = bool(blob.get("content_hash") and blob["content_hash"] != cur_hash)
+    return blob
+
+
+@app.get("/api/visuals/suggestions")
+async def api_visuals_suggestions(
+    draft_id: str,
+    limit: int = 10,
+    compute: int = 0,
+):
+    """Visual suggestions for the right-panel "Visuals" tab.
+
+    Behavior (Phase 54.6.312): the GET returns the cached payload by
+    default — **does not** run the ranker unless ``compute=1`` is
+    explicitly passed. This matches the UX of a manual "Rank" button:
+    the ranker is ~1–2s and the user shouldn't pay that cost on every
+    draft navigation. POST to this same endpoint to force a rank + save.
+    """
+    cached = _visuals_get_cached(draft_id)
+    if cached is not None and not int(compute or 0):
+        return JSONResponse({
+            "draft_id": draft_id,
+            "hits": cached.get("hits") or [],
+            "cached": True,
+            "stale": bool(cached.get("stale")),
+            "ranked_at": cached.get("ranked_at"),
+            "note": cached.get("note"),
+        })
+
+    if not int(compute or 0):
+        return JSONResponse({
+            "draft_id": draft_id, "hits": [], "cached": False,
+            "note": "No ranking saved for this draft. Click Rank to compute.",
+        })
+
+    payload = _visuals_rank_for_draft(draft_id, limit=limit)
+    payload["cached"] = False
+    return JSONResponse(payload)
+
+
+@app.post("/api/visuals/suggestions")
+async def api_visuals_suggestions_rank(
+    draft_id: str,
+    limit: int = 10,
+):
+    """Compute the visual ranking for a draft and persist it into
+    ``drafts.custom_metadata['visual_suggestions']`` so subsequent opens
+    of the Visuals panel serve the saved result instead of re-ranking."""
+    payload = _visuals_rank_for_draft(draft_id, limit=limit)
+
+    if draft_id != BIBLIOGRAPHY_PSEUDO_ID and payload.get("hits") is not None:
+        from datetime import datetime as _dt
+        import hashlib as _h
+        with get_session() as session:
+            row = session.execute(text(
+                "SELECT content FROM drafts WHERE id::text = :did"
+            ), {"did": draft_id}).fetchone()
+            cur_hash = _h.md5(((row and row[0]) or "").encode(
+                "utf-8", errors="ignore")).hexdigest() if row else ""
+            blob = {
+                "hits": payload.get("hits") or [],
+                "ranked_at": _dt.utcnow().isoformat() + "Z",
+                "content_hash": cur_hash,
+                "note": payload.get("note"),
+            }
+            session.execute(text("""
+                UPDATE drafts
+                   SET custom_metadata = COALESCE(custom_metadata, '{}'::jsonb)
+                                         || jsonb_build_object(
+                                              'visual_suggestions',
+                                              CAST(:blob AS jsonb))
+                 WHERE id::text = :did
+            """), {"did": draft_id, "blob": json.dumps(blob)})
+            session.commit()
+        payload["ranked_at"] = blob["ranked_at"]
+
+    payload["cached"] = False
+    return JSONResponse(payload)
+
+
+@app.delete("/api/visuals/suggestions")
+async def api_visuals_suggestions_clear(draft_id: str):
+    """Drop the persisted visual-suggestions cache for a draft so the
+    next Rank-button press recomputes from scratch. Useful for a
+    "Clear saved ranking" control."""
+    if draft_id == BIBLIOGRAPHY_PSEUDO_ID:
+        return JSONResponse({"ok": True, "cleared": False})
+    with get_session() as session:
+        session.execute(text("""
+            UPDATE drafts
+               SET custom_metadata = custom_metadata - 'visual_suggestions'
+             WHERE id::text = :did
+        """), {"did": draft_id})
+        session.commit()
+    return JSONResponse({"ok": True, "cleared": True})
 
 
 @app.get("/debug/equations")
@@ -9511,6 +9957,88 @@ ul.visual-suggestions {{
 .visual-tag--same {{ background: var(--accent); color: white; }}
 .visual-score {{ font-family: var(--font-mono); font-size: 10px; }}
 .visual-insert {{ align-self: flex-start; font-size: 11px; padding: 3px 8px; }}
+.panel-visuals-view-toggle {{ display: inline-flex; gap: 2px; margin-left: auto; }}
+.panel-visuals-view-toggle .btn-sm.is-active {{
+  background: var(--accent); color: #fff; border-color: var(--accent);
+}}
+.panel-visuals-stamp {{ font-size: 10px; color: var(--fg-faint);
+  margin: 0 0 6px 0; letter-spacing: 0.02em; }}
+
+/* Phase 54.6.312 — Gallery layout for the panel. Rows become square-ish
+   cards with the image on top and the caption below, laid out in a
+   responsive CSS grid. List mode keeps the default column layout. */
+#panel-visuals.visuals-mode--gallery ul.visual-suggestions {{
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px;
+}}
+#panel-visuals.visuals-mode--gallery .visual-row {{
+  flex-direction: column; align-items: stretch; padding: 6px;
+}}
+#panel-visuals.visuals-mode--gallery .visual-thumb {{
+  flex: none; width: 100%; height: 100px;
+  cursor: zoom-in;
+}}
+#panel-visuals.visuals-mode--list .visual-thumb {{ cursor: zoom-in; }}
+#panel-visuals.visuals-mode--gallery .visual-meta {{ gap: 2px; }}
+#panel-visuals.visuals-mode--gallery .visual-caption {{
+  font-size: 11px; -webkit-line-clamp: 2;
+}}
+#panel-visuals.visuals-mode--gallery .visual-sub {{ font-size: 9px; }}
+#panel-visuals.visuals-mode--gallery .visual-insert {{
+  width: 100%; text-align: center;
+}}
+
+/* Phase 54.6.312 — Lightbox for the panel-visuals thumbnails. Styled as
+   a fixed overlay so it works outside the normal .modal-overlay stack
+   (which uses relative placement inside #app-body). */
+.visuals-lightbox {{
+  display: none; position: fixed; inset: 0; z-index: 1200;
+  background: rgba(0,0,0,0.82); align-items: center; justify-content: center;
+  padding: 24px;
+}}
+.visuals-lightbox.open {{ display: flex; flex-direction: column; gap: 10px; }}
+.visuals-lightbox img {{
+  max-width: 92vw; max-height: 82vh; object-fit: contain;
+  background: #fff; border-radius: 6px; box-shadow: 0 8px 40px rgba(0,0,0,0.5);
+}}
+.visuals-lightbox-cap {{
+  color: #fff; font-size: 13px; line-height: 1.4; max-width: 88vw;
+  text-align: center; opacity: 0.9;
+}}
+.visuals-lightbox-close {{
+  position: absolute; top: 18px; right: 24px; color: #fff; background: transparent;
+  border: none; font-size: 28px; cursor: pointer;
+}}
+.citation-preview-card {{
+  max-width: 640px; min-width: min(88vw, 420px);
+  background: var(--bg); color: var(--fg);
+  border-radius: 8px; padding: 22px 24px;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.6);
+  line-height: 1.45; font-size: 13px;
+}}
+.citation-preview-card .cpv-head {{
+  font-family: var(--font-mono); font-size: 11px; color: var(--fg-muted);
+  letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 4px;
+}}
+.citation-preview-card .cpv-title {{
+  font-size: 16px; margin: 0 0 6px 0; line-height: 1.3; color: var(--accent);
+}}
+.citation-preview-card .cpv-authors {{ color: var(--fg-muted); font-size: 12px; margin-bottom: 4px; }}
+.citation-preview-card .cpv-journal {{ color: var(--fg-faint); font-size: 11px; margin-bottom: 10px; font-style: italic; }}
+.citation-preview-card .cpv-abstract {{
+  max-height: 280px; overflow-y: auto;
+  background: var(--bg-subtle); padding: 10px 12px; border-radius: 4px;
+  font-size: 12px; margin: 8px 0;
+}}
+.citation-preview-card .cpv-line {{
+  font-family: var(--font-mono); font-size: 11px; background: var(--bg-subtle);
+  padding: 8px; border-radius: 4px; margin: 6px 0;
+}}
+.citation-preview-card .cpv-note {{ color: var(--fg-faint); font-size: 11px; }}
+.citation-preview-card .cpv-links {{ margin-top: 10px; font-size: 12px; }}
+.citation-preview-card .cpv-link {{ color: var(--accent); text-decoration: none; margin-right: 8px; }}
+.citation-preview-card .cpv-link:hover {{ text-decoration: underline; }}
 
 /* Phase 54.6.309 — bibliography pseudo-chapter visual hint. */
 .ch-group--bibliography {{ border-top: 1px dashed var(--border); margin-top: 8px; padding-top: 4px; }}
@@ -10131,7 +10659,13 @@ body.panel-hidden   .col-peek-panel   {{ display: block; }}
 /* Phase 54.6.183 — markdown editor toolbar polish. Letter-glyph
    buttons (B / I / H2 / H3 / [N]) gain proper typographic voice
    instead of rendering in generic sans. */
-.editor-toolbar {{ display: flex; gap: 4px; margin-bottom: 6px; align-items: center; }}
+.editor-toolbar {{ display: flex; gap: 4px; margin-bottom: 6px; align-items: center; flex-wrap: wrap; }}
+.editor-toolbar .toolbar-sep {{
+  display: inline-block; width: 1px; height: 18px;
+  background: var(--border); margin: 0 4px;
+}}
+.version-name {{ font-size: 12px; color: var(--fg); font-style: italic; }}
+.version-name--empty {{ color: var(--fg-faint); font-style: normal; }}
 .editor-toolbar button b,
 .editor-toolbar button em {{
   font-family: var(--font-serif); font-size: 14px;
@@ -10871,6 +11405,7 @@ body.task-bar-open {{ padding-top: 40px; }}
         <button role="menuitem" onclick="openPlanModal()" title="View / edit / regenerate the book plan (the leitmotiv)."><svg class="icon"><use href="#i-file-text"/></svg> Plan</button>
         <button role="menuitem" onclick="showCorkboard()" title="Book-wide corkboard view: every chapter's sections as cards you can drag + reorder."><svg class="icon"><use href="#i-layout-grid"/></svg> Corkboard</button>
         <button role="menuitem" onclick="showVersions()" title="Per-draft version history. Every save keeps the prior version so you can diff or revert."><svg class="icon"><use href="#i-history"/></svg> History</button>
+        <button role="menuitem" onclick="openBibliographyTools()" title="Phase 54.6.312 — Sanity-check and renumber the global bibliography. Use after adding new chapters/sections when the citation numbers in stored markdown look inconsistent."><svg class="icon"><use href="#i-book-open"/></svg> Bibliography tools</button>
         <button role="menuitem" onclick="takeSnapshot()" title="Snapshot the whole book's draft state — safety net before a destructive operation like autowrite-all."><svg class="icon"><use href="#i-camera"/></svg> Snapshot</button>
         <button role="menuitem" onclick="openExportModal()" title="Export the book to Markdown, HTML, PDF (WeasyPrint), EPUB (pandoc), LaTeX, DOCX, or BibTeX."><svg class="icon"><use href="#i-download"/></svg> Export</button>
         <button role="menuitem" onclick="openBookSettings()" title="Per-book settings: title, description, plan (leitmotiv), target chapter length, style fingerprint, per-role model assignments."><svg class="icon"><use href="#i-sliders"/></svg> Settings</button>
@@ -11106,12 +11641,37 @@ body.task-bar-open {{ padding-top: 40px; }}
   <div id="read-view">{content_html}</div>
 
   <div class="u-hidden" id="edit-view">
-    <div class="editor-toolbar">
-      <button onclick="edInsert('**','**')" title="Bold"><b>B</b></button>
-      <button onclick="edInsert('*','*')" title="Italic"><i>I</i></button>
-      <button onclick="edInsert('## ','')" title="Heading">H2</button>
-      <button onclick="edInsert('### ','')" title="Subheading">H3</button>
-      <button onclick="edInsertCite()" title="Citation">[N]</button>
+    <div class="editor-toolbar" role="toolbar" aria-label="Editor toolbar">
+      <button onclick="edInsert('**','**')" title="Bold (Ctrl+B)"><b>B</b></button>
+      <button onclick="edInsert('*','*')" title="Italic (Ctrl+I)"><i>I</i></button>
+      <button onclick="edInsert('~~','~~')" title="Strikethrough (~~text~~)"><s>S</s></button>
+      <button onclick="edInsert('`','`')" title="Inline code (`code`)"><code>&lt;/&gt;</code></button>
+      <span class="toolbar-sep" aria-hidden="true"></span>
+      <button onclick="edInsert('## ','')" title="Heading 2 (## text)">H2</button>
+      <button onclick="edInsert('### ','')" title="Heading 3 (### text)">H3</button>
+      <button onclick="edInsert('#### ','')" title="Heading 4 (#### text)">H4</button>
+      <span class="toolbar-sep" aria-hidden="true"></span>
+      <button onclick="edInsertLine('- ')" title="Bulleted list item">&#8226; List</button>
+      <button onclick="edInsertLine('1. ')" title="Numbered list item">1. List</button>
+      <button onclick="edInsertLine('> ')" title="Block quote">&ldquo; Quote</button>
+      <button onclick="edInsertLine('---\\n')" title="Horizontal rule">&mdash;</button>
+      <span class="toolbar-sep" aria-hidden="true"></span>
+      <button onclick="edInsertLink()" title="Insert a link ([text](url))">&#128279; Link</button>
+      <button onclick="edInsertCite()" title="Inline citation marker [N]">[N]</button>
+      <button onclick="edInsert('$','$')" title="Inline math ($E=mc^2$)">&#8747;</button>
+      <button onclick="edInsertLine('$$\\n', '\\n$$\\n')" title="Display math block ($$…$$)">&#8721;</button>
+      <span class="toolbar-sep" aria-hidden="true"></span>
+      <button onclick="edUndo()" title="Undo (Ctrl+Z) — uses the browser's native undo on the textarea.">&#8630;</button>
+      <button onclick="edRedo()" title="Redo (Ctrl+Shift+Z)">&#8631;</button>
+      <span class="toolbar-sep" aria-hidden="true"></span>
+      <button onclick="edSaveAsVersion()"
+              title="Save the current buffer as a NEW version with an optional name (e.g. 'pre-review'). Lets you keep the current version around as an undo path.">
+        &#128190;&#43; Save as new version…
+      </button>
+      <button onclick="showVersions()"
+              title="Open the versions panel to review, diff, pin, or rename every saved version of this section.">
+        &#128197; Versions
+      </button>
       <span class="autosave" id="autosave-status" title="Autosaves every 5 seconds while editing">
         <span class="dot"></span><span id="autosave-text">Autosave on</span>
       </span>
@@ -11189,11 +11749,18 @@ body.task-bar-open {{ padding-top: 40px; }}
        navigation. -->
   <div class="panel-pane" id="panel-pane-visuals" role="tabpanel">
     <div class="panel-visuals-head">
-      <button class="btn-sm" id="visuals-refresh-btn" onclick="refreshVisualSuggestions()"
-              title="Re-rank visual suggestions against the current draft. The ranker runs a cross-encoder on up to 15 candidates so this takes ~1s.">Refresh</button>
-      <span class="panel-visuals-hint">Click a figure to insert an image reference at the end of the draft.</span>
+      <button class="btn-primary btn-sm" id="visuals-rank-btn" onclick="rankVisualSuggestions()"
+              title="Compute visual rankings for this draft. Runs the 5-signal cross-encoder over up to 15 corpus visuals (~1–2s). Result is saved to the draft so subsequent opens are instant; use Re-rank to recompute after the draft changes.">Rank</button>
+      <button class="btn-sm u-hidden" id="visuals-clear-btn" onclick="clearVisualSuggestions()"
+              title="Delete the saved ranking for this draft so the next Rank press recomputes from scratch.">Clear</button>
+      <span class="panel-visuals-view-toggle"
+            title="Switch between gallery (big thumbnails in a grid) and list (one row per visual with details) layouts.">
+        <button class="btn-sm is-active" id="vis-pane-view-gallery" onclick="setVisualsPaneView('gallery')">Gallery</button>
+        <button class="btn-sm" id="vis-pane-view-list" onclick="setVisualsPaneView('list')">List</button>
+      </span>
+      <span class="panel-visuals-hint" id="panel-visuals-hint">Click a thumbnail to enlarge, Insert to append to the draft.</span>
     </div>
-    <div id="panel-visuals"><em>Open this tab to load suggestions.</em></div>
+    <div id="panel-visuals"><em>Open this tab, then click Rank to compute visual suggestions.</em></div>
   </div>
 </aside>
 
@@ -12373,6 +12940,49 @@ body.task-bar-open {{ padding-top: 40px; }}
 </div>
 
 <!-- Phase 43h — Project management modal -->
+<!-- Phase 54.6.312 — thumbnail lightbox. Outside the .modal-overlay
+     stack because the panel-visuals thumbnails trigger it while the
+     rest of the reader stays interactive behind it. -->
+<div class="visuals-lightbox" id="visuals-lightbox" onclick="if(event.target===this)closeVisualLightbox()">
+  <button class="visuals-lightbox-close" onclick="closeVisualLightbox()" aria-label="Close">&times;</button>
+  <img id="visuals-lightbox-img" alt="" />
+  <div class="visuals-lightbox-cap" id="visuals-lightbox-cap"></div>
+</div>
+
+<!-- Phase 54.6.312 — Citation preview popup. Shown when the user clicks
+     an inline [N] marker in any draft. Populates from
+     /api/bibliography/citation/<N>. Close button, click-outside, Esc
+     all dismiss. -->
+<div class="visuals-lightbox" id="citation-preview" onclick="if(event.target===this)closeCitationPreview()">
+  <button class="visuals-lightbox-close" onclick="closeCitationPreview()" aria-label="Close">&times;</button>
+  <div class="citation-preview-card" id="citation-preview-card">
+    <em>Loading…</em>
+  </div>
+</div>
+
+<!-- Phase 54.6.312 — Bibliography tools modal: audit + renumber. -->
+<div class="modal-overlay" id="bib-tools-modal" onclick="if(event.target===this)closeModal('bib-tools-modal')">
+  <div class="modal">
+    <div class="modal-header">
+      <h3><svg class="icon icon--lg"><use href="#i-book-open"/></svg> Bibliography Tools</h3>
+      <button class="modal-close" onclick="closeModal('bib-tools-modal')" title="Close the Bibliography Tools modal.">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="u-note-sm u-mb-m">
+        Two helpers for when the global bibliography numbering drifts
+        from what's stored in draft markdown (typically after adding a
+        new chapter or section).
+      </div>
+      <div class="u-flex-raw u-gap-2 u-wrap u-mb-m">
+        <button class="btn-secondary" onclick="runBibliographyAudit()"
+                title="Scan every draft for citations pointing at a missing source, sources never cited in the body, and duplicate entries. Read-only, ~1s.">&#128269; Sanity check</button>
+        <button class="btn-primary" onclick="runBibliographySort()"
+                title="Flatten local→global citation numbers INTO the stored draft content. Renumbers every draft's [N] markers and sources list so the raw markdown matches the global bibliography. Idempotent — run again after new chapters/sections.">&#128260; Sort &amp; renumber bibliography</button>
+      </div>
+      <div id="bib-tools-output" class="u-note-sm" style="min-height: 120px; font-family: var(--font-mono); white-space: pre-wrap;"></div>
+    </div>
+  </div>
+</div>
 <!-- Phase 21.c — Visuals browser modal -->
 <div class="modal-overlay" id="visuals-modal" onclick="if(event.target===this)closeModal('visuals-modal')">
   <div class="modal wide">
@@ -13220,6 +13830,8 @@ body.task-bar-open {{ padding-top: 40px; }}
           <button class="tab" data-ctab="corp-agentic" onclick="switchCorpusTab('corp-agentic')" title="Phase 54.6.114 — LLM decomposes a research question into sub-topics, measures corpus coverage, auto-expands gaps.">&#129504; Agentic (question-driven)</button>
           <button class="tab" data-ctab="corp-author" onclick="switchCorpusTab('corp-author')"
                   title="Pull every paper by a specific author (ORCID-preferred). Strict-author matching to defend against name collisions.">&#128100; Expand by author</button>
+          <button class="tab" data-ctab="corp-author-refs" onclick="switchCorpusTab('corp-author-refs')"
+                  title="Phase 54.6.312 — Aggregate every paper cited by one author's corpus works (including self-cites), rank by citation frequency, and cherry-pick before download. Mirrors `sciknow db expand-author-refs`.">&#128218; Expand by author's refs</button>
           <button class="tab" data-ctab="corp-inbound" onclick="switchCorpusTab('corp-inbound')"
                   title="Find papers that CITE the corpus — forward-in-time mirror of db expand. Uses OpenAlex cites: filter.">&#128258; Inbound cites</button>
           <button class="tab" data-ctab="corp-topic" onclick="switchCorpusTab('corp-topic')"
@@ -13489,6 +14101,29 @@ body.task-bar-open {{ padding-top: 40px; }}
             </button>
             <span class="u-hint">
               Preview lets you cherry-pick; Auto uses the relevance threshold.
+            </span>
+          </div>
+        </div>
+
+        <!-- Phase 54.6.312 — Expand-by-author's references. Same pipeline
+             as openExpandAuthorRefs() from the global menu, hosted inside
+             the Corpus modal so users don't have to dig through the
+             top-bar dropdown. -->
+        <div class="u-hidden-card" id="corp-author-refs-pane">
+          <div class="u-note-md">
+            Aggregate every paper <strong>cited by</strong> one author's
+            corpus works (including self-cites), rank by citation
+            frequency, cherry-pick the ones to fetch, then download +
+            ingest via the shared expand-author pipeline. Mirrors
+            <code>sciknow db expand-author-refs</code>.
+          </div>
+          <div class="u-row-mt u-flex-raw u-gap-2 u-ai-center u-wrap">
+            <button class="btn-primary" onclick="openExpandAuthorRefs()"
+                    title="Open the author picker. Loads the top corpus authors by citation count so you can pick one quickly; you can also type any surname or full name.">
+              &#128269; Pick author &amp; preview references
+            </button>
+            <span class="u-hint">
+              The picker opens in its own candidates modal so you can filter + multi-select before any disk write.
             </span>
           </div>
         </div>
@@ -17987,9 +18622,13 @@ async function showVersions() {{
     const makeActiveBtn = v.is_active
       ? ''
       : '<button class="btn-sm" data-action="activate-version" data-draft-id="' + v.id + '" title="Make this the version shown by the reader. Global citation numbering + right-panel sources refresh to match.">Make active</button>';
+    const name = v.version_name
+      ? '<span class="version-name" title="User-supplied version label. Click to rename.">' + escapeHtml(v.version_name) + '</span>'
+      : '<span class="version-name version-name--empty" title="No name assigned. Click to add.">(unnamed)</span>';
     html += '<div class="version-row' + (v.is_active ? ' version-row--active' : '') + '">' +
       '<span class="version-badge" data-vid="' + v.id + '" data-action="select-version" data-version-id="' + v.id + '">' +
         'v' + v.version + '</span>' +
+      '<span onclick="renameVersion(\\'' + v.id + '\\')" style="cursor:pointer;">' + name + '</span>' +
       '<span class="version-meta">' + (v.word_count || 0) + 'w' + review + active + model + '</span>' +
       score +
       makeActiveBtn +
@@ -17997,6 +18636,24 @@ async function showVersions() {{
   }});
   html += '</div>';
   timeline.innerHTML = html;
+}}
+
+async function renameVersion(draftId) {{
+  if (!draftId) return;
+  const current = (versionData.find(v => v.id === draftId) || {{}}).version_name || '';
+  const next = prompt('Version name (empty to clear):', current);
+  if (next === null) return;
+  try {{
+    const fd = new FormData();
+    fd.append('name', next);
+    const res = await fetch('/api/draft/' + encodeURIComponent(draftId) + '/rename-version', {{
+      method: 'POST', body: fd,
+    }});
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    await showVersions();
+  }} catch (e) {{
+    alert('Could not rename: ' + e);
+  }}
 }}
 
 // Phase 54.6.309 — flip the active flag on one version; reload the reader
@@ -18265,6 +18922,93 @@ function edInsert(before, after) {{
 function edInsertCite() {{
   const n = prompt('Citation number:');
   if (n) edInsert('[' + n + ']', '');
+}}
+
+// Phase 54.6.312 — extra markdown insertion helpers for the editor
+// toolbar. edInsertLine prefixes the current line (or each selected
+// line) with `prefix`; useful for lists, quotes, rules.
+function edInsertLine(prefix, suffix) {{
+  const ta = document.getElementById('edit-area');
+  if (!ta) return;
+  suffix = suffix || '';
+  const start = ta.selectionStart;
+  const end = ta.selectionEnd;
+  const before = ta.value.substring(0, start);
+  const selected = ta.value.substring(start, end);
+  const after = ta.value.substring(end);
+  // Find the start of the current line for the caret prefix.
+  const lineStart = before.lastIndexOf('\\n') + 1;
+  const head = before.substring(0, lineStart);
+  const lineBefore = before.substring(lineStart);
+  let body;
+  if (selected) {{
+    body = selected.split('\\n').map(l => prefix + l).join('\\n');
+  }} else {{
+    body = prefix + (lineBefore || '');
+  }}
+  const replaced = selected ? '' : lineBefore;
+  ta.value = head + body + suffix + after.substring(0);
+  const newPos = head.length + body.length + suffix.length;
+  ta.selectionStart = newPos; ta.selectionEnd = newPos;
+  // If we replaced the current line's text, drop it from head/lineBefore.
+  if (!selected && lineBefore) {{
+    // We already substituted above; do nothing extra.
+  }}
+  ta.focus();
+  edPreview();
+}}
+
+function edInsertLink() {{
+  const url = prompt('Link URL (https://…):', 'https://');
+  if (!url) return;
+  const label = prompt('Link text:', '');
+  const sel = label || 'link';
+  edInsert('[' + sel + '](' + url + ')', '');
+}}
+
+function edUndo() {{
+  const ta = document.getElementById('edit-area');
+  if (!ta) return;
+  ta.focus();
+  try {{ document.execCommand('undo'); edPreview(); }}
+  catch (e) {{ /* browser does not support execCommand */ }}
+}}
+
+function edRedo() {{
+  const ta = document.getElementById('edit-area');
+  if (!ta) return;
+  ta.focus();
+  try {{ document.execCommand('redo'); edPreview(); }}
+  catch (e) {{}}
+}}
+
+// Save the editor buffer as a NEW version with an optional label.
+// Calls /api/draft/{{id}}/save-as-version (creates a fresh drafts row,
+// increments version, pins it active) then reloads the reader so the
+// Versions panel shows the new entry.
+async function edSaveAsVersion() {{
+  const ta = document.getElementById('edit-area');
+  if (!ta || !currentDraftId) return;
+  const name = prompt('Version name (optional, e.g. "pre-review"):', '');
+  if (name === null) return;   // cancelled
+  const fd = new FormData();
+  fd.append('content', ta.value);
+  fd.append('version_name', name || '');
+  setAutosaveState('saving', 'Saving new version…');
+  try {{
+    const res = await fetch('/api/draft/' + encodeURIComponent(currentDraftId) + '/save-as-version', {{
+      method: 'POST', body: fd,
+    }});
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    setAutosaveState('', 'Saved v' + (data.version || '') + (data.version_name ? (' (' + data.version_name + ')') : ''));
+    if (_autosaveTimer) {{ clearInterval(_autosaveTimer); _autosaveTimer = null; }}
+    toggleEdit();
+    if (data.new_draft_id && typeof loadSection === 'function') loadSection(data.new_draft_id);
+  }} catch (e) {{
+    setAutosaveState('error', 'Save failed');
+    alert('Could not save as new version: ' + e);
+  }}
 }}
 
 // Phase 14.4 — autosave UX: a small status pill that's always visible
@@ -18791,9 +19535,17 @@ function buildPopovers() {{
     }}
     el.classList.remove('citation-broken');
     el.style.cursor = 'pointer';
-    el.onclick = function() {{
-      const target = document.getElementById('source-' + ref);
-      if (target) target.scrollIntoView({{behavior: 'smooth', block: 'center'}});
+    // Phase 54.6.312 — clicking a citation opens a rich preview modal
+    // (title + authors + abstract + open-access URL) instead of just
+    // scrolling to the source list. Shift+click keeps the old
+    // scroll-to-source behaviour for people who already rely on it.
+    el.onclick = function(ev) {{
+      if (ev && (ev.shiftKey || ev.metaKey || ev.ctrlKey)) {{
+        const target = document.getElementById('source-' + ref);
+        if (target) target.scrollIntoView({{behavior: 'smooth', block: 'center'}});
+        return;
+      }}
+      openCitationPreview(ref);
     }};
   }});
 
@@ -23280,7 +24032,7 @@ function switchCorpusTab(name) {{
     t.classList.toggle('active', t.dataset.ctab === name);
   }});
   ['corp-enrich', 'corp-cites', 'corp-agentic', 'corp-author',
-   'corp-inbound', 'corp-topic', 'corp-coauth'].forEach(n => {{
+   'corp-author-refs', 'corp-inbound', 'corp-topic', 'corp-coauth'].forEach(n => {{
     const pane = document.getElementById(n + '-pane');
     if (pane) pane.style.display = (n === name) ? 'block' : 'none';
   }});
@@ -28183,23 +28935,137 @@ function switchContextTab(name) {{
     if (pane) pane.classList.toggle('is-active', on);
   }});
   try {{ localStorage.setItem('sciknow.ui.contextTab', name); }} catch (e) {{}}
-  // Phase 54.6.309 — lazy-load the visuals pane on first open for the
-  // currently-displayed draft so the ranker cost is only paid once.
+  // Phase 54.6.312 — visuals pane: NEVER auto-rank on tab open. Load the
+  // cached ranking (if any) for the current draft and let the user press
+  // the Rank / Re-rank button explicitly. The ranker costs ~1–2s and the
+  // result is persisted per-draft so subsequent opens are instant.
   if (name === 'visuals') {{
     const pane = document.getElementById('panel-visuals');
-    if (pane && pane.dataset.loadedFor !== ((typeof currentDraftId !== 'undefined' ? currentDraftId : '') || '')) {{
-      refreshVisualSuggestions();
+    const did = (typeof currentDraftId !== 'undefined' ? currentDraftId : '') || '';
+    if (pane && pane.dataset.loadedFor !== did) {{
+      loadCachedVisualSuggestions();
     }}
   }}
 }}
 
-// Phase 54.6.309 — fetch + render visual suggestions for the current
-// draft. Handles the bibliography pseudo-draft (empty note) and empty
-// corpus cleanly. Clicking a suggestion dispatches insertVisualAtCaret
-// which appends the image + caption to the end of the draft body.
-async function refreshVisualSuggestions() {{
+// Phase 54.6.312 — visual suggestions panel. Three entry points:
+//
+//   loadCachedVisualSuggestions()  — on tab-open, GET without compute=1.
+//                                    Renders the saved ranking (if any);
+//                                    otherwise shows a "click Rank" hint.
+//   rankVisualSuggestions()        — the Rank / Re-rank button: POST to
+//                                    /api/visuals/suggestions, which
+//                                    computes + persists to the draft's
+//                                    custom_metadata. Button text flips
+//                                    to "Re-rank" once a ranking exists.
+//   clearVisualSuggestions()       — DELETE the saved ranking.
+//
+// The pane supports gallery + list view modes and a click-to-enlarge
+// lightbox (#visuals-lightbox) so the small thumbnails can be inspected.
+let _visualsPaneView = 'gallery';
+try {{
+  _visualsPaneView = localStorage.getItem('sciknow.ui.visualsPaneView') || 'gallery';
+}} catch (e) {{}}
+
+function setVisualsPaneView(mode) {{
+  _visualsPaneView = (mode === 'list') ? 'list' : 'gallery';
+  try {{ localStorage.setItem('sciknow.ui.visualsPaneView', _visualsPaneView); }} catch (e) {{}}
+  document.getElementById('vis-pane-view-gallery')?.classList.toggle('is-active', _visualsPaneView === 'gallery');
+  document.getElementById('vis-pane-view-list')?.classList.toggle('is-active', _visualsPaneView === 'list');
   const pane = document.getElementById('panel-visuals');
-  const btn = document.getElementById('visuals-refresh-btn');
+  if (pane) {{
+    pane.classList.toggle('visuals-mode--gallery', _visualsPaneView === 'gallery');
+    pane.classList.toggle('visuals-mode--list', _visualsPaneView === 'list');
+  }}
+}}
+
+function _visualsPaneButtons(hasRanking) {{
+  const rankBtn = document.getElementById('visuals-rank-btn');
+  const clearBtn = document.getElementById('visuals-clear-btn');
+  if (rankBtn) rankBtn.textContent = hasRanking ? 'Re-rank' : 'Rank';
+  if (clearBtn) clearBtn.classList.toggle('u-hidden', !hasRanking);
+}}
+
+function _renderVisualsPane(data, opts) {{
+  const pane = document.getElementById('panel-visuals');
+  const hint = document.getElementById('panel-visuals-hint');
+  if (!pane) return;
+  opts = opts || {{}};
+  pane.classList.add(_visualsPaneView === 'list' ? 'visuals-mode--list' : 'visuals-mode--gallery');
+  pane.classList.remove(_visualsPaneView === 'list' ? 'visuals-mode--gallery' : 'visuals-mode--list');
+  if (!data || !data.hits || data.hits.length === 0) {{
+    const msg = (data && data.note)
+      ? data.note
+      : (opts.placeholder || 'No ranking saved for this draft. Click Rank to compute.');
+    pane.innerHTML = '<em>' + escapeHtml(msg) + '</em>';
+    return;
+  }}
+  const stale = opts.stale
+    ? ' <span class="visual-tag" title="The draft content has changed since this ranking was computed. Re-rank for fresh results.">stale</span>'
+    : '';
+  const stamp = opts.ranked_at
+    ? '<div class="panel-visuals-stamp" title="When this ranking was computed.">ranked ' + escapeHtml(opts.ranked_at.replace('T', ' ').replace('Z', ' UTC')) + stale + '</div>'
+    : '';
+  let html = stamp + '<ul class="visual-suggestions">';
+  data.hits.forEach((v) => {{
+    const cap = escapeHtml(v.caption || '(no caption)');
+    const paperTitle = escapeHtml(v.paper_title || '');
+    const kind = escapeHtml(v.kind || '');
+    const figNum = escapeHtml(v.figure_num || '');
+    const score = (v.composite_score || 0).toFixed(2);
+    const samePaper = v.same_paper
+      ? '<span class="visual-tag visual-tag--same" title="Comes from a paper already cited by this draft.">cited</span>'
+      : '';
+    const imgUrl = v.image_url || '';
+    const img = imgUrl
+      ? '<img class="visual-thumb" loading="lazy" src="' + escapeHtml(imgUrl) +
+        '" data-full-src="' + escapeHtml(imgUrl) +
+        '" data-caption="' + cap +
+        '" onclick="openVisualLightbox(this)" alt="' + cap + '" title="Click to enlarge — ' + cap + '">'
+      : '<div class="visual-thumb visual-thumb--text" title="No rendered image for this kind (' + kind + ').">[' + kind + ']</div>';
+    html += '<li class="visual-row" data-visual-id="' + escapeHtml(v.visual_id) + '">' +
+      img +
+      '<div class="visual-meta">' +
+        '<div class="visual-caption">' + cap + '</div>' +
+        '<div class="visual-sub"><span class="visual-src" title="' + paperTitle + '">' + paperTitle + '</span> ' +
+        '<span class="visual-tag">' + kind + (figNum ? ' ' + figNum : '') + '</span> ' +
+        samePaper +
+        '<span class="visual-score" title="Composite ranker score (caption + mention + same-paper + section prior).">score ' + score + '</span></div>' +
+        '<button class="visual-insert btn-sm" onclick="insertVisualIntoDraft(\\'' + v.visual_id + '\\')" title="Append an image reference + caption to the end of this draft. The image is served from /api/visuals/image/{{id}}.">Insert</button>' +
+      '</div>' +
+    '</li>';
+  }});
+  html += '</ul>';
+  pane.innerHTML = html;
+}}
+
+async function loadCachedVisualSuggestions() {{
+  const pane = document.getElementById('panel-visuals');
+  const did = (typeof currentDraftId !== 'undefined' ? currentDraftId : '') || '';
+  if (!pane) return;
+  setVisualsPaneView(_visualsPaneView);
+  if (!did) {{
+    pane.innerHTML = '<em>Open a drafted section first.</em>';
+    _visualsPaneButtons(false);
+    return;
+  }}
+  try {{
+    const res = await fetch('/api/visuals/suggestions?draft_id=' + encodeURIComponent(did) + '&limit=12');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    pane.dataset.loadedFor = did;
+    const hasRanking = !!(data.cached && data.hits && data.hits.length);
+    _visualsPaneButtons(hasRanking);
+    _renderVisualsPane(data, {{ stale: data.stale, ranked_at: data.ranked_at }});
+  }} catch (e) {{
+    pane.innerHTML = '<em>Failed to load saved ranking: ' + escapeHtml(String(e)) + '</em>';
+    _visualsPaneButtons(false);
+  }}
+}}
+
+async function rankVisualSuggestions() {{
+  const pane = document.getElementById('panel-visuals');
+  const btn = document.getElementById('visuals-rank-btn');
   const did = (typeof currentDraftId !== 'undefined' ? currentDraftId : '') || '';
   if (!pane) return;
   if (!did) {{
@@ -28209,51 +29075,158 @@ async function refreshVisualSuggestions() {{
   if (btn) {{ btn.disabled = true; btn.textContent = 'Ranking…'; }}
   pane.innerHTML = '<em>Ranking visuals against this draft…</em>';
   try {{
-    const res = await fetch('/api/visuals/suggestions?draft_id=' + encodeURIComponent(did) + '&limit=12');
+    const res = await fetch('/api/visuals/suggestions?draft_id=' + encodeURIComponent(did) + '&limit=12', {{
+      method: 'POST',
+    }});
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     pane.dataset.loadedFor = did;
-    if (data.note && (!data.hits || data.hits.length === 0)) {{
-      pane.innerHTML = '<em>' + escapeHtml(data.note) + '</em>';
-      return;
-    }}
-    if (!data.hits || data.hits.length === 0) {{
-      pane.innerHTML = '<em>No visual suggestions yet. Run <code>sciknow db extract-visuals</code> and <code>sciknow db embed-visuals</code> to populate.</em>';
-      return;
-    }}
-    let html = '<ul class="visual-suggestions">';
-    data.hits.forEach((v, i) => {{
-      const cap = escapeHtml(v.caption || '(no caption)');
-      const paperTitle = escapeHtml(v.paper_title || '');
-      const kind = escapeHtml(v.kind || '');
-      const figNum = escapeHtml(v.figure_num || '');
-      const score = (v.composite_score || 0).toFixed(2);
-      const samePaper = v.same_paper
-        ? '<span class="visual-tag visual-tag--same" title="Comes from a paper already cited by this draft.">cited</span>'
-        : '';
-      const img = v.image_url
-        ? '<img class="visual-thumb" loading="lazy" src="' + escapeHtml(v.image_url) + '" alt="' + cap + '" title="' + cap + '">'
-        : '<div class="visual-thumb visual-thumb--text" title="No rendered image for this kind (' + kind + ').">[' + kind + ']</div>';
-      html += '<li class="visual-row" data-visual-id="' + escapeHtml(v.visual_id) + '">' +
-        img +
-        '<div class="visual-meta">' +
-          '<div class="visual-caption">' + cap + '</div>' +
-          '<div class="visual-sub"><span class="visual-src" title="' + paperTitle + '">' + paperTitle + '</span> ' +
-          '<span class="visual-tag">' + kind + (figNum ? ' ' + figNum : '') + '</span> ' +
-          samePaper +
-          '<span class="visual-score" title="Composite ranker score (caption + mention + same-paper + section prior).">score ' + score + '</span></div>' +
-          '<button class="visual-insert btn-sm" onclick="insertVisualIntoDraft(\\'' + v.visual_id + '\\')" title="Append an image reference + caption to the end of this draft. The image is served from /api/visuals/image/{{id}}.">Insert</button>' +
-        '</div>' +
-      '</li>';
-    }});
-    html += '</ul>';
-    pane.innerHTML = html;
+    _renderVisualsPane(data, {{ stale: false, ranked_at: data.ranked_at }});
+    _visualsPaneButtons(!!(data.hits && data.hits.length));
   }} catch (e) {{
-    pane.innerHTML = '<em>Failed to load suggestions: ' + escapeHtml(String(e)) + '</em>';
+    pane.innerHTML = '<em>Failed to rank: ' + escapeHtml(String(e)) + '</em>';
   }} finally {{
-    if (btn) {{ btn.disabled = false; btn.textContent = 'Refresh'; }}
+    if (btn) btn.disabled = false;
   }}
 }}
+
+async function clearVisualSuggestions() {{
+  const did = (typeof currentDraftId !== 'undefined' ? currentDraftId : '') || '';
+  if (!did) return;
+  if (!confirm('Delete the saved ranking for this draft? The next Rank press will recompute from scratch.')) return;
+  try {{
+    await fetch('/api/visuals/suggestions?draft_id=' + encodeURIComponent(did), {{ method: 'DELETE' }});
+    await loadCachedVisualSuggestions();
+  }} catch (e) {{
+    alert('Could not clear: ' + e);
+  }}
+}}
+
+// Click-to-enlarge lightbox. The <img> in the panel carries
+// data-full-src + data-caption so the modal can read them without a
+// second round-trip.
+function openVisualLightbox(imgEl) {{
+  const src = imgEl?.dataset?.fullSrc || imgEl?.src;
+  const cap = imgEl?.dataset?.caption || imgEl?.alt || '';
+  const modal = document.getElementById('visuals-lightbox');
+  if (!modal) return;
+  const mImg = document.getElementById('visuals-lightbox-img');
+  const mCap = document.getElementById('visuals-lightbox-cap');
+  if (mImg) mImg.src = src;
+  if (mCap) mCap.innerHTML = escapeHtml(cap);
+  modal.classList.add('open');
+}}
+function closeVisualLightbox() {{
+  const modal = document.getElementById('visuals-lightbox');
+  if (modal) modal.classList.remove('open');
+  const mImg = document.getElementById('visuals-lightbox-img');
+  if (mImg) mImg.src = '';
+}}
+
+// ── Phase 54.6.312 — Citation preview popup ──────────────────────────
+// Click on an inline [N] in a draft → fetch the full publication
+// metadata and render a rich card (title, authors, year, journal,
+// abstract, open-access link). Shift/Cmd/Ctrl+click keeps the legacy
+// scroll-to-source behaviour so the two UX don't collide.
+async function openCitationPreview(n) {{
+  const modal = document.getElementById('citation-preview');
+  const card = document.getElementById('citation-preview-card');
+  if (!modal || !card) return;
+  card.innerHTML = '<em>Loading citation [' + escapeHtml(String(n)) + ']…</em>';
+  modal.classList.add('open');
+  try {{
+    const res = await fetch('/api/bibliography/citation/' + encodeURIComponent(n));
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    const meta = data.metadata;
+    const sourceLine = escapeHtml(data.source_line || '');
+    if (!meta) {{
+      card.innerHTML = '<div class="cpv-head">Citation [' + escapeHtml(String(n)) + ']</div>'
+        + '<div class="cpv-line">' + sourceLine + '</div>'
+        + '<div class="cpv-note">Bibliographic record not found in paper_metadata — the source string above is what the draft stores.</div>';
+      return;
+    }}
+    const authors = Array.isArray(meta.authors) ? meta.authors.join(', ') : (meta.authors || '');
+    const yr = meta.year ? ' (' + escapeHtml(String(meta.year)) + ')' : '';
+    const jr = meta.journal ? '<div class="cpv-journal">' + escapeHtml(meta.journal) + '</div>' : '';
+    const doi = meta.doi
+      ? '<a class="cpv-link" href="https://doi.org/' + encodeURIComponent(meta.doi) + '" target="_blank" rel="noopener">doi:' + escapeHtml(meta.doi) + '</a>'
+      : '';
+    const oa = meta.open_access_url
+      ? '<a class="cpv-link" href="' + escapeHtml(meta.open_access_url) + '" target="_blank" rel="noopener">Open access link</a>'
+      : '';
+    const abstract = meta.abstract ? '<div class="cpv-abstract">' + escapeHtml(meta.abstract) + '</div>' : '';
+    card.innerHTML = '<div class="cpv-head">Citation [' + escapeHtml(String(n)) + ']</div>'
+      + '<h3 class="cpv-title">' + escapeHtml(meta.title || '(untitled)') + yr + '</h3>'
+      + '<div class="cpv-authors">' + escapeHtml(authors) + '</div>'
+      + jr
+      + abstract
+      + '<div class="cpv-links">' + [doi, oa].filter(Boolean).join(' · ') + '</div>';
+  }} catch (e) {{
+    card.innerHTML = '<em>Failed to load citation: ' + escapeHtml(String(e)) + '</em>';
+  }}
+}}
+
+function closeCitationPreview() {{
+  document.getElementById('citation-preview')?.classList.remove('open');
+}}
+
+// ── Phase 54.6.312 — Bibliography audit + sort helpers ──────────────
+async function runBibliographyAudit() {{
+  const out = document.getElementById('bib-tools-output');
+  if (!out) return;
+  out.textContent = 'Running sanity check…';
+  try {{
+    const res = await fetch('/api/bibliography/audit');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    const totals = data.totals || {{}};
+    const rows = data.rows || [];
+    let msg = `Drafts checked: ${{totals.drafts_checked || 0}}\\n`
+      + `Broken citation refs: ${{totals.broken || 0}}\\n`
+      + `Orphan sources: ${{totals.orphans || 0}}\\n`
+      + `Duplicate source groups: ${{totals.dupes || 0}}\\n\\n`;
+    if (!rows.length) {{
+      msg += 'No issues found. The bibliography is healthy.';
+    }} else {{
+      msg += `Drafts with issues (${{rows.length}}):\\n`;
+      rows.forEach(r => {{
+        const chLabel = r.chapter_num ? ('Ch.' + r.chapter_num + ': ' + (r.chapter_title || '')) : '(orphan)';
+        msg += `\\n• ${{chLabel}} — ${{r.section_type || '?'}} — ${{r.title || ''}}\\n`;
+        if (r.broken_refs && r.broken_refs.length) msg += `    broken refs: [${{r.broken_refs.join(', ')}}]\\n`;
+        if (r.orphan_sources && r.orphan_sources.length) msg += `    orphan sources: [${{r.orphan_sources.join(', ')}}]\\n`;
+        if (r.duplicate_groups && r.duplicate_groups.length) {{
+          msg += `    duplicates: `;
+          msg += r.duplicate_groups.map(g => '[' + g.join(',') + ']').join(' ');
+          msg += '\\n';
+        }}
+      }});
+      msg += '\\nFix by pressing "Sort & renumber bibliography" — it re-aligns draft markdown with the global numbering.';
+    }}
+    out.textContent = msg;
+  }} catch (e) {{
+    out.textContent = 'Sanity check failed: ' + e;
+  }}
+}}
+
+async function runBibliographySort() {{
+  const out = document.getElementById('bib-tools-output');
+  if (!out) return;
+  if (!confirm('Rewrite every draft\\'s [N] citations to match the global bibliography order? This flattens local→global numbers so the stored markdown equals what the reader shows. Idempotent, but backup via Snapshot first if you are nervous.')) return;
+  out.textContent = 'Renumbering drafts…';
+  try {{
+    const res = await fetch('/api/bibliography/sort', {{method: 'POST'}});
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    out.textContent = `Updated ${{data.drafts_updated || 0}} draft(s). `
+      + `The bibliography now has ${{data.total_global_sources || 0}} unique sources. `
+      + `Reload the reader to see the new numbers.`;
+  }} catch (e) {{
+    out.textContent = 'Sort failed: ' + e;
+  }}
+}}
+
+function openBibliographyTools() {{ openModal('bib-tools-modal'); }}
 
 // Append an image reference for ``visualId`` to the draft body via the
 // existing edit-in-place flow. If the draft is currently in edit mode
