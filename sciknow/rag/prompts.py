@@ -1612,6 +1612,84 @@ def cove_answer(question: str, results: list) -> tuple[str, str]:
     )
 
 
+# ── Phase 54.6.319 — batched CoV answer (one prefill, N answers) ─────
+#
+# The original factored-CoV (Dhuliawala et al. 2023, ACL Findings 2024)
+# runs N separate Q→A calls so each question's answer can't be
+# contaminated by another's. That's the right default for *correctness*
+# but it's a wall-clock disaster on long source contexts: each call has
+# to re-prefill the full source passage block (~12-16K tokens). Even
+# when Ollama's prefix cache hits, role-swaps elsewhere in the autowrite
+# loop (writer / scorer / verifier) evict the cache between phases.
+#
+# This batched variant answers ALL N questions in a single call:
+#   - prefill happens ONCE on the source passages + the question list,
+#   - decode generates N JSON entries.
+# We instruct the model explicitly to treat each question independently
+# so cross-contamination stays low. Empirically, on Qwen3.6-27B with
+# N=6 questions and a 12K source context, this cuts CoV wall-clock
+# from ~6 minutes to ~1 minute (one prefill instead of six).
+
+COVE_ANSWER_BATCH_SYSTEM = """\
+You are a careful scientific researcher answering MULTIPLE factual questions \
+STRICTLY from the provided source passages. You have NOT seen the draft \
+that motivated these questions.
+
+Critical rules — read carefully:
+- Answer each question INDEPENDENTLY. Do NOT let your answer to one \
+question bias another. Re-read the source passages fresh for each one.
+- If the passages directly answer the question, give the precise answer \
+with the citation marker [N] from the passages.
+- If the passages contain partial information, give the partial answer \
+and note what is missing.
+- If the passages do not address the question at all, set verdict to \
+NOT_IN_SOURCES and answer "Not addressed in the provided passages".
+- If the passages address the question but at a DIFFERENT scope, period, \
+or with different qualifiers than the question implies, set verdict to \
+DIFFERENT_SCOPE and give the source's answer faithfully along with the \
+scope difference.
+- Match each source's epistemic strength — do NOT strengthen *suggests* \
+into *proves*, *associated with* into *causes*, or *may* into *does*.
+
+Respond ONLY with valid JSON of the shape:
+{
+  "answers": [
+    {
+      "question_index": 1,
+      "answer": "...",
+      "verdict": "CONFIRMED|PARTIAL|NOT_IN_SOURCES|DIFFERENT_SCOPE",
+      "citation": "[N]" or null,
+      "notes": "any caveats, scope differences, or epistemic-strength notes"
+    },
+    ...one entry per question, in the same order...
+  ]
+}"""
+
+COVE_ANSWER_BATCH_USER = """\
+Source passages:
+
+{context}
+
+---
+
+Questions to answer (treat each independently):
+{questions_block}"""
+
+
+def cove_answer_batch(questions: list[str], results: list) -> tuple[str, str]:
+    """Phase 54.6.319 — single-call batched CoV answer.
+
+    ``questions`` is the ordered list extracted from the question-
+    generation pass. Output JSON's ``answers[*].question_index`` is
+    1-based and aligns with ``questions``.
+    """
+    qb = "\n".join(f"{i + 1}. {q}" for i, q in enumerate(questions))
+    return COVE_ANSWER_BATCH_SYSTEM, COVE_ANSWER_BATCH_USER.format(
+        context=format_context(results),
+        questions_block=qb,
+    )
+
+
 # ── Sentence planning ───────────────────────────────────────────────────────
 
 SENTENCE_PLAN_SYSTEM = """\

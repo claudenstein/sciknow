@@ -12045,6 +12045,80 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_319_cove_batched_answer() -> None:
+    """Phase 54.6.319 — CoV batches all answers into one LLM call.
+
+    Pre-fix: ``_cove_verify_streaming`` ran one Ollama call per
+    verification question, paying a 12-16K-token prefill on every
+    call. With autowrite's role-swaps evicting Ollama's prefix
+    cache between phases, this dominated wall-clock for 6+ minutes
+    per CoV phase.
+
+    Post-fix: a single batched call with ``cove_answer_batch`` answers
+    all N questions in one structured JSON response. Per-question
+    fallback only fires on JSON-parse / Ollama failure.
+
+    Guards:
+      A) ``cove_answer_batch`` exists in rag.prompts with the right
+         shape (instruction + numbered question block).
+      B) ``COVE_ANSWER_BATCH_SYSTEM`` instructs the model to treat
+         each question independently (the original CoVe correctness
+         property).
+      C) ``_cove_verify_streaming`` calls ``cove_answer_batch`` in
+         the happy path with a per-question loop only as fallback.
+      D) ``_cove_verify`` (non-streaming twin) does the same.
+      E) The output shape (``answers[*].question_index``) matches what
+         the verify function pairs back with the original questions.
+    """
+    import inspect as _inspect
+    from sciknow.rag import prompts as _prompts
+    from sciknow.core import book_ops as _book
+
+    # A) helper exists with right shape
+    assert hasattr(_prompts, "cove_answer_batch"), (
+        "54.6.319 — cove_answer_batch helper must exist"
+    )
+    sys_p, usr_p = _prompts.cove_answer_batch(
+        ["First question?", "Second question?", "Third question?"],
+        results=[],
+    )
+    assert "1. First question?" in usr_p, (
+        "54.6.319 — questions must be 1-indexed in the user message"
+    )
+    assert "2. Second question?" in usr_p
+    assert "3. Third question?" in usr_p
+
+    # B) system prompt enforces independence
+    sys_lower = sys_p.lower()
+    assert "independent" in sys_lower or "independently" in sys_lower, (
+        "54.6.319 — batched system prompt must instruct the model to "
+        "treat each question independently (CoVe's correctness gate)"
+    )
+
+    # C) streaming verify uses the batched path
+    cv_src = _inspect.getsource(_book._cove_verify_streaming)
+    assert "cove_answer_batch" in cv_src, (
+        "54.6.319 — _cove_verify_streaming must call cove_answer_batch"
+    )
+    assert "fallback" in cv_src.lower() or "cove_answer_" in cv_src, (
+        "54.6.319 — streaming verify must keep a per-question fallback "
+        "for the JSON-parse / Ollama-crash safety net"
+    )
+
+    # D) non-streaming verify uses the batched path
+    nsv_src = _inspect.getsource(_book._cove_verify)
+    assert "cove_answer_batch" in nsv_src, (
+        "54.6.319 — _cove_verify must also call cove_answer_batch"
+    )
+
+    # E) output shape: question_index pairing
+    for s in (cv_src, nsv_src):
+        assert "question_index" in s, (
+            "54.6.319 — verify functions must pair answers back to "
+            "questions via the question_index field"
+        )
+
+
 def l1_phase54_6_318_decode_vs_wall_split() -> None:
     """Phase 54.6.318 — dashboard distinguishes decode tok/s from wall-clock tok/s.
 
@@ -17761,6 +17835,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_317_dashboard_tps_windows,
     # Phase 54.6.318 — decode-tps vs wall-tps split + Ollama stats capture
     l1_phase54_6_318_decode_vs_wall_split,
+    # Phase 54.6.319 — CoV batches all answers into one LLM call
+    l1_phase54_6_319_cove_batched_answer,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]

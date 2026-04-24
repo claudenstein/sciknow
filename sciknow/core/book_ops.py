@@ -3973,31 +3973,61 @@ def _cove_verify(draft_content, results, model=None, max_questions: int = 6):
     if not questions:
         return {"questions_asked": 0, "mismatches": [], "cove_score": 1.0}
 
-    # Step 2: For each question, answer it independently from the sources.
-    # The answerer never sees the draft — that's the whole point.
-    mismatches: list[dict] = []
+    # Step 2: BATCHED answer pass (Phase 54.6.319). One LLM call answers
+    # all N questions; source-passage prefill happens once. Drops CoVe
+    # wall-clock by ~Nx vs the historic per-question loop. Falls back to
+    # per-question on JSON-parse / Ollama failure so the safety net is
+    # preserved.
+    valid_questions: list[dict] = []
     for q in questions:
-        question_text = (q.get("question") or "").strip()
-        draft_claim = (q.get("draft_claim") or "").strip()
-        draft_citation = (q.get("citation") or "").strip()
-        if not question_text:
+        text_q = (q.get("question") or "").strip()
+        if not text_q:
             continue
+        valid_questions.append({
+            "text": text_q,
+            "draft_claim": (q.get("draft_claim") or "").strip(),
+            "draft_citation": (q.get("citation") or "").strip(),
+        })
+    if not valid_questions:
+        return {"questions_asked": 0, "mismatches": [], "cove_score": 1.0}
 
-        try:
-            sys_a, usr_a = rag_prompts.cove_answer(question_text, results)
-            raw_a = llm_complete(
-                sys_a, usr_a, model=model, temperature=0.0, num_ctx=16384,
-                keep_alive=-1,
-            )
-            a_clean = re.sub(r'<think>.*?</think>\s*', '', raw_a, flags=re.DOTALL).strip()
-            a_data = json.loads(_clean_json(a_clean), strict=False)
-        except Exception as exc:
-            logger.warning("CoVe answer failed for question %r: %s", question_text, exc)
+    mismatches: list[dict] = []
+    answers: list[dict] = []
+    try:
+        sys_a, usr_a = rag_prompts.cove_answer_batch(
+            [vq["text"] for vq in valid_questions], results,
+        )
+        raw_a = llm_complete(
+            sys_a, usr_a, model=model, temperature=0.0, num_ctx=16384,
+            num_predict=2048, keep_alive=-1,
+        )
+        a_clean = re.sub(r'<think>.*?</think>\s*', '', raw_a, flags=re.DOTALL).strip()
+        a_data = json.loads(_clean_json(a_clean), strict=False)
+        answers = a_data.get("answers") or []
+    except Exception as exc:
+        logger.warning("CoVe batch answer failed: %s — falling back to per-question loop", exc)
+        for q_idx, vq in enumerate(valid_questions, 1):
+            try:
+                sys_a, usr_a = rag_prompts.cove_answer(vq["text"], results)
+                raw_a = llm_complete(
+                    sys_a, usr_a, model=model, temperature=0.0, num_ctx=16384,
+                    keep_alive=-1,
+                )
+                a_clean = re.sub(r'<think>.*?</think>\s*', '', raw_a, flags=re.DOTALL).strip()
+                a_data = json.loads(_clean_json(a_clean), strict=False)
+                a_data["question_index"] = q_idx
+                answers.append(a_data)
+            except Exception as exc2:
+                logger.warning("CoVe answer fallback failed for q%d: %s", q_idx, exc2)
+
+    by_idx = {int(a.get("question_index") or 0): a for a in answers if a}
+    for q_idx, vq in enumerate(valid_questions, 1):
+        a = by_idx.get(q_idx)
+        if not a:
             continue
-
-        verdict = (a_data.get("verdict") or "").upper()
-        independent_answer = (a_data.get("answer") or "").strip()
-        notes = (a_data.get("notes") or "").strip()
+        verdict = (a.get("verdict") or "").upper()
+        independent_answer = (a.get("answer") or "").strip()
+        notes = (a.get("notes") or "").strip()
 
         # A mismatch is any verdict that isn't a clean CONFIRMED.
         # NOT_IN_SOURCES means the draft made a claim the sources don't support.
@@ -4010,18 +4040,18 @@ def _cove_verify(draft_content, results, model=None, max_questions: int = 6):
                 "PARTIAL": "low",
             }.get(verdict, "medium")
             mismatches.append({
-                "question": question_text,
-                "draft_claim": draft_claim,
-                "draft_citation": draft_citation,
+                "question": vq["text"],
+                "draft_claim": vq["draft_claim"],
+                "draft_citation": vq["draft_citation"],
                 "independent_answer": independent_answer,
                 "verdict": verdict,
                 "severity": severity,
                 "notes": notes,
             })
 
-    cove_score = 1.0 - (len(mismatches) / max(len(questions), 1))
+    cove_score = 1.0 - (len(mismatches) / max(len(valid_questions), 1))
     return {
-        "questions_asked": len(questions),
+        "questions_asked": len(valid_questions),
         "mismatches": mismatches,
         "cove_score": round(cove_score, 3),
     }
@@ -4056,31 +4086,75 @@ def _cove_verify_streaming(draft_content, results, model=None, max_questions: in
     if not questions:
         return {"questions_asked": 0, "mismatches": [], "cove_score": 1.0}
 
-    # Step 2 — independent answers, also streamed.
-    mismatches: list[dict] = []
-    for q_idx, q in enumerate(questions, 1):
+    # Phase 54.6.319 — Step 2: BATCHED answer pass.
+    #
+    # Pre-fix this loop ran one Ollama call per question, each with a
+    # fresh 12-16K-token prefill of the source passages. Even with
+    # Ollama's prefix cache, autowrite's role-swaps (writer / scorer /
+    # CoV) evict the cache between phases, so the wall-clock CoV phase
+    # was 5-7 minutes for 6 questions and the task-bar tok/s read
+    # ~1 t/s (decode is fine; prefill dominates wall-clock).
+    #
+    # We now ship ALL questions in a single batched call. Source
+    # prefill happens once; decode generates N JSON answer entries.
+    # The system prompt explicitly instructs the model to treat each
+    # question independently to keep CoVe's hallucination-detection
+    # power intact.
+    valid_questions: list[dict] = []
+    for q in questions:
         question_text = (q.get("question") or "").strip()
-        draft_claim = (q.get("draft_claim") or "").strip()
-        draft_citation = (q.get("citation") or "").strip()
         if not question_text:
             continue
+        valid_questions.append({
+            "text": question_text,
+            "draft_claim": (q.get("draft_claim") or "").strip(),
+            "draft_citation": (q.get("citation") or "").strip(),
+        })
+    if not valid_questions:
+        return {"questions_asked": 0, "mismatches": [], "cove_score": 1.0}
 
-        try:
-            sys_a, usr_a = rag_prompts.cove_answer(question_text, results)
-            raw_a = yield from _stream_phase(
-                sys_a, usr_a, f"cove_answer_{q_idx}",
-                model=model, temperature=0.0, num_ctx=16384,
-            )
-            a_clean = re.sub(r'<think>.*?</think>\s*', '', raw_a, flags=re.DOTALL).strip()
-            a_data = json.loads(_clean_json(a_clean), strict=False)
-        except Exception as exc:
-            logger.warning("CoVe answer failed for question %r: %s", question_text, exc)
+    mismatches: list[dict] = []
+    answers: list[dict] = []
+    try:
+        sys_a, usr_a = rag_prompts.cove_answer_batch(
+            [vq["text"] for vq in valid_questions], results,
+        )
+        raw_a = yield from _stream_phase(
+            sys_a, usr_a, "cove_answers_batch",
+            model=model, temperature=0.0, num_ctx=16384,
+            num_predict=2048,
+        )
+        a_clean = re.sub(r'<think>.*?</think>\s*', '', raw_a, flags=re.DOTALL).strip()
+        a_data = json.loads(_clean_json(a_clean), strict=False)
+        answers = a_data.get("answers") or []
+    except Exception as exc:
+        logger.warning("CoVe batch answer failed: %s", exc)
+        # Fall back to single-call-per-question only when the batch
+        # path failed catastrophically (JSON parse error, Ollama
+        # crash). The fallback path keeps the 54.6.31x safety net.
+        for q_idx, vq in enumerate(valid_questions, 1):
+            try:
+                sys_a, usr_a = rag_prompts.cove_answer(vq["text"], results)
+                raw_a = yield from _stream_phase(
+                    sys_a, usr_a, f"cove_answer_{q_idx}",
+                    model=model, temperature=0.0, num_ctx=16384,
+                )
+                a_clean = re.sub(r'<think>.*?</think>\s*', '', raw_a, flags=re.DOTALL).strip()
+                a_data = json.loads(_clean_json(a_clean), strict=False)
+                a_data["question_index"] = q_idx
+                answers.append(a_data)
+            except Exception as exc2:
+                logger.warning("CoVe answer fallback failed for q%d: %s", q_idx, exc2)
+
+    # Pair each answer with its originating question and collect mismatches.
+    by_idx = {int(a.get("question_index") or 0): a for a in answers if a}
+    for q_idx, vq in enumerate(valid_questions, 1):
+        a = by_idx.get(q_idx)
+        if not a:
             continue
-
-        verdict = (a_data.get("verdict") or "").upper()
-        independent_answer = (a_data.get("answer") or "").strip()
-        notes = (a_data.get("notes") or "").strip()
-
+        verdict = (a.get("verdict") or "").upper()
+        independent_answer = (a.get("answer") or "").strip()
+        notes = (a.get("notes") or "").strip()
         if verdict and verdict != "CONFIRMED":
             severity = {
                 "NOT_IN_SOURCES": "high",
@@ -4088,18 +4162,18 @@ def _cove_verify_streaming(draft_content, results, model=None, max_questions: in
                 "PARTIAL": "low",
             }.get(verdict, "medium")
             mismatches.append({
-                "question": question_text,
-                "draft_claim": draft_claim,
-                "draft_citation": draft_citation,
+                "question": vq["text"],
+                "draft_claim": vq["draft_claim"],
+                "draft_citation": vq["draft_citation"],
                 "independent_answer": independent_answer,
                 "verdict": verdict,
                 "severity": severity,
                 "notes": notes,
             })
 
-    cove_score = 1.0 - (len(mismatches) / max(len(questions), 1))
+    cove_score = 1.0 - (len(mismatches) / max(len(valid_questions), 1))
     return {
-        "questions_asked": len(questions),
+        "questions_asked": len(valid_questions),
         "mismatches": mismatches,
         "cove_score": round(cove_score, 3),
     }
