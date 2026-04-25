@@ -626,7 +626,19 @@ def _get_book_data():
             WHERE d.book_id = :bid
             ORDER BY bc.number,
                      d.section_type,
-                     COALESCE((d.custom_metadata->>'is_active')::boolean, FALSE) DESC,
+                     -- Phase 54.6.321 — prefer NON-EMPTY content. A
+                     -- crashed autowrite can leave the highest-version
+                     -- draft with empty content; the previous order
+                     -- picked it as active and the GUI displayed a
+                     -- blank section even though earlier versions had
+                     -- 10K+ chars. Sort empty drafts to the bottom of
+                     -- their (chapter, section) group so the
+                     -- "first-seen wins" collapse downstream picks the
+                     -- newest *populated* version instead.
+                     CASE WHEN COALESCE((d.custom_metadata->>'is_active')::boolean, FALSE)
+                          THEN 0 ELSE 1 END,
+                     CASE WHEN d.content IS NULL OR LENGTH(d.content) < 50
+                          THEN 1 ELSE 0 END,
                      d.version DESC
         """), {"bid": _book_id}).fetchall()
 
@@ -2013,21 +2025,30 @@ async def api_bibliography_audit():
             except Exception: return {}
         return {}
 
+    # Phase 54.6.321 — same three-tier pick as core.bibliography:
+    # is_active wins, then prefer non-empty content, then highest version.
     best: dict[tuple, tuple] = {}
     for r in draft_rows:
         did, title, sec, content, sources, ver, ch_id, meta, ch_num, ch_title = r
         key = (ch_id, sec)
         is_active = bool(_meta_dict(meta).get("is_active"))
+        has_content = bool((content or "").strip())
         cur = best.get(key)
         if cur is None:
-            best[key] = (r, is_active); continue
-        cur_row, cur_active = cur
+            best[key] = (r, is_active, has_content); continue
+        cur_row, cur_active, cur_content = cur
         if is_active and not cur_active:
-            best[key] = (r, True)
-        elif is_active == cur_active and (ver or 1) > (cur_row[5] or 1):
-            best[key] = (r, is_active)
+            best[key] = (r, True, has_content); continue
+        if cur_active and not is_active:
+            continue
+        if has_content and not cur_content:
+            best[key] = (r, is_active, True); continue
+        if cur_content and not has_content:
+            continue
+        if (ver or 1) > (cur_row[5] or 1):
+            best[key] = (r, is_active, has_content)
 
-    for r, _ in best.values():
+    for r, _is_a, _has_c in best.values():
         did, title, sec, content, sources, ver, ch_id, meta, ch_num, ch_title = r
         src_list = sources if isinstance(sources, list) else []
         src_by_num: dict[int, str] = {}

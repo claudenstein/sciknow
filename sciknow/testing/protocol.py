@@ -12045,6 +12045,57 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_321_active_draft_skips_empty() -> None:
+    """Phase 54.6.321 — active-version selector prefers populated drafts.
+
+    User reported: clicking a sidebar section opens (URL/title update)
+    but the content area is blank. Root cause: a crashed autowrite
+    left the highest-version draft of that section with empty content
+    (LENGTH=0). The active-version logic was "is_active wins, else
+    highest version" — picking the empty v7 over the populated v4.
+
+    Fix: insert a "prefer non-empty content" tier between is_active
+    and version-DESC. Sections now resolve to the newest *populated*
+    version when no version is explicitly pinned.
+
+    Guards:
+      A) _get_book_data SELECT orders empty content rows AFTER
+         populated ones (CASE WHEN content IS NULL OR LENGTH < 50).
+      B) BookBibliography.from_book uses three-tier pick (is_active /
+         has_content / version) instead of two-tier (is_active /
+         version).
+      C) The audit endpoint mirrors the same three-tier pick so the
+         bibliography sanity check doesn't miss empty-draft sections.
+    """
+    import inspect as _inspect
+    from sciknow.web import app as _web
+    from sciknow.core import bibliography as _bib
+
+    # A) draft SELECT pushes empty rows after populated ones
+    gd_src = _inspect.getsource(_web._get_book_data)
+    assert "LENGTH(d.content) < 50" in gd_src or "LENGTH(d.content) <" in gd_src, (
+        "54.6.321 — _get_book_data ORDER BY must rank empty content "
+        "below populated content so the GUI's first-seen-wins collapse "
+        "skips crashed-autowrite shells"
+    )
+
+    # B) BookBibliography uses three-tier pick
+    bib_src = _inspect.getsource(_bib.BookBibliography.from_book)
+    assert "has_content" in bib_src, (
+        "54.6.321 — BookBibliography.from_book must compare has_content "
+        "as a tier between is_active and version"
+    )
+    assert "(content or \"\").strip()" in bib_src, (
+        "54.6.321 — has_content check must trim whitespace"
+    )
+
+    # C) Audit endpoint same three-tier pick
+    audit_src = _inspect.getsource(_web.api_bibliography_audit)
+    assert "has_content" in audit_src, (
+        "54.6.321 — api_bibliography_audit must use has_content tier"
+    )
+
+
 def l1_phase54_6_320_autowrite_vram_eviction() -> None:
     """Phase 54.6.320 — autowrite phases evict retrieval models before LLM.
 
@@ -17906,6 +17957,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_319_cove_batched_answer,
     # Phase 54.6.320 — autowrite evicts retrieval models before LLM phases
     l1_phase54_6_320_autowrite_vram_eviction,
+    # Phase 54.6.321 — active-version selector prefers populated content
+    l1_phase54_6_321_active_draft_skips_empty,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]

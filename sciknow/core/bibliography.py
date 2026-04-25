@@ -123,20 +123,38 @@ class BookBibliography:
                     return {}
             return {}
 
+        # Phase 54.6.321 — three-tier active-version pick:
+        # 1. is_active=true wins outright.
+        # 2. Among the rest, prefer drafts with non-empty content
+        #    (a crashed autowrite can leave a higher-version row with
+        #    content="" — the GUI then displays a blank section).
+        # 3. Fall back to highest version.
         best_for_key: dict[tuple, tuple] = {}
         for r in rows:
             did, ch_id, sec, content, sources, ver, meta, ch_num = r
             key = (ch_id, sec)
             is_active = bool(_meta_dict(meta).get("is_active"))
+            has_content = bool((content or "").strip())
             cur = best_for_key.get(key)
             if cur is None:
-                best_for_key[key] = (r, is_active)
+                best_for_key[key] = (r, is_active, has_content)
                 continue
-            cur_row, cur_active = cur
+            cur_row, cur_active, cur_content = cur
+            # Tier 1: is_active beats everything.
             if is_active and not cur_active:
-                best_for_key[key] = (r, True)
-            elif is_active == cur_active and (ver or 1) > (cur_row[5] or 1):
-                best_for_key[key] = (r, is_active)
+                best_for_key[key] = (r, True, has_content)
+                continue
+            if cur_active and not is_active:
+                continue
+            # Tier 2: same is_active state — prefer the row with content.
+            if has_content and not cur_content:
+                best_for_key[key] = (r, is_active, True)
+                continue
+            if cur_content and not has_content:
+                continue
+            # Tier 3: same content state — pick highest version.
+            if (ver or 1) > (cur_row[5] or 1):
+                best_for_key[key] = (r, is_active, has_content)
 
         # Order kept drafts by (chapter number, section slug) so global
         # numbering mirrors reading order.
