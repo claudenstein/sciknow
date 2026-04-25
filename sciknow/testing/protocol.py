@@ -362,7 +362,9 @@ def l1_web_template_has_overstated() -> None:
     import sciknow.web.app as web
     # The TEMPLATE module-level constant is the f-string render input.
     assert hasattr(web, "TEMPLATE"), "web.app.TEMPLATE missing"
-    t = web.TEMPLATE
+    from sciknow.testing.helpers import rendered_template_static as _v2_rendered
+
+    t = _v2_rendered()
     assert "verified-overstated" in t, "OVERSTATED CSS class missing from template"
     assert "OVERSTATED" in t, "OVERSTATED string missing from template JS"
     assert "cove_verification" in t, "cove_verification SSE handler missing"
@@ -377,7 +379,9 @@ def l1_web_template_phase14_features() -> None:
     toolbar buttons, and the score history panel.
     """
     import sciknow.web.app as web
-    t = web.TEMPLATE
+    from sciknow.testing.helpers import rendered_template_static as _v2_rendered
+
+    t = _v2_rendered()
 
     # New design system tokens
     assert "--font-sans:" in t, "v2 font system tokens missing from CSS"
@@ -438,7 +442,10 @@ def l1_web_phase15_wiki_browse_and_stats() -> None:
     assert "/api/wiki/pages" in routes, "/api/wiki/pages missing"
     assert "/api/wiki/page/{slug}" in routes, "/api/wiki/page/{slug} missing"
 
-    t = web.TEMPLATE
+    from sciknow.testing.helpers import rendered_template_static as _v2_rendered
+
+
+    t = _v2_rendered()
     # Tab UI
     assert 'class="tabs"' in t, "modal tabs CSS class missing"
     assert "switchWikiTab(" in t, "switchWikiTab JS missing"
@@ -825,7 +832,9 @@ def l1_web_phase14_4_book_sections() -> None:
     assert "bc.sections" in src, "_get_book_data SQL missing bc.sections column"
 
     # Template wiring
-    t = web.TEMPLATE
+    from sciknow.testing.helpers import rendered_template_static as _v2_rendered
+
+    t = _v2_rendered()
     # Heatmap chapter title is clickable
     assert "ch-label clickable" in t, \
         "dashboard chapter title not marked clickable"
@@ -854,7 +863,9 @@ def l1_web_phase14_3_book_plan_editor() -> None:
     and the empty-state chapter scope card.
     """
     import sciknow.web.app as web
-    t = web.TEMPLATE
+    from sciknow.testing.helpers import rendered_template_static as _v2_rendered
+
+    t = _v2_rendered()
     # Toolbar
     assert "openPlanModal()" in t, "Plan toolbar button missing"
     # Modal HTML
@@ -1653,7 +1664,9 @@ def l1_phase17_web_length_target() -> None:
     )
 
     # HTML template has the length field + JS helpers.
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    src = _v2_full_src()
     assert "plan-target-words-input" in src, (
         "Plan modal missing target-words input — GUI users can't set length"
     )
@@ -1879,7 +1892,10 @@ def l1_phase18_web_endpoints_and_modal() -> None:
         "[N] would still collide with other drafts'"
     )
 
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+
+    src = _v2_full_src()
 
     # Chapter modal has tabs + sections editor
     assert "switchChapterTab" in src, (
@@ -2167,7 +2183,10 @@ def l1_phase20_web_endpoint_and_router() -> None:
         "autowrite has nowhere to call"
     )
 
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+
+    src = _v2_full_src()
     # JS routes based on isAllSections
     assert "isAllSections" in src, (
         "doAutowrite() doesn't detect 'no section selected' — toolbar "
@@ -2192,7 +2211,10 @@ def l1_phase20_broken_citation_indicator() -> None:
     import inspect
     from sciknow.web import app as web_app
 
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+
+    src = _v2_full_src()
     assert "citation-broken" in src, (
         "buildPopovers doesn't tag broken citations — orphan refs "
         "look identical to working ones, click silently does nothing"
@@ -2282,7 +2304,10 @@ def l1_phase21_sidebar_renders_template_slots() -> None:
     import inspect
     from sciknow.web import app as web_app
 
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+
+    src = _v2_full_src()
 
     # _render_sidebar handles 'empty', 'drafted', 'orphan' status values
     render_src = inspect.getsource(web_app._render_sidebar)
@@ -2324,7 +2349,10 @@ def l1_phase21_section_editor_live_slug_and_budget() -> None:
     import inspect
     from sciknow.web import app as web_app
 
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+
+    src = _v2_full_src()
 
     # Live slug derivation from title in the JS
     assert "updateSectionTitle" in src, (
@@ -2350,7 +2378,10 @@ def l1_phase21_plan_modal_context_aware() -> None:
     import inspect
     from sciknow.web import app as web_app
 
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+
+    src = _v2_full_src()
 
     # Three tabs present in the HTML (54.6.66 shape)
     assert "plan-tab-chapters" in src, (
@@ -2499,7 +2530,9 @@ def l1_phase22_delete_draft_endpoint_and_orphan_cleanup() -> None:
 
     # The JS template defines deleteOrphanDraft and the orphan row
     # renders the X button + click handler.
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    src = _v2_full_src()
     assert "deleteOrphanDraft" in src, (
         "deleteOrphanDraft JS helper missing — orphan X button is dead"
     )
@@ -2521,7 +2554,10 @@ def l1_phase22_chapter_progress_and_word_target() -> None:
     import inspect
     from sciknow.web import app as web_app
 
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+
+    src = _v2_full_src()
 
     # Chapter progress bar in sidebar HTML + CSS
     assert "ch-progress" in src, "missing ch-progress CSS class"
@@ -2555,7 +2591,10 @@ def l1_phase23_chapter_collapse_expand() -> None:
     import inspect
     from sciknow.web import app as web_app
 
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+
+    src = _v2_full_src()
 
     # Per-chapter chevron HTML in _render_sidebar
     render_src = inspect.getsource(web_app._render_sidebar)
@@ -2600,7 +2639,9 @@ def l1_phase23_chapter_collapse_expand() -> None:
     )
     # Restore is wired into both DOMContentLoaded AND rebuildSidebar
     # so SPA refreshes don't drop the user's collapsed state.
-    rs_src = inspect.getsource(web_app)  # full module
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    rs_src = _v2_full_src()  # full module
     # Count occurrences in rebuildSidebar specifically
     assert "DOMContentLoaded" in src and "restoreCollapsedChapters" in src, (
         "restoreCollapsedChapters not wired to page load"
@@ -2736,7 +2777,9 @@ def l1_phase25_chevron_visible() -> None:
     10px / fg-muted which the user reported as invisible."""
     import inspect
     from sciknow.web import app as web_app
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    src = _v2_full_src()
 
     # Find the .ch-toggle CSS rule and check for the new properties
     # The new rule has font-size: 13px and color: var(--fg) (not muted)
@@ -2844,7 +2887,10 @@ def l1_phase25_adopt_orphan_section() -> None:
         "POST /api/chapters/{id}/sections/adopt endpoint not registered"
     )
 
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+
+    src = _v2_full_src()
     assert "adoptOrphanSection" in src, (
         "adoptOrphanSection JS helper missing"
     )
@@ -2890,7 +2936,10 @@ def l1_phase26_section_drag_drop() -> None:
         "_render_sidebar doesn't emit data-section-slug for the drag handler"
     )
 
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+
+    src = _v2_full_src()
 
     # JS rebuildSidebar mirrors the attrs (post-autowrite refresh path)
     assert "draggable=\"true\"" in src, (
@@ -3019,7 +3068,9 @@ def l1_phase27_display_title_from_meta() -> None:
     )
 
     # JS loadSection prefers display_title
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    src = _v2_full_src()
     assert "data.display_title || data.title" in src, (
         "loadSection JS doesn't prefer display_title over data.title"
     )
@@ -3118,7 +3169,9 @@ def l1_phase28_resume_wired_through() -> None:
     )
 
     # JS doAutowrite has the three-way mode picker
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    src = _v2_full_src()
     assert "modeRebuild" in src and "modeResume" in src, (
         "doAutowrite JS doesn't track rebuild/resume mode separately"
     )
@@ -3208,7 +3261,9 @@ def l1_phase29_size_dropdown_in_modal() -> None:
     """
     import inspect
     from sciknow.web import app as web_app
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    src = _v2_full_src()
 
     # Dropdown + handlers in the rendered template
     assert "updateSectionTargetWords" in src, (
@@ -3253,7 +3308,9 @@ def l1_phase29_empty_section_preview_not_write() -> None:
 
     # JS rebuildSidebar mirrors the same call — accept either the old
     # camelCase call or the new data-action kebab name.
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    src = _v2_full_src()
     total = src.count("previewEmptySection") + src.count("preview-empty-section")
     assert total >= 3, (
         "previewEmptySection / preview-empty-section should appear in "
@@ -3276,7 +3333,9 @@ def l1_phase30_persistent_task_bar() -> None:
     """
     import inspect
     from sciknow.web import app as web_app
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    src = _v2_full_src()
 
     # HTML element exists
     assert 'id="task-bar"' in src, "task bar HTML element missing"
@@ -3339,7 +3398,9 @@ def l1_phase30_heatmap_numbered_columns() -> None:
     assert '"absent"' in src
 
     # JS rendering uses positional 1..N headers
-    full_src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    full_src = _v2_full_src()
     # The JS template literal must reference n_columns
     assert "data.n_columns" in full_src, (
         "showDashboard JS doesn't read n_columns from the API response"
@@ -3395,7 +3456,9 @@ def l1_phase30_kg_endpoint() -> None:
         assert p in sig.parameters, f"api_kg missing {p} param"
 
     # JS modal + helpers
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    src = _v2_full_src()
     assert "openKgModal" in src, "openKgModal JS missing"
     assert "loadKg" in src, "loadKg JS missing"
     assert 'id="kg-modal"' in src, "KG modal HTML missing"
@@ -3420,7 +3483,9 @@ def l1_phase31_custom_dropdown_persists() -> None:
     """
     import inspect
     from sciknow.web import app as web_app
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    src = _v2_full_src()
 
     # Renderer reads s._customMode
     assert "s._customMode" in src or "_customMode" in src, (
@@ -3463,7 +3528,9 @@ def l1_phase31_pdf_export() -> None:
     assert "pdf" in web_app._VALID_EXPORT_EXTS
 
     # Export modal JS lists PDF as a separate button (not "HTML / PDF")
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    src = _v2_full_src()
     assert "ext: 'pdf'" in src and "label: 'PDF'" in src, (
         "Export modal doesn't have a separate PDF button"
     )
@@ -3478,7 +3545,9 @@ def l1_phase31_kg_graph_view() -> None:
     rendering, alongside the existing Table tab."""
     import inspect
     from sciknow.web import app as web_app
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    src = _v2_full_src()
 
     # Tabs in the HTML
     assert 'data-tab="kg-graph"' in src and 'data-tab="kg-table"' in src, (
@@ -3619,7 +3688,9 @@ def l1_phase31_read_button_section_filter() -> None:
     )
 
     # JS showChapterReader uses currentSectionType to choose URL
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    src = _v2_full_src()
     assert "only_section=" in src, (
         "showChapterReader JS doesn't pass only_section to the API"
     )
@@ -3638,7 +3709,9 @@ def l1_phase31_edit_button_in_toolbar() -> None:
     """
     import inspect
     from sciknow.web import app as web_app
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    src = _v2_full_src()
 
     # The Edit button now appears in the toolbar's primary group
     # alongside the AI buttons. Phase 54.6.168 replaced the leading
@@ -4017,7 +4090,9 @@ def l1_phase32_1_section_target_visible_and_loaded() -> None:
     """
     import inspect
     from sciknow.web import app as web_app
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    src = _v2_full_src()
 
     # 1) target_words must be copied when loading sections_meta
     assert "target_words: (s.target_words" in src, (
@@ -4051,7 +4126,9 @@ def l1_phase32_2_plan_modal_per_section_length() -> None:
     """
     import inspect
     from sciknow.web import app as web_app
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    src = _v2_full_src()
 
     # 1) Plan modal Chapter sections tab — dropdown wired through
     #    updatePlanChapterTargetWords + updatePlanChapterTargetWordsCustom
@@ -4117,7 +4194,9 @@ def l1_phase32_3_task_bar_is_fixed_not_sticky() -> None:
     """
     import inspect
     from sciknow.web import app as web_app
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    src = _v2_full_src()
 
     # 1) Body must remain a horizontal flex container (this is the
     #    layout the rest of the app depends on; if someone changes
@@ -4162,7 +4241,9 @@ def l1_phase32_4_section_delete_and_add_in_sidebar() -> None:
     """
     import inspect
     from sciknow.web import app as web_app
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    src = _v2_full_src()
 
     # 1) The deleteSection JS function exists
     assert "function deleteSection(" in src or "async function deleteSection(" in src, (
@@ -4232,7 +4313,9 @@ def l1_phase32_5_task_bar_polls_stats_no_sse_competition() -> None:
     """
     import inspect
     from sciknow.web import app as web_app
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    src = _v2_full_src()
 
     # 1) Server-side observer must exist and be wired into the
     #    generator runner BEFORE the event is enqueued.
@@ -4651,7 +4734,9 @@ def l1_phase33_keyboard_shortcuts_and_polish() -> None:
     """
     import inspect
     from sciknow.web import app as web_app
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    src = _v2_full_src()
 
     # 1) Keyboard shortcuts — the global keydown handler must include
     #    the Ctrl+S / Ctrl+K / Ctrl+E / arrow / D / P shortcuts.
@@ -4830,7 +4915,9 @@ def l1_phase35_total_compute_counter() -> None:
 
     # Wiring in web/app.py — persistence helper + finally-block call.
     from sciknow.web import app as web_app
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    src = _v2_full_src()
     assert "def _persist_llm_usage(" in src, (
         "_persist_llm_usage helper missing from web/app.py"
     )
@@ -4904,7 +4991,9 @@ def l1_phase36_tools_panel() -> None:
     import inspect
 
     from sciknow.web import app as web_app
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    src = _v2_full_src()
 
     # 1) Handlers exist on the module
     for name in (
@@ -5077,7 +5166,9 @@ def l1_phase37_per_section_model_override() -> None:
 
     # 4) Web UI wiring — load, render, save, handler
     from sciknow.web import app as web_app
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    src = _v2_full_src()
     # Editor state mirror carries the new field
     assert "model: (s.model && typeof s.model === 'string') ? s.model : ''" in src, (
         "section editor load path must copy model from sections_meta"
@@ -5168,7 +5259,9 @@ def l1_phase38_scoped_snapshot_bundles() -> None:
     )
 
     # UI wiring
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    src = _v2_full_src()
     assert 'onclick="openBundleSnapshots()"' in src, (
         "Bundles button not wired"
     )
@@ -5220,7 +5313,9 @@ def l1_phase39_book_settings_modal() -> None:
     )
 
     # 4) Button + modal HTML wiring
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+    src = _v2_full_src()
     assert 'onclick="openBookSettings()"' in src, (
         "Settings button not wired into the top-bar"
     )
@@ -5379,7 +5474,10 @@ def l1_phase42_data_action_dispatcher() -> None:
     from sciknow.web import app as web_app
     import inspect
 
-    src = inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+
+
+    src = _v2_full_src()
 
     # 1) Dispatcher scaffolding
     assert "const ACTIONS = {" in src, "ACTIONS registry missing"
@@ -5936,7 +6034,9 @@ def l1_phase46e_web_expand_surface() -> None:
         )
 
     # Template renders the Expand-by-Author panel + search hooks
-    tpl = webapp.TEMPLATE
+    from sciknow.testing.helpers import rendered_template_static as _v2_rendered
+
+    tpl = _v2_rendered()
     for token in (
         'id="corp-author-pane"',
         'id="tl-eauth-q"',
@@ -5980,7 +6080,10 @@ def l1_phase46f_setup_wizard_surface() -> None:
             f"Phase 46.F endpoint {required!r} not registered"
         )
 
-    tpl = webapp.TEMPLATE
+    from sciknow.testing.helpers import rendered_template_static as _v2_rendered
+
+
+    tpl = _v2_rendered()
     # Wizard modal + trail + 5 step panes exist
     assert 'id="setup-wizard-modal"' in tpl, "setup wizard modal missing"
     assert 'id="sw-trail"'            in tpl, "sw-trail missing"
@@ -6289,7 +6392,9 @@ def l1_phase43h_web_project_endpoints() -> None:
 
     # The template should mount both the button and the modal, and
     # wire them through openProjectsModal() / refreshProjectsList().
-    tpl = webapp.TEMPLATE
+    from sciknow.testing.helpers import rendered_template_static as _v2_rendered
+
+    tpl = _v2_rendered()
     assert "openProjectsModal" in tpl, (
         "toolbar should bind a Projects button to openProjectsModal()"
     )
@@ -7855,7 +7960,8 @@ def l1_phase54_wiki_browsing_mvp() -> None:
 
     # (6) Template markers: hash router, palette HTML + keydown hook,
     # TOC builder, wiki-link CSS class
-    src = _inspect.getsource(web_app)
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+    src = _v2_full_src()
     for needle in (
         "_wikiRouteFromHash",     # hash router
         "openWikiPalette",         # palette opener
