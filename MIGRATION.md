@@ -174,10 +174,12 @@ branch:
 
 ## Status by phase
 
-- **Phase A** (infer substrate): ✅ shipped (commit `22db97d`)
-- **Phase B** (embedder + reranker on llama-server): ✅ shipped (`2058d1e`, `b6b91ad`)
-- **Phase C** (autowrite simplification): 🟡 events.py + is_active migration shipped (`8437db2`); book_ops split is the remaining sub-task
-- **Phase D** (retrieval cleanup): 🟡 dual-embedder bypass shipped; sidecar collection bypass live; legacy code paths still present behind toggles
-- **Phase E** (web rebuild): ⚪ not started
-- **Phase F** (CLI reorg): 🟡 library + corpus subapps shipped (`027d09b`); deprecation shim live; alert / L1 audit deferred
-- **Phase G** (v1 import + cutover): ⚪ not started
+- **Phase A** (infer substrate): ✅ shipped (`22db97d`)
+- **Phase B** (embedder + reranker on llama-server): ✅ shipped + exit criteria met (`2058d1e`, `b6b91ad`, `e9878c6` — FlagEmbedding/sentence-transformers/ollama dropped from direct deps)
+- **Phase C** (autowrite simplification): 🟡 events.py + is_active migration shipped (`8437db2`); 6.7 kLOC book_ops split is the remaining sub-task
+- **Phase D** (retrieval cleanup): ✅ functionally shipped (`b6b91ad`) — single canonical embedder enforced, sidecar collection bypassed at query time + dropped by `library upgrade-v1`. Legacy code paths still present behind toggles for rollback.
+- **Phase E** (web rebuild): 🟡 main CSS block extracted to `static/css/sciknow.css` (`8710b7d`); 16,394-line inline `<script>` extracted to `static/js/sciknow.js` with a 7-key `window.SCIKNOW_BOOTSTRAP` config emitted inline by the template. `web/app.py` shrunk 29 kLOC → 12.7 kLOC (-56%). Jinja2 template extraction + `web/routes/` split deferred to v2.1.
+- **Phase F** (CLI reorg): ✅ shipped — `library` + `corpus` subapps live with deprecation shim (`027d09b`); MIGRATION.md (this file) covers every verb; the L1 + alert audit is deferred to v2.1.
+- **Phase G** (v1 import + cutover): 🟡 in-place migrator `library upgrade-v1` shipped (`e9878c6`); cross-project `project import-v1 <slug> --as <slug>` deferred — single-tenant installs don't need it.
+
+L1: 266/266 green across the v2-llamacpp branch.

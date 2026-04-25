@@ -12062,7 +12062,7 @@ def l1_phase54_6_230_unified_monitor() -> None:
     web_src = Path(web_app.__module__.replace(".", "/") + ".py")
     # Fallback: read the file directly via __file__
     import sciknow.web.app as _web_mod
-    web_text = Path(_web_mod.__file__).read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
     assert "openMonitorModal" in web_text, (
         "web app must define openMonitorModal() JS function"
     )
@@ -13947,7 +13947,7 @@ def l1_phase54_6_273_cleanup_downloads_includes_inbox() -> None:
     )
 
     # F) Web endpoint forwards the flag
-    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
     assert '"--include-inbox" if include_inbox else "--no-include-inbox"' in web_text, (
         "54.6.273 /api/corpus/cleanup-downloads must forward "
         "--include-inbox to the CLI subprocess"
@@ -13975,7 +13975,7 @@ def l1_phase54_6_272_monitor_help_overlay() -> None:
       E) ? button invokes toggleMonitorHelp.
     """
     from pathlib import Path
-    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
 
     assert 'id="monitor-help-overlay"' in web_text, (
         "54.6.272 help overlay div must be declared"
@@ -14113,7 +14113,7 @@ def l1_phase54_6_269_browser_notifications_for_new_errors() -> None:
       D) Helper only fires for severity === 'error'.
     """
     from pathlib import Path
-    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
 
     assert "function _requestNotificationPermissionIfNeeded" in web_text, (
         "54.6.269 permission-request helper must be defined"
@@ -14203,7 +14203,7 @@ def l1_phase54_6_268_alerts_as_markdown() -> None:
     )
 
     # D) Web endpoint
-    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
     assert "/api/monitor/alerts-md" in web_text, (
         "54.6.268 web must expose /api/monitor/alerts-md endpoint"
     )
@@ -14232,7 +14232,7 @@ def l1_phase54_6_267_health_score_trend_sparkline() -> None:
       E) min/max tooltip for the trend.
     """
     from pathlib import Path
-    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
 
     assert "sciknow.monitor.healthRing" in web_text, (
         "54.6.267 must declare the localStorage key for the health ring"
@@ -14265,7 +14265,7 @@ def l1_phase54_6_266_alert_delta_new_badge() -> None:
       D) localStorage.setItem persists the current codes.
     """
     from pathlib import Path
-    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
 
     assert "sciknow.monitor.seenAlertCodes" in web_text, (
         "54.6.266 alert-delta helper must use a stable storage key"
@@ -14302,7 +14302,7 @@ def l1_phase54_6_265_monitor_hash_deep_links() -> None:
          entry point works both on first paint and live edits.
     """
     from pathlib import Path
-    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
 
     assert "function openMonitorFromHash" in web_text, (
         "54.6.265 openMonitorFromHash() must be defined"
@@ -14423,7 +14423,7 @@ def l1_phase54_6_263_snapshot_self_timing() -> None:
     )
 
     # E) Web last-updated label
-    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
     assert "snap.snapshot_duration_ms" in web_text, (
         "54.6.263 web must read snap.snapshot_duration_ms"
     )
@@ -14516,7 +14516,7 @@ def l1_phase54_6_262_services_reachability() -> None:
     )
 
     # E) Web verdict banner pills
-    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
     assert "snap.services" in web_text, (
         "54.6.262 web modal must read snap.services"
     )
@@ -14636,7 +14636,7 @@ def l1_phase54_6_260_log_tail_in_monitor() -> None:
     )
 
     # D) Web modal panel
-    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
     assert "snap.log_tail" in web_text, (
         "54.6.260 web renderMonitor must read snap.log_tail"
     )
@@ -14715,7 +14715,7 @@ def l1_phase54_6_259_composite_health_score() -> None:
     )
 
     # F) Web verdict banner
-    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
     assert "snap.health_score" in web_text, (
         "54.6.259 web verdict banner must read snap.health_score"
     )
@@ -14745,7 +14745,7 @@ def l1_phase54_6_258_adaptive_poll_rate() -> None:
     """
     from pathlib import Path
 
-    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
 
     assert "const MONITOR_FAST_POLL_S" in web_text, (
         "54.6.258 MONITOR_FAST_POLL_S constant must be declared"
@@ -14839,7 +14839,7 @@ def l1_phase54_6_257_actionable_alerts() -> None:
     )
 
     # E) Web banner copy button + helper
-    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
     assert "copyMonitorAction" in web_text, (
         "54.6.257 web must define copyMonitorAction()"
     )
@@ -14869,7 +14869,7 @@ def l1_phase54_6_256_jump_to_nav_strip() -> None:
     """
     from pathlib import Path
 
-    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
 
     assert 'id="monitor-nav-strip"' in web_text, (
         "54.6.256 modal body must declare monitor-nav-strip"
@@ -14907,7 +14907,7 @@ def l1_phase54_6_255_modal_shortcuts_and_export() -> None:
     """
     from pathlib import Path
 
-    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
 
     # A) download function + button
     assert "function downloadMonitorSnapshot" in web_text, (
@@ -14962,7 +14962,7 @@ def l1_phase54_6_254_monitor_filter_search() -> None:
     import inspect as _inspect
     from pathlib import Path
 
-    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
 
     # A) web input + helpers
     assert 'id="monitor-filter"' in web_text, (
@@ -15055,7 +15055,7 @@ def l1_phase54_6_253_doctor_command_and_verdict_banner() -> None:
     )
 
     # D) Web verdict banner
-    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
     assert "doctor-style verdict banner" in web_text \
         or "sciknow db doctor" in web_text, (
         "54.6.253 web modal must render a doctor-style verdict "
@@ -15143,7 +15143,7 @@ def l1_phase54_6_252_config_drift_surface() -> None:
     )
 
     # F) web modal drift card
-    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
     assert "snap.config_drift" in web_text, (
         "54.6.252 web modal must read snap.config_drift"
     )
@@ -15180,7 +15180,7 @@ def l1_phase54_6_251_web_parity_meta_year_coverage() -> None:
     from pathlib import Path
     import inspect as _inspect
 
-    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
 
     # A) meta quality
     assert "snap.meta_quality" in web_text, (
@@ -15305,7 +15305,7 @@ def l1_phase54_6_250_backup_freshness_signal() -> None:
     )
 
     # E) Web modal renders the pill
-    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
     assert "snap.backup_freshness" in web_text, (
         "54.6.250 web modal must read snap.backup_freshness"
     )
@@ -15339,7 +15339,7 @@ def l1_phase54_6_249_web_modal_parity_book_cost_growth() -> None:
     from pathlib import Path
     import inspect as _inspect
 
-    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
 
     # A) book_activity
     assert "snap.book_activity" in web_text, (
@@ -15410,7 +15410,7 @@ def l1_phase54_6_248_web_monitor_sparklines() -> None:
     from pathlib import Path
     import inspect as _inspect
 
-    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
 
     # A) shared helper
     assert "const _spark = (values, opts) =>" in web_text, (
@@ -15513,7 +15513,7 @@ def l1_phase54_6_247_tps_in_active_jobs_pulse() -> None:
     )
 
     # E) Web modal renders j.tps
-    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
     assert "j.tps" in web_text, (
         "54.6.247 web monitor modal Active-jobs table must read j.tps"
     )
@@ -15591,7 +15591,7 @@ def l1_phase54_6_246_cross_process_active_jobs_pulse() -> None:
             pulse_path.unlink()
 
     # D) web writer side + observer call-site source-grep
-    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
     assert "def _write_web_jobs_pulse" in web_text, (
         "web/app.py must define _write_web_jobs_pulse (cross-process "
         "bridge writer)"
@@ -15764,7 +15764,7 @@ def l1_phase54_6_244_monitor_model_assignments_full() -> None:
         )
 
     # C) Web renderMonitor references the keys
-    web_text = Path("sciknow/web/app.py").read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
     assert "snap.model_assignments" in web_text or "model_assignments" in web_text, (
         "54.6.244 web app must render snap.model_assignments "
         "(mirror the CLI models panel in the monitor modal)"
@@ -15894,7 +15894,7 @@ def l1_phase54_6_243_monitor_alerts_quality() -> None:
     )
 
     # E) web JS references snap.alerts
-    web_text = Path(_web_mod.__file__).read_text(encoding="utf-8")
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
     assert "snap.alerts" in web_text, (
         "web renderMonitor() must consume snap.alerts — shared "
         "source of truth with CLI"

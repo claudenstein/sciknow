@@ -143,11 +143,23 @@ def web_app_full_source() -> str:
                 except Exception:
                     continue
                 # v1-era L1 tests greped the f-string template, so
-                # CSS braces appear doubled (`{{` / `}}`). Re-double
+                # CSS + JS braces appear doubled (`{{` / `}}`). Re-double
                 # when injecting the static file content so those
                 # assertions keep passing without per-test edits.
-                if ext == "css":
+                # (v2 Phase E — JS extraction shipped 2026-04-25; without
+                # this re-double, ~29 plan-modal / monitor tests asserting
+                # `{{}}` source-form would fail against the now-rendered
+                # `{}` in /static/js/sciknow.js.)
+                if ext in ("css", "js"):
                     body = body.replace("{", "{{").replace("}", "}}")
+                # JS extraction also collapsed `\\` → `\` (the rendered
+                # browser form). Tests that asserted the source-form
+                # double-backslash (e.g. `[.\\\\)]` regex char-class
+                # markers, `\\'plan\\'` quoted strings) need that form
+                # back. Re-double after the brace fix so test grep
+                # patterns still hit.
+                if ext == "js":
+                    body = body.replace("\\", "\\\\")
                 chunks.append(
                     f"\n# --- web/static/{p.relative_to(static_dir)} ---\n" + body
                 )

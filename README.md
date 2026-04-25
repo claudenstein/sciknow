@@ -825,26 +825,46 @@ every Phase commit. Most recent batches:
 
 ## Quick Start
 
+> **v2 is in active development on the `v2-llamacpp` branch.** It replaces
+> Ollama + in-process FlagEmbedding/sentence-transformers with a single
+> `llama-server` substrate (writer + embedder + reranker on one stack)
+> and renames `sciknow db` → `sciknow library` (lifecycle) +
+> `sciknow corpus` (growth/maintenance). See
+> [MIGRATION.md](MIGRATION.md) for the full v1→v2 verb / settings
+> mapping. The Quick Start below is the v2 path; v1 (Ollama) instructions
+> live in [docs/INSTALLATION.md](docs/INSTALLATION.md).
+
 ```bash
-# 1. Clone and setup
+# 1. Clone and set up the venv + system deps
 git clone https://github.com/claudenstein/sciknow
 cd sciknow
 bash scripts/setup.sh
 
-# 2. Pull the main LLM
-ollama pull qwen3.5:27b
+# 2. Build llama.cpp (one-time) and download the writer/embedder/reranker GGUFs
+#    — see docs/INSTALLATION.md for the exact paths, quant choices, and
+#      .env keys (LLAMA_SERVER_BINARY, WRITER_MODEL_GGUF, etc).
 
-# 3. Configure (set your email for Crossref polite pool)
+# 3. Configure (set your email for Crossref polite pool, point .env at the GGUFs)
 nano .env
 
-# 4. Initialize
-sciknow db init
+# 4. Bring up the inference substrate (writer + embedder + reranker)
+sciknow infer up --role writer
+sciknow infer up --role embedder
+sciknow infer up --role reranker
+sciknow infer status                 # all three should report ✓ healthy
 
-# 5. Ingest your papers
-sciknow ingest directory ./papers/
+# 5. Initialise PostgreSQL + Qdrant
+sciknow library init                 # was: sciknow db init
+
+# 6. Ingest your papers
+sciknow corpus ingest directory ./papers/
+                                     # was: sciknow ingest directory ./papers/
+
+# 7. (only if upgrading an existing v1 project in place)
+sciknow library upgrade-v1 --dry-run # then drop --dry-run
 ```
 
-See [Installation Guide](docs/INSTALLATION.md) for manual installation, Ollama performance tuning, and full configuration reference.
+See [Installation Guide](docs/INSTALLATION.md) for manual installation, llama.cpp build flags + GGUF model selection, performance tuning, and the full configuration reference.
 
 ---
 
@@ -852,13 +872,13 @@ See [Installation Guide](docs/INSTALLATION.md) for manual installation, Ollama p
 
 ```
 PDFs ──→ MinerU 2.5 ──→ Metadata ──→ Chunker ──→ bge-m3 ──→ PostgreSQL + Qdrant
-                                                                      │
-Query ──→ Dense + Sparse + FTS ──→ RRF fusion ──→ Reranker ──→ Ranked results
-                                                                      │
-                                                              LLM (Ollama) ──→ Answer
+                                                  (llama-server :8091)        │
+Query ──→ Dense + FTS ──→ RRF fusion ──→ Reranker ──→ Ranked results
+                                          (llama-server :8092)                │
+                                              Writer LLM (llama-server :8090) ──→ Answer
 ```
 
-Three services, all native (no Docker): **PostgreSQL 16** (relational + full-text), **Qdrant** (vectors), **Ollama** (LLM inference).
+Three services, all native (no Docker): **PostgreSQL 16** (relational + full-text), **Qdrant** (vectors), **llama-server** (writer + embedder + reranker via the OpenAI-compatible API).
 
 See [Architecture](docs/ARCHITECTURE.md) for the full system diagram, database schema, AI model details, and project structure.
 
