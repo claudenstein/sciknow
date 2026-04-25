@@ -17709,6 +17709,51 @@ def l1_v2_events_schema_covers_known_yields() -> None:
     )
 
 
+def l1_v2_cli_library_corpus_subapps() -> None:
+    """v2 Phase F — `sciknow library` + `sciknow corpus` are mounted on
+    the root Typer app, the spec verbs are present, and `sciknow db`
+    is still mounted as a deprecation shim.
+    """
+    from sciknow.cli import main as cli_main
+    from sciknow.cli import library as cli_library
+    from sciknow.cli import corpus as cli_corpus
+
+    root_groups = {tg.name for tg in cli_main.app.registered_groups}
+    for name in ("library", "corpus", "db", "infer"):
+        assert name in root_groups, (
+            f"sciknow root subapp {name!r} not registered. "
+            f"Got: {sorted(root_groups)}"
+        )
+
+    library_cmds = {c.name for c in cli_library.app.registered_commands}
+    for verb in ("init", "reset", "stats", "migrate", "validate", "snapshot"):
+        assert verb in library_cmds, (
+            f"sciknow library {verb!r} missing. Spec §5.1 requires it. "
+            f"Got: {sorted(library_cmds)}"
+        )
+
+    corpus_cmds = {c.name for c in cli_corpus.app.registered_commands}
+    for verb in ("expand", "enrich"):
+        assert verb in corpus_cmds, (
+            f"sciknow corpus {verb!r} missing. Spec §5.1 requires it. "
+            f"Got: {sorted(corpus_cmds)}"
+        )
+    # `cluster` and `ingest` are mounted as sub-typers under corpus
+    corpus_sub = {tg.name for tg in cli_corpus.app.registered_groups}
+    for name in ("ingest", "cluster"):
+        assert name in corpus_sub, (
+            f"sciknow corpus {name!r} sub-typer missing. "
+            f"Got: {sorted(corpus_sub)}"
+        )
+
+    # Deprecation callback wired on the legacy `db` subapp
+    from sciknow.cli import db as cli_db
+    src = open(cli_db.__file__).read()
+    assert "_db_deprecation_callback" in src, (
+        "sciknow db subapp must carry the v2 Phase F deprecation shim"
+    )
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -18150,6 +18195,9 @@ L1_TESTS: list[Callable] = [
     # v2 Phase C — every event yielded by book_ops/wiki_ops is in the
     # core/events.py schema (contract-shaped — protects the wire)
     l1_v2_events_schema_covers_known_yields,
+    # v2 Phase F — `library` + `corpus` are mounted; `db` carries a
+    # deprecation shim
+    l1_v2_cli_library_corpus_subapps,
 ]
 
 L2_TESTS: list[Callable] = [

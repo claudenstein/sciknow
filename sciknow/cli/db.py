@@ -18,6 +18,31 @@ app = typer.Typer(help="Database and infrastructure management.")
 console = Console()
 
 
+# v2 Phase F — `sciknow db <verb>` is renamed to `sciknow library`
+# (lifecycle) + `sciknow corpus` (growth/maintenance). The db subapp
+# stays mounted as a deprecation shim for one minor release.
+_DEPRECATION_PRINTED = False
+
+
+@app.callback()
+def _db_deprecation_callback() -> None:
+    """Emit a one-shot deprecation warning per process when the user
+    invokes `sciknow db ...` instead of the renamed v2 surfaces."""
+    global _DEPRECATION_PRINTED
+    if _DEPRECATION_PRINTED:
+        return
+    _DEPRECATION_PRINTED = True
+    console.print(
+        "[yellow]⚠ deprecation:[/yellow] [bold]sciknow db[/bold] is being "
+        "renamed in v2. Lifecycle verbs moved to "
+        "[cyan]sciknow library[/cyan] (init/reset/stats/migrate/validate"
+        "/snapshot/backup/doctor); growth/maintenance moved to "
+        "[cyan]sciknow corpus[/cyan] (ingest/expand/enrich/cluster"
+        "/refresh-*/repair/dedup/etc). The db subapp will be removed "
+        "in v2.1.",
+    )
+
+
 # ── Phase 49.1 — downloads/ hygiene helpers ────────────────────────────
 # Every expand run deposits PDFs directly into <download_dir>/*.pdf.
 # Historically they stayed there forever: successful ingests kept the
