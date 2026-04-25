@@ -23,24 +23,85 @@ console = Console()
 # stays mounted as a deprecation shim for one minor release.
 _DEPRECATION_PRINTED = False
 
+# Per-verb v1→v2 mapping. When the operator types `sciknow db <verb>`,
+# the callback reads ``ctx.invoked_subcommand`` and surfaces the exact
+# v2 replacement instead of the generic "see MIGRATION.md" blob. Keys
+# missing from this map fall back to the generic message.
+_V1_TO_V2_VERB = {
+    # Lifecycle → library
+    "init": "library init",
+    "reset": "library reset",
+    "stats": "library stats",
+    "backup": "library backup",
+    "restore": "library restore",
+    "failures": "library failures",
+    "doctor": "library doctor",
+    "monitor": "library monitor",
+    "dashboard": "library dashboard",
+    "audit-sidecar": "library audit-sidecar",
+    "drift": "library drift",
+    "provenance": "library provenance",
+    # Growth/maintenance → corpus
+    "expand": "corpus expand",
+    "enrich": "corpus enrich",
+    "refresh-metadata": "corpus refresh-metadata",
+    "refresh-retractions": "corpus refresh-retractions",
+    "cleanup-downloads": "corpus cleanup-downloads",
+    "reconcile-preprints": "corpus reconcile-preprints",
+    "reconciliations": "corpus reconciliations",
+    "unreconcile": "corpus unreconcile",
+    "repair": "corpus repair",
+    "dedup": "corpus dedup",
+    "reclassify-sections": "corpus reclassify-sections",
+    "link-citations": "corpus link-citations",
+    "classify-papers": "corpus classify-papers",
+    "flag-self-citations": "corpus flag-self-citations",
+    "sync-dense-sidecar": "corpus sync-dense-sidecar",
+    "expand-author": "corpus expand-author",
+    "expand-author-refs": "corpus expand-author-refs",
+    "expand-cites": "corpus expand-cites",
+    "expand-topic": "corpus expand-topic",
+    "expand-coauthors": "corpus expand-coauthors",
+    "expand-inbound": "corpus expand-inbound",
+    "expand-oeuvre": "corpus expand-oeuvre",
+    "extract-visuals": "corpus extract-visuals",
+    "link-visual-mentions": "corpus link-visual-mentions",
+    "caption-visuals": "corpus caption-visuals",
+    "embed-visuals": "corpus embed-visuals",
+    "paraphrase-equations": "corpus paraphrase-equations",
+    "parse-tables": "corpus parse-tables",
+    "download-dois": "corpus download-dois",
+    "tag-multimodal": "corpus tag-multimodal",
+}
+
 
 @app.callback()
-def _db_deprecation_callback() -> None:
+def _db_deprecation_callback(ctx: typer.Context) -> None:
     """Emit a one-shot deprecation warning per process when the user
     invokes `sciknow db ...` instead of the renamed v2 surfaces."""
     global _DEPRECATION_PRINTED
     if _DEPRECATION_PRINTED:
         return
     _DEPRECATION_PRINTED = True
-    console.print(
-        "[yellow]⚠ deprecation:[/yellow] [bold]sciknow db[/bold] is being "
-        "renamed in v2. Lifecycle verbs moved to "
-        "[cyan]sciknow library[/cyan] (init/reset/stats/migrate/validate"
-        "/snapshot/backup/doctor); growth/maintenance moved to "
-        "[cyan]sciknow corpus[/cyan] (ingest/expand/enrich/cluster"
-        "/refresh-*/repair/dedup/etc). The db subapp will be removed "
-        "in v2.1.",
-    )
+    verb = ctx.invoked_subcommand
+    new_path = _V1_TO_V2_VERB.get(verb)
+    if new_path:
+        console.print(
+            f"[yellow]⚠ deprecation:[/yellow] [bold]sciknow db {verb}[/bold] "
+            f"→ rename to [cyan]sciknow {new_path}[/cyan] (v2). The db "
+            f"subapp will be removed in v2.1; see MIGRATION.md for the "
+            f"full mapping.",
+        )
+    else:
+        console.print(
+            "[yellow]⚠ deprecation:[/yellow] [bold]sciknow db[/bold] is being "
+            "renamed in v2. Lifecycle verbs moved to "
+            "[cyan]sciknow library[/cyan] (init/reset/stats/migrate/validate"
+            "/snapshot/backup/doctor); growth/maintenance moved to "
+            "[cyan]sciknow corpus[/cyan] (ingest/expand/enrich/cluster"
+            "/refresh-*/repair/dedup/etc). The db subapp will be removed "
+            "in v2.1.",
+        )
 
 
 # ── Phase 49.1 — downloads/ hygiene helpers ────────────────────────────
