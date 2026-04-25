@@ -89,10 +89,10 @@ A local-first scientific knowledge system that ingests papers, builds a compiled
 > Steps 2-5 are optional but each improves downstream quality. You can ask questions right after step 1.
 
 ```bash
-# Quick start — the essential commands
-sciknow ingest directory ./papers/
-sciknow db stats
-sciknow catalog cluster
+# Quick start — the essential commands (v2 names; v1 `db` shim still mounted)
+sciknow corpus ingest directory ./papers/
+sciknow library stats
+sciknow corpus cluster
 sciknow wiki compile
 sciknow ask question "What is total solar irradiance?"
 sciknow book create "My Book"
@@ -111,20 +111,20 @@ Every step is idempotent / resumable. Later blocks depend on earlier ones.
 # ═══ 1. PROJECT + SCHEMA ══════════════════════════════════════════
 uv run sciknow project init my-project
 uv run sciknow project use my-project
-uv run sciknow db init                             # alembic upgrade + Qdrant collections
+uv run sciknow library init                        # alembic upgrade + Qdrant collections
 
 # ═══ 2. INGEST + METADATA ═════════════════════════════════════════
-uv run sciknow ingest directory ./papers/          # PDFs → Postgres + Qdrant
-uv run sciknow db enrich                           # fill missing DOIs via Crossref / OpenAlex / arXiv
-uv run sciknow db link-citations                   # cross-link cited_document_id for in-corpus papers
-uv run sciknow db stats                            # sanity-check: all papers should be 'complete'
+uv run sciknow corpus ingest directory ./papers/   # PDFs → Postgres + Qdrant
+uv run sciknow corpus enrich                       # fill missing DOIs via Crossref / OpenAlex / arXiv
+uv run sciknow corpus link-citations               # cross-link cited_document_id for in-corpus papers
+uv run sciknow library stats                       # sanity-check: all papers should be 'complete'
 
 # ═══ 3. INDEXING LAYERS ════════════════════════════════════════════
-uv run sciknow catalog cluster                     # BERTopic → paper_metadata.topic_cluster
+uv run sciknow corpus cluster                      # BERTopic → paper_metadata.topic_cluster
                                                    #   (feeds Topic map viz, search --topic filter)
 uv run sciknow catalog raptor build                # hierarchical summary tree in Qdrant
                                                    #   (feeds RAPTOR sunburst viz, enriches retrieval)
-uv run sciknow db tag-multimodal                   # tag chunks with tables / equations for filtering
+uv run sciknow corpus tag-multimodal               # tag chunks with tables / equations for filtering
 
 # ═══ 4. WIKI (SLOWEST STEP — hours) ═══════════════════════════════
 uv run sciknow wiki compile                        # paper summaries (fast, reliable)
@@ -559,8 +559,8 @@ Full 807-doc deep audit runs in ~13 s; sample mode via
 `--uuid-sample 50` for ~2 s. Usage:
 
 ```bash
-sciknow db audit-sidecar --deep              # full
-sciknow db audit-sidecar --deep --uuid-sample 50  # fast sample
+sciknow library audit-sidecar --deep              # full (v1: sciknow db audit-sidecar)
+sciknow library audit-sidecar --deep --uuid-sample 50  # fast sample
 ```
 
 **Phase 54.6.294** adds a **slow-ingest leaderboard** — top-5 docs
@@ -618,16 +618,18 @@ appears in top-5 retrieval results. No OOM, backend stamp
 `mineru-vlm-pro-vllm`, counts match across prod/sidecar/DB.
 
 ```bash
-uv run sciknow db monitor              # one shot, full layout
-uv run sciknow db monitor --watch 5    # btop-style in-place refresh
-uv run sciknow db monitor --json       # JSON for scripting
-uv run sciknow db monitor --compact    # minimal 1-page view (54.6.270)
-uv run sciknow db monitor --filter foo # case-insensitive row filter  (54.6.254)
-uv run sciknow db monitor --log-tail 20       # append last N log lines (54.6.260)
-uv run sciknow db monitor --alerts-md         # alerts as Markdown block (54.6.268)
+# v2 names; v1 `sciknow db monitor|doctor` still mounted with deprecation
+# shim for one release.
+uv run sciknow library monitor              # one shot, full layout
+uv run sciknow library monitor --watch 5    # btop-style in-place refresh
+uv run sciknow library monitor --json       # JSON for scripting
+uv run sciknow library monitor --compact    # minimal 1-page view (54.6.270)
+uv run sciknow library monitor --filter foo # case-insensitive row filter  (54.6.254)
+uv run sciknow library monitor --log-tail 20       # append last N log lines (54.6.260)
+uv run sciknow library monitor --alerts-md         # alerts as Markdown block (54.6.268)
 
-uv run sciknow db doctor               # go/no-go readiness (54.6.253)
-uv run sciknow db doctor --json        # scriptable (exit 0/1/2)
+uv run sciknow library doctor               # go/no-go readiness (54.6.253)
+uv run sciknow library doctor --json        # scriptable (exit 0/1/2)
 ```
 
 `sciknow db doctor` is a focused wrapper that prints the traffic-

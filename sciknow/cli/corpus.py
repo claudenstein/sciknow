@@ -67,3 +67,6 @@ app.command(name="parse-tables")(_db.parse_tables_cmd)
 
 # ── DOI handling ────────────────────────────────────────────────────────
 app.command(name="download-dois")(_db.download_dois)
+
+# ── multimodal chunk tagging ────────────────────────────────────────────
+app.command(name="tag-multimodal")(_db.tag_multimodal)
