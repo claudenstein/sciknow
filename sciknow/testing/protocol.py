@@ -17815,6 +17815,66 @@ def l1_v2_events_schema_covers_known_yields() -> None:
     )
 
 
+def l1_v2_library_upgrade_v1_surface() -> None:
+    """v2 Phase G — `sciknow library upgrade-v1` is registered, dispatches
+    on a project, and the contract surface (--dry-run, --yes, marker
+    file path, sidecar discovery rule) is intact."""
+    import inspect as _inspect
+    from sciknow.cli import library as cli_library
+
+    cmd_names = {c.name for c in cli_library.app.registered_commands}
+    assert "upgrade-v1" in cmd_names, (
+        f"sciknow library upgrade-v1 missing. Got: {sorted(cmd_names)}"
+    )
+    src = _inspect.getsource(cli_library)
+    # Contract assertions — these are the bits the docstring
+    # guarantees and the spec references for the v1→v2 import path.
+    for needle in (
+        "--dry-run",
+        ".v2-upgraded",
+        "settings.embedding_dim",
+        "delete_collection",
+        "qdrant_prefix",
+    ):
+        assert needle in src, (
+            f"library.upgrade_v1 contract surface missing: {needle!r}"
+        )
+
+
+def l1_v2_pyproject_dropped_v1_inproc_models() -> None:
+    """v2 Phase B exit criterion — direct dependencies on
+    FlagEmbedding, sentence-transformers, and ollama are removed
+    from pyproject.toml. They may still arrive transitively (e.g.
+    via MinerU); this test only guards against direct re-add.
+    """
+    from pathlib import Path as _P
+    pp = _P(__file__).resolve().parents[2] / "pyproject.toml"
+    assert pp.exists(), f"pyproject.toml not found at {pp}"
+    body = pp.read_text(encoding="utf-8")
+    # Scan only the [project] dependencies array. Other tool
+    # sections may reference these names in comments; we only care
+    # about the direct dep list.
+    import re as _re
+    m = _re.search(r"^dependencies\s*=\s*\[(.*?)^\]", body,
+                   _re.S | _re.M)
+    assert m, "pyproject.toml: dependencies = [...] block not found"
+    dep_lines = m.group(1)
+    for forbidden in ("FlagEmbedding", "sentence-transformers", "ollama"):
+        # Match the dep name as a quoted literal (with optional
+        # version specifier) so substring matches in comments don't
+        # trip us up.
+        bad = _re.search(
+            rf'"{_re.escape(forbidden)}(\s|>|=|<|~|!|")',
+            dep_lines, _re.I,
+        )
+        assert not bad, (
+            f"v1 in-process model package re-added to pyproject "
+            f"dependencies: {forbidden!r}. Spec §7 + Phase B exit "
+            f"criterion: these live in the rollback escape hatch only "
+            f"(`uv add` to opt back in)."
+        )
+
+
 def l1_v2_cli_library_corpus_subapps() -> None:
     """v2 Phase F — `sciknow library` + `sciknow corpus` are mounted on
     the root Typer app, the spec verbs are present, and `sciknow db`
@@ -18304,6 +18364,12 @@ L1_TESTS: list[Callable] = [
     # v2 Phase F — `library` + `corpus` are mounted; `db` carries a
     # deprecation shim
     l1_v2_cli_library_corpus_subapps,
+    # v2 Phase G — library upgrade-v1 surface (sidecar cleanup +
+    # marker file write)
+    l1_v2_library_upgrade_v1_surface,
+    # v2 Phase B exit criterion — pyproject no longer pulls in
+    # FlagEmbedding / sentence-transformers / ollama directly
+    l1_v2_pyproject_dropped_v1_inproc_models,
 ]
 
 L2_TESTS: list[Callable] = [

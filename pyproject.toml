@@ -15,10 +15,13 @@ dependencies = [
     "qdrant-client>=1.9",
     "httpx>=0.27",
     "pymupdf>=1.24",
-    "FlagEmbedding>=1.2",
+    # v2 Phase B: FlagEmbedding + sentence-transformers + ollama dropped
+    # as direct deps. Their roles are now served by llama-server
+    # (sciknow.infer.client). To roll back to the v1 in-process path
+    # (USE_LLAMACPP_* = False), re-add them with:
+    #     uv add 'FlagEmbedding>=1.2' 'sentence-transformers' 'ollama>=0.3'
     "tiktoken>=0.7",
     "arxiv>=2.1",
-    "ollama>=0.3",
     "mineru[core,vllm]>=3.0.9",
     "umap-learn>=0.5.11",
     "hdbscan>=0.8.42",
