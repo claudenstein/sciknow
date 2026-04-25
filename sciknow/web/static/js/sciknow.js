@@ -8339,7 +8339,7 @@ function renderMonitor(snap) {
       + _fmtNum(sidecarAudit.sidecar_total || 0) + '</div>'
       + '<div class="u-muted" style="margin-left:auto;">cached · '
       + _escHTML(ageStr) + ' old · '
-      + '<code>sciknow db audit-sidecar</code></div>'
+      + '<code>sciknow library audit-sidecar</code></div>'
       + '</div>';
     sections.push(html);
   }
@@ -8368,7 +8368,7 @@ function renderMonitor(snap) {
     let html = '<h4>Citation graph</h4>'
       + '<div style="display:flex;gap:2em;flex-wrap:wrap;padding:0.5em 0.75em;'
       + 'background:var(--bg-alt, #f5f5f5);border-radius:4px;margin-bottom:0.5em;">'
-      + '<div title="Citations whose target paper is also in the corpus — grow with `sciknow db expand`">'
+      + '<div title="Citations whose target paper is also in the corpus — grow with `sciknow corpus expand`">'
       + '<strong>In-corpus refs</strong><br>'
       + '<span style="color:' + covColour + ';font-size:1.1em;">'
       + _fmtNum(internal) + ' / ' + _fmtNum(totalRefs)
@@ -8435,7 +8435,7 @@ function renderMonitor(snap) {
       html += '<div class="u-muted" style="margin-top:0.4em;">'
         + '<strong>' + worstPct.toFixed(0) + '%</strong> of docs missing '
         + '<code>' + _escHTML(worstField) + '</code> — run '
-        + '<code>sciknow db enrich</code> to fill from Crossref / OpenAlex / arXiv.'
+        + '<code>sciknow corpus enrich</code> to fill from Crossref / OpenAlex / arXiv.'
         + '</div>';
     }
     sections.push(html);
@@ -15377,7 +15377,7 @@ function openVisualsModal() {
     const s = d.stats || {};
     const parts = Object.entries(s).map(([k,v]) => k + ': ' + v).join(', ');
     const el = document.getElementById('vis-stats');
-    if (el && !el.textContent) el.textContent = parts ? ('Total: ' + d.total + ' (' + parts + ')') : 'No visuals extracted yet. Run: sciknow db extract-visuals';
+    if (el && !el.textContent) el.textContent = parts ? ('Total: ' + d.total + ' (' + parts + ')') : 'No visuals extracted yet. Run: sciknow corpus extract-visuals';
   }).catch(() => {});
 }
 
