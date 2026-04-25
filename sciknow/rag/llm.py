@@ -1,9 +1,15 @@
 """
-Thin wrapper around the Ollama Python client.
+Writer-LLM facade.
 
-Provides streaming and non-streaming chat, reusing a single client instance.
-All calls are logged to the sciknow logger with model name, prompt sizes,
-and duration for post-hoc debugging.
+v2 Phase A: this module **dispatches** every generative call. By default
+(``settings.use_llamacpp_writer = True``) it routes to
+``sciknow.infer.client`` (llama-server). Setting the toggle to False
+falls back to the v1 ``ollama`` Python client for the same-process
+rollback escape hatch documented in the v2 roadmap.
+
+Public surface (``stream`` / ``complete`` / ``warm_up`` /
+``release_llm`` / ``drain_call_stats``) is preserved so consumers don't
+need to be touched in Phase A.
 """
 from __future__ import annotations
 
@@ -11,24 +17,49 @@ import logging
 import time
 from collections.abc import Iterator
 
-import ollama
-
 from sciknow.config import settings
+
+# Optional ollama import — only resolved when the rollback toggle is on.
+try:  # pragma: no cover — exercised in fallback only
+    import ollama  # type: ignore
+except Exception:  # pragma: no cover
+    ollama = None  # type: ignore[assignment]
 
 logger = logging.getLogger("sciknow.llm")
 
-_client: ollama.Client | None = None
+_client: "ollama.Client | None" = None
 
 
-def _get_client() -> ollama.Client:
+def _get_client() -> "ollama.Client":
+    """Lazily build an Ollama client (only used in v1-fallback mode)."""
     global _client
+    if ollama is None:
+        raise RuntimeError(
+            "v1 fallback requested (settings.use_llamacpp_writer=False) but "
+            "the `ollama` Python package isn't installed. Either keep "
+            "use_llamacpp_writer=True (default) or `uv add ollama`."
+        )
     if _client is None:
         _client = ollama.Client(host=settings.ollama_host)
     return _client
 
 
+def _use_llamacpp() -> bool:
+    """Resolve the dispatch toggle at every call site (so a settings
+    swap inside the same process is honoured immediately)."""
+    return bool(getattr(settings, "use_llamacpp_writer", True))
+
+
 def release_llm(models: list[str] | None = None) -> list[str]:
-    """Unload Ollama models from VRAM.
+    """Unload writer models from VRAM.
+
+    v2 Phase A: when llama-server is the backend, unloading is a no-op
+    by design — the inference substrate keeps models warm for the
+    process lifetime (that's how prompt-cache hit rate stays high).
+    Returns an empty list in that mode so callers' "released N models"
+    log lines simply read "released 0".
+
+    v1 fallback path retained below.
 
     Phase 44.1 — the benchmark harness surfaced a 50–70× slowdown on
     the bge-m3 embedder and bge-reranker-v2-m3 when an LLM was still
@@ -48,6 +79,12 @@ def release_llm(models: list[str] | None = None) -> list[str]:
     Errors are swallowed per-model — a stuck unload shouldn't
     block the caller's real workload.
     """
+    if _use_llamacpp():
+        # v2: llama-server holds the writer warm forever. There's
+        # nothing to release here; the entire VRAM-ledger /
+        # releaser cascade is retired in v2 by design.
+        logger.debug("release_llm: no-op (llama-server backend)")
+        return []
     client = _get_client()
     if models is None:
         try:
@@ -120,6 +157,9 @@ def warm_up(
     Returns True on success, False if the server is unreachable.
     Never raises — this is best-effort.
     """
+    if _use_llamacpp():
+        from sciknow.infer import client as infer_client
+        return infer_client.warm_up(model=model, num_ctx=num_ctx, num_batch=num_batch)
     try:
         client = _get_client()
         chosen = model or settings.llm_model
@@ -169,10 +209,20 @@ def _record_call_stats(stats: dict) -> None:
 
 def drain_call_stats() -> list[dict]:
     """Pop and return all stats accumulated on this thread since the
-    last drain. Called by the web job runner after each event yield."""
-    calls = getattr(_call_stats_local, "calls", [])
+    last drain. Called by the web job runner after each event yield.
+
+    v2 Phase A: when the llama-server backend is active, stats live in
+    ``sciknow.infer.client._call_stats_local``. We merge both buffers so
+    consumers see one combined list regardless of which backend
+    produced the events. (During the transition some calls may go
+    through the v1 path if a caller bypasses _use_llamacpp.)
+    """
+    own = getattr(_call_stats_local, "calls", [])
     _call_stats_local.calls = []
-    return calls
+    if _use_llamacpp():
+        from sciknow.infer import client as infer_client
+        own = list(infer_client.drain_call_stats()) + list(own)
+    return own
 
 
 def stream(
@@ -217,6 +267,16 @@ def stream(
     format:     JSON schema dict for structured output (Ollama v0.5+).
                 Guarantees valid JSON matching the schema.
     """
+    if _use_llamacpp():
+        from sciknow.infer import client as infer_client
+        yield from infer_client.chat_stream(
+            system, user,
+            model=model, temperature=temperature,
+            num_ctx=num_ctx, num_batch=num_batch,
+            num_predict=num_predict, keep_alive=keep_alive,
+            format=format, think=think, top_p=top_p, top_k=top_k,
+        )
+        return
     client = _get_client()
     chosen_model = model or settings.llm_model
     t0 = time.monotonic()
