@@ -12045,6 +12045,71 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_322_retrieval_device_default_cpu_on_24gb() -> None:
+    """Phase 54.6.322 — retrieval models default to CPU on ≤24 GB cards.
+
+    Pre-fix: get_retrieval_device() probed free VRAM at the moment
+    bge-m3 loaded. That moment is *before* Ollama loads the writer
+    LLM (writer loads lazily on first chat call). Probe saw plenty
+    of headroom, chose CUDA, parked 2-3 GB permanently — and when
+    the writer loaded later it had only ~10 GB free and partial-CPU-
+    offloaded with decode collapsing to 4 t/s.
+
+    Fix: auto-default to CPU when total VRAM ≤ 24 GB so the writer
+    owns full VRAM. The 250 ms per-retrieve saving from GPU
+    inference can't pay back the cost of squeezing a 16 GB writer
+    into a partial load.
+
+    Override remains: SCIKNOW_RETRIEVAL_DEVICE=cuda forces GPU
+    (multi-GPU / 32 GB+ / ingest-only workflows).
+
+    Guards:
+      A) The constant `_AUTO_CPU_TOTAL_VRAM_GB` exists and is a
+         number around 24.
+      B) get_retrieval_device() compares total_gb against that
+         threshold and picks CPU when ≤ threshold.
+      C) Env override SCIKNOW_RETRIEVAL_DEVICE=cuda still wins.
+      D) Env override SCIKNOW_RETRIEVAL_DEVICE=cpu still wins.
+    """
+    import inspect as _inspect
+    import os as _os
+    from sciknow.retrieval import device as _dev
+
+    # A) constant exists
+    assert hasattr(_dev, "_AUTO_CPU_TOTAL_VRAM_GB"), (
+        "54.6.322 — _AUTO_CPU_TOTAL_VRAM_GB constant must exist"
+    )
+    assert 20 <= _dev._AUTO_CPU_TOTAL_VRAM_GB <= 30, (
+        f"54.6.322 — threshold must target 24 GB-class cards; got "
+        f"{_dev._AUTO_CPU_TOTAL_VRAM_GB}"
+    )
+
+    # B) auto-path uses the new comparison
+    src = _inspect.getsource(_dev.get_retrieval_device)
+    assert "_AUTO_CPU_TOTAL_VRAM_GB" in src, (
+        "54.6.322 — auto path must reference the threshold constant"
+    )
+    assert "total_gb" in src, (
+        "54.6.322 — auto path must compare TOTAL VRAM, not free"
+    )
+
+    # C) + D) env overrides still win
+    for forced in ("cpu", "cuda"):
+        _dev.reset_device_cache()
+        prev = _os.environ.get("SCIKNOW_RETRIEVAL_DEVICE")
+        _os.environ["SCIKNOW_RETRIEVAL_DEVICE"] = forced
+        try:
+            assert _dev.get_retrieval_device() == forced, (
+                f"54.6.322 — env override {forced!r} must win over auto"
+            )
+        finally:
+            if prev is None:
+                _os.environ.pop("SCIKNOW_RETRIEVAL_DEVICE", None)
+            else:
+                _os.environ["SCIKNOW_RETRIEVAL_DEVICE"] = prev
+            _dev.reset_device_cache()
+
+
 def l1_phase54_6_321_active_draft_skips_empty() -> None:
     """Phase 54.6.321 — active-version selector prefers populated drafts.
 
@@ -17959,6 +18024,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_320_autowrite_vram_eviction,
     # Phase 54.6.321 — active-version selector prefers populated content
     l1_phase54_6_321_active_draft_skips_empty,
+    # Phase 54.6.322 — retrieval models default to CPU on ≤24 GB cards
+    l1_phase54_6_322_retrieval_device_default_cpu_on_24gb,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]
