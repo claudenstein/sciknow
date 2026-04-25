@@ -17596,6 +17596,120 @@ def l1_phase54_6_210_refresh_since_incremental_surface() -> None:
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# v2 contract tests — each Phase X lands at least one contract test here.
+# Spec §6.1: tests assert the public protocol (events, SSE wire, exit
+# codes), not source-grep regressions for specific phase fixes.
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def l1_v2_infer_substrate_surface() -> None:
+    """v2 Phase A — sciknow.infer exposes the writer/embed/rerank surface
+    that consumers depend on, and rag.llm dispatches to it when the
+    USE_LLAMACPP_WRITER toggle is set (default in v2)."""
+    from sciknow.infer import client as infer_client, server as infer_server
+    # Server lifecycle surface
+    for fn in ("up", "down", "status", "swap", "health", "wait_healthy",
+               "tail_log"):
+        assert callable(getattr(infer_server, fn, None)), (
+            f"sciknow.infer.server.{fn} missing or not callable"
+        )
+    # Roles wired with sane defaults (writer model populated by config)
+    assert "writer" in infer_server.ROLE_DEFAULTS
+    assert "embedder" in infer_server.ROLE_DEFAULTS
+    assert "reranker" in infer_server.ROLE_DEFAULTS
+
+    # Client surface — the four entry points consumers rely on
+    for fn in ("chat_stream", "chat_complete", "embed", "rerank",
+               "drain_call_stats", "warm_up"):
+        assert callable(getattr(infer_client, fn, None)), (
+            f"sciknow.infer.client.{fn} missing or not callable"
+        )
+
+    # rag.llm.stream dispatches via _use_llamacpp() — guard against a
+    # regression that bypasses the dispatcher.
+    from sciknow.rag import llm as rag_llm
+    assert callable(getattr(rag_llm, "_use_llamacpp", None)), (
+        "rag.llm._use_llamacpp dispatch helper removed"
+    )
+    src = open(rag_llm.__file__).read()
+    assert "from sciknow.infer import client" in src, (
+        "rag.llm should import sciknow.infer.client for dispatch"
+    )
+    assert "infer_client.chat_stream" in src, (
+        "rag.llm.stream() should delegate to infer_client.chat_stream"
+    )
+
+    # Settings carry the v2 keys (so the dispatcher sees them).
+    from sciknow.config import settings
+    for key in ("infer_writer_url", "infer_embedder_url",
+                "infer_reranker_url", "use_llamacpp_writer",
+                "use_llamacpp_embedder", "use_llamacpp_reranker"):
+        assert hasattr(settings, key), f"settings.{key} missing"
+
+
+def l1_v2_events_schema_covers_known_yields() -> None:
+    """v2 Phase C — every literal event 'type' yielded by book_ops.py
+    and wiki_ops.py must appear in core.events.KNOWN_EVENT_TYPES.
+
+    Contract guarantee: the SSE wire format is a closed union. Adding a
+    new event tag in book_ops without registering it here means the
+    web/CLI/MCP consumers won't render it. Test fails the regression
+    at L1 instead of waiting for an SSE consumer to silently drop it.
+    """
+    import re as _re
+    from pathlib import Path as _P
+    from sciknow.core.events import KNOWN_EVENT_TYPES, parse_event
+
+    repo_root = _P(__file__).resolve().parents[2]
+    sources = [
+        repo_root / "sciknow" / "core" / "book_ops.py",
+        repo_root / "sciknow" / "core" / "wiki_ops.py",
+    ]
+    pattern = _re.compile(r'yield\s+\{[^}]*"type"\s*:\s*"([^"]+)"')
+
+    found: set[str] = set()
+    for src_path in sources:
+        if not src_path.exists():
+            continue
+        for m in pattern.finditer(src_path.read_text(encoding="utf-8")):
+            found.add(m.group(1))
+
+    assert found, (
+        f"no `yield {{\"type\": ...}}` events scraped from {sources!r}"
+    )
+    missing = sorted(found - KNOWN_EVENT_TYPES)
+    assert not missing, (
+        f"book_ops/wiki_ops yield events not in core.events: {missing}. "
+        f"Add to KNOWN_EVENT_TYPES + the SciknowEvent union and a dedicated "
+        f"event class so SSE consumers know how to render them."
+    )
+
+    # Sanity-check the discriminated union exposes a class for every
+    # known type tag — catches a spelling drift between
+    # KNOWN_EVENT_TYPES and the actual SciknowEvent union members.
+    from sciknow.core import events as _events_mod
+    union_tags: set[str] = set()
+    for cls in _events_mod.__dict__.values():
+        if not isinstance(cls, type):
+            continue
+        if not issubclass(cls, _events_mod._BaseEvent):
+            continue
+        ann = cls.model_fields.get("type")
+        if ann is None:
+            continue
+        # Pydantic stores Literal["x"] as ann.annotation; metadata may carry
+        # the discriminator. Cheapest path: stringify the field default.
+        from typing import get_args
+        for tag in get_args(ann.annotation):
+            union_tags.add(tag)
+    drift = KNOWN_EVENT_TYPES - union_tags
+    assert not drift, (
+        f"KNOWN_EVENT_TYPES references tags with no Pydantic class in "
+        f"the SciknowEvent union: {sorted(drift)}"
+    )
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -18031,6 +18145,11 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_323_retrieval_device_revert_to_free_headroom,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
+    # v2 Phase A — infer/ substrate exists + dispatch toggle wired
+    l1_v2_infer_substrate_surface,
+    # v2 Phase C — every event yielded by book_ops/wiki_ops is in the
+    # core/events.py schema (contract-shaped — protects the wire)
+    l1_v2_events_schema_covers_known_yields,
 ]
 
 L2_TESTS: list[Callable] = [

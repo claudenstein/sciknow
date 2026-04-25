@@ -13,6 +13,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, REAL, TSVECTOR, UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -410,6 +411,12 @@ class Draft(Base):
     )
     review_feedback: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="drafted")
+    # v2 Phase C — promoted from custom_metadata.is_active. Partial-unique
+    # index ux_drafts_active_per_section guarantees ≤1 active per
+    # (chapter_id, section_type). Migration 0040 backfills from JSON.
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("FALSE"),
+    )
     custom_metadata: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
