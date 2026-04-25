@@ -77,8 +77,8 @@ class Settings(BaseSettings):
     llama_server_binary: str = "/home/kartofel/Claude/llama.cpp-build/llama.cpp/build/bin/llama-server"
     # GGUF paths or HF ids per role. Empty string → role can't start.
     writer_model_gguf: str = "/home/kartofel/Claude/huggingface/unsloth-Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_M.gguf"
-    embedder_model_gguf: str = ""
-    reranker_model_gguf: str = ""
+    embedder_model_gguf: str = "/home/kartofel/Claude/huggingface/bge-m3-gguf/bge-m3-Q8_0.gguf"
+    reranker_model_gguf: str = "/home/kartofel/Claude/huggingface/bge-reranker-v2-m3-gguf/bge-reranker-v2-m3-Q8_0.gguf"
     # Optional draft model for spec-dec profile.
     draft_model_gguf: str = ""
     # Logical model names (used in /v1/chat requests' "model" field +
@@ -91,6 +91,16 @@ class Settings(BaseSettings):
     # (llama-server). When False, uses the v1 ollama path. Default True
     # for v2; flip to False to roll back to v1 within a single commit.
     use_llamacpp_writer: bool = True
+    # Phase B bridges: same idea for the embedder + reranker. When True,
+    # ingestion/embedder.py and retrieval/reranker.py dispatch to the
+    # llama-server-backed roles instead of loading FlagEmbedding /
+    # FlagReranker / sentence-transformers in-process. The dual-vector
+    # (dense + sparse) contract degrades to dense-only on this path
+    # because llama-server's /v1/embeddings doesn't expose sparse —
+    # the v1 hybrid_search keeps working with one signal less. Future
+    # work: a sparse sidecar role.
+    use_llamacpp_embedder: bool = True
+    use_llamacpp_reranker: bool = True
 
     # Models
     embedding_model: str = "BAAI/bge-m3"

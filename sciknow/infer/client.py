@@ -308,7 +308,27 @@ def rerank(query: str, documents: list[str], model: str | None = None) -> list[f
     data = r.json()
     rows = data.get("results") or []
     rows.sort(key=lambda e: e.get("index", 0))
-    return [float(row.get("relevance_score") or row.get("score") or 0.0) for row in rows]
+    # llama-server emits raw cross-encoder logits in `relevance_score`.
+    # Sigmoid-normalise to [0, 1] so callers see the same contract the
+    # v1 FlagReranker(normalize=True) path produced.
+    import math
+    out: list[float] = []
+    for row in rows:
+        raw = row.get("relevance_score")
+        if raw is None:
+            raw = row.get("score") or 0.0
+        try:
+            x = float(raw)
+        except (TypeError, ValueError):
+            x = 0.0
+        # Numerically stable sigmoid (overflow-safe for large |x|).
+        if x >= 0:
+            ex = math.exp(-x)
+            out.append(1.0 / (1.0 + ex))
+        else:
+            ex = math.exp(x)
+            out.append(ex / (1.0 + ex))
+    return out
 
 
 # ── slots / health (used by observability) ───────────────────────────────

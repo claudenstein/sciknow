@@ -175,7 +175,7 @@ def _build_argv(role: str, profile: str = "default") -> list[str]:
         "--ctx-size", str(cfg["ctx_size"]),
         "--n-gpu-layers", str(cfg["n_gpu_layers"]),
         "--parallel", str(cfg["parallel"]),
-        "--log-disable",          # we capture stderr to log file
+        "--log-colors", "off",
     ]
 
     # Profile overrides

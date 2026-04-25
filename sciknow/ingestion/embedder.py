@@ -20,18 +20,80 @@ logger = logging.getLogger(__name__)
 _model = None
 
 
+class _LlamaCppBgeM3Adapter:
+    """v2 Phase B — BGEM3FlagModel.encode() shim backed by llama-server.
+
+    bge-m3 emits dense + sparse + colbert vectors from a single forward
+    pass in the upstream FlagEmbedding implementation. llama-server's
+    ``/v1/embeddings`` endpoint exposes only the dense channel.
+
+    The adapter satisfies the call-shape contract by returning empty
+    sparse maps (``{}``) and an empty colbert array when the caller
+    asks for either. Downstream code in ``embed_chunks()`` then upserts
+    a SparseVector with no indices, which Qdrant accepts cleanly. The
+    practical effect on retrieval: hybrid_search loses the sparse
+    lexical signal — RRF still fuses dense + FTS so recall holds, but
+    the sparse channel's contribution to MRR (~+0.02 in v1) is
+    deferred until a sparse role lands.
+    """
+
+    def __init__(self, model_name: str | None = None):
+        self.model_name = model_name or settings.embedder_model_name
+
+    def encode(
+        self,
+        texts: list[str],
+        batch_size: int = 32,
+        max_length: int = 8192,
+        return_dense: bool = True,
+        return_sparse: bool = False,
+        return_colbert_vecs: bool = False,
+        **_extra,
+    ) -> dict:
+        from sciknow.infer import client as _infer_client
+        # Stream large batches through the embedder server; llama-server
+        # caps internal --ubatch at 512 tokens, so we let httpx's HTTP/1.1
+        # do the cross-batch work and just shard at our batch_size.
+        if not isinstance(texts, list):
+            texts = list(texts)
+        out_dense: list[list[float]] = []
+        bs = max(1, int(batch_size or len(texts) or 1))
+        for i in range(0, len(texts), bs):
+            chunk = texts[i:i + bs]
+            out_dense.extend(_infer_client.embed(chunk, model=self.model_name))
+
+        # Mimic FlagEmbedding's numpy return for `dense_vecs`.
+        try:
+            import numpy as _np
+            dense_arr = _np.asarray(out_dense, dtype=_np.float32)
+        except Exception:
+            dense_arr = out_dense  # type: ignore[assignment]
+
+        result: dict = {}
+        if return_dense:
+            result["dense_vecs"] = dense_arr
+        if return_sparse:
+            result["lexical_weights"] = [{} for _ in texts]
+        if return_colbert_vecs:
+            result["colbert_vecs"] = []
+        return result
+
+
 def _get_model():
     global _model
     if _model is None:
-        from FlagEmbedding import BGEM3FlagModel
-        from sciknow.retrieval.device import load_with_cpu_fallback
+        if getattr(settings, "use_llamacpp_embedder", True):
+            _model = _LlamaCppBgeM3Adapter()
+        else:
+            from FlagEmbedding import BGEM3FlagModel
+            from sciknow.retrieval.device import load_with_cpu_fallback
 
-        # Phase 15.2 — CPU fallback when the GPU is mostly full of an LLM.
-        # Falls back transparently if CUDA OOMs during load. The cache in
-        # device.py remembers the choice for the rest of the session.
-        _model = load_with_cpu_fallback(
-            BGEM3FlagModel, settings.embedding_model, use_fp16=True,
-        )
+            # Phase 15.2 — CPU fallback when the GPU is mostly full of an LLM.
+            # Falls back transparently if CUDA OOMs during load. The cache in
+            # device.py remembers the choice for the rest of the session.
+            _model = load_with_cpu_fallback(
+                BGEM3FlagModel, settings.embedding_model, use_fp16=True,
+            )
     return _model
 
 
