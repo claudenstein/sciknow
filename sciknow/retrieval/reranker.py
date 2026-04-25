@@ -259,10 +259,20 @@ def rerank(
     if not candidates:
         return []
 
-    reranker = _get_reranker()
-
-    pairs = [[query, c.content_preview] for c in candidates]
-    scores: list[float] = reranker.compute_score(pairs, normalize=True)
+    # v2 Phase B — when settings.use_llamacpp_reranker is on (default
+    # in v2), score via the llama-server /v1/rerank endpoint instead
+    # of loading FlagReranker / a Qwen3-Reranker adapter in-process.
+    # This kills the local CUDA path that conflicts with the writer's
+    # GPU residency.
+    from sciknow.config import settings as _settings
+    if getattr(_settings, "use_llamacpp_reranker", True):
+        from sciknow.infer import client as infer_client
+        docs = [c.content_preview for c in candidates]
+        scores: list[float] = infer_client.rerank(query, docs)
+    else:
+        reranker = _get_reranker()
+        pairs = [[query, c.content_preview] for c in candidates]
+        scores = reranker.compute_score(pairs, normalize=True)
 
     scored = sorted(zip(scores, candidates), key=lambda x: x[0], reverse=True)
 

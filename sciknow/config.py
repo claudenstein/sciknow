@@ -58,8 +58,49 @@ class Settings(BaseSettings):
     qdrant_host: str = "localhost"
     qdrant_port: int = 6333
 
-    # Ollama
+    # Ollama (v1 — retired in v2 Phase A; kept as no-op fallback for one phase).
     ollama_host: str = "http://localhost:11434"
+
+    # ── v2 inference substrate (Phase A) ─────────────────────────────────
+    # Per-role llama-server URLs. The default ports match the spec
+    # §3.2 topology: writer/embedder/reranker on 8090/8091/8092.
+    infer_writer_url: str = "http://127.0.0.1:8090"
+    infer_embedder_url: str = "http://127.0.0.1:8091"
+    infer_reranker_url: str = "http://127.0.0.1:8092"
+    # Profile name passed to `sciknow infer up`. "default" = three roles
+    # co-resident on the GPU; "low-vram" = embedder/reranker on CPU;
+    # "spec-dec" = writer + draft model for speculative decoding.
+    infer_profile: str = "default"
+    # Path to the llama-server binary. Built from
+    # https://github.com/ggerganov/llama.cpp; the local dev box has it
+    # under ~/Claude/llama.cpp-build/.
+    llama_server_binary: str = "/home/kartofel/Claude/llama.cpp-build/llama.cpp/build/bin/llama-server"
+    # GGUF paths or HF ids per role. Empty string → role can't start.
+    writer_model_gguf: str = "/home/kartofel/Claude/huggingface/unsloth-Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_M.gguf"
+    embedder_model_gguf: str = "/home/kartofel/Claude/huggingface/bge-m3-gguf/bge-m3-Q8_0.gguf"
+    reranker_model_gguf: str = "/home/kartofel/Claude/huggingface/bge-reranker-v2-m3-gguf/bge-reranker-v2-m3-Q8_0.gguf"
+    # Optional draft model for spec-dec profile.
+    draft_model_gguf: str = ""
+    # Logical model names (used in /v1/chat requests' "model" field +
+    # logging). llama-server doesn't validate them against the loaded
+    # GGUF; they're labels only.
+    writer_model_name: str = "qwen3.6-27b"
+    embedder_model_name: str = "bge-m3"
+    reranker_model_name: str = "bge-reranker-v2-m3"
+    # Phase A bridge: when True, rag.llm dispatches to sciknow.infer.client
+    # (llama-server). When False, uses the v1 ollama path. Default True
+    # for v2; flip to False to roll back to v1 within a single commit.
+    use_llamacpp_writer: bool = True
+    # Phase B bridges: same idea for the embedder + reranker. When True,
+    # ingestion/embedder.py and retrieval/reranker.py dispatch to the
+    # llama-server-backed roles instead of loading FlagEmbedding /
+    # FlagReranker / sentence-transformers in-process. The dual-vector
+    # (dense + sparse) contract degrades to dense-only on this path
+    # because llama-server's /v1/embeddings doesn't expose sparse —
+    # the v1 hybrid_search keeps working with one signal less. Future
+    # work: a sparse sidecar role.
+    use_llamacpp_embedder: bool = True
+    use_llamacpp_reranker: bool = True
 
     # Models
     embedding_model: str = "BAAI/bge-m3"

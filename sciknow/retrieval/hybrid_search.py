@@ -88,11 +88,21 @@ _dense_embed_model = None
 def _get_embed_model():
     """bge-m3 — primary embedder, always used for sparse (+ ColBERT on
     abstracts). Provides dense output too; only consulted when
-    ``settings.dense_embedder_model`` is unset."""
+    ``settings.dense_embedder_model`` is unset.
+
+    v2 Phase B: when ``settings.use_llamacpp_embedder`` is True (default)
+    we route through the llama-server adapter from
+    ``sciknow.ingestion.embedder``. The adapter exposes the same
+    ``encode(...)`` shape so the call sites below stay untouched.
+    """
     global _embed_model
     if _embed_model is None:
-        from FlagEmbedding import BGEM3FlagModel
         from sciknow.config import settings
+        if getattr(settings, "use_llamacpp_embedder", True):
+            from sciknow.ingestion.embedder import _LlamaCppBgeM3Adapter
+            _embed_model = _LlamaCppBgeM3Adapter()
+            return _embed_model
+        from FlagEmbedding import BGEM3FlagModel
         from sciknow.retrieval.device import load_with_cpu_fallback
         # Phase 54.6.305 — preflight first so the Ollama releaser unloads
         # any resident LLM. On a 24 GB card, qwen3.6:27b-dense pins
