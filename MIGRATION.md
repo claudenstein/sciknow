@@ -176,7 +176,7 @@ branch:
 
 - **Phase A** (infer substrate): ✅ shipped (`22db97d`)
 - **Phase B** (embedder + reranker on llama-server): ✅ shipped + exit criteria met (`2058d1e`, `b6b91ad`, `e9878c6` — FlagEmbedding/sentence-transformers/ollama dropped from direct deps)
-- **Phase C** (autowrite simplification): 🟡 events.py + is_active migration shipped (`8437db2`); 6.7 kLOC book_ops split is the remaining sub-task
+- **Phase C** (autowrite simplification): 🟡 events.py + is_active migration shipped (`8437db2`); `core/autowrite.py` re-export shim establishes the v2 import path. Full body move out of `book_ops.py` deferred — ~30 L1 tests target the engine via `inspect.getsource(book_ops._autowrite_section_body)`, so the move + test retarget is one commit.
 - **Phase D** (retrieval cleanup): ✅ functionally shipped (`b6b91ad`) — single canonical embedder enforced, sidecar collection bypassed at query time + dropped by `library upgrade-v1`. Legacy code paths still present behind toggles for rollback.
 - **Phase E** (web rebuild): 🟡 main CSS block extracted to `static/css/sciknow.css` (`8710b7d`); 16,394-line inline `<script>` extracted to `static/js/sciknow.js` with a 7-key `window.SCIKNOW_BOOTSTRAP` config emitted inline by the template. `web/app.py` shrunk 29 kLOC → 12.7 kLOC (-56%). Jinja2 template extraction + `web/routes/` split deferred to v2.1.
 - **Phase F** (CLI reorg): ✅ shipped — `library` + `corpus` subapps live with deprecation shim (`027d09b`); MIGRATION.md (this file) covers every verb; the L1 + alert audit is deferred to v2.1.

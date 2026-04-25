@@ -17920,6 +17920,43 @@ def l1_v2_cli_library_corpus_subapps() -> None:
     )
 
 
+def l1_v2_autowrite_module_reexports_book_ops_engine() -> None:
+    """v2 Phase C — `sciknow.core.autowrite` exposes the autowrite
+    iteration engine under its v2 module name.
+
+    The full code-split (move bodies out of book_ops.py) is deferred:
+    ~30 L1 tests use ``inspect.getsource(book_ops._autowrite_section_body)``
+    to assert the wire format, and shifting the source target at the
+    same time as splitting risks a silent regression in the engine's
+    yield contract. Until the bodies move, this module re-exports the
+    engine surface so callers can adopt the v2 import path now and the
+    move becomes a single search-and-replace later.
+
+    Guards:
+      - The new module is importable.
+      - The 4 public/private autowrite symbols expected by spec §2 are
+        re-exported and resolve to the same objects book_ops exposes.
+    """
+    from sciknow.core import autowrite as v2_autowrite
+    from sciknow.core import book_ops
+
+    expected = (
+        "autowrite_section_stream",
+        "autowrite_chapter_all_sections_stream",
+        "_autowrite_section_body",
+        "_AutowriteLogger",
+    )
+    for name in expected:
+        assert hasattr(v2_autowrite, name), (
+            f"sciknow.core.autowrite must re-export {name!r}"
+        )
+        assert getattr(v2_autowrite, name) is getattr(book_ops, name), (
+            f"sciknow.core.autowrite.{name} must be the same object as "
+            f"book_ops.{name} (re-export, not a copy — otherwise the "
+            f"two diverge over time)"
+        )
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -18370,6 +18407,10 @@ L1_TESTS: list[Callable] = [
     # v2 Phase B exit criterion — pyproject no longer pulls in
     # FlagEmbedding / sentence-transformers / ollama directly
     l1_v2_pyproject_dropped_v1_inproc_models,
+    # v2 Phase C — `core/autowrite.py` re-exports the iteration engine
+    # so callers can adopt the v2 import path now (full body move
+    # deferred to a follow-up commit)
+    l1_v2_autowrite_module_reexports_book_ops_engine,
 ]
 
 L2_TESTS: list[Callable] = [
