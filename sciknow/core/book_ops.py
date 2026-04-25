@@ -4996,6 +4996,14 @@ def _autowrite_section_body(
         log.stage("scoring", iteration=iteration + 1)
         yield {"type": "progress", "stage": "scoring",
                "detail": f"Scoring iteration {iteration + 1}..."}
+        # Phase 54.6.320 — same VRAM-eviction guard as the verify phase.
+        # bge-m3 + reranker re-loaded by the previous iteration's
+        # retrieve step are still resident; the scorer's 27B model
+        # would partial-load with the embedder co-resident.
+        try:
+            _release_gpu_models()
+        except Exception:
+            pass
         # Phase 54.6.306 — when the scorer is a different model from
         # the writer (i.e. AUTOWRITE_SCORER_MODEL override is set,
         # like gemopus4), Ollama can't keep both sticky models
@@ -5124,6 +5132,18 @@ def _autowrite_section_body(
         log.stage("verifying", iteration=iteration + 1)
         yield {"type": "progress", "stage": "verifying",
                "detail": "Verifying citations..."}
+        # Phase 54.6.320 — free bge-m3 + reranker + ColBERT BEFORE the
+        # 27B verifier call. Without this eviction, retrieval models
+        # held ~10 GB of VRAM (re-loaded by an earlier autowrite
+        # iteration's retrieve step), Ollama saw only ~14 GB free, and
+        # the writer model partial-loaded with ~half its layers
+        # spilled to CPU — decode collapsed from 30+ t/s to ~4 t/s.
+        # This is the same pattern 54.6.305 fixed for the writer
+        # entry path; missing here was the in-loop verify phase.
+        try:
+            _release_gpu_models()
+        except Exception:
+            pass
         try:
             sys_v, usr_v = rag_prompts.verify_claims(content, results)
             verify_raw = yield from _stream_phase(
@@ -5196,6 +5216,11 @@ def _autowrite_section_body(
                 log.stage("cove", iteration=iteration + 1)
                 yield {"type": "progress", "stage": "cove",
                        "detail": "Running Chain-of-Verification (decoupled fact check)..."}
+                # Phase 54.6.320 — eviction before CoVe's batched-N call.
+                try:
+                    _release_gpu_models()
+                except Exception:
+                    pass
                 try:
                     # Phase 15.3: streamed CoVe so the GUI sees question
                     # generation + each independent answer flow as token
@@ -5468,6 +5493,11 @@ def _autowrite_section_body(
         # Re-score (Fix 3: same results) — Phase 15.3 streamed
         log.stage("rescoring", iteration=iteration + 1)
         yield {"type": "progress", "stage": "scoring", "detail": "Re-scoring revision..."}
+        # Phase 54.6.320 — eviction before re-scoring too.
+        try:
+            _release_gpu_models()
+        except Exception:
+            pass
         # Phase 54.6.306 — same sticky-LLM swap problem as the initial
         # scoring call above; the writer was just used for "revising"
         # with keep_alive=-1, so release it before the scorer tries to

@@ -7316,6 +7316,82 @@ async def list_jobs():
         ]
 
 
+@app.post("/api/admin/release-vram")
+async def api_admin_release_vram():
+    """Phase 54.6.320 — runtime VRAM-eviction switch.
+
+    Call this while an autowrite / verify job is running and decode
+    tok/s has tanked because bge-m3 + reranker + ColBERT got reloaded
+    by an iteration's retrieve step and are now squeezing Ollama's
+    writer model into a partial GPU load (the classic "decode 4 t/s
+    instead of 30 t/s" regression).
+
+    Frees the retrieval models held by THIS process (sciknow web
+    server) and reports the VRAM delta. Ollama doesn't auto-rebalance
+    a partial-load on its own — we also issue a model-unload via
+    Ollama's API so the next LLM call re-pages it with full GPU.
+    """
+    import shutil
+    import subprocess
+    from sciknow.core.book_ops import _release_gpu_models
+
+    def _vram_used() -> tuple[int, int, int]:
+        """(used_mib, free_mib, total_mib) on GPU 0; (-1,-1,-1) if nvidia-smi missing."""
+        if not shutil.which("nvidia-smi"):
+            return (-1, -1, -1)
+        try:
+            r = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.used,memory.free,memory.total",
+                 "--format=csv,noheader,nounits", "-i", "0"],
+                capture_output=True, text=True, timeout=5,
+            )
+            parts = [int(x.strip()) for x in r.stdout.strip().split(",")]
+            return (parts[0], parts[1], parts[2])
+        except Exception:
+            return (-1, -1, -1)
+
+    before = _vram_used()
+    _release_gpu_models()
+
+    # Force Ollama to drop the model so the next call re-pages it
+    # under the new (now-larger) free-VRAM budget. keep_alive=0 unloads.
+    unloaded: list[str] = []
+    try:
+        import ollama as _ollama
+        client = _ollama.Client(host=settings.ollama_host, timeout=10)
+        # /api/ps returns the loaded models; unload each by issuing a
+        # zero-token chat with keep_alive=0.
+        try:
+            ps = client.ps()
+            loaded = [m.get("name") or m.get("model") for m in ps.get("models", [])]
+        except Exception:
+            loaded = []
+        for name in loaded:
+            if not name:
+                continue
+            try:
+                client.generate(model=name, prompt="", keep_alive=0, stream=False)
+                unloaded.append(name)
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.warning("ollama unload during release-vram failed: %s", exc)
+
+    after = _vram_used()
+    return JSONResponse({
+        "ok": True,
+        "vram_before_mib": {"used": before[0], "free": before[1], "total": before[2]},
+        "vram_after_mib": {"used": after[0], "free": after[1], "total": after[2]},
+        "ollama_unloaded": unloaded,
+        "note": (
+            "Retrieval models freed and Ollama models unloaded. The "
+            "next LLM call (the running job's next phase) will re-page "
+            "the writer model with the full GPU budget. Decode tok/s "
+            "should jump from the partial-load value back to native."
+        ),
+    })
+
+
 # ── Project management (Phase 43h GUI) ───────────────────────────────────
 #
 # Mirrors the `sciknow project …` CLI surface. The web reader was

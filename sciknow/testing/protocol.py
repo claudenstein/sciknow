@@ -12045,6 +12045,73 @@ def l1_phase54_6_275_retrieval_ab_harness() -> None:
     )
 
 
+def l1_phase54_6_320_autowrite_vram_eviction() -> None:
+    """Phase 54.6.320 — autowrite phases evict retrieval models before LLM.
+
+    User reported decode_tps=4.17 t/s on a Qwen3.6-27B verifier job after
+    6 hours of autowrite. nvidia-smi: sciknow web held 10.1 GB VRAM
+    (bge-m3 + reranker + ColBERT), Ollama held 11.8 GB — only 49% of the
+    22.9 GB writer model fit. The remaining layers spilled to CPU,
+    collapsing decode from ~30 t/s to ~4 t/s.
+
+    Same bug 54.6.305 already fixed at autowrite ENTRY; this phase
+    closes the LOOP — eviction is now also called before the in-loop
+    verify, scoring, rescoring, and CoV phases. After the first
+    iteration's retrieve step reloads the embedder, the next LLM-heavy
+    phase will evict it before launching the 27B model.
+
+    Also adds a runtime escape hatch: POST /api/admin/release-vram
+    frees retrieval models + force-unloads Ollama models so a live
+    autowrite that already collapsed to 4 t/s can be recovered without
+    aborting.
+
+    Guards:
+      A) ``_release_gpu_models`` is called BEFORE each LLM-heavy
+         phase in autowrite (verify / scoring / cove / rescoring).
+      B) ``/api/admin/release-vram`` POST endpoint exists and frees
+         GPU models + reports VRAM before/after.
+    """
+    import inspect as _inspect
+    from sciknow.core import book_ops as _book
+
+    src = _inspect.getsource(_book)
+    # The eviction helper itself
+    assert "_release_gpu_models" in src, (
+        "54.6.320 — _release_gpu_models helper must exist"
+    )
+    # Find the autowrite scoring + verify + cove + rescoring sections
+    # and confirm each carries a _release_gpu_models() call within
+    # ~30 lines of its progress yield.
+    for marker in (
+        '"detail": "Verifying citations..."',
+        '"detail": f"Scoring iteration {iteration + 1}..."',
+        '"detail": "Running Chain-of-Verification (decoupled fact check)..."',
+        '"detail": "Re-scoring revision..."',
+    ):
+        idx = src.find(marker)
+        assert idx >= 0, f"54.6.320 — could not find phase marker {marker!r}"
+        window = src[idx:idx + 1500]
+        assert "_release_gpu_models" in window, (
+            f"54.6.320 — _release_gpu_models() missing within ~30 lines "
+            f"of phase yield {marker!r} — partial-load decode regression "
+            f"will reappear under VRAM pressure"
+        )
+
+    # B) admin endpoint
+    from sciknow.web import app as _web
+    full = _inspect.getsource(_web)
+    assert '/api/admin/release-vram' in full, (
+        "54.6.320 — POST /api/admin/release-vram endpoint must exist"
+    )
+    assert "ollama_unloaded" in full, (
+        "54.6.320 — release-vram response must report which Ollama "
+        "models were unloaded so the operator can verify the recovery"
+    )
+    assert "vram_before_mib" in full and "vram_after_mib" in full, (
+        "54.6.320 — release-vram response must include VRAM before/after"
+    )
+
+
 def l1_phase54_6_319_cove_batched_answer() -> None:
     """Phase 54.6.319 — CoV batches all answers into one LLM call.
 
@@ -17837,6 +17904,8 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_318_decode_vs_wall_split,
     # Phase 54.6.319 — CoV batches all answers into one LLM call
     l1_phase54_6_319_cove_batched_answer,
+    # Phase 54.6.320 — autowrite evicts retrieval models before LLM phases
+    l1_phase54_6_320_autowrite_vram_eviction,
     # Phase 54.6.275 — retrieval A/B harness script
     l1_phase54_6_275_retrieval_ab_harness,
 ]
