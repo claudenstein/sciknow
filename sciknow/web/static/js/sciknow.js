@@ -7767,11 +7767,19 @@ function renderMonitor(snap) {
         + hs + '/100</span>' + sparkHtml + '</div>';
     }
     // Phase 54.6.262 — services reachability pill group. PG / Qdrant
-    // / Ollama with latency-aware colouring (green up, red down, dim
-    // "n/a" when the probe key is missing).
+    // / LLM substrate with latency-aware colouring (green up, red
+    // down, dim "n/a" when the probe key is missing). v2 Phase A
+    // adds infer_writer/embedder/reranker; ollama only appears on
+    // the v1 fallback path. The `if (!info) continue` below silently
+    // skips probes the substrate didn't run, so the same pill list
+    // works on both v1 and v2.
     let svcHtml = '';
     const svcOrder = [
-      ['postgres', 'PG'], ['qdrant', 'Qdr'], ['ollama', 'Ollama'],
+      ['postgres', 'PG'], ['qdrant', 'Qdr'],
+      ['infer_writer', 'Writer'],
+      ['infer_embedder', 'Embedder'],
+      ['infer_reranker', 'Reranker'],
+      ['ollama', 'Ollama'],
     ];
     const svcBits = [];
     for (const [key, label] of svcOrder) {
@@ -7797,7 +7805,7 @@ function renderMonitor(snap) {
       + '<div><strong>Info</strong> <span style="color:#36a;">' + infoN + '</span></div>'
       + svcHtml
       + '<div class="u-muted" style="margin-left:auto;font-size:0.85em;">'
-      + 'Equivalent: <code>sciknow db doctor</code></div>'
+      + 'Equivalent: <code>sciknow library doctor</code></div>'
       + '</div>');
   }
 

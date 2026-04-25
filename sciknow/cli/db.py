@@ -1992,7 +1992,17 @@ def monitor(
                 head.append(f"  ·  health ", style="dim")
                 head.append(f"{hs}/100", style=hs_colour)
             head.append("  ·  svc ", style="dim")
-            for k, short in (("postgres", "P"), ("qdrant", "Q"), ("ollama", "O")):
+            # v2 Phase A — chip set adapts to whatever services_health
+            # probed: PG/Qdr always; W/E/R for llama-server roles, O for
+            # ollama on the v1 fallback. Same rendering convention as
+            # the full monitor layout.
+            chip_keys = [("postgres", "P"), ("qdrant", "Q")]
+            for role, short in (("writer", "W"), ("embedder", "E"), ("reranker", "R")):
+                if f"infer_{role}" in svc:
+                    chip_keys.append((f"infer_{role}", short))
+            if "ollama" in svc:
+                chip_keys.append(("ollama", "O"))
+            for k, short in chip_keys:
                 info = svc.get(k) or {}
                 head.append(short, style="bright_green" if info.get("up") else "bright_red")
             head.append(f"  ·  errors ", style="dim")
@@ -2415,13 +2425,21 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
         header_text.append(f"  ·  ", style=C_DIM)
         header_text.append(bf_str, style=bf_colour)
 
-    # Phase 54.6.262 — services status chip. Compact three-dot
-    # indicator: P (pg) Q (qdrant) O (ollama). Green up, red down.
-    # Only rendered when the services dict is populated.
+    # Phase 54.6.262 — services status chip. Compact dot indicator.
+    # v2 Phase A — chip set adapts to whatever services_health probed:
+    # always P (pg) + Q (qdrant); then W/E/R for llama-server roles
+    # the active toggles enabled, or O (ollama) on the v1 fallback.
+    # Green up, red down. Only rendered when services dict is populated.
     if services:
         header_text.append(f"  ·  ", style=C_DIM)
         header_text.append("svc ", style=C_DIM)
-        for key, short in (("postgres", "P"), ("qdrant", "Q"), ("ollama", "O")):
+        chip_keys = [("postgres", "P"), ("qdrant", "Q")]
+        for role, short in (("writer", "W"), ("embedder", "E"), ("reranker", "R")):
+            if f"infer_{role}" in services:
+                chip_keys.append((f"infer_{role}", short))
+        if "ollama" in services:
+            chip_keys.append(("ollama", "O"))
+        for key, short in chip_keys:
             info = services.get(key) or {}
             dot_colour = C_OK if info.get("up") else C_ERR
             header_text.append(short, style=dot_colour)
