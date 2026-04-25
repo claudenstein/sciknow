@@ -16,30 +16,25 @@ of ~50 candidates (~5-10s). The total cost is small relative to the
 LLM call that follows, and it lets Ollama keep the flagship model
 warm in VRAM throughout the autowrite session.
 
-Phase 54.6.322 — auto-default flipped to CPU on cards ≤24 GB.
+Phase 54.6.323 — REVERT 54.6.322's "auto-default-CPU" behavior.
 
-Pre-fix: auto-detector probed free VRAM at the *moment* bge-m3 loaded.
-That moment is usually BEFORE Ollama loads the 27B writer (the writer
-loads lazily on the first chat call). So the probe saw ~22 GB free,
-chose CUDA, parked 2-3 GB in VRAM permanently — and when the writer
-later loaded, it had only ~10 GB free and partial-CPU-offloaded with
-decode collapsing from 30 t/s to ~4 t/s. Phase 54.6.305/320 added
-explicit eviction calls, but that's a band-aid: the next retrieve
-re-loads the embedder onto GPU and the cycle repeats.
+54.6.322 estimated CPU rerank at ~5-10 s for top-50 and projected
+total CPU-side overhead at ~3 min per autowrite. **Measured on the
+user's actual 32-core / 3090 / Qwen3-Embedding-4B-dense pipeline**:
+the retrieve+rerank gap was 10 min 25 s for ONE cycle — three times
+the writer LLM phase it preceded. The estimate undercounted by ~10×
+because the dual-embedder pipeline runs (a) Qwen3-Embedding-4B
+(4B params dense), (b) bge-m3 sparse + ColBERT prefetch, and
+(c) the cross-encoder rerank — every step compounds on CPU.
 
-The math (see chat history of this phase): per-retrieve GPU saving is
-~250 ms (50 ms vs 300 ms on CPU AVX-512). That is irrecoverable next
-to the *minimum* 8 sec PCIe cost of swapping a 16 GB writer. The
-asymmetry says: small + frequent thing → CPU; big + dominant thing →
-GPU. So on cards where the writer is meant to OWN the GPU (≤24 GB
-total VRAM, single-LLM workloads), the embedder + reranker default to
-CPU.
+Reverting to the pre-322 behavior: auto picks CUDA when there's free
+VRAM, CPU only when free VRAM falls below the headroom threshold.
+Eviction-before-LLM (54.6.305 / 54.6.320) remains the correct
+band-aid for partial-load. The real culprit on 24 GB cards is the
+8 GB Qwen3-Embedding-4B dense embedder; that gets a separate
+eviction in `_get_dense_embed_model` (already in place since 54.6.305).
 
-Override remains: SCIKNOW_RETRIEVAL_DEVICE=cuda forces GPU even on
-24 GB cards (use this on multi-GPU or 32+ GB setups, or when running
-without an LLM co-resident — e.g. ingest-only workflows).
-
-Env: SCIKNOW_RETRIEVAL_DEVICE=cpu|cuda|auto (default auto).
+Env override unchanged: SCIKNOW_RETRIEVAL_DEVICE=cpu|cuda|auto.
 """
 from __future__ import annotations
 
@@ -53,10 +48,17 @@ logger = logging.getLogger("sciknow.retrieval.device")
 # reset_device_cache().
 _cached_device: str | None = None
 
-# Phase 54.6.322 — cards with TOTAL VRAM at or below this threshold
-# default the retrieval models to CPU because they're sized for one
-# big LLM resident at a time. 24 GB = RTX 3090, 4090, A5000.
+# Phase 54.6.323 — revert to original headroom logic. The 54.6.322
+# attempt to default CPU on ≤24 GB cards was reverted after measured
+# data showed the dual-embedder + ColBERT-rerank pipeline runs ~10×
+# slower on CPU than the back-of-envelope estimate. Keep this
+# constant exported for the L1 regression's transitional check.
 _AUTO_CPU_TOTAL_VRAM_GB = 24.5
+
+# How much free VRAM (in GB) we want to see before choosing GPU.
+# bge-m3 itself is ~2 GB; the reranker is another ~1 GB. We need 4 GB
+# of slack to fit both with breathing room for working tensors.
+_VRAM_HEADROOM_GB = 4.0
 
 
 def reset_device_cache() -> None:
@@ -68,15 +70,18 @@ def reset_device_cache() -> None:
 def get_retrieval_device() -> str:
     """Return 'cuda' or 'cpu' for the retrieval-time models.
 
-    Decision order (Phase 54.6.322):
+    Decision order (Phase 54.6.323 — reverted from 54.6.322):
       1. Honour the SCIKNOW_RETRIEVAL_DEVICE env var if set to cpu/cuda.
       2. Auto: if torch.cuda is unavailable → cpu.
-      3. Auto: total VRAM ≤ 24 GB → cpu (the GPU is sized to host one
-         big LLM; the embedder is sub-second on CPU AVX-512 anyway, so
-         the 250 ms per-retrieve saving never pays for the partial-
-         offload cost it imposes on the writer).
-      4. Auto: total VRAM > 24 GB → cuda (multi-LLM setup with room for
-         both).
+      3. Auto: free VRAM < `_VRAM_HEADROOM_GB` (4 GB) → cpu (LLM is
+         loaded and squeezing us — fall back rather than OOM).
+      4. Otherwise → cuda.
+
+    The partial-load risk is now handled by:
+      - 54.6.305 / 54.6.320: explicit `_release_gpu_models()` before
+        every LLM-heavy phase in autowrite.
+      - 54.6.305 itself: `_get_dense_embed_model` (Qwen3-Embedding-4B,
+        the 8 GB outlier) preflights and falls back to CPU OOM.
 
     Cached for the session after the first call.
     """
@@ -97,31 +102,21 @@ def get_retrieval_device() -> str:
             _cached_device = "cpu"
             return _cached_device
 
-        # mem_get_info returns (free, total) in bytes.
         free_b, total_b = torch.cuda.mem_get_info()
         free_gb = free_b / (1024 ** 3)
         total_gb = total_b / (1024 ** 3)
 
-        # Phase 54.6.322 — auto-default to CPU on ≤24 GB cards.
-        # The embedder + reranker on host RAM total ~2 GB; per-query
-        # CPU AVX-512 latency is 0.3 s, irrelevant against an
-        # autowrite phase dominated by minutes of LLM decode.
-        # Keeping them out of VRAM lets the writer model own the GPU
-        # at full speed (no partial CPU offload).
-        if total_gb <= _AUTO_CPU_TOTAL_VRAM_GB:
-            logger.info(
-                "GPU total %.1f GB ≤ %.1f GB threshold → retrieval on CPU "
-                "(embedder + reranker stay in host RAM so the writer LLM "
-                "owns full VRAM). Set SCIKNOW_RETRIEVAL_DEVICE=cuda to "
-                "force GPU when running ingest without an LLM co-resident.",
-                total_gb, _AUTO_CPU_TOTAL_VRAM_GB,
+        if free_gb < _VRAM_HEADROOM_GB:
+            logger.warning(
+                "Only %.1f / %.1f GB free on GPU — falling back to CPU "
+                "for bge-m3 + reranker (likely the LLM is loaded in VRAM). "
+                "Set SCIKNOW_RETRIEVAL_DEVICE=cuda to force GPU anyway.",
+                free_gb, total_gb,
             )
             _cached_device = "cpu"
         else:
             logger.info(
-                "GPU total %.1f GB > %.1f GB threshold and %.1f GB free "
-                "→ cuda",
-                total_gb, _AUTO_CPU_TOTAL_VRAM_GB, free_gb,
+                "%.1f / %.1f GB free on GPU → cuda", free_gb, total_gb,
             )
             _cached_device = "cuda"
     except Exception as exc:
