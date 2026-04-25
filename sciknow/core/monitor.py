@@ -2581,8 +2581,16 @@ def _build_alerts(snap: dict) -> list[dict]:
     # Ollama is warn-level (browse-only installs still work without
     # it). Messages include the latency budget so "slow but up"
     # reads as a distinct state from "unreachable".
+    # v2 Phase A — `infer_writer` is critical (no LLM = no autowrite);
+    # `infer_embedder` and `infer_reranker` are warn (retrieval still
+    # answers via FTS-only fallback if embedder is down).
     services = snap.get("services") or {}
-    CRITICAL_SERVICES = {"postgres", "qdrant"}
+    CRITICAL_SERVICES = {"postgres", "qdrant", "infer_writer"}
+    INFER_FIX = {
+        "infer_writer":   "sciknow infer up --role writer",
+        "infer_embedder": "sciknow infer up --role embedder",
+        "infer_reranker": "sciknow infer up --role reranker",
+    }
     for name, info in services.items():
         if info.get("up"):
             continue
@@ -2595,10 +2603,11 @@ def _build_alerts(snap: dict) -> list[dict]:
                 f"{name} unreachable — {err_snippet or 'no response'}"
             ),
             "action": (
-                "systemctl --user status ollama" if name == "ollama" else
-                "systemctl status postgresql" if name == "postgres" else
-                "systemctl --user status qdrant" if name == "qdrant" else
-                None
+                INFER_FIX.get(name)
+                or ("systemctl --user status ollama" if name == "ollama" else
+                    "systemctl status postgresql" if name == "postgres" else
+                    "systemctl --user status qdrant" if name == "qdrant" else
+                    None)
             ),
         })
 
@@ -3151,6 +3160,43 @@ def _ping_ollama() -> dict:
         }
 
 
+def _ping_infer_role(role: str) -> dict:
+    """v2 Phase A — llama-server reachability probe.
+
+    Hits ``GET {INFER_<ROLE>_URL}/health`` with a 2s timeout. Used
+    when the corresponding ``USE_LLAMACPP_<ROLE>`` toggle is True
+    (the v2 default) so the doctor can tell users when their infer
+    substrate is down — the v2 equivalent of the v1 "ollama
+    unreachable" alert.
+    """
+    import time as _time
+    t0 = _time.monotonic()
+    try:
+        import httpx
+        from sciknow.config import settings
+        url_attr = f"infer_{role}_url"
+        base = getattr(settings, url_attr, None)
+        if not base:
+            return {
+                "up": False,
+                "latency_ms": 0,
+                "error": f"settings.{url_attr} not set",
+            }
+        r = httpx.get(f"{base.rstrip('/')}/health", timeout=2.0)
+        r.raise_for_status()
+        return {
+            "up": True,
+            "latency_ms": int((_time.monotonic() - t0) * 1000),
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "up": False,
+            "latency_ms": int((_time.monotonic() - t0) * 1000),
+            "error": str(exc)[:120],
+        }
+
+
 def _services_health() -> dict:
     """Phase 54.6.262 — PG + Qdrant + Ollama reachability probe.
 
@@ -3170,12 +3216,27 @@ def _services_health() -> dict:
     monitor.
     """
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as _TO
+    from sciknow.config import settings as _s
 
     probes = {
         "postgres": _ping_postgres,
         "qdrant":   _ping_qdrant,
-        "ollama":   _ping_ollama,
     }
+    # v2 Phase A — probe llama-server when the role is on the llamacpp
+    # toggle (the v2 default). Probe ollama only if at least one role
+    # is still on the v1 fallback path. This way the doctor surfaces
+    # "writer unreachable" instead of misleading "ollama unreachable"
+    # warnings on a clean v2 install.
+    use_llamacpp = {
+        "writer":   getattr(_s, "use_llamacpp_writer", True),
+        "embedder": getattr(_s, "use_llamacpp_embedder", True),
+        "reranker": getattr(_s, "use_llamacpp_reranker", True),
+    }
+    for role, on in use_llamacpp.items():
+        if on:
+            probes[f"infer_{role}"] = (lambda r=role: _ping_infer_role(r))
+    if not all(use_llamacpp.values()):
+        probes["ollama"] = _ping_ollama
     out: dict = {}
     with ThreadPoolExecutor(max_workers=len(probes)) as pool:
         futures = {name: pool.submit(fn) for name, fn in probes.items()}

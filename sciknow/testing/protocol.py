@@ -14358,10 +14358,13 @@ def l1_phase54_6_264_services_probes_are_parallel() -> None:
         "54.6.264 per-probe timeout must be <=3s to fail-fast"
     )
 
-    # C) shape unchanged — re-call the live helper; expect three
-    # keys regardless of service state.
+    # C) shape — pg + qdrant always; LLM substrate (ollama OR
+    # infer_*) at least once. v2 Phase A flips the LLM probe set.
     out = mon._services_health()
-    assert set(out.keys()) == {"postgres", "qdrant", "ollama"}
+    assert {"postgres", "qdrant"}.issubset(out.keys()), out.keys()
+    assert "ollama" in out or any(k.startswith("infer_") for k in out), (
+        f"_services_health must probe an LLM substrate, got {set(out.keys())}"
+    )
     for svc, info in out.items():
         for k in ("up", "latency_ms", "error"):
             assert k in info, (
@@ -14456,10 +14459,19 @@ def l1_phase54_6_262_services_reachability() -> None:
     from sciknow.core import monitor as mon
 
     # A) helper shape
+    # v2 Phase A — keys depend on USE_LLAMACPP_* toggles. Default v2:
+    # {postgres, qdrant, infer_writer, infer_embedder, infer_reranker}.
+    # v1 fallback (any toggle False): the corresponding role drops and
+    # `ollama` is added. Always: postgres + qdrant.
     out = mon._services_health()
-    assert set(out.keys()) == {"postgres", "qdrant", "ollama"}, (
-        f"_services_health must return {{postgres, qdrant, ollama}} keys, "
+    assert {"postgres", "qdrant"}.issubset(out.keys()), (
+        f"_services_health must always include postgres + qdrant, "
         f"got {set(out.keys())}"
+    )
+    # Either ollama (v1 path) OR at least one infer_* (v2 path) present.
+    assert "ollama" in out or any(k.startswith("infer_") for k in out), (
+        f"_services_health must probe an LLM substrate (ollama or "
+        f"infer_*), got {set(out.keys())}"
     )
     for svc, info in out.items():
         for k in ("up", "latency_ms", "error"):
@@ -17920,6 +17932,56 @@ def l1_v2_cli_library_corpus_subapps() -> None:
     )
 
 
+def l1_v2_doctor_probes_llama_server_substrate() -> None:
+    """v2 Phase A — `library doctor` health-checks the llama-server
+    substrate, not just ollama.
+
+    Pre-v2 the doctor pinged `ollama.list()` to detect a down LLM.
+    v2's default substrate is llama-server (`infer_writer` /
+    `infer_embedder` / `infer_reranker`); `ollama` is only meaningful
+    on the rollback path. This test pins:
+
+      - `_ping_infer_role` exists and has the right shape.
+      - `_services_health` includes `infer_writer/embedder/reranker`
+        keys when the corresponding USE_LLAMACPP_* toggle is True.
+      - `infer_writer` is in the alert-builder's CRITICAL_SERVICES set
+        (no LLM = no autowrite, so the doctor must surface this as
+        an error not a warn).
+      - The `service_down` alert maps `infer_*` to a `sciknow infer
+        up --role *` action so the operator gets a copy-paste fix.
+    """
+    import inspect as _inspect
+    from sciknow.core import monitor as mon_mod
+
+    assert hasattr(mon_mod, "_ping_infer_role"), (
+        "monitor must define _ping_infer_role for v2 doctor"
+    )
+    sig = _inspect.signature(mon_mod._ping_infer_role)
+    assert "role" in sig.parameters
+
+    services_src = _inspect.getsource(mon_mod._services_health)
+    for needle in (
+        "use_llamacpp_writer",
+        "use_llamacpp_embedder",
+        "use_llamacpp_reranker",
+        "infer_{role}",
+    ):
+        assert needle in services_src, (
+            f"_services_health must reference {needle!r} so the v2 "
+            f"substrate is probed when its toggle is on"
+        )
+
+    alert_src = _inspect.getsource(mon_mod._build_alerts)
+    assert '"infer_writer"' in alert_src and "CRITICAL_SERVICES" in alert_src, (
+        "_build_alerts must include infer_writer in CRITICAL_SERVICES "
+        "so a down writer fires an error-level alert"
+    )
+    assert "sciknow infer up --role writer" in alert_src, (
+        "_build_alerts must offer the `sciknow infer up --role writer` "
+        "action so operators can copy-paste the fix from doctor output"
+    )
+
+
 def l1_v2_autowrite_module_reexports_book_ops_engine() -> None:
     """v2 Phase C — `sciknow.core.autowrite` exposes the autowrite
     iteration engine under its v2 module name.
@@ -18411,6 +18473,10 @@ L1_TESTS: list[Callable] = [
     # so callers can adopt the v2 import path now (full body move
     # deferred to a follow-up commit)
     l1_v2_autowrite_module_reexports_book_ops_engine,
+    # v2 Phase A — doctor probes llama-server substrate (writer /
+    # embedder / reranker) instead of just ollama; surfaces the v2
+    # `sciknow infer up --role *` fix path inline in alerts
+    l1_v2_doctor_probes_llama_server_substrate,
 ]
 
 L2_TESTS: list[Callable] = [
