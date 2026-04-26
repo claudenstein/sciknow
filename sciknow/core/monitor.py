@@ -3160,6 +3160,43 @@ def _ping_ollama() -> dict:
         }
 
 
+def _infer_substrate_snapshot() -> list[dict]:
+    """v2 Phase A — list of llama-server roles with their port / pid /
+    model / health for the dashboard.
+
+    Returns ``[]`` on fresh installs that haven't started any role
+    yet, and on the v1 fallback path when ``USE_LLAMACPP_*`` is False
+    for every role (so the dashboard hides the panel cleanly instead
+    of rendering an empty table). Calls ``infer.server.status()`` so
+    the source of truth is the same data ``sciknow infer status``
+    prints — no chance of drift between CLI and web.
+    """
+    try:
+        from sciknow.config import settings as _s
+        on = (
+            getattr(_s, "use_llamacpp_writer", True)
+            or getattr(_s, "use_llamacpp_embedder", True)
+            or getattr(_s, "use_llamacpp_reranker", True)
+        )
+        if not on:
+            return []
+        from sciknow.infer.server import status as _status
+        rows = _status()
+        return [
+            {
+                "role": p.role,
+                "port": p.port,
+                "pid": p.pid,
+                "model": str(p.model),
+                "healthy": bool(p.healthy),
+            }
+            for p in rows
+        ]
+    except Exception as exc:
+        logger.debug("infer_substrate snapshot failed: %s", exc)
+        return []
+
+
 def _ping_infer_role(role: str) -> dict:
     """v2 Phase A — llama-server reachability probe.
 
@@ -4665,6 +4702,11 @@ def collect_monitor_snapshot(
         # on localhost); not cached so each snapshot call gives a
         # fresh reading.
         "services": _services_health(),
+        # v2 Phase A — llama-server substrate snapshot. List of
+        # {role, port, pid, model, healthy} dicts so the dashboard
+        # panels can show "writer Qwen3.6-27B Q4 — :8090 — pid 12345"
+        # without re-shelling out to `sciknow infer status`.
+        "infer_substrate": _infer_substrate_snapshot(),
         # 54.6.237 additions
         "corpus_growth": growth,
         "book_activity": book_act,

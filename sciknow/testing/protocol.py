@@ -17932,6 +17932,55 @@ def l1_v2_cli_library_corpus_subapps() -> None:
     )
 
 
+def l1_v2_monitor_carries_infer_substrate() -> None:
+    """v2 Phase A — monitor snapshot exposes `infer_substrate`, a list
+    of llama-server roles with their port / pid / model / health.
+
+    The dashboard panel that used to read `snap.llm.loaded_models`
+    (Ollama) gains a v2 path that reads `snap.infer_substrate` and
+    falls back to the legacy panel only when the substrate list is
+    empty (v1 fallback installs).
+
+    Guards:
+      - Helper exists, is empty when all USE_LLAMACPP_* are False,
+        and otherwise returns dicts with the documented keys.
+      - Snapshot integration: collect_monitor_snapshot() carries the
+        key with a list value.
+      - Web JS prefers infer_substrate over loaded_models.
+    """
+    import inspect as _inspect
+    from sciknow.core import monitor as mon_mod
+    from sciknow.testing.helpers import web_app_full_source
+
+    assert hasattr(mon_mod, "_infer_substrate_snapshot")
+    snap_helper_src = _inspect.getsource(mon_mod._infer_substrate_snapshot)
+    assert "use_llamacpp_writer" in snap_helper_src, (
+        "_infer_substrate_snapshot must skip when no llamacpp toggles "
+        "are on"
+    )
+    assert "from sciknow.infer.server import status" in snap_helper_src, (
+        "_infer_substrate_snapshot must source from infer.server.status "
+        "so CLI + web stay in sync"
+    )
+
+    snap = mon_mod.collect_monitor_snapshot()
+    assert "infer_substrate" in snap, (
+        "snapshot must carry `infer_substrate` for the dashboard"
+    )
+    assert isinstance(snap["infer_substrate"], list)
+
+    # JS panel reads the new key
+    src = web_app_full_source()
+    assert "snap.infer_substrate" in src, (
+        "renderMonitor must read snap.infer_substrate so the v2 LLM "
+        "substrate panel populates"
+    )
+    assert "LLM substrate" in src, (
+        "v2 panel header must say 'LLM substrate' so the legacy "
+        "Ollama-only label doesn't mislead operators"
+    )
+
+
 def l1_v2_doctor_probes_llama_server_substrate() -> None:
     """v2 Phase A — `library doctor` health-checks the llama-server
     substrate, not just ollama.
@@ -18477,6 +18526,10 @@ L1_TESTS: list[Callable] = [
     # embedder / reranker) instead of just ollama; surfaces the v2
     # `sciknow infer up --role *` fix path inline in alerts
     l1_v2_doctor_probes_llama_server_substrate,
+    # v2 Phase A — monitor snapshot carries `infer_substrate` so the
+    # dashboard panel can show llama-server role state without
+    # re-shelling out to `sciknow infer status`
+    l1_v2_monitor_carries_infer_substrate,
 ]
 
 L2_TESTS: list[Callable] = [

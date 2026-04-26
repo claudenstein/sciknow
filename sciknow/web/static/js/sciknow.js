@@ -8609,8 +8609,28 @@ function renderMonitor(snap) {
     sections.push(html);
   }
 
-  // Ollama loaded models
-  if (loaded.length) {
+  // v2 Phase A — llama-server substrate panel. List of writer /
+  // embedder / reranker roles with port + pid + model path + health.
+  // On v1 fallback installs `infer_substrate` is `[]` and we fall
+  // through to the legacy Ollama-loaded-models panel below.
+  const inferSub = snap.infer_substrate || [];
+  if (inferSub.length) {
+    let html = '<h4>LLM substrate — llama-server roles</h4>'
+      + '<table class="stats-table" style="width:100%;">'
+      + '<tr><th>Role</th><th>Port</th><th>PID</th><th>Health</th><th>Model</th></tr>';
+    for (const r of inferSub) {
+      const dot = r.healthy
+        ? '<span style="color:#080;">●</span>'
+        : '<span style="color:#c33;">✗</span>';
+      html += '<tr><td>' + _escHTML(r.role) + '</td>'
+        + '<td>' + _escHTML(String(r.port)) + '</td>'
+        + '<td>' + _escHTML(String(r.pid || '—')) + '</td>'
+        + '<td>' + dot + (r.healthy ? ' healthy' : ' down') + '</td>'
+        + '<td><code style="font-size:0.85em;">' + _escHTML(r.model) + '</code></td></tr>';
+    }
+    html += '</table>';
+    sections.push(html);
+  } else if (loaded.length) {
     let html = '<h4>Ollama — loaded models</h4><table class="stats-table" style="width:100%;">'
       + '<tr><th>Model</th><th>VRAM</th><th>Expires</th></tr>';
     for (const m of loaded) {
@@ -8620,7 +8640,7 @@ function renderMonitor(snap) {
     html += '</table>';
     sections.push(html);
   } else {
-    sections.push('<p class="u-note">Ollama: no models resident right now.</p>');
+    sections.push('<p class="u-note">No LLM models resident — start one with <code>sciknow infer up --role writer</code>.</p>');
   }
 
   // Phase 54.6.301 — retrieval latency panel.  Session ring buffer
