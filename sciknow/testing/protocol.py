@@ -18517,13 +18517,12 @@ _OLLAMA_KEPT_BY_DESIGN: dict[str, str] = {
     # Web mirror of the doctor's release-vram action; same rationale.
     "sciknow/web/routes/system.py":
         "release-vram parity with monitor.py for v1 ollama",
-    # finalize_draft's L3 figure-claim verifier still uses the v1
-    # Ollama path (separate from caption-visuals which migrated to the
-    # llama-server vlm role). Drop this entry once verify_draft_figures_l3
-    # is also routed through the substrate's vlm role — that's a v2.2
-    # follow-up bundled with the autowrite stall investigation.
+    # finalize_draft's L3 figure-claim verifier dispatches to the
+    # llama-server vlm role on v2; the `import ollama` line remains
+    # only as the v1 rollback branch (USE_LLAMACPP_VLM=False). Drop
+    # this entry when the v1 rollback hatch is removed in v2.2+.
     "sciknow/core/finalize_draft.py":
-        "L3 figure-claim verifier — still on Ollama VLM path",
+        "L3 figure verifier — v1 rollback branch (USE_LLAMACPP_VLM=False)",
     # v1-era model comparison benches — they iterate over Ollama-tag
     # named model variants (qwen3:30b-a3b vs qwen2.5:32b-instruct etc.)
     # which the substrate's one-GGUF-per-role model doesn't expose.

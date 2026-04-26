@@ -200,7 +200,20 @@ def verify_draft_figures_l3(
     from sciknow.core.visuals_mentions import _parse_figure_number, _kind_matches
     from sciknow.storage.db import get_session
 
-    model = vlm_model or getattr(_settings, "visuals_caption_model", None) or "qwen2.5vl:32b"
+    use_v2_vlm = bool(getattr(_settings, "use_llamacpp_vlm", True))
+    if use_v2_vlm:
+        # v2 substrate path — vlm role on llama-server :8093 (Qwen3-VL).
+        # Caller can override via the explicit vlm_model arg; otherwise
+        # we use the configured logical name (label only — actual GGUF
+        # is set by VLM_MODEL_GGUF in config.py).
+        model = vlm_model or getattr(_settings, "vlm_model_name", None) or "qwen3-vl-30b-a3b"
+    else:
+        # v1 rollback — Ollama VLM (typically qwen2.5vl:32b).
+        model = (
+            vlm_model
+            or getattr(_settings, "visuals_caption_model", None)
+            or "qwen2.5vl:32b"
+        )
     t0 = _time.monotonic()
 
     # ── Load the draft
@@ -256,14 +269,36 @@ def verify_draft_figures_l3(
                     "asset_path": vr[4] or "",
                 })
 
-    # ── Lazy-import ollama only when we have something to verify
-    try:
-        import ollama as _ollama
-        client = _ollama.Client(host=_settings.ollama_host)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("ollama import failed — L3 verify cannot run: %s", exc)
-        # Degrade to "L1 only" result so caller still sees resolution status
-        client = None
+    # ── Resolve the VLM caller. v2 path goes through the llama-server
+    # vlm role; v1 fallback uses Ollama. If the vlm role isn't running
+    # (writer typically holds the GPU), degrade gracefully to L2 — the
+    # user explicitly starts vlm + reruns finalize when they want full
+    # L3 figure verification.
+    client = None  # v1 ollama client
+    use_v2 = use_v2_vlm
+    if use_v2:
+        try:
+            from sciknow.infer import server as _infer_server
+            if not _infer_server.health("vlm"):
+                logger.warning(
+                    "vlm role on :%s not healthy — L3 figure verification "
+                    "will be skipped (start with `sciknow infer up --role vlm` "
+                    "or run `sciknow corpus caption-visuals` which auto-swaps).",
+                    _infer_server.ROLE_DEFAULTS.get("vlm", {}).get("port", 8093),
+                )
+                use_v2 = False  # neither path active → degrade to L2
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("vlm role check failed: %s", exc)
+            use_v2 = False
+    if not use_v2:
+        # v1 fallback — try Ollama. May still be unreachable, in which
+        # case we degrade like the v2 path.
+        try:
+            import ollama as _ollama
+            client = _ollama.Client(host=_settings.ollama_host)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ollama import failed — L3 verify cannot run: %s", exc)
+            client = None
 
     verdicts: list[FigureVerdict] = []
     for i, mws in enumerate(markers_with_sent, start=1):
@@ -295,7 +330,8 @@ def verify_draft_figures_l3(
         # Tables + equations have no raster image to show the VLM; they
         # get L1-only — resolved = pass (we trust the caption match
         # from L2 that already ran during autowrite).
-        if kind in ("table", "equation") or img_path is None or client is None:
+        no_vlm = (not use_v2) and (client is None)
+        if kind in ("table", "equation") or img_path is None or no_vlm:
             verdicts.append(FigureVerdict(
                 marker=mws["marker"], kind=kind, num=num,
                 resolved=True,
@@ -316,22 +352,33 @@ def verify_draft_figures_l3(
             ))
             continue
 
-        # ── Level 3: one VLM call
+        # ── Level 3: one VLM call (llama-server v2 or Ollama v1)
         user_prompt = L3_VERIFY_USER.format(claim=sent[:600])
         score: int | None = None
         justification = ""
         try:
-            resp = client.chat(
-                model=model,
-                messages=[
-                    {"role": "system", "content": L3_VERIFY_SYSTEM},
-                    {"role": "user", "content": user_prompt,
-                     "images": [str(img_path)]},
-                ],
-                options={"temperature": 0.2, "num_predict": 200},
-                keep_alive=-1,
-            )
-            raw = (resp.get("message") or {}).get("content", "").strip()
+            if use_v2:
+                from sciknow.infer import client as _infer_client
+                raw = _infer_client.chat_with_image(
+                    system=L3_VERIFY_SYSTEM,
+                    user=user_prompt,
+                    image_paths=[str(img_path)],
+                    model=model,
+                    temperature=0.2,
+                    num_predict=200,
+                )
+            else:
+                resp = client.chat(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": L3_VERIFY_SYSTEM},
+                        {"role": "user", "content": user_prompt,
+                         "images": [str(img_path)]},
+                    ],
+                    options={"temperature": 0.2, "num_predict": 200},
+                    keep_alive=-1,
+                )
+                raw = (resp.get("message") or {}).get("content", "").strip()
             # Model may return ```json fenced — strip fences
             raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
             # Also strip thinking blocks if a thinking model slipped in
