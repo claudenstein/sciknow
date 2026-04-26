@@ -133,9 +133,12 @@ def web_app_full_source() -> str:
     """
     from sciknow.web import app as web_app
     src = inspect.getsource(web_app)
+    chunks = [src]
+
+    # CSS + JS under web/static/ — re-doubled to mimic the f-string
+    # source form (see comment block above each rewrite).
     static_dir = Path(__file__).resolve().parents[1] / "web" / "static"
     if static_dir.exists():
-        chunks = [src]
         for ext in ("css", "js"):
             for p in sorted(static_dir.rglob(f"*.{ext}")):
                 try:
@@ -163,8 +166,34 @@ def web_app_full_source() -> str:
                 chunks.append(
                     f"\n# --- web/static/{p.relative_to(static_dir)} ---\n" + body
                 )
-        return "".join(chunks)
-    return src
+
+    # HTML templates under web/templates/ — v2 Phase E extracted the
+    # 3.8 kLOC TEMPLATE string into book_reader.html. The template
+    # uses Python `.format()`, so `{var}` placeholders and `{{`/`}}`
+    # literal braces in the *source* form are preserved verbatim in
+    # the file. But Python source escapes (`\\` → `\`, `\'` → `'`)
+    # were applied during extraction. Tests that grep for the source
+    # form (e.g. raw assertions checking for `\\'foo\\'` patterns in
+    # rendered onclick handlers) need those re-doubled — same logic
+    # as the JS extraction above.
+    templates_dir = Path(__file__).resolve().parents[1] / "web" / "templates"
+    if templates_dir.exists():
+        for p in sorted(templates_dir.rglob("*.html")):
+            try:
+                body = p.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            # Re-double backslashes to mirror Python source-form so
+            # tests that asserted `\\'plan\\'`-style patterns still
+            # match. Braces in templates are already in source form
+            # (the file is read verbatim, .format() never applied),
+            # so don't touch those — leave `{var}` and `{{`/`}}` as-is.
+            body = body.replace("\\", "\\\\")
+            chunks.append(
+                f"\n# --- web/templates/{p.relative_to(templates_dir)} ---\n" + body
+            )
+
+    return "".join(chunks)
 
 
 # ── Rendered template helpers ────────────────────────────────────────
