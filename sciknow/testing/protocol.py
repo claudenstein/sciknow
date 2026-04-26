@@ -13438,6 +13438,47 @@ def l1_snapshot_diff_brief_helper() -> None:
     )
 
 
+def l1_snapshot_autowrite_auto_trigger() -> None:
+    """Phase 54.6.328 (snapshot-versioning Phase 4) — autowrite-chapter
+    auto-snapshots before running, with prune.
+
+    Guards:
+      A) autowrite_chapter_all_sections_stream calls
+         _snapshot_chapter_drafts before iterating.
+      B) The auto-snapshot is named with a `pre-autowrite-` prefix +
+         timestamp so the prune regex matches.
+      C) The prune helper exists with a regex bound to that prefix
+         pattern.
+      D) The auto-snapshot path is wrapped in try/except so a failure
+         to snapshot never blocks autowrite.
+    """
+    import inspect as _inspect
+    from sciknow.core import autowrite as _aw
+
+    src = _inspect.getsource(_aw.autowrite_chapter_all_sections_stream)
+    assert "_snapshot_chapter_drafts" in src or "_snap_ch" in src, (
+        "autowrite_chapter must snapshot before iterating sections"
+    )
+    assert "pre-autowrite" in src, (
+        "auto-snapshot name must include `pre-autowrite-` prefix so "
+        "the prune regex matches"
+    )
+    assert "compute_bundle_brief" in src, (
+        "auto-snapshot must compute the diff brief"
+    )
+    assert "except Exception" in src and "pass" in src, (
+        "snapshot failures must never block autowrite"
+    )
+
+    assert hasattr(_aw, "_prune_chapter_unnamed_snapshots"), (
+        "Phase 4 prune helper must exist"
+    )
+    prune_src = _inspect.getsource(_aw._prune_chapter_unnamed_snapshots)
+    assert "pre-" in prune_src and "DELETE FROM draft_snapshots" in prune_src, (
+        "prune helper must target pre-<trigger>-<timestamp> snapshots"
+    )
+
+
 def l1_snapshot_history_diff_cli() -> None:
     """Phase 54.6.328 (snapshot-versioning Phase 3) — book history +
     book diff CLI verbs.
@@ -19534,6 +19575,8 @@ L1_TESTS: list[Callable] = [
     l1_snapshot_section_scope_cli,
     # Phase 54.6.328 (snapshot-versioning Phase 3) — book history + book diff
     l1_snapshot_history_diff_cli,
+    # Phase 54.6.328 (snapshot-versioning Phase 4) — autowrite auto-snapshot
+    l1_snapshot_autowrite_auto_trigger,
     l1_phase54_6_298_enrichment_coverage,
     l1_phase54_6_299_hnsw_drift_check,
     l1_phase54_6_301_retrieval_latency_buffer,

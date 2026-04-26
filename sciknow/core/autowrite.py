@@ -1598,6 +1598,37 @@ def _autowrite_section_body(
     }
 
 
+def _prune_chapter_unnamed_snapshots(session, chapter_id: str, *, keep: int) -> int:
+    """Phase 54.6.328 (Phase 4) — keep the N newest auto-trigger
+    snapshots per chapter, drop older ones.
+
+    Auto-trigger snapshots have names that start with one of the
+    well-known machine prefixes (``pre-autowrite-``, ``pre-revise-``,
+    etc. — anything matching ``pre-<word>-`` where the suffix carries
+    a timestamp). User-named snapshots (anything else) are NEVER
+    pruned by this helper — they're the explicit "I want this
+    forever" anchors.
+
+    Returns the number of rows deleted.
+    """
+    from sqlalchemy import text
+    rows = session.execute(text("""
+        SELECT id::text FROM draft_snapshots
+        WHERE chapter_id::text = :cid
+          AND scope = 'chapter'
+          AND name ~ '^pre-[a-z0-9_-]+-[0-9]'
+        ORDER BY created_at DESC
+        OFFSET :keep
+    """), {"cid": chapter_id, "keep": int(keep)}).fetchall()
+    if not rows:
+        return 0
+    ids = [r[0] for r in rows]
+    n = session.execute(text(
+        "DELETE FROM draft_snapshots WHERE id::text = ANY(:ids)"
+    ), {"ids": ids}).rowcount or 0
+    return int(n)
+
+
 def autowrite_chapter_all_sections_stream(
     book_id: str,
     chapter_id: str,
@@ -1658,6 +1689,60 @@ def autowrite_chapter_all_sections_stream(
     # rebuild wins over resume if both somehow get passed.
     if rebuild and resume:
         resume = False
+
+    # Phase 54.6.328 (snapshot-versioning Phase 4) — auto-snapshot the
+    # chapter's current draft state BEFORE letting autowrite touch it.
+    # No-ops cleanly when the chapter is empty (snapshot returns None).
+    # Snapshot name encodes the trigger so the Timeline can group by
+    # source. Best-effort: a snapshot failure must never block the
+    # autowrite from running.
+    import datetime as _dt
+    try:
+        from sciknow.web.routes.snapshots import (
+            _snapshot_chapter_drafts as _snap_ch,
+        )
+        from sciknow.core.snapshot_diff import compute_bundle_brief
+        with get_session() as _sess:
+            _bundle = _snap_ch(_sess, chapter_id)
+            if _bundle.get("drafts"):
+                _stamp = _dt.datetime.now(_dt.timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
+                _snap_name = f"pre-autowrite-{_stamp}"
+                _prev = _sess.execute(text("""
+                    SELECT content FROM draft_snapshots
+                    WHERE chapter_id::text = :cid AND scope = 'chapter'
+                    ORDER BY created_at DESC LIMIT 1
+                """), {"cid": chapter_id}).fetchone()
+                _prev_bundle = None
+                if _prev and _prev[0]:
+                    try:
+                        import json as _json_mod
+                        _prev_bundle = _json_mod.loads(_prev[0])
+                    except Exception:
+                        _prev_bundle = None
+                _meta = compute_bundle_brief(_bundle, _prev_bundle)
+                import json as _json_mod
+                _wc = sum(d.get("word_count") or 0 for d in _bundle["drafts"])
+                _sess.execute(text("""
+                    INSERT INTO draft_snapshots
+                        (chapter_id, scope, name, content, word_count, meta)
+                    VALUES
+                        (CAST(:cid AS uuid), 'chapter', :name, :content, :wc,
+                         CAST(:meta AS jsonb))
+                """), {"cid": chapter_id, "name": _snap_name,
+                       "content": _json_mod.dumps(_bundle),
+                       "wc": _wc,
+                       "meta": _json_mod.dumps(_meta)})
+                _sess.commit()
+                # Prune unnamed older snapshots (keep last 14 per chapter).
+                _prune_chapter_unnamed_snapshots(_sess, chapter_id, keep=14)
+                _sess.commit()
+    except Exception:  # noqa: BLE001
+        # Snapshot is the safety net for the user, but it cannot
+        # become a blocker. Failure to snapshot is logged via the
+        # existing autowrite event stream's later steps if relevant.
+        pass
 
     # Resolve the chapter's sections list (slug + title + plan).
     with get_session() as session:
