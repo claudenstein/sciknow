@@ -18010,6 +18010,45 @@ def l1_v2_monitor_carries_infer_substrate() -> None:
     )
 
 
+def l1_v2_package_version_surface() -> None:
+    """v2 — package version is readable via importlib.metadata, exposed
+    on `sciknow.__version__`, surfaced in the FastAPI app metadata
+    (/openapi.json `info.version`), and printable via `sciknow --version`.
+
+    Pins the v2.0 contract that operators have a one-shot way to
+    verify the installed version from any of three surfaces:
+      python  → `sciknow.__version__`
+      shell   → `sciknow --version`
+      HTTP    → `GET /openapi.json` → `info.version`
+    """
+    import sciknow
+    from fastapi.testclient import TestClient
+    from typer.testing import CliRunner
+    from sciknow.cli.main import app as cli_app
+    from sciknow.web import app as web_app
+
+    pkg_version = sciknow.__version__
+    assert pkg_version and pkg_version != "0.0.0+unknown", (
+        f"sciknow.__version__ should be the installed package version, "
+        f"got {pkg_version!r} — installation drift?"
+    )
+
+    # CLI --version
+    r = CliRunner().invoke(cli_app, ["--version"])
+    assert r.exit_code == 0, f"`sciknow --version` failed: {r.output[:200]}"
+    assert pkg_version in r.output, (
+        f"--version output {r.output!r} doesn't include {pkg_version}"
+    )
+
+    # FastAPI /openapi.json
+    c = TestClient(web_app.app)
+    body = c.get("/openapi.json").json()
+    assert body["info"]["version"] == pkg_version, (
+        f"FastAPI app version {body['info']['version']!r} ≠ "
+        f"sciknow.__version__ {pkg_version!r}"
+    )
+
+
 def l1_v2_safe_endpoints_smoke_test() -> None:
     """v2 Phase E — every "safe" GET endpoint (no required state)
     returns a non-5xx status when hit via TestClient.
@@ -18858,6 +18897,9 @@ L1_TESTS: list[Callable] = [
     # full dispatch path (catches runtime regressions the bytecode
     # check might miss)
     l1_v2_safe_endpoints_smoke_test,
+    # v2 — package version readable from python (sciknow.__version__),
+    # CLI (--version), and HTTP (/openapi.json info.version)
+    l1_v2_package_version_surface,
 ]
 
 L2_TESTS: list[Callable] = [
