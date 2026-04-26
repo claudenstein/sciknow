@@ -1,6 +1,6 @@
 # SciKnow v2 — Final Stretch
 
-**Companion to:** `docs/SCIKNOW_V2_ROADMAP.md` (the original phase plan, all 7 phases shipped) and `MIGRATION.md` (the verb / settings reference).
+**Companions:** [`docs/SCIKNOW_V2_ROADMAP.md`](SCIKNOW_V2_ROADMAP.md) (the original v1→v2 phase plan, all 7 phases shipped), [`MIGRATION.md`](../MIGRATION.md) (verb / settings reference), and — once Stage 5 closes — [`docs/POST_V2_ROADMAP.md`](POST_V2_ROADMAP.md) (the shipping order for v2.1, v2.2, DGX Spark, and the data-gated learning passes).
 
 This document covers the **post-shipment items** the original roadmap required but never marked done. The substrate code is fully landed and the L1+L2 contract suites are green; what's missing is the *verification layer* — proof that the substrate actually works end-to-end on a pure-v2 install (no Ollama, no FlagEmbedding) and that the spec's three decision gates have measured data behind them.
 

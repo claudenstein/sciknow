@@ -922,6 +922,7 @@ Project planning and release history:
 | Document | Contents |
 |---|---|
 | **[Roadmap](docs/ROADMAP.md)** | Open items by source (QA, research runners-up, hardware-gated, compound-learning layers) |
+| **[Post-v2 roadmap](docs/POST_V2_ROADMAP.md)** | Shipping order from v2.0.0rc2 → v2.0.0 → v2.1 cleanup → v2.2 features → DGX Spark unlock → data-gated learning |
 | **[Ingestion roadmap](docs/ROADMAP_INGESTION.md)** | 43 research proposals for improving `sciknow refresh` / ingest — by pipeline stage + cross-cutting, priority-ranked |
 | **[Phase log](docs/PHASE_LOG.md)** | Release notes per phase commit, newest first |
 | **[Strategy](docs/STRATEGY.md)** | Long-range direction; why certain trade-offs were chosen |
