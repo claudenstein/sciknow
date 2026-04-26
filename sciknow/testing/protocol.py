@@ -12298,8 +12298,15 @@ def l1_phase54_6_320_autowrite_vram_eviction() -> None:
     """
     import inspect as _inspect
     from sciknow.core import book_ops as _book
+    from sciknow.core import autowrite as _autowrite
 
-    src = _inspect.getsource(_book)
+    # v2 Phase C — autowrite engine moved from book_ops.py to
+    # autowrite.py. The phase markers we grep below now live in
+    # autowrite.py, but `_release_gpu_models` is still defined in
+    # book_ops.py and re-exported. Concatenate both sources so the
+    # contract stays "the markers + the eviction call appear within
+    # 30 lines of each other in the autowrite engine code".
+    src = _inspect.getsource(_book) + "\n" + _inspect.getsource(_autowrite)
     # The eviction helper itself
     assert "_release_gpu_models" in src, (
         "54.6.320 — _release_gpu_models helper must exist"
