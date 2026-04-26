@@ -1578,6 +1578,7 @@ def _model_assignments() -> dict:
         use_v2_writer = bool(getattr(settings, "use_llamacpp_writer", True))
         use_v2_embedder = bool(getattr(settings, "use_llamacpp_embedder", True))
         use_v2_reranker = bool(getattr(settings, "use_llamacpp_reranker", True))
+        use_v2_vlm = bool(getattr(settings, "use_llamacpp_vlm", True))
 
         # Writer slot: on v2 surface the single writer GGUF and
         # explicitly null out the v1 per-role keys (they don't dispatch).
@@ -1616,6 +1617,21 @@ def _model_assignments() -> dict:
             getattr(settings, "reranker_model", None)
         )
 
+        # Caption VLM: on v2 surface the GGUF basename actually being
+        # served by the vlm role; on v1 fallback fall back to the
+        # Ollama tag the user configured (qwen2.5vl by default).
+        if use_v2_vlm:
+            caption_label = (
+                f"{_gguf_basename(getattr(settings, 'vlm_model_gguf', None))} "
+                f"(llama-server)"
+            )
+        else:
+            caption_label = (
+                getattr(settings, "visuals_caption_model", None)
+                or getattr(settings, "caption_vlm_model", None)
+                or getattr(settings, "vlm_model", None)
+            )
+
         return {
             "llm_main": llm_main,
             "llm_fast": llm_fast,
@@ -1623,11 +1639,7 @@ def _model_assignments() -> dict:
             "book_outline": book_outline,
             "book_review": book_review,
             "autowrite_scorer": autowrite_scorer,
-            "caption_vlm": (
-                getattr(settings, "visuals_caption_model", None)
-                or getattr(settings, "caption_vlm_model", None)
-                or getattr(settings, "vlm_model", None)
-            ),
+            "caption_vlm": caption_label,
             "embedder": embedder_label,
             "reranker": reranker_label,
             "pdf_backend": getattr(settings, "pdf_converter_backend", None),
@@ -1636,6 +1648,7 @@ def _model_assignments() -> dict:
             ),
             "mineru_vlm_model": getattr(settings, "mineru_vlm_model", None),
             "v2_writer_active": use_v2_writer,
+            "v2_vlm_active": use_v2_vlm,
         }
     except Exception:
         return {}
@@ -3233,11 +3246,16 @@ def _infer_substrate_snapshot() -> list[dict]:
             getattr(_s, "use_llamacpp_writer", True)
             or getattr(_s, "use_llamacpp_embedder", True)
             or getattr(_s, "use_llamacpp_reranker", True)
+            or getattr(_s, "use_llamacpp_vlm", True)
         )
         if not on:
             return []
         from sciknow.infer.server import status as _status
         rows = _status()
+        # The vlm role hot-swaps with the writer (`corpus caption-visuals`
+        # toggles it for the duration of a captioning batch and stops it
+        # after). Surface it only when actually running so the dashboard
+        # doesn't flag it as ✗ down at all times — that's expected.
         return [
             {
                 "role": p.role,
@@ -3247,6 +3265,7 @@ def _infer_substrate_snapshot() -> list[dict]:
                 "healthy": bool(p.healthy),
             }
             for p in rows
+            if p.role != "vlm" or p.pid is not None
         ]
     except Exception as exc:
         logger.debug("infer_substrate snapshot failed: %s", exc)

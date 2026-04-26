@@ -72,6 +72,24 @@ ROLE_DEFAULTS: dict[str, dict] = {
         "parallel": 1,
         "extra_flags": ["--reranking"],
     },
+    # v2.0 — visuals captioner. Loads a multimodal Qwen3-VL GGUF
+    # + the mmproj sidecar that bridges the vision encoder into the
+    # LM embedding space. Hot-swaps with the writer on a 3090 (both
+    # ~17 GB) — `corpus caption-visuals` manages the down/up cycle
+    # so users don't have to think about VRAM pressure during a
+    # captioning batch.
+    "vlm": {
+        "port": 8093,
+        "model": settings.vlm_model_gguf,
+        "mmproj": settings.vlm_mmproj_gguf,
+        "ctx_size": 16384,
+        "n_gpu_layers": 999,
+        "parallel": 1,
+        "extra_flags": [
+            "--cont-batching",
+            "--flash-attn", "on",
+        ],
+    },
 }
 
 
@@ -139,6 +157,7 @@ def _resolve_url(role: str) -> str:
         "writer": settings.infer_writer_url,
         "embedder": settings.infer_embedder_url,
         "reranker": settings.infer_reranker_url,
+        "vlm": settings.infer_vlm_url,
     }[role]
 
 
@@ -190,6 +209,15 @@ def _build_argv(role: str, profile: str = "default") -> list[str]:
         "--parallel", str(cfg["parallel"]),
         "--log-colors", "off",
     ]
+    # Multimodal projector — required for vision-capable roles.
+    mmproj = cfg.get("mmproj")
+    if mmproj:
+        if not Path(str(mmproj)).exists():
+            raise RuntimeError(
+                f"Multimodal projector not found at {mmproj!r}. Set "
+                f"{role.upper()}_MMPROJ_GGUF in .env."
+            )
+        argv += ["--mmproj", str(mmproj)]
 
     # Profile overrides
     if profile == "low-vram" and role in ("embedder", "reranker"):

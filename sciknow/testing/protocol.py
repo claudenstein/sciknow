@@ -9690,27 +9690,24 @@ def l1_phase54_6_72_visuals_caption_surface() -> None:
     for col in ("ai_caption", "ai_caption_model", "ai_captioned_at"):
         assert hasattr(Visual, col), f"Visual model missing {col!r}"
 
-    # C) CLI command registered AND the default model is the quality-first
-    # pick (Phase 54.6.73 directive — "always optimize for best quality").
-    # Flipping the default back to a 7B variant without documenting why
-    # should trip this test.
+    # C) CLI command registered AND the v2 substrate path is wired:
+    # caption-visuals dispatches to the llama-server vlm role with
+    # the configured Qwen3-VL GGUF. Hot-swap with the writer is the
+    # contract on a 3090 (both ~17 GB).
     assert hasattr(_db_cli, "caption_visuals_cmd"), (
-        "CLI must expose `sciknow db caption-visuals`"
+        "CLI must expose `sciknow corpus caption-visuals`"
     )
-    # Resolution chain: --model > settings.visuals_caption_model >
-    # qwen2.5vl:32b (per the 54.6.73 quality-first directive). Check
-    # the body contains both the settings lookup and the qwen2.5vl:32b
-    # fallback — flipping the fallback silently should trip this test.
     import inspect as _inspect
     cmd_src = _inspect.getsource(_db_cli.caption_visuals_cmd)
-    assert 'settings.visuals_caption_model' in cmd_src, (
-        "caption-visuals must honor settings.visuals_caption_model "
-        "(54.6.74 — lets the VLM sweep winner persist via .env)"
+    assert 'infer_client.chat_with_image' in cmd_src, (
+        "caption-visuals must call infer_client.chat_with_image — the "
+        "v2.0 substrate path. Don't reintroduce the v1 ollama.Client.chat() "
+        "call without first migrating the rest of the captioning pipeline."
     )
-    assert '"qwen2.5vl:32b"' in cmd_src, (
-        "caption-visuals fallback must remain the quality pick "
-        "(qwen2.5vl:32b) per the 54.6.73 directive; "
-        "to lower the fallback, document the reason in the CLI docstring"
+    assert 'infer_server.health("vlm")' in cmd_src, (
+        "caption-visuals must check the vlm role's health before kicking "
+        "off the batch — the hot-swap contract requires bringing it up "
+        "(and stopping the writer to free VRAM) when not already running."
     )
 
     # D) /api/visuals hydrates ai_caption
@@ -18520,14 +18517,13 @@ _OLLAMA_KEPT_BY_DESIGN: dict[str, str] = {
     # Web mirror of the doctor's release-vram action; same rationale.
     "sciknow/web/routes/system.py":
         "release-vram parity with monitor.py for v1 ollama",
-    # VLM (vision) calls — substrate has writer/embedder/reranker roles
-    # only, no VLM role. caption-visuals + finalize_draft.verify_draft_figures_l3
-    # both require Ollama-served vision models.
-    "sciknow/cli/db.py":
-        "caption-visuals VLM call (uses images=[...]); writer-side judge "
-        "calls in this file are routed via rag.llm.complete()",
+    # finalize_draft's L3 figure-claim verifier still uses the v1
+    # Ollama path (separate from caption-visuals which migrated to the
+    # llama-server vlm role). Drop this entry once verify_draft_figures_l3
+    # is also routed through the substrate's vlm role — that's a v2.2
+    # follow-up bundled with the autowrite stall investigation.
     "sciknow/core/finalize_draft.py":
-        "L3 figure-claim verifier — VLM call (images=[...])",
+        "L3 figure-claim verifier — still on Ollama VLM path",
     # v1-era model comparison benches — they iterate over Ollama-tag
     # named model variants (qwen3:30b-a3b vs qwen2.5:32b-instruct etc.)
     # which the substrate's one-GGUF-per-role model doesn't expose.

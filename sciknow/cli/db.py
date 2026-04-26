@@ -10046,15 +10046,11 @@ def link_visual_mentions_cmd(
 def caption_visuals_cmd(
     model: str = typer.Option(
         None, "--model",
-        help="Vision-LLM tag to use via Ollama. Default: "
-             "settings.visuals_caption_model if set (let the 54.6.74 "
-             "VLM sweep winner persist via .env) else qwen2.5vl:32b. "
-             "(~19 GB Q4, fits a 3090 with the main LLM unloaded — "
-             "strongest open VLM that fits for document+chart quality). "
-             "For faster / lower-VRAM: qwen2.5vl:7b (~6 GB, co-resident "
-             "with an LLM). Other options: internvl3:14b, llama3.2-vision:11b, "
-             "minicpm-v:8b. `ollama ps` to unload other models; "
-             "`ollama pull <model>` to fetch.",
+        help="Vision model label sent to llama-server. Default: "
+             "settings.vlm_model_name (qwen3-vl-30b-a3b). The actual "
+             "GGUF + mmproj sidecar are configured via VLM_MODEL_GGUF "
+             "and VLM_MMPROJ_GGUF in .env; this flag is just the label "
+             "stamped on each row's ai_caption_model column.",
     ),
     kind: str = typer.Option(
         "figure,chart", "--kind",
@@ -10075,44 +10071,53 @@ def caption_visuals_cmd(
         help="If set, skip rows whose existing caption is short — forces "
              "re-caption of thin placeholders without re-doing good ones.",
     ),
+    keep_writer: bool = typer.Option(
+        False, "--keep-writer",
+        help="Don't auto-stop the writer role to free VRAM for the VLM. "
+             "By default we hot-swap (writer down → vlm up → caption batch "
+             "→ vlm down → writer up) because both are ~17 GB and don't "
+             "co-reside on a 3090. Set this flag if you have a card with "
+             "enough headroom (e.g. DGX Spark) or if writer was already "
+             "down before invocation.",
+    ),
 ):
-    """Phase 54.6.72 (#1) — run a vision LLM over every image visual and
-    store a one-paragraph caption in the `ai_caption` column.
+    """Run a multimodal LLM over every image visual and store a
+    one-paragraph caption in the ``ai_caption`` column.
 
-    Hydrates the 9,988 silent MinerU-extracted figures + charts for
-    semantic retrieval and for real previews in the wiki Visuals tab.
+    Hydrates the silent MinerU-extracted figures + charts for semantic
+    retrieval and for real previews in the wiki Visuals tab.
 
-    Model is invoked via Ollama's image endpoint. Requires the model
-    to already be pulled — this command does NOT auto-pull (the pull
-    is a ~6-20 GB download and we want it explicit).
+    v2.0 — captioning runs through the llama-server `vlm` role on
+    port 8093 (Qwen3-VL-30B-A3B-Instruct by default). Requires the
+    GGUF + mmproj sidecar to be configured via ``VLM_MODEL_GGUF`` /
+    ``VLM_MMPROJ_GGUF`` in .env.
 
-    Quality note: default flipped from qwen2.5vl:7b → qwen2.5vl:32b in
-    Phase 54.6.73 after the user directive "always optimize for best
-    quality". On the 3090 the 32B variant (Q4 quant, ~19 GB VRAM) fits
-    only when other models are unloaded (``ollama stop <current>``); it
-    runs ~3-4× slower than 7B but produces materially better captions
-    for scientific plots and tables (MinerU's own PDF parser is
-    Qwen2-VL-derived, so Qwen2.5-VL inherits the document lineage).
-    Pass ``--model qwen2.5vl:7b`` to trade quality for speed /
-    co-residence with the LLM.
+    On a 3090 the writer (~17 GB) and the VLM (~17 GB) can't
+    co-reside, so this command hot-swaps:
+
+        writer down → vlm up → caption batch → vlm down → writer up
+
+    The swap costs ~10-15 s of cold-loads each direction, amortised
+    over the whole batch (typically hundreds of figures × ~3-5 s
+    each). Pass ``--keep-writer`` to skip the swap when running on
+    a card with more headroom.
 
     Examples:
 
-      ollama pull qwen2.5vl:32b                       # recommended
-      ollama stop qwen3:30b-a3b-instruct-2507-q4_K_M  # free VRAM
-      sciknow db caption-visuals                       # caption all pending
-      sciknow db caption-visuals -n 20 --force         # re-caption first 20
-      sciknow db caption-visuals --kind figure         # figures only
-      sciknow db caption-visuals --model qwen2.5vl:7b  # faster, lower quality
+      sciknow corpus caption-visuals                    # caption all pending
+      sciknow corpus caption-visuals -n 20 --force      # re-caption first 20
+      sciknow corpus caption-visuals --kind figure      # figures only
+      sciknow corpus caption-visuals --keep-writer      # skip auto-swap
     """
     from sciknow.cli import preflight
     preflight(qdrant=False)
 
-    import ollama
     from sciknow.config import settings
     from sciknow.core.visuals_caption import (
         PROMPT_SYSTEM, PROMPT_USER, resolve_asset_path,
     )
+    from sciknow.infer import client as infer_client
+    from sciknow.infer import server as infer_server
     from sciknow.storage.db import get_session
     from sqlalchemy import text as sql_text
 
@@ -10121,26 +10126,44 @@ def caption_visuals_cmd(
         console.print("[red]--kind must be a non-empty comma-separated list[/red]")
         raise typer.Exit(2)
 
-    # Phase 54.6.74 — resolve the effective model: explicit --model
-    # wins, else settings.visuals_caption_model (set by .env after
-    # the VLM sweep picks a winner), else the CLI default.
+    # Resolve the model label that gets stamped on each row. The
+    # actual GGUF + mmproj sidecar served by llama-server is
+    # configured separately via VLM_MODEL_GGUF / VLM_MMPROJ_GGUF.
     if model is None:
-        model = settings.visuals_caption_model or "qwen2.5vl:32b"
+        model = settings.vlm_model_name
 
-    # Sanity-check model availability up front so we fail fast.
-    client = ollama.Client(host=settings.ollama_host)
-    try:
-        installed = {m.model for m in client.list().models}
-    except Exception as exc:
-        console.print(f"[red]Ollama unreachable:[/red] {exc}")
-        raise typer.Exit(1)
-    if model not in installed:
+    # Hot-swap: ensure the vlm role is healthy. On a 3090 we have to
+    # take the writer down first because the VLM needs the same
+    # ~17 GB the writer is holding. Track which roles we touched so
+    # we can restore them after the captioning batch.
+    writer_was_up = False
+    swapped = False
+    if not infer_server.health("vlm"):
+        if not keep_writer and infer_server.health("writer"):
+            writer_was_up = True
+            console.print(
+                "[dim]Hot-swap: stopping writer to free VRAM for the VLM…[/dim]"
+            )
+            infer_server.down("writer")
         console.print(
-            f"[red]Model {model!r} not installed.[/red] Run:\n"
-            f"  [bold]ollama pull {model}[/bold]\n"
-            f"and retry."
+            f"[dim]Starting vlm role on :{infer_server.ROLE_DEFAULTS['vlm']['port']}…[/dim]"
         )
-        raise typer.Exit(1)
+        try:
+            info = infer_server.up("vlm")
+            swapped = True
+        except Exception as exc:
+            console.print(f"[red]Failed to start VLM role:[/red] {exc}")
+            if writer_was_up:
+                console.print("[dim]Restoring writer…[/dim]")
+                try:
+                    infer_server.up("writer")
+                except Exception:
+                    pass
+            raise typer.Exit(1)
+        console.print(
+            f"[green]✓ vlm healthy[/green] :{info.port} pid={info.pid} "
+            f"model={Path(info.model).name}"
+        )
 
     # Fetch pending rows.
     kind_ph = ", ".join(f":k{i}" for i, _ in enumerate(kinds))
@@ -10170,67 +10193,84 @@ def caption_visuals_cmd(
     captioned = 0
     skipped = 0
     t0 = time.monotonic()
-    for idx, (vid, doc_id, vkind, asset_path, existing_caption, fig_num) in enumerate(rows, 1):
-        img_path = resolve_asset_path(doc_id, asset_path)
-        if img_path is None:
-            skipped += 1
-            console.print(f"  [dim][{idx}/{total}][/dim] "
-                          f"[yellow]⊘ SKIP[/yellow]  "
-                          f"{fig_num or vkind} · image file missing on disk")
-            continue
+    try:
+        for idx, (vid, doc_id, vkind, asset_path, existing_caption, fig_num) in enumerate(rows, 1):
+            img_path = resolve_asset_path(doc_id, asset_path)
+            if img_path is None:
+                skipped += 1
+                console.print(f"  [dim][{idx}/{total}][/dim] "
+                              f"[yellow]⊘ SKIP[/yellow]  "
+                              f"{fig_num or vkind} · image file missing on disk")
+                continue
 
-        # Compose a short, targeted prompt. Existing MinerU caption is
-        # usually empty or the raw "Figure 1" line — we pass it as
-        # context anyway so the VLM can refine rather than ignore it.
-        user_prompt = PROMPT_USER.format(
-            kind=vkind,
-            existing_caption=(existing_caption or "").strip() or "(none)",
-        )
-        try:
-            resp = client.chat(
-                model=model,
-                messages=[
-                    {"role": "system", "content": PROMPT_SYSTEM},
-                    {"role": "user", "content": user_prompt,
-                     "images": [str(img_path)]},
-                ],
-                options={"temperature": 0.2, "num_predict": 300},
-                keep_alive=-1,
+            # Compose a short, targeted prompt. Existing MinerU caption is
+            # usually empty or the raw "Figure 1" line — we pass it as
+            # context anyway so the VLM can refine rather than ignore it.
+            user_prompt = PROMPT_USER.format(
+                kind=vkind,
+                existing_caption=(existing_caption or "").strip() or "(none)",
             )
-            ai_caption = (resp.get("message") or {}).get("content", "").strip()
-        except Exception as exc:
-            skipped += 1
-            console.print(f"  [dim][{idx}/{total}][/dim] "
-                          f"[red]⚠ FAIL[/red]  {fig_num or vkind}  · {exc}")
-            continue
+            try:
+                ai_caption = infer_client.chat_with_image(
+                    system=PROMPT_SYSTEM,
+                    user=user_prompt,
+                    image_paths=[img_path],
+                    model=model,
+                    temperature=0.2,
+                    num_predict=300,
+                )
+            except Exception as exc:
+                skipped += 1
+                console.print(f"  [dim][{idx}/{total}][/dim] "
+                              f"[red]⚠ FAIL[/red]  {fig_num or vkind}  · {exc}")
+                continue
 
-        if not ai_caption or len(ai_caption) < 20:
-            skipped += 1
-            console.print(f"  [dim][{idx}/{total}][/dim] "
-                          f"[yellow]⊘ SKIP[/yellow]  {fig_num or vkind}  · "
-                          f"caption too short")
-            continue
+            if not ai_caption or len(ai_caption) < 20:
+                skipped += 1
+                console.print(f"  [dim][{idx}/{total}][/dim] "
+                              f"[yellow]⊘ SKIP[/yellow]  {fig_num or vkind}  · "
+                              f"caption too short")
+                continue
 
-        with get_session() as session:
-            session.execute(sql_text("""
-                UPDATE visuals SET
-                  ai_caption = :cap,
-                  ai_caption_model = :mdl,
-                  ai_captioned_at = now()
-                WHERE id::text = :vid
-            """), {"cap": ai_caption.replace("\x00", ""),
-                   "mdl": model, "vid": vid})
-            session.commit()
-        captioned += 1
-        preview = ai_caption[:70].replace("\n", " ")
-        console.print(
-            f"  [dim][{idx}/{total}][/dim] "
-            f"[green]✓ CAP[/green]  {fig_num or vkind}  · {preview}"
-        )
-        if idx % 50 == 0:
-            rate = idx / max(0.01, time.monotonic() - t0)
-            eta = (total - idx) / max(0.01, rate)
-            console.print(f"  [dim]… {rate:.2f}/s, eta {eta:.0f}s[/dim]")
+            with get_session() as session:
+                session.execute(sql_text("""
+                    UPDATE visuals SET
+                      ai_caption = :cap,
+                      ai_caption_model = :mdl,
+                      ai_captioned_at = now()
+                    WHERE id::text = :vid
+                """), {"cap": ai_caption.replace("\x00", ""),
+                       "mdl": model, "vid": vid})
+                session.commit()
+            captioned += 1
+            preview = ai_caption[:70].replace("\n", " ")
+            console.print(
+                f"  [dim][{idx}/{total}][/dim] "
+                f"[green]✓ CAP[/green]  {fig_num or vkind}  · {preview}"
+            )
+            if idx % 50 == 0:
+                rate = idx / max(0.01, time.monotonic() - t0)
+                eta = (total - idx) / max(0.01, rate)
+                console.print(f"  [dim]… {rate:.2f}/s, eta {eta:.0f}s[/dim]")
+    finally:
+        # Restore the substrate to its pre-batch shape: stop the vlm
+        # role we started, bring the writer back. Best-effort — never
+        # block the captioning batch's success on a swap-back failure.
+        if swapped:
+            try:
+                infer_server.down("vlm")
+                console.print("[dim]Hot-swap: vlm role stopped.[/dim]")
+            except Exception as exc:
+                console.print(f"[yellow]Failed to stop vlm: {exc}[/yellow]")
+        if writer_was_up:
+            try:
+                infer_server.up("writer")
+                console.print("[dim]Hot-swap: writer back online.[/dim]")
+            except Exception as exc:
+                console.print(
+                    f"[yellow]Failed to restart writer: {exc}[/yellow] "
+                    f"— start it manually with `sciknow infer up --role writer`."
+                )
 
     console.print(
         f"\n[green]✓ Captioned {captioned}[/green] · "
