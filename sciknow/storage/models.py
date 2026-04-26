@@ -478,6 +478,17 @@ class DraftSnapshot(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     word_count: Mapped[int | None] = mapped_column(Integer)
+    # Phase 54.6.328 — diff brief computed at create time. Shape per
+    # ``sciknow.core.snapshot_diff``:
+    #   prose:    {words_added, words_removed, paragraphs_added,
+    #              paragraphs_removed, citations_added, citations_removed}
+    #   bundle:   {sections: {<slug>: <prose-shape>}, totals,
+    #              structural?: <outline-shape>}
+    # Defaults to {} for migrated-in-place rows; renderers fall back
+    # to "—" for empty briefs.
+    meta: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

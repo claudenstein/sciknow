@@ -24,6 +24,10 @@ from fastapi import APIRouter, Form, HTTPException
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from sciknow.core.snapshot_diff import (
+    compute_bundle_brief,
+    compute_prose_diff,
+)
 from sciknow.storage.db import get_session
 
 router = APIRouter()
@@ -39,15 +43,26 @@ async def create_snapshot(draft_id: str, name: str = Form("")):
         if not draft:
             raise HTTPException(404, "Draft not found")
 
+        # Phase 54.6.328 — compute the diff brief vs the prior snapshot
+        # of the same draft (or empty-string baseline for first snapshot).
+        prev = session.execute(text("""
+            SELECT content FROM draft_snapshots
+            WHERE draft_id::text LIKE :q
+            ORDER BY created_at DESC LIMIT 1
+        """), {"q": f"{draft_id}%"}).fetchone()
+        prev_content = prev[0] if prev else ""
+        meta = compute_prose_diff(prev_content, draft[0] or "")
+
         snap_name = name or f"Snapshot {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')}"
         session.execute(text("""
-            INSERT INTO draft_snapshots (draft_id, name, content, word_count)
-            VALUES (CAST(:did AS uuid), :name, :content, :wc)
+            INSERT INTO draft_snapshots (draft_id, name, content, word_count, meta)
+            VALUES (CAST(:did AS uuid), :name, :content, :wc, CAST(:meta AS jsonb))
         """), {"did": draft_id, "name": snap_name,
-               "content": draft[0], "wc": draft[1]})
+               "content": draft[0], "wc": draft[1],
+               "meta": json.dumps(meta)})
         session.commit()
 
-    return JSONResponse({"ok": True, "name": snap_name})
+    return JSONResponse({"ok": True, "name": snap_name, "meta": meta})
 
 
 @router.get("/api/snapshots/{draft_id}")
@@ -55,14 +70,15 @@ async def list_snapshots(draft_id: str):
     """List all snapshots for a draft."""
     with get_session() as session:
         rows = session.execute(text("""
-            SELECT id::text, name, word_count, created_at
+            SELECT id::text, name, word_count, created_at, meta
             FROM draft_snapshots WHERE draft_id::text LIKE :q
             ORDER BY created_at DESC
         """), {"q": f"{draft_id}%"}).fetchall()
 
     return {"snapshots": [
         {"id": r[0], "name": r[1], "word_count": r[2] or 0,
-         "created_at": str(r[3]) if r[3] else ""}
+         "created_at": str(r[3]) if r[3] else "",
+         "meta": (r[4] if isinstance(r[4], dict) else {}) or {}}
         for r in rows
     ]}
 
@@ -115,6 +131,32 @@ def _snapshot_chapter_drafts(session, chapter_id: str) -> dict:
     }
 
 
+def _prev_bundle_content(session, *, scope: str, container_id: str) -> dict | None:
+    """Fetch the most-recent prior bundle for diff-brief computation.
+
+    scope='chapter' / 'book'. Returns the parsed JSON (the same shape
+    that gets stored under ``content``) or None if no prior snapshot.
+    """
+    if scope == "chapter":
+        row = session.execute(text("""
+            SELECT content FROM draft_snapshots
+            WHERE chapter_id::text = :cid AND scope = 'chapter'
+            ORDER BY created_at DESC LIMIT 1
+        """), {"cid": container_id}).fetchone()
+    else:
+        row = session.execute(text("""
+            SELECT content FROM draft_snapshots
+            WHERE book_id::text = :bid AND scope = 'book'
+            ORDER BY created_at DESC LIMIT 1
+        """), {"bid": container_id}).fetchone()
+    if not row or not row[0]:
+        return None
+    try:
+        return json.loads(row[0])
+    except Exception:
+        return None
+
+
 def _snapshot_book_drafts(session, book_id: str, *, name: str = "") -> str | None:
     """Snapshot every draft in a book as a single ``scope='book'`` row.
 
@@ -126,6 +168,9 @@ def _snapshot_book_drafts(session, book_id: str, *, name: str = "") -> str | Non
     Returns the inserted ``draft_snapshots.id`` (UUID as string). Returns
     None if the book has no drafts to snapshot — caller should treat
     that as "nothing to preserve" and continue.
+
+    Phase 54.6.328 — also computes the diff brief vs the prior book
+    snapshot and stores it in the new ``meta`` column.
     """
     import datetime as _dt
     chapters = session.execute(text(
@@ -147,15 +192,20 @@ def _snapshot_book_drafts(session, book_id: str, *, name: str = "") -> str | Non
     snap_name = (name or "").strip() or (
         f"book {book_id[:8]} — {_dt.datetime.now().strftime('%Y-%m-%d %H:%M')}"
     )
-    payload = json.dumps({"book_id": book_id, "chapters": chapter_bundles})
+    bundle = {"book_id": book_id, "chapters": chapter_bundles}
+    payload = json.dumps(bundle)
+    prev_bundle = _prev_bundle_content(session, scope="book", container_id=book_id)
+    meta = compute_bundle_brief(bundle, prev_bundle)
     row = session.execute(text("""
         INSERT INTO draft_snapshots
-            (book_id, scope, name, content, word_count)
+            (book_id, scope, name, content, word_count, meta)
         VALUES
-            (CAST(:bid AS uuid), 'book', :name, :content, :wc)
+            (CAST(:bid AS uuid), 'book', :name, :content, :wc,
+             CAST(:meta AS jsonb))
         RETURNING id::text
     """), {"bid": book_id, "name": snap_name,
-           "content": payload, "wc": grand}).fetchone()
+           "content": payload, "wc": grand,
+           "meta": json.dumps(meta)}).fetchone()
     return row[0] if row else None
 
 
@@ -166,6 +216,9 @@ async def create_chapter_snapshot(chapter_id: str, name: str = Form("")):
     Phase 38 — the safety net for autowrite-all on a chapter. Takes a
     label, stores the chapter's current draft state as a JSON bundle
     in a single `draft_snapshots` row with scope='chapter'.
+
+    Phase 54.6.328 — also computes the diff brief vs the prior
+    chapter snapshot and stores it in ``meta``.
     """
     import datetime as _dt
     with get_session() as session:
@@ -182,18 +235,25 @@ async def create_chapter_snapshot(chapter_id: str, name: str = Form("")):
         )
         payload = json.dumps(bundle)
         total_words = sum(d.get("word_count") or 0 for d in bundle["drafts"])
+        prev_bundle = _prev_bundle_content(
+            session, scope="chapter", container_id=chapter_id,
+        )
+        meta = compute_bundle_brief(bundle, prev_bundle)
         session.execute(text("""
             INSERT INTO draft_snapshots
-                (chapter_id, scope, name, content, word_count)
+                (chapter_id, scope, name, content, word_count, meta)
             VALUES
-                (CAST(:cid AS uuid), 'chapter', :name, :content, :wc)
+                (CAST(:cid AS uuid), 'chapter', :name, :content, :wc,
+                 CAST(:meta AS jsonb))
         """), {"cid": chapter_id, "name": snap_name,
-               "content": payload, "wc": total_words})
+               "content": payload, "wc": total_words,
+               "meta": json.dumps(meta)})
         session.commit()
     return JSONResponse({
         "ok": True, "name": snap_name,
         "drafts_included": len(bundle["drafts"]),
         "total_words": total_words,
+        "meta": meta,
     })
 
 
@@ -233,21 +293,27 @@ async def create_book_snapshot(book_id: str, name: str = Form("")):
         snap_name = (name or "").strip() or (
             f"{book[1]} — {_dt.datetime.now().strftime('%Y-%m-%d %H:%M')}"
         )
-        payload = json.dumps({
-            "book_id": book_id, "chapters": chapter_bundles,
-        })
+        bundle = {"book_id": book_id, "chapters": chapter_bundles}
+        payload = json.dumps(bundle)
+        prev_bundle = _prev_bundle_content(
+            session, scope="book", container_id=book_id,
+        )
+        meta = compute_bundle_brief(bundle, prev_bundle)
         session.execute(text("""
             INSERT INTO draft_snapshots
-                (book_id, scope, name, content, word_count)
+                (book_id, scope, name, content, word_count, meta)
             VALUES
-                (CAST(:bid AS uuid), 'book', :name, :content, :wc)
+                (CAST(:bid AS uuid), 'book', :name, :content, :wc,
+                 CAST(:meta AS jsonb))
         """), {"bid": book_id, "name": snap_name,
-               "content": payload, "wc": grand_total})
+               "content": payload, "wc": grand_total,
+               "meta": json.dumps(meta)})
         session.commit()
     return JSONResponse({
         "ok": True, "name": snap_name,
         "chapters_included": len(chapter_bundles),
         "total_words": grand_total,
+        "meta": meta,
     })
 
 
@@ -256,14 +322,15 @@ async def list_chapter_snapshots(chapter_id: str):
     """List chapter-scope snapshots for a chapter."""
     with get_session() as session:
         rows = session.execute(text("""
-            SELECT id::text, name, word_count, created_at, scope
+            SELECT id::text, name, word_count, created_at, scope, meta
             FROM draft_snapshots
             WHERE chapter_id::text = :cid AND scope = 'chapter'
             ORDER BY created_at DESC
         """), {"cid": chapter_id}).fetchall()
     return {"snapshots": [
         {"id": r[0], "name": r[1], "word_count": r[2] or 0,
-         "created_at": str(r[3]) if r[3] else "", "scope": r[4]}
+         "created_at": str(r[3]) if r[3] else "", "scope": r[4],
+         "meta": (r[5] if isinstance(r[5], dict) else {}) or {}}
         for r in rows
     ]}
 
@@ -273,14 +340,15 @@ async def list_book_snapshots(book_id: str):
     """List book-scope snapshots for a book."""
     with get_session() as session:
         rows = session.execute(text("""
-            SELECT id::text, name, word_count, created_at, scope
+            SELECT id::text, name, word_count, created_at, scope, meta
             FROM draft_snapshots
             WHERE book_id::text = :bid AND scope = 'book'
             ORDER BY created_at DESC
         """), {"bid": book_id}).fetchall()
     return {"snapshots": [
         {"id": r[0], "name": r[1], "word_count": r[2] or 0,
-         "created_at": str(r[3]) if r[3] else "", "scope": r[4]}
+         "created_at": str(r[3]) if r[3] else "", "scope": r[4],
+         "meta": (r[5] if isinstance(r[5], dict) else {}) or {}}
         for r in rows
     ]}
 

@@ -2134,9 +2134,14 @@ def snapshot(
     import datetime as _dt
     from sqlalchemy import text as _text
     from sciknow.storage.db import get_session
-    from sciknow.web.app import (
-        _snapshot_chapter_drafts,
+    from sciknow.core.snapshot_diff import (
+        compute_bundle_brief,
+        render_brief_one_line,
     )
+    from sciknow.web.app import (
+        _snapshot_chapter_drafts, _snapshot_book_drafts,
+    )
+    from sciknow.web.routes.snapshots import _prev_bundle_content
 
     with get_session() as session:
         book = _get_book(session, book_title)
@@ -2162,55 +2167,47 @@ def snapshot(
                 f"{_dt.datetime.now().strftime('%Y-%m-%d %H:%M')}"
             )
             total_words = sum(d.get("word_count") or 0 for d in bundle["drafts"])
+            prev_bundle = _prev_bundle_content(
+                session, scope="chapter", container_id=ch[0],
+            )
+            meta = compute_bundle_brief(bundle, prev_bundle)
             session.execute(_text("""
                 INSERT INTO draft_snapshots
-                    (chapter_id, scope, name, content, word_count)
+                    (chapter_id, scope, name, content, word_count, meta)
                 VALUES
-                    (CAST(:cid AS uuid), 'chapter', :name, :content, :wc)
+                    (CAST(:cid AS uuid), 'chapter', :name, :content, :wc,
+                     CAST(:meta AS jsonb))
             """), {"cid": ch[0], "name": snap_name,
-                   "content": _json.dumps(bundle), "wc": total_words})
+                   "content": _json.dumps(bundle), "wc": total_words,
+                   "meta": _json.dumps(meta)})
             session.commit()
             console.print(
                 f"[green]✓ Snapshot saved:[/green] {snap_name}\n"
                 f"  scope=chapter  drafts={len(bundle['drafts'])}  "
-                f"words={total_words:,}"
+                f"words={total_words:,}\n"
+                f"  diff: {render_brief_one_line(meta)}"
             )
             return
 
-        # Whole-book path
-        chapters = session.execute(_text(
-            "SELECT id::text, number, title FROM book_chapters "
-            "WHERE book_id::text = :bid ORDER BY number"
-        ), {"bid": book_id}).fetchall()
-        chapter_bundles: list[dict] = []
-        grand = 0
-        for ch in chapters:
-            b = _snapshot_chapter_drafts(session, ch[0])
-            if not b["drafts"]:
-                continue
-            b["chapter_number"] = ch[1]
-            b["chapter_title"] = ch[2] or ""
-            chapter_bundles.append(b)
-            grand += sum(d.get("word_count") or 0 for d in b["drafts"])
-        if not chapter_bundles:
+        # Whole-book path — delegate to the shared helper which handles
+        # bundle assembly + brief computation in one call.
+        snap_id = _snapshot_book_drafts(session, book_id, name=name.strip())
+        if not snap_id:
             console.print(f"[yellow]Book has no drafts to snapshot.[/yellow]")
             raise typer.Exit(0)
-        snap_name = name.strip() or (
-            f"{book[1]} — {_dt.datetime.now().strftime('%Y-%m-%d %H:%M')}"
-        )
-        payload = _json.dumps({"book_id": book_id, "chapters": chapter_bundles})
-        session.execute(_text("""
-            INSERT INTO draft_snapshots
-                (book_id, scope, name, content, word_count)
-            VALUES
-                (CAST(:bid AS uuid), 'book', :name, :content, :wc)
-        """), {"bid": book_id, "name": snap_name,
-               "content": payload, "wc": grand})
         session.commit()
-    console.print(
-        f"[green]✓ Snapshot saved:[/green] {snap_name}\n"
-        f"  scope=book  chapters={len(chapter_bundles)}  words={grand:,}"
-    )
+        # Read back the persisted row so we can render the same brief
+        # the helper computed.
+        row = session.execute(_text(
+            "SELECT name, word_count, meta FROM draft_snapshots "
+            "WHERE id::text = :sid"
+        ), {"sid": snap_id}).fetchone()
+        if row:
+            console.print(
+                f"[green]✓ Snapshot saved:[/green] {row[0]}\n"
+                f"  scope=book  words={row[1] or 0:,}\n"
+                f"  diff: {render_brief_one_line(row[2] or {})}"
+            )
 
 
 @app.command()
@@ -2233,6 +2230,7 @@ def snapshots(
     """
     from sqlalchemy import text as _text
     from sciknow.storage.db import get_session
+    from sciknow.core.snapshot_diff import render_brief_one_line
 
     with get_session() as session:
         book = _get_book(session, book_title)
@@ -2249,7 +2247,8 @@ def snapshots(
                 console.print(f"[red]Chapter {chapter} not found.[/red]")
                 raise typer.Exit(1)
             rows = session.execute(_text("""
-                SELECT id::text, name, word_count, created_at, scope
+                SELECT id::text, name, word_count, created_at, scope, meta,
+                       NULL AS ch_num
                 FROM draft_snapshots
                 WHERE chapter_id::text = :cid AND scope = 'chapter'
                 ORDER BY created_at DESC
@@ -2257,7 +2256,7 @@ def snapshots(
         else:
             rows = session.execute(_text("""
                 SELECT s.id::text, s.name, s.word_count, s.created_at, s.scope,
-                       bc.number
+                       s.meta, bc.number
                 FROM draft_snapshots s
                 LEFT JOIN book_chapters bc ON bc.id = s.chapter_id
                 WHERE s.book_id::text = :bid
@@ -2272,11 +2271,16 @@ def snapshots(
     console.print()
     for r in rows:
         sid, nm, wc, ts, scope = r[0], r[1], r[2] or 0, str(r[3] or ""), r[4]
-        ch_num = r[5] if len(r) > 5 and r[5] is not None else "—"
+        meta = r[5] if isinstance(r[5], dict) else {}
+        ch_num = r[6] if len(r) > 6 and r[6] is not None else "—"
         scope_tag = (f"[dim]scope=book[/dim]" if scope == "book"
                      else f"[dim]scope=chapter Ch.{ch_num}[/dim]")
-        console.print(f"  [cyan]{sid[:8]}[/cyan]  {ts[:19]}  "
-                      f"{scope_tag}  words={wc:,}  {nm}")
+        brief = render_brief_one_line(meta)
+        console.print(
+            f"  [cyan]{sid[:8]}[/cyan]  {ts[:19]}  "
+            f"{scope_tag}  words={wc:,}  {nm}\n"
+            f"           [dim]Δ {brief}[/dim]"
+        )
 
 
 @app.command(name="snapshot-restore")

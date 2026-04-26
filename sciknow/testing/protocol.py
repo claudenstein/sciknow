@@ -13331,6 +13331,113 @@ def l1_phase54_6_297_book_outline_model() -> None:
     )
 
 
+def l1_snapshot_diff_brief_helper() -> None:
+    """Phase 54.6.328 (snapshot-versioning Phase 1) — diff brief helper
+    contract + plumbing into the snapshot create paths.
+
+    Guards:
+
+      A) `core/snapshot_diff.py` exports compute_prose_diff,
+         compute_bundle_brief, compute_outline_structural_diff,
+         render_brief_one_line.
+      B) compute_prose_diff returns the documented 6-key shape with
+         non-negative ints.
+      C) compute_bundle_brief returns sections + totals; totals
+         carries the 6 prose deltas + sections_total + sections_changed.
+      D) compute_outline_structural_diff returns added_chapters,
+         removed_chapters, renamed_chapters, section_changes.
+      E) draft_snapshots.meta column exists in the SQLAlchemy model
+         (the alembic migration is verified at L2).
+      F) /api/snapshot/{draft_id} writes meta on insert
+         (web/routes/snapshots.py source-grep).
+      G) _snapshot_book_drafts writes meta on insert.
+      H) cli/book.py::snapshots renders render_brief_one_line.
+    """
+    import inspect as _inspect
+    from sciknow.core import snapshot_diff as _sd
+
+    # A — public API
+    for name in (
+        "compute_prose_diff", "compute_bundle_brief",
+        "compute_outline_structural_diff", "render_brief_one_line",
+    ):
+        assert hasattr(_sd, name), (
+            f"sciknow.core.snapshot_diff must export {name!r}"
+        )
+
+    # B — prose diff shape
+    out = _sd.compute_prose_diff("foo bar [1].", "foo bar baz [1] [2].\n\nNew para.")
+    for key in (
+        "words_added", "words_removed",
+        "paragraphs_added", "paragraphs_removed",
+        "citations_added", "citations_removed",
+    ):
+        assert key in out, f"prose diff missing key {key!r}"
+        assert isinstance(out[key], int) and out[key] >= 0, (
+            f"prose diff {key} must be a non-negative int, got {out[key]!r}"
+        )
+    assert out["words_added"] >= 1, "diff should detect added words"
+    assert out["citations_added"] >= 1, "diff should detect added [N] markers"
+
+    # C — bundle brief shape
+    bundle = {"drafts": [
+        {"section_type": "intro", "content": "alpha beta",
+         "word_count": 2, "chapter_id": "c1"},
+        {"section_type": "methods", "content": "gamma delta",
+         "word_count": 2, "chapter_id": "c1"},
+    ]}
+    bbrief = _sd.compute_bundle_brief(bundle, None)
+    assert "sections" in bbrief and "totals" in bbrief
+    assert bbrief["totals"]["sections_total"] == 2
+    assert bbrief["totals"]["words_added"] >= 4
+
+    # D — structural diff shape
+    sd = _sd.compute_outline_structural_diff(
+        [{"number": 1, "title": "Old", "sections": ["a", "b"]}],
+        [{"number": 1, "title": "Old", "sections": ["a", "c"]},
+         {"number": 2, "title": "New", "sections": []}],
+    )
+    for key in ("added_chapters", "removed_chapters",
+                "renamed_chapters", "section_changes"):
+        assert key in sd, f"structural diff missing key {key!r}"
+    assert any(c["number"] == 2 for c in sd["added_chapters"])
+    assert any(c["chapter_number"] == 1 and "c" in c["added"]
+               for c in sd["section_changes"])
+
+    # E — meta column on the ORM model
+    from sciknow.storage.models import DraftSnapshot
+    assert hasattr(DraftSnapshot, "meta"), (
+        "DraftSnapshot must expose meta column (Phase 54.6.328 migration "
+        "0041 must be applied)"
+    )
+
+    # F — web routes write meta
+    from sciknow.web.routes import snapshots as _snap_routes
+    src = _inspect.getsource(_snap_routes)
+    assert "meta = compute_prose_diff" in src or "meta = compute_bundle_brief" in src, (
+        "/api/snapshot/* endpoints must compute the diff brief at create time"
+    )
+    assert ":meta" in src, (
+        "INSERT INTO draft_snapshots must persist the meta column"
+    )
+
+    # G — _snapshot_book_drafts writes meta (used by `book outline --overwrite`)
+    book_helper_src = _inspect.getsource(_snap_routes._snapshot_book_drafts)
+    assert "compute_bundle_brief" in book_helper_src, (
+        "_snapshot_book_drafts must compute the bundle brief"
+    )
+    assert "meta" in book_helper_src, (
+        "_snapshot_book_drafts must persist meta"
+    )
+
+    # H — CLI list renders the brief
+    from sciknow.cli import book as _book_cli
+    cli_src = _inspect.getsource(_book_cli.snapshots)
+    assert "render_brief_one_line" in cli_src, (
+        "sciknow book snapshots must render the diff brief column"
+    )
+
+
 def l1_book_outline_overwrite_flag() -> None:
     """v2.0 — `book outline --overwrite=archive|hard` for re-outlining
     a book whose chapter graph already exists.
@@ -19335,6 +19442,8 @@ L1_TESTS: list[Callable] = [
     # v2.0 — book outline --overwrite=archive|hard for re-outlining a
     # book that already has chapters; auto-snapshots first.
     l1_book_outline_overwrite_flag,
+    # Phase 54.6.328 — diff-brief column on draft_snapshots + helper.
+    l1_snapshot_diff_brief_helper,
     l1_phase54_6_298_enrichment_coverage,
     l1_phase54_6_299_hnsw_drift_check,
     l1_phase54_6_301_retrieval_latency_buffer,
