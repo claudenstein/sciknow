@@ -81,6 +81,8 @@ from sciknow.web.routes import tools as _tools_routes  # noqa: E402
 app.include_router(_tools_routes.router)
 from sciknow.web.routes import autowrite as _autowrite_routes  # noqa: E402
 app.include_router(_autowrite_routes.router)
+from sciknow.web.routes import export as _export_routes  # noqa: E402
+app.include_router(_export_routes.router)
 
 
 # Phase 33 — build tag: a short version string visible in the browser
@@ -2407,125 +2409,6 @@ def _html_to_pdf_response(html: str, filename: str):
 
 
 _VALID_EXPORT_EXTS = ("txt", "md", "html", "pdf")
-
-
-@app.get("/api/export/draft/{draft_id}.{ext}")
-async def export_draft(draft_id: str, ext: str):
-    """Phase 30/31 — export a single draft as txt/md/html/pdf."""
-    if ext not in _VALID_EXPORT_EXTS:
-        raise HTTPException(400, f"ext must be one of {_VALID_EXPORT_EXTS}")
-    book, chapters, drafts, gaps, comments = _get_book_data()
-    draft = next((d for d in drafts if d[0] == draft_id or d[0].startswith(draft_id)), None)
-    if not draft:
-        raise HTTPException(404, "Draft not found")
-    md = _draft_to_md(draft)
-    if ext == "md":
-        from fastapi.responses import PlainTextResponse
-        return PlainTextResponse(md, media_type="text/markdown; charset=utf-8")
-    if ext == "txt":
-        from fastapi.responses import PlainTextResponse
-        return PlainTextResponse(_strip_md(md), media_type="text/plain; charset=utf-8")
-    # html or pdf
-    body = _draft_to_html_body(draft)
-    html = _wrap_html_export(draft[1] or "Untitled", body)
-    if ext == "pdf":
-        slug = _slugify_for_filename(draft[1] or "draft") or "draft"
-        return _html_to_pdf_response(html, f"{slug}.pdf")
-    return HTMLResponse(html)
-
-
-@app.get("/api/export/chapter/{chapter_id}.{ext}")
-async def export_chapter(chapter_id: str, ext: str):
-    """Phase 30/31 — export every drafted section in a chapter, ordered
-    by the chapter's sections meta. Skips empty/orphan sections."""
-    if ext not in _VALID_EXPORT_EXTS:
-        raise HTTPException(400, f"ext must be one of {_VALID_EXPORT_EXTS}")
-    book, chapters, drafts, gaps, comments = _get_book_data()
-    ch = next((c for c in chapters if c[0] == chapter_id), None)
-    if not ch:
-        raise HTTPException(404, "Chapter not found")
-    ch_num, ch_title = ch[1], ch[2]
-    section_drafts = _ordered_chapter_drafts(drafts, chapter_id)
-    if ext == "md":
-        from fastapi.responses import PlainTextResponse
-        parts = [f"# Ch.{ch_num} {ch_title}\n"]
-        for d in section_drafts:
-            parts.append(_draft_to_md(d))
-        return PlainTextResponse("\n\n".join(parts), media_type="text/markdown; charset=utf-8")
-    if ext == "txt":
-        from fastapi.responses import PlainTextResponse
-        parts = [f"Ch.{ch_num} {ch_title}\n{'=' * 40}\n"]
-        for d in section_drafts:
-            parts.append(_strip_md(_draft_to_md(d)))
-        return PlainTextResponse("\n\n".join(parts), media_type="text/plain; charset=utf-8")
-    # html or pdf
-    body = (
-        f"<h1>Ch.{ch_num} {_esc(ch_title or '')}</h1>"
-        f"<div class='meta'>{len(section_drafts)} sections</div>"
-    )
-    for d in section_drafts:
-        body += _draft_to_html_body(d)
-    html = _wrap_html_export(f"Ch.{ch_num} {ch_title}", body)
-    if ext == "pdf":
-        slug = _slugify_for_filename(ch_title or "chapter") or "chapter"
-        return _html_to_pdf_response(html, f"ch{ch_num}_{slug}.pdf")
-    return HTMLResponse(html)
-
-
-@app.get("/api/export/book.{ext}")
-async def export_book(ext: str):
-    """Phase 30/31 — export the whole book as one file. Iterates
-    chapters in order, then sections in each chapter's defined order."""
-    if ext not in _VALID_EXPORT_EXTS:
-        raise HTTPException(400, f"ext must be one of {_VALID_EXPORT_EXTS}")
-    book, chapters, drafts, gaps, comments = _get_book_data()
-    book_title = book[1] if book else "Untitled book"
-    if ext == "md":
-        from fastapi.responses import PlainTextResponse
-        parts = [f"# {book_title}\n"]
-        for ch in chapters:
-            parts.append(f"\n## Ch.{ch[1]} {ch[2]}\n")
-            for d in _ordered_chapter_drafts(drafts, ch[0]):
-                parts.append(_draft_to_md(d, include_sources=False))
-        # Bibliography at the end of the book, not per-section
-        all_sources = []
-        seen = set()
-        for d in drafts:
-            srcs = d[5]
-            if isinstance(srcs, str):
-                try:
-                    srcs = json.loads(srcs)
-                except Exception:
-                    srcs = []
-            for s in srcs or []:
-                if s and s not in seen:
-                    seen.add(s)
-                    all_sources.append(s)
-        if all_sources:
-            parts.append("\n\n## Bibliography\n\n")
-            for i, s in enumerate(all_sources, start=1):
-                parts.append(f"{i}. {s}\n")
-        from fastapi.responses import PlainTextResponse
-        return PlainTextResponse("\n".join(parts), media_type="text/markdown; charset=utf-8")
-    if ext == "txt":
-        from fastapi.responses import PlainTextResponse
-        parts = [f"{book_title}\n{'=' * len(book_title)}\n"]
-        for ch in chapters:
-            parts.append(f"\nCh.{ch[1]} {ch[2]}\n{'-' * 40}\n")
-            for d in _ordered_chapter_drafts(drafts, ch[0]):
-                parts.append(_strip_md(_draft_to_md(d, include_sources=False)))
-        return PlainTextResponse("\n".join(parts), media_type="text/plain; charset=utf-8")
-    # html or pdf
-    body = f"<h1>{_esc(book_title)}</h1><div class='meta'>{len(chapters)} chapters</div>"
-    for ch in chapters:
-        body += f"<h1>Ch.{ch[1]} {_esc(ch[2] or '')}</h1>"
-        for d in _ordered_chapter_drafts(drafts, ch[0]):
-            body += _draft_to_html_body(d)
-    html = _wrap_html_export(book_title, body)
-    if ext == "pdf":
-        slug = _slugify_for_filename(book_title) or "book"
-        return _html_to_pdf_response(html, f"{slug}.pdf")
-    return HTMLResponse(html)
 
 
 # ── Phase 30: Knowledge Graph browse endpoint ────────────────────────────────
@@ -7190,4 +7073,7 @@ from sciknow.web.routes.tools import (  # noqa: E402, F401
 )
 from sciknow.web.routes.autowrite import (  # noqa: E402, F401
     api_autowrite_chapter, api_autowrite,
+)
+from sciknow.web.routes.export import (  # noqa: E402, F401
+    export_draft, export_chapter, export_book,
 )
