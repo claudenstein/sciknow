@@ -8875,20 +8875,32 @@ function renderMonitor(snap) {
 
   // Phase 54.6.244 — model assignments per role. Mirrors the CLI
   // "gpu · models" panel — the user can see the whole LLM wiring at
-  // a glance without opening Book Settings → Models tab. Overrides
-  // that fall back to llm_main render the main model name with a
-  // "(↑LLM_MODEL)" suffix so the user can tell "explicitly pinned
-  // to llm_main" apart from "inherits llm_main".
+  // a glance without opening Book Settings → Models tab.
+  // v2 Phase A — when v2_writer_active is true, the writer GGUF
+  // handles every writer-class role, so the per-role rows
+  // (BOOK_WRITE_MODEL, BOOK_REVIEW_MODEL, AUTOWRITE_SCORER_MODEL,
+  // LLM_FAST_MODEL) are not honored at runtime and we hide them.
+  // The v1 fallback path (USE_LLAMACPP_WRITER=False) restores the
+  // full per-role table so .env-configured Ollama tags stay
+  // auditable.
   const models = snap.model_assignments || {};
   if (models.llm_main) {
     const main = models.llm_main;
+    const v2Writer = !!models.v2_writer_active;
     const fmt = (val, inherits) => {
       if (val) return '<code>' + _escHTML(val) + '</code>';
       if (inherits && main) return '<code>' + _escHTML(main)
         + '</code> <span class="u-muted">(↑LLM_MODEL)</span>';
       return '<em class="u-muted">(unset)</em>';
     };
-    const rows = [
+    const v2Rows = [
+      ['Writer',          main,                      false],
+      ['Caption VLM',     models.caption_vlm,        false],
+      ['MinerU VLM',      models.mineru_vlm_model,   false],
+      ['Embedder',        models.embedder,           false],
+      ['Reranker',        models.reranker,           false],
+    ];
+    const v1Rows = [
       ['LLM_MODEL',              main,                      false],
       ['LLM_FAST_MODEL',         models.llm_fast,           false],
       ['BOOK_WRITE_MODEL',       models.book_write,         true],
@@ -8899,7 +8911,11 @@ function renderMonitor(snap) {
       ['EMBEDDING_MODEL',        models.embedder,           false],
       ['RERANKER_MODEL',         models.reranker,           false],
     ];
-    let html = '<h4>Model assignments</h4>'
+    const rows = v2Writer ? v2Rows : v1Rows;
+    const heading = v2Writer
+      ? 'Model assignments <span class="u-muted">(v2 substrate · single canonical writer)</span>'
+      : 'Model assignments <span class="u-muted">(v1 fallback · per-role Ollama tags)</span>';
+    let html = '<h4>' + heading + '</h4>'
       + '<table class="stats-table" style="width:100%;">'
       + '<tr><th>Role</th><th>Model</th></tr>';
     for (const [role, val, inherits] of rows) {

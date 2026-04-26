@@ -3303,31 +3303,47 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     # now?"). Compact two-col: role → model (trimmed to 28 chars).
     # Phase 54.6.244 — added book writer / reviewer / autowrite
     # scorer / caption VLM rows so the whole book pipeline is
-    # auditable from the dashboard. Inherited slots (override = None)
-    # render with a subtle "↑llm" suffix so the user can tell
-    # "explicitly set to llm_main" apart from "inherits llm_main".
+    # auditable from the dashboard.
+    # v2 Phase A — when ``v2_writer_active`` is True, the writer GGUF
+    # handles ALL writer-class roles (single canonical writer per
+    # spec §2.1), so the per-role rows would all repeat the same
+    # value. We collapse them in v2 mode and only show llm + the
+    # roles that genuinely differ (caption VLM, mineru VLM,
+    # embedder, reranker). On v1 fallback (USE_LLAMACPP_WRITER=False)
+    # the per-role overrides come back so .env-configured per-role
+    # tags are auditable.
     if models:
         gpu_tbl.add_row("")
         gpu_tbl.add_row(Text("models", style=C_DIM))
         llm_main = models.get("llm_main")
-        rows_to_show: list[tuple[str, str | None, bool]] = [
-            ("llm",      llm_main, False),
-            ("fast",     models.get("llm_fast")
-                         if models.get("llm_fast") != llm_main else None,
-                         False),
-            ("book-out", models.get("book_outline") or llm_main,
-                         models.get("book_outline") is None),
-            ("book-wr",  models.get("book_write")  or llm_main,
-                         models.get("book_write") is None),
-            ("book-rv",  models.get("book_review") or llm_main,
-                         models.get("book_review") is None),
-            ("aw-score", models.get("autowrite_scorer") or llm_main,
-                         models.get("autowrite_scorer") is None),
-            ("caption",  models.get("caption_vlm"), False),
-            ("vlm-pro",  models.get("mineru_vlm_model"), False),
-            ("embedder", models.get("embedder"), False),
-            ("reranker", models.get("reranker"), False),
-        ]
+        v2_writer = bool(models.get("v2_writer_active"))
+        if v2_writer:
+            rows_to_show: list[tuple[str, str | None, bool]] = [
+                ("writer",   llm_main, False),
+                ("caption",  models.get("caption_vlm"), False),
+                ("vlm-pro",  models.get("mineru_vlm_model"), False),
+                ("embedder", models.get("embedder"), False),
+                ("reranker", models.get("reranker"), False),
+            ]
+        else:
+            rows_to_show = [
+                ("llm",      llm_main, False),
+                ("fast",     models.get("llm_fast")
+                             if models.get("llm_fast") != llm_main else None,
+                             False),
+                ("book-out", models.get("book_outline") or llm_main,
+                             models.get("book_outline") is None),
+                ("book-wr",  models.get("book_write")  or llm_main,
+                             models.get("book_write") is None),
+                ("book-rv",  models.get("book_review") or llm_main,
+                             models.get("book_review") is None),
+                ("aw-score", models.get("autowrite_scorer") or llm_main,
+                             models.get("autowrite_scorer") is None),
+                ("caption",  models.get("caption_vlm"), False),
+                ("vlm-pro",  models.get("mineru_vlm_model"), False),
+                ("embedder", models.get("embedder"), False),
+                ("reranker", models.get("reranker"), False),
+            ]
         for role, name, inherited in rows_to_show:
             if not name:
                 continue
