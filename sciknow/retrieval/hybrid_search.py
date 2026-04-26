@@ -134,6 +134,13 @@ def _get_dense_embed_model():
     per-query cost stays at one forward pass.
     """
     from sciknow.config import settings
+    # v2 Phase B/D — single canonical embedder. When the llamacpp
+    # embedder is active, the v1 Qwen3-Embedding-4B sidecar path is
+    # off by design (spec §2.1: "One canonical embedder"). We
+    # short-circuit here so the in-process sentence-transformers
+    # load never fires, freeing the GPU for the writer.
+    if getattr(settings, "use_llamacpp_embedder", True):
+        return None
     tag = getattr(settings, "dense_embedder_model", None)
     if not tag or tag == settings.embedding_model:
         return None  # Single-embedder mode — bge-m3 path.
@@ -342,6 +349,11 @@ def _dense_collection_name() -> str:
     (``section_type``/``year``/``domain`` live on the sidecar
     points too via the ingestion pipeline update below)."""
     from sciknow.config import settings
+    # v2 Phase B/D — single canonical embedder. The llamacpp toggle
+    # forces queries onto the prod papers collection (bge-m3 1024-dim);
+    # the v1 Qwen3 sidecar is invisible to query path.
+    if getattr(settings, "use_llamacpp_embedder", True):
+        return PAPERS_COLLECTION
     tag = getattr(settings, "dense_embedder_model", None)
     if not tag or tag == settings.embedding_model:
         return PAPERS_COLLECTION

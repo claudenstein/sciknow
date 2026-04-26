@@ -158,11 +158,11 @@ per hour of effort.
 - [x] **~~#2 — Structured table parsing.~~** Shipped in Phase 54.6.106.
   Migration 0028 adds `table_title / table_headers / table_summary /
   table_n_rows / table_n_cols / table_parsed_at` to `visuals`. CLI
-  `sciknow db parse-tables` runs the fast LLM on MinerU's HTML and
+  `sciknow corpus parse-tables` runs the fast LLM on MinerU's HTML and
   stores the structured output; Visuals modal table cards render the
   parsed block (title + summary + column list + shape) above the raw
   HTML when available. Wired into `refresh` as step 11. **Follow-up
-  completed** in 54.6.109: `sciknow db embed-visuals` now picks the
+  completed** in 54.6.109: `sciknow corpus embed-visuals` now picks the
   best embedding text per kind (tables use `table_summary`, figures/
   charts use `ai_caption`, equations use the natural-language
   paraphrase) — every visual kind is now semantically searchable.
@@ -196,7 +196,7 @@ per hour of effort.
   `paper_type` / `paper_type_confidence` / `paper_type_model` to
   `paper_metadata`. New `sciknow/core/paper_type.py` classifier (LLM
   one-pass on abstract + first 2000 chars + bibliographic metadata)
-  covers 8 categories. CLI `sciknow db classify-papers`. Part 2
+  covers 8 categories. CLI `sciknow corpus classify-papers`. Part 2
   (Phase 54.6.81): `_apply_paper_type_weight` in hybrid_search
   multiplies rrf_score by a per-type weight (opinion=0.4 →
   peer_reviewed=1.0); defaults OFF behind `PAPER_TYPE_WEIGHTING=true`
@@ -204,8 +204,8 @@ per hour of effort.
 - [x] **~~#11 — Equation natural-language paraphrase embedding.~~**
   Shipped in Phase 54.6.78 (paraphrase generator) + 54.6.82 (Qdrant
   embed). `sciknow/core/equation_paraphrase.py` +
-  `sciknow db paraphrase-equations` CLI write paraphrases to
-  `visuals.ai_caption`; `sciknow db embed-visuals` (`retrieval/visuals_search.py`)
+  `sciknow corpus paraphrase-equations` CLI write paraphrases to
+  `visuals.ai_caption`; `sciknow corpus embed-visuals` (`retrieval/visuals_search.py`)
   embeds captions + paraphrases into a per-project `<slug>_visuals`
   Qdrant collection. Wired into `sciknow refresh` step 11.
 - [ ] **#12 — Compound learning Layer 3** (already in §4b, still pending,

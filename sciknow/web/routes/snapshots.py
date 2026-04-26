@@ -1,0 +1,348 @@
+"""``sciknow.web.routes.snapshots`` — draft / chapter / book snapshot endpoints.
+
+v2 Phase E (route split) — extracted from `web/app.py`. 8 handlers
+covering the snapshot system:
+
+  POST /api/snapshot/{draft_id}                save named per-draft snapshot
+  GET  /api/snapshots/{draft_id}               list per-draft snapshots
+  GET  /api/snapshot-content/{snapshot_id}     fetch one snapshot's body
+  POST /api/snapshot/chapter/{chapter_id}      bundle every draft in a chapter
+  POST /api/snapshot/book/{book_id}            bundle every chapter in a book
+  GET  /api/snapshots/chapter/{chapter_id}     list chapter-scope snapshots
+  GET  /api/snapshots/book/{book_id}           list book-scope snapshots
+  POST /api/snapshot/restore-bundle/{snap_id}  non-destructive bundle restore
+
+Self-contained — no app.py cross-deps. The two helpers
+(`_snapshot_chapter_drafts`, `_restore_chapter_bundle`) move with
+the routes since they aren't referenced anywhere else.
+"""
+from __future__ import annotations
+
+import json
+
+from fastapi import APIRouter, Form, HTTPException
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
+
+from sciknow.storage.db import get_session
+
+router = APIRouter()
+
+
+@router.post("/api/snapshot/{draft_id}")
+async def create_snapshot(draft_id: str, name: str = Form("")):
+    """Save a named snapshot of a draft's current content."""
+    with get_session() as session:
+        draft = session.execute(text(
+            "SELECT content, word_count FROM drafts WHERE id::text LIKE :q LIMIT 1"
+        ), {"q": f"{draft_id}%"}).fetchone()
+        if not draft:
+            raise HTTPException(404, "Draft not found")
+
+        snap_name = name or f"Snapshot {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        session.execute(text("""
+            INSERT INTO draft_snapshots (draft_id, name, content, word_count)
+            VALUES (CAST(:did AS uuid), :name, :content, :wc)
+        """), {"did": draft_id, "name": snap_name,
+               "content": draft[0], "wc": draft[1]})
+        session.commit()
+
+    return JSONResponse({"ok": True, "name": snap_name})
+
+
+@router.get("/api/snapshots/{draft_id}")
+async def list_snapshots(draft_id: str):
+    """List all snapshots for a draft."""
+    with get_session() as session:
+        rows = session.execute(text("""
+            SELECT id::text, name, word_count, created_at
+            FROM draft_snapshots WHERE draft_id::text LIKE :q
+            ORDER BY created_at DESC
+        """), {"q": f"{draft_id}%"}).fetchall()
+
+    return {"snapshots": [
+        {"id": r[0], "name": r[1], "word_count": r[2] or 0,
+         "created_at": str(r[3]) if r[3] else ""}
+        for r in rows
+    ]}
+
+
+@router.get("/api/snapshot-content/{snapshot_id}")
+async def get_snapshot_content(snapshot_id: str):
+    """Get the content of a specific snapshot."""
+    with get_session() as session:
+        row = session.execute(text(
+            "SELECT content FROM draft_snapshots WHERE id::text = :sid"
+        ), {"sid": snapshot_id}).fetchone()
+    if not row:
+        raise HTTPException(404, "Snapshot not found")
+    return {"content": row[0]}
+
+
+# ── Phase 38: chapter + book snapshots (bundle of all drafts) ────────────────
+
+
+def _snapshot_chapter_drafts(session, chapter_id: str) -> dict:
+    """Build the JSON bundle that will be stored in `content`.
+
+    Captures the LATEST version per (chapter_id, section_type) —
+    i.e. what the user would see in the GUI right now. Orphan drafts
+    (chapter_id set but section_type is None or already replaced) are
+    not special-cased: we just take the newest row per section_type.
+    """
+    rows = session.execute(text("""
+        SELECT DISTINCT ON (d.section_type)
+            d.id::text, d.section_type, d.title, d.version, d.word_count,
+            d.content, d.sources
+        FROM drafts d
+        WHERE d.chapter_id::text = :cid
+        ORDER BY d.section_type, d.version DESC, d.created_at DESC
+    """), {"cid": chapter_id}).fetchall()
+    return {
+        "chapter_id": chapter_id,
+        "drafts": [
+            {
+                "id": r[0],
+                "section_type": r[1],
+                "title": r[2] or "",
+                "version": r[3] or 1,
+                "word_count": r[4] or 0,
+                "content": r[5] or "",
+                "sources": r[6] if isinstance(r[6], list) else [],
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.post("/api/snapshot/chapter/{chapter_id}")
+async def create_chapter_snapshot(chapter_id: str, name: str = Form("")):
+    """Snapshot every draft in a chapter as one bundle.
+
+    Phase 38 — the safety net for autowrite-all on a chapter. Takes a
+    label, stores the chapter's current draft state as a JSON bundle
+    in a single `draft_snapshots` row with scope='chapter'.
+    """
+    import datetime as _dt
+    with get_session() as session:
+        ch = session.execute(text(
+            "SELECT id::text, title FROM book_chapters WHERE id::text = :cid"
+        ), {"cid": chapter_id}).fetchone()
+        if not ch:
+            raise HTTPException(404, "Chapter not found")
+        bundle = _snapshot_chapter_drafts(session, chapter_id)
+        if not bundle["drafts"]:
+            raise HTTPException(400, "Chapter has no drafts to snapshot")
+        snap_name = (name or "").strip() or (
+            f"{ch[1]} — {_dt.datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        )
+        payload = json.dumps(bundle)
+        total_words = sum(d.get("word_count") or 0 for d in bundle["drafts"])
+        session.execute(text("""
+            INSERT INTO draft_snapshots
+                (chapter_id, scope, name, content, word_count)
+            VALUES
+                (CAST(:cid AS uuid), 'chapter', :name, :content, :wc)
+        """), {"cid": chapter_id, "name": snap_name,
+               "content": payload, "wc": total_words})
+        session.commit()
+    return JSONResponse({
+        "ok": True, "name": snap_name,
+        "drafts_included": len(bundle["drafts"]),
+        "total_words": total_words,
+    })
+
+
+@router.post("/api/snapshot/book/{book_id}")
+async def create_book_snapshot(book_id: str, name: str = Form("")):
+    """Snapshot every draft across every chapter in a book.
+
+    Phase 38 — the union-of-chapters safety net. Useful before running
+    autowrite at the whole-book level or before a risky refactor.
+    """
+    import datetime as _dt
+    with get_session() as session:
+        book = session.execute(text(
+            "SELECT id::text, title FROM books WHERE id::text = :bid"
+        ), {"bid": book_id}).fetchone()
+        if not book:
+            raise HTTPException(404, "Book not found")
+        chapters = session.execute(text(
+            "SELECT id::text, number, title FROM book_chapters "
+            "WHERE book_id::text = :bid ORDER BY number"
+        ), {"bid": book_id}).fetchall()
+
+        chapter_bundles = []
+        grand_total = 0
+        for ch in chapters:
+            bundle = _snapshot_chapter_drafts(session, ch[0])
+            if not bundle["drafts"]:
+                continue
+            bundle["chapter_number"] = ch[1]
+            bundle["chapter_title"] = ch[2] or ""
+            chapter_bundles.append(bundle)
+            grand_total += sum(d.get("word_count") or 0 for d in bundle["drafts"])
+
+        if not chapter_bundles:
+            raise HTTPException(400, "Book has no drafts to snapshot")
+
+        snap_name = (name or "").strip() or (
+            f"{book[1]} — {_dt.datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        )
+        payload = json.dumps({
+            "book_id": book_id, "chapters": chapter_bundles,
+        })
+        session.execute(text("""
+            INSERT INTO draft_snapshots
+                (book_id, scope, name, content, word_count)
+            VALUES
+                (CAST(:bid AS uuid), 'book', :name, :content, :wc)
+        """), {"bid": book_id, "name": snap_name,
+               "content": payload, "wc": grand_total})
+        session.commit()
+    return JSONResponse({
+        "ok": True, "name": snap_name,
+        "chapters_included": len(chapter_bundles),
+        "total_words": grand_total,
+    })
+
+
+@router.get("/api/snapshots/chapter/{chapter_id}")
+async def list_chapter_snapshots(chapter_id: str):
+    """List chapter-scope snapshots for a chapter."""
+    with get_session() as session:
+        rows = session.execute(text("""
+            SELECT id::text, name, word_count, created_at, scope
+            FROM draft_snapshots
+            WHERE chapter_id::text = :cid AND scope = 'chapter'
+            ORDER BY created_at DESC
+        """), {"cid": chapter_id}).fetchall()
+    return {"snapshots": [
+        {"id": r[0], "name": r[1], "word_count": r[2] or 0,
+         "created_at": str(r[3]) if r[3] else "", "scope": r[4]}
+        for r in rows
+    ]}
+
+
+@router.get("/api/snapshots/book/{book_id}")
+async def list_book_snapshots(book_id: str):
+    """List book-scope snapshots for a book."""
+    with get_session() as session:
+        rows = session.execute(text("""
+            SELECT id::text, name, word_count, created_at, scope
+            FROM draft_snapshots
+            WHERE book_id::text = :bid AND scope = 'book'
+            ORDER BY created_at DESC
+        """), {"bid": book_id}).fetchall()
+    return {"snapshots": [
+        {"id": r[0], "name": r[1], "word_count": r[2] or 0,
+         "created_at": str(r[3]) if r[3] else "", "scope": r[4]}
+        for r in rows
+    ]}
+
+
+def _restore_chapter_bundle(session, bundle: dict) -> int:
+    """Insert a NEW draft version per section in the bundle.
+
+    Non-destructive: the existing drafts stay put with their current
+    versions; the restored bundle shows up as the newest version of
+    each section (so the GUI's "latest version" resolver picks it).
+    Returns the number of drafts created.
+    """
+    from uuid import uuid4 as _uuid4
+
+    chapter_id = bundle.get("chapter_id")
+    drafts = bundle.get("drafts") or []
+    created = 0
+    for d in drafts:
+        section_type = d.get("section_type")
+        if not section_type:
+            continue
+        row = session.execute(text(
+            "SELECT COALESCE(MAX(version), 0) FROM drafts "
+            "WHERE chapter_id::text = :cid AND section_type = :st"
+        ), {"cid": chapter_id, "st": section_type}).fetchone()
+        next_ver = int((row[0] if row else 0) or 0) + 1
+        bk_row = session.execute(text(
+            "SELECT book_id::text FROM drafts "
+            "WHERE chapter_id::text = :cid LIMIT 1"
+        ), {"cid": chapter_id}).fetchone()
+        book_id = bk_row[0] if bk_row else None
+        sources_json = json.dumps(d.get("sources") or [])
+        restore_title = d.get("title") or f"Restored {section_type}"
+        session.execute(text("""
+            INSERT INTO drafts
+                (id, title, book_id, chapter_id, section_type, topic,
+                 content, word_count, sources, version, model_used,
+                 custom_metadata)
+            VALUES
+                (:id, :title, CAST(:bid AS uuid), CAST(:cid AS uuid),
+                 :st, :topic, :content, :wc, CAST(:sources AS jsonb),
+                 :ver, :model, CAST(:meta AS jsonb))
+        """), {
+            "id": str(_uuid4()),
+            "title": restore_title,
+            "bid": book_id,
+            "cid": chapter_id,
+            "st": section_type,
+            "topic": None,
+            "content": d.get("content") or "",
+            "wc": int(d.get("word_count") or 0),
+            "sources": sources_json,
+            "ver": next_ver,
+            "model": "snapshot-restore",
+            "meta": json.dumps({
+                "checkpoint": "restored_from_snapshot",
+                "restored_from_draft_id": d.get("id"),
+                "restored_from_version": d.get("version"),
+            }),
+        })
+        created += 1
+    return created
+
+
+@router.post("/api/snapshot/restore-bundle/{snapshot_id}")
+async def restore_snapshot_bundle(snapshot_id: str):
+    """Non-destructively restore a chapter/book bundle snapshot.
+
+    Phase 38. For each section in the bundle, inserts a new `drafts`
+    row at `version = max_current_version + 1`, so the restored
+    content becomes the new latest. Existing rows are untouched,
+    giving the user an undo path if the restore itself was wrong.
+    """
+    with get_session() as session:
+        row = session.execute(text(
+            "SELECT id::text, scope, content, chapter_id::text, "
+            "       book_id::text, name "
+            "FROM draft_snapshots WHERE id::text = :sid LIMIT 1"
+        ), {"sid": snapshot_id}).fetchone()
+        if not row:
+            raise HTTPException(404, "Snapshot not found")
+        _, scope, content, ch_id, bk_id, snap_name = row
+        if scope not in ("chapter", "book"):
+            raise HTTPException(
+                400,
+                f"Snapshot scope {scope!r} is not a bundle — use the "
+                f"per-draft restore endpoint instead."
+            )
+        try:
+            payload = json.loads(content)
+        except Exception as exc:
+            raise HTTPException(500, f"Malformed snapshot bundle: {exc}")
+
+        total_drafts = 0
+        chapters_touched = 0
+        if scope == "chapter":
+            total_drafts = _restore_chapter_bundle(session, payload)
+            chapters_touched = 1
+        else:  # book
+            for ch_bundle in payload.get("chapters") or []:
+                total_drafts += _restore_chapter_bundle(session, ch_bundle)
+                chapters_touched += 1
+        session.commit()
+
+    return JSONResponse({
+        "ok": True, "name": snap_name, "scope": scope,
+        "chapters_restored": chapters_touched,
+        "drafts_created": total_drafts,
+    })

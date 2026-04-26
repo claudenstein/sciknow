@@ -437,7 +437,7 @@ The thesis statement that anchors every chapter. Read carefully. Regenerate with
 ```bash
 sciknow book gaps "Global Cooling"
 ```
-If gaps are severe, expand the corpus: `sciknow db expand --limit 50 -q "your topic"`
+If gaps are severe, expand the corpus: `sciknow corpus expand --limit 50 -q "your topic"`
 
 ### 5. Write chapter by chapter
 Start from chapter 1 — each chapter gets summaries of all prior chapters:

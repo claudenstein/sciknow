@@ -72,7 +72,7 @@ new candidate**. Papers already in the corpus never get re-checked, so
 a paper that gets retracted after ingestion stays in the corpus flagged
 as authoritative. Add:
 
-- **`sciknow db refresh-retractions`** — iterate `paper_metadata.doi`,
+- **`sciknow corpus refresh-retractions`** — iterate `paper_metadata.doi`,
   batch-query Crossref's `works?filter=doi:…&filter=update-type:retraction`,
   mark hits in a new `paper_metadata.retraction_status` column
   (`retracted | corrected | none`) with a `retraction_checked_at`
@@ -209,7 +209,7 @@ piece stays parked until ≥500 labels accumulate.
 "What papers cite a seed" complements "what seed cites". New CLI:
 
 ```
-sciknow db expand-inbound [-n LIMIT] [--relevance-threshold T] \
+sciknow corpus expand-inbound [-n LIMIT] [--relevance-threshold T] \
                           [--per-seed-cap N] [--total-limit N] \
                           [-q "topic"] [--dry-run] [--retry-failed]
 ```
@@ -271,7 +271,7 @@ ranker; it replaces the static query specification AND the decision of
 
 ### 3.1 Question-driven expansion
 
-**`sciknow db expand --question "What is the current best estimate of
+**`sciknow corpus expand --question "What is the current best estimate of
 equilibrium climate sensitivity?"`**
 
 Flow:

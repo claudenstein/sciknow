@@ -27,7 +27,7 @@ Failed PDFs are copied to `data/failed/`. Successfully processed PDFs are copied
 
 4. **Marker markdown** (last resort) — if Marker's JSON path also fails, the markdown renderer runs as a final fallback.
 
-**`auto` dispatch order** (Phase 2 of roadmap 3.1.6): `VLM-Pro → pipeline → Marker JSON → Marker markdown`. VLM-Pro is silently skipped if the extras aren't installed (install detection via `_vlm_extras_missing`), so existing installations keep working while new ones pick up VLM-Pro automatically. Each converted document stamps `documents.converter_backend` + `documents.converter_version` so the failures clinic (`sciknow db failures`) can attribute failure classes per variant, and post-migration audits can distinguish VLM-Pro-era from pipeline-era chunks.
+**`auto` dispatch order** (Phase 2 of roadmap 3.1.6): `VLM-Pro → pipeline → Marker JSON → Marker markdown`. VLM-Pro is silently skipped if the extras aren't installed (install detection via `_vlm_extras_missing`), so existing installations keep working while new ones pick up VLM-Pro automatically. Each converted document stamps `documents.converter_backend` + `documents.converter_version` so the failures clinic (`sciknow library failures`) can attribute failure classes per variant, and post-migration audits can distinguish VLM-Pro-era from pipeline-era chunks.
 
 **MinerU output format:** `content_list.json` — a flat list of typed blocks:
 - `text` with `text_level` (0 = body, 1 = title, 2 = section heading, 3+ = subheading)

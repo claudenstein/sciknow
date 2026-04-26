@@ -34,7 +34,7 @@ uv run sciknow project init global-cooling
 uv run sciknow project use global-cooling
 
 # Initialise schema + Qdrant collections (idempotent; safe to re-run).
-uv run sciknow db init
+uv run sciknow library init
 
 # Ingest the folder. Recursive by default; MinerU converts each PDF,
 # then metadata → chunking → embedding. Resumable: if you Ctrl-C and
@@ -42,17 +42,17 @@ uv run sciknow db init
 uv run sciknow ingest directory "<PAPERS_FOLDER>"
 
 # Progress + per-stage status (run any time you want to peek).
-uv run sciknow db stats
+uv run sciknow library stats
 
 # Fill in missing DOIs + metadata via Crossref + OpenAlex + arXiv.
-uv run sciknow db enrich
+uv run sciknow corpus enrich
 
 # Compile the knowledge wiki — THIS is what populates the KG with
 # entity-relationship triples (plus summaries + concept pages).
 uv run sciknow wiki compile
 
 # (Optional) follow citations outward to grow the corpus.
-uv run sciknow db expand
+uv run sciknow corpus expand
 
 # Create a book and launch the web reader — the KG lives there.
 uv run sciknow book create "Global Cooling"

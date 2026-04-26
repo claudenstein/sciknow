@@ -205,7 +205,12 @@ def _get_dense_embedder():
     (sentence-transformers SentenceTransformer, BF16) when the
     dual-embedder split is active, else None. Lazy-loaded and
     cached for the lifetime of the ingestion process.
+
+    v2 Phase B/D — single canonical embedder. The llamacpp embedder
+    toggle short-circuits the dual-embedder split per spec §2.1.
     """
+    if getattr(settings, "use_llamacpp_embedder", True):
+        return None
     tag = getattr(settings, "dense_embedder_model", None)
     if not tag or tag == settings.embedding_model:
         return None

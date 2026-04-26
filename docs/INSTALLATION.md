@@ -4,6 +4,27 @@
 
 ---
 
+> **v2 vs v1 substrate**: this doc describes the **v1** (Ollama-resident)
+> install path, kept as the rollback option for v2. The **v2 default** is
+> a llama-server substrate (writer + embedder + reranker on dedicated
+> processes) — start it with:
+>
+> ```bash
+> sciknow infer up --role writer    # :8090 — Qwen3.6-27B Q4_K_M GGUF
+> sciknow infer up --role embedder  # :8091 — bge-m3 GGUF
+> sciknow infer up --role reranker  # :8092 — bge-reranker-v2-m3 GGUF
+> sciknow infer status              # health + PID + model
+> sciknow library doctor            # confirms svc PQWER all green
+> ```
+>
+> Configuration via `.env`: `LLAMA_SERVER_BINARY`, `WRITER_MODEL_GGUF`,
+> `EMBEDDER_MODEL_GGUF`, `RERANKER_MODEL_GGUF`, `INFER_*_URL`. The v1
+> Ollama path stays available — set `USE_LLAMACPP_WRITER=False` (or any
+> other role) to fall back. See [MIGRATION.md](../MIGRATION.md) for the
+> full v1→v2 settings + verb mapping.
+
+---
+
 ## Quick Start (setup.sh)
 
 The setup script installs and configures all dependencies on Ubuntu/Debian with CUDA 12.x:
@@ -43,7 +64,7 @@ nano .env
 ### Initialize the schema
 
 ```bash
-sciknow db init
+sciknow library init
 ```
 
 This runs Alembic migrations (creates all tables, indexes, and the full-text search trigger) and initializes the Qdrant collections.
@@ -51,7 +72,7 @@ This runs Alembic migrations (creates all tables, indexes, and the full-text sea
 ### Verify
 
 ```bash
-sciknow db stats
+sciknow library stats
 ```
 
 Should show zeros with green checkmarks for PostgreSQL and Qdrant.

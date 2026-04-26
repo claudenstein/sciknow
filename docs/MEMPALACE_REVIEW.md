@@ -69,7 +69,7 @@ with 3× duplicate chunks; the reranker and LLM context budget waste
 slots on paraphrases.
 
 **Scope**: new `sciknow/maintenance/dedup.py` (~150 LOC); new CLI
-`sciknow db dedup [--dry-run] [--threshold 0.15]`. Scrolls Qdrant by
+`sciknow corpus dedup [--dry-run] [--threshold 0.15]`. Scrolls Qdrant by
 `document_id` groups, cosine-distance 0.15 (~85% similarity),
 transactionally deletes points + `chunks` rows.
 
@@ -163,7 +163,7 @@ rebuild. Halfway-house between `db stats` (read-only) and `db reset`
 those two. One paper's Qdrant points can go orphan (row exists but
 no vector, or vice versa) and the only known fix is `db reset`.
 
-**Scope**: new `sciknow db repair [--scan|--prune|--rebuild-paper
+**Scope**: new `sciknow corpus repair [--scan|--prune|--rebuild-paper
 <doc_id>]`. Scan diffs PG `chunks.qdrant_point_id` against a Qdrant
 scroll; prune removes orphans; rebuild-paper re-chunks + re-embeds
 one document. ~150 LOC. Don't port the Chroma code — port the

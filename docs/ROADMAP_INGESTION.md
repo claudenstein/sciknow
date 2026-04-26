@@ -73,7 +73,7 @@ Every proposal below is evaluated against at least one of:
 
 #### 3.0.1 Expand OA resolver set (C) — **partially shipped**
 
-The current download path for `sciknow db expand` etc. resolves OA
+The current download path for `sciknow corpus expand` etc. resolves OA
 PDFs through Crossref / Unpaywall / OpenAlex / Semantic Scholar /
 Europe PMC (54.6.51) / HAL / Zenodo / arXiv / Copernicus. As of
 54.6.216, **OSF Preprints** is added as one umbrella resolver
@@ -246,7 +246,7 @@ qwen2.5vl:7b → `query_caption`.
    into `table` blocks for in-table images; chunker stays stable
    (block schema is unchanged); parse-tables no-op; L1 regressions
    pin each touch-point.
-4. **Phase 4 — full re-ingest.** `sciknow db reset` then the
+4. **Phase 4 — full re-ingest.** `sciknow library reset` then the
    standard refresh sequence. Decision on 3090-now vs DGX Spark
    documented in the handoff doc written at Phase 4 time.
 5. **Phase 5 — multi-aspect captions (closes §3.5.2).** See the
@@ -782,7 +782,7 @@ Scoring: **Impact** (H/M/L) × **Effort** (H/M/L) → **Verdict**.
 | 3.9.1 | RAPTOR summary verification | Q | M | L | **Shipped 54.6.208** | Claim-atomization gate before node persist |
 | 3.11.2 | Incremental refresh (`--since`) | S | M | L | **Shipped 54.6.210** | `sciknow refresh --since=7d/last-run` + wiki compile filter |
 | 3.11.4 | Budget-aware refresh (`--budget-time`) | R, S | L | L | **Shipped 54.6.206** | `--budget-time=6h/30m` + Exit(3) for budget-hit |
-| 3.11.6 | Failure-mode clinic view | R, O | M | L | **Shipped 54.6.205** | `sciknow db failures` aggregates ingestion_jobs |
+| 3.11.6 | Failure-mode clinic view | R, O | M | L | **Shipped 54.6.205** | `sciknow library failures` aggregates ingestion_jobs |
 | 3.1.6 | Full migration to MinerU 2.5-Pro via vLLM | Q, C, R | H | M | **Ship (in progress)** | 2026-04-22: replaces 3.1.1. vLLM systemd service; auto-dispatch fallback; full re-ingest |
 | 3.0.1 | Expand OA resolver set (Europe PMC + CORE + OSF) | C | H | M | **Shipped 54.6.216 + 54.6.217** | OSF Preprints (54.6.216) + CORE (54.6.217) + Europe PMC (54.6.51) + HAL + Zenodo. Closed |
 | 3.1.1 | Routed converter backend (heuristic gate) | S, Q | H | M | **Superseded by 3.1.6** | See §3.1.1 detail + §3.1.6 rationale |
@@ -801,7 +801,7 @@ Scoring: **Impact** (H/M/L) × **Effort** (H/M/L) → **Verdict**.
 | 3.4.4 | Section-type as ranking signal | Q | L | M | **Defer** | Filter already exists; ranking delta likely small |
 | 3.5.2 | Multi-aspect captions (literal / synthesis / search) | Q | M | M | **Ship as Phase 5 of 3.1.6** | MinerU-Pro's per-figure output is the "literal" layer; closes as a follow-on of 3.1.6 |
 | 3.5.4 | Figure-paragraph alignment training set | O | L | L | **Likely obsolete post-3.1.6** | VLM-Pro reading-order makes the 54.6.138 heuristic exact |
-| 3.6.2 | Self-citation flagging | Q | L | L | **Shipped 54.6.223** | `citations.is_self_cite` + surname-key overlap detection + `sciknow db flag-self-citations`. Live: 40.3% self-cite rate on the 340 in-corpus cross-linked citations |
+| 3.6.2 | Self-citation flagging | Q | L | L | **Shipped 54.6.223** | `citations.is_self_cite` + surname-key overlap detection + `sciknow corpus flag-self-citations`. Live: 40.3% self-cite rate on the 340 in-corpus cross-linked citations |
 | 3.7.2 | KG relation vocabulary constraint | Q | M | M | **Shipped 54.6.220** | 20-relation closed vocabulary (forces / responds_to / proxies_for / reconstructs / supports / contradicts / ...) + alias table + KG_EXTRACT prompt preferences |
 | 3.7.3 | KG quality sampling | O | L | L | **Shipped 54.6.218** | `sciknow wiki kg-sample` — LLM-judge or human grading, JSONL per-run for longitudinal tracking |
 | 3.8.2 | Dynamic topics over time | O | L | M | **Defer** | Visualization play, non-critical |
@@ -809,7 +809,7 @@ Scoring: **Impact** (H/M/L) × **Effort** (H/M/L) → **Verdict**.
 | 3.9.2 | Adaptive RAPTOR depth | Q | L | L | **Defer** | Current 3-level fine for current corpus size |
 | 3.10.1 | Incremental wiki updates | S | M | M | **Defer** | Full rebuild is fine at current corpus size; worth it past 2k papers |
 | 3.10.2 | Wiki-claim-to-paper consistency check | Q | M | M | **Defer** | Builds on claim-atomization; low regression risk |
-| 3.11.3 | Pipeline observability dashboard | O | M | M | **Shipped 54.6.229** | `sciknow db dashboard` — stage timing p50/p95 + failure rate + throughput trend + LLM usage. CLI only; web-UI follow-on pending |
+| 3.11.3 | Pipeline observability dashboard | O | M | M | **Shipped 54.6.229** | `sciknow library dashboard` — stage timing p50/p95 + failure rate + throughput trend + LLM usage. CLI only; web-UI follow-on pending |
 | 3.11.5 | Quality regression suite | O | M | L | **Shipped 54.6.224** | `sciknow bench-snapshot` (per-commit git-SHA snapshots) + `sciknow bench-diff A B` (direction-aware regression flagging, exit-1 on regression suitable for CI) |
 | 3.1.2 | Equation extraction accuracy bench | O, Q | L | L | **Shipped 54.6.222** | `sciknow db equation-bench` — two-axis (latex_valid + paraphrase_matches) grading via LLM or human, JSONL per run. Gives pre/post baseline when VLM-Pro re-ingest lands |
 | 3.1.5 | Reading-order ML model | Q | M | H | **Superseded by 3.1.6** | VLM-Pro reads natively; scrambled-order tail shrinks to near-zero |

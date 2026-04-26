@@ -14,8 +14,10 @@ from sciknow.cli import catalog as catalog_module
 from sciknow.cli import db as db_module
 from sciknow.cli import draft as draft_module
 from sciknow.cli import feedback as feedback_module
+from sciknow.cli import corpus as corpus_module
 from sciknow.cli import infer as infer_module
 from sciknow.cli import ingest as ingest_module
+from sciknow.cli import library as library_module
 from sciknow.cli import project as project_module
 from sciknow.cli import refresh as refresh_module
 from sciknow.cli import search as search_module
@@ -26,12 +28,27 @@ from sciknow.logging_config import setup_logging
 
 app = typer.Typer(
     name="sciknow",
-    help="Local-first scientific knowledge system.",
+    help=(
+        "Local-first scientific knowledge system. v2 substrate: "
+        "writer + embedder + reranker on llama-server. Bring up with "
+        "`sciknow infer up --role <r>`; verify with `sciknow library "
+        "doctor`. See `sciknow --version` for the installed version."
+    ),
     no_args_is_help=True,
 )
 console = Console()
 
 logger = logging.getLogger("sciknow.cli")
+
+
+def _version_callback(value: bool) -> None:
+    """Eager `--version` handler — prints version + exits before any
+    subcommand fires (so it works even on a broken install where
+    `sciknow library doctor` would error)."""
+    if value:
+        from sciknow import __version__
+        console.print(f"sciknow {__version__}")
+        raise typer.Exit(0)
 
 
 @app.callback()
@@ -42,6 +59,10 @@ def _startup(
         help="Override the active project for this invocation. "
              "Equivalent to setting SCIKNOW_PROJECT in the env. "
              "See `sciknow project list` for available slugs.",
+    ),
+    _version: bool = typer.Option(
+        False, "--version", callback=_version_callback, is_eager=True,
+        help="Print the installed sciknow version and exit.",
     ),
 ) -> None:
     """Initialize logging and record the CLI invocation.
@@ -72,6 +93,12 @@ app.add_typer(backup_module.app, name="backup")
 # Phase 54.6.27 — master refresh command (re-run full pipeline on new papers)
 app.command(name="refresh")(refresh_module.refresh)
 app.add_typer(catalog_module.app, name="catalog")
+# v2 Phase F — `library` + `corpus` are the spec'd v2 namespaces;
+# `db` is retained as a deprecation shim that prints a one-shot
+# warning then dispatches to the same callables (db_module.app is
+# still the implementation source).
+app.add_typer(library_module.app, name="library")
+app.add_typer(corpus_module.app, name="corpus")
 app.add_typer(db_module.app, name="db")
 app.add_typer(ingest_module.app, name="ingest")
 app.add_typer(search_module.app, name="search")

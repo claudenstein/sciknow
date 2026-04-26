@@ -2581,8 +2581,16 @@ def _build_alerts(snap: dict) -> list[dict]:
     # Ollama is warn-level (browse-only installs still work without
     # it). Messages include the latency budget so "slow but up"
     # reads as a distinct state from "unreachable".
+    # v2 Phase A — `infer_writer` is critical (no LLM = no autowrite);
+    # `infer_embedder` and `infer_reranker` are warn (retrieval still
+    # answers via FTS-only fallback if embedder is down).
     services = snap.get("services") or {}
-    CRITICAL_SERVICES = {"postgres", "qdrant"}
+    CRITICAL_SERVICES = {"postgres", "qdrant", "infer_writer"}
+    INFER_FIX = {
+        "infer_writer":   "sciknow infer up --role writer",
+        "infer_embedder": "sciknow infer up --role embedder",
+        "infer_reranker": "sciknow infer up --role reranker",
+    }
     for name, info in services.items():
         if info.get("up"):
             continue
@@ -2595,10 +2603,11 @@ def _build_alerts(snap: dict) -> list[dict]:
                 f"{name} unreachable — {err_snippet or 'no response'}"
             ),
             "action": (
-                "systemctl --user status ollama" if name == "ollama" else
-                "systemctl status postgresql" if name == "postgres" else
-                "systemctl --user status qdrant" if name == "qdrant" else
-                None
+                INFER_FIX.get(name)
+                or ("systemctl --user status ollama" if name == "ollama" else
+                    "systemctl status postgresql" if name == "postgres" else
+                    "systemctl --user status qdrant" if name == "qdrant" else
+                    None)
             ),
         })
 
@@ -2728,7 +2737,7 @@ def _build_alerts(snap: dict) -> list[dict]:
             "code": "enrichment_gap",
             "message": (
                 f"metadata gap: {worst}% of complete docs missing "
-                f"{worst_field} — run `sciknow db enrich`"
+                f"{worst_field} — run `sciknow corpus enrich`"
             ),
         })
 
@@ -2988,13 +2997,17 @@ def _build_alerts(snap: dict) -> list[dict]:
     # parameters we can't safely supply (e.g. missing_model needs
     # the tag name, which is already in the message), we leave
     # `action` None and rely on the inline hint.
+    # v2 Phase F — alert action hints renamed to the v2 surfaces
+    # (`library` for lifecycle, `corpus` for growth/maintenance).
+    # The deprecation shim still routes the v1 verbs if a user
+    # copy-pastes from older alerts in their scrollback.
     _ACTIONS: dict[str, str] = {
-        "stuck_ingest":    "sciknow ingest directory ./data/inbox --resume",
-        "embed_drift":     "sciknow db reingest --stage embedding",
-        "dupe_hashes":     "sciknow db stats  # inspect hash dupes",
+        "stuck_ingest":    "sciknow corpus ingest directory ./data/inbox --resume",
+        "embed_drift":     "sciknow corpus reingest --stage embedding",
+        "dupe_hashes":     "sciknow library stats  # inspect hash dupes",
         "bench_stale":     "sciknow bench-snapshot",
-        "backup_stale":    "sciknow backup run",
-        "inbox_waiting":   "sciknow ingest directory ./data/inbox",
+        "backup_stale":    "sciknow library backup",
+        "inbox_waiting":   "sciknow corpus ingest directory ./data/inbox",
         "gpu_hot":         "nvidia-smi  # confirm temp and check airflow",
         "gpu_warm":        "nvidia-smi  # monitor temp",
         "vram_critical":   (
@@ -3006,21 +3019,21 @@ def _build_alerts(snap: dict) -> list[dict]:
             "--format=csv"
         ),
         "stage_slowdown":  (
-            "sciknow db failures  # inspect recent per-doc timing"
+            "sciknow library failures  # inspect recent per-doc timing"
         ),
         "model_thrash":    (
             "grep -E 'LLM_MODEL|BOOK_WRITE_MODEL|AUTOWRITE_SCORER' "
             ".env  # consider unifying per-role overrides"
         ),
         "sidecar_drift":   (
-            "sciknow db audit-sidecar  # per-doc mismatch detail"
+            "sciknow library audit-sidecar  # per-doc mismatch detail"
         ),
         "payload_index_missing": (
-            "sciknow db init  # idempotent; re-creates missing "
+            "sciknow library init  # idempotent; re-creates missing "
             "payload indexes"
         ),
         "enrichment_gap": (
-            "sciknow db enrich  # fills DOI/abstract/authors from "
+            "sciknow corpus enrich  # fills DOI/abstract/authors from "
             "Crossref / OpenAlex / arXiv"
         ),
         "hnsw_drift": (
@@ -3033,7 +3046,7 @@ def _build_alerts(snap: dict) -> list[dict]:
         "mineru_big":      "du -sh data/mineru_output/  # consider pruning processed outputs",
         "disk_critical":   "df -h",
         "disk_low":        "df -h",
-        "retractions":     "sciknow db stats  # flagged retractions",
+        "retractions":     "sciknow library stats  # flagged retractions",
     }
     for a in alerts:
         code = a.get("code")
@@ -3151,6 +3164,80 @@ def _ping_ollama() -> dict:
         }
 
 
+def _infer_substrate_snapshot() -> list[dict]:
+    """v2 Phase A — list of llama-server roles with their port / pid /
+    model / health for the dashboard.
+
+    Returns ``[]`` on fresh installs that haven't started any role
+    yet, and on the v1 fallback path when ``USE_LLAMACPP_*`` is False
+    for every role (so the dashboard hides the panel cleanly instead
+    of rendering an empty table). Calls ``infer.server.status()`` so
+    the source of truth is the same data ``sciknow infer status``
+    prints — no chance of drift between CLI and web.
+    """
+    try:
+        from sciknow.config import settings as _s
+        on = (
+            getattr(_s, "use_llamacpp_writer", True)
+            or getattr(_s, "use_llamacpp_embedder", True)
+            or getattr(_s, "use_llamacpp_reranker", True)
+        )
+        if not on:
+            return []
+        from sciknow.infer.server import status as _status
+        rows = _status()
+        return [
+            {
+                "role": p.role,
+                "port": p.port,
+                "pid": p.pid,
+                "model": str(p.model),
+                "healthy": bool(p.healthy),
+            }
+            for p in rows
+        ]
+    except Exception as exc:
+        logger.debug("infer_substrate snapshot failed: %s", exc)
+        return []
+
+
+def _ping_infer_role(role: str) -> dict:
+    """v2 Phase A — llama-server reachability probe.
+
+    Hits ``GET {INFER_<ROLE>_URL}/health`` with a 2s timeout. Used
+    when the corresponding ``USE_LLAMACPP_<ROLE>`` toggle is True
+    (the v2 default) so the doctor can tell users when their infer
+    substrate is down — the v2 equivalent of the v1 "ollama
+    unreachable" alert.
+    """
+    import time as _time
+    t0 = _time.monotonic()
+    try:
+        import httpx
+        from sciknow.config import settings
+        url_attr = f"infer_{role}_url"
+        base = getattr(settings, url_attr, None)
+        if not base:
+            return {
+                "up": False,
+                "latency_ms": 0,
+                "error": f"settings.{url_attr} not set",
+            }
+        r = httpx.get(f"{base.rstrip('/')}/health", timeout=2.0)
+        r.raise_for_status()
+        return {
+            "up": True,
+            "latency_ms": int((_time.monotonic() - t0) * 1000),
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "up": False,
+            "latency_ms": int((_time.monotonic() - t0) * 1000),
+            "error": str(exc)[:120],
+        }
+
+
 def _services_health() -> dict:
     """Phase 54.6.262 — PG + Qdrant + Ollama reachability probe.
 
@@ -3170,12 +3257,27 @@ def _services_health() -> dict:
     monitor.
     """
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as _TO
+    from sciknow.config import settings as _s
 
     probes = {
         "postgres": _ping_postgres,
         "qdrant":   _ping_qdrant,
-        "ollama":   _ping_ollama,
     }
+    # v2 Phase A — probe llama-server when the role is on the llamacpp
+    # toggle (the v2 default). Probe ollama only if at least one role
+    # is still on the v1 fallback path. This way the doctor surfaces
+    # "writer unreachable" instead of misleading "ollama unreachable"
+    # warnings on a clean v2 install.
+    use_llamacpp = {
+        "writer":   getattr(_s, "use_llamacpp_writer", True),
+        "embedder": getattr(_s, "use_llamacpp_embedder", True),
+        "reranker": getattr(_s, "use_llamacpp_reranker", True),
+    }
+    for role, on in use_llamacpp.items():
+        if on:
+            probes[f"infer_{role}"] = (lambda r=role: _ping_infer_role(r))
+    if not all(use_llamacpp.values()):
+        probes["ollama"] = _ping_ollama
     out: dict = {}
     with ThreadPoolExecutor(max_workers=len(probes)) as pool:
         futures = {name: pool.submit(fn) for name, fn in probes.items()}
@@ -4604,6 +4706,11 @@ def collect_monitor_snapshot(
         # on localhost); not cached so each snapshot call gives a
         # fresh reading.
         "services": _services_health(),
+        # v2 Phase A — llama-server substrate snapshot. List of
+        # {role, port, pid, model, healthy} dicts so the dashboard
+        # panels can show "writer Qwen3.6-27B Q4 — :8090 — pid 12345"
+        # without re-shelling out to `sciknow infer status`.
+        "infer_substrate": _infer_substrate_snapshot(),
         # 54.6.237 additions
         "corpus_growth": growth,
         "book_activity": book_act,

@@ -18,6 +18,92 @@ app = typer.Typer(help="Database and infrastructure management.")
 console = Console()
 
 
+# v2 Phase F — `sciknow db <verb>` is renamed to `sciknow library`
+# (lifecycle) + `sciknow corpus` (growth/maintenance). The db subapp
+# stays mounted as a deprecation shim for one minor release.
+_DEPRECATION_PRINTED = False
+
+# Per-verb v1→v2 mapping. When the operator types `sciknow db <verb>`,
+# the callback reads ``ctx.invoked_subcommand`` and surfaces the exact
+# v2 replacement instead of the generic "see MIGRATION.md" blob. Keys
+# missing from this map fall back to the generic message.
+_V1_TO_V2_VERB = {
+    # Lifecycle → library
+    "init": "library init",
+    "reset": "library reset",
+    "stats": "library stats",
+    "backup": "library backup",
+    "restore": "library restore",
+    "failures": "library failures",
+    "doctor": "library doctor",
+    "monitor": "library monitor",
+    "dashboard": "library dashboard",
+    "audit-sidecar": "library audit-sidecar",
+    "drift": "library drift",
+    "provenance": "library provenance",
+    # Growth/maintenance → corpus
+    "expand": "corpus expand",
+    "enrich": "corpus enrich",
+    "refresh-metadata": "corpus refresh-metadata",
+    "refresh-retractions": "corpus refresh-retractions",
+    "cleanup-downloads": "corpus cleanup-downloads",
+    "reconcile-preprints": "corpus reconcile-preprints",
+    "reconciliations": "corpus reconciliations",
+    "unreconcile": "corpus unreconcile",
+    "repair": "corpus repair",
+    "dedup": "corpus dedup",
+    "reclassify-sections": "corpus reclassify-sections",
+    "link-citations": "corpus link-citations",
+    "classify-papers": "corpus classify-papers",
+    "flag-self-citations": "corpus flag-self-citations",
+    "sync-dense-sidecar": "corpus sync-dense-sidecar",
+    "expand-author": "corpus expand-author",
+    "expand-author-refs": "corpus expand-author-refs",
+    "expand-cites": "corpus expand-cites",
+    "expand-topic": "corpus expand-topic",
+    "expand-coauthors": "corpus expand-coauthors",
+    "expand-inbound": "corpus expand-inbound",
+    "expand-oeuvre": "corpus expand-oeuvre",
+    "extract-visuals": "corpus extract-visuals",
+    "link-visual-mentions": "corpus link-visual-mentions",
+    "caption-visuals": "corpus caption-visuals",
+    "embed-visuals": "corpus embed-visuals",
+    "paraphrase-equations": "corpus paraphrase-equations",
+    "parse-tables": "corpus parse-tables",
+    "download-dois": "corpus download-dois",
+    "tag-multimodal": "corpus tag-multimodal",
+}
+
+
+@app.callback()
+def _db_deprecation_callback(ctx: typer.Context) -> None:
+    """Emit a one-shot deprecation warning per process when the user
+    invokes `sciknow db ...` instead of the renamed v2 surfaces."""
+    global _DEPRECATION_PRINTED
+    if _DEPRECATION_PRINTED:
+        return
+    _DEPRECATION_PRINTED = True
+    verb = ctx.invoked_subcommand
+    new_path = _V1_TO_V2_VERB.get(verb)
+    if new_path:
+        console.print(
+            f"[yellow]⚠ deprecation:[/yellow] [bold]sciknow db {verb}[/bold] "
+            f"→ rename to [cyan]sciknow {new_path}[/cyan] (v2). The db "
+            f"subapp will be removed in v2.1; see MIGRATION.md for the "
+            f"full mapping.",
+        )
+    else:
+        console.print(
+            "[yellow]⚠ deprecation:[/yellow] [bold]sciknow db[/bold] is being "
+            "renamed in v2. Lifecycle verbs moved to "
+            "[cyan]sciknow library[/cyan] (init/reset/stats/migrate/validate"
+            "/snapshot/backup/doctor); growth/maintenance moved to "
+            "[cyan]sciknow corpus[/cyan] (ingest/expand/enrich/cluster"
+            "/refresh-*/repair/dedup/etc). The db subapp will be removed "
+            "in v2.1.",
+        )
+
+
 # ── Phase 49.1 — downloads/ hygiene helpers ────────────────────────────
 # Every expand run deposits PDFs directly into <download_dir>/*.pdf.
 # Historically they stayed there forever: successful ingests kept the
@@ -1906,7 +1992,17 @@ def monitor(
                 head.append(f"  ·  health ", style="dim")
                 head.append(f"{hs}/100", style=hs_colour)
             head.append("  ·  svc ", style="dim")
-            for k, short in (("postgres", "P"), ("qdrant", "Q"), ("ollama", "O")):
+            # v2 Phase A — chip set adapts to whatever services_health
+            # probed: PG/Qdr always; W/E/R for llama-server roles, O for
+            # ollama on the v1 fallback. Same rendering convention as
+            # the full monitor layout.
+            chip_keys = [("postgres", "P"), ("qdrant", "Q")]
+            for role, short in (("writer", "W"), ("embedder", "E"), ("reranker", "R")):
+                if f"infer_{role}" in svc:
+                    chip_keys.append((f"infer_{role}", short))
+            if "ollama" in svc:
+                chip_keys.append(("ollama", "O"))
+            for k, short in chip_keys:
                 info = svc.get(k) or {}
                 head.append(short, style="bright_green" if info.get("up") else "bright_red")
             head.append(f"  ·  errors ", style="dim")
@@ -2329,13 +2425,21 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
         header_text.append(f"  ·  ", style=C_DIM)
         header_text.append(bf_str, style=bf_colour)
 
-    # Phase 54.6.262 — services status chip. Compact three-dot
-    # indicator: P (pg) Q (qdrant) O (ollama). Green up, red down.
-    # Only rendered when the services dict is populated.
+    # Phase 54.6.262 — services status chip. Compact dot indicator.
+    # v2 Phase A — chip set adapts to whatever services_health probed:
+    # always P (pg) + Q (qdrant); then W/E/R for llama-server roles
+    # the active toggles enabled, or O (ollama) on the v1 fallback.
+    # Green up, red down. Only rendered when services dict is populated.
     if services:
         header_text.append(f"  ·  ", style=C_DIM)
         header_text.append("svc ", style=C_DIM)
-        for key, short in (("postgres", "P"), ("qdrant", "Q"), ("ollama", "O")):
+        chip_keys = [("postgres", "P"), ("qdrant", "Q")]
+        for role, short in (("writer", "W"), ("embedder", "E"), ("reranker", "R")):
+            if f"infer_{role}" in services:
+                chip_keys.append((f"infer_{role}", short))
+        if "ollama" in services:
+            chip_keys.append(("ollama", "O"))
+        for key, short in chip_keys:
             info = services.get(key) or {}
             dot_colour = C_OK if info.get("up") else C_ERR
             header_text.append(short, style=dot_colour)
@@ -3068,9 +3172,29 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
             )
             gpu_tbl.add_row(load_row)
 
-    # Ollama models mini-list
+    # LLM substrate mini-list. v2 Phase A — prefer the llama-server
+    # snapshot (writer/embedder/reranker with health dot + port) when
+    # the substrate is up; fall through to Ollama-loaded-models on the
+    # v1 fallback path; finally fall through to the empty-state hint.
     gpu_tbl.add_row("")
-    if loaded:
+    infer_sub = snap.get("infer_substrate") or []
+    if infer_sub:
+        for r in infer_sub:
+            mini = Text()
+            healthy = bool(r.get("healthy"))
+            mini.append("◉ " if healthy else "✗ ", style=C_OK if healthy else C_ERR)
+            mini.append(f"{r.get('role', '?'):8s}", style=C_ACCENT)
+            mini.append(f"  :{r.get('port', '?')}", style=C_DIM)
+            model = (r.get("model") or "?")
+            # Show only the basename for terminal real-estate
+            try:
+                from pathlib import Path as _P
+                model_short = _P(model).name
+            except Exception:
+                model_short = model
+            mini.append(f"  {model_short[:36]}", style=C_DIM)
+            gpu_tbl.add_row(mini)
+    elif loaded:
         for m in loaded:
             mini = Text()
             mini.append("◉ ", style=C_OK)
@@ -3082,7 +3206,10 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
                 mini.append(f"  exp {str(exp)[-8:-3] if len(str(exp)) > 8 else str(exp)}", style=C_DIM)
             gpu_tbl.add_row(mini)
     else:
-        gpu_tbl.add_row(Text("◎ ollama: no models loaded", style=C_DIM))
+        gpu_tbl.add_row(Text(
+            "◎ no LLM resident — `sciknow infer up --role writer`",
+            style=C_DIM,
+        ))
 
     # Phase 54.6.291 — VRAM preflight summary chip.  Shows recent
     # pressure: "preflight 2/8 tight · 12.3G freed".  Quiet until

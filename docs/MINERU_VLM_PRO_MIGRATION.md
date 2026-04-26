@@ -27,7 +27,7 @@ command.
 Verify freshly before proceeding:
 
 ```bash
-uv run sciknow db stats
+uv run sciknow library stats
 uv run python -c "import vllm" 2>&1 | head -3   # expect: ModuleNotFoundError
 ```
 
@@ -69,7 +69,7 @@ from the existing `data/processed/` tree. Run VLM-Pro explicitly:
 ```bash
 # pick a paper already in the corpus — re-ingesting it with --force
 # exercises the full pipeline without contaminating the data
-DOC_ID=$(uv run sciknow db stats --json 2>/dev/null | head -1 || true)  # optional
+DOC_ID=$(uv run sciknow library stats --json 2>/dev/null | head -1 || true)  # optional
 export PDF_CONVERTER_BACKEND=mineru-vlm-pro
 uv run sciknow ingest file projects/<slug>/data/processed/<paper>.pdf --force
 unset PDF_CONVERTER_BACKEND
@@ -88,7 +88,7 @@ Watch for:
 3. **content_list.json** written under
    `data/mineru_output/<doc_id>/<stem>/vlm/`. Verify it has
    sensible `type`-keyed blocks.
-4. **Converter stamp**: `uv run sciknow db stats --doc-id <prefix>`
+4. **Converter stamp**: `uv run sciknow library stats --doc-id <prefix>`
    (or direct SQL) should show `converter_backend =
    'mineru-vlm-pro-vllm'` and `converter_version` populated.
 
@@ -110,12 +110,12 @@ directory layout first). **Make sure the PDFs survive the reset**
 
 ```bash
 # Dry-run path audit (SAFE — no writes):
-uv run sciknow db stats
+uv run sciknow library stats
 ls projects/<slug>/data/processed/ | wc -l    # should be ~807
 
 # DESTRUCTIVE — only run after the smoke test in §3 passed:
-uv run sciknow db reset
-uv run sciknow db init        # fresh migrations + Qdrant collections
+uv run sciknow library reset
+uv run sciknow library init        # fresh migrations + Qdrant collections
 uv run sciknow ingest directory projects/<slug>/data/processed/ \
     --workers 1                # vllm serialises inference; 1 worker
 uv run sciknow refresh --no-ingest
@@ -150,8 +150,8 @@ for this kind of multi-session run.)
 After the re-ingest completes:
 
 ```bash
-uv run sciknow db stats
-uv run sciknow db failures         # any new failure classes?
+uv run sciknow library stats
+uv run sciknow library failures         # any new failure classes?
 
 # every document should carry the new stamp
 uv run python -c "
@@ -195,8 +195,8 @@ VLM-Pro is not producing sensible output? Quick rollback:
 # 2. Pin the old backend
 echo "PDF_CONVERTER_BACKEND=mineru" >> .env
 # 3. Ignore the deprecation warning for now, re-ingest on pipeline
-uv run sciknow db reset
-uv run sciknow db init
+uv run sciknow library reset
+uv run sciknow library init
 uv run sciknow ingest directory projects/<slug>/data/processed/
 # 4. Capture repro case for a bug report
 ```
