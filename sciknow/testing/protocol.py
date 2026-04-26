@@ -18056,7 +18056,7 @@ def l1_v2_safe_endpoints_smoke_test() -> None:
 
 def l1_v2_route_handlers_resolve_all_names() -> None:
     """v2 Phase E — every extracted route handler can resolve all
-    its module-level name references.
+    its module-level name references, including nested closures.
 
     Catches the specific class of bug where the route extractor missed
     a cross-module symbol prefix (e.g. `_create_job` instead of
@@ -18064,53 +18064,60 @@ def l1_v2_route_handlers_resolve_all_names() -> None:
     import time, so the umbrella `route_split_modules_loaded` test
     didn't catch ~68 such bugs that crept in during the bulk extract.
 
-    This test walks each handler's bytecode for LOAD_GLOBAL ops and
-    asserts every loaded name resolves to either:
-      - a builtin (always available)
-      - a name defined in the route module
-      - a name imported at module-top
-      - the conventional `_app` lazy shim (must be inside the function
-        body, so we just look for LOAD_FAST/STORE_FAST `_app` in the
-        same code object)
+    Walks each handler's bytecode (and any nested code objects in
+    `co_consts` — covers inline `gen()` closures the SSE handlers use)
+    for LOAD_GLOBAL ops and asserts every loaded name resolves to a
+    builtin, a module-level binding, or a STORE_FAST/STORE_NAME local.
     """
     import dis
     import importlib
+    import types
     from pathlib import Path
     from sciknow.web import app as _web
 
+    def _walk_code(code: types.CodeType, locals_seed: set[str]):
+        """Yield (code_object, loaded_globals, locals) tuples for `code`
+        and every nested code object inside its co_consts."""
+        local_names = set(locals_seed)
+        for instr in dis.get_instructions(code):
+            if instr.opname in ("STORE_FAST", "STORE_NAME"):
+                if isinstance(instr.argval, str):
+                    local_names.add(instr.argval)
+        loaded_globals = {
+            instr.argval
+            for instr in dis.get_instructions(code)
+            if instr.opname == "LOAD_GLOBAL" and isinstance(instr.argval, str)
+        }
+        yield code, loaded_globals, local_names
+        for const in code.co_consts:
+            if isinstance(const, types.CodeType):
+                # Nested function — its closure inherits the enclosing
+                # locals as cell vars; pass them in as a locals seed.
+                yield from _walk_code(const, local_names | set(const.co_freevars))
+
     routes_dir = Path(_web.__file__).resolve().parent / "routes"
     failures: list[str] = []
+    builtins_set = (
+        set(__builtins__.keys()) if isinstance(__builtins__, dict)
+        else set(dir(__builtins__))
+    )
     for p in sorted(routes_dir.glob("*.py")):
         if p.stem == "__init__":
             continue
         mod = importlib.import_module(f"sciknow.web.routes.{p.stem}")
-        # Module's global namespace at import time
-        mod_globals = set(vars(mod).keys()) | set(__builtins__.keys() if isinstance(__builtins__, dict) else dir(__builtins__))
-        # Walk every async function defined in the module
+        mod_globals = set(vars(mod).keys()) | builtins_set
         for name, fn in vars(mod).items():
             if not callable(fn) or not hasattr(fn, "__code__"):
                 continue
             if fn.__module__ != mod.__name__:
-                continue  # imported from elsewhere — skip
-            code = fn.__code__
-            # Names this function loads from globals
-            loaded_globals = {
-                instr.argval
-                for instr in dis.get_instructions(code)
-                if instr.opname == "LOAD_GLOBAL" and isinstance(instr.argval, str)
-            }
-            # `_app` is allowed if the function imports it as a local
-            # via the `from X import Y as Z` pattern (which compiles to
-            # IMPORT_NAME + STORE_FAST).
-            local_names = set(code.co_varnames[:code.co_argcount + code.co_kwonlyargcount])
-            for instr in dis.get_instructions(code):
-                if instr.opname in ("STORE_FAST", "STORE_NAME"):
-                    if isinstance(instr.argval, str):
-                        local_names.add(instr.argval)
-            for n in loaded_globals - mod_globals - local_names:
-                # Skip names that look like locals (lowercase short identifiers
-                # are often arg defaults — not really suspicious)
-                failures.append(f"{p.stem}.{name}: unresolved global '{n}'")
+                continue
+            top_locals = set(
+                fn.__code__.co_varnames[:fn.__code__.co_argcount + fn.__code__.co_kwonlyargcount]
+            )
+            for code, loaded, local_names in _walk_code(fn.__code__, top_locals):
+                for n in loaded - mod_globals - local_names:
+                    suffix = "" if code is fn.__code__ else f" (nested in {code.co_name})"
+                    failures.append(f"{p.stem}.{name}{suffix}: unresolved global '{n}'")
 
     assert not failures, (
         "Route handlers reference unresolved names — bulk-extractor "
