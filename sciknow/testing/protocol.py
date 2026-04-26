@@ -6995,10 +6995,12 @@ def l2_phase32_9_dpo_export_roundtrip() -> None:
             """), {"rid": run_c[0]})
             s.commit()
 
-        # Run the export
+        # Run the export — scoped to this test's slug so accumulated
+        # production iterations on the same book don't bleed in.
         n, path = book_ops._export_preference_pairs(
             book_id=book_id, output_path=out,
             min_score=0.7, min_delta=0.02,
+            section_slug=fake_slug,
         )
         assert n == 2, f"expected 2 pairs (KEEP + DISCARD; low-score skipped), got {n}"
 

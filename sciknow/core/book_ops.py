@@ -1961,6 +1961,7 @@ def _export_preference_pairs(
     min_delta: float = 0.02,
     require_approval: bool = False,
     include_discard: bool = True,
+    section_slug: str | None = None,
 ) -> tuple[int, "Path"]:
     """Phase 32.9 — Layer 4: walk autowrite_iterations and export
     preference pairs as JSONL.
@@ -2011,6 +2012,13 @@ def _export_preference_pairs(
     if book_id:
         where_clauses.append("r.book_id::text = :book_id")
         params["book_id"] = book_id
+    if section_slug:
+        # Hermetic-test escape hatch: callers (notably the L2
+        # roundtrip test) can scope the export to runs whose
+        # section_slug matches a per-test sentinel, so accumulated
+        # production iterations on the same book don't bleed in.
+        where_clauses.append("r.section_slug = :section_slug")
+        params["section_slug"] = section_slug
 
     with get_session() as session:
         rows = session.execute(text(f"""
