@@ -101,6 +101,8 @@ from sciknow.web.routes import corpus as _corpus_routes  # noqa: E402
 app.include_router(_corpus_routes.router)
 from sciknow.web.routes import draft_actions as _draft_actions_routes  # noqa: E402
 app.include_router(_draft_actions_routes.router)
+from sciknow.web.routes import pages as _pages_routes  # noqa: E402
+app.include_router(_pages_routes.router)
 
 
 # Phase 33 — build tag: a short version string visible in the browser
@@ -880,12 +882,6 @@ async def index(request: Request):
     return resp
 
 
-@app.get("/section/{draft_id}", response_class=HTMLResponse)
-async def section(draft_id: str):
-    book, chapters, drafts, gaps, comments = _get_book_data()
-    return HTMLResponse(_render_book(book, chapters, drafts, gaps, comments, focus_draft=draft_id))
-
-
 # ── Phase 54.6.178 — routed views ────────────────────────────────────────────
 # Each modal that serves as a standalone "place" (Plan, Settings, Wiki, …)
 # gets its own URL. The page still renders the reader layout — shell +
@@ -924,55 +920,6 @@ def _routed_view(modal_id: str) -> HTMLResponse:
     resp = HTMLResponse(html)
     resp.headers["Cache-Control"] = "no-store, max-age=0"
     return resp
-
-
-@app.get("/plan",      response_class=HTMLResponse)
-async def route_plan():      return _routed_view("plan-modal")
-
-@app.get("/settings",  response_class=HTMLResponse)
-async def route_settings():  return _routed_view("book-settings-modal")
-
-@app.get("/wiki",      response_class=HTMLResponse)
-async def route_wiki():      return _routed_view("wiki-modal")
-
-@app.get("/bundles",   response_class=HTMLResponse)
-async def route_bundles():   return _routed_view("bundles-modal")
-
-@app.get("/tools",     response_class=HTMLResponse)
-async def route_tools():     return _routed_view("tools-modal")
-
-@app.get("/projects",  response_class=HTMLResponse)
-async def route_projects():  return _routed_view("projects-modal")
-
-@app.get("/catalog",   response_class=HTMLResponse)
-async def route_catalog():   return _routed_view("catalog-modal")
-
-@app.get("/export",    response_class=HTMLResponse)
-async def route_export():    return _routed_view("export-modal")
-
-@app.get("/corpus",    response_class=HTMLResponse)
-async def route_corpus():    return _routed_view("corpus-modal")
-
-@app.get("/visualize", response_class=HTMLResponse)
-async def route_visualize(): return _routed_view("viz-modal")
-
-@app.get("/kg",        response_class=HTMLResponse)
-async def route_kg():        return _routed_view("kg-modal")
-
-@app.get("/ask",       response_class=HTMLResponse)
-async def route_ask():       return _routed_view("ask-modal")
-
-@app.get("/setup",     response_class=HTMLResponse)
-async def route_setup():     return _routed_view("setup-modal")
-
-@app.get("/backups",   response_class=HTMLResponse)
-async def route_backups():   return _routed_view("backups-modal")
-
-@app.get("/visuals",   response_class=HTMLResponse)
-async def route_visuals():   return _routed_view("visuals-modal")
-
-@app.get("/help",      response_class=HTMLResponse)
-async def route_help():      return _routed_view("ai-help-modal")
 
 
 @app.post("/comment")
@@ -3426,4 +3373,11 @@ from sciknow.web.routes.draft_actions import (  # noqa: E402, F401
     api_write, api_review, api_revise, api_gaps, api_argue,
     api_verify, api_insert_citations, api_adversarial_review,
     api_edge_cases,
+)
+from sciknow.web.routes.pages import (  # noqa: E402, F401
+    section, route_plan, route_settings, route_wiki,
+    route_bundles, route_tools, route_projects, route_catalog,
+    route_export, route_corpus, route_visualize, route_kg,
+    route_ask, route_setup, route_backups, route_visuals,
+    route_help,
 )
