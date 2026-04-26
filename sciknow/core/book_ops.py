@@ -2158,7 +2158,27 @@ def _save_draft(session, *, title, book_id, chapter_id, section_type, topic,
 
 
 def _release_gpu_models():
-    """Free bge-m3 embedder + reranker from VRAM so Ollama can use the full GPU."""
+    """Free bge-m3 embedder + reranker from VRAM so the writer can use the
+    full GPU.
+
+    v2 Phase D — fast no-op when llama-server is the substrate. With
+    `USE_LLAMACPP_*=True` (the v2 default) the in-process embedder /
+    reranker are never loaded — the LlamaCpp adapter holds zero VRAM,
+    so there's nothing to release. Skipping the three release_* calls
+    avoids ~10 ms of pointless gc + cuda.empty_cache thrashing per
+    autowrite phase transition (16 call sites across the engine).
+
+    Falls through to the v1 release sequence whenever any role is on
+    the in-process fallback (someone flipped a USE_LLAMACPP_* toggle
+    to False), so the rollback path keeps working unchanged.
+    """
+    from sciknow.config import settings as _s
+    if (
+        getattr(_s, "use_llamacpp_writer", True)
+        and getattr(_s, "use_llamacpp_embedder", True)
+        and getattr(_s, "use_llamacpp_reranker", True)
+    ):
+        return
     from sciknow.ingestion.embedder import release_model
     from sciknow.retrieval.hybrid_search import release_embed_model
     from sciknow.retrieval.reranker import release_reranker
