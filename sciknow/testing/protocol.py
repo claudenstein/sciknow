@@ -18010,6 +18010,50 @@ def l1_v2_monitor_carries_infer_substrate() -> None:
     )
 
 
+def l1_v2_safe_endpoints_smoke_test() -> None:
+    """v2 Phase E — every "safe" GET endpoint (no required state)
+    returns a non-5xx status when hit via TestClient.
+
+    Stronger than the bytecode-resolution test: actually exercises the
+    handler end-to-end, so import + dispatch + response building are
+    all exercised. Catches regressions in:
+      - cross-module symbol resolution at call time (not just bytecode)
+      - empty-book degradation (the _get_book_data guard)
+      - response-class compatibility after route extractions
+
+    The 22 endpoints here all tolerate an unset `_book_id` (return
+    empty / 404 / 200 with empty data) — they're the "anything that
+    doesn't require setting up live book state" set. Endpoints that
+    NEED a real book (autowrite, draft mutations, etc.) aren't here.
+    """
+    from fastapi.testclient import TestClient
+    from sciknow.web import app as _web
+
+    SAFE = [
+        "/api/jobs", "/api/feedback", "/api/feedback/stats", "/api/methods",
+        "/api/visuals/stats", "/api/projects", "/api/wiki/pages",
+        "/api/wiki/titles", "/api/catalog", "/api/catalog/topics",
+        "/api/settings/models", "/api/stats", "/api/monitor",
+        "/api/monitor/alerts-md", "/api/reconciliations",
+        "/api/bibliography/audit", "/api/backups", "/api/setup/status",
+        "/api/bench/section-lengths", "/api/book", "/api/book-types",
+        "/api/chapters",
+    ]
+    c = TestClient(_web.app)
+    failures: list[str] = []
+    for url in SAFE:
+        try:
+            r = c.get(url)
+            if r.status_code >= 500:
+                failures.append(f"{url} → {r.status_code}: {r.text[:80]}")
+        except Exception as exc:
+            failures.append(f"{url} → EXCEPTION {type(exc).__name__}: {str(exc)[:80]}")
+    assert not failures, (
+        f"Safe-endpoint smoke test failures ({len(failures)}/{len(SAFE)}):\n  "
+        + "\n  ".join(failures)
+    )
+
+
 def l1_v2_route_handlers_resolve_all_names() -> None:
     """v2 Phase E — every extracted route handler can resolve all
     its module-level name references.
@@ -18803,6 +18847,10 @@ L1_TESTS: list[Callable] = [
     # LOAD_GLOBAL names; catches missed _app prefix injections that
     # only NameError at call time
     l1_v2_route_handlers_resolve_all_names,
+    # v2 Phase E — 22-endpoint TestClient smoke test exercises the
+    # full dispatch path (catches runtime regressions the bytecode
+    # check might miss)
+    l1_v2_safe_endpoints_smoke_test,
 ]
 
 L2_TESTS: list[Callable] = [
