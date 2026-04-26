@@ -167,8 +167,8 @@ branch:
 | `sciknow/cli/corpus.py` | n/a       | NEW                                        |
 | `sciknow/core/events.py`| n/a       | NEW — Pydantic union + KNOWN_EVENT_TYPES   |
 | `sciknow/cli/db.py`     | 11.5 kLOC | retained as deprecation shim source; verb bodies still live here for one release |
-| `sciknow/core/book_ops.py` | 6.7 kLOC | unsplit; v2 split into book_ops + autowrite is a follow-up commit |
-| `sciknow/web/app.py`    | 31.6 kLOC | unsplit; Phase E externalises CSS / JS / templates incrementally |
+| `sciknow/core/book_ops.py` | 6.7 kLOC | **5.0 kLOC after autowrite split (-26%)**; engine bodies in `core/autowrite.py`, re-exported back for inspect.getsource contract tests |
+| `sciknow/web/app.py`    | 31.6 kLOC | **2.1 kLOC after route split (-93%)**; CSS, JS, TEMPLATE all externalised; 25 resource modules under `web/routes/` |
 | `sciknow/retrieval/device.py` | 156 LOC | no-op when llamacpp toggle is on; deletion deferred until v2.1 |
 | `sciknow/core/gpu_ledger.py` / `vram_budget.py` | 218 + 317 LOC | no-op cascades on the v2 path; deletion deferred until v2.1 |
 
