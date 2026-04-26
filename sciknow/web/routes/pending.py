@@ -4,7 +4,7 @@ v2 Phase E (route split) — extracted from `web/app.py`. The 4
 handlers (list / update / remove / retry) wrap
 `sciknow.core.pending_ops`. The retry handler also writes a
 temp `dois.json` and spawns the `db download-dois` CLI via
-`_spawn_cli_streaming` (resolved lazily via the `_app` shim).
+`_app._spawn_cli_streaming` (resolved lazily via the `_app` shim).
 """
 from __future__ import annotations
 

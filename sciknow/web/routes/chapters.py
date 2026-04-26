@@ -5,9 +5,9 @@ covering chapter list / create / update / sections-edit / delete /
 reorder / plan-sections / resolved-targets.
 
 Heavy cross-module deps (resolved via lazy `_app` shim per handler):
-  `_get_book_data`, `_chapter_sections_dicts`, `_normalize_section`,
-  `_book_id`, `BookBibliography`, `BIBLIOGRAPHY_PSEUDO_ID`,
-  `BIBLIOGRAPHY_TITLE`, `logger`.
+  `_app._get_book_data`, `_app._chapter_sections_dicts`, `_app._normalize_section`,
+  `_app._book_id`, `_app.BookBibliography`, `_app.BIBLIOGRAPHY_PSEUDO_ID`,
+  `_app.BIBLIOGRAPHY_TITLE`, `logger`.
 """
 from __future__ import annotations
 

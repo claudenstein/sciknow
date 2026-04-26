@@ -5,9 +5,9 @@ covering wiki page browse, ask, annotation, query, lint, consensus,
 extract-kg, and compile.
 
 Cross-module deps (via lazy `_app` shim):
-  - `_create_job`, `_run_generator_in_thread`, `_spawn_cli_streaming`
+  - `_app._create_job`, `_app._run_generator_in_thread`, `_app._spawn_cli_streaming`
     for the SSE-streamed wrappers.
-  - `_md_to_html` for the wiki-page HTML render.
+  - `_app._md_to_html` for the wiki-page HTML render.
 """
 from __future__ import annotations
 

@@ -6,10 +6,10 @@ handler renders a draft / chapter / book in one of txt / md / html
 
 Heavy cross-module dep set — these routes lean on a lot of the
 shared helpers in app.py:
-  `_VALID_EXPORT_EXTS`, `_get_book_data`, `_draft_to_md`,
-  `_strip_md`, `_draft_to_html_body`, `_wrap_html_export`,
-  `_slugify_for_filename`, `_html_to_pdf_response`, `_esc`,
-  `_ordered_chapter_drafts`.
+  `_app._VALID_EXPORT_EXTS`, `_app._get_book_data`, `_app._draft_to_md`,
+  `_app._strip_md`, `_app._draft_to_html_body`, `_app._wrap_html_export`,
+  `_app._slugify_for_filename`, `_app._html_to_pdf_response`, `_app._esc`,
+  `_app._ordered_chapter_drafts`.
 
 Resolved via the standard lazy `_app` shim — by call-time the
 parent module is fully loaded so the bindings exist on it.

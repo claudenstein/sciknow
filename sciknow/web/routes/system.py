@@ -6,7 +6,7 @@ fit anywhere else: stats, settings.models, monitor, monitor/alerts-md,
 admin/release-vram.
 
 Cross-module deps (via standard lazy `_app` shim):
-  - /api/monitor reads `_jobs`, `_job_lock`, `_job_tps` for the
+  - /api/monitor reads `_app._jobs`, `_app._job_lock`, `_app._job_tps` for the
     active-jobs sidebar.
 """
 from __future__ import annotations

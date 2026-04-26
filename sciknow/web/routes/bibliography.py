@@ -1,7 +1,7 @@
 """``sciknow.web.routes.bibliography`` — bibliography endpoints.
 
 v2 Phase E (route split) — extracted from `web/app.py`. Behaviour
-unchanged. The only cross-module dep is `_get_book_data` (resolved
+unchanged. The only cross-module dep is `_app._get_book_data` (resolved
 lazily inside each handler via the standard `from sciknow.web import
 app as _app` shim — defers the import until call-time so the route
 file imports cleanly while app.py is mid-load).
@@ -133,7 +133,7 @@ async def api_bibliography_sort():
     ``[N]`` values.
 
     Without this, the reader shows the global numbering (via
-    ``BookBibliography.remap_content``) but the raw markdown in the
+    ``_app.BookBibliography.remap_content``) but the raw markdown in the
     editor still has the original local numbers. Running "Sort" once
     rewrites each draft's content + sources list so ``[N]`` everywhere
     means the same paper. Idempotent — re-running after new sections
@@ -149,7 +149,7 @@ async def api_bibliography_sort():
 
     updated = 0
     with get_session() as session:
-        bib = BookBibliography.from_book(session, book[0])
+        bib = _app.BookBibliography.from_book(session, book[0])
         for did, lmap in bib.draft_local_to_global.items():
             if not lmap: continue
             row = session.execute(text(
@@ -205,7 +205,7 @@ async def api_bibliography_citation(global_num: int):
     from sciknow.core.bibliography import BookBibliography, _source_key
     import re as _re
     with get_session() as session:
-        bib = BookBibliography.from_book(session, book[0])
+        bib = _app.BookBibliography.from_book(session, book[0])
         idx = int(global_num) - 1
         if idx < 0 or idx >= len(bib.global_sources):
             raise HTTPException(404, "Citation out of range.")

@@ -5,7 +5,7 @@ runs the corresponding `sciknow.core.viz_ops` builder in a thread-
 pool executor (these are heavy: UMAP projections, RAPTOR tree walks,
 year × cluster aggregations) and returns the JSON-shaped result.
 
-Cross-module dep: `_book_id` (the active-book id stamped on the
+Cross-module dep: `_app._book_id` (the active-book id stamped on the
 running web process). Resolved lazily inside `api_viz_gap_radar`
 so the route file imports cleanly while app.py is mid-load.
 """

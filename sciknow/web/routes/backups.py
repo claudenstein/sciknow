@@ -4,8 +4,8 @@ v2 Phase E (route split) — extracted from `web/app.py`.
 
 7 handlers (list / run / download / restore / schedule / delete /
 purge) all spawn a streaming CLI subprocess via the
-`_spawn_cli_streaming` helper that lives in `web.app` (it threads
-its stdout into the per-job event queue). `_create_job` (also in
+`_app._spawn_cli_streaming` helper that lives in `web.app` (it threads
+its stdout into the per-job event queue). `_app._create_job` (also in
 app.py) issues the job id. Both resolved lazily via the standard
 `from sciknow.web import app as _app` shim.
 """
@@ -33,7 +33,7 @@ async def api_backups_list():
 
 @router.post("/api/backups/run")
 async def api_backups_run():
-    """Trigger a full backup via _spawn_cli_streaming."""
+    """Trigger a full backup via _app._spawn_cli_streaming."""
     from sciknow.web import app as _app
     job_id, _ = _app._create_job("backup_run")
     loop = asyncio.get_event_loop()
@@ -60,7 +60,7 @@ async def api_backups_download(dirname: str, filename: str):
 
 @router.post("/api/backups/restore")
 async def api_backups_restore(request: Request):
-    """Trigger a restore from a backup set via _spawn_cli_streaming.
+    """Trigger a restore from a backup set via _app._spawn_cli_streaming.
     Body: {timestamp: "latest"|"20260415T030000Z", force: true|false}."""
     from sciknow.web import app as _app
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}

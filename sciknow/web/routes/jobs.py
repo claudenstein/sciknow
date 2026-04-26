@@ -3,8 +3,8 @@
 v2 Phase E (route split) — extracted from `web/app.py`.
 
 The 4 handlers (SSE stream / cancel / stats / list) consume the
-process-local `_jobs` dict + `_job_lock` lock + the throughput
-helpers (`_job_tps`, `_job_decode_stats`, `_job_tps_windows`) all
+process-local `_app._jobs` dict + `_app._job_lock` lock + the throughput
+helpers (`_app._job_tps`, `_app._job_decode_stats`, `_app._job_tps_windows`) all
 defined in `web.app`. Resolved lazily inside each handler via the
 standard `from sciknow.web import app as _app` shim — by call-time
 app.py is fully loaded, so the bindings exist on the module.

@@ -5,7 +5,7 @@ covering book metadata get/put, plan/outline generation,
 auto-expand preview, create, length-report, and book-types.
 
 Cross-module deps via the standard lazy `_app` shim (prepended into
-each handler that touches `_get_book_data` or `_book_id`).
+each handler that touches `_app._get_book_data` or `_app._book_id`).
 """
 from __future__ import annotations
 
@@ -169,7 +169,7 @@ async def api_book_plan_generate(model: str = Form(None)):
     tokens to the browser via SSE. Mirrors the `sciknow book plan --edit`
     CLI flow but persists to drafts.custom_metadata-style streaming."""
     from sciknow.web import app as _app
-    job_id, queue = _create_job("book_plan_generate")
+    job_id, queue = _app._create_job("book_plan_generate")
     loop = asyncio.get_event_loop()
 
     def gen():
@@ -218,7 +218,7 @@ async def api_book_plan_generate(model: str = Form(None)):
         yield {"type": "completed", "plan": new_plan, "chars": len(new_plan)}
 
     threading.Thread(
-        target=_run_generator_in_thread, args=(job_id, gen, loop), daemon=True
+        target=_app._run_generator_in_thread, args=(job_id, gen, loop), daemon=True
     ).start()
     return JSONResponse({"job_id": job_id})
 
@@ -242,7 +242,7 @@ async def api_book_outline_generate(
     the user prompt.
     """
     from sciknow.web import app as _app
-    job_id, queue = _create_job("book_outline_generate")
+    job_id, queue = _app._create_job("book_outline_generate")
     loop = asyncio.get_event_loop()
 
     def gen():
@@ -365,7 +365,7 @@ async def api_book_outline_generate(
                "n_inserted": inserted, "n_skipped": skipped}
 
     threading.Thread(
-        target=_run_generator_in_thread, args=(job_id, gen, loop), daemon=True
+        target=_app._run_generator_in_thread, args=(job_id, gen, loop), daemon=True
     ).start()
     return JSONResponse({"job_id": job_id})
 

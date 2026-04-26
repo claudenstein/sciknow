@@ -9,7 +9,7 @@ v2 Phase E (route split) — extracted from `web/app.py`. Groups the
   POST /api/search/similar   — nearest-neighbour by abstract (JSON)
 
 The two SSE handlers spawn a background generator via
-`_run_generator_in_thread` from app.py and tag it with `_create_job`;
+`_app._run_generator_in_thread` from app.py and tag it with `_app._create_job`;
 both resolved via the standard lazy `_app` shim.
 """
 from __future__ import annotations

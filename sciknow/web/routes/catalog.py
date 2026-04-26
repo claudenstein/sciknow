@@ -5,7 +5,7 @@ covering paper-list / authors / domains / topics browse plus the
 two SSE-streamed CLI wrappers (cluster + raptor build).
 
 Cross-module deps (via lazy `_app` shim):
-  - `_create_job`, `_spawn_cli_streaming` for the SSE wrappers.
+  - `_app._create_job`, `_app._spawn_cli_streaming` for the SSE wrappers.
 """
 from __future__ import annotations
 

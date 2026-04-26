@@ -6,8 +6,8 @@ job-launcher handlers wrap the autowrite engine generators
 in a background thread and return a job id for SSE streaming.
 
 Cross-module deps (via standard lazy `_app` shim):
-  - `_create_job` and `_run_generator_in_thread` (background runner)
-  - `_book_id` (active-book id stamped on the running process)
+  - `_app._create_job` and `_app._run_generator_in_thread` (background runner)
+  - `_app._book_id` (active-book id stamped on the running process)
 """
 from __future__ import annotations
 

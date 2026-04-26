@@ -208,7 +208,8 @@ async def api_visuals_suggestions(
     the ranker is ~1–2s and the user shouldn't pay that cost on every
     draft navigation. POST to this same endpoint to force a rank + save.
     """
-    cached = _visuals_get_cached(draft_id)
+    from sciknow.web import app as _app
+    cached = _app._visuals_get_cached(draft_id)
     if cached is not None and not int(compute or 0):
         return JSONResponse({
             "draft_id": draft_id,
@@ -225,7 +226,7 @@ async def api_visuals_suggestions(
             "note": "No ranking saved for this draft. Click Rank to compute.",
         })
 
-    payload = _visuals_rank_for_draft(draft_id, limit=limit)
+    payload = _app._visuals_rank_for_draft(draft_id, limit=limit)
     payload["cached"] = False
     return JSONResponse(payload)
 
@@ -239,7 +240,7 @@ async def api_visuals_suggestions_rank(
     ``drafts.custom_metadata['visual_suggestions']`` so subsequent opens
     of the Visuals panel serve the saved result instead of re-ranking."""
     from sciknow.web import app as _app
-    payload = _visuals_rank_for_draft(draft_id, limit=limit)
+    payload = _app._visuals_rank_for_draft(draft_id, limit=limit)
 
     if draft_id != _app.BIBLIOGRAPHY_PSEUDO_ID and payload.get("hits") is not None:
         from datetime import datetime as _dt
