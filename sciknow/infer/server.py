@@ -45,11 +45,24 @@ ROLE_DEFAULTS: dict[str, dict] = {
     },
     "embedder": {
         "port": 8091,
+        # V2_FINAL Stage 3: --ctx-size is the *total* context across all
+        # parallel slots. With --parallel 4 + --ctx-size 8192, each slot
+        # gets only 2048 tokens — too tight for real corpus chunks (some
+        # exceed 2048 tokens after tokenisation). Bumping to 32768 gives
+        # each of 4 slots its own 8192 window, matching bge-m3's max.
         "model": settings.embedder_model_gguf,
-        "ctx_size": 8192,
+        "ctx_size": 32768,
         "n_gpu_layers": 999,
         "parallel": 4,
-        "extra_flags": ["--embedding", "--pooling", "mean"],
+        # --ubatch-size must be >= the longest single input or
+        # llama-server returns 500 "input too large to process".
+        # bge-m3 honours up to 8192 tokens; chunker.py already caps at
+        # 8192, so matching ubatch to per-slot ctx is the safe default.
+        "extra_flags": [
+            "--embedding", "--pooling", "mean",
+            "--batch-size", "8192",
+            "--ubatch-size", "8192",
+        ],
     },
     "reranker": {
         "port": 8092,
