@@ -73,6 +73,8 @@ from sciknow.web.routes import ledger as _ledger_routes  # noqa: E402
 app.include_router(_ledger_routes.router)
 from sciknow.web.routes import pending as _pending_routes  # noqa: E402
 app.include_router(_pending_routes.router)
+from sciknow.web.routes import reconciliations as _reconciliations_routes  # noqa: E402
+app.include_router(_reconciliations_routes.router)
 
 
 # Phase 33 — build tag: a short version string visible in the browser
@@ -7124,49 +7126,6 @@ async def api_book_types():
     return JSONResponse({"types": out})
 
 
-@app.get("/api/reconciliations")
-async def api_reconciliations():
-    """Phase 54.6.125 (Tier 3 #3) — list current preprint↔journal
-    reconciliations for the active project."""
-    from sciknow.core.preprint_reconcile import list_reconciliations
-    return JSONResponse({"pairs": list_reconciliations()})
-
-
-@app.post("/api/reconciliations/undo")
-async def api_reconciliations_undo(request: Request):
-    """Body: {doc_id: 'uuid prefix'}. Clears canonical_document_id."""
-    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
-    doc_id = (body.get("doc_id") or "").strip()
-    if not doc_id:
-        raise HTTPException(400, "doc_id required")
-    from sqlalchemy import text
-    from sciknow.storage.db import get_session
-    from sciknow.core.preprint_reconcile import undo_reconciliation
-    with get_session() as session:
-        rows = session.execute(text("""
-            SELECT id::text FROM documents
-            WHERE id::text LIKE :p || '%' AND canonical_document_id IS NOT NULL
-            LIMIT 2
-        """), {"p": doc_id}).fetchall()
-    if len(rows) == 0:
-        raise HTTPException(404, "no non-canonical document matches")
-    if len(rows) > 1:
-        raise HTTPException(409, "ambiguous prefix — give more of the UUID")
-    ok = undo_reconciliation(rows[0][0])
-    return JSONResponse({"ok": bool(ok), "doc_id": rows[0][0]})
-
-
-@app.get("/api/provenance")
-async def api_provenance(key: str):
-    """Phase 54.6.117 (Tier 4 #1) — provenance record by DOI / arxiv / doc-id prefix."""
-    from sciknow.core.provenance import lookup as _lookup
-    doc_id, rec = _lookup(key)
-    return JSONResponse({
-        "document_id": doc_id,
-        "provenance": rec,
-    })
-
-
 # ── Phase 54.6.24 — backup endpoints ───────────────────────────────────────
 
 @app.post("/api/cli-stream")
@@ -7823,4 +7782,7 @@ from sciknow.web.routes.ledger import (  # noqa: E402, F401
 from sciknow.web.routes.pending import (  # noqa: E402, F401
     api_pending_downloads_list, api_pending_downloads_update,
     api_pending_downloads_remove, api_pending_downloads_retry,
+)
+from sciknow.web.routes.reconciliations import (  # noqa: E402, F401
+    api_reconciliations, api_reconciliations_undo, api_provenance,
 )
