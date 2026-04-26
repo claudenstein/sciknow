@@ -79,6 +79,8 @@ from sciknow.web.routes import system as _system_routes  # noqa: E402
 app.include_router(_system_routes.router)
 from sciknow.web.routes import tools as _tools_routes  # noqa: E402
 app.include_router(_tools_routes.router)
+from sciknow.web.routes import autowrite as _autowrite_routes  # noqa: E402
+app.include_router(_autowrite_routes.router)
 
 
 # Phase 33 — build tag: a short version string visible in the browser
@@ -3551,99 +3553,6 @@ async def api_verify(draft_id: str, model: str = Form(None)):
             yield {"type": "error", "message": f"Verification failed: {exc}"}
 
         yield {"type": "completed", "draft_id": d_id}
-
-    thread = threading.Thread(
-        target=_run_generator_in_thread, args=(job_id, gen, loop), daemon=True)
-    thread.start()
-
-    return JSONResponse({"job_id": job_id})
-
-
-@app.post("/api/autowrite-chapter")
-async def api_autowrite_chapter(
-    chapter_id: str = Form(...),
-    max_iter: int = Form(3),
-    target_score: float = Form(0.85),
-    model: str = Form(None),
-    target_words: int = Form(None),
-    rebuild: bool = Form(False),
-    resume: bool = Form(False),
-    include_visuals: bool = Form(False),   # Phase 54.6.144
-):
-    """Phase 20 — autowrite EVERY section of a chapter in sequence.
-
-    The toolbar Autowrite button routes here when the user has a
-    chapter selected but no specific section, instead of defaulting
-    to a single 'introduction' draft (which doesn't match any of the
-    chapter's user-defined sections and creates an orphan).
-
-    The backend generator handles the section iteration, draft skip
-    logic, and per-section progress events. This endpoint just kicks
-    it off as a job and returns the job_id for SSE streaming.
-    """
-    from sciknow.core.book_ops import autowrite_chapter_all_sections_stream
-
-    job_id, queue = _create_job("autowrite_chapter")
-    loop = asyncio.get_event_loop()
-
-    def gen():
-        return autowrite_chapter_all_sections_stream(
-            book_id=_book_id, chapter_id=chapter_id,
-            model=model or None,
-            max_iter=max_iter, target_score=target_score,
-            target_words=target_words if target_words and target_words > 0 else None,
-            rebuild=rebuild,
-            resume=resume,
-            include_visuals=include_visuals,
-        )
-
-    thread = threading.Thread(
-        target=_run_generator_in_thread, args=(job_id, gen, loop), daemon=True)
-    thread.start()
-
-    return JSONResponse({"job_id": job_id})
-
-
-@app.post("/api/autowrite")
-async def api_autowrite(
-    chapter_id: str = Form(None),
-    section_type: str = Form("introduction"),
-    max_iter: int = Form(3),
-    target_score: float = Form(0.85),
-    full: bool = Form(False),
-    model: str = Form(None),
-    target_words: int = Form(None),
-    include_visuals: bool = Form(False),   # Phase 54.6.144
-):
-    """Phase 17 — target_words is optional; when None, the effective
-    per-section target is resolved from the book's custom_metadata
-    (target_chapter_words / num_sections_in_chapter). When set, it
-    overrides the book-level value for this run only.
-
-    Phase 54.6.144 — ``include_visuals`` turns on the 54.6.142 autowrite
-    visuals integration: the 5-signal ranker surfaces figures to the
-    writer, the gated instruction ships in the system prompt, and
-    ``visual_citation`` joins the scorer dimensions. Default off so the
-    existing workflow is untouched."""
-    from sciknow.core.book_ops import autowrite_section_stream
-
-    if full:
-        # For full book autowrite, we'd need to chain multiple generators.
-        # For now, require chapter_id for single-section autowrite from web.
-        if not chapter_id:
-            return JSONResponse({"error": "chapter_id required (full-book autowrite not yet supported from web)"}, status_code=400)
-
-    job_id, queue = _create_job("autowrite")
-    loop = asyncio.get_event_loop()
-
-    def gen():
-        return autowrite_section_stream(
-            book_id=_book_id, chapter_id=chapter_id,
-            section_type=section_type, model=model or None,
-            max_iter=max_iter, target_score=target_score,
-            target_words=target_words if target_words and target_words > 0 else None,
-            include_visuals=include_visuals,
-        )
 
     thread = threading.Thread(
         target=_run_generator_in_thread, args=(job_id, gen, loop), daemon=True)
@@ -7278,4 +7187,7 @@ from sciknow.web.routes.system import (  # noqa: E402, F401
 )
 from sciknow.web.routes.tools import (  # noqa: E402, F401
     api_ask, api_search_query, api_search_similar, api_ask_synthesize,
+)
+from sciknow.web.routes.autowrite import (  # noqa: E402, F401
+    api_autowrite_chapter, api_autowrite,
 )
