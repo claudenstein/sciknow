@@ -174,12 +174,12 @@ branch:
 
 ## Status by phase
 
-- **Phase A** (infer substrate): ✅ shipped (`22db97d`)
+- **Phase A** (infer substrate): ✅ shipped (`22db97d`) + doctor probes the writer/embedder/reranker via `_ping_infer_role` (`cabdd3f`); CLI + web service-pill chips render `PQWER` on v2 / `PQO` on v1 fallback (`18d83a2`); monitor snapshot carries `infer_substrate` and the dashboard shows per-role port + model + health (`f461089`, `9941b0b`).
 - **Phase B** (embedder + reranker on llama-server): ✅ shipped + exit criteria met (`2058d1e`, `b6b91ad`, `e9878c6` — FlagEmbedding/sentence-transformers/ollama dropped from direct deps)
-- **Phase C** (autowrite simplification): 🟡 events.py + is_active migration shipped (`8437db2`); `core/autowrite.py` re-export shim establishes the v2 import path. Full body move out of `book_ops.py` deferred — ~30 L1 tests target the engine via `inspect.getsource(book_ops._autowrite_section_body)`, so the move + test retarget is one commit.
+- **Phase C** (autowrite simplification): 🟡 events.py + is_active migration shipped (`8437db2`); `core/autowrite.py` re-export shim establishes the v2 import path (`499e6e8`). Full body move out of `book_ops.py` deferred — ~30 L1 tests target the engine via `inspect.getsource(book_ops._autowrite_section_body)`, so the move + test retarget is one commit.
 - **Phase D** (retrieval cleanup): ✅ functionally shipped (`b6b91ad`) — single canonical embedder enforced, sidecar collection bypassed at query time + dropped by `library upgrade-v1`. Legacy code paths still present behind toggles for rollback.
-- **Phase E** (web rebuild): 🟡 main CSS block extracted to `static/css/sciknow.css` (`8710b7d`); 16,394-line inline `<script>` extracted to `static/js/sciknow.js` with a 7-key `window.SCIKNOW_BOOTSTRAP` config emitted inline by the template. `web/app.py` shrunk 29 kLOC → 12.7 kLOC (-56%). Jinja2 template extraction + `web/routes/` split deferred to v2.1.
-- **Phase F** (CLI reorg): ✅ shipped — `library` + `corpus` subapps live with deprecation shim (`027d09b`); MIGRATION.md (this file) covers every verb; the L1 + alert audit is deferred to v2.1.
-- **Phase G** (v1 import + cutover): 🟡 in-place migrator `library upgrade-v1` shipped (`e9878c6`); cross-project `project import-v1 <slug> --as <slug>` deferred — single-tenant installs don't need it.
+- **Phase E** (web rebuild): 🟢 main CSS block extracted to `static/css/sciknow.css` (`8710b7d`); 16,394-line inline `<script>` extracted to `static/js/sciknow.js` with a 7-key `window.SCIKNOW_BOOTSTRAP` config emitted inline by the template (`74c1fc7`). `web/app.py` shrunk 29 kLOC → 12.7 kLOC (-56%). Jinja2 template extraction + `web/routes/` split deferred to v2.1.
+- **Phase F** (CLI reorg): ✅ shipped — `library` + `corpus` subapps live with deprecation shim (`027d09b`); per-verb deprecation hint maps each `sciknow db <verb>` to its v2 home (`4bdb4dd`); alert action map points at v2 verbs (`9941b0b`); MIGRATION.md (this file) covers every verb; the L1 + alert audit is deferred to v2.1.
+- **Phase G** (v1 import + cutover): 🟢 in-place migrator `library upgrade-v1` shipped (`e9878c6`); README quick-start + 4 user-visible JS hints flipped to v2 verbs (`7810592`, `96c4916`). Cross-project `project import-v1 <slug> --as <slug>` deferred — single-tenant installs don't need it.
 
-L1: 266/266 green across the v2-llamacpp branch.
+**v2 ready for testing**: every roadmap phase is shipped or has a documented v2.1 deferral. L1: 270/270 green across `v2-llamacpp`. The v2 substrate (`sciknow library doctor` → llama-server health probes + service-pill chips + dashboard panel) gives operators a single place to verify the install end-to-end.
