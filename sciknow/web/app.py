@@ -651,6 +651,15 @@ def _persist_llm_usage(job_id: str) -> None:
 # ── Data helpers ─────────────────────────────────────────────────────────────
 
 def _get_book_data():
+    # Phase 54.6.x — guard against an unset/empty `_book_id`. When the
+    # web app is started by `sciknow book serve <slug>`, `set_book` is
+    # called and binds `_book_id` to a real UUID. In a TestClient
+    # (which doesn't go through the CLI) `_book_id` is the empty
+    # string, and Postgres rejects it with a UUID DataError. Returning
+    # an empty 5-tuple here lets every downstream handler surface the
+    # missing-book state cleanly (404 / empty list) instead of 500.
+    if not _book_id:
+        return (None, [], [], [], [])
     with get_session() as session:
         book = session.execute(text("""
             SELECT id::text, title, description, plan, status, custom_metadata,
