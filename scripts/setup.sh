@@ -1,6 +1,23 @@
 #!/usr/bin/env bash
 # SciKnow setup script — safe to run multiple times.
 # Assumes Ubuntu/Debian and an RTX 3090 with CUDA 12.x drivers installed.
+#
+# v2 substrate note: this script installs the v1 (Ollama) inference
+# stack. v2's default substrate is llama-server (writer/embedder/
+# reranker as managed subprocesses on :8090/:8091/:8092) — see
+# docs/INSTALLATION.md and MIGRATION.md for the v2 install path
+# (llama.cpp build flags, GGUF model downloads, .env keys for
+# LLAMA_SERVER_BINARY + WRITER_MODEL_GGUF + INFER_*_URL). After
+# this script finishes, bring up the v2 substrate with:
+#
+#   sciknow infer up --role writer    # :8090
+#   sciknow infer up --role embedder  # :8091
+#   sciknow infer up --role reranker  # :8092
+#   sciknow library doctor            # confirms svc PQWER all green
+#
+# Or stay on v1 by setting USE_LLAMACPP_WRITER=False (and similar
+# for embedder/reranker) in .env. The deprecation shim accepts both
+# code paths.
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
