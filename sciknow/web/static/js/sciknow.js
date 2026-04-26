@@ -8177,8 +8177,8 @@ function renderMonitor(snap) {
         + '<th style="width:9em;">Last updated</th></tr>';
       for (const c of chapters) {
         const p = c.completion_pct || 0;
-        const col = p >= 80 ? '#080' : p >= 30 ? '#b70' : 'var(--fg-muted)';
-        const bar = '<div style="display:flex;height:0.85em;border-radius:3px;overflow:hidden;background:#eee;">'
+        const col = p >= 80 ? 'var(--success)' : p >= 30 ? 'var(--warn)' : 'var(--fg-muted)';
+        const bar = '<div style="display:flex;height:0.85em;border-radius:3px;overflow:hidden;background:var(--border);">'
           + '<div style="background:' + col + ';width:' + p.toFixed(0) + '%;"></div>'
           + '</div>';
         const updated = c.last_updated_iso
@@ -8438,9 +8438,9 @@ function renderMonitor(snap) {
       + '<th style="width:6em;text-align:right;">Missing</th></tr>';
     for (const f of fields) {
       const pctPresent = 100 - f.pct_missing;
-      const col = pctPresent >= 80 ? '#080'
-        : pctPresent >= 50 ? '#b70' : '#c33';
-      const bar = '<div style="display:flex;height:0.9em;border-radius:3px;overflow:hidden;background:#eee;">'
+      const col = pctPresent >= 80 ? 'var(--success)'
+        : pctPresent >= 50 ? 'var(--warn)' : 'var(--danger)';
+      const bar = '<div style="display:flex;height:0.9em;border-radius:3px;overflow:hidden;background:var(--border);">'
         + '<div style="background:' + col + ';width:' + pctPresent.toFixed(1) + '%;"></div>'
         + '</div>';
       html += '<tr><td><code>' + _escHTML(f.name) + '</code></td>'
@@ -15593,7 +15593,7 @@ async function loadVisuals(append) {
             ? '<div class="u-xxs u-muted u-mb-6"><strong>Columns:</strong> '
                 + v.table_headers.map(h => _escHtml(String(h))).join(' · ') + '</div>'
             : '';
-          parsed = '<div style="padding:8px;background:#fafafa;border-radius:4px;border:1px solid #eee;margin-bottom:8px;">'
+          parsed = '<div style="padding:8px;background:var(--bg-alt, var(--bg-elevated));border-radius:4px;border:1px solid var(--border);margin-bottom:8px;">'
             + title + summary + hdrs + '</div>';
         }
         return parsed
@@ -16340,12 +16340,14 @@ async function shutdownServer() {
     await fetch('/api/server/shutdown', {method: 'POST'});
     document.body.innerHTML =
       '<div style="padding:40px;max-width:620px;margin:60px auto;font-family:-apple-system,sans-serif;'
-      + 'border:1px solid #ddd;border-radius:8px;background:#f8f8f8;">'
+      + 'border:1px solid var(--border);border-radius:8px;background:var(--bg-elevated);'
+      + 'color:var(--fg);">'
       + '<h2 style="margin:0 0 12px;">Server stopped</h2>'
       + '<p>Your terminal is back at <code>$</code>. To pick up the new active project, run:</p>'
-      + '<pre style="padding:10px;background:#fff;border:1px solid #ddd;border-radius:4px;">'
+      + '<pre style="padding:10px;background:var(--bg);border:1px solid var(--border);'
+      + 'border-radius:4px;color:var(--fg);">'
       + 'sciknow book serve "&lt;book title&gt;"</pre>'
-      + '<p style="font-size:12px;color:#666;margin:12px 0 0;">Then reload this browser tab.</p>'
+      + '<p style="font-size:12px;color:var(--fg-muted);margin:12px 0 0;">Then reload this browser tab.</p>'
       + '</div>';
   } catch (exc) {
     _projMsg('Shutdown request failed: ' + exc, 'error');
