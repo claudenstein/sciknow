@@ -77,8 +77,8 @@ class Settings(BaseSettings):
     llama_server_binary: str = "/home/kartofel/Claude/llama.cpp-build/llama.cpp/build/bin/llama-server"
     # GGUF paths or HF ids per role. Empty string → role can't start.
     writer_model_gguf: str = "/home/kartofel/Claude/huggingface/unsloth-Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_M.gguf"
-    embedder_model_gguf: str = "/home/kartofel/Claude/huggingface/bge-m3-gguf/bge-m3-Q8_0.gguf"
-    reranker_model_gguf: str = "/home/kartofel/Claude/huggingface/bge-reranker-v2-m3-gguf/bge-reranker-v2-m3-Q8_0.gguf"
+    embedder_model_gguf: str = "/home/kartofel/Claude/huggingface/gpustack-bge-m3-gguf/bge-m3-Q8_0.gguf"
+    reranker_model_gguf: str = "/home/kartofel/Claude/huggingface/gpustack-bge-reranker-v2-m3-gguf/bge-reranker-v2-m3-Q8_0.gguf"
     # Optional draft model for spec-dec profile.
     draft_model_gguf: str = ""
     # Logical model names (used in /v1/chat requests' "model" field +

@@ -1125,6 +1125,312 @@ def l3_embedder_loads() -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# V2_FINAL Stage 1 — v2-only L3 suite
+#
+# Rationale: the v1 L3 tests above all reach Ollama or the in-process
+# FlagEmbedding loader. We need parallel tests that prove the
+# llama-server substrate (writer/embedder/reranker subprocesses on
+# ports 8090/8091/8092) actually works end-to-end without Ollama.
+#
+# Each l3_v2_* test:
+#   * skips cleanly if its specific role isn't reachable (so the suite
+#     can run on a CI box without the GGUFs);
+#   * touches `infer.client.*` directly (NOT `rag.llm` which can
+#     dispatch either way);
+#   * for the dispatch / autowrite tests, asserts that no `ollama`
+#     module gets imported as a side-effect on a v2-only run.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _v2_health(role: str) -> bool:
+    """Per-role llama-server health probe used by the l3_v2_* skip gates."""
+    try:
+        from sciknow.infer import client as infer_client
+        return bool(infer_client.health(role))
+    except Exception:
+        return False
+
+
+def l3_v2_writer_health() -> None:
+    """Writer llama-server (:8090) is up and the configured GGUF exists.
+
+    Establishes the precondition for every other writer-side l3_v2_*
+    test. Skips cleanly if the role isn't running so the suite stays
+    runnable on a CI box without the GGUFs.
+    """
+    import os
+    from sciknow.config import settings
+    if not _v2_health("writer"):
+        return TestResult.skip(
+            "l3_v2_writer_health",
+            f"skipped — writer role not reachable at {settings.infer_writer_url}",
+        )
+    gguf = settings.writer_model_gguf
+    assert gguf, "WRITER_MODEL_GGUF is empty in settings"
+    assert os.path.exists(gguf), f"WRITER_MODEL_GGUF does not exist on disk: {gguf}"
+    return TestResult.ok(
+        name="l3_v2_writer_health",
+        message=f"writer up at {settings.infer_writer_url}, gguf={os.path.basename(gguf)}",
+    )
+
+
+def l3_v2_embedder_health() -> None:
+    """Embedder llama-server (:8091) is up and the configured GGUF exists."""
+    import os
+    from sciknow.config import settings
+    if not _v2_health("embedder"):
+        return TestResult.skip(
+            "l3_v2_embedder_health",
+            f"skipped — embedder role not reachable at {settings.infer_embedder_url}",
+        )
+    gguf = settings.embedder_model_gguf
+    assert gguf, "EMBEDDER_MODEL_GGUF is empty in settings"
+    assert os.path.exists(gguf), f"EMBEDDER_MODEL_GGUF does not exist on disk: {gguf}"
+    return TestResult.ok(
+        name="l3_v2_embedder_health",
+        message=f"embedder up at {settings.infer_embedder_url}, gguf={os.path.basename(gguf)}",
+    )
+
+
+def l3_v2_reranker_health() -> None:
+    """Reranker llama-server (:8092) is up and the configured GGUF exists."""
+    import os
+    from sciknow.config import settings
+    if not _v2_health("reranker"):
+        return TestResult.skip(
+            "l3_v2_reranker_health",
+            f"skipped — reranker role not reachable at {settings.infer_reranker_url}",
+        )
+    gguf = settings.reranker_model_gguf
+    assert gguf, "RERANKER_MODEL_GGUF is empty in settings"
+    assert os.path.exists(gguf), f"RERANKER_MODEL_GGUF does not exist on disk: {gguf}"
+    return TestResult.ok(
+        name="l3_v2_reranker_health",
+        message=f"reranker up at {settings.infer_reranker_url}, gguf={os.path.basename(gguf)}",
+    )
+
+
+def l3_v2_writer_complete_smoke() -> None:
+    """`infer.client.chat_complete(...)` returns a non-empty string fast.
+
+    Uses the substrate directly (NOT `rag.llm.complete`, which can
+    dispatch either way — that test would silently pass on Ollama if
+    `USE_LLAMACPP_WRITER=False`).
+    """
+    import time
+    from sciknow.config import settings
+    from sciknow.infer import client as infer_client
+    if not _v2_health("writer"):
+        return TestResult.skip(
+            "l3_v2_writer_complete_smoke",
+            "skipped — writer role not reachable",
+        )
+    t0 = time.monotonic()
+    out = infer_client.chat_complete(
+        "You are a brief assistant.",
+        "Reply with the single word: ok",
+        temperature=0.0,
+        num_predict=8,
+    )
+    elapsed = time.monotonic() - t0
+    assert isinstance(out, str) and len(out) > 0, (
+        f"empty response from writer substrate: {out!r}"
+    )
+    assert elapsed < 30.0, (
+        f"writer substrate took {elapsed:.1f}s for a 1-token reply — "
+        f"either the model isn't pre-loaded or something is very wrong"
+    )
+    return TestResult.ok(
+        name="l3_v2_writer_complete_smoke",
+        message=f"got {len(out)} chars from {settings.writer_model_name} in {elapsed:.1f}s",
+    )
+
+
+def l3_v2_embedder_roundtrip() -> None:
+    """`infer.client.embed([text])` returns a 1024-dim list of floats.
+
+    bge-m3's dense head is 1024-dim; any deviation indicates the
+    embedder server loaded the wrong model file.
+    """
+    from sciknow.config import settings
+    from sciknow.infer import client as infer_client
+    if not _v2_health("embedder"):
+        return TestResult.skip(
+            "l3_v2_embedder_roundtrip",
+            "skipped — embedder role not reachable",
+        )
+    vecs = infer_client.embed(["smoke test"])
+    assert isinstance(vecs, list) and len(vecs) == 1, (
+        f"expected exactly 1 vector for 1 input, got {len(vecs) if isinstance(vecs, list) else vecs!r}"
+    )
+    v = vecs[0]
+    assert isinstance(v, list) and len(v) == settings.embedding_dim, (
+        f"expected {settings.embedding_dim}-dim vector, got len={len(v) if isinstance(v, list) else v!r}"
+    )
+    assert all(isinstance(x, (int, float)) for x in v[:8]), (
+        f"vector contains non-numeric values; first 8: {v[:8]!r}"
+    )
+    return TestResult.ok(
+        name="l3_v2_embedder_roundtrip",
+        message=f"embed returned {len(v)}-dim vector",
+    )
+
+
+def l3_v2_reranker_roundtrip() -> None:
+    """`infer.client.rerank(...)` returns float scores ordered correctly.
+
+    The query "what is photosynthesis" should rank doc[0] (relevant)
+    above doc[1] (off-topic). Asserts both shape and ordering.
+    """
+    from sciknow.infer import client as infer_client
+    if not _v2_health("reranker"):
+        return TestResult.skip(
+            "l3_v2_reranker_roundtrip",
+            "skipped — reranker role not reachable",
+        )
+    query = "what is photosynthesis"
+    docs = [
+        "Photosynthesis is the biological process by which plants convert "
+        "light energy into chemical energy stored in glucose.",
+        "Quarterly revenue for Q3 2024 increased 12% over the prior year, "
+        "driven by stronger margins in the enterprise segment.",
+    ]
+    scores = infer_client.rerank(query, docs)
+    assert isinstance(scores, list) and len(scores) == 2, (
+        f"expected 2 scores for 2 docs, got {scores!r}"
+    )
+    assert all(isinstance(s, float) for s in scores), (
+        f"non-float score in {scores!r}"
+    )
+    assert scores[0] > scores[1], (
+        f"reranker ranked off-topic doc above relevant one — "
+        f"scores={scores!r}. Either the model is loaded wrong or the "
+        f"sigmoid normalization broke."
+    )
+    return TestResult.ok(
+        name="l3_v2_reranker_roundtrip",
+        message=f"scores={[round(s, 3) for s in scores]} (doc0 > doc1 ✓)",
+    )
+
+
+def l3_v2_autowrite_uses_llamacpp() -> None:
+    """One autowrite-style writer call dispatches via llamacpp on a v2 box.
+
+    Asserts (a) `_use_llamacpp()` is True at call time and (b) the
+    `ollama` module isn't imported as a side-effect of the call. The
+    latter catches a regression where a code path silently re-imports
+    ollama on the v2 happy path (e.g. a `from ollama import Client`
+    inside a function body).
+    """
+    import sys
+    from sciknow.config import settings
+    from sciknow.rag import prompts
+    from sciknow.rag.llm import _use_llamacpp, stream as llm_stream
+    if not _v2_health("writer"):
+        return TestResult.skip(
+            "l3_v2_autowrite_uses_llamacpp",
+            "skipped — writer role not reachable",
+        )
+    if not getattr(settings, "use_llamacpp_writer", True):
+        return TestResult.skip(
+            "l3_v2_autowrite_uses_llamacpp",
+            "skipped — USE_LLAMACPP_WRITER=False (v1 fallback active)",
+        )
+    assert _use_llamacpp(), (
+        "_use_llamacpp() returned False even though USE_LLAMACPP_WRITER=True"
+    )
+    sys_w, usr_w = prompts.write_section_v2(
+        section="introduction", topic="A smoke-test topic",
+        results=[],
+        book_plan="Smoke book plan.",
+        prior_summaries=None, paragraph_plan=None,
+        target_words=50, section_plan=None,
+        lessons=None, style_fingerprint_block=None,
+    )
+    ollama_in_modules_before = "ollama" in sys.modules
+    toks: list[str] = []
+    for tok in llm_stream(sys_w, usr_w, num_ctx=2048, num_predict=80):
+        toks.append(tok)
+        if len(toks) >= 80:
+            break
+    content = "".join(toks)
+    assert len(content) > 30, (
+        f"writer produced only {len(content)} chars — substrate may be "
+        f"misrouted. Output: {content[:200]!r}"
+    )
+    if not ollama_in_modules_before:
+        assert "ollama" not in sys.modules, (
+            "the v2 dispatch path imported `ollama` as a side-effect — "
+            "look for an unguarded `import ollama` in the writer call chain"
+        )
+    return TestResult.ok(
+        name="l3_v2_autowrite_uses_llamacpp",
+        message=f"wrote {len(content)} chars via substrate, ollama not imported",
+    )
+
+
+def l3_v2_dispatch_audit() -> None:
+    """Static audit: `rag/llm.py`'s public entry points reach `infer.client`
+    on the v2 path (USE_LLAMACPP_*=True).
+
+    Walks the bytecode of `complete`, `stream`, `warm_up` and
+    `drain_call_stats` and asserts each either (a) contains `_use_llamacpp`
+    + a reference to the `infer` substrate module, or (b) delegates to
+    another wrapper that does. Catches regressions where someone removes
+    the v2 branch from a wrapper but leaves the function intact, silently
+    routing every call to Ollama.
+    """
+    import dis
+    from sciknow.rag import llm as rag_llm
+    targets = ("complete", "stream", "warm_up", "drain_call_stats")
+    # Wrappers that themselves carry the v2 branch — delegating to one of
+    # these counts as "audited transitively".
+    delegators = {"stream", "complete", "chat_complete", "chat_stream"}
+    failures: list[str] = []
+    for name in targets:
+        fn = getattr(rag_llm, name, None)
+        if fn is None:
+            failures.append(f"{name}: not found in rag.llm")
+            continue
+        names_seen: set[str] = set()
+        for instr in dis.get_instructions(fn):
+            if instr.opname in ("LOAD_GLOBAL", "LOAD_NAME", "LOAD_DEREF"):
+                if instr.argval:
+                    names_seen.add(instr.argval)
+            if instr.opname == "IMPORT_NAME" and instr.argval:
+                names_seen.add(instr.argval)
+            if instr.opname == "IMPORT_FROM" and instr.argval:
+                names_seen.add(instr.argval)
+        # Path (b): delegates to an already-audited wrapper.
+        if names_seen & (delegators - {name}):
+            continue
+        # Path (a): contains the v2 branch directly.
+        if "_use_llamacpp" not in names_seen:
+            failures.append(
+                f"{name}: neither references `_use_llamacpp` nor delegates "
+                f"to a v2-aware wrapper — v2 branch may have been removed"
+            )
+            continue
+        # The v2 branch must reference `infer` (the client module import).
+        # `from sciknow.infer import client as infer_client` lands as
+        # IMPORT_NAME 'sciknow.infer' / IMPORT_FROM 'client' / STORE_FAST
+        # 'infer_client'. Accept any of these.
+        v2_refs = {"infer", "infer_client", "sciknow.infer", "client"}
+        if not (names_seen & v2_refs):
+            failures.append(
+                f"{name}: references `_use_llamacpp` but no `infer.client` — "
+                f"the v2 branch is gated but doesn't reach the substrate"
+            )
+    assert not failures, (
+        "rag/llm.py dispatch audit failed:\n  - " + "\n  - ".join(failures)
+    )
+    return TestResult.ok(
+        name="l3_v2_dispatch_audit",
+        message=f"all {len(targets)} dispatch wrappers reach infer.client on v2 path",
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Phase 54.6.39 — Single-example LLM pipeline smoke tests
 #
 # Rationale (from today's memory: feedback_test_single_before_bulk.md):
@@ -18938,6 +19244,15 @@ L3_TESTS: list[Callable] = [
     l3_ollama_reachable,
     l3_llm_complete_smoke,
     l3_embedder_loads,
+    # V2_FINAL Stage 1 — v2-only substrate tests (cheap; skip if role down).
+    l3_v2_writer_health,
+    l3_v2_embedder_health,
+    l3_v2_reranker_health,
+    l3_v2_writer_complete_smoke,
+    l3_v2_embedder_roundtrip,
+    l3_v2_reranker_roundtrip,
+    l3_v2_autowrite_uses_llamacpp,
+    l3_v2_dispatch_audit,
     # Phase 54.6.39 — single-example pipeline smokes.
     # Order matters: cheap sanity checks first, expensive end-to-end last.
     l3_llm_num_predict_cap_honored,           # ~5s   — catches Ollama/wrapper num_predict regressions
@@ -18989,8 +19304,17 @@ def run_layer(
         if not qd_ok():
             return ([TestResult.skip("L2", "skipped — Qdrant not reachable")], 0)
     if layer_name == "L3":
-        if not _ollama_reachable():
-            return ([TestResult.skip("L3", "skipped — Ollama not reachable")], 0)
+        # V2_FINAL Stage 1 — accept either v1 (Ollama) OR v2 (llama-server
+        # writer) as a usable backend. Each individual test still skips
+        # itself when its specific role/backend isn't reachable, so the
+        # layer can run on a pure-v2 box without Ollama.
+        v1_ok = _ollama_reachable()
+        v2_ok = _v2_health("writer") or _v2_health("embedder") or _v2_health("reranker")
+        if not (v1_ok or v2_ok):
+            return ([TestResult.skip(
+                "L3",
+                "skipped — neither Ollama nor any llama-server role reachable",
+            )], 0)
 
     tests = LAYERS.get(layer_name, [])
     results: list[TestResult] = []
