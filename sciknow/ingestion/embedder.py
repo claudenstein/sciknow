@@ -142,38 +142,13 @@ def release_model() -> None:
         pass
 
 
-def release_dense_embedder() -> None:
-    """Phase 54.6.290 — drop the Qwen3-Embedding-4B cache from the
-    ingest process.  Called from the VRAM preflight releaser so a
-    pre-convert preflight can reclaim ~8 GB without waiting for the
-    process to exit."""
-    global _dense_model_cache
-    if _dense_model_cache is None:
-        return
-    try:
-        del _dense_model_cache
-    finally:
-        _dense_model_cache = None
-    try:
-        import gc, torch
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    except Exception:
-        pass
-
-
 def release_embedders() -> int:
-    """Phase 54.6.290 — release both bge-m3 and the Qwen3 dense
-    sidecar model at once.  Returns approximate MB freed for
+    """Release the bge-m3 cache. Returns approximate MB freed for
     logging (authoritative number comes from nvidia-smi after)."""
     freed_approx = 0
     if _model is not None:
         release_model()
         freed_approx += 2300  # bge-m3 FP16 footprint
-    if _dense_model_cache is not None:
-        release_dense_embedder()
-        freed_approx += 8000  # Qwen3-Embedding-4B BF16 footprint
     return freed_approx
 
 
@@ -197,233 +172,6 @@ def _to_sparse(lexical_weights: dict) -> SparseVector:
     return SparseVector(indices=indices, values=values)
 
 
-_dense_model_cache = None
-
-
-def _get_dense_embedder():
-    """Phase 54.6.279 — return the configured dense embedder
-    (sentence-transformers SentenceTransformer, BF16) when the
-    dual-embedder split is active, else None. Lazy-loaded and
-    cached for the lifetime of the ingestion process.
-
-    v2 Phase B/D — single canonical embedder. The llamacpp embedder
-    toggle short-circuits the dual-embedder split per spec §2.1.
-    """
-    if getattr(settings, "use_llamacpp_embedder", True):
-        return None
-    tag = getattr(settings, "dense_embedder_model", None)
-    if not tag or tag == settings.embedding_model:
-        return None
-    global _dense_model_cache
-    if _dense_model_cache is None:
-        import torch as _torch
-        from sentence_transformers import SentenceTransformer
-        _dense_model_cache = SentenceTransformer(
-            tag, device="cuda", trust_remote_code=True,
-            model_kwargs={"torch_dtype": _torch.bfloat16},
-        )
-        # Cap seq length so outlier long chunks don't OOM activations.
-        # Matches the A/B harness policy. Chunks are typically
-        # 500-2500 tokens so this truncates only the top few %.
-        _dense_model_cache.max_seq_length = 2048
-    return _dense_model_cache
-
-
-def _sidecar_collection_name() -> str:
-    """Mirror of retrieval/hybrid_search.py::_dense_collection_name.
-    Resolves the sidecar name for the active project + configured
-    dense embedder. Called only when dual-embedder split is active."""
-    from sciknow.core.project import get_active_project
-    explicit = getattr(settings, "dense_sidecar_collection", None)
-    if explicit:
-        return explicit
-    tag = settings.dense_embedder_model
-    prefix = get_active_project().qdrant_prefix
-    slug = tag.replace("/", "_").replace(":", "_").lower()
-    return f"{prefix}_ab_{slug}_papers"
-
-
-def backfill_sidecar_payload(
-    qdrant_client: QdrantClient, *, batch: int = 256,
-) -> dict:
-    """Phase 54.6.279 — copy payload from the prod papers collection
-    onto matching sidecar points. One-shot migration for users who
-    ran the A/B harness before the dual-embedder ship (the harness
-    omitted payload on sidecar points to save disk; production
-    retrieval needs payload for filter pushdown).
-
-    Idempotent. Returns ``{matched, missing, skipped}`` counts.
-    """
-    if not getattr(settings, "dense_embedder_model", None):
-        return {"matched": 0, "missing": 0, "skipped": 0,
-                "note": "dual-embedder not active; nothing to backfill"}
-
-    sidecar = _sidecar_collection_name()
-    if not qdrant_client.collection_exists(sidecar):
-        return {"matched": 0, "missing": 0, "skipped": 0,
-                "note": f"sidecar {sidecar} does not exist"}
-
-    matched = missing = skipped = 0
-    missing_points: list[tuple[str, dict, str]] = []  # (id, payload, content_proxy)
-    offset = None
-    while True:
-        points, offset = qdrant_client.scroll(
-            collection_name=PAPERS_COLLECTION,
-            limit=batch, offset=offset, with_payload=True,
-            with_vectors=False,
-        )
-        if not points:
-            break
-        ids_in_batch = [p.id for p in points]
-        existing = qdrant_client.retrieve(
-            collection_name=sidecar, ids=ids_in_batch,
-            with_payload=True, with_vectors=False,
-        )
-        existing_map = {str(e.id): e for e in existing}
-        for p in points:
-            sid = str(p.id)
-            sp = existing_map.get(sid)
-            if not sp:
-                missing += 1
-                missing_points.append((sid, p.payload or {}, ""))
-                continue
-            if sp.payload:  # Already has payload, skip
-                skipped += 1
-                continue
-            qdrant_client.set_payload(
-                collection_name=sidecar, payload=p.payload or {},
-                points=[sid],
-            )
-            matched += 1
-        if offset is None:
-            break
-
-    # Phase 54.6.279 — also embed any chunks that exist in prod but
-    # not the sidecar (new ingests added after the A/B harness ran).
-    # Fetch their text content from PG (sidecar can't source it) and
-    # dual-embed into the sidecar so retrieval is complete.
-    embedded_missing = 0
-    if missing_points:
-        from sqlalchemy import text as _sql
-        from sciknow.storage.db import get_session
-        dense_model = _get_dense_embedder()
-        if dense_model is not None:
-            dense_model.max_seq_length = 2048
-            missing_ids = [mid for mid, _, _ in missing_points]
-            # Fetch content from chunks table by qdrant_point_id.
-            with get_session() as session:
-                rows = session.execute(_sql(
-                    "SELECT qdrant_point_id::text AS qp, content "
-                    "FROM chunks WHERE qdrant_point_id::text = ANY(:ids)"
-                ), {"ids": missing_ids}).fetchall()
-            text_by_id = {r.qp: r.content for r in rows}
-            bsize = 8
-            points_to_add: list[PointStruct] = []
-            for i in range(0, len(missing_points), bsize):
-                batch_chunk = missing_points[i:i + bsize]
-                texts = [text_by_id.get(mid, "") for mid, _, _ in batch_chunk]
-                # Skip any point whose text isn't available in the DB
-                valid = [(mid, pld, txt) for (mid, pld, _), txt in zip(batch_chunk, texts) if txt]
-                if not valid:
-                    continue
-                vecs = dense_model.encode(
-                    [t for _, _, t in valid], batch_size=len(valid),
-                    convert_to_numpy=True, normalize_embeddings=True,
-                    show_progress_bar=False,
-                )
-                for (mid, pld, _), v in zip(valid, vecs):
-                    points_to_add.append(PointStruct(
-                        id=mid, vector={"dense": v.tolist()}, payload=pld,
-                    ))
-                embedded_missing += len(valid)
-            if points_to_add:
-                qdrant_client.upsert(
-                    collection_name=sidecar, points=points_to_add,
-                )
-
-    return {
-        "matched": matched, "missing": missing, "skipped": skipped,
-        "embedded_missing": embedded_missing,
-    }
-
-
-def _ensure_sidecar_exists(qdrant_client: QdrantClient) -> str:
-    """Create the sidecar collection on-demand if missing. Dim is
-    read from settings.dense_embedder_dim. Returns the collection
-    name. Idempotent — no-op when the collection already exists.
-
-    Phase 54.6.296 — also ensures the same payload indexes that
-    ``storage/qdrant.py::init_collections`` creates on the prod
-    papers collection.  Without these, filter pushdown on the
-    dense leg (``document_id``, ``year``, ``section_type``,
-    ``domains``, ``journal``, ``node_level``) degrades to a full
-    scan — the problem that motivated this phase (sidecars created
-    pre-54.6.296 had zero payload indexes).  Calls are idempotent
-    per the Qdrant semantics (``create_payload_index`` on an
-    existing index is a no-op).
-    """
-    from qdrant_client.models import (
-        Distance, VectorParams, PayloadSchemaType,
-        HnswConfigDiff, ScalarQuantization, ScalarQuantizationConfig,
-        ScalarType,
-    )
-    coll = _sidecar_collection_name()
-    if not qdrant_client.collection_exists(coll):
-        dim = int(getattr(settings, "dense_embedder_dim", 2560))
-        # Phase 54.6.299 — apply the same HNSW + quantization tuning
-        # as the prod papers collection (see init_collections in
-        # storage/qdrant.py).  Pre-54.6.299 sidecars took Qdrant
-        # defaults (m=16, ef_construct=100, no quantization) which
-        # hurt dense-leg recall vs the tuned prod collection.  Since
-        # the sidecar carries the same number of points as prod, it
-        # should share the same tuning.
-        hnsw_cfg = HnswConfigDiff(
-            m=settings.qdrant_hnsw_m,
-            ef_construct=settings.qdrant_hnsw_ef_construct,
-        )
-        quant_cfg = (
-            ScalarQuantization(
-                scalar=ScalarQuantizationConfig(
-                    type=ScalarType.INT8, always_ram=True,
-                ),
-            )
-            if settings.qdrant_scalar_quantization else None
-        )
-        qdrant_client.create_collection(
-            collection_name=coll,
-            vectors_config={
-                "dense": VectorParams(
-                    size=dim, distance=Distance.COSINE,
-                    hnsw_config=hnsw_cfg,
-                ),
-            },
-            quantization_config=quant_cfg,
-        )
-    # Ensure payload indexes — must mirror init_collections() for the
-    # prod papers collection so retrieval filters hit indexes on both
-    # sides.  Idempotent: create_payload_index raises on duplicate,
-    # which we swallow.
-    _expected_indexes = [
-        ("document_id", PayloadSchemaType.KEYWORD),
-        ("section_type", PayloadSchemaType.KEYWORD),
-        ("year", PayloadSchemaType.INTEGER),
-        ("domains", PayloadSchemaType.KEYWORD),
-        ("journal", PayloadSchemaType.KEYWORD),
-        ("node_level", PayloadSchemaType.INTEGER),
-    ]
-    for field, schema in _expected_indexes:
-        try:
-            qdrant_client.create_payload_index(coll, field, schema)
-        except Exception as exc:
-            msg = str(exc).lower()
-            if "already exists" in msg or "already created" in msg:
-                continue
-            logger.debug(
-                "sidecar payload index %s failed: %s", field, exc,
-            )
-    return coll
-
-
 def embed_chunks(
     chunks: list[Chunk],
     document_id: UUID,
@@ -433,23 +181,11 @@ def embed_chunks(
     """
     Embed a list of chunks and upsert them into the 'papers' collection.
     Returns list of Qdrant point UUIDs (same order as input chunks).
-
-    Phase 54.6.279 — when ``settings.dense_embedder_model`` is set
-    to a model other than bge-m3, ingestion also encodes every chunk
-    with the dense embedder (Qwen3-Embedding-4B by default) and
-    upserts to the configured sidecar collection. The prod papers
-    collection still carries bge-m3's sparse vectors; its dense
-    vectors are left populated but ignored at query time when the
-    split is active.
     """
     if not chunks:
         return []
 
     model = _get_model()
-    dense_model = _get_dense_embedder()  # None when split inactive
-    sidecar_coll = (
-        _ensure_sidecar_exists(qdrant_client) if dense_model else None
-    )
     texts = [c.content for c in chunks]
     point_ids: list[UUID] = []
 
@@ -470,21 +206,7 @@ def embed_chunks(
         dense_vecs = output["dense_vecs"]
         sparse_vecs = output["lexical_weights"]
 
-        # Phase 54.6.279 — parallel dense-embed pass when the split
-        # is active. Documents are encoded WITHOUT the query-side
-        # instruction prefix (HF model card: queries get "Instruct:
-        # … Query: …", documents get raw text).
-        sidecar_dense_vecs = None
-        if dense_model is not None:
-            sidecar_batch = min(len(batch_texts), 8)  # smaller batch for Qwen3-4B
-            sidecar_dense_vecs = dense_model.encode(
-                batch_texts, batch_size=sidecar_batch,
-                convert_to_numpy=True, normalize_embeddings=True,
-                show_progress_bar=False,
-            )
-
         points = []
-        sidecar_points = []
         for i, chunk in enumerate(batch_chunks):
             point_id = uuid4()
             point_ids.append(point_id)
@@ -509,25 +231,7 @@ def embed_chunks(
                 payload=payload,
             ))
 
-            if sidecar_dense_vecs is not None:
-                # Full payload copied to sidecar so hybrid_search's
-                # dense leg honours filters (year/domain/section_type
-                # etc.) identically on the sidecar collection. Storage
-                # overhead is small — payload is shared text/numbers,
-                # ~200 bytes per point × 31k points ≈ 6 MB for the
-                # current corpus, negligible next to the 2560-dim
-                # vectors themselves (~40 MB in float32).
-                sidecar_points.append(PointStruct(
-                    id=str(point_id),
-                    vector={"dense": sidecar_dense_vecs[i].tolist()},
-                    payload=payload,
-                ))
-
         qdrant_client.upsert(collection_name=PAPERS_COLLECTION, points=points)
-        if sidecar_points:
-            qdrant_client.upsert(
-                collection_name=sidecar_coll, points=sidecar_points,
-            )
 
     return point_ids
 

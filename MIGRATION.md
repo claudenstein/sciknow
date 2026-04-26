@@ -44,7 +44,6 @@ Update muscle memory now.
 | `sciknow db dashboard` | `sciknow library dashboard` |                                 |
 | `sciknow db drift` | `sciknow library drift` |                                          |
 | `sciknow db provenance` | `sciknow library provenance` |                              |
-| `sciknow db audit-sidecar` | `sciknow library audit-sidecar` |                       |
 | **(new)** | `sciknow library migrate` | shorthand for `uv run alembic upgrade head` |
 | **(new)** | `sciknow library validate` | shorthand for `alembic check`              |
 | **(new)** | `sciknow library snapshot` | stable name for the backup tarball         |
@@ -62,7 +61,6 @@ Update muscle memory now.
 | `sciknow db link-citations` | `sciknow corpus link-citations` |                     |
 | `sciknow db classify-papers` | `sciknow corpus classify-papers` |                   |
 | `sciknow db flag-self-citations` | `sciknow corpus flag-self-citations` |           |
-| `sciknow db sync-dense-sidecar` | `sciknow corpus sync-dense-sidecar` |              |
 | `sciknow db expand-author` | `sciknow corpus expand-author` |                       |
 | `sciknow db expand-author-refs` | `sciknow corpus expand-author-refs` |            |
 | `sciknow db expand-cites` | `sciknow corpus expand-cites` |                         |
@@ -177,7 +175,7 @@ branch:
 - **Phase A** (infer substrate): ✅ shipped (`22db97d`) + doctor probes the writer/embedder/reranker via `_ping_infer_role` (`cabdd3f`); CLI + web service-pill chips render `PQWER` on v2 / `PQO` on v1 fallback (`18d83a2`); monitor snapshot carries `infer_substrate` and the dashboard shows per-role port + model + health (`f461089`, `9941b0b`).
 - **Phase B** (embedder + reranker on llama-server): ✅ shipped + exit criteria met (`2058d1e`, `b6b91ad`, `e9878c6` — FlagEmbedding/sentence-transformers/ollama dropped from direct deps)
 - **Phase C** (autowrite simplification): ✅ shipped — events.py + is_active migration (`8437db2`); `core/autowrite.py` re-export shim landed first (`499e6e8`); the engine bodies (`autowrite_section_stream`, `_autowrite_section_body`, `autowrite_chapter_all_sections_stream`) then moved out of `book_ops.py` (this commit). book_ops.py: 6.7 kLOC → 5.0 kLOC (-26%). The shim in book_ops.py keeps `book_ops.X` references working — `inspect.getsource` resolves through to the new file, so the engine contract tests (l1_phase54_6_320_autowrite_vram_eviction, etc.) keep passing.
-- **Phase D** (retrieval cleanup): ✅ functionally shipped (`b6b91ad`) — single canonical embedder enforced, sidecar collection bypassed at query time + dropped by `library upgrade-v1`. Legacy code paths still present behind toggles for rollback.
+- **Phase D** (retrieval cleanup): ✅ shipped (`b6b91ad`) + cleanup landed in v2.1 — single canonical embedder; the dual-embedder sidecar pathway (config keys, `_get_dense_embedder` / `_sidecar_collection_name` / `audit-sidecar` / `sync-dense-sidecar`) is fully removed from the active code base. `library upgrade-v1` still drops legacy sidecar collections from disk for v1 → v2.1 users.
 - **Phase E** (web rebuild): ✅ shipped — main CSS extracted to `static/css/sciknow.css` (`8710b7d`); 16,394-line inline `<script>` extracted to `static/js/sciknow.js` (`74c1fc7`); 3,847-line TEMPLATE extracted to `web/templates/book_reader.html` (`691f934`); route split into 25 resource modules under `web/routes/` — `projects`, `feedback`, `bibliography`, `viz`, `jobs`, `backups`, `ledger`, `pending`, `reconciliations`, `system`, `tools`, `autowrite`, `export`, `catalog`, `snapshots`, `wiki`, `chapters`, `book`, `draft`, `visuals`, `corpus`, `draft_actions` (`d2c16a8`), `pages` (`8428d20`), `comments` + `misc`. Pattern: lazy `from sciknow.web import app as _app` for cross-module helpers + re-export at the bottom of app.py for `getattr`/`inspect.getsource` test coverage. `web/app.py`: **29,074 → 2,401 lines (-91.7%)**. Only the root `/` index, the `/debug/equations` diagnostic, the TEMPLATE asset load + the helper functions remain in app.py.
 - **Phase F** (CLI reorg): ✅ shipped — `library` + `corpus` subapps live with deprecation shim (`027d09b`); per-verb deprecation hint maps each `sciknow db <verb>` to its v2 home (`4bdb4dd`); alert action map points at v2 verbs (`9941b0b`); MIGRATION.md (this file) covers every verb; the L1 + alert audit is deferred to v2.1.
 - **Phase G** (v1 import + cutover): ✅ shipped — in-place migrator `library upgrade-v1` (`e9878c6`); cross-project `project import-v1 <src> --as <dst>` (this commit) handles the multi-tenant case; README quick-start + 4 user-visible JS hints flipped to v2 verbs (`7810592`, `96c4916`).

@@ -13156,18 +13156,15 @@ def l1_phase54_6_301_retrieval_latency_buffer() -> None:
 
 
 def l1_phase54_6_299_hnsw_drift_check() -> None:
-    """Phase 54.6.299 — Qdrant HNSW / quantization drift check +
-    tuned sidecar creation.
+    """Phase 54.6.299 — Qdrant HNSW / quantization drift check.
 
     Guards:
 
       A) `_qdrant_hnsw_drift` helper exists with the expected / per-
          collection / drift_count return shape.
-      B) `_ensure_sidecar_exists` passes HNSW + quantization tuning
-         so new sidecars match the prod papers collection.
-      C) `_build_alerts` emits `hnsw_drift`.
-      D) CLI renders 'hnsw tuning' row.
-      E) Web qdrant table renders the HNSW column.
+      B) `_build_alerts` emits `hnsw_drift`.
+      C) CLI renders 'hnsw tuning' row.
+      D) Web qdrant table renders the HNSW column.
     """
     import inspect as _inspect
     from sciknow.core import monitor as _mon
@@ -13184,19 +13181,6 @@ def l1_phase54_6_299_hnsw_drift_check() -> None:
         assert key in src, (
             f"54.6.299 helper must populate {key!r}"
         )
-
-    from sciknow.ingestion import embedder as _emb
-    ensure_src = _inspect.getsource(_emb._ensure_sidecar_exists)
-    assert "HnswConfigDiff" in ensure_src, (
-        "54.6.299 _ensure_sidecar_exists must pass HnswConfigDiff"
-    )
-    assert "ScalarQuantization" in ensure_src, (
-        "54.6.299 _ensure_sidecar_exists must pass ScalarQuantization "
-        "when settings.qdrant_scalar_quantization"
-    )
-    assert "qdrant_hnsw_m" in ensure_src, (
-        "54.6.299 sidecar must read qdrant_hnsw_m from settings"
-    )
 
     alerts_src = _inspect.getsource(_mon._build_alerts)
     assert "hnsw_drift" in alerts_src, (
@@ -13341,15 +13325,10 @@ def l1_phase54_6_296_payload_index_health() -> None:
 
       A) `_qdrant_payload_indexes` helper exists returning per-
          collection expected/present/missing/extra lists.
-      B) `_ensure_sidecar_exists` creates all six expected payload
-         indexes (document_id / section_type / year / domains /
-         journal / node_level) — this is the fix for the bug where
-         sidecars had zero indexes and filter pushdown fell back
-         to a full scan.
-      C) `_build_alerts` emits `payload_index_missing` when any
+      B) `_build_alerts` emits `payload_index_missing` when any
          expected index is absent.
-      D) CLI renders a "payload indexes" row in the qdrant panel.
-      E) Web modal renders an Indexes column in the qdrant table.
+      C) CLI renders a "payload indexes" row in the qdrant panel.
+      D) Web modal renders an Indexes column in the qdrant table.
     """
     import inspect as _inspect
     from sciknow.core import monitor as _mon
@@ -13362,20 +13341,6 @@ def l1_phase54_6_296_payload_index_health() -> None:
         assert key in src, (
             f"54.6.296 helper must populate {key!r}"
         )
-
-    from sciknow.ingestion import embedder as _emb
-    ensure_src = _inspect.getsource(_emb._ensure_sidecar_exists)
-    for field in (
-        "document_id", "section_type", "year",
-        "domains", "journal", "node_level",
-    ):
-        assert f'"{field}"' in ensure_src, (
-            f"54.6.296 _ensure_sidecar_exists must create payload "
-            f"index for {field!r}"
-        )
-    assert "create_payload_index" in ensure_src, (
-        "54.6.296 sidecar must create payload indexes"
-    )
 
     alerts_src = _inspect.getsource(_mon._build_alerts)
     assert "payload_index_missing" in alerts_src, (
@@ -13398,42 +13363,6 @@ def l1_phase54_6_296_payload_index_health() -> None:
     )
 
 
-def l1_phase54_6_295_sidecar_deep_audit() -> None:
-    """Phase 54.6.295 — deep audit helper + --deep CLI flag.
-
-    Guards:
-
-      A) `_sidecar_deep_audit` exists with the documented return keys.
-      B) CLI exposes `--deep` + `--uuid-sample` on audit-sidecar.
-      C) CLI folds deep results into the exit-code logic.
-    """
-    import inspect as _inspect
-    from sciknow.core import monitor as _mon
-
-    assert hasattr(_mon, "_sidecar_deep_audit"), (
-        "54.6.295 _sidecar_deep_audit helper must exist"
-    )
-    src = _inspect.getsource(_mon._sidecar_deep_audit)
-    for key in (
-        "uuid_sample_checked", "uuid_mismatched", "uuid_partial",
-        "payload_broken", "payload_keys_checked",
-        "sidecar_dim_values", "sidecar_dim_sample",
-        "stamp_drift_count", "stamp_breakdown",
-        "untagged_prod", "untagged_raptor", "untagged_stale",
-    ):
-        assert key in src, (
-            f"54.6.295 deep audit must populate {key!r}"
-        )
-
-    from sciknow.cli import db as _db_cli
-    cli_src = _inspect.getsource(_db_cli.audit_sidecar_cmd)
-    assert "--deep" in cli_src, "54.6.295 CLI must expose --deep"
-    assert "--uuid-sample" in cli_src, (
-        "54.6.295 CLI must expose --uuid-sample for deep mode"
-    )
-    assert "_sidecar_deep_audit" in cli_src, (
-        "54.6.295 CLI must call the deep audit helper"
-    )
 
 
 def l1_phase54_6_294_slow_docs_leaderboard() -> None:
@@ -13483,115 +13412,8 @@ def l1_phase54_6_294_slow_docs_leaderboard() -> None:
     )
 
 
-def l1_phase54_6_293_sidecar_audit_in_monitor() -> None:
-    """Phase 54.6.293 — cached sidecar integrity audit in the monitor
-    snapshot + dashboard panels + sidecar_drift alert.
-
-    Guards:
-
-      A) `_sidecar_audit_cached` helper exists with TTL-based cache
-         and ``age_s`` / ``from_cache`` metadata.
-      B) collect_monitor_snapshot exposes `sidecar_audit`.
-      C) `_build_alerts` emits sidecar_drift when critical buckets
-         are non-zero.
-      D) CLI renders the `sidecar N/N ✓` row in the corpus panel.
-      E) Web renderMonitor renders a `Sidecar integrity` heading
-         + drift counts.
-    """
-    import inspect as _inspect
-    from sciknow.core import monitor as _mon
-
-    assert hasattr(_mon, "_sidecar_audit_cached"), (
-        "54.6.293 _sidecar_audit_cached helper must exist"
-    )
-    src = _inspect.getsource(_mon._sidecar_audit_cached)
-    assert "_SIDECAR_AUDIT_CACHE" in src or "SIDECAR_AUDIT" in src, (
-        "54.6.293 cached helper must use a module-level cache"
-    )
-    assert "age_s" in src and "from_cache" in src, (
-        "54.6.293 cached helper must stamp age_s + from_cache"
-    )
-    assert "_SIDECAR_AUDIT_TTL_S" in _inspect.getsource(_mon) or \
-           "TTL" in src, (
-        "54.6.293 cache must have a TTL constant"
-    )
-
-    snap_src = _inspect.getsource(_mon.collect_monitor_snapshot)
-    assert '"sidecar_audit"' in snap_src, (
-        "54.6.293 snapshot must expose sidecar_audit"
-    )
-    assert "_sidecar_audit_cached" in snap_src, (
-        "54.6.293 snapshot must call the cached helper"
-    )
-
-    alerts_src = _inspect.getsource(_mon._build_alerts)
-    assert "sidecar_drift" in alerts_src, (
-        "54.6.293 _build_alerts must emit sidecar_drift"
-    )
-
-    from sciknow.cli import db as _db_cli
-    cli_src = _inspect.getsource(_db_cli._build_monitor_layout)
-    assert "sidecar_audit" in cli_src, (
-        "54.6.293 CLI must read snap['sidecar_audit']"
-    )
-
-    from sciknow.testing.helpers import web_app_full_source
-    web_src = web_app_full_source()
-    assert "snap.sidecar_audit" in web_src, (
-        "54.6.293 web must read snap.sidecar_audit"
-    )
-    assert "Sidecar integrity" in web_src, (
-        "54.6.293 web must render a 'Sidecar integrity' heading"
-    )
 
 
-def l1_phase54_6_292_sidecar_audit_cli() -> None:
-    """Phase 54.6.292 — per-document sidecar integrity audit + CLI.
-
-    Guards:
-
-      A) `_sidecar_integrity_audit` helper exists with the documented
-         return keys.
-      B) CLI registers `audit-sidecar` command (hyphenated name).
-      C) CLI emits --json, raises typer.Exit(1) on critical
-         mismatches, and has a --fix-orphans option.
-    """
-    import inspect as _inspect
-    from sciknow.core import monitor as _mon
-
-    assert hasattr(_mon, "_sidecar_integrity_audit"), (
-        "54.6.292 _sidecar_integrity_audit helper must exist"
-    )
-    src = _inspect.getsource(_mon._sidecar_integrity_audit)
-    for key in (
-        "n_docs", "db_chunks", "prod_total", "sidecar_total",
-        "untagged_prod", "healthy",
-        "sidecar_missing", "sidecar_partial", "sidecar_orphan",
-        "prod_missing", "prod_partial", "prod_orphan",
-        "problems",
-    ):
-        assert key in src, (
-            f"54.6.292 audit helper must populate {key!r}"
-        )
-    assert "dense_embedder_model" in src, (
-        "54.6.292 audit must early-out when dual-embedder not active"
-    )
-
-    from sciknow.cli import db as _db_cli
-    assert hasattr(_db_cli, "audit_sidecar_cmd"), (
-        "54.6.292 CLI must register an audit-sidecar command"
-    )
-    cli_src = _inspect.getsource(_db_cli.audit_sidecar_cmd)
-    assert '@app.command("audit-sidecar")' in _inspect.getsource(_db_cli), (
-        "54.6.292 CLI must use hyphenated name audit-sidecar"
-    )
-    assert '--json' in cli_src, "54.6.292 must support --json"
-    assert '--fix-orphans' in cli_src, (
-        "54.6.292 must expose --fix-orphans"
-    )
-    assert "typer.Exit(1)" in cli_src, (
-        "54.6.292 must exit 1 on critical mismatches for pipelining"
-    )
 
 
 def l1_phase54_6_291_preflight_event_history() -> None:
@@ -13948,39 +13770,6 @@ def l1_phase54_6_286_vram_headroom_watchdog() -> None:
     )
 
 
-def l1_phase54_6_285_sidecar_sweep_on_force_reingest() -> None:
-    """Phase 54.6.285 — `--force` re-ingest must sweep the dual-embedder
-    sidecar collection along with the prod papers collection.
-
-    Without this, sidecar accumulates stale points on every --force
-    cycle (found during the 54.6.279 end-to-end ingestion verification:
-    a 16-chunk doc ended up with 16 prod + 32 sidecar points after one
-    --force, because the delete path only touched prod).
-
-    Guards:
-
-      A) `_delete_qdrant_vectors` branches on `settings.dense_embedder_model`
-         to invoke the sidecar sweep.
-      B) Uses `_sidecar_collection_name` (shared helper) to resolve the
-         sidecar collection name, keeping ingest + retrieval aligned.
-      C) Swallows exceptions so best-effort cleanup doesn't block the
-         re-ingest when the sidecar doesn't exist yet.
-    """
-    import inspect as _inspect
-    from sciknow.ingestion import pipeline as _pipe
-
-    src = _inspect.getsource(_pipe._delete_qdrant_vectors)
-    assert "dense_embedder_model" in src, (
-        "54.6.285 _delete_qdrant_vectors must branch on dense_embedder_model"
-    )
-    assert "_sidecar_collection_name" in src, (
-        "54.6.285 sidecar sweep must use the shared _sidecar_collection_name "
-        "helper so ingest + retrieval resolve the same collection"
-    )
-    assert "collection_exists" in src, (
-        "54.6.285 sidecar sweep must guard on collection_exists so the "
-        "first ingest on a fresh install doesn't error"
-    )
 
 
 def l1_phase54_6_284_retraction_detail() -> None:
@@ -18605,62 +18394,6 @@ def l1_v2_no_unguarded_ollama_imports() -> None:
     )
 
 
-def l1_v2_dual_embedder_deprecation_warning() -> None:
-    """v2 Phase D — Settings emits a deprecation warning when the
-    dual-embedder split (DENSE_EMBEDDER_MODEL) is still configured.
-
-    The legacy v1 sidecar pathway is kept for one release as a
-    rollback escape hatch. v2.1 will remove it; this warning gives
-    operators time to migrate via `sciknow library upgrade-v1` and
-    drop the env keys.
-
-    Guards: source-grep the validator + verify the warning fires on
-    a non-default `dense_embedder_model` value.
-    """
-    import inspect
-    import logging
-    from sciknow.config import Settings
-
-    src = inspect.getsource(Settings)
-    assert "_warn_dual_embedder_deprecated" in src, (
-        "v2 Phase D — Settings must define a model_validator "
-        "_warn_dual_embedder_deprecated"
-    )
-    assert "removed in v2.1" in src, (
-        "validator message must call out the v2.1 removal"
-    )
-
-    # Synthetic: construct a fresh Settings with the dual-embedder
-    # split active and confirm the warning fires.
-    import os
-    from contextlib import contextmanager
-
-    @contextmanager
-    def _capture_warns():
-        rec = []
-        old = logging.getLogger("sciknow.config").handlers
-        h = logging.Handler()
-        h.emit = lambda r: rec.append(r.getMessage())
-        logging.getLogger("sciknow.config").addHandler(h)
-        try:
-            yield rec
-        finally:
-            logging.getLogger("sciknow.config").removeHandler(h)
-
-    prev = os.environ.get("DENSE_EMBEDDER_MODEL")
-    os.environ["DENSE_EMBEDDER_MODEL"] = "Qwen/Qwen3-Embedding-4B"
-    try:
-        with _capture_warns() as messages:
-            Settings()  # re-construct → triggers validator
-        assert any("dual-embedder" in m for m in messages), (
-            f"validator must warn on DENSE_EMBEDDER_MODEL set; "
-            f"captured: {messages}"
-        )
-    finally:
-        if prev is None:
-            os.environ.pop("DENSE_EMBEDDER_MODEL", None)
-        else:
-            os.environ["DENSE_EMBEDDER_MODEL"] = prev
 
 
 def l1_v2_route_split_modules_loaded() -> None:
@@ -19260,17 +18993,13 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_282_section_coverage,
     l1_phase54_6_283_llm_usage_heatmap,
     l1_phase54_6_284_retraction_detail,
-    l1_phase54_6_285_sidecar_sweep_on_force_reingest,
     l1_phase54_6_286_vram_headroom_watchdog,
     l1_phase54_6_287_section_coverage_by_backend,
     l1_phase54_6_288_stage_timing_regression,
     l1_phase54_6_289_model_swap_counter,
     l1_phase54_6_290_vram_budget_preflight,
     l1_phase54_6_291_preflight_event_history,
-    l1_phase54_6_292_sidecar_audit_cli,
-    l1_phase54_6_293_sidecar_audit_in_monitor,
     l1_phase54_6_294_slow_docs_leaderboard,
-    l1_phase54_6_295_sidecar_deep_audit,
     l1_phase54_6_296_payload_index_health,
     l1_phase54_6_297_book_outline_model,
     l1_phase54_6_298_enrichment_coverage,
@@ -19327,9 +19056,6 @@ L1_TESTS: list[Callable] = [
     # v2 Phase E — every web/routes/<resource>.py is importable, has a
     # router, and is mounted by app.include_router(...)
     l1_v2_route_split_modules_loaded,
-    # v2 Phase D — Settings warns on the dual-embedder split being
-    # active (DENSE_EMBEDDER_MODEL set); v2.1 will remove the fallback
-    l1_v2_dual_embedder_deprecation_warning,
     # v2 Phase E — every route handler's bytecode resolves all its
     # LOAD_GLOBAL names; catches missed _app prefix injections that
     # only NameError at call time

@@ -7666,8 +7666,6 @@ function renderMonitor(snap) {
   const seccov = snap.section_coverage || {};
   // Phase 54.6.287 — per-converter-backend section coverage.
   const seccovByBackend = snap.section_coverage_by_backend || [];
-  // Phase 54.6.293 — cached sidecar integrity audit.
-  const sidecarAudit = snap.sidecar_audit || {};
   // Phase 54.6.298 — per-field enrichment coverage.
   const enrichment = snap.enrichment || {};
   // Phase 54.6.294 — top-N slow ingest docs.
@@ -8305,43 +8303,6 @@ function renderMonitor(snap) {
     }
     sections.push('<h4>Section coverage</h4>'
       + headline + bar + legend + perBackend);
-  }
-
-  // Phase 54.6.293 — cached sidecar integrity banner.  Shows the
-  // 807/807 ✓ vs any drift count, plus cache age.  Silent when
-  // dual-embedder isn't configured.
-  if (sidecarAudit && sidecarAudit.enabled && !sidecarAudit.error) {
-    const n = sidecarAudit.n_docs || 0;
-    const healthy = sidecarAudit.healthy || 0;
-    const critical =
-      (sidecarAudit.sidecar_missing || 0)
-      + (sidecarAudit.sidecar_partial || 0)
-      + (sidecarAudit.sidecar_orphan || 0)
-      + (sidecarAudit.prod_missing || 0)
-      + (sidecarAudit.prod_partial || 0);
-    const age = sidecarAudit.age_s || 0;
-    const ageStr = age < 60 ? age.toFixed(0) + ' s'
-      : (age / 60).toFixed(1) + ' min';
-    const col = critical === 0 ? '#080' : '#c33';
-    const icon = critical === 0 ? '✓' : '✗';
-    let html = '<h4>Sidecar integrity</h4>'
-      + '<div style="display:flex;gap:2em;flex-wrap:wrap;padding:0.5em 0.75em;'
-      + 'background:var(--bg-alt, #f5f5f5);border-radius:4px;margin-bottom:0.5em;">'
-      + '<div><strong>Status</strong> '
-      + '<span style="color:' + col + ';font-size:1.1em;font-weight:bold;">'
-      + icon + ' ' + _fmtNum(healthy) + '/' + _fmtNum(n) + '</span></div>'
-      + '<div><strong>Missing</strong>: ' + (sidecarAudit.sidecar_missing || 0) + '</div>'
-      + '<div><strong>Partial</strong>: ' + (sidecarAudit.sidecar_partial || 0) + '</div>'
-      + '<div><strong>Orphan</strong>: ' + (sidecarAudit.sidecar_orphan || 0) + '</div>'
-      + '<div><strong>DB / prod / sidecar</strong>: '
-      + _fmtNum(sidecarAudit.db_chunks || 0) + ' / '
-      + _fmtNum(sidecarAudit.prod_total || 0) + ' / '
-      + _fmtNum(sidecarAudit.sidecar_total || 0) + '</div>'
-      + '<div class="u-muted" style="margin-left:auto;">cached · '
-      + _escHTML(ageStr) + ' old · '
-      + '<code>sciknow library audit-sidecar</code></div>'
-      + '</div>';
-    sections.push(html);
   }
 
   // Phase 54.6.280 — citation graph connectivity. Three compact

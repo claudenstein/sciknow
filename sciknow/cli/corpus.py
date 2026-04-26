@@ -2,8 +2,8 @@
 
 Spec §5.1: corpus owns ``ingest``, ``expand``, ``enrich``, ``cluster``
 plus the operational siblings (refresh-metadata, repair, dedup,
-reclassify-sections, link-citations, cleanup-downloads, sync-dense-
-sidecar, classify-papers, all expand-* family verbs).
+reclassify-sections, link-citations, cleanup-downloads, classify-papers,
+all expand-* family verbs).
 
 Implementations live in ``sciknow.cli.db`` / ``sciknow.cli.ingest`` /
 ``sciknow.cli.catalog``. This module is the v2 namespace; ``cli/main.py``
@@ -46,7 +46,6 @@ app.command(name="reclassify-sections")(_db.reclassify_sections)
 app.command(name="link-citations")(_db.link_citations)
 app.command(name="classify-papers")(_db.classify_papers_cmd)
 app.command(name="flag-self-citations")(_db.flag_self_citations_cmd)
-app.command(name="sync-dense-sidecar")(_db.sync_dense_sidecar_cmd)
 
 # ── expand family ───────────────────────────────────────────────────────
 app.command(name="expand-author")(_db.expand_author)

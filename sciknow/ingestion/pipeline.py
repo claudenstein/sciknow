@@ -73,21 +73,6 @@ def _delete_qdrant_vectors(qdrant, document_id: str) -> None:
     except Exception:
         pass  # collection may not exist yet on first run
 
-    # Sidecar sweep (Phase 54.6.285).  Lazy-imported to keep the
-    # embedder module off the hot path when the split is inactive.
-    try:
-        from sciknow.config import settings
-        if getattr(settings, "dense_embedder_model", None):
-            from sciknow.ingestion.embedder import _sidecar_collection_name
-            sidecar = _sidecar_collection_name()
-            if qdrant.collection_exists(sidecar):
-                qdrant.delete(
-                    collection_name=sidecar,
-                    points_selector=point_filter,
-                )
-    except Exception:
-        pass  # best-effort; never block a re-ingest on sidecar cleanup
-
 
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()

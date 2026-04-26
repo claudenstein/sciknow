@@ -2,8 +2,8 @@
 
 Spec §5.1: this is the v2 home for `init`, `reset`, `stats`, `migrate`,
 `validate`, `snapshot` (and the operational helpers backup / restore /
-doctor / monitor / dashboard / failures / drift / provenance /
-audit-sidecar that live alongside them).
+doctor / monitor / dashboard / failures / drift / provenance that
+live alongside them).
 
 The implementations remain in ``sciknow.cli.db`` for now; this module
 re-exports the command callables under the renamed subapp so the v2
@@ -46,7 +46,6 @@ app.command(name="monitor")(_db.monitor)
 app.command(name="dashboard")(_db.dashboard)
 
 # ── audits / drift detection ────────────────────────────────────────────
-app.command(name="audit-sidecar")(_db.audit_sidecar_cmd)
 app.command(name="drift")(_db.drift_cmd)
 app.command(name="provenance")(_db.provenance_cmd)
 

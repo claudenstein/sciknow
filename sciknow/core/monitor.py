@@ -735,57 +735,14 @@ def _build_llm_section(
     }
 
 
-# Phase 54.6.293 — time-based cache for the sidecar audit so the
-# monitor can surface it on every snapshot without paying the
-# ~0.6 s Qdrant scroll each time.  Module-level, per-process —
-# same lifetime convention as the other ring buffers in this file.
-_SIDECAR_AUDIT_CACHE: dict = {"at": 0.0, "result": None}
-_SIDECAR_AUDIT_TTL_S: float = 300.0   # 5 min — audit is read-only,
-                                      # refreshes on the N-th snapshot
-                                      # after TTL expiry
-
-
-def _sidecar_audit_cached(session) -> dict:
-    """Cached wrapper around ``_sidecar_integrity_audit``.
-
-    Returns the last computed result when age < TTL.  First call
-    (or post-TTL call) runs the audit inline and caches.  The
-    result dict carries an ``age_s`` key so renderers can show
-    "audit 42 s old" vs "audit 4 min old".
-
-    Safe during active ingestion — the audit is read-only.
-    """
-    import time as _time
-    now = _time.monotonic()
-    cached = _SIDECAR_AUDIT_CACHE.get("result")
-    cached_at = _SIDECAR_AUDIT_CACHE.get("at") or 0.0
-    if cached is not None and (now - cached_at) < _SIDECAR_AUDIT_TTL_S:
-        out = dict(cached)
-        out["age_s"] = round(now - cached_at, 1)
-        out["from_cache"] = True
-        return out
-    # Fresh audit.
-    try:
-        fresh = _sidecar_integrity_audit(session)
-    except Exception as exc:
-        logger.warning("sidecar audit failed: %s", exc)
-        fresh = {"enabled": True, "error": str(exc)}
-    _SIDECAR_AUDIT_CACHE["result"] = fresh
-    _SIDECAR_AUDIT_CACHE["at"] = now
-    out = dict(fresh)
-    out["age_s"] = 0.0
-    out["from_cache"] = False
-    return out
-
-
 def _qdrant_hnsw_drift() -> dict:
     """Phase 54.6.299 — compare each collection's actual HNSW +
     quantization config against ``settings``.
 
-    Only **papers-class** collections (the prod papers + any dual-
-    embedder sidecar ``<prefix>_ab_..._papers``) are checked against
-    the tuned ``QDRANT_HNSW_M`` / ``QDRANT_HNSW_EF_CONSTRUCT`` /
-    ``QDRANT_SCALAR_QUANTIZATION`` env values.  Small collections
+    Only **papers-class** collections (the prod papers collection)
+    are checked against the tuned ``QDRANT_HNSW_M`` /
+    ``QDRANT_HNSW_EF_CONSTRUCT`` / ``QDRANT_SCALAR_QUANTIZATION``
+    env values.  Small collections
     (abstracts / wiki / visuals) legitimately use Qdrant's defaults
     (m=16, ef_construct=100, no quantization), so they get a
     reduced expectation set and never flag drift for those fields.
@@ -842,9 +799,6 @@ def _qdrant_hnsw_drift() -> dict:
     drift_count = 0
     for col in collections:
         name = col.name
-        # "papers-class" = anything ending in "_papers", which
-        # covers both the prod collection and dual-embedder
-        # sidecars (<prefix>_ab_<slug>_papers).
         kind = "papers" if name.endswith("_papers") else "small"
         try:
             info = client.get_collection(name)
@@ -909,11 +863,10 @@ def _qdrant_payload_indexes() -> dict:
     """Phase 54.6.296 — verify every Qdrant collection carries its
     expected payload indexes.
 
-    Expected index sets mirror ``storage/qdrant.py::init_collections``
-    and ``ingestion/embedder.py::_ensure_sidecar_exists`` (54.6.296
-    fix).  Missing indexes silently degrade retrieval — filter
-    pushdown on the dense leg falls back to a full scan, which on
-    a 30k-point collection is ~100× slower than an indexed lookup.
+    Expected index sets mirror ``storage/qdrant.py::init_collections``.
+    Missing indexes silently degrade retrieval — filter pushdown on
+    the dense leg falls back to a full scan, which on a 30k-point
+    collection is ~100× slower than an indexed lookup.
 
     Returns::
 
@@ -965,11 +918,6 @@ def _qdrant_payload_indexes() -> dict:
             for suffix, idxs in expected_by_suffix.items():
                 if name == f"{prefix}_{suffix}":
                     return idxs
-        # Dual-embedder sidecar: name format
-        # ``<prefix>_ab_<slug>_papers`` — same indexes as the prod
-        # papers collection because retrieval filters apply to both.
-        if name.endswith("_papers") and "_ab_" in name:
-            return expected_by_suffix["papers"]
         # Generic match when prefix resolution fails (e.g. multi-
         # project install looking at another project's collections).
         for suffix, idxs in expected_by_suffix.items():
@@ -1001,414 +949,6 @@ def _qdrant_payload_indexes() -> dict:
         missing_total += len(missing)
 
     return {"collections": out_colls, "missing_total": missing_total}
-
-
-def _sidecar_deep_audit(session, *, uuid_sample: int = 0) -> dict:
-    """Phase 54.6.295 — deeper audit beyond chunk-count parity.
-
-    Extends ``_sidecar_integrity_audit`` with checks the aggregate
-    count-match can't catch:
-
-      * UUID identity per doc.  Same counts on both sides is
-        necessary but not sufficient — a broken write path could
-        leave identical-size point sets with *different* UUIDs,
-        which would mean retrieval picks up sidecar dense vectors
-        paired with the wrong prod payload.
-      * Sidecar payload completeness (document_id + chunk_id +
-        section_type must be present; their absence would break
-        filter pushdown).
-      * Sidecar vector dim sample (confirms the stored vectors
-        match ``settings.dense_embedder_dim`` — a mis-encoded point
-        would pass the count check but fail at query time).
-      * ``chunks.embedding_model`` stamp drift — a change to
-        ``settings.embedding_model`` would leave older rows with
-        the wrong stamp, a silent "some chunks are stale" state.
-      * Untagged prod points classified RAPTOR vs stale.  The
-        count-based audit buckets them as ``untagged_prod`` but
-        doesn't say whether they're legitimate RAPTOR summaries
-        (``node_level`` set) or something else that needs cleanup.
-
-    ``uuid_sample=0`` = check every complete doc (slow, ~30 s on
-    807 docs).  ``uuid_sample=50`` = random 50-doc sample (~2 s).
-    Used for the CLI ``--deep`` path; the routine cached audit
-    skips this.
-
-    Returns::
-
-        {
-          "uuid_sample_checked": int,
-          "uuid_mismatched":     int,   # zero overlap (critical)
-          "uuid_partial":        int,   # partial overlap (critical)
-          "payload_broken":      int,   # sidecar points missing required key
-          "payload_keys_checked": [...],
-          "sidecar_dim_sample":  int,   # points sampled
-          "sidecar_dim_values":  [int], # observed dims (expected [2560])
-          "stamp_drift_count":   int,   # chunks where embedding_model !=
-                                        # settings.embedding_model
-          "stamp_breakdown":     [{"model": str, "n": int}],
-          "untagged_prod":       int,
-          "untagged_raptor":     int,
-          "untagged_stale":      int,   # untagged AND not RAPTOR
-          "stale_sample":        [...],
-        }
-
-    Returns ``{"enabled": False}`` when the dual-embedder isn't
-    configured.
-    """
-    from sqlalchemy import text as _text
-    from sciknow.config import settings
-    from sciknow.storage.qdrant import (
-        get_client as _get_qdrant, PAPERS_COLLECTION,
-    )
-
-    if not getattr(settings, "dense_embedder_model", None):
-        return {"enabled": False}
-
-    try:
-        from sciknow.ingestion.embedder import _sidecar_collection_name
-        sidecar_name = _sidecar_collection_name()
-    except Exception:
-        return {"enabled": True, "error": "sidecar name resolve failed"}
-
-    client = _get_qdrant()
-    try:
-        from qdrant_client.http import models as _qm
-    except Exception:
-        return {"enabled": True, "error": "qdrant_client import failed"}
-
-    out: dict = {"enabled": True}
-
-    # 1. UUID identity per doc (full or sampled).
-    try:
-        doc_rows = session.execute(_text(
-            "SELECT id FROM documents "
-            "WHERE ingestion_status = 'complete'"
-        )).fetchall()
-        doc_ids = [str(r[0]) for r in doc_rows]
-    except Exception:
-        doc_ids = []
-
-    if uuid_sample > 0 and len(doc_ids) > uuid_sample:
-        import random
-        random.seed(42)  # deterministic — same sample every run
-        to_check = random.sample(doc_ids, uuid_sample)
-    else:
-        to_check = doc_ids
-
-    def _ids_for_doc(coll: str, doc_id: str) -> set[str]:
-        ids: set[str] = set()
-        offset = None
-        filt = _qm.Filter(must=[
-            _qm.FieldCondition(
-                key="document_id",
-                match=_qm.MatchValue(value=doc_id),
-            ),
-        ])
-        while True:
-            try:
-                pts, offset = client.scroll(
-                    collection_name=coll, scroll_filter=filt,
-                    limit=256, offset=offset,
-                    with_payload=False, with_vectors=False,
-                )
-            except Exception:
-                return set()
-            ids.update(str(p.id) for p in pts)
-            if not offset:
-                break
-        return ids
-
-    mismatched = 0
-    partial = 0
-    for doc_id in to_check:
-        p_ids = _ids_for_doc(PAPERS_COLLECTION, doc_id)
-        s_ids = _ids_for_doc(sidecar_name, doc_id)
-        if p_ids == s_ids:
-            continue
-        if p_ids.isdisjoint(s_ids):
-            mismatched += 1
-        else:
-            partial += 1
-    out["uuid_sample_checked"] = len(to_check)
-    out["uuid_mismatched"] = mismatched
-    out["uuid_partial"] = partial
-
-    # 2. Sidecar payload completeness.  Single pass over the
-    # sidecar collection; ~0.5 s.
-    required_keys = ("document_id", "chunk_id", "section_type")
-    total_points = 0
-    missing_any = 0
-    offset = None
-    while True:
-        try:
-            pts, offset = client.scroll(
-                collection_name=sidecar_name, limit=5000,
-                offset=offset, with_payload=True, with_vectors=False,
-            )
-        except Exception:
-            break
-        for p in pts:
-            total_points += 1
-            pl = p.payload or {}
-            if any(pl.get(k) in (None, "") for k in required_keys):
-                missing_any += 1
-        if not offset:
-            break
-    out["payload_keys_checked"] = list(required_keys)
-    out["payload_broken"] = missing_any
-
-    # 3. Sidecar vector dim sample.
-    try:
-        pts, _ = client.scroll(
-            collection_name=sidecar_name, limit=20,
-            with_vectors=True, with_payload=False,
-        )
-    except Exception:
-        pts = []
-    dims = set()
-    for p in pts:
-        v = p.vector
-        vec = v.get("dense", v) if isinstance(v, dict) else v
-        try:
-            dims.add(len(vec))
-        except TypeError:
-            pass
-    out["sidecar_dim_sample"] = len(pts)
-    out["sidecar_dim_values"] = sorted(dims)
-
-    # 4. embedding_model stamp drift in chunks table.
-    try:
-        rows = session.execute(_text(
-            "SELECT COALESCE(embedding_model, '<null>'), COUNT(*) "
-            "FROM chunks GROUP BY embedding_model"
-        )).fetchall()
-    except Exception:
-        rows = []
-    current_model = settings.embedding_model
-    drift = 0
-    breakdown = []
-    for model, n in rows:
-        breakdown.append({"model": str(model), "n": _safe_int(n)})
-        if str(model) != current_model:
-            drift += _safe_int(n)
-    out["stamp_drift_count"] = drift
-    out["stamp_breakdown"] = breakdown
-    out["current_embedding_model"] = current_model
-
-    # 5. Untagged prod classification: RAPTOR vs stale.
-    try:
-        valid_docs = {str(r[0]) for r in session.execute(_text(
-            "SELECT id FROM documents"
-        )).fetchall()}
-    except Exception:
-        valid_docs = set()
-    untagged_count = 0
-    raptor_count = 0
-    stale_count = 0
-    stale_samples: list[dict] = []
-    offset = None
-    while True:
-        try:
-            pts, offset = client.scroll(
-                collection_name=PAPERS_COLLECTION, limit=5000,
-                offset=offset, with_payload=True, with_vectors=False,
-            )
-        except Exception:
-            break
-        for p in pts:
-            pl = p.payload or {}
-            did = pl.get("document_id") or ""
-            if did and did in valid_docs:
-                continue  # normal chunk, skip
-            untagged_count += 1
-            if pl.get("node_level") is not None:
-                raptor_count += 1
-            else:
-                stale_count += 1
-                if len(stale_samples) < 5:
-                    stale_samples.append({
-                        "point_id": str(p.id),
-                        "document_id": pl.get("document_id"),
-                        "section_type": pl.get("section_type"),
-                        "node_level": pl.get("node_level"),
-                    })
-        if not offset:
-            break
-    out["untagged_prod"] = untagged_count
-    out["untagged_raptor"] = raptor_count
-    out["untagged_stale"] = stale_count
-    out["stale_sample"] = stale_samples
-
-    return out
-
-
-def _sidecar_integrity_audit(session, *, limit_problems: int = 20) -> dict:
-    """Phase 54.6.292 — per-document integrity check across the
-    PG chunks table, the prod Qdrant collection, and the dual-
-    embedder sidecar collection.
-
-    Runs in O(N_points) time (single scroll per collection); on
-    the current 807-doc corpus this is ~0.6 s.  Not cheap enough
-    to call from every monitor snapshot, but fine for an explicit
-    ``sciknow db audit-sidecar`` command + an opt-in monitor
-    inclusion via ``--audit-sidecar``.
-
-    Returns a summary dict plus the first ``limit_problems`` rows
-    of each problem category so an operator can act on the output
-    directly::
-
-        {
-          "enabled":          bool,    # False when dual-embedder not active
-          "n_docs":           int,
-          "db_chunks":        int,
-          "prod_total":       int,
-          "sidecar_total":    int,
-          "untagged_prod":    int,     # prod points with no document_id or
-                                       # a document_id that isn't in PG
-                                       # (RAPTOR summary nodes land here)
-          "healthy":          int,     # n_chunks == prod == sidecar
-          "sidecar_missing":  int,     # chunks > 0, sidecar == 0
-          "sidecar_partial":  int,     # 0 < sidecar < chunks
-          "sidecar_orphan":   int,     # sidecar > chunks
-          "prod_missing":     int,
-          "prod_partial":     int,
-          "prod_orphan":      int,
-          "problems": {
-            "sidecar_missing": [(doc_id, chunks, prod, side), ...],
-            ...
-          },
-        }
-
-    When the dual-embedder isn't configured (no
-    ``settings.dense_embedder_model``), returns
-    ``{"enabled": False}`` and skips the Qdrant scrolls.
-    """
-    from sqlalchemy import text as _text
-    from sciknow.config import settings
-    from sciknow.storage.qdrant import (
-        get_client as _get_qdrant, PAPERS_COLLECTION,
-    )
-
-    if not getattr(settings, "dense_embedder_model", None):
-        return {"enabled": False}
-
-    try:
-        from sciknow.ingestion.embedder import _sidecar_collection_name
-        sidecar_name = _sidecar_collection_name()
-    except Exception:
-        sidecar_name = None
-
-    # 1. Per-doc chunk counts from PG.
-    try:
-        rows = session.execute(_text(
-            "SELECT d.id, COUNT(c.id) "
-            "FROM documents d "
-            "LEFT JOIN chunks c ON c.document_id = d.id "
-            "WHERE d.ingestion_status = 'complete' "
-            "GROUP BY d.id"
-        )).fetchall()
-    except Exception:
-        return {"enabled": True, "error": "pg read failed"}
-    db_chunks = {str(r[0]): _safe_int(r[1]) for r in rows}
-
-    # 2. Scroll each Qdrant collection counting points by document_id.
-    client = _get_qdrant()
-
-    def _scroll_counts(coll: str) -> tuple[dict[str, int], int]:
-        counts: dict[str, int] = {}
-        total = 0
-        offset = None
-        while True:
-            try:
-                pts, offset = client.scroll(
-                    collection_name=coll, limit=5000, offset=offset,
-                    with_payload=["document_id"], with_vectors=False,
-                )
-            except Exception:
-                return {}, 0
-            for p in pts:
-                doc = (p.payload or {}).get("document_id") or ""
-                counts[doc] = counts.get(doc, 0) + 1
-                total += 1
-            if not offset:
-                break
-        return counts, total
-
-    prod_counts, prod_total = _scroll_counts(PAPERS_COLLECTION)
-    side_counts, side_total = (
-        _scroll_counts(sidecar_name) if sidecar_name else ({}, 0)
-    )
-
-    # Untagged prod points: either no document_id (RAPTOR nodes
-    # typically land here) or tagged with an id that isn't in PG
-    # (stale leftovers).  Sum of (prod_counts[doc] for doc not in
-    # db_chunks) + prod_counts.get("", 0).
-    untagged_prod = prod_counts.get("", 0) + sum(
-        n for doc, n in prod_counts.items()
-        if doc and doc not in db_chunks
-    )
-
-    # 3. Categorise.
-    healthy = 0
-    sidecar_missing: list[tuple[str, int, int, int]] = []
-    sidecar_partial: list[tuple[str, int, int, int]] = []
-    sidecar_orphan:  list[tuple[str, int, int, int]] = []
-    prod_missing:    list[tuple[str, int, int, int]] = []
-    prod_partial:    list[tuple[str, int, int, int]] = []
-    prod_orphan:     list[tuple[str, int, int, int]] = []
-    for doc_id, n_chunks in db_chunks.items():
-        if n_chunks == 0:
-            continue
-        nprod = prod_counts.get(doc_id, 0)
-        nside = side_counts.get(doc_id, 0)
-        if nside == n_chunks and nprod == n_chunks:
-            healthy += 1
-            continue
-        if nside == 0:
-            sidecar_missing.append((doc_id, n_chunks, nprod, nside))
-        elif nside < n_chunks:
-            sidecar_partial.append((doc_id, n_chunks, nprod, nside))
-        elif nside > n_chunks:
-            sidecar_orphan.append((doc_id, n_chunks, nprod, nside))
-        if nprod == 0:
-            prod_missing.append((doc_id, n_chunks, nprod, nside))
-        elif nprod < n_chunks:
-            prod_partial.append((doc_id, n_chunks, nprod, nside))
-        elif nprod > n_chunks:
-            prod_orphan.append((doc_id, n_chunks, nprod, nside))
-
-    # Keep the first N rows of each problem bucket in the output
-    # (caller can re-run with more detail via the CLI command).
-    def _cap(rows):
-        return [
-            {"document_id": d, "chunks": c, "prod": p, "sidecar": s}
-            for (d, c, p, s) in rows[:limit_problems]
-        ]
-
-    return {
-        "enabled": True,
-        "sidecar_collection": sidecar_name,
-        "n_docs": len(db_chunks),
-        "db_chunks": sum(db_chunks.values()),
-        "prod_total": prod_total,
-        "sidecar_total": side_total,
-        "untagged_prod": untagged_prod,
-        "healthy": healthy,
-        "sidecar_missing": len(sidecar_missing),
-        "sidecar_partial": len(sidecar_partial),
-        "sidecar_orphan": len(sidecar_orphan),
-        "prod_missing": len(prod_missing),
-        "prod_partial": len(prod_partial),
-        "prod_orphan": len(prod_orphan),
-        "problems": {
-            "sidecar_missing": _cap(sidecar_missing),
-            "sidecar_partial": _cap(sidecar_partial),
-            "sidecar_orphan": _cap(sidecar_orphan),
-            "prod_missing": _cap(prod_missing),
-            "prod_partial": _cap(prod_partial),
-            "prod_orphan": _cap(prod_orphan),
-        },
-    }
 
 
 def _summarize_search_events(events: list[dict]) -> dict:
@@ -1729,10 +1269,9 @@ def _stage_timing_deltas(session, min_samples: int = 5) -> list[dict]:
 
     Compares the trailing 7 days against the preceding 7 days to
     catch silent slowdowns — e.g. "embedding p95 jumped 2.4× after
-    we flipped dense_embedder_model to Qwen3-4B".  Without this,
-    the existing `stage_timing` panel shows *current* p95 but no
-    baseline, so regressions only surface when something actually
-    breaks.
+    a model swap". Without this, the existing `stage_timing` panel
+    shows *current* p95 but no baseline, so regressions only
+    surface when something actually breaks.
 
     Returns one dict per stage::
 
@@ -2701,10 +2240,10 @@ def _build_alerts(snap: dict) -> list[dict]:
         })
 
     # Phase 54.6.299 — HNSW/quantization drift alert.  Fires info
-    # when a papers-class collection (prod papers or dual-embedder
-    # sidecar) is on defaults instead of the tuned env values.
-    # info-level because the fix (rebuild collection) is expensive
-    # and the operator may legitimately defer it.
+    # when a papers-class collection is on defaults instead of the
+    # tuned env values.  info-level because the fix (rebuild
+    # collection) is expensive and the operator may legitimately
+    # defer it.
     hnsw = snap.get("qdrant_hnsw") or {}
     drift_n = hnsw.get("drift_count", 0) or 0
     if drift_n > 0:
@@ -2764,32 +2303,6 @@ def _build_alerts(snap: dict) -> list[dict]:
                 f"{', '.join(sample.get('missing', [])[:3])}"
             ),
         })
-
-    # Phase 54.6.293 — sidecar integrity alert.  Fires warn whenever
-    # any critical bucket is non-zero (sidecar_missing, _partial,
-    # _orphan, prod_missing, prod_partial).  prod_orphan is NOT
-    # critical — RAPTOR nodes legitimately live only in prod.
-    audit = snap.get("sidecar_audit") or {}
-    if audit.get("enabled") and not audit.get("error"):
-        critical = (
-            (audit.get("sidecar_missing", 0) or 0)
-            + (audit.get("sidecar_partial", 0) or 0)
-            + (audit.get("sidecar_orphan", 0) or 0)
-            + (audit.get("prod_missing", 0) or 0)
-            + (audit.get("prod_partial", 0) or 0)
-        )
-        if critical > 0:
-            alerts.append({
-                "severity": "warn",
-                "code": "sidecar_drift",
-                "message": (
-                    f"sidecar audit: {critical} doc(s) out of "
-                    f"{audit.get('n_docs', 0)} mismatched "
-                    f"(missing {audit.get('sidecar_missing', 0)}, "
-                    f"partial {audit.get('sidecar_partial', 0)}, "
-                    f"orphan {audit.get('sidecar_orphan', 0)})"
-                ),
-            })
 
     # Phase 54.6.289 — Ollama model-swap churn alert.  Fires when
     # the observed swap rate is ≥15/hr over a window of ≥10 minutes
@@ -3025,9 +2538,6 @@ def _build_alerts(snap: dict) -> list[dict]:
             "grep -E 'LLM_MODEL|BOOK_WRITE_MODEL|AUTOWRITE_SCORER' "
             ".env  # consider unifying per-role overrides"
         ),
-        "sidecar_drift":   (
-            "sciknow library audit-sidecar  # per-doc mismatch detail"
-        ),
         "payload_index_missing": (
             "sciknow library init  # idempotent; re-creates missing "
             "payload indexes"
@@ -3037,9 +2547,9 @@ def _build_alerts(snap: dict) -> list[dict]:
             "Crossref / OpenAlex / arXiv"
         ),
         "hnsw_drift": (
-            "# Accept the drift (cheap) or rebuild — new sidecars\n"
-            "# auto-apply tuning (54.6.299). To rebuild the current\n"
-            "# one, delete + re-encode via sync-dense-sidecar."
+            "# Accept the drift (cheap) or rebuild the affected\n"
+            "# collection by dropping it and re-running\n"
+            "# `sciknow library init` to recreate it tuned."
         ),
         "ram_pressure":    "ps axu --sort=-%mem | head",
         "host_overload":   "uptime; top -b -n 1 | head -20",
@@ -4573,11 +4083,6 @@ def collect_monitor_snapshot(
         retractions = _safe_db(
             session, _retraction_detail, default={},
         )
-        # 54.6.293 — cached per-doc sidecar integrity audit.  Runs
-        # inline on first call + every 5 min; no-op on cache hits.
-        sidecar_audit = _safe_db(
-            session, _sidecar_audit_cached, default={},
-        )
         # 54.6.294 — top N docs by total ingestion wall-clock.
         slow_docs = _safe_db(
             session, _slow_docs_leaderboard, default=[],
@@ -4678,10 +4183,6 @@ def collect_monitor_snapshot(
         # the operator to review.  Behind the "retracted_papers"
         # info-level alert.
         "retractions": retractions,
-        # 54.6.293 — sidecar audit result (time-cached).  ``enabled``
-        # is False when dual-embedder isn't configured; renderers
-        # should show nothing in that case.
-        "sidecar_audit": sidecar_audit,
         # 54.6.294 — top-N slowest docs by total ingestion wall-clock.
         # Top-5 of the full corpus — identifies outlier PDFs.
         "slow_docs": slow_docs,

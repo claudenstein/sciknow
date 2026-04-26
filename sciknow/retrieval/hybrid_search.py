@@ -82,13 +82,10 @@ def _rrf_merge(
 # ── Query embedding ────────────────────────────────────────────────────────────
 
 _embed_model = None
-_dense_embed_model = None
 
 
 def _get_embed_model():
-    """bge-m3 — primary embedder, always used for sparse (+ ColBERT on
-    abstracts). Provides dense output too; only consulted when
-    ``settings.dense_embedder_model`` is unset.
+    """bge-m3 — single canonical embedder for both dense and sparse.
 
     v2 Phase B: when ``settings.use_llamacpp_embedder`` is True (default)
     we route through the llama-server adapter from
@@ -104,13 +101,6 @@ def _get_embed_model():
             return _embed_model
         from FlagEmbedding import BGEM3FlagModel
         from sciknow.retrieval.device import load_with_cpu_fallback
-        # Phase 54.6.305 — preflight first so the Ollama releaser unloads
-        # any resident LLM. On a 24 GB card, qwen3.6:27b-dense pins
-        # ~21.75 GB (17.6 GB weights + 4 GB KV at 16k ctx), leaving only
-        # ~2 GB free — bge-m3 would then hit the Phase 15.2 CPU fallback
-        # and retrieval slows 50-70× (see release_llm() docstring).
-        # Preflight trades a ~10s LLM cold-reload at the next write call
-        # for keeping bge-m3 on GPU through every section in the chapter.
         try:
             from sciknow.core.vram_budget import preflight as _preflight
             _preflight(2500, reason="bge-m3 query embedder", raise_on_fail=False)
@@ -123,110 +113,23 @@ def _get_embed_model():
     return _embed_model
 
 
-def _get_dense_embed_model():
-    """Phase 54.6.279 — lazy-load the dense-only embedder when the
-    dual-embedder split is active. Returns ``None`` when unset, which
-    signals the single-embedder path (bge-m3 supplies dense).
-
-    Model is sentence-transformers / CrossEncoder-family, loaded in
-    BF16 for the Qwen3-Embedding-4B case (FP32 OOMs on 24 GB with
-    the LLM co-resident). Kept resident like the bge-m3 embedder so
-    per-query cost stays at one forward pass.
-    """
-    from sciknow.config import settings
-    # v2 Phase B/D — single canonical embedder. When the llamacpp
-    # embedder is active, the v1 Qwen3-Embedding-4B sidecar path is
-    # off by design (spec §2.1: "One canonical embedder"). We
-    # short-circuit here so the in-process sentence-transformers
-    # load never fires, freeing the GPU for the writer.
-    if getattr(settings, "use_llamacpp_embedder", True):
-        return None
-    tag = getattr(settings, "dense_embedder_model", None)
-    if not tag or tag == settings.embedding_model:
-        return None  # Single-embedder mode — bge-m3 path.
-    global _dense_embed_model
-    if _dense_embed_model is None:
-        import torch as _torch
-        from sentence_transformers import SentenceTransformer
-        # Phase 54.6.305 — this is the path that autowrite was OOMing on:
-        # Qwen3-Embedding-4B in BF16 is ~8 GB resident; on a 24 GB card
-        # with qwen3.6:27b-dense pinned at ~21.75 GB, only ~2 GB is free
-        # and SentenceTransformer(..., device='cuda') hard-failed with
-        # `torch.OutOfMemoryError: Tried to allocate 742.00 MiB`.  Call
-        # preflight to trigger the Ollama releaser before loading, then
-        # fall back to CPU if even after the release we still can't fit
-        # (shouldn't happen with a single 27B LLM, but keeps us alive on
-        # smaller cards).
-        device = "cuda"
-        try:
-            from sciknow.core.vram_budget import preflight as _preflight
-            _preflight(9000, reason=f"dense embedder {tag}", raise_on_fail=False)
-        except Exception:  # pragma: no cover
-            pass
-        try:
-            _dense_embed_model = SentenceTransformer(
-                tag, device=device, trust_remote_code=True,
-                model_kwargs={"torch_dtype": _torch.bfloat16},
-            )
-        except Exception as exc:  # pragma: no cover — best-effort fallback
-            msg = str(exc).lower()
-            if "out of memory" in msg or "cuda" in msg:
-                logger.warning(
-                    "dense embedder %s failed to load on cuda (%s) — "
-                    "retrying on CPU; per-query retrieval will be slower",
-                    tag, type(exc).__name__,
-                )
-                try:
-                    _torch.cuda.empty_cache()
-                except Exception:
-                    pass
-                _dense_embed_model = SentenceTransformer(
-                    tag, device="cpu", trust_remote_code=True,
-                    model_kwargs={"torch_dtype": _torch.bfloat16},
-                )
-            else:
-                raise
-    return _dense_embed_model
-
-
 def release_embed_model() -> None:
-    """Drop the cached query embedding model(s) and free VRAM.
-
-    Phase 54.6.305 — previously we only set the globals to None and
-    called ``torch.cuda.empty_cache()``. On the Qwen3-Embedding-4B
-    dual-embedder path (~8 GB in BF16) that was not enough: PyTorch
-    retained the tensor memory inside the caching allocator so Ollama
-    saw only ~14 GB free and partial-loaded the 22 GB writer model
-    with ~10 GB spilled to CPU (decode dropped from 30+ t/s to ~4 t/s).
-    The fix: move each model to CPU before dropping the reference, so
-    the GPU-side tensors are actually deallocated; run gc.collect()
-    twice (the SentenceTransformer object graph has cycles through its
-    tokenizer wrappers and needs two passes); then empty_cache +
-    synchronize + empty_cache a second time to encourage the allocator
-    to release reserved-but-unused blocks back to the driver.
-    """
-    global _embed_model, _dense_embed_model
+    """Drop the cached query embedding model and free VRAM."""
+    global _embed_model
     try:
         import gc, torch
     except Exception:
         gc = None  # type: ignore[assignment]
         torch = None  # type: ignore[assignment]
 
-    for name in ("_embed_model", "_dense_embed_model"):
-        model = globals().get(name)
-        if model is None:
-            continue
+    if _embed_model is not None:
         try:
-            to_cpu = getattr(model, "to", None)
+            to_cpu = getattr(_embed_model, "to", None)
             if callable(to_cpu):
                 to_cpu("cpu")
         except Exception:
             pass
-        try:
-            globals()[name] = None
-        except Exception:
-            pass
-        del model
+        _embed_model = None
     if gc is not None:
         try:
             gc.collect()
@@ -244,15 +147,8 @@ def release_embed_model() -> None:
 
 
 def _embed_query(query: str) -> tuple[list[float], SparseVector]:
-    """Produce query-side (dense, sparse). Sparse always comes from
-    bge-m3 (prod's sparse collection is keyed on bge-m3 lexical
-    weights). Dense comes from either bge-m3 (single-embedder mode)
-    or the configured dense embedder (Phase 54.6.279 dual mode).
-    """
+    """Produce query-side (dense, sparse) via bge-m3."""
     model = _get_embed_model()
-    # Sparse always via bge-m3 (matches ingest-side sparse vectors).
-    # We also get bge-m3 dense for free here; it's discarded when
-    # the dual-embedder path overrides it below.
     output = model.encode(
         [query],
         batch_size=1,
@@ -266,25 +162,7 @@ def _embed_query(query: str) -> tuple[list[float], SparseVector]:
         indices=[int(k) for k in lw.keys()],
         values=[float(v) for v in lw.values()],
     )
-
-    dense_model = _get_dense_embed_model()
-    if dense_model is None:
-        # Single-embedder path — use bge-m3 dense output.
-        return output["dense_vecs"][0].tolist(), sparse
-
-    # Dual-embedder path — dense from Qwen3 (or other configured
-    # embedder). Apply the HF model card's query-instruction prefix
-    # for best accuracy (the same pattern the A/B harness used).
-    instruction = (
-        "Given a scientific literature search query, retrieve "
-        "relevant passages that answer the query"
-    )
-    prompt = f"Instruct: {instruction}\nQuery: {query}"
-    dense_arr = dense_model.encode(
-        [prompt], convert_to_numpy=True, normalize_embeddings=True,
-        show_progress_bar=False,
-    )
-    return dense_arr[0].tolist(), sparse
+    return output["dense_vecs"][0].tolist(), sparse
 
 
 # ── Filter helpers ─────────────────────────────────────────────────────────────
@@ -339,33 +217,6 @@ def _search_params() -> "SearchParams | None":
     )
 
 
-def _dense_collection_name() -> str:
-    """Phase 54.6.279 — the Qdrant collection to query for dense
-    vectors. Falls back to ``PAPERS_COLLECTION`` (the prod primary)
-    when the dual-embedder split is inactive. When active, uses the
-    explicit ``settings.dense_sidecar_collection`` if set, else the
-    conventional ``<qdrant_prefix>_ab_<embedder-slug>_papers`` name
-    the A/B harness writes. Payload filters apply the same as before
-    (``section_type``/``year``/``domain`` live on the sidecar
-    points too via the ingestion pipeline update below)."""
-    from sciknow.config import settings
-    # v2 Phase B/D — single canonical embedder. The llamacpp toggle
-    # forces queries onto the prod papers collection (bge-m3 1024-dim);
-    # the v1 Qwen3 sidecar is invisible to query path.
-    if getattr(settings, "use_llamacpp_embedder", True):
-        return PAPERS_COLLECTION
-    tag = getattr(settings, "dense_embedder_model", None)
-    if not tag or tag == settings.embedding_model:
-        return PAPERS_COLLECTION
-    explicit = getattr(settings, "dense_sidecar_collection", None)
-    if explicit:
-        return explicit
-    from sciknow.core.project import get_active_project
-    prefix = get_active_project().qdrant_prefix
-    slug = tag.replace("/", "_").replace(":", "_").lower()
-    return f"{prefix}_ab_{slug}_papers"
-
-
 def _qdrant_dense(
     client: QdrantClient,
     dense_vec: list[float],
@@ -373,7 +224,7 @@ def _qdrant_dense(
     qdrant_filter: Filter | None,
 ) -> list[str]:
     response = client.query_points(
-        collection_name=_dense_collection_name(),
+        collection_name=PAPERS_COLLECTION,
         query=dense_vec,
         using="dense",
         limit=top_k,
