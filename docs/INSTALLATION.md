@@ -43,7 +43,7 @@ nano .env
 ### Initialize the schema
 
 ```bash
-sciknow db init
+sciknow library init
 ```
 
 This runs Alembic migrations (creates all tables, indexes, and the full-text search trigger) and initializes the Qdrant collections.
@@ -51,7 +51,7 @@ This runs Alembic migrations (creates all tables, indexes, and the full-text sea
 ### Verify
 
 ```bash
-sciknow db stats
+sciknow library stats
 ```
 
 Should show zeros with green checkmarks for PostgreSQL and Qdrant.

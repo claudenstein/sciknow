@@ -23,13 +23,13 @@ Move or clone the full sciknow collection to another machine.
 
 ```bash
 # Full backup (PDFs + vectors + DB) — recommended
-sciknow db backup --output sciknow_2026-04-04.tar.gz
+sciknow library backup --output sciknow_2026-04-04.tar.gz
 
 # Metadata + vectors only (much smaller, no raw PDFs)
-sciknow db backup --no-pdfs --no-downloads --output sciknow_metadata.tar.gz
+sciknow library backup --no-pdfs --no-downloads --output sciknow_metadata.tar.gz
 
 # Include Marker output (avoids re-running OCR on restore)
-sciknow db backup --marker --output sciknow_full.tar.gz
+sciknow library backup --marker --output sciknow_full.tar.gz
 ```
 
 ### Restore on a new machine
@@ -40,13 +40,13 @@ git clone https://github.com/you/sciknow
 cd sciknow && ./scripts/setup.sh
 
 # 2. Restore the backup
-sciknow db restore sciknow_2026-04-04.tar.gz
+sciknow library restore sciknow_2026-04-04.tar.gz
 
 # 3. If the DB already exists, use --force
-sciknow db restore sciknow_2026-04-04.tar.gz --force
+sciknow library restore sciknow_2026-04-04.tar.gz --force
 
 # 4. Verify
-sciknow db stats
+sciknow library stats
 ```
 
 > After restore: edit `.env` if the new machine uses different credentials, hostnames, or model names.
@@ -78,13 +78,13 @@ Automatically grows the collection by following citations in existing papers. Si
 6. **Provenance tagging** — every expanded paper is tagged `ingest_source='expand'`.
 
 ```bash
-sciknow db expand --dry-run --limit 50              # preview
-sciknow db expand --limit 100                        # run it
-sciknow db expand --limit 50 -q "solar irradiance"   # topic-targeted
-sciknow db expand --relevance-threshold 0.65          # more selective
-sciknow db expand --no-relevance --limit 100          # no filter
-sciknow db expand --no-ingest --limit 50              # download only
-sciknow db expand --resolve --limit 50                # resolve title-only refs
+sciknow corpus expand --dry-run --limit 50              # preview
+sciknow corpus expand --limit 100                        # run it
+sciknow corpus expand --limit 50 -q "solar irradiance"   # topic-targeted
+sciknow corpus expand --relevance-threshold 0.65          # more selective
+sciknow corpus expand --no-relevance --limit 100          # no filter
+sciknow corpus expand --no-ingest --limit 50              # download only
+sciknow corpus expand --resolve --limit 50                # resolve title-only refs
 ```
 
 ### Expected open-access hit rate
@@ -110,10 +110,10 @@ Finds DOIs for papers that lack them via active lookup.
 5. **Full Crossref hydration** — once DOI confirmed, fetches complete record
 
 ```bash
-sciknow db enrich                     # full run
-sciknow db enrich --dry-run           # preview
-sciknow db enrich --threshold 0.80    # looser matching
-sciknow db enrich --limit 50          # bounded
+sciknow corpus enrich                     # full run
+sciknow corpus enrich --dry-run           # preview
+sciknow corpus enrich --threshold 0.80    # looser matching
+sciknow corpus enrich --limit 50          # bounded
 ```
 
 ### Why 100% DOI coverage is not achievable
@@ -134,7 +134,7 @@ A well-curated journal library can reach ~95%. Mixed collections plateau at 55-7
 References are extracted from every paper and stored in the `citations` table. Cross-linked when both citing and cited papers are in the corpus.
 
 - **Automatic cross-linking** during ingestion (forward + backward)
-- **Batch re-linking:** `sciknow db link-citations` after bulk ingestion
+- **Batch re-linking:** `sciknow corpus link-citations` after bulk ingestion
 - **Citation-boosted retrieval:** log-dampened boost via `CITATION_BOOST_FACTOR`
 
 ---
@@ -158,7 +158,7 @@ Every document has an `ingest_source` field:
 - `seed` — manually ingested via CLI
 - `expand` — auto-discovered via `db expand`
 
-`sciknow db stats` shows an "Ingest source" breakdown.
+`sciknow library stats` shows an "Ingest source" breakdown.
 
 ---
 
@@ -198,7 +198,7 @@ Edit `_SECTION_PATTERNS` in `sciknow/ingestion/chunker.py` — add a new `(canon
 ### Changing the embedding model
 
 1. Update `EMBEDDING_MODEL` and `EMBEDDING_DIM` in `.env`
-2. Re-initialize collections: `sciknow db init`
+2. Re-initialize collections: `sciknow library init`
 3. Re-embed all papers: `db reset` + re-ingest
 
 ### Metadata quality

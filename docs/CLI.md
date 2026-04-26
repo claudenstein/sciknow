@@ -9,13 +9,13 @@
 ### Lifecycle + stats
 
 ```bash
-sciknow db init              # Run migrations + init Qdrant collections
-sciknow db reset             # Wipe everything and re-initialise (use before a full re-ingest)
-sciknow db stats             # Show paper/chunk counts and status breakdown
-sciknow db refresh-metadata  # Re-run metadata extraction for papers with poor-quality metadata
-sciknow db backup            # Back up the full collection to a portable archive
-sciknow db restore           # Restore a backup on a new machine
-sciknow db tag-multimodal    # Tag chunks with tables/equations for filtered search
+sciknow library init              # Run migrations + init Qdrant collections
+sciknow library reset             # Wipe everything and re-initialise (use before a full re-ingest)
+sciknow library stats             # Show paper/chunk counts and status breakdown
+sciknow corpus refresh-metadata  # Re-run metadata extraction for papers with poor-quality metadata
+sciknow library backup            # Back up the full collection to a portable archive
+sciknow library restore           # Restore a backup on a new machine
+sciknow corpus tag-multimodal    # Tag chunks with tables/equations for filtered search
 ```
 
 ### Corpus growth
@@ -27,16 +27,16 @@ web reader, each has a **"Preview candidates"** button that lets you
 cherry-pick which DOIs to ingest before pulling the trigger.
 
 ```bash
-sciknow db enrich                       # Find DOIs for papers missing one (Crossref / OpenAlex / arXiv)
+sciknow corpus enrich                       # Find DOIs for papers missing one (Crossref / OpenAlex / arXiv)
 
-sciknow db expand                       # Outbound — follow references in existing papers
-sciknow db expand --dry-run --shortlist-tsv out.tsv   # Preview with every ranker signal
-sciknow db expand-author "Solanki"      # By author name (OpenAlex + Crossref)
-sciknow db expand-author "Solanki" --orcid 0000-0002-XXXX-XXXX
-sciknow db expand-cites                 # Inbound — papers that CITE yours (forward-in-time mirror of `expand`)
-sciknow db expand-topic "thermospheric cooling"        # Free-text OpenAlex search
-sciknow db expand-coauthors             # Coauthor snowball (invisible college, depth=1)
-sciknow db expand-coauthors --depth 2 --relevance-threshold 0.65  # Wider net with stricter filter
+sciknow corpus expand                       # Outbound — follow references in existing papers
+sciknow corpus expand --dry-run --shortlist-tsv out.tsv   # Preview with every ranker signal
+sciknow corpus expand-author "Solanki"      # By author name (OpenAlex + Crossref)
+sciknow corpus expand-author "Solanki" --orcid 0000-0002-XXXX-XXXX
+sciknow corpus expand-cites                 # Inbound — papers that CITE yours (forward-in-time mirror of `expand`)
+sciknow corpus expand-topic "thermospheric cooling"        # Free-text OpenAlex search
+sciknow corpus expand-coauthors             # Coauthor snowball (invisible college, depth=1)
+sciknow corpus expand-coauthors --depth 2 --relevance-threshold 0.65  # Wider net with stricter filter
 
 sciknow book auto-expand "Book Title"   # Gap-driven: every open BookGap (topic/evidence) becomes its own
                                         # topic query; candidates merged + scored across gaps, papers
@@ -48,16 +48,16 @@ sciknow book auto-expand "Book Title"   # Gap-driven: every open BookGap (topic/
 ```bash
 # Download specific DOIs with optional title/year hints (JSON file or comma list).
 # Backs the "Download selected" button from every preview modal.
-sciknow db download-dois --dois "10.1038/nature12345,10.1126/science.abc"
-sciknow db download-dois --dois-file picked.json --workers 4
+sciknow corpus download-dois --dois "10.1038/nature12345,10.1126/science.abc"
+sciknow corpus download-dois --dois-file picked.json --workers 4
 
 # Dedup across every location a PDF can end up (data/processed, data/failed,
 # downloads root, downloads/processed, downloads/failed_ingest). --cross-project
 # (default ON) queries EVERY sciknow project's DB — so a PDF downloaded into
 # project B that's already ingested in project A is recognised and cleaned up.
-sciknow db cleanup-downloads --dry-run
-sciknow db cleanup-downloads --delete-dupes      # aggressive: deletes instead of moving
-sciknow db cleanup-downloads --no-cross-project  # only check the active project's DB
+sciknow corpus cleanup-downloads --dry-run
+sciknow corpus cleanup-downloads --delete-dupes      # aggressive: deletes instead of moving
+sciknow corpus cleanup-downloads --no-cross-project  # only check the active project's DB
 ```
 
 ### Pending downloads (papers without a legal OA PDF)
@@ -68,17 +68,17 @@ retry later or acquire manually. Surfaced in the web reader as the
 "📋 Pending downloads" button at the top of the Corpus Tools tab.
 
 ```bash
-sciknow db pending list                         # defaults to --status pending
-sciknow db pending list --status all            # include manual_acquired / abandoned
-sciknow db pending list --source expand-author  # filter by which flow added the row
-sciknow db pending retry                        # re-run the 6-source cascade, bypassing .no_oa_cache
-sciknow db pending retry --limit 20             # smaller batch
-sciknow db pending mark-done 10.1038/nature12345 --note "got via ILL"
-sciknow db pending abandon 10.1234/xyz --note "not worth chasing"
-sciknow db pending reopen 10.1234/xyz           # move back to pending
-sciknow db pending remove 10.1234/xyz           # delete the row outright
-sciknow db pending export --format csv -o pending.csv
-sciknow db pending export --format json --status all > pending.json
+sciknow corpus pending list                         # defaults to --status pending
+sciknow corpus pending list --status all            # include manual_acquired / abandoned
+sciknow corpus pending list --source expand-author  # filter by which flow added the row
+sciknow corpus pending retry                        # re-run the 6-source cascade, bypassing .no_oa_cache
+sciknow corpus pending retry --limit 20             # smaller batch
+sciknow corpus pending mark-done 10.1038/nature12345 --note "got via ILL"
+sciknow corpus pending abandon 10.1234/xyz --note "not worth chasing"
+sciknow corpus pending reopen 10.1234/xyz           # move back to pending
+sciknow corpus pending remove 10.1234/xyz           # delete the row outright
+sciknow corpus pending export --format csv -o pending.csv
+sciknow corpus pending export --format json --status all > pending.json
 ```
 
 ---

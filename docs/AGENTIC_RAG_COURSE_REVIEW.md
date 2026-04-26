@@ -130,7 +130,7 @@ LOC locally.
   one forward pass, cross-encoder reranker). Migrating would be a
   regression.
 - **Jina cloud embeddings** — breaks local-first.
-- **Airflow DAGs** — `sciknow db expand` + `watchlist` cron is
+- **Airflow DAGs** — `sciknow corpus expand` + `watchlist` cron is
   lighter and purpose-built.
 - **Telegram bot** — sciknow is desktop; no value.
 - **Gradio UI** — `sciknow book serve` is strictly more capable.
