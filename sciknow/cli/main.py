@@ -36,6 +36,16 @@ console = Console()
 logger = logging.getLogger("sciknow.cli")
 
 
+def _version_callback(value: bool) -> None:
+    """Eager `--version` handler — prints version + exits before any
+    subcommand fires (so it works even on a broken install where
+    `sciknow library doctor` would error)."""
+    if value:
+        from sciknow import __version__
+        console.print(f"sciknow {__version__}")
+        raise typer.Exit(0)
+
+
 @app.callback()
 def _startup(
     ctx: typer.Context,
@@ -44,6 +54,10 @@ def _startup(
         help="Override the active project for this invocation. "
              "Equivalent to setting SCIKNOW_PROJECT in the env. "
              "See `sciknow project list` for available slugs.",
+    ),
+    _version: bool = typer.Option(
+        False, "--version", callback=_version_callback, is_eager=True,
+        help="Print the installed sciknow version and exit.",
     ),
 ) -> None:
     """Initialize logging and record the CLI invocation.
