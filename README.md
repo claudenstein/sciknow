@@ -25,13 +25,13 @@ A local-first scientific knowledge system that ingests papers, builds a compiled
 - **Metadata extraction** — 4-layer cascade: embedded PDF → Crossref → arXiv → LLM
 - **Citation graph** — extracts references, cross-links corpus papers, boosts highly-cited papers in search
 - **Five corpus-expansion vectors**, all sharing a **preview-and-select** flow in the browser (checkbox shortlist, per-row relevance score, "Download selected"):
-  - `db expand` — **outbound** citations (follow references in existing papers)
-  - `db expand-author` — every paper by a **named author** across OpenAlex + Crossref
-  - `db expand-cites` — **inbound** citations (papers that cite yours — forward-in-time mirror)
-  - `db expand-topic` — **free-text topic** search (solves the bootstrap + sideways-expansion problem)
-  - `db expand-coauthors` — **invisible college** (papers by coauthors of your corpus authors)
+  - `corpus expand` — **outbound** citations (follow references in existing papers)
+  - `corpus expand-author` — every paper by a **named author** across OpenAlex + Crossref
+  - `corpus expand-cites` — **inbound** citations (papers that cite yours — forward-in-time mirror)
+  - `corpus expand-topic` — **free-text topic** search (solves the bootstrap + sideways-expansion problem)
+  - `corpus expand-coauthors` — **invisible college** (papers by coauthors of your corpus authors)
   - `book auto-expand` — **gap-driven** auto-expansion: every open `book gaps` entry becomes its own topic search, candidates merged + ranked so papers that close multiple gaps rise to the top
-- **Cross-project dedup** — `db cleanup-downloads --cross-project` (default ON) checks every sciknow project's DB by SHA-256, so a PDF downloaded into project B that's already ingested in project A is recognised and cleaned
+- **Cross-project dedup** — `corpus cleanup-downloads --cross-project` (default ON) checks every sciknow project's DB by SHA-256, so a PDF downloaded into project B that's already ingested in project A is recognised and cleaned
 - **Pending downloads panel** — ~50% of expand selections typically have no legal OA PDF; those rows auto-persist to `pending_downloads` with full metadata (title, authors, year, source-method) so you can retry (the 6-source cascade bypasses `.no_oa_cache`), mark manually-acquired, abandon with a note, or export to CSV for ILL. Surfaced as the "📋 Pending downloads" entry in the top-bar **🌱 Corpus ▾** dropdown and `sciknow corpus pending list|retry|mark-done|abandon|export` from the CLI
 - **Topic clustering** — BERTopic (UMAP + HDBSCAN + c-TF-IDF) assigns papers to named thematic clusters in seconds
 
@@ -505,7 +505,7 @@ journal) across all complete documents. Surfaces a compact
 `enrich  doi 73% · abst 30% · auth 86%` row in the CLI corpus
 panel and a full Coverage table + stacked bars in the web modal.
 `enrichment_gap` info-level alert fires when any actionable field
-(excluding year) is missing on >50% of docs, with `sciknow db
+(excluding year) is missing on >50% of docs, with `sciknow corpus
 enrich` as the suggested fix. Live corpus: 70.5% missing abstract
 — big gap for ColBERT / abstracts collection quality.
 
@@ -955,9 +955,15 @@ Research notes (reading material, not authoritative for current behaviour):
 | Storage | 500 GB SSD | 2 TB NVMe |
 | OS | Ubuntu 22.04+ | Ubuntu 22.04+ |
 
-**VRAM budget on 3090 (24 GB):** bge-m3 (~2.2 GB) + qwen3.5:27b (~18 GB) + bge-reranker (~0.5 GB) = fits comfortably.
+**VRAM budget on 3090 (24 GB):** llama-server writer (Qwen3.6-27B-UD-Q4_K_XL ~17.6 GB) + embedder (bge-m3-Q8 ~0.6 GB) + reranker (bge-reranker-v2-m3-Q8 ~0.6 GB) = fits comfortably with ~5 GB headroom for KV cache + activations.
 
-**Remote GPU:** Set `OLLAMA_HOST=http://your-gpu-server:11434` in `.env`. Zero code changes.
+**Remote GPU:** Point the three v2 substrate URLs at the remote host in `.env`:
+```bash
+INFER_WRITER_URL=http://your-gpu-server:8090
+INFER_EMBEDDER_URL=http://your-gpu-server:8091
+INFER_RERANKER_URL=http://your-gpu-server:8092
+```
+Run `sciknow infer up --role <writer|embedder|reranker>` on the remote host. Zero code changes locally. (v1 rollback path: `OLLAMA_HOST=http://your-gpu-server:11434` after `USE_LLAMACPP_WRITER=False`.)
 
 ---
 
