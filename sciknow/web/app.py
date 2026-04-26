@@ -39,7 +39,16 @@ from sciknow.core.bibliography import (
 
 logger = logging.getLogger("sciknow.web")
 
-app = FastAPI(title="SciKnow Book Reader")
+from sciknow import __version__ as _SCIKNOW_VERSION
+app = FastAPI(
+    title="SciKnow Book Reader",
+    version=_SCIKNOW_VERSION,
+    description=(
+        "v2 substrate: writer + embedder + reranker on llama-server "
+        "(:8090/:8091/:8092). Bring up with `sciknow infer up --role <r>` "
+        "and verify with `sciknow library doctor`."
+    ),
+)
 
 # Phase 54.6.48 — serve vendored frontend libraries (KaTeX + ECharts)
 # from `/static/` instead of the public jsdelivr CDN. Eliminates the
