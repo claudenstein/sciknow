@@ -13438,6 +13438,47 @@ def l1_snapshot_diff_brief_helper() -> None:
     )
 
 
+def l1_snapshot_section_scope_cli() -> None:
+    """Phase 54.6.328 (snapshot-versioning Phase 2) — CLI parity for
+    section-scope snapshots.
+
+    Guards:
+
+      A) `book snapshot` accepts a --draft option.
+      B) --draft is mutually exclusive with --chapter (CLI rejects).
+      C) The body inserts scope='draft' rows with the diff brief.
+      D) Existing web /api/snapshot/{draft_id} behaviour is preserved
+         (no contract change to the web endpoint).
+    """
+    import inspect as _inspect
+    from sciknow.cli import book as _book_cli
+
+    # A — option present
+    sig = _inspect.signature(_book_cli.snapshot)
+    assert "draft" in sig.parameters, (
+        "book snapshot must accept a --draft option for section-scope snapshots"
+    )
+
+    # B + C — body asserts mutex + writes scope='draft' with meta
+    body = _inspect.getsource(_book_cli.snapshot)
+    assert "--draft and --chapter are mutually exclusive" in body, (
+        "book snapshot must reject --draft + --chapter together"
+    )
+    assert "'draft'" in body or '"draft"' in body, (
+        "book snapshot --draft path must insert scope='draft' rows"
+    )
+    assert "compute_prose_diff" in body, (
+        "book snapshot --draft path must compute the diff brief"
+    )
+
+    # D — web endpoint contract intact
+    from sciknow.web.routes import snapshots as _snap_routes
+    web_src = _inspect.getsource(_snap_routes.create_snapshot)
+    assert "scope" not in web_src or "draft" in web_src, (
+        "/api/snapshot/{draft_id} must keep its draft-scope semantics"
+    )
+
+
 def l1_book_outline_overwrite_flag() -> None:
     """v2.0 — `book outline --overwrite=archive|hard` for re-outlining
     a book whose chapter graph already exists.
@@ -19444,6 +19485,8 @@ L1_TESTS: list[Callable] = [
     l1_book_outline_overwrite_flag,
     # Phase 54.6.328 — diff-brief column on draft_snapshots + helper.
     l1_snapshot_diff_brief_helper,
+    # Phase 54.6.328 (snapshot-versioning Phase 2) — book snapshot --draft
+    l1_snapshot_section_scope_cli,
     l1_phase54_6_298_enrichment_coverage,
     l1_phase54_6_299_hnsw_drift_check,
     l1_phase54_6_301_retrieval_latency_buffer,

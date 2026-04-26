@@ -2110,38 +2110,110 @@ def _print_ledger_row(row, indent: str = "", prefix: str = "") -> None:
 @app.command()
 def snapshot(
     book_title: Annotated[str, typer.Argument(
-        help="Book title (or book-id prefix) to snapshot.")],
+        help="Book title (or book-id prefix) to snapshot. Pass '-' "
+             "with --draft to skip the book lookup (the draft id "
+             "carries enough context).")],
     chapter: int = typer.Option(
         0, "--chapter", "-c",
         help="Chapter number to snapshot (default 0 = whole book).",
     ),
+    draft: str | None = typer.Option(
+        None, "--draft", "-d",
+        help="Section-scope snapshot: snapshot just this single draft's "
+             "current content. Accepts a full draft UUID or any prefix "
+             "(min 6 chars). Produces a scope='draft' row that the web's "
+             "/api/snapshot-content/<id> endpoint and `book snapshot-restore` "
+             "(coming Phase 3) consume identically to legacy per-draft "
+             "snapshots. Mutex with --chapter.",
+    ),
     name: str = typer.Option("", "--name", help="Optional snapshot label."),
 ):
-    """Phase 54.6.75 (#13) — snapshot every draft in a book or a chapter
-    so autowrite-all can be rolled back with one command.
+    """Snapshot a book / chapter / single section so you can roll back.
 
-    Mirrors the web reader's snapshot buttons (`POST /api/snapshot/book/{id}`,
-    `POST /api/snapshot/chapter/{id}`). Captures the latest draft per
-    (chapter, section_type) into one `draft_snapshots` row with
-    scope='chapter' or 'book'. Non-destructive — nothing is overwritten.
+    Mirrors the web reader's snapshot buttons. Captures the latest
+    draft per (chapter, section_type) into one ``draft_snapshots``
+    row with the appropriate scope. Non-destructive — nothing is
+    overwritten.
+
+    Phase 54.6.328 — every snapshot now carries a diff brief in the
+    ``meta`` column, computed at create time vs the prior snapshot
+    in the same scope. Renders as a "Δ +1,247/-380w · 4¶" line on
+    save and in `book snapshots` listings.
 
     Examples:
 
-      sciknow book snapshot "Global Cooling"                  # whole book
-      sciknow book snapshot "Global Cooling" --chapter 3      # one chapter
-      sciknow book snapshot "Global Cooling" --name "pre-rewrite"
+      sciknow book snapshot "Global Cooling"                    # whole book
+      sciknow book snapshot "Global Cooling" --chapter 3        # one chapter
+      sciknow book snapshot - --draft cd7cdee2 --name "pre-revise"
+                                                                # one section
     """
     import datetime as _dt
     from sqlalchemy import text as _text
     from sciknow.storage.db import get_session
     from sciknow.core.snapshot_diff import (
-        compute_bundle_brief,
+        compute_bundle_brief, compute_prose_diff,
         render_brief_one_line,
     )
     from sciknow.web.app import (
         _snapshot_chapter_drafts, _snapshot_book_drafts,
     )
     from sciknow.web.routes.snapshots import _prev_bundle_content
+
+    if draft is not None and chapter > 0:
+        console.print("[red]--draft and --chapter are mutually exclusive.[/red]")
+        raise typer.Exit(2)
+
+    # Section-scope path — short-circuits the book lookup so callers
+    # that only have a draft id (the GUI's editor toolbar) can snapshot
+    # without naming the enclosing book.
+    if draft is not None:
+        if len(draft) < 6:
+            console.print(
+                "[red]--draft id too short[/red] (min 6 chars to disambiguate)."
+            )
+            raise typer.Exit(2)
+        with get_session() as session:
+            row = session.execute(_text("""
+                SELECT id::text, title, content, word_count
+                FROM drafts WHERE id::text LIKE :q LIMIT 2
+            """), {"q": f"{draft}%"}).fetchall()
+            if not row:
+                console.print(f"[red]No draft matches {draft!r}.[/red]")
+                raise typer.Exit(1)
+            if len(row) > 1:
+                console.print(
+                    f"[red]Ambiguous draft prefix {draft!r}[/red] — "
+                    f"matches {len(row)} rows."
+                )
+                raise typer.Exit(1)
+            did, dtitle, dcontent, dwc = row[0]
+            prev = session.execute(_text("""
+                SELECT content FROM draft_snapshots
+                WHERE draft_id::text = :did
+                ORDER BY created_at DESC LIMIT 1
+            """), {"did": did}).fetchone()
+            prev_content = prev[0] if prev else ""
+            meta = compute_prose_diff(prev_content, dcontent or "")
+            snap_name = name.strip() or (
+                f"{(dtitle or 'draft')[:40]} — "
+                f"{_dt.datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            )
+            session.execute(_text("""
+                INSERT INTO draft_snapshots
+                    (draft_id, scope, name, content, word_count, meta)
+                VALUES
+                    (CAST(:did AS uuid), 'draft', :name, :content, :wc,
+                     CAST(:meta AS jsonb))
+            """), {"did": did, "name": snap_name,
+                   "content": dcontent or "", "wc": dwc or 0,
+                   "meta": __import__("json").dumps(meta)})
+            session.commit()
+        console.print(
+            f"[green]✓ Snapshot saved:[/green] {snap_name}\n"
+            f"  scope=draft  draft={did[:8]}  words={dwc or 0:,}\n"
+            f"  diff: {render_brief_one_line(meta)}"
+        )
+        return
 
     with get_session() as session:
         book = _get_book(session, book_title)
