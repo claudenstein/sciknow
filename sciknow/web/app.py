@@ -935,31 +935,6 @@ def _routed_view(modal_id: str) -> HTMLResponse:
     return resp
 
 
-# ── JSON API ─────────────────────────────────────────────────────────────────
-
-# ── Bibliography endpoints (Phase 54.6.312) ────────────────────────────
-# The global bibliography is rebuilt on every book-reader load via
-# `BookBibliography.from_book`, so the raw draft content stays in
-# *local* numbering and remap_content projects it to global at render
-# time. These endpoints expose three user-facing operations the UI was
-# missing:
-#
-#   GET  /api/bibliography/audit  — per-draft sanity check (broken refs,
-#                                   orphan sources, duplicates).
-#   POST /api/bibliography/sort   — flatten local→global numbers INTO
-#                                   the stored draft content so the
-#                                   numbers the reader sees match the
-#                                   markdown the editor shows. Reorders
-#                                   draft.sources to global order too.
-#   GET  /api/bibliography/citation/{book_id}/{n}
-#                                — fetch full publication metadata for
-#                                  a global citation number (title,
-#                                  authors, year, journal, doi, abstract,
-#                                  open-access URL) for click-to-preview.
-
-
-# ── Chapter management ───────────────────────────────────────────────────────
-
 # ── Phase 30: Export endpoints (text / markdown / printable HTML) ───────────
 #
 # Pandoc isn't installed and adding weasyprint would pull a lot of
@@ -1153,36 +1128,6 @@ def _html_to_pdf_response(html: str, filename: str):
 _VALID_EXPORT_EXTS = ("txt", "md", "html", "pdf")
 
 
-# ── Phase 30: Knowledge Graph browse endpoint ────────────────────────────────
-#
-# The KG schema (sciknow.storage.models.KnowledgeGraphTriple, table
-# `knowledge_graph`) was added by an earlier phase but had zero web
-# exposure — only the wiki compile pipeline writes to it. This
-# endpoint exposes a simple filtered list view so the user can
-# sanity-check the corpus's extracted (subject, predicate, object)
-# triples without dropping into psql.
-
-# ── Snapshots ────────────────────────────────────────────────────────────────
-
-# ── Phase 38: chapter + book snapshots (bundle of all drafts) ────────────────
-# Design:
-#   - A scope='chapter' snapshot stores {"chapter_id", "drafts": [...]}
-#     in `content` as JSON. Each draft entry carries section_type,
-#     title, version, word_count, and the full content text at snapshot
-#     time.
-#   - A scope='book' snapshot stores {"book_id", "chapters": [{chapter
-#     bundle}, ...]} — the natural union.
-#   - Restore is NON-DESTRUCTIVE for chapter/book snapshots: it inserts
-#     new draft rows with fresh version numbers instead of overwriting
-#     existing content. Safer than the per-draft overwrite path because
-#     chapter restores touch many sections at once.
-#
-# Snapshot the chapter BEFORE firing autowrite-all. Restore if the
-# autowrite-all run produces worse output than what you had.
-
-
-# ── Draft status + metadata ──────────────────────────────────────────────────
-
 # ── Chapter reader (continuous scroll) ───────────────────────────────────────
 
 def _titleify_slug_for_display(slug: str) -> str:
@@ -1191,8 +1136,6 @@ def _titleify_slug_for_display(slug: str) -> str:
     but kept here so this module doesn't have to import lazily."""
     return (slug or "").replace("_", " ").strip().title()
 
-
-# ── Corkboard data ──────────────────────────────────────────────────────────
 
 # ── SSE / Streaming endpoints ───────────────────────────────────────────────
 
@@ -1287,20 +1230,6 @@ def _run_generator_in_thread(job_id: str, generator_fn, loop):
         _finish_job(job_id)
 
 
-# ── Phase 54.6.14 — method catalogues ──────────────────────────────────
-# Pickers in Plan / Outline / Gaps surface these so the user can steer
-# the LLM's approach (Tree of Thoughts, Five Whys, Pre-mortem, etc.)
-# without rewriting prompts. Data adapted from BMAD-METHOD (MIT).
-
-# ── Phase 54.6.14 — Critic Skills (adversarial review + edge-case hunter) ──
-
-# ── Phase 14: Web v2 endpoints ──────────────────────────────────────────────
-#
-# These add CLI parity to the GUI: score history viewer (Phase 13), wiki
-# query, corpus RAG ask, catalog browser, and a stats panel for the
-# dashboard.
-
-
 # ── Phase 50.B — user feedback capture (LambdaMART feedstock) ────────────
 
 # Phase 54.6.135 — route was `/api/feedback` which collided with the
@@ -1311,36 +1240,6 @@ def _run_generator_in_thread(job_id: str, generator_fn, loop):
 # the endpoint stayed; moved to a disambiguated path so the ±mark route
 # can own `/api/feedback` again. The rename has no frontend caller
 # (there never was one at the time of the fix).
-# ── Phase 36: Tools panel endpoints ──────────────────────────────────────────
-# Brings four CLI-only capabilities into the web GUI:
-#   search query / search similar  → JSON
-#   ask synthesize                 → SSE (mirrors /api/ask which is the
-#                                        `ask question` equivalent)
-#   catalog topics                 → JSON (topic cluster breakdown)
-#   db enrich / db expand          → SSE, subprocess-backed so the CLI
-#                                    stays the source of truth for these
-#                                    long-running ops with complex flag
-#                                    surfaces (workers, resolvers, …).
-
-
-# ── Phase 46.E — Authors + domains + expand-author (web surface) ─────────────
-#
-# Makes the "grow the corpus" capability reachable from the browser:
-#   GET /api/catalog/authors       — ranked + searchable authors
-#   GET /api/catalog/domains       — paper_metadata.domains unnested + ranked
-#   POST /api/corpus/expand-author — run `sciknow db expand-author` as an
-#                                    SSE-streamed subprocess (same pattern as
-#                                    the existing /api/corpus/expand)
-#
-# Ranking rationale: the user selecting an author for expansion wants to
-# see their most-cited / most-authored-in-this-corpus candidates first,
-# so the default sort key is (citation_count DESC, paper_count DESC).
-# An optional ?q=fragment filters by substring on the author name — PG's
-# ILIKE on an already-GROUP-BYed name list is fast enough at our scale
-# (~5k distinct authors in the global-cooling project); if the author
-# count ever exceeds ~50k we'd promote this to a materialized view.
-
-
 # ── Corpus actions — subprocess-backed, stream stdout as SSE ─────────────────
 
 import os  # noqa: E402 — kept local-ish with the block that uses it
@@ -1500,46 +1399,6 @@ def _spawn_cli_streaming(job_id: str, argv: list[str], loop, on_finish=None):
         target=_run_generator_in_thread, args=(job_id, gen, loop), daemon=True
     ).start()
 
-
-# ── Phase 46.F — End-to-end web flow (ingest / indices / book create) ────────
-#
-# Wires every CLI step from "empty project" to "book export" to a web
-# endpoint so the Setup Wizard modal can walk a new user through the
-# entire pipeline from the browser. All long-running ops use the same
-# SSE-streamed-subprocess pattern as /api/corpus/{enrich,expand}.
-#
-# Endpoints added here:
-#   POST /api/corpus/ingest-directory   stream `sciknow ingest directory <path>`
-#   POST /api/corpus/upload             multipart upload → stage → ingest
-#   POST /api/catalog/cluster           stream `sciknow catalog cluster`
-#   POST /api/catalog/raptor/build      stream `sciknow catalog raptor build`
-#   POST /api/wiki/compile              stream `sciknow wiki compile`
-#   POST /api/book/create               create a book + optional bootstrap
-#                                       (inline, no subprocess — fast)
-#   GET  /api/setup/status              aggregate "where am I in the pipeline?"
-
-
-# ── Phase 54.6.11 — /api/viz/* endpoints for the Visualize modal ───────
-# Six lightweight JSON endpoints backing the six tabs. Heavy work
-# (UMAP fit) is done in the helper and cached on disk per-project.
-
-
-
-# ── Project management (Phase 43h GUI) ───────────────────────────────────
-#
-# Mirrors the `sciknow project …` CLI surface. The web reader was
-# launched against a specific book in a specific project, so switching
-# projects from the running server would leave the UI pointing at a
-# book that no longer exists in the active project's DB. We therefore:
-#   - show the active project + all siblings read-only (list / show)
-#   - let the user init new projects, destroy others, or `use` a different
-#     slug — but `use` just writes .active-project and returns a notice
-#     that the user must restart the server to actually switch corpora.
-# This keeps the CLI semantics intact and avoids the footgun of hot-
-# swapping the DB connection under the running app.
-
-
-# ── Phase 54.6.24 — backup endpoints ───────────────────────────────────────
 
 # ── HTML rendering helpers ───────────────────────────────────────────────────
 
