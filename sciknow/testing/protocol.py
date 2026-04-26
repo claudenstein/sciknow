@@ -18010,6 +18010,70 @@ def l1_v2_monitor_carries_infer_substrate() -> None:
     )
 
 
+def l1_v2_route_handlers_resolve_all_names() -> None:
+    """v2 Phase E — every extracted route handler can resolve all
+    its module-level name references.
+
+    Catches the specific class of bug where the route extractor missed
+    a cross-module symbol prefix (e.g. `_create_job` instead of
+    `_app._create_job`). NameError only fires at call time, not at
+    import time, so the umbrella `route_split_modules_loaded` test
+    didn't catch ~68 such bugs that crept in during the bulk extract.
+
+    This test walks each handler's bytecode for LOAD_GLOBAL ops and
+    asserts every loaded name resolves to either:
+      - a builtin (always available)
+      - a name defined in the route module
+      - a name imported at module-top
+      - the conventional `_app` lazy shim (must be inside the function
+        body, so we just look for LOAD_FAST/STORE_FAST `_app` in the
+        same code object)
+    """
+    import dis
+    import importlib
+    from pathlib import Path
+    from sciknow.web import app as _web
+
+    routes_dir = Path(_web.__file__).resolve().parent / "routes"
+    failures: list[str] = []
+    for p in sorted(routes_dir.glob("*.py")):
+        if p.stem == "__init__":
+            continue
+        mod = importlib.import_module(f"sciknow.web.routes.{p.stem}")
+        # Module's global namespace at import time
+        mod_globals = set(vars(mod).keys()) | set(__builtins__.keys() if isinstance(__builtins__, dict) else dir(__builtins__))
+        # Walk every async function defined in the module
+        for name, fn in vars(mod).items():
+            if not callable(fn) or not hasattr(fn, "__code__"):
+                continue
+            if fn.__module__ != mod.__name__:
+                continue  # imported from elsewhere — skip
+            code = fn.__code__
+            # Names this function loads from globals
+            loaded_globals = {
+                instr.argval
+                for instr in dis.get_instructions(code)
+                if instr.opname == "LOAD_GLOBAL" and isinstance(instr.argval, str)
+            }
+            # `_app` is allowed if the function imports it as a local
+            # via the `from X import Y as Z` pattern (which compiles to
+            # IMPORT_NAME + STORE_FAST).
+            local_names = set(code.co_varnames[:code.co_argcount + code.co_kwonlyargcount])
+            for instr in dis.get_instructions(code):
+                if instr.opname in ("STORE_FAST", "STORE_NAME"):
+                    if isinstance(instr.argval, str):
+                        local_names.add(instr.argval)
+            for n in loaded_globals - mod_globals - local_names:
+                # Skip names that look like locals (lowercase short identifiers
+                # are often arg defaults — not really suspicious)
+                failures.append(f"{p.stem}.{name}: unresolved global '{n}'")
+
+    assert not failures, (
+        "Route handlers reference unresolved names — bulk-extractor "
+        "missed prefix injection. Examples:\n  " + "\n  ".join(failures[:20])
+    )
+
+
 def l1_v2_dual_embedder_deprecation_warning() -> None:
     """v2 Phase D — Settings emits a deprecation warning when the
     dual-embedder split (DENSE_EMBEDDER_MODEL) is still configured.
@@ -18735,6 +18799,10 @@ L1_TESTS: list[Callable] = [
     # v2 Phase D — Settings warns on the dual-embedder split being
     # active (DENSE_EMBEDDER_MODEL set); v2.1 will remove the fallback
     l1_v2_dual_embedder_deprecation_warning,
+    # v2 Phase E — every route handler's bytecode resolves all its
+    # LOAD_GLOBAL names; catches missed _app prefix injections that
+    # only NameError at call time
+    l1_v2_route_handlers_resolve_all_names,
 ]
 
 L2_TESTS: list[Callable] = [

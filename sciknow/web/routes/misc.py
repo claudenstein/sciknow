@@ -8,15 +8,24 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import threading
 
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import JSONResponse, HTMLResponse, FileResponse, Response, StreamingResponse, PlainTextResponse
 from sqlalchemy import text
 
+from sciknow.core.bibliography import render_bibliography_markdown
 from sciknow.storage.db import get_session
 
 router = APIRouter()
+
+
+def _titleify_slug_for_display(slug: str) -> str:
+    """Turn a section slug like 'related-work' into 'Related work'."""
+    if not slug:
+        return ""
+    return slug.replace("-", " ").replace("_", " ").strip().capitalize()
 
 
 @router.get("/api/section/{draft_id}")

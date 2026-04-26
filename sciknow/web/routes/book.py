@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 
 from fastapi import APIRouter, Form, HTTPException, Request
@@ -19,6 +20,7 @@ from sqlalchemy import text
 
 from sciknow.storage.db import get_session
 
+logger = logging.getLogger("sciknow.web.routes.book")
 router = APIRouter()
 
 

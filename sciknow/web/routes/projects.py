@@ -18,10 +18,13 @@ sub-tree):
 """
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+logger = logging.getLogger("sciknow.web.routes.projects")
 router = APIRouter()
 
 
