@@ -1252,6 +1252,8 @@ def _run_generator_in_thread(job_id: str, generator_fn, loop):
 # ── Corpus actions — subprocess-backed, stream stdout as SSE ─────────────────
 
 import os  # noqa: E402 — kept local-ish with the block that uses it
+import shlex  # noqa: E402 — used by _spawn_cli_streaming for shell-safe quoting
+import subprocess  # noqa: E402 — used by _spawn_cli_streaming
 # ── Phase 21.b — Visuals API ────────────────────────────────────────────────
 
 _EQUATIONS_DIAGNOSTIC_TEMPLATE = (

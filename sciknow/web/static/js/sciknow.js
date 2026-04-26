@@ -9035,57 +9035,12 @@ function renderMonitor(snap) {
     sections.push(html);
   }
 
-  // Phase 54.6.294 — slow-ingest leaderboard.  Top N docs by total
-  // wall-clock with per-stage breakdown so operators can see
-  // which stage dominated (usually convert, sometimes embedding
-  // on very-long docs).  Silent when the leaderboard is empty.
-  if (slowDocs.length) {
-    let html = '<h4>Slow ingest (top ' + slowDocs.length + ')</h4>'
-      + '<table class="stats-table" style="width:100%;font-size:0.9em;">'
-      + '<tr><th style="width:5em;">Total</th><th>Title</th>'
-      + '<th title="Fraction of wall-clock in each pipeline stage">Stage breakdown</th></tr>';
-    for (const d of slowDocs) {
-      const totalS = (d.total_ms || 0) / 1000;
-      const col = totalS > 600 ? '#c33'
-        : totalS > 120 ? '#b70' : 'var(--fg-muted)';
-      const totalStr = totalS >= 60
-        ? (totalS / 60).toFixed(1) + ' min'
-        : totalS.toFixed(0) + ' s';
-      const stages = d.stage_ms || {};
-      // Mini stacked bar per stage
-      const stagePalette = {
-        convert: '#6aa', metadata: '#7a5',
-        chunking: '#38a', embedding: '#a58',
-      };
-      let bar = '<div style="display:flex;height:0.8em;border-radius:3px;overflow:hidden;'
-        + 'min-width:120px;">';
-      const stageKeys = Object.keys(stages).sort((a, b) => stages[b] - stages[a]);
-      for (const k of stageKeys) {
-        const pct = d.total_ms ? (stages[k] / d.total_ms * 100) : 0;
-        const c = stagePalette[k] || '#666';
-        bar += '<div style="background:' + c + ';width:' + pct + '%;" '
-          + 'title="' + _escHTML(k) + ': ' + (stages[k] / 1000).toFixed(1)
-          + 's (' + pct.toFixed(0) + '%)"></div>';
-      }
-      bar += '</div>';
-      // Legend: list the stages with their seconds
-      const legendBits = stageKeys.map(k => {
-        const c = stagePalette[k] || '#666';
-        return '<span style="margin-right:0.6em;font-size:0.85em;">'
-          + '<span style="display:inline-block;width:0.65em;height:0.65em;background:'
-          + c + ';margin-right:0.2em;vertical-align:middle;"></span>'
-          + _escHTML(k) + ' ' + (stages[k] / 1000).toFixed(1) + 's</span>';
-      }).join('');
-      html += '<tr><td style="color:' + col + ';font-weight:bold;">'
-        + _escHTML(totalStr) + '</td>'
-        + '<td>' + _escHTML((d.title || '?').slice(0, 80)) + '</td>'
-        + '<td>' + bar
-        + '<div style="color:var(--fg-muted);margin-top:0.2em;">' + legendBits + '</div>'
-        + '</td></tr>';
-    }
-    html += '</table>';
-    sections.push(html);
-  }
+  // Phase 54.6.294 — slow-ingest leaderboard removed from the GUI
+  // (2026-04-26). Was visually noisy (5 rows per render, ~120 px
+  // tall stacked-bar each) and rarely actionable on a stable corpus.
+  // The data still ships in `snap.slow_docs` for any downstream
+  // JSON consumer; just no longer rendered in the System Monitor
+  // modal.
 
   // Top failure classes — summary of worst offenders in last 24h
   if (topFailures.length) {

@@ -13511,13 +13511,17 @@ def l1_phase54_6_295_sidecar_deep_audit() -> None:
 def l1_phase54_6_294_slow_docs_leaderboard() -> None:
     """Phase 54.6.294 — top-N slow-ingest leaderboard in the monitor.
 
-    Guards:
+    Render contract relaxed 2026-04-26: the leaderboard panel was
+    pulled from CLI dashboard + GUI System Monitor modal (visually
+    noisy on a stable corpus, rarely actionable). The data API is
+    preserved for any downstream JSON consumer.
+
+    Guards (post-2026-04-26):
 
       A) `_slow_docs_leaderboard` exists with document_id / title /
          total_ms / stage_ms fields.
       B) Snapshot exposes `slow_docs`.
-      C) CLI renders the "slow docs" footer block.
-      D) Web modal renders a "Slow ingest" heading.
+      C+D removed — render no longer required.
     """
     import inspect as _inspect
     from sciknow.core import monitor as _mon
@@ -13536,22 +13540,7 @@ def l1_phase54_6_294_slow_docs_leaderboard() -> None:
 
     snap_src = _inspect.getsource(_mon.collect_monitor_snapshot)
     assert '"slow_docs"' in snap_src, (
-        "54.6.294 snapshot must expose slow_docs"
-    )
-
-    from sciknow.cli import db as _db_cli
-    cli_src = _inspect.getsource(_db_cli._build_monitor_layout)
-    assert "slow_docs" in cli_src and "slow docs" in cli_src, (
-        "54.6.294 CLI must read + render slow_docs"
-    )
-
-    from sciknow.testing.helpers import web_app_full_source
-    web_src = web_app_full_source()
-    assert "snap.slow_docs" in web_src, (
-        "54.6.294 web must read snap.slow_docs"
-    )
-    assert "Slow ingest" in web_src, (
-        "54.6.294 web must render a 'Slow ingest' heading"
+        "54.6.294 snapshot must expose slow_docs (data API preserved)"
     )
 
 
