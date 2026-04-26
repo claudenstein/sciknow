@@ -50,34 +50,46 @@ def resolve_asset_path(doc_id: str, asset_path: str) -> Path | None:
     """Resolve a visual's `asset_path` against the active project's
     mineru_output subtree.
 
-    MinerU writes images to
-    ``data/mineru_output/<doc_id>/<slug>/auto/images/<sha>.jpg`` and
-    the row stores the relative path ``images/<sha>.jpg`` — so we
-    resolve against each ``<slug>/auto/`` subfolder until one hits.
+    MinerU writes images to one of three layouts depending on backend:
+
+      * ``<slug>/auto/images/<sha>.jpg``   — pipeline mode (MinerU 2.0)
+      * ``<slug>/vlm/images/<sha>.jpg``    — VLM-Pro mode (MinerU 2.5+, current default)
+      * ``<slug>/images/<sha>.jpg``        — bare layout (older outputs)
+
+    The row stores the relative path ``images/<sha>.jpg``, so we probe
+    each candidate infix in priority order until one resolves. This
+    mirrors the fix shipped in Phase 54.6.303 to ``/api/visuals/image``
+    in the web app — without it, every visual ingested with VLM-Pro
+    silently failed to resolve, leaving caption-visuals and
+    finalize_draft.verify_draft_figures_l3 unable to find ANY figure
+    file on disk (the L3 verifier degrades to L2; caption-visuals
+    skips with "image file missing on disk").
 
     Returns None if the file is missing (e.g. a mineru_output cleanup
     deleted the image after the row was created). Callers should skip
-    gracefully rather than error — a missing file is a valid skip
-    reason, not a bug.
+    gracefully rather than error.
 
     Path-traversal guard: the resolved path must be under the doc's
-    mineru_output dir (same guard as /api/visuals/image in the web
-    app — see 54.6.61).
+    mineru_output dir (same guard as /api/visuals/image — see 54.6.61).
     """
     from sciknow.config import settings
 
     doc_dir = Path(settings.data_dir) / "mineru_output" / str(doc_id)
     if not doc_dir.is_dir():
         return None
+    doc_real = doc_dir.resolve()
+    # Probe each backend's layout. Order matters only for performance
+    # — once a candidate hits, return it.
+    infixes = ("auto", "vlm", None)
     for sub in doc_dir.iterdir():
         if not sub.is_dir():
             continue
-        # Primary layout: <slug>/auto/images/<sha>.jpg
-        primary = (sub / "auto" / asset_path).resolve()
-        if primary.is_file() and doc_dir.resolve() in primary.parents:
-            return primary
-        # Fallback: no auto/ (older MinerU outputs)
-        fallback = (sub / asset_path).resolve()
-        if fallback.is_file() and doc_dir.resolve() in fallback.parents:
-            return fallback
+        for infix in infixes:
+            candidate = (sub / infix / asset_path) if infix else (sub / asset_path)
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            if resolved.is_file() and doc_real in resolved.parents:
+                return resolved
     return None

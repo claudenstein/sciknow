@@ -1789,6 +1789,23 @@ def _render_sidebar(items, active_id):
             sec_v = int(sec.get("version") or 0)
             sec_w = int(sec.get("words") or 0)
 
+            # Phase 32.4 — inline ✗ delete button mirrors what
+            # rebuildSidebar() in sciknow.js renders. Without this, the
+            # section ✗ button only existed AFTER a JS rebuild fired
+            # (e.g. after deleting a chapter / adopting an orphan); on
+            # initial page load users had no way to remove a section
+            # from a chapter's sections_meta. Inline onclick stops the
+            # click from bubbling to the wrapping anchor's
+            # onclick="return navTo(this)" — same pattern as the
+            # sec-orphan-delete button above.
+            sec_del_btn = (
+                f'<button class="sec-delete-btn" '
+                f'onclick="event.preventDefault();event.stopPropagation();'
+                f'deleteSection(\'{ch_id}\',\'{sec_type}\')" '
+                f'title="Remove this section from the chapter '
+                f'(draft becomes an orphan)">\u2717</button>'
+            )
+
             if status == "empty":
                 # Phase 26 — draggable for reordering empty slots before drafting.
                 # Phase 29 — clicking an empty section now PREVIEWS it
@@ -1808,7 +1825,8 @@ def _render_sidebar(items, active_id):
                     f'data-sec-type="{sec_type}">'
                     f'<span class="sec-status-dot empty"></span>'
                     f'{display}'
-                    f'<span class="meta">empty \u00b7 \u270e</span></div>'
+                    f'<span class="meta">empty \u00b7 \u270e</span>'
+                    f'{sec_del_btn}</div>'
                 )
             elif status == "orphan":
                 # Phase 22 — inline X button on orphan drafts so the
@@ -1844,6 +1862,10 @@ def _render_sidebar(items, active_id):
                 # The click handler (navTo) still fires on plain clicks;
                 # the browser distinguishes click from drag based on
                 # whether the cursor moved during mousedown.
+                # Phase 32.4 — sec_del_btn appended inside the anchor
+                # so users can remove the section from sections_meta
+                # without first triggering a JS rebuild via some other
+                # action.
                 out += (
                     f'<a class="sec-link {active}" href="/section/{sec_id}" '
                     f'draggable="true" '
@@ -1853,7 +1875,8 @@ def _render_sidebar(items, active_id):
                     f'onclick="return navTo(this)">'
                     f'<span class="sec-status-dot drafted"></span>'
                     f'{display} '
-                    f'<span class="meta">v{sec_v} \u00b7 {sec_w}w</span></a>'
+                    f'<span class="meta">v{sec_v} \u00b7 {sec_w}w</span>'
+                    f'{sec_del_btn}</a>'
                 )
         if not ch["sections"]:
             out += (
