@@ -32,7 +32,7 @@ A local-first scientific knowledge system that ingests papers, builds a compiled
   - `db expand-coauthors` — **invisible college** (papers by coauthors of your corpus authors)
   - `book auto-expand` — **gap-driven** auto-expansion: every open `book gaps` entry becomes its own topic search, candidates merged + ranked so papers that close multiple gaps rise to the top
 - **Cross-project dedup** — `db cleanup-downloads --cross-project` (default ON) checks every sciknow project's DB by SHA-256, so a PDF downloaded into project B that's already ingested in project A is recognised and cleaned
-- **Pending downloads panel** — ~50% of expand selections typically have no legal OA PDF; those rows auto-persist to `pending_downloads` with full metadata (title, authors, year, source-method) so you can retry (the 6-source cascade bypasses `.no_oa_cache`), mark manually-acquired, abandon with a note, or export to CSV for ILL. Surfaced as the "📋 Pending downloads" entry in the top-bar **🌱 Corpus ▾** dropdown and `sciknow db pending list|retry|mark-done|abandon|export` from the CLI
+- **Pending downloads panel** — ~50% of expand selections typically have no legal OA PDF; those rows auto-persist to `pending_downloads` with full metadata (title, authors, year, source-method) so you can retry (the 6-source cascade bypasses `.no_oa_cache`), mark manually-acquired, abandon with a note, or export to CSV for ILL. Surfaced as the "📋 Pending downloads" entry in the top-bar **🌱 Corpus ▾** dropdown and `sciknow corpus pending list|retry|mark-done|abandon|export` from the CLI
 - **Topic clustering** — BERTopic (UMAP + HDBSCAN + c-TF-IDF) assigns papers to named thematic clusters in seconds
 
 **Search & Retrieval**
@@ -174,7 +174,7 @@ a dozen papers are new.
 
 ### Live monitor
 
-`sciknow db monitor` is a btop-inspired single-screen dashboard for
+`sciknow library monitor` is a btop-inspired single-screen dashboard for
 the whole system: corpus counts with a done/total progress bar,
 GPU VRAM + utilization bars with tri-colour heat, currently-loaded
 Ollama models, Qdrant collection shapes (with ◆ColBERT / ●dense /
@@ -203,7 +203,7 @@ on papers we also have), extraction coverage (how many papers had
 their references parsed at all), and the orphan count (complete docs
 with zero incoming citations from the rest of the corpus). The web
 modal additionally lists the top-5 most-cited papers. Useful for
-deciding when to run `sciknow db expand` (low coverage) vs when the
+deciding when to run `sciknow corpus expand` (low coverage) vs when the
 MinerU fallback is dropping reference sections (low extraction).
 
 **Phase 54.6.281** adds an **inbox age histogram** — the inbox scan
@@ -559,7 +559,7 @@ Full 807-doc deep audit runs in ~13 s; sample mode via
 `--uuid-sample 50` for ~2 s. Usage:
 
 ```bash
-sciknow library audit-sidecar --deep              # full (v1: sciknow db audit-sidecar)
+sciknow library audit-sidecar --deep              # full (v1: sciknow library audit-sidecar)
 sciknow library audit-sidecar --deep --uuid-sample 50  # fast sample
 ```
 
@@ -578,11 +578,11 @@ total ratio without paying the 0.6 s Qdrant scroll each time. CLI
 gets a `sidecar N/N ✓ age Xs` row in the corpus panel; web modal
 gets a "Sidecar integrity" banner with drift counts + DB/prod/
 sidecar totals. `sidecar_drift` alert fires when any critical
-bucket is non-zero, with `sciknow db audit-sidecar` as the
+bucket is non-zero, with `sciknow library audit-sidecar` as the
 suggested-fix command.
 
 **Phase 54.6.292** adds a **per-doc sidecar integrity audit** —
-`sciknow db audit-sidecar` cross-checks every complete document's
+`sciknow library audit-sidecar` cross-checks every complete document's
 chunk count against both Qdrant collections (prod + dual-embedder
 sidecar) and categorises mismatches (sidecar_missing,
 sidecar_partial, sidecar_orphan, prod_missing, prod_partial,
@@ -618,7 +618,7 @@ appears in top-5 retrieval results. No OOM, backend stamp
 `mineru-vlm-pro-vllm`, counts match across prod/sidecar/DB.
 
 ```bash
-# v2 names; v1 `sciknow db monitor|doctor` still mounted with deprecation
+# v2 names; v1 `sciknow library monitor|doctor` still mounted with deprecation
 # shim for one release.
 uv run sciknow library monitor              # one shot, full layout
 uv run sciknow library monitor --watch 5    # btop-style in-place refresh
@@ -632,10 +632,10 @@ uv run sciknow library doctor               # go/no-go readiness (54.6.253)
 uv run sciknow library doctor --json        # scriptable (exit 0/1/2)
 ```
 
-`sciknow db doctor` is a focused wrapper that prints the traffic-
+`sciknow library doctor` is a focused wrapper that prints the traffic-
 light verdict + health score + hardware summary + grouped alerts,
 then exits with a shell-friendly code tied to the worst severity.
-Pipeline-friendly: `sciknow db doctor && sciknow ingest directory …`
+Pipeline-friendly: `sciknow library doctor && sciknow ingest directory …`
 is safer than eyeballing the monitor before a long run.
 
 Watch mode uses Rich's `Live` + alternate-screen buffer, so it
@@ -802,22 +802,22 @@ every Phase commit. Most recent batches:
 | **Map evidence for/against a claim** | `sciknow book argue "claim"` |
 | **Find gaps** in a book project | `sciknow book gaps "Book"` |
 | **Auto-fill book gaps** with new papers from OpenAlex | `sciknow book auto-expand "Book"` |
-| **Follow references** of my papers | `sciknow db expand` |
-| **Find papers that cite mine** (forward-in-time) | `sciknow db expand-cites` |
-| **Pull every paper by an author** | `sciknow db expand-author "Solanki"` |
-| **Broad-search OpenAlex** by topic (bootstrap / new direction) | `sciknow db expand-topic "thermospheric cooling"` |
-| **Coauthor snowball** (same-lab researchers) | `sciknow db expand-coauthors` |
+| **Follow references** of my papers | `sciknow corpus expand` |
+| **Find papers that cite mine** (forward-in-time) | `sciknow corpus expand-cites` |
+| **Pull every paper by an author** | `sciknow corpus expand-author "Solanki"` |
+| **Broad-search OpenAlex** by topic (bootstrap / new direction) | `sciknow corpus expand-topic "thermospheric cooling"` |
+| **Coauthor snowball** (same-lab researchers) | `sciknow corpus expand-coauthors` |
 | **Auto-insert citations** into a draft | `sciknow book insert-citations <draft-id>` |
-| **Reclaim disk** from already-ingested downloads | `sciknow db cleanup-downloads` |
-| **See papers stuck without a legal OA PDF** | `sciknow db pending list` |
-| **Retry pending downloads** (new OA links may have appeared) | `sciknow db pending retry` |
+| **Reclaim disk** from already-ingested downloads | `sciknow corpus cleanup-downloads` |
+| **See papers stuck without a legal OA PDF** | `sciknow corpus pending list` |
+| **Retry pending downloads** (new OA links may have appeared) | `sciknow corpus pending retry` |
 | **Backfill the KG** (empty or stale `knowledge_graph`) | `sciknow wiki extract-kg` |
 | **Draft a chapter outline** from the LLM | `sciknow book outline "Title"` (also available from the Plans modal) |
 | **Auto-plan section concepts** (3-4 bullets per section) | `sciknow book plan-sections "Title"` (also the Chapter modal + Book Settings buttons) |
 | **See whole-book projected length** at a glance | `sciknow book length-report "Title"` (also the Book Settings panel) |
 | **Pre-export verify figure citations** ([Fig. N] → VLM) | `sciknow book finalize-draft <draft-id>` (also the Verify dropdown) |
 | **Switch a book's project type** (or unfreeze default) | `sciknow book set-target "Title" --unset` then `book set-target "Title" --words N` |
-| **Link body-text mentions to figures** | `sciknow db link-visual-mentions` |
+| **Link body-text mentions to figures** | `sciknow corpus link-visual-mentions` |
 | **Watch a topic for new hot papers** | `sciknow watch add-velocity "thermospheric cooling"` |
 | **Measure visuals ranker quality** (P@1 / R@3) | `sciknow bench-visuals-ranker` |
 | **Measure corpus idea density vs §24** | `sciknow bench-idea-density` *(needs spaCy)* |
@@ -856,7 +856,7 @@ sciknow infer up --role reranker
 sciknow infer status                 # all three should report ✓ healthy
 
 # 5. Initialise PostgreSQL + Qdrant
-sciknow library init                 # was: sciknow db init
+sciknow library init                 # was: sciknow library init
 
 # 6. Ingest your papers
 sciknow corpus ingest directory ./papers/
