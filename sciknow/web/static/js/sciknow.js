@@ -265,7 +265,22 @@ async function loadSection(draftId) {
     document.getElementById('draft-title').textContent = data.display_title || data.title;
     document.getElementById('draft-version').textContent = data.version;
     document.getElementById('draft-words').textContent = data.word_count;
-    document.getElementById('read-view').innerHTML = data.content_html;
+    // When the draft has no body (autowrite stub, freshly-deleted content,
+    // or a newly-created version that hasn't been written yet), show a
+    // visible placeholder so the user doesn't read the empty panel as
+    // "the text isn't shown" — the previous innerHTML='' silently blanked
+    // the panel and was the top soak-window UX complaint.
+    const _hasContent = (data.content_html || '').trim().length > 0;
+    if (_hasContent) {
+      document.getElementById('read-view').innerHTML = data.content_html;
+    } else {
+      const _ver = data.version || 1;
+      document.getElementById('read-view').innerHTML =
+        '<div class="empty-state"><h3>This draft is empty</h3>' +
+        '<p class="u-muted">Version ' + _ver + ' has no body yet — ' +
+        'click <strong>Write</strong> in the toolbar to draft a single shot, ' +
+        'or <strong>Autowrite</strong> to run the convergence loop.</p></div>';
+    }
     // Phase 54.6.87 — render math in the loaded draft content so $...$
     // doesn't show up as literal dollar signs.
     _renderMathInEl(document.getElementById('read-view'));
@@ -3268,7 +3283,11 @@ function rebuildSidebar(chapters, activeId) {
       const display = escapeHtml(draft.title || (slug.charAt(0).toUpperCase() + slug.slice(1)));
       // Phase 22 — inline X button to delete the orphan
       // Phase 25 — also "+" button to adopt the slug into sections
-      // Phase 42 — data-action dispatch for orphan +/✗ buttons.
+      // Inline onclick mirrors sec-delete-btn so click stops propagating
+      // BEFORE the wrapping anchor's onclick="return navTo(this)"
+      // fires — otherwise loadSection runs first, currentDraftId flips
+      // to the orphan, and the subsequent delete falls through to
+      // showDashboard() so the user feels like "nothing happened".
       html += '<a class="sec-link sec-orphan" href="/section/' + draft.id +
         '" data-draft-id="' + draft.id + '" onclick="return navTo(this)" ' +
         'title="Orphan draft. Click to inspect, + to adopt into sections, X to delete.">' +
@@ -3276,11 +3295,12 @@ function rebuildSidebar(chapters, activeId) {
         display +
         ' <span class="meta">orphan \u00b7 v' + draft.version + ' \u00b7 ' + draft.words + 'w</span>' +
         '<button class="sec-orphan-adopt" ' +
-        'data-action="adopt-orphan-section" ' +
-        'data-chapter-id="' + ch.id + '" data-sec-type="' + slug + '" ' +
+        'onclick="event.preventDefault();event.stopPropagation();' +
+        'adoptOrphanSection(\'' + ch.id + '\',\'' + slug + '\')" ' +
         'title="Add this section_type to the chapter sections list">+</button>' +
         '<button class="sec-orphan-delete" ' +
-        'data-action="delete-orphan-draft" data-draft-id="' + draft.id + '" ' +
+        'onclick="event.preventDefault();event.stopPropagation();' +
+        'deleteOrphanDraft(\'' + draft.id + '\')" ' +
         'title="Delete this orphan draft permanently">\u2717</button>' +
         '</a>';
     });

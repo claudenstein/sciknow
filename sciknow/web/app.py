@@ -1816,9 +1816,12 @@ def _render_sidebar(items, active_id):
                 # Phase 25 — also show a "+" button that adopts the
                 # slug into the chapter's sections list, re-classifying
                 # the draft from "orphan" to "drafted".
-                # Phase 42 — orphan +/✗ buttons switched to data-action.
-                # The dispatcher handler calls preventDefault+stopPropagation
-                # internally so the anchor's navigation doesn't fire.
+                # Inline onclick mirrors sec-delete-btn so the click
+                # stops propagating BEFORE the wrapping anchor's
+                # onclick="return navTo(this)" fires — otherwise
+                # loadSection runs first, currentDraftId flips to the
+                # orphan, and the subsequent delete falls through to
+                # showDashboard() so the user feels like nothing happened.
                 out += (
                     f'<a class="sec-link sec-orphan" href="/section/{sec_id}" '
                     f'data-draft-id="{sec_id}" onclick="return navTo(this)" '
@@ -1827,13 +1830,12 @@ def _render_sidebar(items, active_id):
                     f'{display} '
                     f'<span class="meta">orphan \u00b7 v{sec_v} \u00b7 {sec_w}w</span>'
                     f'<button class="sec-orphan-adopt" '
-                    f'data-action="adopt-orphan-section" '
-                    f'data-chapter-id="{ch_id}" '
-                    f'data-sec-type="{sec_type}" '
+                    f'onclick="event.preventDefault();event.stopPropagation();'
+                    f'adoptOrphanSection(\'{ch_id}\',\'{sec_type}\')" '
                     f'title="Add this section_type to the chapter\u2019s sections list (idempotent)">+</button>'
                     f'<button class="sec-orphan-delete" '
-                    f'data-action="delete-orphan-draft" '
-                    f'data-draft-id="{sec_id}" '
+                    f'onclick="event.preventDefault();event.stopPropagation();'
+                    f'deleteOrphanDraft(\'{sec_id}\')" '
                     f'title="Delete this orphan draft permanently">\u2717</button>'
                     f'</a>'
                 )
