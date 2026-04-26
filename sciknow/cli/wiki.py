@@ -1216,21 +1216,23 @@ def kg_sample(
     def _llm_grade(row) -> tuple[str, str]:
         """Return (grade, reason) from the LLM judge. Empty strings on
         parse failure — caller treats that as 'unclear'."""
-        import ollama as _ollama
-        client = _ollama.Client(host=settings.ollama_host, timeout=60)
+        # V2_FINAL Stage 2: route via rag.llm.complete which dispatches
+        # to llama-server when USE_LLAMACPP_WRITER=True (default).
+        from sciknow.rag.llm import complete as _llm_complete
         prompt = _KG_GRADE_PROMPT.format(
             subject=row[1], predicate=row[2], object=row[3],
             title=row[5] or "(unknown)", year=row[6] or "n.d.",
             source_sentence=row[7] or "",
         )
         try:
-            resp = client.chat(
+            content = _llm_complete(
+                "You are a careful KG triple judge.",
+                prompt,
                 model=_resolved_model,
-                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                num_predict=200,
                 format="json",
-                options={"temperature": 0.0, "num_predict": 200},
             )
-            content = (resp.get("message") or {}).get("content", "")
             data = _json.loads(content)
             grade = str(data.get("grade", "")).strip().lower()
             reason = str(data.get("reason", "")).strip()

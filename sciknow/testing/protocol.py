@@ -8607,18 +8607,28 @@ def l1_phase54_6_21_audit_fixes() -> None:
         "concept UPDATE must dedupe before array_append"
     )
 
-    # K) metadata LLM fallback now has timeout (54.6.23)
+    # K) metadata LLM fallback dispatches via rag.llm.complete (V2_FINAL
+    # Stage 2) so it picks up either the substrate's httpx 600s read
+    # timeout or Ollama's per-client timeout depending on
+    # USE_LLAMACPP_WRITER. The original 54.6.23 assertion was that a
+    # slow LLM can't block the pipeline indefinitely; routing through
+    # the dispatch facade preserves that contract.
     from sciknow.ingestion import metadata as _metadata
     meta_src = _inspect.getsource(_metadata._layer_llm)
-    assert "timeout=" in meta_src, (
-        "_layer_llm must pass an explicit timeout to ollama.Client "
-        "so a slow/hung model can't block the pipeline indefinitely"
+    assert ("from sciknow.rag.llm import" in meta_src
+            and "complete" in meta_src), (
+        "_layer_llm must dispatch via sciknow.rag.llm.complete so the "
+        "substrate↔Ollama choice (and the per-backend timeouts) flow "
+        "through the central facade"
     )
-    # Phase 54.6.30 — _layer_llm now passes keep_alive=-1 to avoid
-    # model reloads across the N papers in a bulk ingest.
+    # Phase 54.6.30 — _layer_llm passes keep_alive=-1 to avoid model
+    # reloads across the N papers in a bulk ingest. The substrate
+    # accepts+ignores keep_alive (model is resident for the process
+    # lifetime); Ollama uses it as before.
     assert "keep_alive=-1" in meta_src, (
         "_layer_llm must pass keep_alive=-1 to keep the fast model "
-        "resident across papers in a bulk ingest"
+        "resident across papers in a bulk ingest (no-op on substrate, "
+        "load-time saver on Ollama)"
     )
 
     # L) Phase 54.6.30 — llm.py wrapper defaults
@@ -18479,6 +18489,122 @@ def l1_v2_route_handlers_resolve_all_names() -> None:
     )
 
 
+# ════════════════════════════════════════════════════════════════════
+# V2_FINAL Stage 2 — ollama import audit
+#
+# Catalogue every `import ollama` site under sciknow/. Each must be
+# either:
+#   (a) inside the `KEPT_BY_DESIGN` list below — explicitly v1-only
+#       paths (VLM, doctor probes, model-tag bench tools), OR
+#   (b) inside `rag/llm.py` (the dispatch facade itself — the rollback
+#       escape hatch when USE_LLAMACPP_WRITER=False).
+#
+# Adding a new `import ollama` outside both lists is a regression: the
+# v2 substrate already covers the writer-LLM use case via
+# `rag.llm.complete()` which dispatches via `_use_llamacpp()`.
+# ════════════════════════════════════════════════════════════════════
+
+
+# Files where an ollama import is intentional and stays in v2 by design.
+# Format: { "path/from/repo/root.py": "one-line reason" }.
+_OLLAMA_KEPT_BY_DESIGN: dict[str, str] = {
+    # The dispatch facade itself — `rag/llm.py` keeps an Ollama branch as
+    # the rollback hatch when `USE_LLAMACPP_WRITER=False`.
+    "sciknow/rag/llm.py":
+        "dispatch facade — Ollama branch is the v1 rollback hatch",
+    # Doctor probes Ollama explicitly so it can detect a v1-style outage
+    # even on a v2 deployment (operators sometimes still have Ollama
+    # running for the VLM / sweep tools).
+    "sciknow/core/monitor.py":
+        "doctor probes Ollama for backwards compatibility + release-vram",
+    # Web mirror of the doctor's release-vram action; same rationale.
+    "sciknow/web/routes/system.py":
+        "release-vram parity with monitor.py for v1 ollama",
+    # VLM (vision) calls — substrate has writer/embedder/reranker roles
+    # only, no VLM role. caption-visuals + finalize_draft.verify_draft_figures_l3
+    # both require Ollama-served vision models.
+    "sciknow/cli/db.py":
+        "caption-visuals VLM call (uses images=[...]); writer-side judge "
+        "calls in this file are routed via rag.llm.complete()",
+    "sciknow/core/finalize_draft.py":
+        "L3 figure-claim verifier — VLM call (images=[...])",
+    # v1-era model comparison benches — they iterate over Ollama-tag
+    # named model variants (qwen3:30b-a3b vs qwen2.5:32b-instruct etc.)
+    # which the substrate's one-GGUF-per-role model doesn't expose.
+    "sciknow/testing/model_sweep.py":
+        "v1-era per-model bench (Ollama tag-named variants)",
+    "sciknow/testing/quality.py":
+        "v1-era quality bench (Ollama tag-named variants)",
+    "sciknow/testing/vlm_sweep.py":
+        "VLM benchmarking — vision models served by Ollama",
+}
+
+
+def l1_v2_no_unguarded_ollama_imports() -> None:
+    """V2_FINAL Stage 2 — every `import ollama` site is accounted for.
+
+    Walks the source under `sciknow/` for `import ollama` (top-level or
+    function-scoped) and asserts each line lives in a file listed in
+    `_OLLAMA_KEPT_BY_DESIGN`. Any new ollama import outside that list
+    fails the test until either (a) the call site is routed via
+    `rag.llm.complete()` (which already dispatches via `_use_llamacpp()`)
+    or (b) the file is added to the keep list with a one-line reason.
+    """
+    import re
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[2]
+    pkg_root = repo_root / "sciknow"
+    pat = re.compile(r"^\s*(?:import\s+ollama\b|from\s+ollama\b)", re.MULTILINE)
+
+    offenders: list[str] = []
+    found_paths: set[str] = set()
+    for py in pkg_root.rglob("*.py"):
+        rel = str(py.relative_to(repo_root))
+        # Skip caches + the test harness itself (which references
+        # ollama in docstrings + dispatch-audit text).
+        if "__pycache__" in rel:
+            continue
+        if rel == "sciknow/testing/protocol.py":
+            continue
+        try:
+            src = py.read_text()
+        except OSError:
+            continue
+        if not pat.search(src):
+            continue
+        found_paths.add(rel)
+        if rel in _OLLAMA_KEPT_BY_DESIGN:
+            continue
+        # Surface every offending line with line numbers for fast triage.
+        for i, line in enumerate(src.splitlines(), start=1):
+            if pat.match(line):
+                offenders.append(f"{rel}:{i}  {line.strip()}")
+
+    assert not offenders, (
+        "V2_FINAL Stage 2 — unguarded `import ollama` lines found. "
+        "Either route the call through `sciknow.rag.llm.complete()` "
+        "(which dispatches to llama-server when USE_LLAMACPP_WRITER=True) "
+        "or add the file to `_OLLAMA_KEPT_BY_DESIGN` with a reason. "
+        "Offenders:\n  - " + "\n  - ".join(offenders)
+    )
+
+    # Sanity: the keep list itself shouldn't drift. Surface entries that
+    # no longer correspond to any actual `import ollama` (so we keep
+    # the list pruned).
+    stale = sorted(set(_OLLAMA_KEPT_BY_DESIGN) - found_paths)
+    assert not stale, (
+        "V2_FINAL Stage 2 — `_OLLAMA_KEPT_BY_DESIGN` lists files with "
+        "no matching `import ollama` line; prune these:\n  - "
+        + "\n  - ".join(stale)
+    )
+
+    return TestResult.ok(
+        name="l1_v2_no_unguarded_ollama_imports",
+        message=(f"{len(found_paths)} files with `import ollama`, "
+                 f"all kept-by-design or in dispatch facade"),
+    )
+
+
 def l1_v2_dual_embedder_deprecation_warning() -> None:
     """v2 Phase D — Settings emits a deprecation warning when the
     dual-embedder split (DENSE_EMBEDDER_MODEL) is still configured.
@@ -19215,6 +19341,10 @@ L1_TESTS: list[Callable] = [
     # v2 — package version readable from python (sciknow.__version__),
     # CLI (--version), and HTTP (/openapi.json info.version)
     l1_v2_package_version_surface,
+    # V2_FINAL Stage 2 — every `import ollama` site is either inside
+    # the dispatch facade (rag/llm.py) or in the kept-by-design list
+    # (VLM, doctor probes, model-tag bench tools).
+    l1_v2_no_unguarded_ollama_imports,
 ]
 
 L2_TESTS: list[Callable] = [

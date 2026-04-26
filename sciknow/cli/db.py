@@ -10934,8 +10934,8 @@ def caption_bench_cmd(
     _resolved_model = model or settings.llm_fast_model or settings.llm_model
 
     def _llm_grade(row) -> tuple[str, str, str, str]:
-        import ollama as _ollama
-        client = _ollama.Client(host=settings.ollama_host, timeout=60)
+        # V2_FINAL Stage 2: route via rag.llm.complete (substrate dispatch).
+        from sciknow.rag.llm import complete as _llm_complete
         prompt = _CAPTION_GRADE_PROMPT.format(
             kind=row[2],
             title=(row[7] or "(unknown)")[:150],
@@ -10945,13 +10945,14 @@ def caption_bench_cmd(
             ai_caption=(row[5] or "")[:1500],
         )
         try:
-            resp = client.chat(
+            content = _llm_complete(
+                "You are a careful caption-quality judge.",
+                prompt,
                 model=_resolved_model,
-                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                num_predict=300,
                 format="json",
-                options={"temperature": 0.0, "num_predict": 300},
             )
-            content = (resp.get("message") or {}).get("content", "")
             data = _json.loads(content)
             acc = str(data.get("accuracy", "")).strip().lower()
             hall = str(data.get("hallucination", "")).strip().lower()
@@ -11250,21 +11251,22 @@ def equation_bench_cmd(
     _resolved_model = model or settings.llm_fast_model or settings.llm_model
 
     def _llm_grade(row) -> tuple[str, str, str]:
-        import ollama as _ollama
-        client = _ollama.Client(host=settings.ollama_host, timeout=60)
+        # V2_FINAL Stage 2: route via rag.llm.complete (substrate dispatch).
+        from sciknow.rag.llm import complete as _llm_complete
         prompt = _EQ_GRADE_PROMPT.format(
             latex=(row[2] or "")[:2000],
             paraphrase=(row[3] or "")[:1500],
             surrounding_text=(row[4] or "")[:500],
         )
         try:
-            resp = client.chat(
+            content = _llm_complete(
+                "You are a careful equation-paraphrase judge.",
+                prompt,
                 model=_resolved_model,
-                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                num_predict=250,
                 format="json",
-                options={"temperature": 0.0, "num_predict": 250},
             )
-            content = (resp.get("message") or {}).get("content", "")
             data = _json.loads(content)
             lv = str(data.get("latex_valid", "")).strip().lower()
             pm_ = str(data.get("paraphrase_matches", "")).strip().lower()
