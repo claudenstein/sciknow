@@ -83,6 +83,8 @@ from sciknow.web.routes import autowrite as _autowrite_routes  # noqa: E402
 app.include_router(_autowrite_routes.router)
 from sciknow.web.routes import export as _export_routes  # noqa: E402
 app.include_router(_export_routes.router)
+from sciknow.web.routes import catalog as _catalog_routes  # noqa: E402
+app.include_router(_catalog_routes.router)
 
 
 # Phase 33 — build tag: a short version string visible in the browser
@@ -3949,94 +3951,6 @@ async def api_wiki_consensus(topic: str = Form(...), model: str = Form(None)):
 # the endpoint stayed; moved to a disambiguated path so the ±mark route
 # can own `/api/feedback` again. The rename has no frontend caller
 # (there never was one at the time of the fix).
-@app.get("/api/catalog")
-async def api_catalog(
-    page: int = 1,
-    per_page: int = 25,
-    year_from: int = None,
-    year_to: int = None,
-    author: str = None,
-    journal: str = None,
-    topic_cluster: str = None,
-):
-    """Paginated paper list with optional filters. Mirrors `sciknow catalog list`.
-
-    Phase 41 — query is fully static. Every optional filter is
-    always bound (as the real value or NULL) and gated by a
-    ``(:param IS NULL OR …)`` short-circuit. This removes the
-    f-string interpolation of pre-built WHERE fragments that the
-    Phase 22 audit flagged: no code path builds SQL from Python
-    strings anymore, so a future maintainer can't accidentally
-    concatenate user input into the query shape.
-    """
-    page = max(page, 1)
-    per_page = min(max(per_page, 1), 100)
-    offset = (page - 1) * per_page
-
-    params: dict = {
-        "limit": per_page,
-        "offset": offset,
-        "year_from": year_from,
-        "year_to": year_to,
-        # Both ILIKE filters are wrapped with %% here so the SQL can
-        # stay static. NULL means "no filter" courtesy of the gating
-        # IS NULL check on each clause.
-        "author": f"%{author}%" if author else None,
-        "journal": f"%{journal}%" if journal else None,
-        "topic_cluster": topic_cluster or None,
-    }
-
-    with get_session() as session:
-        total = session.execute(text("""
-            SELECT COUNT(*) FROM paper_metadata pm
-            WHERE (:year_from IS NULL OR pm.year >= :year_from)
-              AND (:year_to   IS NULL OR pm.year <= :year_to)
-              AND (:author    IS NULL OR EXISTS (
-                   SELECT 1 FROM jsonb_array_elements(pm.authors) a
-                   WHERE a->>'name' ILIKE :author))
-              AND (:journal        IS NULL OR pm.journal ILIKE :journal)
-              AND (:topic_cluster  IS NULL OR pm.topic_cluster = :topic_cluster)
-        """), params).scalar() or 0
-
-        rows = session.execute(text("""
-            SELECT pm.document_id::text, pm.title, pm.year, pm.authors,
-                   pm.journal, pm.doi, pm.abstract, pm.topic_cluster,
-                   pm.metadata_source
-            FROM paper_metadata pm
-            WHERE (:year_from IS NULL OR pm.year >= :year_from)
-              AND (:year_to   IS NULL OR pm.year <= :year_to)
-              AND (:author    IS NULL OR EXISTS (
-                   SELECT 1 FROM jsonb_array_elements(pm.authors) a
-                   WHERE a->>'name' ILIKE :author))
-              AND (:journal        IS NULL OR pm.journal ILIKE :journal)
-              AND (:topic_cluster  IS NULL OR pm.topic_cluster = :topic_cluster)
-            ORDER BY pm.year DESC NULLS LAST, pm.title
-            LIMIT :limit OFFSET :offset
-        """), params).fetchall()
-
-    papers = [
-        {
-            "document_id": r[0],
-            "title": r[1] or "(untitled)",
-            "year": r[2],
-            "authors": r[3] or [],
-            "journal": r[4],
-            "doi": r[5],
-            "abstract": (r[6] or "")[:600],
-            "topic_cluster": r[7],
-            "metadata_source": r[8],
-        }
-        for r in rows
-    ]
-    return JSONResponse({
-        "page": page,
-        "per_page": per_page,
-        "total": total,
-        "n_pages": (total + per_page - 1) // per_page,
-        "papers": papers,
-    })
-
-
 # ── Phase 36: Tools panel endpoints ──────────────────────────────────────────
 # Brings four CLI-only capabilities into the web GUI:
 #   search query / search similar  → JSON
@@ -4065,142 +3979,6 @@ async def api_catalog(
 # ILIKE on an already-GROUP-BYed name list is fast enough at our scale
 # (~5k distinct authors in the global-cooling project); if the author
 # count ever exceeds ~50k we'd promote this to a materialized view.
-
-
-@app.get("/api/catalog/authors")
-async def api_catalog_authors(
-    q: str = "",
-    limit: int = 50,
-    min_papers: int = 1,
-):
-    """Phase 46.E — ranked + searchable author index.
-
-    Returns authors from ``paper_metadata.authors`` unnested and grouped
-    by name, ranked by ``(citation_count DESC, paper_count DESC)`` so
-    the most-cited / most-prolific names surface first. Used by the
-    web UI's Expand-by-Author picker.
-
-    Params:
-      q          — substring match (case-insensitive) on the author name;
-                   empty string returns the top ``limit`` overall.
-      limit      — cap on rows returned (default 50).
-      min_papers — require at least this many papers in the corpus
-                   (default 1 — every author).
-    """
-    limit = max(1, min(500, int(limit or 50)))
-    min_papers = max(1, int(min_papers or 1))
-    q_like = f"%{q.strip()}%" if q and q.strip() else None
-    with get_session() as session:
-        # CTE approach — CROSS JOIN LATERAL is the correct PG dance for
-        # jsonb_array_elements inside a join that also hits citations.
-        # Using DISTINCT on (document_id) within the explosion to
-        # deduplicate the many-to-one from authors → document.
-        base_sql = """
-            WITH exploded AS (
-                SELECT author->>'name' AS name,
-                       COALESCE(author->>'orcid', '') AS orcid,
-                       pm.document_id
-                FROM paper_metadata pm
-                CROSS JOIN LATERAL jsonb_array_elements(pm.authors) AS author
-                WHERE pm.authors IS NOT NULL
-                  AND author->>'name' IS NOT NULL
-                  AND trim(author->>'name') != ''
-            )
-            SELECT e.name,
-                   COUNT(DISTINCT e.document_id) AS n_papers,
-                   COUNT(c.id)                   AS n_cites,
-                   (ARRAY_AGG(DISTINCT NULLIF(e.orcid, '')))[1] AS first_orcid
-            FROM exploded e
-            LEFT JOIN citations c ON c.cited_document_id = e.document_id
-            {where}
-            GROUP BY e.name
-            HAVING COUNT(DISTINCT e.document_id) >= :min_papers
-            ORDER BY n_cites DESC, n_papers DESC, e.name
-            LIMIT :limit
-        """
-        params = {"min_papers": min_papers, "limit": limit}
-        if q_like:
-            where = "WHERE e.name ILIKE :q"
-            params["q"] = q_like
-        else:
-            where = ""
-        rows = session.execute(
-            text(base_sql.format(where=where)), params,
-        ).fetchall()
-
-    return JSONResponse({
-        "authors": [
-            {"name": r[0], "n_papers": int(r[1] or 0),
-             "n_citations": int(r[2] or 0), "orcid": r[3] or None}
-            for r in rows
-        ],
-        "query": q,
-        "limit": limit,
-    })
-
-
-@app.get("/api/catalog/domains")
-async def api_catalog_domains(limit: int = 60):
-    """Phase 46.E — ranked domain / tag index (paper_metadata.domains unnested).
-
-    ``domains`` is a text[] column populated by the metadata cascade —
-    Crossref's subject list or the arXiv primary-category field. Empty
-    arrays are common (our corpus ingested mostly via embedded_pdf /
-    Crossref for works without subject tags), but this endpoint still
-    ranks what's present so the UI can expose tag-filtering.
-    """
-    limit = max(1, min(500, int(limit or 60)))
-    with get_session() as session:
-        rows = session.execute(text("""
-            SELECT tag, COUNT(DISTINCT pm.document_id) AS n
-            FROM paper_metadata pm
-            CROSS JOIN LATERAL unnest(pm.domains) AS tag
-            WHERE pm.domains IS NOT NULL
-              AND array_length(pm.domains, 1) > 0
-              AND trim(tag) != ''
-            GROUP BY tag
-            ORDER BY n DESC, tag
-            LIMIT :lim
-        """), {"lim": limit}).fetchall()
-    return JSONResponse({
-        "domains": [{"name": r[0], "n": int(r[1])} for r in rows],
-    })
-
-
-@app.get("/api/catalog/topics")
-async def api_catalog_topics(name: str = None):
-    """Topic cluster breakdown (sciknow catalog topics).
-
-    With no args: returns every non-null cluster name + paper count.
-    With ?name=...: returns the cluster's paper list (title/year/doi).
-    """
-    with get_session() as session:
-        if name:
-            rows = session.execute(text("""
-                SELECT pm.document_id::text, pm.title, pm.year, pm.doi,
-                       pm.authors, pm.journal
-                FROM paper_metadata pm
-                WHERE pm.topic_cluster = :n
-                ORDER BY pm.year DESC NULLS LAST, pm.title
-                LIMIT 500
-            """), {"n": name}).fetchall()
-            papers = [
-                {"document_id": r[0], "title": r[1], "year": r[2],
-                 "doi": r[3], "authors": r[4] or [], "journal": r[5]}
-                for r in rows
-            ]
-            return JSONResponse({"name": name, "papers": papers, "n": len(papers)})
-
-        rows = session.execute(text("""
-            SELECT topic_cluster, COUNT(*)
-            FROM paper_metadata
-            WHERE topic_cluster IS NOT NULL AND topic_cluster != ''
-            GROUP BY topic_cluster
-            ORDER BY COUNT(*) DESC
-        """)).fetchall()
-    return JSONResponse({
-        "topics": [{"name": r[0], "n": int(r[1])} for r in rows],
-    })
 
 
 # ── Corpus actions — subprocess-backed, stream stdout as SSE ─────────────────
@@ -5058,38 +4836,6 @@ async def api_corpus_upload(request: Request):
         _spawn_cli_streaming(job_id, argv, loop)
         payload["job_id"] = job_id
     return JSONResponse(payload)
-
-
-@app.post("/api/catalog/cluster")
-async def api_catalog_cluster(
-    min_cluster_size: int = Form(0),
-    rebuild: bool = Form(False),
-    dry_run: bool = Form(False),
-):
-    """SSE-streamed wrapper around ``sciknow catalog cluster``."""
-    job_id, _ = _create_job("catalog_cluster")
-    loop = asyncio.get_event_loop()
-    argv = ["catalog", "cluster"]
-    if min_cluster_size and int(min_cluster_size) > 0:
-        argv += ["--min-cluster-size", str(int(min_cluster_size))]
-    if rebuild: argv.append("--rebuild")
-    if dry_run: argv.append("--dry-run")
-    _spawn_cli_streaming(job_id, argv, loop)
-    return JSONResponse({"job_id": job_id})
-
-
-@app.post("/api/catalog/raptor/build")
-async def api_catalog_raptor_build():
-    """SSE-streamed wrapper around ``sciknow catalog raptor build``.
-
-    RAPTOR is a one-off batch op (typically 5-30 min depending on
-    corpus size). No options exposed — build policy uses the CLI
-    defaults.
-    """
-    job_id, _ = _create_job("catalog_raptor_build")
-    loop = asyncio.get_event_loop()
-    _spawn_cli_streaming(job_id, ["catalog", "raptor", "build"], loop)
-    return JSONResponse({"job_id": job_id})
 
 
 @app.post("/api/wiki/compile")
@@ -7076,4 +6822,8 @@ from sciknow.web.routes.autowrite import (  # noqa: E402, F401
 )
 from sciknow.web.routes.export import (  # noqa: E402, F401
     export_draft, export_chapter, export_book,
+)
+from sciknow.web.routes.catalog import (  # noqa: E402, F401
+    api_catalog, api_catalog_authors, api_catalog_domains,
+    api_catalog_topics, api_catalog_cluster, api_catalog_raptor_build,
 )
