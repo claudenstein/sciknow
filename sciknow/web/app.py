@@ -1461,6 +1461,11 @@ def _visuals_get_cached(draft_id: str) -> dict | None:
     return blob
 
 
+_EQUATIONS_DIAGNOSTIC_TEMPLATE = (
+    Path(__file__).resolve().parent / "templates" / "equations_diagnostic.html"
+).read_text(encoding="utf-8")
+
+
 @app.get("/debug/equations")
 async def debug_equations(limit: int = 60):
     """Phase 54.6.107 — self-contained equation-render diagnostic.
@@ -1470,11 +1475,10 @@ async def debug_equations(limit: int = 60):
     ok / KaTeX-error / empty) so we can diagnose why the user sees
     half the equations failing without needing headless automation.
     """
-    from sqlalchemy import text as _dt
-    from starlette.responses import HTMLResponse
+    import json as _j
     try:
         with get_session() as session:
-            rows = session.execute(_dt("""
+            rows = session.execute(text("""
                 SELECT id::text, content
                 FROM visuals
                 WHERE kind='equation' AND content IS NOT NULL AND content <> ''
@@ -1484,98 +1488,14 @@ async def debug_equations(limit: int = 60):
     except Exception as exc:
         return HTMLResponse(f"<pre>DB error: {exc}</pre>", status_code=500)
 
-    import json as _j
     eqs = [{"id": r[0], "content": r[1]} for r in rows]
-    body = f"""<!doctype html>
-<html><head><title>sciknow equation diagnostic</title>
-<link rel="stylesheet" href="/static/vendor/katex/katex.min.css"/>
-<script defer src="/static/vendor/katex/katex.min.js"></script>
-<style>
-body {{ font-family: system-ui, sans-serif; margin: 20px; background: #f8f8f8; }}
-h1 {{ font-size: 18px; margin-bottom: 8px; }}
-#stats {{ position: sticky; top: 0; background: #fff; padding: 10px 14px;
-         border: 1px solid #ccc; border-radius: 6px; margin-bottom: 14px;
-         font-size: 13px; z-index: 10; }}
-.eq-card {{ background: #fff; border: 1px solid #ddd; border-radius: 6px;
-            padding: 12px 14px; margin-bottom: 10px; }}
-.eq-card.fail {{ border-color: #e57373; background: #fff5f5; }}
-.eq-head {{ font: 11px/1 monospace; color: #888; margin-bottom: 6px; }}
-.eq-render {{ font-size: 17px; min-height: 30px; overflow-x: auto; }}
-.eq-latex {{ font: 11px/1.4 monospace; color: #555; margin-top: 6px;
-             white-space: pre-wrap; word-break: break-word;
-             padding: 4px 6px; background: #fafafa; border-radius: 3px; }}
-.eq-err {{ font: 11px monospace; color: #c00; margin-top: 4px; }}
-</style>
-</head><body>
-<h1>Equation rendering diagnostic — {len(eqs)} random equations</h1>
-<div id="stats">Loading KaTeX…</div>
-<div id="out"></div>
-<script>
-const EQS = {_j.dumps(eqs)};
-function strip(src) {{
-  let b = (src || '').trim();
-  b = b.replace(/^\\s*\\$\\$\\s*/, '').replace(/\\s*\\$\\$\\s*$/, '');
-  b = b.replace(/^\\s*\\$\\s*/, '').replace(/\\s*\\$\\s*$/, '');
-  b = b.replace(/^\\s*\\\\\\[\\s*/, '').replace(/\\s*\\\\\\]\\s*$/, '');
-  b = b.replace(/^\\s*\\\\\\(\\s*/, '').replace(/\\s*\\\\\\)\\s*$/, '');
-  return b.trim();
-}}
-function esc(s) {{
-  return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}}
-function run() {{
-  if (typeof window.katex === 'undefined') {{ setTimeout(run, 200); return; }}
-  const out = document.getElementById('out');
-  const stats = document.getElementById('stats');
-  let ok = 0, fail = 0, failMsgs = new Map();
-  let html = '';
-  for (const eq of EQS) {{
-    const body = strip(eq.content);
-    let rendered = '', errMsg = '', failed = false;
-    try {{
-      rendered = window.katex.renderToString(body, {{
-        displayMode: true, throwOnError: true, strict: false, output: 'html'
-      }});
-      ok++;
-    }} catch (e) {{
-      failed = true;
-      fail++;
-      errMsg = (e.message || String(e)).split('\\n')[0];
-      const key = errMsg.replace(/pos \\d+/g, 'pos N').slice(0, 70);
-      failMsgs.set(key, (failMsgs.get(key) || 0) + 1);
-      try {{
-        rendered = window.katex.renderToString(body, {{
-          displayMode: true, throwOnError: false, strict: 'ignore', output: 'html'
-        }});
-      }} catch (_) {{
-        rendered = '<em>KaTeX refused even in lenient mode</em>';
-      }}
-    }}
-    html += '<div class="eq-card' + (failed ? ' fail' : '') + '">'
-      + '<div class="eq-head">' + esc(eq.id.slice(0, 8)) + (failed ? ' — FAIL' : ' — ok') + '</div>'
-      + '<div class="eq-render">' + rendered + '</div>'
-      + (failed ? '<div class="eq-err">' + esc(errMsg) + '</div>' : '')
-      + '<div class="eq-latex">' + esc(body) + '</div>'
-      + '</div>';
-  }}
-  out.innerHTML = html;
-  const sorted = [...failMsgs.entries()].sort((a, b) => b[1] - a[1]);
-  let sHtml = '<strong>' + ok + '/' + (ok + fail) + ' rendered (' + Math.round(100 * ok / (ok + fail)) + '%).</strong>';
-  if (fail > 0) {{
-    sHtml += ' <strong>' + fail + ' failed.</strong> Error buckets:<ul style="margin:4px 0 0 18px;">';
-    for (const [msg, count] of sorted) {{
-      sHtml += '<li>' + count + '× ' + esc(msg) + '</li>';
-    }}
-    sHtml += '</ul>';
-  }}
-  stats.innerHTML = sHtml;
-}}
-run();
-</script>
-</body></html>
-"""
+    # Plain str.replace (not .format) so the CSS + JS braces in the
+    # template don't have to be escaped — only two placeholders.
+    body = (
+        _EQUATIONS_DIAGNOSTIC_TEMPLATE
+            .replace("__N_EQS__", str(len(eqs)))
+            .replace("__EQS_JSON__", _j.dumps(eqs))
+    )
     return HTMLResponse(body)
 
 
