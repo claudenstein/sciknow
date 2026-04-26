@@ -184,4 +184,4 @@ branch:
 
 **v2 ready for production**: every roadmap phase is shipped (most ✅, a handful with explicit v2.1 polish notes). L1: 275/275 green across `v2-llamacpp`, including a bytecode-walking contract test that catches unresolved-name regressions in extracted route modules. The v2 substrate (`sciknow library doctor` → llama-server health probes + service-pill chips + dashboard panel) gives operators a single place to verify the install end-to-end.
 
-End-to-end smoke (TestClient, 22 GET endpoints with no required state): **19/22 resolve cleanly**, the 3 stragglers all hit the same `_book_id is empty` test-context limitation (not a bug). Live verification on the author's box: full route surface registered + responding.
+End-to-end smoke (TestClient, 22 GET endpoints with no required state): **22/22 resolve cleanly** — `_get_book_data` was hardened to return an empty 5-tuple on unset `_book_id` (the test context's missing `set_book` call) instead of raising a Postgres UUID DataError, so every downstream handler degrades to "empty book" responses cleanly. Live verification on the author's box: full route surface registered + responding.
