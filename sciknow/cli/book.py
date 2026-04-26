@@ -2441,6 +2441,280 @@ def snapshot_restore(
     )
 
 
+# ── history / diff (Phase 54.6.328 snapshot-versioning Phase 3) ───────────
+
+@app.command(name="history")
+def history(
+    target: Annotated[str, typer.Argument(
+        help="What to walk: '<chapter>:<section>' for one section's "
+             "version chain (e.g. '3:solar_dynamo'), or just a book "
+             "title for a book-level rollup.")],
+    book_title: str | None = typer.Option(
+        None, "--book", "-b",
+        help="Book title (only needed when target is just <chapter>:<section>; "
+             "the active book is used otherwise).",
+    ),
+    chapter: int = typer.Option(
+        0, "--chapter", "-c",
+        help="With a book title target, scope the rollup to one chapter "
+             "instead of the whole book.",
+    ),
+    limit: int = typer.Option(
+        50, "--limit", "-n",
+        help="Cap rows printed. Default 50; section history is rarely "
+             "longer in practice.",
+    ),
+):
+    """Walk a section / chapter / book version timeline with diff briefs.
+
+    For a section target ('<ch-num>:<section-slug>'), prints every
+    drafts.version row interleaved with any draft-scope snapshots,
+    each with a one-line diff brief vs the immediately-prior entry.
+
+    For a book or chapter target, rolls up to the latest active draft
+    per section + the most recent chapter/book snapshots.
+
+    Examples:
+
+      sciknow book history 3:solar_dynamo_behavior_over_millennia
+      sciknow book history "Global Cooling" --chapter 3
+      sciknow book history "Global Cooling"
+    """
+    from sqlalchemy import text as _text
+    from sciknow.storage.db import get_session
+    from sciknow.core.snapshot_diff import render_brief_one_line
+    from sciknow.core.version_history import list_section_history
+
+    # Section view: target shape ch:slug
+    if ":" in target and not target.endswith(":"):
+        try:
+            ch_part, slug = target.split(":", 1)
+            ch_num = int(ch_part)
+        except ValueError:
+            console.print(
+                "[red]Invalid section target.[/red] Use '<chapter>:<section-slug>'."
+            )
+            raise typer.Exit(2)
+        with get_session() as session:
+            ch = session.execute(_text("""
+                SELECT bc.id::text, bc.title FROM book_chapters bc
+                JOIN books b ON b.id = bc.book_id
+                WHERE bc.number = :n
+                ORDER BY b.created_at DESC LIMIT 1
+            """), {"n": ch_num}).fetchone()
+            if not ch:
+                console.print(f"[red]No chapter with number {ch_num}.[/red]")
+                raise typer.Exit(1)
+            entries = list_section_history(
+                session, chapter_id=ch[0], section_slug=slug,
+            )
+        if not entries:
+            console.print(f"[dim]No history for {ch_num}:{slug}.[/dim]")
+            return
+        console.print()
+        console.print(
+            f"  [bold]Ch.{ch_num}[/bold] · {ch[1] or '?'} · "
+            f"[cyan]{slug}[/cyan]  ({len(entries)} entries)"
+        )
+        console.print()
+        for e in entries[:limit]:
+            kind_tag = (
+                "[bold]✓ active[/bold]" if e.is_active
+                else f"[dim]{e.kind}[/dim]"
+            )
+            score = e.extra.get("final_overall")
+            score_tag = (
+                f" score={score:.2f}" if isinstance(score, (int, float))
+                else ""
+            )
+            label = e.label
+            if e.kind == "draft":
+                label = f"v{e.version or 0}"
+            ts = (e.created_at or "")[:19]
+            console.print(
+                f"  [cyan]{e.id[:8]}[/cyan]  {label:<10s}  {ts}  "
+                f"{e.word_count:>6,d}w  {kind_tag}{score_tag}"
+            )
+            console.print(
+                f"           [dim]Δ {render_brief_one_line(e.meta)}[/dim]"
+            )
+        return
+
+    # Book / chapter rollup view.
+    with get_session() as session:
+        book = _get_book(session, target)
+        if not book:
+            console.print(f"[red]Book not found:[/red] {target}")
+            raise typer.Exit(1)
+        book_id = book[0]
+
+        if chapter > 0:
+            ch = session.execute(_text("""
+                SELECT id::text, title FROM book_chapters
+                WHERE book_id::text = :bid AND number = :n LIMIT 1
+            """), {"bid": book_id, "n": chapter}).fetchone()
+            if not ch:
+                console.print(f"[red]Chapter {chapter} not found.[/red]")
+                raise typer.Exit(1)
+            ch_filter = "WHERE chapter_id::text = :cid"
+            params = {"cid": ch[0]}
+            scope_label = f"Ch.{chapter} {ch[1] or ''}"
+        else:
+            ch_filter = (
+                "WHERE chapter_id IN ("
+                "  SELECT id FROM book_chapters WHERE book_id::text = :bid"
+                ")"
+            )
+            params = {"bid": book_id}
+            scope_label = book[1]
+
+        # Latest active draft per (chapter, section_type), with brief
+        # = diff vs the prior version in that chain.
+        sec_rows = session.execute(_text(f"""
+            SELECT DISTINCT ON (chapter_id, section_type)
+                id::text, chapter_id::text, section_type, version,
+                word_count, content, created_at,
+                COALESCE((custom_metadata->>'is_active')::boolean, FALSE) AS active
+            FROM drafts
+            {ch_filter}
+            ORDER BY chapter_id, section_type,
+                     COALESCE((custom_metadata->>'is_active')::boolean, FALSE) DESC,
+                     CASE WHEN content IS NULL OR LENGTH(content) < 50
+                          THEN 1 ELSE 0 END,
+                     version DESC
+        """), params).fetchall()
+
+        # Bundle snapshots in scope.
+        snap_q = (
+            "SELECT id::text, name, word_count, created_at, scope, meta "
+            "FROM draft_snapshots "
+        )
+        if chapter > 0:
+            snap_q += "WHERE chapter_id::text = :cid AND scope='chapter' "
+            snap_params = {"cid": ch[0]}
+        else:
+            snap_q += (
+                "WHERE book_id::text = :bid OR chapter_id IN ("
+                "  SELECT id FROM book_chapters WHERE book_id::text = :bid"
+                ") "
+            )
+            snap_params = {"bid": book_id}
+        snap_q += "ORDER BY created_at DESC LIMIT 20"
+        snap_rows = session.execute(_text(snap_q), snap_params).fetchall()
+
+    console.print()
+    console.print(f"  [bold]{scope_label}[/bold]  ({len(sec_rows)} sections)")
+    console.print()
+    for r in sec_rows[:limit]:
+        did, _cid, slug, ver, wc, _content, ts, active = r
+        active_tag = "[bold]✓[/bold]" if active else " "
+        console.print(
+            f"  {active_tag}  [cyan]{did[:8]}[/cyan]  "
+            f"v{ver or 0:<3d}  {(slug or '')[:50]:<50s}  "
+            f"{wc or 0:>6,d}w  [dim]{str(ts or '')[:19]}[/dim]"
+        )
+    if snap_rows:
+        console.print()
+        console.print("  [dim]bundle snapshots[/dim]")
+        for s in snap_rows:
+            sid, nm, wc, ts, scope, meta = s
+            meta = meta if isinstance(meta, dict) else {}
+            console.print(
+                f"     [cyan]{sid[:8]}[/cyan]  "
+                f"[dim]scope={scope:<7s}[/dim]  "
+                f"{wc or 0:>6,d}w  {(nm or '')[:50]}"
+            )
+            console.print(
+                f"              [dim]Δ {render_brief_one_line(meta)} · "
+                f"{str(ts or '')[:19]}[/dim]"
+            )
+
+
+@app.command(name="diff")
+def diff(
+    ref_a: Annotated[str, typer.Argument(
+        help="First version ref (older). Accepts a draft/snapshot id "
+             "or prefix (≥6 chars), or '<ch>:<slug>:vN' / "
+             "'<ch>:<slug>:latest'.")],
+    ref_b: Annotated[str, typer.Argument(
+        help="Second version ref (newer). Same shapes as ref_a.")],
+    json_out: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead "
+        "of unified diff text.",
+    ),
+    context: int = typer.Option(
+        3, "--context", "-U",
+        help="Lines of context for the unified diff (default 3).",
+    ),
+):
+    """Word-level diff between any two versions.
+
+    Examples:
+
+      sciknow book diff 3a9e1b2c d7c3   # two draft prefixes
+      sciknow book diff 3:solar_dynamo:v6 3:solar_dynamo:latest
+      sciknow book diff 3a9e1b2c 3:solar_dynamo:latest --json
+    """
+    import difflib as _difflib
+    import json as _json
+    from sqlalchemy import text as _text  # noqa: F401
+    from sciknow.storage.db import get_session
+    from sciknow.core.snapshot_diff import compute_prose_diff
+    from sciknow.core.version_history import resolve_version_ref
+
+    with get_session() as session:
+        a = resolve_version_ref(session, ref_a)
+        b = resolve_version_ref(session, ref_b)
+    if not a:
+        console.print(f"[red]Couldn't resolve {ref_a!r}.[/red]")
+        raise typer.Exit(1)
+    if not b:
+        console.print(f"[red]Couldn't resolve {ref_b!r}.[/red]")
+        raise typer.Exit(1)
+
+    brief = compute_prose_diff(a["content"], b["content"])
+
+    if json_out:
+        console.print(_json.dumps({
+            "a": {k: v for k, v in a.items() if k != "content"},
+            "b": {k: v for k, v in b.items() if k != "content"},
+            "brief": brief,
+        }, indent=2))
+        return
+
+    console.print()
+    console.print(f"  [dim]A:[/dim] {a['label']}  ({a['word_count']:,}w)")
+    console.print(f"  [dim]B:[/dim] {b['label']}  ({b['word_count']:,}w)")
+    console.print(
+        f"  [dim]Δ +{brief['words_added']:,}/-{brief['words_removed']:,}w · "
+        f"+{brief['paragraphs_added']}/-{brief['paragraphs_removed']}¶ · "
+        f"+{brief['citations_added']}/-{brief['citations_removed']}cite[/dim]"
+    )
+    console.print()
+    diff_text = "\n".join(_difflib.unified_diff(
+        (a["content"] or "").splitlines(),
+        (b["content"] or "").splitlines(),
+        fromfile=a["label"],
+        tofile=b["label"],
+        n=context,
+        lineterm="",
+    ))
+    if not diff_text:
+        console.print("[dim]No textual differences.[/dim]")
+        return
+    for line in diff_text.splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            console.print(f"[bold]{line}[/bold]")
+        elif line.startswith("+"):
+            console.print(f"[green]{line}[/green]")
+        elif line.startswith("-"):
+            console.print(f"[red]{line}[/red]")
+        elif line.startswith("@@"):
+            console.print(f"[cyan]{line}[/cyan]")
+        else:
+            console.print(line)
+
+
 # ── review ─────────────────────────────────────────────────────────────────────
 
 @app.command()

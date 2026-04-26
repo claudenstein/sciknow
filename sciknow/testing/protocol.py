@@ -13438,6 +13438,51 @@ def l1_snapshot_diff_brief_helper() -> None:
     )
 
 
+def l1_snapshot_history_diff_cli() -> None:
+    """Phase 54.6.328 (snapshot-versioning Phase 3) — book history +
+    book diff CLI verbs.
+
+    Guards:
+      A) version_history exports list_section_history + resolve_version_ref.
+      B) cli/book exposes `history` and `diff` verbs.
+      C) `history` body imports list_section_history.
+      D) `diff` body imports resolve_version_ref + compute_prose_diff
+         and uses difflib.unified_diff for prose output.
+    """
+    import inspect as _inspect
+    from sciknow.core import version_history as _vh
+    from sciknow.cli import book as _book_cli
+
+    for name in ("list_section_history", "resolve_version_ref"):
+        assert hasattr(_vh, name), (
+            f"sciknow.core.version_history must export {name!r}"
+        )
+
+    for verb in ("history", "diff"):
+        assert hasattr(_book_cli, verb), (
+            f"sciknow book {verb} must be a registered CLI verb"
+        )
+
+    hist_src = _inspect.getsource(_book_cli.history)
+    assert "list_section_history" in hist_src, (
+        "book history must call list_section_history"
+    )
+    assert "render_brief_one_line" in hist_src, (
+        "book history must render the diff brief column"
+    )
+
+    diff_src = _inspect.getsource(_book_cli.diff)
+    assert "resolve_version_ref" in diff_src, (
+        "book diff must call resolve_version_ref"
+    )
+    assert "compute_prose_diff" in diff_src, (
+        "book diff must compute the prose diff brief"
+    )
+    assert "unified_diff" in diff_src, (
+        "book diff must produce a unified diff"
+    )
+
+
 def l1_snapshot_section_scope_cli() -> None:
     """Phase 54.6.328 (snapshot-versioning Phase 2) — CLI parity for
     section-scope snapshots.
@@ -19487,6 +19532,8 @@ L1_TESTS: list[Callable] = [
     l1_snapshot_diff_brief_helper,
     # Phase 54.6.328 (snapshot-versioning Phase 2) — book snapshot --draft
     l1_snapshot_section_scope_cli,
+    # Phase 54.6.328 (snapshot-versioning Phase 3) — book history + book diff
+    l1_snapshot_history_diff_cli,
     l1_phase54_6_298_enrichment_coverage,
     l1_phase54_6_299_hnsw_drift_check,
     l1_phase54_6_301_retrieval_latency_buffer,
