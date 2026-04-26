@@ -63,6 +63,8 @@ from sciknow.web.routes import feedback as _feedback_routes  # noqa: E402
 app.include_router(_feedback_routes.router)
 from sciknow.web.routes import bibliography as _bibliography_routes  # noqa: E402
 app.include_router(_bibliography_routes.router)
+from sciknow.web.routes import viz as _viz_routes  # noqa: E402
+app.include_router(_viz_routes.router)
 
 
 # Phase 33 — build tag: a short version string visible in the browser
@@ -6702,85 +6704,6 @@ async def api_corpus_expand(
 # Six lightweight JSON endpoints backing the six tabs. Heavy work
 # (UMAP fit) is done in the helper and cached on disk per-project.
 
-@app.get("/api/viz/topic-map")
-async def api_viz_topic_map(refresh: bool = False):
-    """UMAP 2D projection of every paper's abstract embedding."""
-    from sciknow.core.viz_ops import topic_map
-    try:
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: topic_map(refresh=bool(refresh)),
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-    return JSONResponse(result)
-
-
-@app.get("/api/viz/raptor-tree")
-async def api_viz_raptor_tree():
-    """Hierarchical RAPTOR summary tree for the sunburst view."""
-    from sciknow.core.viz_ops import raptor_tree
-    try:
-        result = await asyncio.get_event_loop().run_in_executor(None, raptor_tree)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-    return JSONResponse(result)
-
-
-@app.post("/api/viz/consensus-landscape")
-async def api_viz_consensus_landscape(topic: str = Form(""), model: str = Form(None)):
-    """Claims scatter for a topic — wraps wiki consensus_map."""
-    if not topic.strip():
-        raise HTTPException(status_code=400, detail="topic required")
-    from sciknow.core.viz_ops import consensus_landscape
-    try:
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: consensus_landscape(topic, model=(model or None)),
-        )
-    except Exception as exc:
-        logger.exception("viz consensus-landscape failed")
-        raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}")
-    return JSONResponse(result)
-
-
-@app.get("/api/viz/timeline")
-async def api_viz_timeline():
-    """Year × cluster stacked area for the timeline river."""
-    from sciknow.core.viz_ops import timeline
-    try:
-        result = await asyncio.get_event_loop().run_in_executor(None, timeline)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-    return JSONResponse(result)
-
-
-@app.get("/api/viz/ego-radial")
-async def api_viz_ego_radial(document_id: str, k: int = 20):
-    """Top-K similar papers radially around a document."""
-    if not document_id:
-        raise HTTPException(status_code=400, detail="document_id required")
-    from sciknow.core.viz_ops import ego_radial
-    try:
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: ego_radial(document_id, k=int(k)),
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-    return JSONResponse(result)
-
-
-@app.get("/api/viz/gap-radar")
-async def api_viz_gap_radar():
-    """Per-chapter coverage radar for the active book."""
-    from sciknow.core.viz_ops import gap_radar
-    try:
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: gap_radar(_book_id),
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-    return JSONResponse(result)
 
 
 @app.get("/api/settings/models")
@@ -8243,4 +8166,9 @@ from sciknow.web.routes.feedback import (  # noqa: E402, F401
 from sciknow.web.routes.bibliography import (  # noqa: E402, F401
     api_bibliography_audit, api_bibliography_sort,
     api_bibliography_citation,
+)
+from sciknow.web.routes.viz import (  # noqa: E402, F401
+    api_viz_topic_map, api_viz_raptor_tree,
+    api_viz_consensus_landscape, api_viz_timeline,
+    api_viz_ego_radial, api_viz_gap_radar,
 )
