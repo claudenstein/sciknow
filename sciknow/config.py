@@ -420,6 +420,30 @@ class Settings(BaseSettings):
         object.__setattr__(self, "_env_overrides", overrides)
         return self
 
+    @model_validator(mode="after")
+    def _warn_dual_embedder_deprecated(self):
+        """v2 Phase D — warn when the dual-embedder split (Phase 54.6.279)
+        is still configured. v2 commits to a single canonical embedder
+        per spec §2.1; the sidecar pathway is kept for one release as a
+        rollback escape hatch but will be removed in v2.1.
+
+        Triggers when ``DENSE_EMBEDDER_MODEL`` is set to a non-empty
+        value different from ``EMBEDDING_MODEL``. No-op for the v2
+        default (DENSE_EMBEDDER_MODEL unset → bge-m3 only).
+        """
+        dem = (self.dense_embedder_model or "").strip()
+        if dem and dem != self.embedding_model:
+            logging.getLogger("sciknow.config").warning(
+                "DENSE_EMBEDDER_MODEL=%r is set — the dual-embedder split "
+                "from v1 (Phase 54.6.279) is active. v2 commits to a "
+                "single canonical embedder (%s); this fallback will be "
+                "removed in v2.1. Migrate by running `sciknow library "
+                "upgrade-v1`, then drop DENSE_EMBEDDER_MODEL / "
+                "DENSE_EMBEDDER_DIM / DENSE_SIDECAR_COLLECTION from .env.",
+                dem, self.embedding_model,
+            )
+        return self
+
     @computed_field
     @property
     def pg_url(self) -> str:

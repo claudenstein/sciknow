@@ -18010,6 +18010,64 @@ def l1_v2_monitor_carries_infer_substrate() -> None:
     )
 
 
+def l1_v2_dual_embedder_deprecation_warning() -> None:
+    """v2 Phase D — Settings emits a deprecation warning when the
+    dual-embedder split (DENSE_EMBEDDER_MODEL) is still configured.
+
+    The legacy v1 sidecar pathway is kept for one release as a
+    rollback escape hatch. v2.1 will remove it; this warning gives
+    operators time to migrate via `sciknow library upgrade-v1` and
+    drop the env keys.
+
+    Guards: source-grep the validator + verify the warning fires on
+    a non-default `dense_embedder_model` value.
+    """
+    import inspect
+    import logging
+    from sciknow.config import Settings
+
+    src = inspect.getsource(Settings)
+    assert "_warn_dual_embedder_deprecated" in src, (
+        "v2 Phase D — Settings must define a model_validator "
+        "_warn_dual_embedder_deprecated"
+    )
+    assert "removed in v2.1" in src, (
+        "validator message must call out the v2.1 removal"
+    )
+
+    # Synthetic: construct a fresh Settings with the dual-embedder
+    # split active and confirm the warning fires.
+    import os
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _capture_warns():
+        rec = []
+        old = logging.getLogger("sciknow.config").handlers
+        h = logging.Handler()
+        h.emit = lambda r: rec.append(r.getMessage())
+        logging.getLogger("sciknow.config").addHandler(h)
+        try:
+            yield rec
+        finally:
+            logging.getLogger("sciknow.config").removeHandler(h)
+
+    prev = os.environ.get("DENSE_EMBEDDER_MODEL")
+    os.environ["DENSE_EMBEDDER_MODEL"] = "Qwen/Qwen3-Embedding-4B"
+    try:
+        with _capture_warns() as messages:
+            Settings()  # re-construct → triggers validator
+        assert any("dual-embedder" in m for m in messages), (
+            f"validator must warn on DENSE_EMBEDDER_MODEL set; "
+            f"captured: {messages}"
+        )
+    finally:
+        if prev is None:
+            os.environ.pop("DENSE_EMBEDDER_MODEL", None)
+        else:
+            os.environ["DENSE_EMBEDDER_MODEL"] = prev
+
+
 def l1_v2_route_split_modules_loaded() -> None:
     """v2 Phase E — every web/routes/<resource>.py is importable, each
     exposes an `APIRouter` named `router`, and the parent app has
@@ -18674,6 +18732,9 @@ L1_TESTS: list[Callable] = [
     # v2 Phase E — every web/routes/<resource>.py is importable, has a
     # router, and is mounted by app.include_router(...)
     l1_v2_route_split_modules_loaded,
+    # v2 Phase D — Settings warns on the dual-embedder split being
+    # active (DENSE_EMBEDDER_MODEL set); v2.1 will remove the fallback
+    l1_v2_dual_embedder_deprecation_warning,
 ]
 
 L2_TESTS: list[Callable] = [
