@@ -28,7 +28,12 @@ from sciknow.logging_config import setup_logging
 
 app = typer.Typer(
     name="sciknow",
-    help="Local-first scientific knowledge system.",
+    help=(
+        "Local-first scientific knowledge system. v2 substrate: "
+        "writer + embedder + reranker on llama-server. Bring up with "
+        "`sciknow infer up --role <r>`; verify with `sciknow library "
+        "doctor`. See `sciknow --version` for the installed version."
+    ),
     no_args_is_help=True,
 )
 console = Console()
