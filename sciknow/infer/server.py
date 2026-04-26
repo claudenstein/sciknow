@@ -67,10 +67,21 @@ ROLE_DEFAULTS: dict[str, dict] = {
     "reranker": {
         "port": 8092,
         "model": settings.reranker_model_gguf,
-        "ctx_size": 4096,
+        # bge-reranker-v2-m3 supports 8192 max sequence length. We set
+        # ctx_size, batch_size, and ubatch_size all to 8192 because the
+        # reranker receives (query, document) pairs where the document
+        # can be a RAPTOR summary node (full summary_text up to ~700
+        # tokens) — the prior 4096/512 defaults rejected pairs > 512
+        # tokens with `input is too large to process. increase the
+        # physical batch size`. Same reasoning as the embedder role.
+        "ctx_size": 8192,
         "n_gpu_layers": 999,
         "parallel": 1,
-        "extra_flags": ["--reranking"],
+        "extra_flags": [
+            "--reranking",
+            "--batch-size", "8192",
+            "--ubatch-size", "8192",
+        ],
     },
     # v2.0 — visuals captioner. Loads a multimodal Qwen3-VL GGUF
     # + the mmproj sidecar that bridges the vision encoder into the
