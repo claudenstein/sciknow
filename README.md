@@ -827,18 +827,23 @@ every Phase commit. Most recent batches:
 
 ## Quick Start
 
-> **v2 ships on the `v2-llamacpp` branch** (production-ready; merge to
-> `main` is a separate operational decision). All seven roadmap phases
-> are shipped. The substrate is a single `llama-server` stack (writer
+> **v2 is at `2.0.0rc2` on the `v2-llamacpp` branch** (all seven
+> roadmap phases shipped; the four V2_FINAL post-shipment stages —
+> v2-only L3 suite, ollama import audit, decision-gate bench harness,
+> BENCHMARKS.md gate entries — also landed on 2026-04-25). The
+> remaining gate before tagging `v2.0.0` and merging to `main` is the
+> calendar soak window (real-world v2 use for ~1 week to catch the
+> long tail). The substrate is a single `llama-server` stack (writer
 > + embedder + reranker on one process tree) replacing v1's Ollama +
 > in-process FlagEmbedding/sentence-transformers. CLI verbs renamed:
 > `sciknow db` → `sciknow library` (lifecycle) + `sciknow corpus`
 > (growth/maintenance) with a one-release deprecation shim. See
 > [MIGRATION.md](MIGRATION.md) for the full v1→v2 verb / settings /
-> migration-path reference, and [PHASE_LOG.md](docs/PHASE_LOG.md)
-> for the per-phase summary. The Quick Start below is the v2 path;
-> v1 (Ollama) install instructions live in
-> [docs/INSTALLATION.md](docs/INSTALLATION.md).
+> migration-path reference, [docs/V2_FINAL.md](docs/V2_FINAL.md) for
+> the post-shipment status + soak/tag procedure, and
+> [PHASE_LOG.md](docs/PHASE_LOG.md) for the per-phase summary. The
+> Quick Start below is the v2 path; v1 (Ollama) install instructions
+> live in [docs/INSTALLATION.md](docs/INSTALLATION.md).
 
 ```bash
 # 1. Clone and set up the venv + system deps
