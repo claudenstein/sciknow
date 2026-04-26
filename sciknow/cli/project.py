@@ -901,3 +901,256 @@ def unarchive(
 
     write_active_slug(slug)
     console.print(f"\n[green]✓ Project [bold]{slug}[/bold] restored and now active.[/green]")
+
+
+# ── v2 Phase G — cross-project v1 → v2 import ───────────────────────────
+
+
+def _migrate_qdrant_collections_between(
+    src: Project, dst: Project,
+) -> None:
+    """v2 Phase G — copy every Qdrant collection from one project's
+    prefix to another's.
+
+    Generalisation of ``_migrate_qdrant_collections`` (which always
+    sourced from the empty/legacy prefix). Streams via scroll+upsert
+    so it doesn't rely on Qdrant's filesystem snapshot path being
+    visible to the server.
+    """
+    from sciknow.storage.qdrant import get_client, init_collections
+
+    client = get_client()
+    try:
+        existing = {c.name for c in client.get_collections().collections}
+    except Exception as exc:
+        console.print(f"[yellow]Qdrant unreachable: {exc}. Skipping.[/yellow]")
+        return
+
+    # Provision the target project's prefixed collections.
+    prev_env = os.environ.get("SCIKNOW_PROJECT")
+    os.environ["SCIKNOW_PROJECT"] = dst.slug
+    try:
+        init_collections()
+    finally:
+        if prev_env is None:
+            os.environ.pop("SCIKNOW_PROJECT", None)
+        else:
+            os.environ["SCIKNOW_PROJECT"] = prev_env
+
+    pairs = [
+        (src.papers_collection,    dst.papers_collection),
+        (src.abstracts_collection, dst.abstracts_collection),
+        (src.wiki_collection,      dst.wiki_collection),
+        (src.visuals_collection,   dst.visuals_collection),
+    ]
+    for old, new in pairs:
+        if old not in existing:
+            console.print(f"  [dim]skip Qdrant {old} (not present)[/dim]")
+            continue
+        if old == new:
+            console.print(
+                f"  [dim]skip Qdrant {old} (source and target collection "
+                f"names are identical — nothing to copy)[/dim]"
+            )
+            continue
+        try:
+            src_count = client.get_collection(old).points_count
+        except Exception as exc:
+            console.print(f"  [yellow]skip Qdrant {old}: {exc}[/yellow]")
+            continue
+        if src_count == 0:
+            console.print(f"  [dim]skip Qdrant {old} (empty)[/dim]")
+            continue
+        with console.status(f"Copying Qdrant `{old}` → `{new}` ({src_count} pts)…"):
+            copied = _scroll_upsert(client, old, new, batch_size=500)
+        # Brief settle window for async upserts to register in count.
+        import time as _t
+        for _ in range(5):
+            try:
+                dst_count = client.get_collection(new).points_count
+            except Exception:
+                dst_count = -1
+            if dst_count == src_count:
+                break
+            _t.sleep(1)
+        ok = dst_count == src_count
+        marker = "[green]✓[/green]" if ok else "[yellow]?[/yellow]"
+        console.print(f"  {marker} Qdrant {old} → {new}: copied={copied} dst_count={dst_count}")
+
+
+@app.command(name="import-v1")
+def import_v1(
+    source_slug: Annotated[str, typer.Argument(
+        help="Source project slug to import from. Use `default` for the "
+             "legacy single-tenant install (PG `sciknow`, unprefixed Qdrant).",
+    )],
+    as_slug: Annotated[str, typer.Option(
+        "--as", help="Target v2 project slug to create.",
+    )],
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Print planned operations without executing them.",
+    ),
+    skip_qdrant: bool = typer.Option(
+        False, "--skip-qdrant",
+        help="Skip the Qdrant copy (PG + filesystem only). Useful when "
+             "you've already snapshotted vectors with `library snapshot`.",
+    ),
+) -> None:
+    """v2 Phase G — cross-project v1 → v2 project import.
+
+    Reads ``<source_slug>``'s PostgreSQL database, Qdrant collections,
+    and ``data/`` tree, and writes them into a new v2 project at
+    ``<as_slug>``. The target slug must not already exist.
+
+    What this does:
+
+      1. Validates the source has a PG database and the target slot
+         is free.
+      2. Clones the source PG database to the target via ``CREATE
+         DATABASE … WITH TEMPLATE`` (atomic, fast on local PG).
+      3. Copies every Qdrant collection from ``<source>_*`` to
+         ``<as>_*`` via scroll+upsert (skip with ``--skip-qdrant``).
+      4. rsync-equivalent copy of ``<source>/data/`` → ``<as>/data/``;
+         existing files at the destination are preserved (so the
+         operator can re-run the import safely after fixing data).
+      5. Drops any v1 dual-embedder sidecar collections from the new
+         project (mirrors what ``library upgrade-v1`` does in place).
+      6. Stamps ``<as_slug>/.imported_from`` with the source slug +
+         timestamp so the lineage is auditable.
+
+    The source project is left untouched — this is a copy, not a
+    move. To retire the source after a successful import, follow up
+    with ``sciknow project archive <source_slug>``.
+
+    Re-embedding is **not required** for v1→v2: the canonical
+    embedder (bge-m3, Q8_0) is bit-identical between v1 and v2, so
+    the dense + sparse vectors copy across as-is.
+    """
+    # Resolve source. Allow "default" as the legacy single-tenant slug.
+    from sciknow.core.project import _DEFAULT_SLUG, _repo_root
+
+    if source_slug == _DEFAULT_SLUG:
+        source = Project.default()
+    else:
+        source = Project(slug=source_slug, repo_root=_repo_root())
+
+    target = Project(slug=as_slug, repo_root=_repo_root())
+
+    console.print(f"[bold]Importing v1 → v2:[/bold] {source.slug} → {as_slug}")
+    console.print(f"  Source PG : {source.pg_database}")
+    console.print(f"  Target PG : {target.pg_database}")
+    console.print(f"  Source Qdrant prefix : {source.qdrant_prefix or '(unprefixed)'}")
+    console.print(f"  Target Qdrant prefix : {target.qdrant_prefix}")
+    console.print(f"  Source data dir      : {source.data_dir}")
+    console.print(f"  Target data dir      : {target.data_dir}")
+
+    # Validate source.
+    if not _pg_database_exists(source.pg_database):
+        console.print(
+            f"[red]Source PG database `{source.pg_database}` not found.[/red]"
+        )
+        raise typer.Exit(1)
+    if not source.data_dir.exists():
+        console.print(
+            f"[yellow]Source data dir not found: {source.data_dir}. "
+            f"Will continue without filesystem copy.[/yellow]"
+        )
+
+    # Validate target.
+    if target.root.exists():
+        console.print(
+            f"[red]Target project root already exists: {target.root}. "
+            f"Refusing to overwrite — pick a fresh --as slug or "
+            f"`project destroy {as_slug}` first.[/red]"
+        )
+        raise typer.Exit(1)
+    if _pg_database_exists(target.pg_database):
+        console.print(
+            f"[red]Target PG database `{target.pg_database}` already "
+            f"exists. Drop it manually if you really mean to import "
+            f"on top of it.[/red]"
+        )
+        raise typer.Exit(1)
+
+    if dry_run:
+        console.print("[dim](dry-run, no changes made)[/dim]")
+        return
+
+    # 1. Clone PG.
+    with console.status(
+        f"Cloning PG database (`{source.pg_database}` → `{target.pg_database}`)…"
+    ):
+        _create_pg_database(target.pg_database, template=source.pg_database)
+    console.print(f"  [green]✓[/green] PG cloned to `{target.pg_database}`")
+
+    # 2. Provision target dirs.
+    _ensure_init_dirs(target)
+
+    # 3. Copy data dir contents (preserve existing target files).
+    if source.data_dir.exists():
+        with console.status("Copying filesystem contents…"):
+            for child in source.data_dir.iterdir():
+                dest = target.data_dir / child.name
+                if dest.exists():
+                    console.print(f"  [yellow]skip (exists): {dest}[/yellow]")
+                    continue
+                if child.is_dir():
+                    shutil.copytree(child, dest)
+                else:
+                    shutil.copy2(child, dest)
+        console.print(f"  [green]✓[/green] data/* copied to {target.data_dir}")
+
+    # 4. Migrate Qdrant collections.
+    if skip_qdrant:
+        console.print("  [dim]skipped Qdrant copy (--skip-qdrant)[/dim]")
+    else:
+        _migrate_qdrant_collections_between(source, target)
+
+    # 5. v1 → v2 sidecar cleanup on the target. Mirrors what
+    #    `library upgrade-v1` does in-place.
+    try:
+        from sciknow.storage.qdrant import get_client as _get_q
+        client = _get_q()
+        existing = {c.name for c in client.get_collections().collections}
+        prefix = target.qdrant_prefix or ""
+        sidecars = [
+            c for c in existing
+            if c.startswith(f"{prefix}_ab_") or c.startswith(f"{prefix}ab_")
+        ]
+        for c in sidecars:
+            try:
+                client.delete_collection(c)
+                console.print(f"  [green]✓[/green] dropped legacy sidecar Qdrant collection `{c}`")
+            except Exception as exc:
+                console.print(f"  [yellow]could not drop sidecar `{c}`: {exc}[/yellow]")
+    except Exception as exc:
+        console.print(f"  [yellow]sidecar cleanup skipped: {exc}[/yellow]")
+
+    # 6. Stamp lineage marker.
+    marker = target.root / ".imported_from"
+    marker.write_text(
+        f"{source.slug}\n"
+        f"imported_at: {datetime.utcnow().isoformat()}Z\n"
+        f"sciknow_version: v2\n",
+        encoding="utf-8",
+    )
+    console.print(f"  [green]✓[/green] stamped {marker.relative_to(target.repo_root)}")
+
+    # Also stamp `.v2-upgraded` so `library upgrade-v1` is a no-op
+    # on this project (already upgraded by definition).
+    upgraded = target.root / ".v2-upgraded"
+    upgraded.write_text(
+        f"upgraded_at: {datetime.utcnow().isoformat()}Z\n"
+        f"via: project import-v1 from {source.slug}\n",
+        encoding="utf-8",
+    )
+
+    console.print(
+        f"\n[green]✓[/green] Project [bold]{as_slug}[/bold] imported from "
+        f"[bold]{source.slug}[/bold]."
+    )
+    console.print(
+        f"[dim]Source project left untouched. Activate with `sciknow "
+        f"project use {as_slug}`.[/dim]"
+    )

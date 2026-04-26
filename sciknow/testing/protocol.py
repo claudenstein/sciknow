@@ -17986,6 +17986,55 @@ def l1_v2_monitor_carries_infer_substrate() -> None:
     )
 
 
+def l1_v2_project_import_v1_surface() -> None:
+    """v2 Phase G — `sciknow project import-v1` cross-project verb.
+
+    The MIGRATION.md tracker had this deferred ("single-tenant
+    installs don't need it") because the v1 → v2 single-tenant flow
+    is covered by `library upgrade-v1`. The cross-project import
+    closes the multi-project case: take a v1 project, write a fresh
+    v2 project alongside it, leave the source untouched.
+
+    Guards:
+      - Command registered under `project` subapp.
+      - Required surface: `<source_slug>` arg + `--as` option +
+        `--dry-run` + `--skip-qdrant` flags.
+      - Implementation references the right primitives so it can't
+        diverge (CREATE DATABASE WITH TEMPLATE, scroll+upsert via
+        the shared `_migrate_qdrant_collections_between` helper,
+        sidecar drop, `.imported_from` lineage stamp).
+    """
+    import inspect as _inspect
+    from sciknow.cli import project as proj_cli
+
+    assert hasattr(proj_cli, "import_v1"), (
+        "sciknow.cli.project must expose `import_v1` for v2 Phase G"
+    )
+    sig = _inspect.signature(proj_cli.import_v1)
+    for kw in ("source_slug", "as_slug", "dry_run", "skip_qdrant"):
+        assert kw in sig.parameters, (
+            f"project import-v1 missing parameter: {kw}"
+        )
+
+    assert hasattr(proj_cli, "_migrate_qdrant_collections_between"), (
+        "_migrate_qdrant_collections_between helper must exist so the "
+        "import-v1 code path doesn't fork from the legacy migrator"
+    )
+
+    src = _inspect.getsource(proj_cli.import_v1)
+    for needle in (
+        "_create_pg_database",  # CREATE DATABASE … WITH TEMPLATE inside helper
+        "template=source.pg_database",  # the v1→v2 PG clone path
+        "_migrate_qdrant_collections_between",
+        ".imported_from",   # lineage marker
+        ".v2-upgraded",     # mirrors library upgrade-v1
+    ):
+        assert needle in src, (
+            f"project import-v1 must reference {needle!r} so the v2 "
+            f"contract is preserved"
+        )
+
+
 def l1_v2_doctor_probes_llama_server_substrate() -> None:
     """v2 Phase A — `library doctor` health-checks the llama-server
     substrate, not just ollama.
@@ -18535,6 +18584,10 @@ L1_TESTS: list[Callable] = [
     # dashboard panel can show llama-server role state without
     # re-shelling out to `sciknow infer status`
     l1_v2_monitor_carries_infer_substrate,
+    # v2 Phase G — cross-project `project import-v1 <src> --as <dst>`
+    # closes the multi-tenant migration case (single-tenant case is
+    # `library upgrade-v1`)
+    l1_v2_project_import_v1_surface,
 ]
 
 L2_TESTS: list[Callable] = [
