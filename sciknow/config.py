@@ -159,7 +159,7 @@ class Settings(BaseSettings):
     # a type-specific weight: peer_reviewed/preprint/thesis/book_chapter
     # stay at 1.0; editorial/policy drop to 0.7; unknown 0.8;
     # opinion 0.4 (hardest hit). Off by default — enable only after
-    # `sciknow db classify-papers` has populated paper_type on a
+    # `sciknow corpus classify-papers` has populated paper_type on a
     # meaningful fraction of the corpus, otherwise everything uses the
     # 'unknown' fallback.
     paper_type_weighting: bool = False
@@ -336,7 +336,7 @@ class Settings(BaseSettings):
     # sections" than passive citation popularity. Set to 0 to disable.
     useful_count_boost_factor: float = 0.15
 
-    # `sciknow db expand` relevance filter. Cosine similarity threshold under
+    # `sciknow corpus expand` relevance filter. Cosine similarity threshold under
     # which candidate references are dropped before download. 0.55 is a sane
     # default for bge-m3 — ~80% of on-topic refs score above it on a focused
     # library, while off-topic references (statistical methods cited from a

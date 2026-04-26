@@ -3615,7 +3615,7 @@ async function showDashboard() {
         // attr, parsed back via parseInt in the handler.
         btn = '<button data-action="write-for-gap" data-chapter-num="' + g.chapter_num + '" title="Open this gap chapter + start a write job scoped to its topic.">Write</button>';
       } else if (g.type === 'topic' || g.type === 'evidence') {
-        // Phase 54.6.5 — replace the old "Run: sciknow db expand" alert
+        // Phase 54.6.5 — replace the old "Run: sciknow corpus expand" alert
         // with a real one-click flow: prefill the Topic-search subtab
         // with this gap's description and open the preview modal.
         btn = '<button data-action="expand-single-gap" '
@@ -7249,7 +7249,7 @@ function openToolsModal() {
 // ── Phase 54.6.230 — System Monitor modal ───────────────────────────
 //
 // Polls /api/monitor on an interval while the modal is open; reuses
-// the same snapshot dict the CLI's `sciknow db monitor` renders, so
+// the same snapshot dict the CLI's `sciknow library monitor` renders, so
 // any changes to one side automatically flow through. Interval is
 // stopped on close + on "Poll = 0s". Not SSE by design — pipeline
 // stats don't change fast enough to justify a streaming connection,
@@ -7705,7 +7705,7 @@ function renderMonitor(snap) {
 
   // Phase 54.6.253 — doctor-style verdict banner at the top of the
   // modal. Traffic-light verdict (OK / WARN / FAIL) mirrors the CLI
-  // `sciknow db doctor` output: same rule — error wins over warn
+  // `sciknow library doctor` output: same rule — error wins over warn
   // wins over info. Rendered even when there are zero alerts so
   // operators get an explicit "all green" confirmation.
   {
@@ -7857,7 +7857,7 @@ function renderMonitor(snap) {
         : '')
       // Phase 54.6.268 — Markdown export button. Fetches the shared
       // /api/monitor/alerts-md endpoint so the copied text matches
-      // what `sciknow db monitor --alerts-md` produces.
+      // what `sciknow library monitor --alerts-md` produces.
       + ' <button class="btn btn--sm" style="padding:0.1em 0.5em;font-size:0.75em;margin-left:auto;" '
       + 'onclick="copyAlertsMarkdown(this)" '
       + 'title="Copy current alerts as a Markdown block — paste into Slack / Linear / GitHub ticket">📋 Copy as MD</button>'
@@ -8405,7 +8405,7 @@ function renderMonitor(snap) {
   // Phase 54.6.251 — metadata-source breakdown. Source is where the
   // paper's title/authors/year came from: "crossref" (ideal),
   // "embedded_pdf" (OK), "unknown" (dashboard asks user to run
-  // `sciknow db enrich`). Rendered as a horizontal stacked bar so
+  // `sciknow corpus enrich`). Rendered as a horizontal stacked bar so
   // ratio is legible without a legend per slice.
   if (metaQ.sources && metaQ.sources.length) {
     const total = metaQ.sources.reduce((a, s) => a + (s.n || 0), 0);

@@ -1,4 +1,4 @@
-"""Phase 54.6.1 — preview-and-select helper for `sciknow db expand-author`.
+"""Phase 54.6.1 — preview-and-select helper for `sciknow corpus expand-author`.
 
 Splits the pre-download phase of the CLI flow into a library call so the web
 UI can:

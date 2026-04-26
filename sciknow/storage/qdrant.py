@@ -119,7 +119,7 @@ def init_collections(client: QdrantClient | None = None) -> None:
     """Create the active project's collections if they don't exist.
 
     Idempotent — collections that already exist are skipped. Reads the
-    active project's collection names at call time so ``sciknow db init``
+    active project's collection names at call time so ``sciknow library init``
     against a freshly-created project produces the right prefixes.
     """
     if client is None:
@@ -157,7 +157,7 @@ def init_collections(client: QdrantClient | None = None) -> None:
                     f"Qdrant collection {coll!r} has dense vector size "
                     f"{actual}, but settings.embedding_dim={settings.embedding_dim}. "
                     f"Either revert EMBEDDING_DIM in .env or drop the "
-                    f"collection (`sciknow db reset`) and re-ingest."
+                    f"collection (`sciknow library reset`) and re-ingest."
                 )
 
     if papers_coll not in existing:

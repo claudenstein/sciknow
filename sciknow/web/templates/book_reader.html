@@ -389,11 +389,11 @@
         <svg class="icon"><use href="#i-sprout"/></svg> Corpus <svg class="icon icon--sm"><use href="#i-chevron-down"/></svg>
       </button>
       <div class="nav-dropdown-menu" role="menu">
-        <button role="menuitem" onclick="openCorpusModal('corp-enrich')" title="Fill missing DOIs via Crossref/OpenAlex/arXiv title search + persist OpenAlex extras (concepts/funders/grants/ROR). Mirrors `sciknow db enrich`."><svg class="icon"><use href="#i-search"/></svg> Enrich metadata</button>
-        <button role="menuitem" onclick="openCorpusModal('corp-cites')" title="Outbound reference crawl — follow citations IN your papers to discover new work. RRF + MMR diversity + citation-context signals. Mirrors `sciknow db expand`."><svg class="icon"><use href="#i-globe"/></svg> Expand (citations)</button>
-        <button role="menuitem" onclick="openCorpusModal('corp-author')" title="Fetch every paper by a named author via OpenAlex. Use when you want an author's full bibliography regardless of current citations. Mirrors `sciknow db expand-author`."><svg class="icon"><use href="#i-user"/></svg> Expand by author</button>
-        <button role="menuitem" onclick="openExpandAuthorRefs()" title="Phase 54.6.309 — pick an existing author from the corpus. Aggregates every paper they cited across all their works (including self-cites), ranks by citation frequency, and lands in the cherry-pick modal before download. Mirrors `sciknow db expand-author-refs`."><svg class="icon"><use href="#i-user"/></svg> Expand by author's references</button>
-        <button role="menuitem" onclick="openCorpusModal('corp-inbound')" title="Forward-in-time mirror of Expand: find papers that CITE your corpus. Mirrors `sciknow db expand-inbound`."><svg class="icon"><use href="#i-inbox"/></svg> Inbound cites</button>
+        <button role="menuitem" onclick="openCorpusModal('corp-enrich')" title="Fill missing DOIs via Crossref/OpenAlex/arXiv title search + persist OpenAlex extras (concepts/funders/grants/ROR). Mirrors `sciknow corpus enrich`."><svg class="icon"><use href="#i-search"/></svg> Enrich metadata</button>
+        <button role="menuitem" onclick="openCorpusModal('corp-cites')" title="Outbound reference crawl — follow citations IN your papers to discover new work. RRF + MMR diversity + citation-context signals. Mirrors `sciknow corpus expand`."><svg class="icon"><use href="#i-globe"/></svg> Expand (citations)</button>
+        <button role="menuitem" onclick="openCorpusModal('corp-author')" title="Fetch every paper by a named author via OpenAlex. Use when you want an author's full bibliography regardless of current citations. Mirrors `sciknow corpus expand-author`."><svg class="icon"><use href="#i-user"/></svg> Expand by author</button>
+        <button role="menuitem" onclick="openExpandAuthorRefs()" title="Phase 54.6.309 — pick an existing author from the corpus. Aggregates every paper they cited across all their works (including self-cites), ranks by citation frequency, and lands in the cherry-pick modal before download. Mirrors `sciknow corpus expand-author-refs`."><svg class="icon"><use href="#i-user"/></svg> Expand by author's references</button>
+        <button role="menuitem" onclick="openCorpusModal('corp-inbound')" title="Forward-in-time mirror of Expand: find papers that CITE your corpus. Mirrors `sciknow corpus expand-inbound`."><svg class="icon"><use href="#i-inbox"/></svg> Inbound cites</button>
         <button role="menuitem" onclick="openCorpusModal('corp-topic')" title="OpenAlex free-text topic search ranked by citation count. Good for kickstarting a new project."><svg class="icon"><use href="#i-tag"/></svg> Topic search</button>
         <button role="menuitem" onclick="openCorpusModal('corp-coauth')" title="Find people who coauthored with your corpus's authors. Useful for invisible-college expansion."><svg class="icon"><use href="#i-users"/></svg> Coauthors</button>
         <div class="u-border-b" style="height:1px;margin:2px 0;"></div>
@@ -2591,7 +2591,7 @@
         </p>
       </div>
       <p class="u-note" style="margin-top:1em;color:var(--fg-muted);">
-        Mirrors <code>sciknow db monitor</code>. Same data source
+        Mirrors <code>sciknow library monitor</code>. Same data source
         (<code>core.monitor.collect_monitor_snapshot</code>) feeds both
         CLI and GUI; the endpoint is <code>GET /api/monitor</code> if
         you want to pipe into another tool. Read-only — safe to leave
@@ -2791,7 +2791,7 @@
           <button class="tab" data-ctab="corp-author" onclick="switchCorpusTab('corp-author')"
                   title="Pull every paper by a specific author (ORCID-preferred). Strict-author matching to defend against name collisions.">&#128100; Expand by author</button>
           <button class="tab" data-ctab="corp-author-refs" onclick="switchCorpusTab('corp-author-refs')"
-                  title="Phase 54.6.312 — Aggregate every paper cited by one author's corpus works (including self-cites), rank by citation frequency, and cherry-pick before download. Mirrors `sciknow db expand-author-refs`.">&#128218; Expand by author's refs</button>
+                  title="Phase 54.6.312 — Aggregate every paper cited by one author's corpus works (including self-cites), rank by citation frequency, and cherry-pick before download. Mirrors `sciknow corpus expand-author-refs`.">&#128218; Expand by author's refs</button>
           <button class="tab" data-ctab="corp-inbound" onclick="switchCorpusTab('corp-inbound')"
                   title="Find papers that CITE the corpus — forward-in-time mirror of db expand. Uses OpenAlex cites: filter.">&#128258; Inbound cites</button>
           <button class="tab" data-ctab="corp-topic" onclick="switchCorpusTab('corp-topic')"
@@ -2804,7 +2804,7 @@
         <div class="u-card" id="corp-enrich-pane">
           <div class="u-note-sm">
             Fill missing DOIs via Crossref / OpenAlex / arXiv title search.
-            Mirrors <code>sciknow db enrich</code>.
+            Mirrors <code>sciknow corpus enrich</code>.
           </div>
           <div class="field u-row-wrap-end-tight">
             <div class="u-col-70"><label>Limit</label>
@@ -2826,7 +2826,7 @@
         <div class="u-hidden-card" id="corp-cites-pane">
           <div class="u-note-sm">
             Follow references &rarr; download OA PDFs &rarr; ingest.
-            Mirrors <code>sciknow db expand</code>.
+            Mirrors <code>sciknow corpus expand</code>.
           </div>
           <div class="field u-row-wrap-end-tight">
             <div class="u-col-70"><label title="Hard cap on total papers downloaded this run. 0 = no cap.">Limit</label>
@@ -2975,7 +2975,7 @@
           <div class="u-note-md">
             Find every paper by an author across OpenAlex + Crossref, then
             download the open-access ones and ingest. Mirrors
-            <code>sciknow db expand-author</code>. The picker below ranks
+            <code>sciknow corpus expand-author</code>. The picker below ranks
             authors by <strong>citation count</strong> (within this
             corpus) then paper count, so the most-authoritative names
             surface first.
@@ -3056,7 +3056,7 @@
               &#128269; Preview candidates
             </button>
             <button class="btn-secondary" onclick="doToolCorpus('expand-author')"
-                    title="Skip preview — run the full pipeline with the relevance-filter threshold auto-downloading everything above it. Equivalent to `sciknow db expand-author --relevance`.">
+                    title="Skip preview — run the full pipeline with the relevance-filter threshold auto-downloading everything above it. Equivalent to `sciknow corpus expand-author --relevance`.">
               &#9889; Auto-download (override)
             </button>
             <span class="u-hint">
@@ -3078,7 +3078,7 @@
             corpus works (including self-cites), rank by citation
             frequency, cherry-pick the ones to fetch, then download +
             ingest via the shared expand-author pipeline. Mirrors
-            <code>sciknow db expand-author-refs</code>.
+            <code>sciknow corpus expand-author-refs</code>.
           </div>
           <div class="field u-row-end">
             <div class="u-flex-3">
@@ -3118,7 +3118,7 @@
             Find papers that <strong>cite</strong> papers already in your
             corpus — the forward-in-time mirror of <code>db expand</code>.
             Calls OpenAlex's <code>/works?filter=cites:W…</code> per seed.
-            Mirrors <code>sciknow db expand-cites</code>.
+            Mirrors <code>sciknow corpus expand-cites</code>.
           </div>
           <div class="field u-row-wrap-end-tight">
             <div class="u-col-120"><label>Per-seed cap</label>
@@ -3169,7 +3169,7 @@
           <div class="u-note-md">
             Free-text OpenAlex search. Push-based expansion — solves the
             bootstrap / sideways-expansion problem <code>expand</code> can't
-            address. Mirrors <code>sciknow db expand-topic "QUERY"</code>.
+            address. Mirrors <code>sciknow corpus expand-topic "QUERY"</code>.
           </div>
           <div class="field">
             <label>Topic query</label>
@@ -3200,7 +3200,7 @@
             Fetch papers by every OpenAlex author on any paper in the
             corpus (depth=1). Captures the <em>invisible college</em> —
             researchers in the same lab who don't always cite each
-            other directly. Mirrors <code>sciknow db expand-coauthors</code>.
+            other directly. Mirrors <code>sciknow corpus expand-coauthors</code>.
           </div>
           <div class="field u-row-wrap-end-tight">
             <div class="u-col-wide"><label>Depth</label>

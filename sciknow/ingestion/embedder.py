@@ -476,7 +476,7 @@ def _warn_colbert_slot_missing_once() -> None:
         "ENABLE_COLBERT_ABSTRACTS=True but the abstracts Qdrant "
         "collection was created without a `colbert` multi-vector "
         "slot. New embeds will be dense+sparse only. To enable "
-        "colbert: `sciknow db reset` + `sciknow db init` (destructive "
+        "colbert: `sciknow library reset` + `sciknow library init` (destructive "
         "— recreates every collection) or delete just the abstracts "
         "collection manually and re-run `db init`.",
         UserWarning,

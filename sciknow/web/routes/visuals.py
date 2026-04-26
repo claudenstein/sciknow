@@ -277,7 +277,7 @@ async def api_visuals_search(q: str, kind: str = "", k: int = 10):
     the caption text, then joined to the full ``visuals`` row so the
     caller gets paper_title, asset_path, etc. for display. Empty
     result list when the visuals collection hasn't been populated
-    yet (`sciknow db embed-visuals`).
+    yet (`sciknow corpus embed-visuals`).
     """
     from sciknow.retrieval.visuals_search import search_visuals
     from sciknow.storage.qdrant import get_client as _get_qdrant

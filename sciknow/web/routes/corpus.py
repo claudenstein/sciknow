@@ -28,7 +28,7 @@ async def api_corpus_enrich(
     limit: int = Form(0),
     delay: float = Form(0.2),
 ):
-    """Invoke `sciknow db enrich` from the web UI — SSE log stream."""
+    """Invoke `sciknow corpus enrich` from the web UI — SSE log stream."""
     from sciknow.web import app as _app
     job_id, _queue = _app._create_job("corpus_enrich")
     loop = asyncio.get_event_loop()
@@ -220,7 +220,7 @@ async def api_corpus_expand_author(
     ingest: bool = Form(True),
     dry_run: bool = Form(False),
 ):
-    """Phase 46.E — invoke ``sciknow db expand-author`` from the web UI.
+    """Phase 46.E — invoke ``sciknow corpus expand-author`` from the web UI.
 
     Runs as a background subprocess; stdout streams as SSE ``log`` events.
     """
@@ -379,7 +379,7 @@ async def api_corpus_expand_author_refs_preview(
         return JSONResponse({
             "author": author, "surname": surname,
             "n_author_papers": len(paper_rows), "candidates": [],
-            "note": "No citations for those papers. Run `sciknow db link-citations` first.",
+            "note": "No citations for those papers. Run `sciknow corpus link-citations` first.",
         })
 
     agg: dict[str, dict] = {}
@@ -601,7 +601,7 @@ async def api_corpus_expand_author_download_selected(request: Request):
     Body: JSON ``{"candidates": [{"doi": "...", "title": "...",
     "year": 2020}, ...], "workers": int, "ingest": bool}``.
 
-    Spawns ``sciknow db download-dois --dois-file <tmp.json>`` and streams
+    Spawns ``sciknow corpus download-dois --dois-file <tmp.json>`` and streams
     stdout as SSE. Tmp file is cleaned up when the job finishes.
     """
     from sciknow.web import app as _app
@@ -761,7 +761,7 @@ async def api_corpus_cleanup_downloads(
     clean_failed: bool = Form(True),
     include_inbox: bool = Form(True),
 ):
-    """Phase 54.6.4 + 54.6.19 + 54.6.273 — trigger `sciknow db cleanup-downloads`.
+    """Phase 54.6.4 + 54.6.19 + 54.6.273 — trigger `sciknow corpus cleanup-downloads`.
 
     Streams the subprocess log over SSE. Defaults: dry_run=False,
     delete_dupes=True, cross_project=True, clean_failed=True,
@@ -799,7 +799,7 @@ async def api_corpus_expand_preview(
     """Phase 54.6.3 — Preview the citation-expansion shortlist without
     downloading anything.
 
-    Spawns ``sciknow db expand --dry-run --shortlist-tsv <tmp>`` as a
+    Spawns ``sciknow corpus expand --dry-run --shortlist-tsv <tmp>`` as a
     subprocess so SSE streams its progress; the tempfile path is
     stored on the job record so the follow-up GET
     ``/api/corpus/expand/preview/{job_id}/candidates`` can parse it
@@ -943,7 +943,7 @@ async def api_corpus_expand(
     relevance_query: str = Form(""),
     workers: int = Form(0),
 ):
-    """Invoke `sciknow db expand` from the web UI — SSE log stream.
+    """Invoke `sciknow corpus expand` from the web UI — SSE log stream.
 
     ``budget`` is the RRF pool size per round (default 50); ``limit`` is
     the hard cap on total downloads. See ``docs/EXPAND_RESEARCH.md`` §6a.

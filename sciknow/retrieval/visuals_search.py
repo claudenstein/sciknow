@@ -1,7 +1,7 @@
 """Phase 54.6.82 (#11 follow-up) — search the visuals Qdrant collection.
 
 Companion to ``hybrid_search`` for text chunks. Queries the per-project
-visuals Qdrant collection (populated by ``sciknow db embed-visuals``)
+visuals Qdrant collection (populated by ``sciknow corpus embed-visuals``)
 using the same bge-m3 dense + sparse signals fused via RRF that
 ``hybrid_search`` uses for papers.
 

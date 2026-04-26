@@ -2,7 +2,7 @@
 
 After each expand round, compute how the corpus abstract-centroid
 has shifted. Persistent log at ``<project data>/expand/drift.log``
-plus a summary surfaced in ``sciknow db stats``.
+plus a summary surfaced in ``sciknow library stats``.
 
 The cosine-drop-to-previous-centroid is a fast proxy for "this
 expansion changed what the corpus is about": 0.00 = identical,

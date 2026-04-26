@@ -297,11 +297,11 @@ def l1_cli_commands_register() -> None:
     assert "autowrite-bench" in book_cmds, \
         f"autowrite-bench not on book app — found: {sorted(book_cmds)}"
 
-    # main app composes everything
+    # main app composes everything (v2.1 — db shim retired)
     from sciknow.cli import main as cli_main
     main_groups = {tg.name for tg in cli_main.app.registered_groups}
-    for group in ("catalog", "db", "ingest", "search", "ask", "book",
-                  "draft", "wiki"):
+    for group in ("catalog", "library", "corpus", "ingest", "search", "ask",
+                  "book", "draft", "wiki"):
         assert group in main_groups, f"main app missing subapp: {group}"
 
 
@@ -607,7 +607,7 @@ def l1_relevance_filter_imports_resolve() -> None:
 
 
 def l1_phase16_expand_author() -> None:
-    """Phase 16 — `sciknow db expand-author` author search command.
+    """Phase 16 — `sciknow corpus expand-author` author search command.
 
     Verifies the new author_search module exposes its public API,
     the CLI command is registered, and the command's source references
@@ -998,7 +998,7 @@ def l2_papers_collection_exists() -> None:
     client = get_client()
     existing = {c.name for c in client.get_collections().collections}
     assert PAPERS_COLLECTION in existing, \
-        f"Qdrant collection {PAPERS_COLLECTION!r} missing — run `sciknow db init`"
+        f"Qdrant collection {PAPERS_COLLECTION!r} missing — run `sciknow library init`"
 
 
 def l2_db_stats_query() -> None:
@@ -7712,7 +7712,7 @@ def l1_phase49_expand_rrf_ranker() -> None:
     # Standalone cleanup command registered
     assert "cleanup-downloads" in {
         c.name for c in db_cli.app.registered_commands
-    }, "`sciknow db cleanup-downloads` not registered"
+    }, "`sciknow corpus cleanup-downloads` not registered"
     # Phase 54.6.19 — cleanup-downloads grew a --clean-failed flag
     cleanup_src = _inspect.getsource(db_cli.cleanup_downloads)
     assert "--clean-failed/--no-clean-failed" in cleanup_src, (
@@ -9285,7 +9285,7 @@ def l1_phase54_6_82_visuals_search_surface() -> None:
     Structural only. Verifies:
       A) embedder exports embed_to_visuals_collection
       B) retrieval.visuals_search exports search_visuals + VisualHit
-      C) CLI exposes `sciknow db embed-visuals`
+      C) CLI exposes `sciknow corpus embed-visuals`
       D) web exposes GET /api/visuals/search
     """
     from sciknow.ingestion import embedder
@@ -9303,7 +9303,7 @@ def l1_phase54_6_82_visuals_search_surface() -> None:
         "visuals_search must expose the VisualHit dataclass"
     )
     assert hasattr(_db_cli, "embed_visuals_cmd"), (
-        "CLI must expose `sciknow db embed-visuals`"
+        "CLI must expose `sciknow corpus embed-visuals`"
     )
     routes = {p for p, _m in all_app_routes()}
     assert "/api/visuals/search" in routes, (
@@ -9369,7 +9369,7 @@ def l1_phase54_6_80_paper_type_surface() -> None:
 
     # D) CLI command registered
     assert hasattr(_db_cli, "classify_papers_cmd"), (
-        "CLI must expose `sciknow db classify-papers`"
+        "CLI must expose `sciknow corpus classify-papers`"
     )
 
     # E) Retrieval-side integration (#10 part 2): hybrid_search exposes
@@ -9500,7 +9500,7 @@ def l1_phase54_6_78_equation_paraphrase_surface() -> None:
 
     # D) CLI command registered
     assert hasattr(_db_cli, "paraphrase_equations_cmd"), (
-        "CLI must expose `sciknow db paraphrase-equations`"
+        "CLI must expose `sciknow corpus paraphrase-equations`"
     )
 
 
@@ -9667,7 +9667,7 @@ def l1_phase54_6_72_visuals_caption_surface() -> None:
          resolve_asset_path.
       B) Visual ORM model carries ai_caption / ai_caption_model /
          ai_captioned_at fields (migration 0026 shipped).
-      C) CLI exposes `sciknow db caption-visuals`.
+      C) CLI exposes `sciknow corpus caption-visuals`.
       D) /api/visuals returns ai_caption + ai_caption_model fields
          (visible in the handler source).
       E) resolve_asset_path refuses escape-paths (basic path-traversal guard).
@@ -9695,7 +9695,7 @@ def l1_phase54_6_72_visuals_caption_surface() -> None:
     # Flipping the default back to a 7B variant without documenting why
     # should trip this test.
     assert hasattr(_db_cli, "caption_visuals_cmd"), (
-        "CLI must expose `sciknow db caption-visuals`"
+        "CLI must expose `sciknow corpus caption-visuals`"
     )
     # Resolution chain: --model > settings.visuals_caption_model >
     # qwen2.5vl:32b (per the 54.6.73 quality-first directive). Check
@@ -12028,7 +12028,7 @@ def l1_phase54_6_138_visuals_mention_linker_surface() -> None:
     from sciknow.cli import db as db_cli
     cmd_names = {cmd.name for cmd in db_cli.app.registered_commands}
     assert "link-visual-mentions" in cmd_names, (
-        "`sciknow db link-visual-mentions` command must be registered"
+        "`sciknow corpus link-visual-mentions` command must be registered"
     )
 
     # F) Storage model has the column
@@ -12299,7 +12299,7 @@ def l1_phase54_6_134_agentic_coverage_uses_reranker() -> None:
 
 
 def l1_phase54_6_230_unified_monitor() -> None:
-    """Phase 54.6.230 — unified monitor (CLI `sciknow db monitor` + /api/monitor).
+    """Phase 54.6.230 — unified monitor (CLI `sciknow library monitor` + /api/monitor).
 
     Builds on 54.6.229 (CLI dashboard) but adds GPU state, Ollama
     loaded models, Qdrant collection shapes, converter-backend
@@ -12314,7 +12314,7 @@ def l1_phase54_6_230_unified_monitor() -> None:
       B) Graceful-degrade contract: any single sub-source failing
          (ollama down, nvidia-smi absent, Qdrant unreachable) must
          degrade to `[]` / `{}` not raise.
-      C) CLI `sciknow db monitor` registered; help renders.
+      C) CLI `sciknow library monitor` registered; help renders.
       D) `/api/monitor` endpoint registered; returns 200 with the
          expected schema when hit end-to-end.
       E) Command-palette entry `monitor` present in the web app
@@ -12372,9 +12372,9 @@ def l1_phase54_6_230_unified_monitor() -> None:
         )
 
     # C) CLI registered
-    r = CliRunner().invoke(cli_app, ["db", "monitor", "--help"])
+    r = CliRunner().invoke(cli_app, ["library", "monitor", "--help"])
     assert r.exit_code == 0, (
-        f"db monitor --help failed: {r.output[:300]}"
+        f"library monitor --help failed: {r.output[:300]}"
     )
     assert hasattr(db_cli, "monitor")
     sig = _inspect.signature(db_cli.monitor)
@@ -14022,7 +14022,7 @@ def l1_phase54_6_280_citation_graph_panel() -> None:
 
 
 def l1_phase54_6_273_cleanup_downloads_includes_inbox() -> None:
-    """Phase 54.6.273 — `sciknow db cleanup-downloads` scans
+    """Phase 54.6.273 — `sciknow corpus cleanup-downloads` scans
     data/inbox/ recursively and force-deletes PDFs already 'complete'
     in the DB, then removes empty inbox subfolders.
 
@@ -14133,7 +14133,7 @@ def l1_phase54_6_272_monitor_help_overlay() -> None:
 
 
 def l1_phase54_6_271_doctor_watch_mode() -> None:
-    """Phase 54.6.271 — sciknow db doctor gains --watch N for a
+    """Phase 54.6.271 — sciknow library doctor gains --watch N for a
     live readiness tick. Refactors the render into a pure
     ``_render_doctor(snap)`` so watch-mode and one-shot share one
     renderer and the verdict classification is pure.
@@ -15158,7 +15158,7 @@ def l1_phase54_6_254_monitor_filter_search() -> None:
 
 
 def l1_phase54_6_253_doctor_command_and_verdict_banner() -> None:
-    """Phase 54.6.253 — new ``sciknow db doctor`` readiness command
+    """Phase 54.6.253 — new ``sciknow library doctor`` readiness command
     and matching web verdict banner.
 
     Pre-253 there was no "is this system ready to run a long job?"
@@ -15169,7 +15169,7 @@ def l1_phase54_6_253_doctor_command_and_verdict_banner() -> None:
 
     Guards:
 
-      A) ``sciknow db doctor`` is registered as a CLI subcommand.
+      A) ``sciknow library doctor`` is registered as a CLI subcommand.
       B) The command's source body calls ``collect_monitor_snapshot``,
          reads ``alerts`` by severity, and raises typer.Exit with a
          code derived from the worst severity (0 / 1 / 2 mapping).
@@ -15212,7 +15212,7 @@ def l1_phase54_6_253_doctor_command_and_verdict_banner() -> None:
     # D) Web verdict banner
     from sciknow.testing.helpers import web_app_full_source as _v2_full_src; web_text = _v2_full_src()
     assert "doctor-style verdict banner" in web_text \
-        or "sciknow db doctor" in web_text, (
+        or "sciknow library doctor" in web_text, (
         "54.6.253 web modal must render a doctor-style verdict "
         "banner referencing the CLI equivalent"
     )
@@ -16059,7 +16059,7 @@ def l1_phase54_6_243_monitor_alerts_quality() -> None:
 def l1_phase54_6_229_pipeline_dashboard_cli() -> None:
     """Phase 54.6.229 (roadmap 3.11.3) — pipeline observability dashboard.
 
-    `sciknow db dashboard` composes existing telemetry
+    `sciknow library dashboard` composes existing telemetry
     (ingestion_jobs + llm_usage_log) into a single four-panel view.
     Read-only and safe to run alongside active ingestion. Tests:
 
@@ -16083,7 +16083,7 @@ def l1_phase54_6_229_pipeline_dashboard_cli() -> None:
     from sciknow.cli import db as db_cli
 
     # A) help renders
-    r = CliRunner().invoke(app, ["db", "dashboard", "--help"])
+    r = CliRunner().invoke(app, ["library", "dashboard", "--help"])
     assert r.exit_code == 0, (
         f"dashboard --help failed: {r.output[:300]}"
     )
@@ -16099,7 +16099,7 @@ def l1_phase54_6_229_pipeline_dashboard_cli() -> None:
     # C) JSON output schema — exercise end-to-end because the
     # aggregation queries are the main surface and a regression
     # that drops, say, the throughput panel is silently bad.
-    r = CliRunner().invoke(app, ["db", "dashboard", "--json"])
+    r = CliRunner().invoke(app, ["library", "dashboard", "--json"])
     assert r.exit_code == 0, (
         f"dashboard --json failed: {r.output[:300]}"
     )
@@ -16334,7 +16334,7 @@ def l1_phase54_6_226_caption_bench_cli_surface() -> None:
     Third member of the bench harness trio (kg-sample 54.6.218 +
     equation-bench 54.6.222). Pins:
 
-      A) `sciknow db caption-bench` Typer command + help render.
+      A) `sciknow library caption-bench` Typer command + help render.
       B) Parameters: --n, --kind, --judge, --model, --output-dir, --seed.
       C) Grading prompt defines the three-axis rubric (accuracy /
          hallucination / usefulness) plus label vocabularies.
@@ -16347,7 +16347,7 @@ def l1_phase54_6_226_caption_bench_cli_surface() -> None:
     from sciknow.cli import db as db_cli
 
     # A) help
-    r = CliRunner().invoke(app, ["db", "caption-bench", "--help"])
+    r = CliRunner().invoke(app, ["library", "caption-bench", "--help"])
     assert r.exit_code == 0, (
         f"caption-bench --help failed: {r.output[:300]}"
     )
@@ -16400,7 +16400,7 @@ def l1_phase54_6_225_refresh_includes_link_mentions() -> None:
     """Phase 54.6.225 (roadmap 3.3.3) — link-visual-mentions in refresh pipeline.
 
     Pre-54.6.225, `visuals.mention_paragraphs` was populated only when
-    the user ran `sciknow db link-visual-mentions` manually. Refresh
+    the user ran `sciknow corpus link-visual-mentions` manually. Refresh
     pipeline now includes it as step 8a, between extract-visuals
     (creates the rows the linker targets) and caption-visuals (uses
     mention context). Tests lock:
@@ -16616,7 +16616,7 @@ def l1_phase54_6_223_self_citation_detection() -> None:
          None-on-empty-input behaviour is load-bearing: the UI and
          retrieval filters must distinguish "no data" from
          "author independence confirmed".
-      E) `sciknow db flag-self-citations` CLI registered with
+      E) `sciknow corpus flag-self-citations` CLI registered with
          --limit / --force flags; the implementation reads from
          cross-linked citations (cited_document_id IS NOT NULL).
     """
@@ -16681,7 +16681,7 @@ def l1_phase54_6_223_self_citation_detection() -> None:
     assert surname_keys_from_authors([{"name": "et al."}]) == set()
 
     # E) CLI registered
-    r = CliRunner().invoke(app, ["db", "flag-self-citations", "--help"])
+    r = CliRunner().invoke(app, ["corpus", "flag-self-citations", "--help"])
     assert r.exit_code == 0, (
         f"flag-self-citations --help failed: {r.output[:300]}"
     )
@@ -16714,7 +16714,7 @@ def l1_phase54_6_222_equation_bench_cli_surface() -> None:
 
     Offline-only surface checks:
 
-      A) `sciknow db equation-bench` Typer command registered; help
+      A) `sciknow library equation-bench` Typer command registered; help
          renders.
       B) Parameters: --n, --judge, --model, --output-dir, --seed.
       C) Grading prompt (`_EQ_GRADE_PROMPT`) defines the two-axis
@@ -16730,7 +16730,7 @@ def l1_phase54_6_222_equation_bench_cli_surface() -> None:
     from sciknow.cli import db as db_cli
 
     # A) help
-    r = CliRunner().invoke(app, ["db", "equation-bench", "--help"])
+    r = CliRunner().invoke(app, ["library", "equation-bench", "--help"])
     assert r.exit_code == 0, (
         f"equation-bench --help failed: {r.output[:300]}"
     )
@@ -16800,7 +16800,7 @@ def l1_phase54_6_221_paper_institutions_surface() -> None:
          generic UPDATE loop (otherwise SQL tries to UPDATE a
          non-existent column and crashes on every enrich), and
          INSERTs into paper_institutions.
-      F) `sciknow db backfill-institutions` CLI registered with
+      F) `sciknow corpus backfill-institutions` CLI registered with
          --limit / --force / --delay flags.
     """
     import inspect as _inspect
@@ -16879,7 +16879,7 @@ def l1_phase54_6_221_paper_institutions_surface() -> None:
     )
 
     # F) CLI registered
-    r = CliRunner().invoke(app, ["db", "backfill-institutions", "--help"])
+    r = CliRunner().invoke(app, ["corpus", "backfill-institutions", "--help"])
     assert r.exit_code == 0, (
         f"backfill-institutions --help failed: {r.output[:300]}"
     )
@@ -18032,19 +18032,23 @@ def l1_v2_pyproject_dropped_v1_inproc_models() -> None:
 
 def l1_v2_cli_library_corpus_subapps() -> None:
     """v2 Phase F — `sciknow library` + `sciknow corpus` are mounted on
-    the root Typer app, the spec verbs are present, and `sciknow db`
-    is still mounted as a deprecation shim.
+    the root Typer app and the spec verbs are present. v2.1 retired the
+    `sciknow db` shim; the verb bodies still live in cli/db.py and are
+    re-mounted under their canonical v2 names by library + corpus.
     """
     from sciknow.cli import main as cli_main
     from sciknow.cli import library as cli_library
     from sciknow.cli import corpus as cli_corpus
 
     root_groups = {tg.name for tg in cli_main.app.registered_groups}
-    for name in ("library", "corpus", "db", "infer"):
+    for name in ("library", "corpus", "infer"):
         assert name in root_groups, (
             f"sciknow root subapp {name!r} not registered. "
             f"Got: {sorted(root_groups)}"
         )
+    assert "db" not in root_groups, (
+        "v2.1 — `sciknow db` shim must be retired from the root Typer app"
+    )
 
     library_cmds = {c.name for c in cli_library.app.registered_commands}
     for verb in ("init", "reset", "stats", "migrate", "validate", "snapshot"):
@@ -18066,13 +18070,6 @@ def l1_v2_cli_library_corpus_subapps() -> None:
             f"sciknow corpus {name!r} sub-typer missing. "
             f"Got: {sorted(corpus_sub)}"
         )
-
-    # Deprecation callback wired on the legacy `db` subapp
-    from sciknow.cli import db as cli_db
-    src = open(cli_db.__file__).read()
-    assert "_db_deprecation_callback" in src, (
-        "sciknow db subapp must carry the v2 Phase F deprecation shim"
-    )
 
 
 def l1_v2_monitor_carries_infer_substrate() -> None:
@@ -18944,7 +18941,7 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_251_web_parity_meta_year_coverage,
     # Phase 54.6.252 — config drift signal + alert
     l1_phase54_6_252_config_drift_surface,
-    # Phase 54.6.253 — sciknow db doctor + web verdict banner
+    # Phase 54.6.253 — sciknow library doctor + web verdict banner
     l1_phase54_6_253_doctor_command_and_verdict_banner,
     # Phase 54.6.254 — live filter on web modal + CLI --filter flag
     l1_phase54_6_254_monitor_filter_search,

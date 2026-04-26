@@ -1,6 +1,6 @@
 """Phase 54.6.230 — unified monitor snapshot.
 
-One aggregator shared by ``sciknow db monitor`` (CLI) and
+One aggregator shared by ``sciknow library monitor`` (CLI) and
 ``/api/monitor`` (web reader). Pulls together the pieces that used
 to live in scattered places:
 
@@ -1626,7 +1626,7 @@ def _citation_graph(session) -> dict:
 
       * **Internal coverage** — how many of the corpus's outgoing
         references land on papers we actually have. Low numbers mean
-        `sciknow db expand` has room to run.
+        `sciknow corpus expand` has room to run.
       * **Extraction coverage** — how many complete docs have had
         their reference list extracted at all. Papers with zero
         outgoing refs usually indicate converter drop-out (MinerU
@@ -1873,7 +1873,7 @@ def _inbox_pending(data_dir: Path | None) -> dict:
     try:
         import time as _time
         # Recursive match: `sciknow ingest directory data/inbox/` walks
-        # subfolders, and `sciknow db cleanup-downloads --include-inbox`
+        # subfolders, and `sciknow corpus cleanup-downloads --include-inbox`
         # does too.  Stay consistent so the count doesn't diverge from
         # what the ingest command actually sees.
         pdfs = [
@@ -2264,7 +2264,7 @@ def _build_alerts(snap: dict) -> list[dict]:
     # Phase 54.6.298 — enrichment gap alert.  Fires info when any
     # actionable field (doi/abstract/authors/title/journal) is
     # missing on >50% of complete docs — actionable because
-    # `sciknow db enrich` fills most of these from external sources
+    # `sciknow corpus enrich` fills most of these from external sources
     # (Crossref / OpenAlex / arXiv).  Info-level, not warn, because
     # this is a "work remains" signal, not a failure.
     enr = snap.get("enrichment") or {}
@@ -3171,7 +3171,7 @@ def _read_web_jobs_pulse(data_dir: Path | None) -> list[dict]:
 
     The web server writes this file from
     ``_write_web_jobs_pulse()`` on every job state transition. The
-    CLI ``sciknow db monitor`` runs in a *different* process with no
+    CLI ``sciknow library monitor`` runs in a *different* process with no
     access to the web's in-memory ``_jobs`` dict, so without this
     pulse it can never show running autowrite / book-write / wiki
     compile jobs — a real gap for anyone babysitting a long run
@@ -3296,7 +3296,7 @@ def _enrichment_progress(session) -> dict:
     """Phase 54.6.298 — per-field metadata coverage across all
     complete documents.
 
-    Directly answers "how much work remains for `sciknow db enrich`?"
+    Directly answers "how much work remains for `sciknow corpus enrich`?"
     in one glance.  Missing-abstract counts are especially important
     because abstracts feed both the dedicated abstracts Qdrant
     collection and, when ``enable_colbert_abstracts`` is on, the
@@ -3578,7 +3578,7 @@ def _top_failure_classes(
 ) -> list[dict]:
     """Top N (stage × error-prefix) failure classes in the trailing
     window. Small limit on purpose — this is a summary, full detail
-    lives in `sciknow db failures`."""
+    lives in `sciknow library failures`."""
     from sqlalchemy import text
     try:
         rows = session.execute(text(f"""
@@ -4112,7 +4112,7 @@ def collect_monitor_snapshot(
     # Phase 54.6.291 — preflight event summary.  Lives in the same
     # process so the buffer is only populated when ingestion ran in
     # this process (the CLI `ingest` command + the web worker).  Cross-
-    # process reads — e.g. `sciknow db monitor --watch` over SSH
+    # process reads — e.g. `sciknow library monitor --watch` over SSH
     # while ingest runs elsewhere — will see an empty list; that's
     # fine, the log file is the authoritative cross-process source.
     from sciknow.core.vram_budget import preflight_events as _pre_events
@@ -4156,7 +4156,7 @@ def collect_monitor_snapshot(
         "stuck_job": stuck_job,
         "meta_quality": meta_quality,
         # 54.6.298 — per-field metadata-enrichment coverage for
-        # "how much work remains for sciknow db enrich?".
+        # "how much work remains for sciknow corpus enrich?".
         "enrichment": enrichment,
         # 54.6.235 additions
         "year_histogram": year_hist,

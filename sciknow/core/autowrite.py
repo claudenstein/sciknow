@@ -1332,7 +1332,7 @@ def _autowrite_section_body(
             if weak_topics:
                 yield {"type": "progress", "stage": "expanding",
                        "detail": f"Weak coverage: {', '.join(weak_topics)}. "
-                                 f"Consider: sciknow db expand -q \"{weak_topics[0]}\""}
+                                 f"Consider: sciknow corpus expand -q \"{weak_topics[0]}\""}
 
         # Phase 54.6.26 — Adaptive revision (from WriteHERE's dynamic
         # planning). When scoring reveals completeness gaps or

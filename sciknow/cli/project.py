@@ -705,7 +705,7 @@ def archive(
     Restore later with ``sciknow project unarchive <file>``.
     """
     if slug == "default":
-        console.print("[red]Use `sciknow db backup` for the legacy 'default' install.[/red]")
+        console.print("[red]Use `sciknow library backup` for the legacy 'default' install.[/red]")
         raise typer.Exit(2)
     validate_slug(slug)
     project = Project(slug=slug, repo_root=get_active_project().repo_root)
@@ -895,8 +895,8 @@ def unarchive(
             console.print(
                 "  [yellow]![/yellow] Qdrant snapshots present in archive but cannot be "
                 "restored automatically (Qdrant snapshot files live in the server's storage "
-                "volume). To rebuild vectors: run `sciknow db init` then re-ingest with "
-                "`sciknow ingest directory <project-data>/processed/`."
+                "volume). To rebuild vectors: run `sciknow library init` then re-ingest with "
+                "`sciknow corpus ingest directory <project-data>/processed/`."
             )
 
     write_active_slug(slug)

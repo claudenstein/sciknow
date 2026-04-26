@@ -2,7 +2,7 @@
 
 Long-running processes (``sciknow refresh``, the FastAPI web
 reader) write short JSON "heartbeat" files into
-``<data_dir>/monitor/`` that ``sciknow db monitor`` /
+``<data_dir>/monitor/`` that ``sciknow library monitor`` /
 ``/api/monitor`` read to surface live progress.
 
 Why files and not a shared DB table:

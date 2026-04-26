@@ -55,7 +55,7 @@ async def api_settings_models():
 async def api_stats():
     """Aggregate stats for the enhanced dashboard panel.
 
-    Mirrors a subset of `sciknow db stats` + `catalog raptor stats` +
+    Mirrors a subset of `sciknow library stats` + `catalog raptor stats` +
     `catalog topics`. Cheap to compute — runs four counts plus two
     GROUP BYs against PostgreSQL, no Qdrant scrolls except for the
     RAPTOR level breakdown which uses an indexed payload filter so it's
@@ -127,7 +127,7 @@ async def api_monitor_alerts_md():
     """Phase 54.6.268 — return current alerts as a Markdown block.
 
     Shares ``core.monitor.alerts_as_markdown`` with the CLI
-    ``sciknow db monitor --alerts-md`` so both UIs produce the same
+    ``sciknow library monitor --alerts-md`` so both UIs produce the same
     paste-ready format. Returns ``text/plain`` so copy-to-clipboard
     in the browser sees unescaped Markdown.
     """
@@ -142,7 +142,7 @@ async def api_monitor_alerts_md():
 async def api_monitor(days: int = 14):
     """Phase 54.6.230 — unified monitor snapshot for the web reader.
 
-    One endpoint, one dict — same shape as ``sciknow db monitor
+    One endpoint, one dict — same shape as ``sciknow library monitor
     --json`` because both call ``core.monitor.collect_monitor_
     snapshot``. The web "System Monitor" modal polls this every
     5s. Read-only; safe during active ingestion.

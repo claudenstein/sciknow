@@ -67,5 +67,16 @@ app.command(name="parse-tables")(_db.parse_tables_cmd)
 # ── DOI handling ────────────────────────────────────────────────────────
 app.command(name="download-dois")(_db.download_dois)
 
+# ── pending-downloads management ────────────────────────────────────────
+app.add_typer(_db.pending_app, name="pending")
+
+# ── feedback (user judgements on retrieval results / papers) ────────────
+app.command(name="feedback-list")(_db.feedback_list_cmd)
+app.command(name="feedback-add")(_db.feedback_add_cmd)
+app.command(name="feedback-remove")(_db.feedback_remove_cmd)
+
+# ── institution backfill ────────────────────────────────────────────────
+app.command(name="backfill-institutions")(_db.backfill_institutions_cmd)
+
 # ── multimodal chunk tagging ────────────────────────────────────────────
 app.command(name="tag-multimodal")(_db.tag_multimodal)

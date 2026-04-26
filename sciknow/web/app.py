@@ -285,7 +285,7 @@ def _create_job(job_type: str) -> tuple[str, asyncio.Queue]:
             "llm_calls": [],
         }
         # Phase 54.6.246 — announce the new job to the cross-process
-        # pulse so `sciknow db monitor` sees it before the first event.
+        # pulse so `sciknow library monitor` sees it before the first event.
         _write_web_jobs_pulse()
     return job_id, queue
 
@@ -460,7 +460,7 @@ def _observe_event_for_stats(job_id: str, event: dict) -> None:
     streaming generator.
 
     Phase 54.6.246 — also writes a cross-process active-jobs pulse
-    on non-token events so `sciknow db monitor` over SSH sees which
+    on non-token events so `sciknow library monitor` over SSH sees which
     jobs are running without polling the web endpoint.
     """
     et = event.get("type")

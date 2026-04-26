@@ -48,15 +48,7 @@ class AlreadyIngested(Exception):
 
 
 def _delete_qdrant_vectors(qdrant, document_id: str) -> None:
-    """Remove all Qdrant points for a document before re-ingesting it.
-
-    Phase 54.6.285 — also sweeps the dense sidecar collection when the
-    dual-embedder split is active.  Without this, `--force` re-ingest
-    would leave orphan sidecar points from the previous ingest (found
-    during the 54.6.279 end-to-end verification: a 16-chunk doc ended
-    up with 16 prod points + 32 sidecar points after one --force
-    cycle — old + new concatenated).
-    """
+    """Remove all Qdrant points for a document before re-ingesting it."""
     from qdrant_client.models import Filter, FieldCondition, MatchValue
     from sciknow.storage.qdrant import PAPERS_COLLECTION
 
@@ -174,7 +166,7 @@ def ingest(
                   and completed successfully.
     ingest_source — provenance tag recorded in documents.ingest_source.
                   'seed'   = manually ingested via CLI (default)
-                  'expand' = auto-discovered via `sciknow db expand`
+                  'expand' = auto-discovered via `sciknow corpus expand`
                   Applied only on first insert; existing rows keep their
                   original source (so a failed seed paper re-tried from
                   expand stays tagged 'seed').

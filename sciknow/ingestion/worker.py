@@ -30,7 +30,7 @@ def main() -> None:
     import os
     force = os.environ.get("SCIKNOW_FORCE_INGEST", "0") == "1"
     # Provenance tag recorded in documents.ingest_source on first insert.
-    # Defaults to 'seed'; `sciknow db expand` sets it to 'expand' so the
+    # Defaults to 'seed'; `sciknow corpus expand` sets it to 'expand' so the
     # resulting rows can be distinguished in db stats / future pruning.
     ingest_source = os.environ.get("SCIKNOW_INGEST_SOURCE", "seed")
 

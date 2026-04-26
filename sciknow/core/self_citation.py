@@ -5,7 +5,7 @@ with another's — the signal that tags a citation as a *self-citation*.
 No LLM, no API, no fuzzy matching beyond surname + first-initial
 normalisation.
 
-Used by ``sciknow db flag-self-citations`` (and callable directly
+Used by ``sciknow corpus flag-self-citations`` (and callable directly
 from anywhere that has two author lists in hand, e.g. the
 groundedness / overstated-claim passes in the writer).
 

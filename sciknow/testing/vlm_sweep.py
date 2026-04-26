@@ -175,7 +175,7 @@ def generate_figure_set(n: int = DEFAULT_N_FIGURES, seed: int = 42,
     if not figures:
         raise RuntimeError(
             "No figures with on-disk images found — run "
-            "`sciknow db extract-visuals` first and make sure "
+            "`sciknow corpus extract-visuals` first and make sure "
             "mineru_output/ is intact."
         )
     with path.open("w") as f:

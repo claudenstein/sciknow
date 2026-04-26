@@ -18,90 +18,6 @@ app = typer.Typer(help="Database and infrastructure management.")
 console = Console()
 
 
-# v2 Phase F — `sciknow db <verb>` is renamed to `sciknow library`
-# (lifecycle) + `sciknow corpus` (growth/maintenance). The db subapp
-# stays mounted as a deprecation shim for one minor release.
-_DEPRECATION_PRINTED = False
-
-# Per-verb v1→v2 mapping. When the operator types `sciknow db <verb>`,
-# the callback reads ``ctx.invoked_subcommand`` and surfaces the exact
-# v2 replacement instead of the generic "see MIGRATION.md" blob. Keys
-# missing from this map fall back to the generic message.
-_V1_TO_V2_VERB = {
-    # Lifecycle → library
-    "init": "library init",
-    "reset": "library reset",
-    "stats": "library stats",
-    "backup": "library backup",
-    "restore": "library restore",
-    "failures": "library failures",
-    "doctor": "library doctor",
-    "monitor": "library monitor",
-    "dashboard": "library dashboard",
-    "drift": "library drift",
-    "provenance": "library provenance",
-    # Growth/maintenance → corpus
-    "expand": "corpus expand",
-    "enrich": "corpus enrich",
-    "refresh-metadata": "corpus refresh-metadata",
-    "refresh-retractions": "corpus refresh-retractions",
-    "cleanup-downloads": "corpus cleanup-downloads",
-    "reconcile-preprints": "corpus reconcile-preprints",
-    "reconciliations": "corpus reconciliations",
-    "unreconcile": "corpus unreconcile",
-    "repair": "corpus repair",
-    "dedup": "corpus dedup",
-    "reclassify-sections": "corpus reclassify-sections",
-    "link-citations": "corpus link-citations",
-    "classify-papers": "corpus classify-papers",
-    "flag-self-citations": "corpus flag-self-citations",
-    "expand-author": "corpus expand-author",
-    "expand-author-refs": "corpus expand-author-refs",
-    "expand-cites": "corpus expand-cites",
-    "expand-topic": "corpus expand-topic",
-    "expand-coauthors": "corpus expand-coauthors",
-    "expand-inbound": "corpus expand-inbound",
-    "expand-oeuvre": "corpus expand-oeuvre",
-    "extract-visuals": "corpus extract-visuals",
-    "link-visual-mentions": "corpus link-visual-mentions",
-    "caption-visuals": "corpus caption-visuals",
-    "embed-visuals": "corpus embed-visuals",
-    "paraphrase-equations": "corpus paraphrase-equations",
-    "parse-tables": "corpus parse-tables",
-    "download-dois": "corpus download-dois",
-    "tag-multimodal": "corpus tag-multimodal",
-}
-
-
-@app.callback()
-def _db_deprecation_callback(ctx: typer.Context) -> None:
-    """Emit a one-shot deprecation warning per process when the user
-    invokes `sciknow db ...` instead of the renamed v2 surfaces."""
-    global _DEPRECATION_PRINTED
-    if _DEPRECATION_PRINTED:
-        return
-    _DEPRECATION_PRINTED = True
-    verb = ctx.invoked_subcommand
-    new_path = _V1_TO_V2_VERB.get(verb)
-    if new_path:
-        console.print(
-            f"[yellow]⚠ deprecation:[/yellow] [bold]sciknow db {verb}[/bold] "
-            f"→ rename to [cyan]sciknow {new_path}[/cyan] (v2). The db "
-            f"subapp will be removed in v2.1; see MIGRATION.md for the "
-            f"full mapping.",
-        )
-    else:
-        console.print(
-            "[yellow]⚠ deprecation:[/yellow] [bold]sciknow db[/bold] is being "
-            "renamed in v2. Lifecycle verbs moved to "
-            "[cyan]sciknow library[/cyan] (init/reset/stats/migrate/validate"
-            "/snapshot/backup/doctor); growth/maintenance moved to "
-            "[cyan]sciknow corpus[/cyan] (ingest/expand/enrich/cluster"
-            "/refresh-*/repair/dedup/etc). The db subapp will be removed "
-            "in v2.1.",
-        )
-
-
 # ── Phase 49.1 — downloads/ hygiene helpers ────────────────────────────
 # Every expand run deposits PDFs directly into <download_dir>/*.pdf.
 # Historically they stayed there forever: successful ingests kept the
@@ -562,10 +478,10 @@ def _run_agentic_expand(
     retry_failed: bool,
     resume: bool = False,
 ) -> None:
-    """Orchestrator for ``sciknow db expand --question "..."``.
+    """Orchestrator for ``sciknow corpus expand --question "..."``.
 
     Plans → checks coverage → runs per-sub-topic expansion via the
-    existing Phase 49 pipeline (``sciknow db expand --relevance-query``
+    existing Phase 49 pipeline (``sciknow corpus expand --relevance-query``
     as a subprocess) → re-checks → stops when covered or max_rounds.
     """
     import subprocess
@@ -705,14 +621,14 @@ def backup(
     To restore on a new machine:
 
     \\b
-      sciknow db restore sciknow_backup.tar.gz
+      sciknow library restore sciknow_backup.tar.gz
 
     Examples:
 
     \\b
-      sciknow db backup
-      sciknow db backup --output ~/backups/sciknow_2026-04-04.tar.gz
-      sciknow db backup --no-pdfs   # metadata + vectors only (much smaller)
+      sciknow library backup
+      sciknow library backup --output ~/backups/sciknow_2026-04-04.tar.gz
+      sciknow library backup --no-pdfs   # metadata + vectors only (much smaller)
     """
     from sciknow.config import settings
     from sciknow.storage.qdrant import get_client
@@ -825,7 +741,7 @@ def backup(
     console.print(f"\n[bold green]✓ Backup complete[/bold green] → [bold]{output}[/bold]  ({size_mb} MB)")
     console.print(
         "\nRestore on a new machine with:\n"
-        f"  [bold]sciknow db restore {output}[/bold]"
+        f"  [bold]sciknow library restore {output}[/bold]"
     )
 
 
@@ -833,7 +749,7 @@ def backup(
 
 @app.command()
 def restore(
-    archive: Path = typer.Argument(help="Path to the backup archive produced by 'sciknow db backup'."),
+    archive: Path = typer.Argument(help="Path to the backup archive produced by 'sciknow library backup'."),
     skip_pdfs:    bool = typer.Option(False, "--skip-pdfs",    help="Skip restoring PDF files."),
     skip_vectors: bool = typer.Option(False, "--skip-vectors", help="Skip restoring Qdrant snapshots."),
     force:        bool = typer.Option(False, "--force",
@@ -842,15 +758,15 @@ def restore(
     """
     Restore a sciknow backup on a new machine.
 
-    Expects PostgreSQL and Qdrant to already be running (use 'sciknow db init'
+    Expects PostgreSQL and Qdrant to already be running (use 'sciknow library init'
     first to create the schema, or use --force to drop and recreate).
 
     Examples:
 
     \\b
-      sciknow db restore sciknow_backup.tar.gz
-      sciknow db restore sciknow_backup.tar.gz --force
-      sciknow db restore sciknow_backup.tar.gz --skip-vectors
+      sciknow library restore sciknow_backup.tar.gz
+      sciknow library restore sciknow_backup.tar.gz --force
+      sciknow library restore sciknow_backup.tar.gz --skip-vectors
     """
     from sciknow.config import settings
 
@@ -974,7 +890,7 @@ def restore(
 
     console.print("\n[bold green]✓ Restore complete.[/bold green]")
     console.print(
-        "Run [bold]sciknow db stats[/bold] to verify the collection is intact."
+        "Run [bold]sciknow library stats[/bold] to verify the collection is intact."
     )
 
 
@@ -1030,9 +946,9 @@ def reset(
 
     Examples:
 
-      sciknow db reset --yes
+      sciknow library reset --yes
 
-      sciknow db reset --yes --no-keep-pdfs   # also delete all PDFs
+      sciknow library reset --yes --no-keep-pdfs   # also delete all PDFs
     """
     import shutil
 
@@ -1410,13 +1326,13 @@ def doctor(
 
     Typical uses:
 
-      uv run sciknow db doctor                 # check before heavy job
-      uv run sciknow db doctor && sciknow ingest directory ./papers/
-      uv run sciknow db doctor --json | jq .
-      uv run sciknow db doctor --watch 5       # live readiness tick (54.6.271)
+      uv run sciknow library doctor                 # check before heavy job
+      uv run sciknow library doctor && sciknow ingest directory ./papers/
+      uv run sciknow library doctor --json | jq .
+      uv run sciknow library doctor --watch 5       # live readiness tick (54.6.271)
 
     Runs against the same `collect_monitor_snapshot` used by
-    ``sciknow db monitor`` and ``/api/monitor``; picks up every
+    ``sciknow library monitor`` and ``/api/monitor``; picks up every
     alert class the dashboard does (stuck_ingest, embed_drift,
     missing_model, backup_stale, config_drift, disk_critical, …).
     The `doctor` exit code is the primary signal — pipelining it
@@ -1546,9 +1462,9 @@ def monitor(
 
     Examples:
 
-      sciknow db monitor                    # one shot
-      sciknow db monitor --watch 5          # live view, re-render every 5s
-      sciknow db monitor --json | jq .      # scripted pipelines
+      sciknow library monitor                    # one shot
+      sciknow library monitor --watch 5          # live view, re-render every 5s
+      sciknow library monitor --json | jq .      # scripted pipelines
     """
     from sciknow.cli import preflight
     preflight(qdrant=False)
@@ -3736,7 +3652,7 @@ def dashboard(
          `bench --layer live` doesn't cover because it runs synthetic
          queries rather than real ingestion.
       2. **Stage failures** — error rate per stage + top error class.
-         Builds on the `sciknow db failures` clinic (54.6.205) —
+         Builds on the `sciknow library failures` clinic (54.6.205) —
          this surface is the summary view; `failures` is the deep-
          dive.
       3. **Throughput trend** — documents-per-day for the trailing
@@ -3750,9 +3666,9 @@ def dashboard(
 
     Examples:
 
-      sciknow db dashboard                # default 30-day window
-      sciknow db dashboard --days 7       # last week only
-      sciknow db dashboard --json | jq .  # scripted pipelines
+      sciknow library dashboard                # default 30-day window
+      sciknow library dashboard --days 7       # last week only
+      sciknow library dashboard --json | jq .  # scripted pipelines
     """
     from sciknow.cli import preflight
     preflight(qdrant=False)
@@ -3923,7 +3839,7 @@ def dashboard(
     if any_failures:
         console.print(
             "[dim]Drill into top error classes with "
-            "`sciknow db failures --stage <name>`.[/dim]"
+            "`sciknow library failures --stage <name>`.[/dim]"
         )
 
     # --- Throughput panel ---
@@ -4212,7 +4128,7 @@ def drift_cmd(
 
     records = read_recent(proj.root, n=n)
     if not records:
-        console.print("[yellow]No drift records yet. Run `sciknow db drift --snapshot` "
+        console.print("[yellow]No drift records yet. Run `sciknow library drift --snapshot` "
                       "or trigger an expand round.[/yellow]")
         return
     console.print(f"[bold]Recent drift ({len(records)}):[/bold]")
@@ -4284,7 +4200,7 @@ def reconcile_preprints_cmd(
     count; then year; then deterministic doc_id) and marks the others
     with ``canonical_document_id`` pointing at the canonical. The
     non-canonical rows become invisible to retrieval but are NOT
-    deleted — run ``sciknow db unreconcile <doc_id>`` to reverse.
+    deleted — run ``sciknow corpus unreconcile <doc_id>`` to reverse.
 
     Preprint DOI is copied onto the canonical's
     ``paper_metadata.extra.preprint_doi`` so both identifiers stay
@@ -4292,8 +4208,8 @@ def reconcile_preprints_cmd(
 
     Examples:
 
-      sciknow db reconcile-preprints --dry-run     # show the plan
-      sciknow db reconcile-preprints               # apply
+      sciknow corpus reconcile-preprints --dry-run     # show the plan
+      sciknow corpus reconcile-preprints               # apply
     """
     from sciknow.cli import preflight
     preflight(qdrant=False)
@@ -4352,8 +4268,8 @@ def reconcile_preprints_cmd(
     )
     console.print(
         "[dim]Non-canonical rows are now hidden from retrieval. "
-        "Run `sciknow db reconciliations` to list them, "
-        "`sciknow db unreconcile <doc_id>` to undo.[/dim]"
+        "Run `sciknow corpus reconciliations` to list them, "
+        "`sciknow corpus unreconcile <doc_id>` to undo.[/dim]"
     )
 
 
@@ -4454,10 +4370,10 @@ def expand_inbound_cmd(
 
     Examples:
 
-      sciknow db expand-inbound                             # top 20 @ 0.55 thr
-      sciknow db expand-inbound -n 50 --relevance-threshold 0.6
-      sciknow db expand-inbound --dry-run                   # see shortlist only
-      sciknow db expand-inbound -q "climate sensitivity" -n 30
+      sciknow corpus expand-inbound                             # top 20 @ 0.55 thr
+      sciknow corpus expand-inbound -n 50 --relevance-threshold 0.6
+      sciknow corpus expand-inbound --dry-run                   # see shortlist only
+      sciknow corpus expand-inbound -q "climate sensitivity" -n 30
     """
     from sciknow.cli import preflight
     preflight()
@@ -4610,7 +4526,7 @@ def expand_oeuvre_cmd(
     """Phase 54.6.116 (Tier 2 #4) — auto-complete author oeuvres.
 
     Finds every author who already has ≥``--min-corpus-papers`` papers
-    in the corpus and runs ``sciknow db expand-author`` for each,
+    in the corpus and runs ``sciknow corpus expand-author`` for each,
     capping new downloads per author. Complementary to ``db expand``
     (outbound reference crawl) and ``db expand-author`` (manual single-
     author expansion): this automates the "go through the most-
@@ -4625,9 +4541,9 @@ def expand_oeuvre_cmd(
 
     Examples:
 
-      sciknow db expand-oeuvre                     # default: 10 authors × 10 papers
-      sciknow db expand-oeuvre --min-corpus-papers 5 --max-authors 5 --dry-run
-      sciknow db expand-oeuvre -q "climate sensitivity"
+      sciknow corpus expand-oeuvre                     # default: 10 authors × 10 papers
+      sciknow corpus expand-oeuvre --min-corpus-papers 5 --max-authors 5 --dry-run
+      sciknow corpus expand-oeuvre -q "climate sensitivity"
     """
     from sciknow.cli import preflight
     preflight()
@@ -4736,8 +4652,8 @@ def feedback_add_cmd(
 
     Examples:
 
-      sciknow db feedback-add positive --doi 10.1029/2022JD037524 --topic "ECS"
-      sciknow db feedback-add neg --title "Off-topic computer-vision paper"
+      sciknow corpus feedback-add positive --doi 10.1029/2022JD037524 --topic "ECS"
+      sciknow corpus feedback-add neg --title "Off-topic computer-vision paper"
     """
     kind_norm = {"pos": "positive", "positive": "positive",
                  "neg": "negative", "negative": "negative",
@@ -4829,9 +4745,9 @@ def refresh_retractions_cmd(
 
     Examples:
 
-      sciknow db refresh-retractions              # all eligible (365d skip)
-      sciknow db refresh-retractions -n 100       # sample 100
-      sciknow db refresh-retractions --max-age-days 0   # force full re-sweep
+      sciknow corpus refresh-retractions              # all eligible (365d skip)
+      sciknow corpus refresh-retractions -n 100       # sample 100
+      sciknow corpus refresh-retractions --max-age-days 0   # force full re-sweep
     """
     from sciknow.cli import preflight
     preflight(qdrant=False)
@@ -4986,11 +4902,11 @@ def enrich(
 
     Examples:
 
-      sciknow db enrich --dry-run
+      sciknow corpus enrich --dry-run
 
-      sciknow db enrich --threshold 0.90
+      sciknow corpus enrich --threshold 0.90
 
-      sciknow db enrich --limit 50 --delay 0.5
+      sciknow corpus enrich --limit 50 --delay 0.5
     """
     from sciknow.cli import preflight
     preflight(qdrant=False)  # enrich only touches PostgreSQL
@@ -5650,11 +5566,11 @@ def expand(
 
     Examples:
 
-      sciknow db expand --dry-run
+      sciknow corpus expand --dry-run
 
-      sciknow db expand --download-dir ~/papers/auto
+      sciknow corpus expand --download-dir ~/papers/auto
 
-      sciknow db expand --limit 20 --no-ingest
+      sciknow corpus expand --limit 20 --no-ingest
     """
     import sys
     import time
@@ -7378,7 +7294,7 @@ def tag_multimodal():
 
     Examples:
 
-      sciknow db tag-multimodal
+      sciknow corpus tag-multimodal
     """
     from sciknow.cli import preflight
     preflight(qdrant=True)
@@ -7598,15 +7514,15 @@ def expand_author(
 
     Examples:
 
-      sciknow db expand-author "Zharkova"
+      sciknow corpus expand-author "Zharkova"
 
-      sciknow db expand-author "Zharkova" --dry-run
+      sciknow corpus expand-author "Zharkova" --dry-run
 
-      sciknow db expand-author "Zharkova" --from 2015 --limit 30
+      sciknow corpus expand-author "Zharkova" --from 2015 --limit 30
 
-      sciknow db expand-author "Zharkova" --orcid 0000-0002-0026-2725
+      sciknow corpus expand-author "Zharkova" --orcid 0000-0002-0026-2725
 
-      sciknow db expand-author "John Smith" --relevance-query "climate sensitivity"
+      sciknow corpus expand-author "John Smith" --relevance-query "climate sensitivity"
     """
     import time
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -8025,13 +7941,13 @@ def expand_author_refs_cmd(
 
     Examples:
 
-      sciknow db expand-author-refs --author "Zharkova"
+      sciknow corpus expand-author-refs --author "Zharkova"
 
-      sciknow db expand-author-refs                          # interactive picker
+      sciknow corpus expand-author-refs                          # interactive picker
 
-      sciknow db expand-author-refs --author "Vinós" --min-mentions 2 --dry-run
+      sciknow corpus expand-author-refs --author "Vinós" --min-mentions 2 --dry-run
 
-      sciknow db expand-author-refs --author "Mörner" -q "solar forcing climate"
+      sciknow corpus expand-author-refs --author "Mörner" -q "solar forcing climate"
     """
     import time
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -8164,7 +8080,7 @@ def expand_author_refs_cmd(
     if not cite_rows:
         console.print(
             "[yellow]No citations found for those papers. Run "
-            "`sciknow db link-citations` to populate the table.[/yellow]"
+            "`sciknow corpus link-citations` to populate the table.[/yellow]"
         )
         raise typer.Exit(0)
 
@@ -8465,9 +8381,9 @@ def download_dois(
 
     Examples:
 
-      sciknow db download-dois --dois "10.1038/nature12345,10.1126/science.abc"
+      sciknow corpus download-dois --dois "10.1038/nature12345,10.1126/science.abc"
 
-      sciknow db download-dois --dois-file selected.json --workers 4
+      sciknow corpus download-dois --dois-file selected.json --workers 4
     """
     import time
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -9084,9 +9000,9 @@ def pending_list(
     console.print(table)
     console.print(
         f"\n[dim]{len(rows)} row(s). Retry with "
-        f"[bold]sciknow db pending retry[/bold], mark as manually acquired "
-        f"with [bold]sciknow db pending mark-done <doi>[/bold], abandon "
-        f"with [bold]sciknow db pending abandon <doi>[/bold].[/dim]"
+        f"[bold]sciknow corpus pending retry[/bold], mark as manually acquired "
+        f"with [bold]sciknow corpus pending mark-done <doi>[/bold], abandon "
+        f"with [bold]sciknow corpus pending abandon <doi>[/bold].[/dim]"
     )
 
 
@@ -9253,9 +9169,9 @@ def extract_visuals_cmd(
 
     Examples:
 
-      sciknow db extract-visuals                # extract for all papers
-      sciknow db extract-visuals --limit 50     # first 50 only
-      sciknow db extract-visuals --force        # re-extract everything
+      sciknow corpus extract-visuals                # extract for all papers
+      sciknow corpus extract-visuals --limit 50     # first 50 only
+      sciknow corpus extract-visuals --force        # re-extract everything
     """
     import re as _re
 
@@ -9617,10 +9533,10 @@ def link_visual_mentions_cmd(
 
     Examples:
 
-      sciknow db link-visual-mentions                      # link all papers
-      sciknow db link-visual-mentions --doc-id abc123      # smoke test one paper
-      sciknow db link-visual-mentions --limit 10           # first 10 papers
-      sciknow db link-visual-mentions --force              # re-link all
+      sciknow corpus link-visual-mentions                      # link all papers
+      sciknow corpus link-visual-mentions --doc-id abc123      # smoke test one paper
+      sciknow corpus link-visual-mentions --limit 10           # first 10 papers
+      sciknow corpus link-visual-mentions --force              # re-link all
 
     After this runs, ``visuals.mention_paragraphs`` is either ``[]``
     (no body references found — e.g. decorative figures) or a list of
@@ -9738,10 +9654,10 @@ def caption_visuals_cmd(
 
       ollama pull qwen2.5vl:32b                       # recommended
       ollama stop qwen3:30b-a3b-instruct-2507-q4_K_M  # free VRAM
-      sciknow db caption-visuals                       # caption all pending
-      sciknow db caption-visuals -n 20 --force         # re-caption first 20
-      sciknow db caption-visuals --kind figure         # figures only
-      sciknow db caption-visuals --model qwen2.5vl:7b  # faster, lower quality
+      sciknow corpus caption-visuals                       # caption all pending
+      sciknow corpus caption-visuals -n 20 --force         # re-caption first 20
+      sciknow corpus caption-visuals --kind figure         # figures only
+      sciknow corpus caption-visuals --model qwen2.5vl:7b  # faster, lower quality
     """
     from sciknow.cli import preflight
     preflight(qdrant=False)
@@ -9913,9 +9829,9 @@ def embed_visuals_cmd(
 
     Examples:
 
-      sciknow db embed-visuals                        # all with ai_caption
-      sciknow db embed-visuals --kind equation -n 50  # test subset
-      sciknow db embed-visuals --force                # re-embed all
+      sciknow corpus embed-visuals                        # all with ai_caption
+      sciknow corpus embed-visuals --kind equation -n 50  # test subset
+      sciknow corpus embed-visuals --force                # re-embed all
     """
     from sciknow.cli import preflight
     preflight()
@@ -10071,9 +9987,9 @@ def classify_papers_cmd(
 
     Examples:
 
-      sciknow db classify-papers            # all pending
-      sciknow db classify-papers -n 20      # first 20
-      sciknow db classify-papers --force    # re-classify all
+      sciknow corpus classify-papers            # all pending
+      sciknow corpus classify-papers -n 20      # first 20
+      sciknow corpus classify-papers --force    # re-classify all
     """
     from sciknow.cli import preflight
     preflight(qdrant=False)
@@ -10222,10 +10138,10 @@ def paraphrase_equations_cmd(
 
     Examples:
 
-      sciknow db paraphrase-equations                    # all pending
-      sciknow db paraphrase-equations -n 50              # first 50
-      sciknow db paraphrase-equations --force            # re-do all
-      sciknow db paraphrase-equations --model gemma3:27b-it-qat
+      sciknow corpus paraphrase-equations                    # all pending
+      sciknow corpus paraphrase-equations -n 50              # first 50
+      sciknow corpus paraphrase-equations --force            # re-do all
+      sciknow corpus paraphrase-equations --model gemma3:27b-it-qat
     """
     from sciknow.cli import preflight
     preflight(qdrant=False)
@@ -10339,10 +10255,10 @@ def parse_tables_cmd(
 
     Examples:
 
-      sciknow db parse-tables                  # all pending
-      sciknow db parse-tables -n 20            # first 20
-      sciknow db parse-tables --force          # re-parse everything
-      sciknow db parse-tables --model qwen3:30b-a3b-instruct-2507-q4_K_M
+      sciknow corpus parse-tables                  # all pending
+      sciknow corpus parse-tables -n 20            # first 20
+      sciknow corpus parse-tables --force          # re-parse everything
+      sciknow corpus parse-tables --model qwen3:30b-a3b-instruct-2507-q4_K_M
     """
     from sciknow.cli import preflight
     preflight(qdrant=False)
@@ -10516,11 +10432,11 @@ def caption_bench_cmd(
 
     Examples:
 
-      sciknow db caption-bench                     # 30 figures+charts
-      sciknow db caption-bench --n 50              # bigger sample
-      sciknow db caption-bench --kind chart        # charts only
-      sciknow db caption-bench --judge human       # interactive
-      sciknow db caption-bench --judge both        # LLM + human confirm
+      sciknow library caption-bench                     # 30 figures+charts
+      sciknow library caption-bench --n 50              # bigger sample
+      sciknow library caption-bench --kind chart        # charts only
+      sciknow library caption-bench --judge human       # interactive
+      sciknow library caption-bench --judge both        # LLM + human confirm
     """
     from sciknow.cli import preflight
     preflight(qdrant=False)
@@ -10577,7 +10493,7 @@ def caption_bench_cmd(
     if not rows:
         console.print(
             "[yellow]No captioned figures/charts match the filter.[/yellow] "
-            "Run `sciknow db caption-visuals` first."
+            "Run `sciknow corpus caption-visuals` first."
         )
         return
 
@@ -10842,10 +10758,10 @@ def equation_bench_cmd(
 
     Examples:
 
-      sciknow db equation-bench                 # 30 equations, LLM-graded
-      sciknow db equation-bench --n 50          # bigger sample
-      sciknow db equation-bench --judge human   # interactive grading
-      sciknow db equation-bench --judge both    # LLM + human confirm
+      sciknow library equation-bench                 # 30 equations, LLM-graded
+      sciknow library equation-bench --n 50          # bigger sample
+      sciknow library equation-bench --judge human   # interactive grading
+      sciknow library equation-bench --judge both    # LLM + human confirm
     """
     from sciknow.cli import preflight
     preflight(qdrant=False)
@@ -10893,7 +10809,7 @@ def equation_bench_cmd(
     if not rows:
         console.print(
             "[yellow]No equations match the filter.[/yellow] "
-            "Run `sciknow db extract-visuals` and `sciknow db "
+            "Run `sciknow corpus extract-visuals` and `sciknow corpus "
             "paraphrase-equations` first."
         )
         return
@@ -11075,9 +10991,9 @@ def flag_self_citations_cmd(
 
     Examples:
 
-      sciknow db flag-self-citations              # all cross-linked
-      sciknow db flag-self-citations --limit 50   # smoke test
-      sciknow db flag-self-citations --force      # re-run everything
+      sciknow corpus flag-self-citations              # all cross-linked
+      sciknow corpus flag-self-citations --limit 50   # smoke test
+      sciknow corpus flag-self-citations --force      # re-run everything
     """
     from sciknow.cli import preflight
     preflight(qdrant=False)
@@ -11194,9 +11110,9 @@ def backfill_institutions_cmd(
 
     Examples:
 
-      sciknow db backfill-institutions                  # fill all gaps
-      sciknow db backfill-institutions --limit 100      # sample-size run
-      sciknow db backfill-institutions --force          # full refresh
+      sciknow corpus backfill-institutions                  # fill all gaps
+      sciknow corpus backfill-institutions --limit 100      # sample-size run
+      sciknow corpus backfill-institutions --force          # full refresh
     """
     from sciknow.cli import preflight
     preflight(qdrant=False)

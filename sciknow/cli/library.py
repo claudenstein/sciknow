@@ -49,6 +49,11 @@ app.command(name="dashboard")(_db.dashboard)
 app.command(name="drift")(_db.drift_cmd)
 app.command(name="provenance")(_db.provenance_cmd)
 
+# ── benches + data export ───────────────────────────────────────────────
+app.command(name="export")(_db.export)
+app.command(name="caption-bench")(_db.caption_bench_cmd)
+app.command(name="equation-bench")(_db.equation_bench_cmd)
+
 
 @app.command(name="migrate")
 def migrate_cmd():

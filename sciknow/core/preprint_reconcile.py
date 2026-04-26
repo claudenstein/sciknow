@@ -12,7 +12,7 @@ Design (locked 54.6.125 — `user has no drafts` simplified):
   break: whichever has more ingested chunks (content-richness proxy).
 - **Non-destructive**: nothing deleted. ``documents.canonical_document_id``
   FK on the non-canonical row; retrieval filters where this is NULL.
-- **Reversible**: ``sciknow db unreconcile <doc_id>`` clears the FK.
+- **Reversible**: ``sciknow corpus unreconcile <doc_id>`` clears the FK.
 - **Detection**: group corpus DOIs by OpenAlex ``work_id``. Any group
   with ≥ 2 rows is a reconciliation candidate. OpenAlex returns the
   same ``work_id`` for preprint + journal DOIs of the same paper via

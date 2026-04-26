@@ -24,9 +24,10 @@ sciknow db caption-visuals                   sciknow corpus caption-visuals
 # ... every other db verb has the same library/corpus shape
 ```
 
-The v1 `sciknow db <verb>` namespace remains mounted in v2.0 with a
-one-shot deprecation warning per process. It will be removed in v2.1.
-Update muscle memory now.
+The v1 `sciknow db <verb>` namespace was mounted in v2.0 as a one-release
+deprecation shim and **retired in v2.1**. The verb bodies still live in
+`sciknow/cli/db.py` (re-mounted under `library` + `corpus`); the only
+breakage is that `sciknow db <verb>` itself no longer resolves.
 
 ## Subapp restructure (Phase F)
 

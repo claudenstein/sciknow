@@ -3,7 +3,7 @@ Relevance filtering for collection expansion.
 
 Given a list of candidate references and either a free-text query or the
 current corpus as an anchor, compute cosine similarity against the bge-m3
-dense embedding and return per-candidate scores. Used by `sciknow db expand`
+dense embedding and return per-candidate scores. Used by `sciknow corpus expand`
 to drop off-topic references before paying the download + ingest cost.
 
 Two anchor modes:

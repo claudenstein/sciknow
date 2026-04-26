@@ -93,13 +93,12 @@ app.add_typer(backup_module.app, name="backup")
 # Phase 54.6.27 — master refresh command (re-run full pipeline on new papers)
 app.command(name="refresh")(refresh_module.refresh)
 app.add_typer(catalog_module.app, name="catalog")
-# v2 Phase F — `library` + `corpus` are the spec'd v2 namespaces;
-# `db` is retained as a deprecation shim that prints a one-shot
-# warning then dispatches to the same callables (db_module.app is
-# still the implementation source).
+# v2 Phase F — `library` (lifecycle) + `corpus` (growth/maintenance)
+# are the spec'd v2 namespaces. The v1 `sciknow db` shim was retired
+# in v2.1; cli/db.py still hosts the verb implementations, which the
+# library + corpus subapps re-mount under their canonical names.
 app.add_typer(library_module.app, name="library")
 app.add_typer(corpus_module.app, name="corpus")
-app.add_typer(db_module.app, name="db")
 app.add_typer(ingest_module.app, name="ingest")
 app.add_typer(search_module.app, name="search")
 app.add_typer(ask_module.app, name="ask")
@@ -786,7 +785,7 @@ def bench_visuals_ranker_cmd(
         console.print(
             f"[yellow]Only {len(sampled)} items after stratification — "
             f"corpus may lack diverse mention-paragraphs. "
-            f"Run `sciknow db link-visual-mentions --force` first.[/yellow]"
+            f"Run `sciknow corpus link-visual-mentions --force` first.[/yellow]"
         )
 
     from collections import Counter

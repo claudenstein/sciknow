@@ -433,7 +433,7 @@ def check_velocity_cmd(
         0, "--auto-ingest",
         help="If > 0, after each check ingest the top-N *new* papers "
              "(those not in the previous check's DOI set) via "
-             "`sciknow db download-dois`. 0 = off (default, user-review "
+             "`sciknow corpus download-dois`. 0 = off (default, user-review "
              "gate honored). Set to ~3-5 for light auto-growth on "
              "trusted queries; leave 0 for personal bibliographies.",
     ),
@@ -521,14 +521,14 @@ def check_velocity_cmd(
         unique = [d for d in new_dois_across_all if not (d in seen or seen.add(d))]
         console.print(
             f"\n[bold]--auto-ingest[/bold]: queuing {len(unique)} new DOI(s) "
-            "to `sciknow db download-dois`…"
+            "to `sciknow corpus download-dois`…"
         )
         import subprocess, sys
         for doi in unique:
             console.print(f"  {doi}")
         try:
             res = subprocess.run(
-                [sys.executable, "-m", "sciknow.cli.main", "db",
+                [sys.executable, "-m", "sciknow.cli.main", "corpus",
                  "download-dois", *unique],
                 check=False,
             )

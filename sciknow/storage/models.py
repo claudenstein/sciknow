@@ -49,7 +49,7 @@ class Document(Base):
     converter_backend: Mapped[str | None] = mapped_column(Text)
     converter_version: Mapped[str | None] = mapped_column(Text)
     # How this document entered the collection. 'seed' = manually ingested,
-    # 'expand' = auto-discovered via `sciknow db expand`. Used for provenance
+    # 'expand' = auto-discovered via `sciknow corpus expand`. Used for provenance
     # and to support future `db prune --source expand` operations.
     ingest_source: Mapped[str] = mapped_column(
         Text, nullable=False, server_default="seed"
@@ -60,7 +60,7 @@ class Document(Base):
     # gets this FK set to the canonical row's id. Retrieval filters
     # WHERE canonical_document_id IS NULL so the non-canonical is
     # invisible without being deleted. Fully reversible via
-    # `sciknow db unreconcile <doc_id>`.
+    # `sciknow corpus unreconcile <doc_id>`.
     canonical_document_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL"),
         nullable=True,
@@ -581,7 +581,7 @@ class WikiPage(Base):
 class Visual(Base):
     """A figure, table, equation, or code block extracted from a paper.
 
-    Populated by ``sciknow db extract-visuals`` which walks each paper's
+    Populated by ``sciknow corpus extract-visuals`` which walks each paper's
     ``content_list.json`` (MinerU output). Later phases (21.b–21.f) build
     retrieval, UI, and write-loop integration on top of this table.
     """
@@ -601,7 +601,7 @@ class Visual(Base):
     qdrant_point_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
     # Phase 54.6.72 — vision-LLM caption for figures/charts (NULL for
     # text-only kinds like equation/table/code). Filled by
-    # `sciknow db caption-visuals`. ai_caption_model records which
+    # `sciknow corpus caption-visuals`. ai_caption_model records which
     # VLM produced it so re-runs with a better model can target the
     # stale rows.
     ai_caption: Mapped[str | None] = mapped_column(Text)
@@ -925,7 +925,7 @@ class PaperInstitution(Base):
     away signal.
 
     Populated at enrich time from OpenAlex ``authorships[].institutions[]``;
-    backfillable via ``sciknow db backfill-institutions``.
+    backfillable via ``sciknow corpus backfill-institutions``.
     """
     __tablename__ = "paper_institutions"
 

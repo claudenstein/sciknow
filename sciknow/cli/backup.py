@@ -782,7 +782,7 @@ def restore(
             if snaps_dir.exists() and any(snaps_dir.iterdir()):
                 console.print(
                     "  [yellow]![/yellow] Qdrant vectors need rebuilding: "
-                    "run `sciknow db init` then "
+                    "run `sciknow library init` then "
                     "`sciknow ingest directory <data>/processed/`"
                 )
 
@@ -821,7 +821,7 @@ def restore(
         )
         console.print(
             f"[dim]Active project set to: {restored[0]}. "
-            f"Run `sciknow db init` to rebuild Qdrant collections.[/dim]"
+            f"Run `sciknow library init` to rebuild Qdrant collections.[/dim]"
         )
     else:
         console.print("\n[yellow]No projects were restored.[/yellow]")
