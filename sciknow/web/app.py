@@ -65,6 +65,8 @@ from sciknow.web.routes import bibliography as _bibliography_routes  # noqa: E40
 app.include_router(_bibliography_routes.router)
 from sciknow.web.routes import viz as _viz_routes  # noqa: E402
 app.include_router(_viz_routes.router)
+from sciknow.web.routes import jobs as _jobs_routes  # noqa: E402
+app.include_router(_jobs_routes.router)
 
 
 # Phase 33 — build tag: a short version string visible in the browser
@@ -6879,100 +6881,6 @@ async def api_monitor(days: int = 14):
     return JSONResponse(snap)
 
 
-@app.get("/api/stream/{job_id}")
-async def stream_job(job_id: str):
-    """SSE endpoint — streams events from a running job."""
-    with _job_lock:
-        job = _jobs.get(job_id)
-    if not job:
-        raise HTTPException(404, "Job not found")
-
-    queue = job["queue"]
-
-    async def event_generator():
-        while True:
-            try:
-                event = await asyncio.wait_for(queue.get(), timeout=300)
-            except asyncio.TimeoutError:
-                yield f"data: {json.dumps({'type': 'timeout'})}\n\n"
-                break
-            if event is None:
-                yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                break
-            yield f"data: {json.dumps(event)}\n\n"
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
-
-
-@app.delete("/api/jobs/{job_id}")
-async def cancel_job(job_id: str):
-    with _job_lock:
-        job = _jobs.get(job_id)
-    if not job:
-        raise HTTPException(404, "Job not found")
-    job["cancel"].set()
-    return JSONResponse({"ok": True})
-
-
-@app.get("/api/jobs/{job_id}/stats")
-async def get_job_stats(job_id: str):
-    """Phase 32.5 — server-side counter snapshot for the persistent
-    task bar.
-
-    The task bar polls this every ~500ms instead of opening a second
-    SSE source on /api/stream/{job_id}. The previous SSE-based design
-    competed with the per-section preview consumer for the SAME
-    asyncio.Queue, and Queue.get() removes items, so the two
-    consumers split the event stream and the task bar saw a tiny
-    fraction of the tokens (or zero if the per-section consumer was
-    faster). Polling a server-side counter eliminates that race.
-
-    Returns 410 (Gone) for jobs that finished and were swept by the
-    GC, so the client can transition to "done" cleanly without
-    re-fetching the job list.
-    """
-    with _job_lock:
-        job = _jobs.get(job_id)
-        if not job:
-            # Treat as already-finished — the GC swept it after the
-            # 5-minute window, OR the job was never created.
-            raise HTTPException(410, "Job not found (likely already finished)")
-        # Phase 54.6.247 — shared helper with _write_web_jobs_pulse
-        # so both UIs see the same number.
-        tps = _job_tps(job)
-        elapsed_s = time.monotonic() - job.get("started_at", time.monotonic())
-        return JSONResponse({
-            "id": job_id,
-            "stream_state": job.get("stream_state", "streaming"),
-            "tokens": int(job.get("tokens", 0)),
-            "tps": round(tps, 2),
-            # Phase 54.6.318 — surface the Ollama decode/prefill split
-            # to the task-bar consumer too. Browsers can render
-            # "decode 31 t/s · 92% prefill" alongside the 1.0 t/s
-            # wall-clock so users instantly see what's actually slow.
-            "decode_stats": _job_decode_stats(job),
-            "tps_windows": _job_tps_windows(job),
-            "elapsed_s": round(elapsed_s, 1),
-            "model_name": job.get("model_name"),
-            "task_desc": job.get("task_desc") or job.get("type"),
-            "target_words": job.get("target_words"),
-            "error_message": job.get("error_message"),
-        })
-
-
-@app.get("/api/jobs")
-async def list_jobs():
-    with _job_lock:
-        return [
-            {"id": jid, "type": j["type"], "status": j["status"]}
-            for jid, j in _jobs.items()
-        ]
-
-
 @app.post("/api/admin/release-vram")
 async def api_admin_release_vram():
     """Phase 54.6.320 — runtime VRAM-eviction switch.
@@ -8171,4 +8079,7 @@ from sciknow.web.routes.viz import (  # noqa: E402, F401
     api_viz_topic_map, api_viz_raptor_tree,
     api_viz_consensus_landscape, api_viz_timeline,
     api_viz_ego_radial, api_viz_gap_radar,
+)
+from sciknow.web.routes.jobs import (  # noqa: E402, F401
+    stream_job, cancel_job, get_job_stats, list_jobs,
 )

@@ -4329,10 +4329,23 @@ def l1_phase32_5_task_bar_polls_stats_no_sse_competition() -> None:
     )
 
     # 2) The polling endpoint must exist and return the expected fields.
-    assert '@app.get("/api/jobs/{job_id}/stats")' in src, (
+    # v2 Phase E: the handler may live on `@app.get(...)` (in app.py)
+    # or `@router.get(...)` (after the route split into web/routes/jobs.py).
+    if '@router.get("/api/jobs/{job_id}/stats")' in src:
+        decorator = '@router.get("/api/jobs/{job_id}/stats")'
+    else:
+        decorator = '@app.get("/api/jobs/{job_id}/stats")'
+    assert decorator in src, (
         "GET /api/jobs/{id}/stats endpoint missing"
     )
-    stats_src = src.split('@app.get("/api/jobs/{job_id}/stats")')[1].split("@app.")[0]
+    # Split on the chosen decorator; bound by either next @app./@router.
+    stats_src_after = src.split(decorator)[1]
+    # Stop at the next decorator (either form) — whichever comes first.
+    next_app = stats_src_after.find("@app.")
+    next_router = stats_src_after.find("@router.")
+    candidates = [x for x in (next_app, next_router) if x >= 0]
+    end = min(candidates) if candidates else len(stats_src_after)
+    stats_src = stats_src_after[:end]
     for field in ('"tokens"', '"tps"', '"elapsed_s"', '"stream_state"', '"model_name"'):
         assert field in stats_src, (
             f"stats endpoint missing field: {field}"

@@ -193,6 +193,25 @@ def web_app_full_source() -> str:
                 f"\n# --- web/templates/{p.relative_to(templates_dir)} ---\n" + body
             )
 
+    # Resource-scoped route modules under web/routes/ — v2 Phase E
+    # split. Tests that grep for `@app.get("/api/X")` etc. need the
+    # extracted handlers visible too. We append the source verbatim
+    # (no re-escape) so any `@router.X` patterns are findable, and
+    # tests that look for both forms (`@app.X` OR `@router.X`) keep
+    # working.
+    routes_dir = Path(__file__).resolve().parents[1] / "web" / "routes"
+    if routes_dir.exists():
+        for p in sorted(routes_dir.rglob("*.py")):
+            if p.name == "__init__.py":
+                continue
+            try:
+                body = p.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            chunks.append(
+                f"\n# --- web/routes/{p.relative_to(routes_dir)} ---\n" + body
+            )
+
     return "".join(chunks)
 
 
