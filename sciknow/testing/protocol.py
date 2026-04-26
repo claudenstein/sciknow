@@ -4055,9 +4055,10 @@ def l1_phase32_endpoint_handler_signatures_consistent() -> None:
     from sciknow.testing.helpers import web_app_full_source
 
     src = web_app_full_source()
-    # Match `@app.<method>(...)\nasync def name(` and `@app.<method>(...)\ndef name(`
+    # v2 Phase E (route split) — handlers may live on `@app.X` (in app.py)
+    # or `@router.X` (in any web/routes/ module). Count both.
     pattern = _re.compile(
-        r"@app\.(get|post|put|delete)\([^)]*\)\s*\n(async\s+)?def\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+        r"@(?:app|router)\.(get|post|put|delete)\([^)]*\)\s*\n(async\s+)?def\s+([a-zA-Z_][a-zA-Z0-9_]*)",
     )
     sync_handlers: list[str] = []
     total = 0
@@ -4069,7 +4070,7 @@ def l1_phase32_endpoint_handler_signatures_consistent() -> None:
             sync_handlers.append(name)
 
     assert total >= 40, (
-        f"expected at least 40 @app.* handlers, found {total} "
+        f"expected at least 40 @app.*/@router.* handlers, found {total} "
         "— regex broken?"
     )
     assert not sync_handlers, (
