@@ -827,14 +827,18 @@ every Phase commit. Most recent batches:
 
 ## Quick Start
 
-> **v2 is in active development on the `v2-llamacpp` branch.** It replaces
-> Ollama + in-process FlagEmbedding/sentence-transformers with a single
-> `llama-server` substrate (writer + embedder + reranker on one stack)
-> and renames `sciknow db` → `sciknow library` (lifecycle) +
-> `sciknow corpus` (growth/maintenance). See
-> [MIGRATION.md](MIGRATION.md) for the full v1→v2 verb / settings
-> mapping. The Quick Start below is the v2 path; v1 (Ollama) instructions
-> live in [docs/INSTALLATION.md](docs/INSTALLATION.md).
+> **v2 ships on the `v2-llamacpp` branch** (production-ready; merge to
+> `main` is a separate operational decision). All seven roadmap phases
+> are shipped. The substrate is a single `llama-server` stack (writer
+> + embedder + reranker on one process tree) replacing v1's Ollama +
+> in-process FlagEmbedding/sentence-transformers. CLI verbs renamed:
+> `sciknow db` → `sciknow library` (lifecycle) + `sciknow corpus`
+> (growth/maintenance) with a one-release deprecation shim. See
+> [MIGRATION.md](MIGRATION.md) for the full v1→v2 verb / settings /
+> migration-path reference, and [PHASE_LOG.md](docs/PHASE_LOG.md)
+> for the per-phase summary. The Quick Start below is the v2 path;
+> v1 (Ollama) install instructions live in
+> [docs/INSTALLATION.md](docs/INSTALLATION.md).
 
 ```bash
 # 1. Clone and set up the venv + system deps
