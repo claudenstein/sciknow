@@ -12343,8 +12343,11 @@ def l1_phase54_6_320_autowrite_vram_eviction() -> None:
         )
 
     # B) admin endpoint
-    from sciknow.web import app as _web
-    full = _inspect.getsource(_web)
+    # v2 Phase E: the admin/release-vram handler may live in app.py or
+    # in routes/system.py after the route split. Use the helper that
+    # concatenates both so the contract is location-agnostic.
+    from sciknow.testing.helpers import web_app_full_source as _v2_full_src
+    full = _v2_full_src()
     assert '/api/admin/release-vram' in full, (
         "54.6.320 — POST /api/admin/release-vram endpoint must exist"
     )
