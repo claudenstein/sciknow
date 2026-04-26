@@ -18010,6 +18010,65 @@ def l1_v2_monitor_carries_infer_substrate() -> None:
     )
 
 
+def l1_v2_route_split_modules_loaded() -> None:
+    """v2 Phase E — every web/routes/<resource>.py is importable, each
+    exposes an `APIRouter` named `router`, and the parent app has
+    mounted every router via `app.include_router(...)`.
+
+    This is the umbrella regression gate for the route split. Without
+    it, a future commit could quietly delete a `from sciknow.web.routes
+    import X` line and the corresponding endpoints would 404 silently.
+
+    The test loops over the live `web/routes/*.py` files (filesystem
+    discovery, no hard-coded list to drift), so adding a new route
+    module just means `app.include_router(_X_routes.router)` in
+    `web/app.py` — no need to update this test.
+    """
+    import importlib
+    from pathlib import Path
+    from fastapi import APIRouter
+    from sciknow.web import app as _web
+
+    routes_dir = Path(_web.__file__).resolve().parent / "routes"
+    assert routes_dir.is_dir(), "web/routes/ directory missing"
+
+    modules = sorted(
+        p.stem for p in routes_dir.glob("*.py") if p.stem != "__init__"
+    )
+    assert len(modules) >= 20, (
+        f"Expected ≥20 route modules after the v2 Phase E split, "
+        f"found {len(modules)}: {modules}"
+    )
+
+    # Every route file imports cleanly and exposes a router.
+    for name in modules:
+        mod = importlib.import_module(f"sciknow.web.routes.{name}")
+        router = getattr(mod, "router", None)
+        assert isinstance(router, APIRouter), (
+            f"web/routes/{name}.py must define `router = APIRouter()`; "
+            f"got {router!r}"
+        )
+        assert len(router.routes) >= 1, (
+            f"web/routes/{name}.py defines an empty router — every "
+            f"resource module must register at least one handler"
+        )
+
+    # The parent app must have mounted at least one route from each
+    # module. We can't easily map handlers back to their module after
+    # include_router(), but the live FastAPI app's route count is a
+    # rough lower bound: it should be ≥ sum(len(router.routes) for each).
+    total_router_routes = 0
+    for name in modules:
+        mod = importlib.import_module(f"sciknow.web.routes.{name}")
+        total_router_routes += len(mod.router.routes)
+    live_routes = len(_web.app.routes)
+    assert live_routes >= total_router_routes, (
+        f"FastAPI app has {live_routes} routes but the routes/ modules "
+        f"declare {total_router_routes} together — at least one router "
+        f"missing an `app.include_router(...)` call in web/app.py"
+    )
+
+
 def l1_v2_project_import_v1_surface() -> None:
     """v2 Phase G — `sciknow project import-v1` cross-project verb.
 
@@ -18612,6 +18671,9 @@ L1_TESTS: list[Callable] = [
     # closes the multi-tenant migration case (single-tenant case is
     # `library upgrade-v1`)
     l1_v2_project_import_v1_surface,
+    # v2 Phase E — every web/routes/<resource>.py is importable, has a
+    # router, and is mounted by app.include_router(...)
+    l1_v2_route_split_modules_loaded,
 ]
 
 L2_TESTS: list[Callable] = [
