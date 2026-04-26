@@ -3172,9 +3172,29 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
             )
             gpu_tbl.add_row(load_row)
 
-    # Ollama models mini-list
+    # LLM substrate mini-list. v2 Phase A — prefer the llama-server
+    # snapshot (writer/embedder/reranker with health dot + port) when
+    # the substrate is up; fall through to Ollama-loaded-models on the
+    # v1 fallback path; finally fall through to the empty-state hint.
     gpu_tbl.add_row("")
-    if loaded:
+    infer_sub = snap.get("infer_substrate") or []
+    if infer_sub:
+        for r in infer_sub:
+            mini = Text()
+            healthy = bool(r.get("healthy"))
+            mini.append("◉ " if healthy else "✗ ", style=C_OK if healthy else C_ERR)
+            mini.append(f"{r.get('role', '?'):8s}", style=C_ACCENT)
+            mini.append(f"  :{r.get('port', '?')}", style=C_DIM)
+            model = (r.get("model") or "?")
+            # Show only the basename for terminal real-estate
+            try:
+                from pathlib import Path as _P
+                model_short = _P(model).name
+            except Exception:
+                model_short = model
+            mini.append(f"  {model_short[:36]}", style=C_DIM)
+            gpu_tbl.add_row(mini)
+    elif loaded:
         for m in loaded:
             mini = Text()
             mini.append("◉ ", style=C_OK)
@@ -3186,7 +3206,10 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
                 mini.append(f"  exp {str(exp)[-8:-3] if len(str(exp)) > 8 else str(exp)}", style=C_DIM)
             gpu_tbl.add_row(mini)
     else:
-        gpu_tbl.add_row(Text("◎ ollama: no models loaded", style=C_DIM))
+        gpu_tbl.add_row(Text(
+            "◎ no LLM resident — `sciknow infer up --role writer`",
+            style=C_DIM,
+        ))
 
     # Phase 54.6.291 — VRAM preflight summary chip.  Shows recent
     # pressure: "preflight 2/8 tight · 12.3G freed".  Quiet until

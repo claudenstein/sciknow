@@ -2737,7 +2737,7 @@ def _build_alerts(snap: dict) -> list[dict]:
             "code": "enrichment_gap",
             "message": (
                 f"metadata gap: {worst}% of complete docs missing "
-                f"{worst_field} — run `sciknow db enrich`"
+                f"{worst_field} — run `sciknow corpus enrich`"
             ),
         })
 
@@ -2997,13 +2997,17 @@ def _build_alerts(snap: dict) -> list[dict]:
     # parameters we can't safely supply (e.g. missing_model needs
     # the tag name, which is already in the message), we leave
     # `action` None and rely on the inline hint.
+    # v2 Phase F — alert action hints renamed to the v2 surfaces
+    # (`library` for lifecycle, `corpus` for growth/maintenance).
+    # The deprecation shim still routes the v1 verbs if a user
+    # copy-pastes from older alerts in their scrollback.
     _ACTIONS: dict[str, str] = {
-        "stuck_ingest":    "sciknow ingest directory ./data/inbox --resume",
-        "embed_drift":     "sciknow db reingest --stage embedding",
-        "dupe_hashes":     "sciknow db stats  # inspect hash dupes",
+        "stuck_ingest":    "sciknow corpus ingest directory ./data/inbox --resume",
+        "embed_drift":     "sciknow corpus reingest --stage embedding",
+        "dupe_hashes":     "sciknow library stats  # inspect hash dupes",
         "bench_stale":     "sciknow bench-snapshot",
-        "backup_stale":    "sciknow backup run",
-        "inbox_waiting":   "sciknow ingest directory ./data/inbox",
+        "backup_stale":    "sciknow library backup",
+        "inbox_waiting":   "sciknow corpus ingest directory ./data/inbox",
         "gpu_hot":         "nvidia-smi  # confirm temp and check airflow",
         "gpu_warm":        "nvidia-smi  # monitor temp",
         "vram_critical":   (
@@ -3015,21 +3019,21 @@ def _build_alerts(snap: dict) -> list[dict]:
             "--format=csv"
         ),
         "stage_slowdown":  (
-            "sciknow db failures  # inspect recent per-doc timing"
+            "sciknow library failures  # inspect recent per-doc timing"
         ),
         "model_thrash":    (
             "grep -E 'LLM_MODEL|BOOK_WRITE_MODEL|AUTOWRITE_SCORER' "
             ".env  # consider unifying per-role overrides"
         ),
         "sidecar_drift":   (
-            "sciknow db audit-sidecar  # per-doc mismatch detail"
+            "sciknow library audit-sidecar  # per-doc mismatch detail"
         ),
         "payload_index_missing": (
-            "sciknow db init  # idempotent; re-creates missing "
+            "sciknow library init  # idempotent; re-creates missing "
             "payload indexes"
         ),
         "enrichment_gap": (
-            "sciknow db enrich  # fills DOI/abstract/authors from "
+            "sciknow corpus enrich  # fills DOI/abstract/authors from "
             "Crossref / OpenAlex / arXiv"
         ),
         "hnsw_drift": (
@@ -3042,7 +3046,7 @@ def _build_alerts(snap: dict) -> list[dict]:
         "mineru_big":      "du -sh data/mineru_output/  # consider pruning processed outputs",
         "disk_critical":   "df -h",
         "disk_low":        "df -h",
-        "retractions":     "sciknow db stats  # flagged retractions",
+        "retractions":     "sciknow library stats  # flagged retractions",
     }
     for a in alerts:
         code = a.get("code")
