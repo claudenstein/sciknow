@@ -2030,7 +2030,7 @@ from sciknow.web.routes.snapshots import (  # noqa: E402, F401
     create_chapter_snapshot, create_book_snapshot,
     list_chapter_snapshots, list_book_snapshots,
     restore_snapshot_bundle,
-    _snapshot_chapter_drafts, _restore_chapter_bundle,
+    _snapshot_chapter_drafts, _snapshot_book_drafts, _restore_chapter_bundle,
 )
 from sciknow.web.routes.wiki import (  # noqa: E402, F401
     api_wiki_pages, api_wiki_annotation_get, api_wiki_annotation_put,

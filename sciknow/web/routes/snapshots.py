@@ -115,6 +115,50 @@ def _snapshot_chapter_drafts(session, chapter_id: str) -> dict:
     }
 
 
+def _snapshot_book_drafts(session, book_id: str, *, name: str = "") -> str | None:
+    """Snapshot every draft in a book as a single ``scope='book'`` row.
+
+    Mirrors the inline logic in ``cli/book.py::snapshot`` (whole-book
+    branch). Used by ``book outline --overwrite`` so the destructive
+    re-outline path can capture state with one call instead of
+    duplicating ~25 lines of bundle-building.
+
+    Returns the inserted ``draft_snapshots.id`` (UUID as string). Returns
+    None if the book has no drafts to snapshot — caller should treat
+    that as "nothing to preserve" and continue.
+    """
+    import datetime as _dt
+    chapters = session.execute(text(
+        "SELECT id::text, number, title FROM book_chapters "
+        "WHERE book_id::text = :bid ORDER BY number"
+    ), {"bid": book_id}).fetchall()
+    chapter_bundles: list[dict] = []
+    grand = 0
+    for ch in chapters:
+        b = _snapshot_chapter_drafts(session, ch[0])
+        if not b["drafts"]:
+            continue
+        b["chapter_number"] = ch[1]
+        b["chapter_title"] = ch[2] or ""
+        chapter_bundles.append(b)
+        grand += sum(d.get("word_count") or 0 for d in b["drafts"])
+    if not chapter_bundles:
+        return None
+    snap_name = (name or "").strip() or (
+        f"book {book_id[:8]} — {_dt.datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    )
+    payload = json.dumps({"book_id": book_id, "chapters": chapter_bundles})
+    row = session.execute(text("""
+        INSERT INTO draft_snapshots
+            (book_id, scope, name, content, word_count)
+        VALUES
+            (CAST(:bid AS uuid), 'book', :name, :content, :wc)
+        RETURNING id::text
+    """), {"bid": book_id, "name": snap_name,
+           "content": payload, "wc": grand}).fetchone()
+    return row[0] if row else None
+
+
 @router.post("/api/snapshot/chapter/{chapter_id}")
 async def create_chapter_snapshot(chapter_id: str, name: str = Form("")):
     """Snapshot every draft in a chapter as one bundle.

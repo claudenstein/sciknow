@@ -13331,6 +13331,81 @@ def l1_phase54_6_297_book_outline_model() -> None:
     )
 
 
+def l1_book_outline_overwrite_flag() -> None:
+    """v2.0 — `book outline --overwrite=archive|hard` for re-outlining
+    a book whose chapter graph already exists.
+
+    Guards:
+
+      A) `book outline` accepts an `overwrite` parameter and rejects
+         values other than 'archive' / 'hard'.
+      B) The CLI body branches on the overwrite mode:
+         - 'hard' deletes drafts (`DELETE FROM drafts`)
+         - 'archive' nulls chapter_id (`UPDATE drafts SET chapter_id =
+           NULL`) so they survive as orphans
+         - both modes drop chapters (`DELETE FROM book_chapters`)
+      C) When a snapshot is requested (default), the body calls
+         `_snapshot_book_drafts` BEFORE the wipe so a restore is possible.
+      D) Without --overwrite, the body refuses to clobber an outline
+         whose every chapter number collides with the new proposal —
+         pointing the user at the two valid overwrite modes.
+      E) `_snapshot_book_drafts` is exported from `web.app` and lives
+         in `web/routes/snapshots.py`.
+    """
+    import inspect as _inspect
+    from sciknow.cli import book as _book_cli
+
+    # A — parameter exists, validation rejects bad values.
+    sig = _inspect.signature(_book_cli.outline)
+    assert "overwrite" in sig.parameters, (
+        "book outline must accept an --overwrite option"
+    )
+    assert "snapshot_first" in sig.parameters, (
+        "book outline must accept a --snapshot/--no-snapshot option for "
+        "the overwrite path's safety net"
+    )
+    body = _inspect.getsource(_book_cli.outline)
+    for token in ('"archive"', '"hard"'):
+        assert token in body, (
+            f"book outline must validate --overwrite against {token}"
+        )
+
+    # B — wipe branches.
+    assert "DELETE FROM drafts" in body, (
+        "--overwrite=hard branch must delete drafts"
+    )
+    assert "UPDATE drafts SET chapter_id = NULL" in body, (
+        "--overwrite=archive branch must null drafts.chapter_id so "
+        "drafts survive as orphans"
+    )
+    assert "DELETE FROM book_chapters" in body, (
+        "both overwrite modes must drop existing chapters"
+    )
+
+    # C — snapshot before wipe.
+    assert "_snapshot_book_drafts" in body, (
+        "overwrite path must call _snapshot_book_drafts before wiping "
+        "(safety net; user can restore via book snapshot-restore)"
+    )
+
+    # D — refusal when chapters exist + no --overwrite + every number collides.
+    assert "every proposed number collides" in body or "proposed_nums" in body, (
+        "merge-mode (--overwrite unset) must refuse when every proposed "
+        "chapter number collides with an existing chapter — print recipe"
+    )
+
+    # E — helper export surface.
+    from sciknow.web import app as _web_app
+    assert hasattr(_web_app, "_snapshot_book_drafts"), (
+        "_snapshot_book_drafts must be re-exported from web.app for "
+        "cli/book.py to import"
+    )
+    from sciknow.web.routes import snapshots as _snap_routes
+    assert hasattr(_snap_routes, "_snapshot_book_drafts"), (
+        "_snapshot_book_drafts must be defined in web/routes/snapshots.py"
+    )
+
+
 def l1_phase54_6_296_payload_index_health() -> None:
     """Phase 54.6.296 — Qdrant payload-index health check.
 
@@ -19268,6 +19343,9 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_295_sidecar_deep_audit,
     l1_phase54_6_296_payload_index_health,
     l1_phase54_6_297_book_outline_model,
+    # v2.0 — book outline --overwrite=archive|hard for re-outlining a
+    # book that already has chapters; auto-snapshots first.
+    l1_book_outline_overwrite_flag,
     l1_phase54_6_298_enrichment_coverage,
     l1_phase54_6_299_hnsw_drift_check,
     l1_phase54_6_301_retrieval_latency_buffer,

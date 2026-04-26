@@ -1143,6 +1143,23 @@ def outline(
     save:  bool = typer.Option(True,  "--save/--no-save",
                                 help="Save proposed chapters to the database."),
     model: str | None = typer.Option(None, "--model", help="Override LLM model."),
+    overwrite: str | None = typer.Option(
+        None, "--overwrite",
+        help="Re-outline an already-outlined book. One of: 'archive' "
+             "(drop chapters, KEEP drafts as orphans — recoverable via the "
+             "sidebar's + adopt button or via snapshot-restore), or 'hard' "
+             "(drop chapters AND delete drafts; irreversible without a "
+             "snapshot). Both modes auto-snapshot first as a safety net "
+             "(skip with --no-snapshot). Without this flag, existing "
+             "chapters are preserved and the LLM's new chapters are "
+             "merged in by `number` (the legacy behaviour).",
+    ),
+    snapshot_first: bool = typer.Option(
+        True, "--snapshot/--no-snapshot",
+        help="With --overwrite, take a book-wide draft snapshot before "
+             "wiping anything. Default ON; pass --no-snapshot to skip "
+             "(only sensible when you've just snapshotted by hand).",
+    ),
 ):
     """
     Generate a proposed chapter structure using the LLM and your paper collection.
@@ -1151,7 +1168,9 @@ def outline(
 
       sciknow book outline "Global Cooling"
 
-      sciknow book outline "Global Cooling" --no-save   # preview only
+      sciknow book outline "Global Cooling" --no-save                # preview only
+      sciknow book outline "Global Cooling" --overwrite=archive      # drafts → orphans
+      sciknow book outline "Global Cooling" --overwrite=hard         # delete drafts too
     """
     import json
     from sqlalchemy import text
@@ -1161,6 +1180,12 @@ def outline(
     from sciknow.storage.db import get_session
 
     from sciknow.core.project_type import get_project_type
+
+    if overwrite is not None and overwrite not in ("archive", "hard"):
+        console.print(
+            f"[red]--overwrite must be 'archive' or 'hard'; got {overwrite!r}.[/red]"
+        )
+        raise typer.Exit(2)
 
     # Phase 54.6.297 — per-role outline model override.  CLI `--model`
     # arg wins > BOOK_OUTLINE_MODEL env > LLM_MODEL (default in the
@@ -1314,6 +1339,81 @@ def outline(
 
     if save:
         with get_session() as session:
+            # Inspect current chapter/draft counts so we can prompt the
+            # user when they're about to clobber something.
+            n_existing_chapters = session.execute(text(
+                "SELECT COUNT(*) FROM book_chapters WHERE book_id::text = :bid"
+            ), {"bid": book[0]}).scalar() or 0
+            n_existing_drafts = session.execute(text(
+                "SELECT COUNT(*) FROM drafts WHERE book_id::text = :bid"
+            ), {"bid": book[0]}).scalar() or 0
+
+            # Refuse merge-mode (--overwrite unset) when the book already
+            # has an outline AND would silently re-skip every proposed
+            # chapter. The legacy "INSERT only when number doesn't exist"
+            # path stays for the rare case where a user manually deleted
+            # one chapter and wants a top-up — that produces non-zero
+            # inserts even with chapters present, so we only block when
+            # EVERY proposed number collides.
+            if overwrite is None and n_existing_chapters > 0:
+                proposed_nums = {int(ch["number"]) for ch in chapters}
+                existing_nums = {
+                    int(r[0]) for r in session.execute(text(
+                        "SELECT number FROM book_chapters "
+                        "WHERE book_id::text = :bid"
+                    ), {"bid": book[0]}).fetchall()
+                }
+                if proposed_nums.issubset(existing_nums):
+                    console.print(
+                        f"[yellow]Book already has {n_existing_chapters} "
+                        f"chapter(s); every proposed number collides.[/yellow]"
+                    )
+                    console.print(
+                        "Re-run with one of:\n"
+                        "  [bold]--overwrite=archive[/bold]  drop chapters, "
+                        "keep drafts as orphans (recoverable)\n"
+                        "  [bold]--overwrite=hard[/bold]     drop chapters "
+                        "AND delete drafts (irreversible without snapshot)\n"
+                        "Both modes auto-snapshot first."
+                    )
+                    raise typer.Exit(1)
+
+            # Overwrite path — snapshot then wipe.
+            if overwrite is not None and n_existing_chapters > 0:
+                if snapshot_first and n_existing_drafts > 0:
+                    from sciknow.web.app import _snapshot_book_drafts
+                    snap_id = _snapshot_book_drafts(
+                        session, book[0],
+                        name=f"pre-reoutline-{overwrite}",
+                    )
+                    console.print(
+                        f"[dim]Snapshot {str(snap_id)[:8]} captured "
+                        f"({n_existing_drafts} drafts). Restore with: "
+                        f"sciknow book snapshot-restore {str(snap_id)[:8]}[/dim]"
+                    )
+                if overwrite == "hard":
+                    n_drafts_deleted = session.execute(text(
+                        "DELETE FROM drafts WHERE book_id::text = :bid"
+                    ), {"bid": book[0]}).rowcount or 0
+                    console.print(
+                        f"[yellow]Deleted {n_drafts_deleted} draft(s).[/yellow]"
+                    )
+                else:  # archive
+                    n_archived = session.execute(text(
+                        "UPDATE drafts SET chapter_id = NULL "
+                        "WHERE book_id::text = :bid AND chapter_id IS NOT NULL"
+                    ), {"bid": book[0]}).rowcount or 0
+                    console.print(
+                        f"[dim]Unlinked {n_archived} draft(s) from chapters "
+                        f"(now visible as orphans in the sidebar).[/dim]"
+                    )
+                n_chapters_dropped = session.execute(text(
+                    "DELETE FROM book_chapters WHERE book_id::text = :bid"
+                ), {"bid": book[0]}).rowcount or 0
+                console.print(
+                    f"[yellow]Dropped {n_chapters_dropped} chapter(s).[/yellow]"
+                )
+
             for ch in chapters:
                 existing = session.execute(text("""
                     SELECT id FROM book_chapters WHERE book_id = :bid AND number = :num
