@@ -1,0 +1,36 @@
+% Textbook-flavoured memoir: chapter precis, exercise/example boxes,
+% checkpoint summaries.
+
+\definecolor{TextbookAccent}{RGB}{40,80,140}     % steel blue
+\usepackage{mdframed}
+\usepackage[most]{tcolorbox}
+
+\chapterstyle{thatcher}                           % serif chapter style
+\setsecheadstyle{\large\bfseries\color{TextbookAccent}}
+\setsubsecheadstyle{\bfseries\color{TextbookAccent!80}}
+
+% Worked-example, exercise, and checkpoint boxes that callers can
+% \begin{example}…\end{example}. The IR doesn't auto-emit these yet,
+% but the boxes are available for hand-edited follow-ups in the
+% .tex bundle, and for templates that grow box-style content.
+\newtcolorbox{example}[1][]{
+  colback=TextbookAccent!5,
+  colframe=TextbookAccent!60!black,
+  fonttitle=\bfseries,
+  title=Example, sharp corners=south,
+  enhanced, breakable, #1,
+}
+\newtcolorbox{exercise}[1][]{
+  colback=TextbookAccent!8,
+  colframe=TextbookAccent!90!black,
+  fonttitle=\bfseries,
+  title=Exercise, sharp corners=south,
+  enhanced, breakable, #1,
+}
+\newtcolorbox{checkpoint}[1][]{
+  colback=gray!5,
+  colframe=gray!50,
+  fonttitle=\bfseries,
+  title=Check Your Understanding, sharp corners=south,
+  enhanced, breakable, #1,
+}

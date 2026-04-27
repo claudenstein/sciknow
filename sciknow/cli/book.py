@@ -3594,14 +3594,28 @@ _DEFAULT_SECTIONS = ["overview", "key_evidence", "current_understanding", "open_
 
 
 def _get_chapter_sections(session, chapter_id: str) -> list[str]:
-    """Get per-chapter sections from DB, or fall back to defaults."""
+    """Get per-chapter sections from DB, or fall back to defaults.
+
+    Phase 54.6.x — sections were historically stored as a list of
+    plain strings; the deep-outline pipeline now writes them as
+    ``[{slug, title, plan, target_words}, ...]`` dicts. This helper
+    handles both shapes by delegating to
+    ``_normalize_chapter_sections`` and returning just the slug list
+    (which is all the autowrite loop needs).
+    """
     from sqlalchemy import text
+    from sciknow.core.book_ops import _normalize_chapter_sections
     row = session.execute(text(
         "SELECT sections FROM book_chapters WHERE id::text = :cid"
     ), {"cid": chapter_id}).fetchone()
-    if row and row[0] and isinstance(row[0], list) and len(row[0]) > 0:
-        # Normalize section names to lowercase slugs
-        return [s.lower().replace(" ", "_") for s in row[0]]
+    if row and row[0]:
+        try:
+            normalized = _normalize_chapter_sections(row[0])
+            slugs = [s.get("slug") for s in normalized if s.get("slug")]
+            if slugs:
+                return slugs
+        except Exception:  # noqa: BLE001
+            pass
     return _DEFAULT_SECTIONS
 
 
@@ -3655,6 +3669,19 @@ def autowrite(
             "claim-depiction verification is deferred to a future "
             "`book finalize-draft` pre-export pass. Default off — "
             "existing workflows are untouched."
+        ),
+    ),
+    flexible_length: bool | None = typer.Option(
+        None, "--flexible-length/--no-flexible-length",
+        help=(
+            "Phase 54.6.x — set the per-chapter flexible_length flag "
+            "before running. When ON, autowrite is permitted to extend "
+            "up to 2× the section's target_words IF the retrieval pool "
+            "is rich enough (≥24 chunks). Persists to "
+            "book_chapters.flexible_length so future runs inherit it. "
+            "With --full this applies to every chapter; with a single "
+            "chapter argument, only that chapter is toggled. Omit to "
+            "leave per-chapter flags untouched."
         ),
     ),
 ):
@@ -3748,6 +3775,37 @@ def autowrite(
         console.print(
             f"[bold]Autowrite:[/bold] {b_title} — "
             f"{len(targets)} section(s), max {max_iter} iter, target {target_score}"
+        )
+
+    # Phase 54.6.x — apply the --flexible-length toggle before running.
+    # The flag is persisted on book_chapters.flexible_length so the
+    # autowrite engine's _get_chapter_flexible_length() picks it up
+    # via the same code path used by the GUI checkbox. Scope:
+    #   - --full: every chapter in the book
+    #   - single chapter argument: only that chapter
+    if flexible_length is not None:
+        with get_session() as session:
+            if full:
+                n = session.execute(text("""
+                    UPDATE book_chapters SET flexible_length = :flex
+                    WHERE book_id::text = :bid
+                """), {"flex": bool(flexible_length), "bid": book_id}).rowcount
+            else:
+                # Targets list contains one or more (ch_id, ch_num, …)
+                # tuples for the resolved chapter; we only need to flip
+                # that single chapter id.
+                target_ch_ids = sorted({t[0] for t in targets})
+                n = 0
+                for cid in target_ch_ids:
+                    n += session.execute(text("""
+                        UPDATE book_chapters SET flexible_length = :flex
+                        WHERE id::text = :cid
+                    """), {"flex": bool(flexible_length), "cid": cid}).rowcount
+            session.commit()
+        state = "ON" if flexible_length else "OFF"
+        console.print(
+            f"[dim]flexible_length={state} on {n} chapter(s) "
+            f"(persisted to book_chapters.flexible_length).[/dim]"
         )
 
     # Phase 28 — rebuild and resume are mutually exclusive
@@ -3984,29 +4042,46 @@ def export(
     include_sources: bool = typer.Option(True, "--sources/--no-sources",
                                           help="Include source citations per chapter."),
     fmt:        str = typer.Option("markdown", "--format", "-f",
-                                    help="Export format: markdown, html, pdf, epub, bibtex, latex, docx."),
+                                    help="markdown, html, pdf, epub, bibtex, latex, docx, "
+                                         "pdf-pro (LaTeX-compiled), tex-bundle (.zip)."),
+    template:   str | None = typer.Option(None, "--template",
+                                           help="LaTeX template slug for pdf-pro / tex-bundle "
+                                                "(elsarticle, kaobook, classicthesis, …). "
+                                                "Default: project type's first template."),
+    font_family: str = typer.Option("lmodern", "--font",
+                                     help="Font family: lmodern, libertinus, termes, "
+                                          "ebgaramond, palatino, sourceserif."),
+    font_size: int = typer.Option(11, "--font-size",
+                                   help="Font size in pt: 10, 11, 12."),
+    paper:      str = typer.Option("a4paper", "--paper",
+                                    help="a4paper or letterpaper."),
+    bib_style:  str = typer.Option("numeric", "--bib-style",
+                                    help="numeric, authoryear, ieee, apa, chicago."),
 ):
     """
     Compile all chapter drafts into a single document.
 
     Formats:
-      markdown  — Markdown with inline [N] citations + bibliography (default)
-      html      — self-contained static reader (same look as the web reader)
-      pdf       — HTML → PDF via weasyprint (Phase 40 — parity with the web export)
-      epub      — Markdown → EPUB via Pandoc (Phase 40; requires pandoc installed)
-      bibtex    — .bib file from all cited papers' metadata
-      latex     — Markdown → LaTeX via Pandoc (requires pandoc installed)
-      docx      — Markdown → DOCX via Pandoc (requires pandoc installed)
+      markdown    — Markdown with inline [N] citations + bibliography (default)
+      html        — self-contained static reader (same look as the web reader)
+      pdf         — HTML → PDF via weasyprint (legacy, Phase 40)
+      pdf-pro     — Markdown → IR → LaTeX → PDF via latexmk (professional)
+      tex-bundle  — Same as pdf-pro but emits a .zip with main.tex/refs.bib/figures
+      epub        — Markdown → EPUB via Pandoc
+      bibtex      — .bib file from all cited papers' metadata
+      latex       — Markdown → LaTeX via Pandoc (legacy; pdf-pro is recommended)
+      docx        — Markdown → DOCX via Pandoc
 
     Examples:
 
       sciknow book export "Global Cooling"
 
-      sciknow book export "Global Cooling" --format pdf -o book.pdf
+      sciknow book export "Global Cooling" --format pdf-pro --template kaobook
 
-      sciknow book export "Global Cooling" --format epub -o book.epub
+      sciknow book export "Global Cooling" --format pdf-pro --template elsarticle \\
+          --font ebgaramond --font-size 11 --bib-style authoryear
 
-      sciknow book export "Global Cooling" --format bibtex -o refs.bib
+      sciknow book export "Global Cooling" --format tex-bundle -o gc-source.zip
     """
     from sqlalchemy import text
     from sciknow.storage.db import get_session
@@ -4021,6 +4096,52 @@ def export(
         if not book:
             console.print(f"[red]Book not found:[/red] {book_title}")
             raise typer.Exit(1)
+
+    # ── pdf-pro / tex-bundle short-circuit ─────────────────────────────
+    # The professional LaTeX path doesn't share the markdown-build path
+    # below (it operates directly off Postgres + the formatting module),
+    # so handle it here before the legacy pipeline kicks in.
+    if fmt in ("pdf-pro", "tex-bundle"):
+        from sciknow.formatting import (
+            ExportOptions,
+            build_book_pdf,
+            build_book_tex_bundle,
+            LatexCompileError,
+        )
+        opts = ExportOptions(
+            template_slug=template,
+            font_family=font_family,
+            font_size_pt=font_size,
+            paper=paper,
+            bib_style=bib_style,
+        )
+        safe = book[1].lower().replace(" ", "_").replace("/", "-")[:50]
+        try:
+            if fmt == "pdf-pro":
+                pdf, _log, _tex = build_book_pdf(book[0], opts)
+                out_path = output or Path(f"{safe}.pdf")
+                out_path.write_bytes(pdf)
+                console.print(
+                    f"[green]✓ PDF (pro) exported:[/green] [bold]{out_path}[/bold] "
+                    f"({len(pdf):,} bytes)"
+                )
+            else:
+                zip_bytes, _tex = build_book_tex_bundle(book[0], opts)
+                out_path = output or Path(f"{safe}-tex-bundle.zip")
+                out_path.write_bytes(zip_bytes)
+                console.print(
+                    f"[green]✓ LaTeX bundle exported:[/green] [bold]{out_path}[/bold] "
+                    f"({len(zip_bytes):,} bytes)"
+                )
+        except LatexCompileError as e:
+            console.print(f"[red]LaTeX compile failed:[/red] {e}")
+            log_path = Path(f"{safe}-latex.log")
+            log_path.write_text(getattr(e, "log_text", "") or "", encoding="utf-8")
+            tex_path = Path(f"{safe}-failed.tex")
+            tex_path.write_text(getattr(e, "tex_source", "") or "", encoding="utf-8")
+            console.print(f"[dim]Wrote {log_path} (full log) and {tex_path} (source).[/dim]")
+            raise typer.Exit(1)
+        return
 
         chapters = session.execute(text("""
             SELECT id::text, number, title, description

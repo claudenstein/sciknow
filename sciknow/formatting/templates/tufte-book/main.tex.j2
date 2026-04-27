@@ -1,0 +1,51 @@
+((# Tufte-book — Bringhurst-style book with side-margin notes.
+    tufte-book hardwires natbib; we stay on natbib + bibtex backend. #))
+\documentclass[((( options.font_size_pt )))pt, ((( options.paper )))]{tufte-book}
+
+\input{preamble_common.tex}
+\input{preamble.tex}
+
+\bibliographystyle{plainnat}
+
+\title{((( front.title | tex_escape )))}
+\author[((( front.authors | join(', ') | tex_escape )))]{((( front.authors | join(', ') | tex_escape )))}
+\publisher{((* if front.affiliations *))((( front.affiliations[0] | tex_escape )))((* else *))sciknow((* endif *))}
+\date{((* if front.date *))((( front.date | tex_escape )))((* else *))\today((* endif *))}
+
+\begin{document}
+\frontmatter
+((# tufte-book's \maketitle does its own uppercasing on the title and
+    can choke on inputs with discretionary hyphens or LaTeX specials.
+    A plain titlepage is more reliable. #))
+\begin{titlepage}
+  \centering
+  \vspace*{4cm}
+  {\Huge\bfseries ((( front.title | tex_escape )))\par}
+  \vspace{1cm}
+  {\large ((( front.authors | join(', ') | tex_escape ))) \par}
+  \vfill
+  ((* if front.date *))((( front.date | tex_escape ))) ((* else *))\today((* endif *))
+\end{titlepage}
+((* if options.table_of_contents *))
+\tableofcontents
+((* endif *))
+\mainmatter
+
+((* if is_flat *))
+((* if chapters and chapters[0].sections *))
+\chapter{((( chapters[0].title | tex_escape )))}
+((* for s in chapters[0].sections if (s.section_type or '').lower() != 'abstract' *))
+((( s | section_to_latex )))
+((* endfor *))
+((* endif *))
+((* else *))
+((* for ch in chapters *))
+((( ch | chapter_to_latex )))
+((* endfor *))
+((* endif *))
+
+\backmatter
+((* if bib_entries *))
+\bibliography{refs}
+((* endif *))
+\end{document}

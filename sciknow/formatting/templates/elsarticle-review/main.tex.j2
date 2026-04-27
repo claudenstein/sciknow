@@ -1,0 +1,62 @@
+((# Elsevier review article — single column, double-spacing, #))
+\documentclass[((( options.font_size_pt )))pt, ((( options.paper ))), review]{elsarticle}
+
+\input{preamble_common.tex}
+\input{preamble.tex}
+
+((( font_package | safe )))
+
+\bibliographystyle{elsarticle-num}
+
+\begin{document}
+\begin{frontmatter}
+
+\title{((( front.title | tex_escape )))((* if front.subtitle *)): ((( front.subtitle | tex_escape )))((* endif *))}
+
+((* for author in front.authors *))
+\author{((( author | tex_escape )))}
+((* endfor *))
+
+((* if front.affiliations *))
+((* for aff in front.affiliations *))
+\affiliation{organization={((( aff | tex_escape )))}}
+((* endfor *))
+((* endif *))
+
+((* if abstract_section *))
+\begin{abstract}
+((( abstract_section.blocks | blocks_to_latex(0) )))
+\end{abstract}
+((* elif front.abstract *))
+\begin{abstract}
+((( front.abstract | tex_escape )))
+\end{abstract}
+((* endif *))
+
+((* if front.keywords *))
+\begin{keyword}
+((( front.keywords | join(' \\sep ') | tex_escape )))
+\end{keyword}
+((* endif *))
+
+\end{frontmatter}
+
+((* if is_flat *))
+((* for s in body_sections *))
+((( s | section_to_latex )))
+((* endfor *))
+((* else *))
+((* for ch in chapters *))
+\section{((( ch.title | tex_escape )))}
+((* for s in ch.sections *))
+\subsection{((( s.title | tex_escape )))}
+((( s.blocks | blocks_to_latex(1) )))
+((* endfor *))
+((* endfor *))
+((* endif *))
+
+((* if bib_entries *))
+\bibliography{refs}
+((* endif *))
+
+\end{document}

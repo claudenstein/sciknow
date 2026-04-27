@@ -1330,3 +1330,94 @@ def kg_sample(
         "[dim]Compare this file against prior samples under the same "
         "directory to track KG quality drift over time.[/dim]"
     )
+
+
+# ── Phase 55: Wiki PDF export via the formatting pipeline ────────────
+
+
+@app.command(name="export")
+def export(
+    page_slug: Annotated[str | None, typer.Argument(help="Wiki page slug. Omit for whole-wiki export.")] = None,
+    output: Path | None = typer.Option(None, "--output", "-o",
+                                        help="Output file (default: <slug>.pdf or wiki.pdf)."),
+    template: str | None = typer.Option(None, "--template",
+                                         help="LaTeX template (kaobook, article, …). "
+                                              "Default: kaobook for whole-wiki, article for single page."),
+    font_family: str = typer.Option("lmodern", "--font"),
+    font_size: int = typer.Option(11, "--font-size"),
+    paper: str = typer.Option("a4paper", "--paper"),
+    fmt: str = typer.Option("pdf-pro", "--format", "-f",
+                             help="pdf-pro (compiled PDF) or tex-bundle (.zip)."),
+):
+    """Compile the wiki (or one page) to a professional PDF via LaTeX.
+
+    Examples:
+
+      sciknow wiki export                          # whole wiki → kaobook PDF
+      sciknow wiki export historical-temperature-reconstruction
+      sciknow wiki export --template article -o single.pdf
+    """
+    _check_wiki_table()
+    from sciknow.formatting import (
+        ExportOptions, LatexCompileError, build_wiki_pdf,
+    )
+    from sciknow.formatting.build import _build_wiki_document
+    from sciknow.formatting.latex_renderer import render_document
+    import io, zipfile
+
+    if not template:
+        template = "article" if page_slug else "kaobook"
+    opts = ExportOptions(
+        template_slug=template,
+        font_family=font_family,
+        font_size_pt=font_size,
+        paper=paper,
+    )
+
+    safe = (page_slug or "wiki").replace("/", "-")[:60]
+    try:
+        if fmt == "tex-bundle":
+            doc = _build_wiki_document(page_slug, opts)
+            tex_source, spec = render_document(doc, opts)
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("main.tex", tex_source)
+                for fname, src in doc.figure_assets.items():
+                    try: zf.write(src, fname)
+                    except Exception: pass
+                from sciknow.formatting.latex_renderer import TEMPLATES_DIR
+                template_dir = TEMPLATES_DIR / spec.slug
+                for ext in (".cls", ".sty", ".tex"):
+                    for path in template_dir.glob(f"*{ext}"):
+                        if path.name.endswith(".j2"): continue
+                        zf.write(path, path.name)
+                shared_dir = TEMPLATES_DIR / "_shared"
+                for ext in (".sty", ".cls", ".tex"):
+                    for path in shared_dir.glob(f"*{ext}"):
+                        zf.write(path, path.name)
+            out_path = output or Path(f"{safe}-tex-bundle.zip")
+            out_path.write_bytes(buf.getvalue())
+            console.print(
+                f"[green]✓ Wiki LaTeX bundle exported:[/green] [bold]{out_path}[/bold] "
+                f"({len(buf.getvalue()):,} bytes)"
+            )
+        else:
+            pdf, _log, _tex = build_wiki_pdf(page_slug, opts)
+            out_path = output or Path(f"{safe}.pdf")
+            out_path.write_bytes(pdf)
+            console.print(
+                f"[green]✓ Wiki PDF exported:[/green] [bold]{out_path}[/bold] "
+                f"({len(pdf):,} bytes)"
+            )
+    except LatexCompileError as e:
+        console.print(f"[red]LaTeX compile failed:[/red] {e}")
+        log_path = Path(f"{safe}-latex.log")
+        log_path.write_text(getattr(e, "log_text", "") or "", encoding="utf-8")
+        tex_path = Path(f"{safe}-failed.tex")
+        tex_path.write_text(getattr(e, "tex_source", "") or "", encoding="utf-8")
+        console.print(f"[dim]Wrote {log_path} and {tex_path} for inspection.[/dim]")
+        raise typer.Exit(1)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+

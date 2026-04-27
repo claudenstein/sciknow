@@ -1,0 +1,52 @@
+((# Generic article class — broadest compatibility. #))
+\documentclass[((( options.font_size_pt )))pt, ((( options.paper )))((* if options.two_column *)), twocolumn((* endif *))]{article}
+
+((( font_package | safe )))
+
+\input{preamble_common.tex}
+\input{preamble.tex}
+
+\usepackage[backend=biber,style=((( bib_style )))]{biblatex}
+\addbibresource{refs.bib}
+
+\title{((( front.title | tex_escape )))((* if front.subtitle *)): ((( front.subtitle | tex_escape )))((* endif *))}
+\author{((( front.authors | join(' \\and ') | tex_escape )))}
+\date{((* if front.date *))((( front.date | tex_escape )))((* else *))\today((* endif *))}
+
+\begin{document}
+\maketitle
+
+((* if abstract_section *))
+\begin{abstract}
+((( abstract_section.blocks | blocks_to_latex(0) )))
+\end{abstract}
+((* elif front.abstract *))
+\begin{abstract}
+((( front.abstract | tex_escape )))
+\end{abstract}
+((* endif *))
+
+((* if options.table_of_contents *))
+\tableofcontents
+((* endif *))
+
+((* if is_flat *))
+((* for s in body_sections *))
+((( s | section_to_latex )))
+((* endfor *))
+((* else *))
+((* for ch in chapters *))
+\section{((( ch.title | tex_escape )))}
+((* if ch.description *))\textit{((( ch.description | tex_escape )))}\par((* endif *))
+((* for s in ch.sections *))
+\subsection{((( s.title | tex_escape )))}
+((( s.blocks | blocks_to_latex(1) )))
+((* endfor *))
+((* endfor *))
+((* endif *))
+
+((* if bib_entries *))
+\printbibliography
+((* endif *))
+
+\end{document}

@@ -1,0 +1,15 @@
+% Template-specific preamble for elsarticle.
+
+% elsarticle's own option for review formatting is enabled at the
+% \documentclass level when slug == 'elsarticle-review' (see main.tex.j2).
+
+% Keep these light — elsarticle ships with reasonable defaults.
+% \biboptions is a natbib hook; with nonatbib it would error out, so
+% we omit it. biblatex options come from the documentclass \usepackage.
+
+% Some elsarticle versions emit a warning when affiliations have no id;
+% our author block keeps it simple.
+
+% elsarticle defines its own \biboptions when natbib is loaded. With
+% nonatbib + biblatex we manage citation styling via biblatex options
+% in the documentclass-level \usepackage.

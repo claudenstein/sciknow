@@ -3229,6 +3229,165 @@ function openExportModal() {
     document.querySelector('.sidebar h2').textContent || 'Book';
   document.getElementById('export-book-btns').innerHTML =
     _btnHtml('/api/export/book', true);
+
+  // Phase 55 — populate the Pro PDF (LaTeX) panel.
+  populateProExportControls();
+}
+
+
+// ── Phase 55 — Pro PDF (LaTeX → latexmk → PDF) ───────────────────────
+
+let _proExportTemplatesCache = null;
+let _proExportPollTimer = null;
+
+async function populateProExportControls() {
+  // Template + font + bib_style dropdowns are populated from the API
+  // so they stay in sync with the registry. We cache the response for
+  // the lifetime of the page.
+  try {
+    if (!_proExportTemplatesCache) {
+      const resp = await fetch('/api/export/pro/templates');
+      _proExportTemplatesCache = await resp.json();
+    }
+    const data = _proExportTemplatesCache;
+
+    // Template dropdown — flatten across project types and dedupe.
+    const tmplSel = document.getElementById('pro-export-template');
+    if (tmplSel && tmplSel.children.length <= 1) {
+      const seen = new Set();
+      Object.keys(data.by_project_type).forEach(pt => {
+        const group = document.createElement('optgroup');
+        group.label = pt.replace(/_/g, ' ');
+        data.by_project_type[pt].forEach(t => {
+          if (seen.has(t.slug)) return;
+          seen.add(t.slug);
+          const o = document.createElement('option');
+          o.value = t.slug;
+          o.textContent = t.name;
+          o.title = t.description || '';
+          group.appendChild(o);
+        });
+        if (group.children.length) tmplSel.appendChild(group);
+      });
+    }
+
+    // Font + bib style
+    const fontSel = document.getElementById('pro-export-font');
+    if (fontSel && fontSel.children.length === 0) {
+      data.fonts.forEach(f => {
+        const o = document.createElement('option');
+        o.value = f.slug; o.textContent = f.name;
+        if (f.slug === 'lmodern') o.selected = true;
+        fontSel.appendChild(o);
+      });
+    }
+    const bibSel = document.getElementById('pro-export-bibstyle');
+    if (bibSel && bibSel.children.length === 0) {
+      data.bib_styles.forEach(b => {
+        const o = document.createElement('option');
+        o.value = b.slug; o.textContent = b.name;
+        if (b.slug === 'numeric') o.selected = true;
+        bibSel.appendChild(o);
+      });
+    }
+  } catch (e) {
+    console.error('Failed to load pro-export templates:', e);
+  }
+}
+
+function _proExportRequestPayload(fmt) {
+  const v = id => document.getElementById(id);
+  return {
+    fmt: fmt,
+    template_slug: v('pro-export-template').value || null,
+    font_family: v('pro-export-font').value || 'lmodern',
+    font_size_pt: parseInt(v('pro-export-fontsize').value || '11', 10),
+    paper: v('pro-export-paper').value || 'a4paper',
+    two_column: v('pro-export-twocolumn').checked,
+    bib_style: v('pro-export-bibstyle').value || 'numeric',
+    cover_page: v('pro-export-cover').checked,
+    table_of_contents: v('pro-export-toc').checked,
+    list_of_figures: v('pro-export-lof').checked,
+    list_of_tables: v('pro-export-lot').checked,
+    abstract_override: v('pro-export-abstract').value || null,
+    author_override: v('pro-export-author').value || null,
+    affiliation: v('pro-export-affiliation').value || null,
+    dedication: v('pro-export-dedication').value || null,
+    acknowledgements: v('pro-export-acks').value || null,
+    include_bibliography_chapter: v('pro-export-bib').checked,
+  };
+}
+
+async function startProExport(fmt) {
+  const status = document.getElementById('pro-export-status');
+  const logWrap = document.getElementById('pro-export-log-wrap');
+  const logBox = document.getElementById('pro-export-log');
+  const pdfBtn = document.getElementById('pro-export-pdf-btn');
+  const texBtn = document.getElementById('pro-export-tex-btn');
+  pdfBtn.disabled = texBtn.disabled = true;
+  status.textContent = 'starting…';
+  logWrap.style.display = 'none';
+
+  try {
+    const resp = await fetch('/api/export/pro/build', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(_proExportRequestPayload(fmt)),
+    });
+    if (!resp.ok) {
+      const txt = await resp.text();
+      status.textContent = 'failed: ' + txt.slice(0, 200);
+      pdfBtn.disabled = texBtn.disabled = false;
+      return;
+    }
+    const data = await resp.json();
+    _pollProExportJob(data.job_id, fmt);
+  } catch (e) {
+    status.textContent = 'failed: ' + e.message;
+    pdfBtn.disabled = texBtn.disabled = false;
+  }
+}
+
+function _pollProExportJob(jobId, fmt) {
+  const status = document.getElementById('pro-export-status');
+  const logWrap = document.getElementById('pro-export-log-wrap');
+  const logBox = document.getElementById('pro-export-log');
+  const pdfBtn = document.getElementById('pro-export-pdf-btn');
+  const texBtn = document.getElementById('pro-export-tex-btn');
+
+  if (_proExportPollTimer) { clearInterval(_proExportPollTimer); }
+  const start = Date.now();
+
+  _proExportPollTimer = setInterval(async () => {
+    let r;
+    try {
+      r = await fetch('/api/export/pro/job/' + jobId);
+    } catch (e) {
+      status.textContent = 'poll failed: ' + e.message;
+      clearInterval(_proExportPollTimer); _proExportPollTimer = null;
+      pdfBtn.disabled = texBtn.disabled = false;
+      return;
+    }
+    const j = await r.json();
+    const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+    if (j.status === 'pending' || j.status === 'running') {
+      status.textContent = `${j.status}: ${j.progress || ''} (${elapsed}s)`;
+    } else if (j.status === 'done') {
+      clearInterval(_proExportPollTimer); _proExportPollTimer = null;
+      status.innerHTML =
+        `<strong>✓ ready</strong> · ${(j.size/1024).toFixed(0)} KB · ${elapsed}s · ` +
+        `<a href="/api/export/pro/job/${jobId}/download" target="_blank">download ${j.filename}</a>`;
+      pdfBtn.disabled = texBtn.disabled = false;
+      // Auto-trigger download
+      window.location.href = '/api/export/pro/job/' + jobId + '/download';
+    } else if (j.status === 'error') {
+      clearInterval(_proExportPollTimer); _proExportPollTimer = null;
+      status.innerHTML = `<strong>✗ failed:</strong> ${j.error}`;
+      logWrap.style.display = '';
+      logBox.textContent = j.log_excerpt || '(no log)';
+      pdfBtn.disabled = texBtn.disabled = false;
+    }
+  }, 800);
 }
 
 async function refreshAfterJob(newDraftId) {
