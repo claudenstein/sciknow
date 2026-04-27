@@ -11,6 +11,7 @@
   --sidebar-bg: #f5f4ef;      /* warm chrome */
   --toolbar-bg: #f0ede5;      /* slightly deeper chrome */
   --code-bg: #efece3;
+  --bg-alt: #f5f4ef;          /* alt surface — toolbar bands, chip strips */
   --modal-overlay: rgba(28, 25, 23, 0.42);
   /* Text — stone, not slate */
   --fg: #1c1917;              /* stone-900 */
@@ -78,6 +79,7 @@
   --sidebar-bg: #070707;      /* sidebar + topbar */
   --toolbar-bg: #0a0a0a;
   --code-bg: #111111;
+  --bg-alt: #121212;          /* alt surface in dark — barely lifted band */
   --modal-overlay: rgba(0, 0, 0, 0.78);
   --fg: #f5f4ef;              /* warm white */
   --fg-muted: #a8a29e;
@@ -2598,11 +2600,24 @@ input[type="password"], textarea, select {
   background: var(--bg-elevated);
   color: var(--fg);
   border: 1px solid var(--border);
+  border-radius: var(--r-sm);
 }
 input[type="text"]:focus, input[type="search"]:focus,
 input[type="number"]:focus, input[type="email"]:focus,
 input[type="url"]:focus, textarea:focus, select:focus {
   border-color: var(--accent); outline: none;
+}
+/* Native <option> elements in <select> dropdowns. Some browsers
+   (Firefox + Chromium-on-Linux without an OS-wide dark-mode pref)
+   render the popup with system colours that ignore the parent
+   background. Force the dark theme through. */
+select option {
+  background: var(--bg-elevated);
+  color: var(--fg);
+}
+input::placeholder, textarea::placeholder {
+  color: var(--fg-faint);
+  opacity: 0.85;
 }
 
 /* Native checkboxes + radios honour `color-scheme` declared in :root

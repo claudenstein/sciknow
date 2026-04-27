@@ -5018,5 +5018,6 @@ def edge_case_hunter_stream(
 from sciknow.core.autowrite import (  # noqa: F401, E402
     autowrite_section_stream,
     autowrite_chapter_all_sections_stream,
+    autowrite_book_all_chapters_stream,
     _autowrite_section_body,
 )

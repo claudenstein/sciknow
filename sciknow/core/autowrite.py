@@ -1928,6 +1928,135 @@ def autowrite_chapter_all_sections_stream(
     }
 
 
+def autowrite_book_all_chapters_stream(
+    book_id: str,
+    *,
+    model: str | None = None,
+    max_iter: int = 3,
+    target_score: float = 0.85,
+    target_words: int | None = None,
+    rebuild: bool = False,
+    resume: bool = False,
+    include_visuals: bool = False,
+) -> Iterator[Event]:
+    """Phase 54.6.x — autowrite EVERY section of EVERY chapter in the book.
+
+    Iterates the book's chapters in their stored order and chains
+    ``autowrite_chapter_all_sections_stream`` for each one. The same
+    rebuild / resume / skip semantics apply at the per-section level
+    inside each chapter; this wrapper just walks the chapter list.
+
+    Cancellation propagates through GeneratorExit on the inner generator
+    just like the chapter-level wrapper, so the in-flight section's
+    streaming-save flush still runs before the whole-book run unwinds.
+    """
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+
+    if rebuild and resume:
+        resume = False
+
+    with get_session() as session:
+        rows = session.execute(text("""
+            SELECT id::text, number, title
+            FROM book_chapters
+            WHERE book_id::text = :bid
+            ORDER BY number ASC
+        """), {"bid": book_id}).fetchall()
+
+    chapters = [{"id": r[0], "number": r[1], "title": r[2] or ""} for r in rows]
+    n_chapters = len(chapters)
+
+    yield {
+        "type": "book_autowrite_start",
+        "book_id": book_id,
+        "n_chapters": n_chapters,
+        "chapters": chapters,
+        "rebuild": rebuild,
+        "resume": resume,
+    }
+
+    if n_chapters == 0:
+        yield {
+            "type": "all_chapters_complete",
+            "n_chapters": 0,
+            "n_chapters_completed": 0,
+            "n_sections_completed": 0,
+            "n_sections_skipped": 0,
+            "n_sections_failed": 0,
+            "message": "no chapters in this book — add chapters first",
+        }
+        return
+
+    n_chapters_completed = 0
+    total_sections_completed = 0
+    total_sections_skipped = 0
+    total_sections_failed = 0
+
+    for ci, ch in enumerate(chapters, start=1):
+        yield {
+            "type": "chapter_start",
+            "chapter_index": ci, "chapter_total": n_chapters,
+            "chapter_id": ch["id"],
+            "chapter_number": ch["number"],
+            "chapter_title": ch["title"],
+        }
+        try:
+            inner = autowrite_chapter_all_sections_stream(
+                book_id=book_id,
+                chapter_id=ch["id"],
+                model=model,
+                max_iter=max_iter,
+                target_score=target_score,
+                target_words=target_words,
+                rebuild=rebuild,
+                resume=resume,
+                include_visuals=include_visuals,
+            )
+            for event in inner:
+                event = dict(event)
+                event["chapter_index"] = ci
+                event["chapter_total"] = n_chapters
+                event["chapter_id"] = ch["id"]
+                if event.get("type") == "all_sections_complete":
+                    total_sections_completed += int(event.get("n_completed", 0) or 0)
+                    total_sections_skipped += int(event.get("n_skipped", 0) or 0)
+                    total_sections_failed += int(event.get("n_failed", 0) or 0)
+                yield event
+        except GeneratorExit:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "autowrite_book chapter %r failed: %s", ch["id"], exc,
+            )
+            yield {
+                "type": "chapter_error",
+                "chapter_index": ci, "chapter_id": ch["id"],
+                "message": str(exc),
+            }
+            yield {
+                "type": "chapter_done",
+                "chapter_index": ci, "chapter_id": ch["id"],
+                "error": str(exc),
+            }
+            continue
+
+        n_chapters_completed += 1
+        yield {
+            "type": "chapter_done",
+            "chapter_index": ci, "chapter_id": ch["id"],
+        }
+
+    yield {
+        "type": "all_chapters_complete",
+        "n_chapters": n_chapters,
+        "n_chapters_completed": n_chapters_completed,
+        "n_sections_completed": total_sections_completed,
+        "n_sections_skipped": total_sections_skipped,
+        "n_sections_failed": total_sections_failed,
+    }
+
+
 # ════════════════════════════════════════════════════════════════════
 # Phase 46 — Two-stage citation insertion (A)
 # ════════════════════════════════════════════════════════════════════

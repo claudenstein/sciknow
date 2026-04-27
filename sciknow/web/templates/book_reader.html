@@ -368,6 +368,7 @@
         <button role="menuitem" onclick="openTimelineModal()" title="Phase 54.6.328 — unified Timeline modal. Tabs for Section / Chapter / Book each show the version chain or snapshot list with a one-line diff brief per row. Tick two rows to compare them."><svg class="icon"><use href="#i-clock"/></svg> Timeline (snapshots + versions)</button>
         <button role="menuitem" onclick="openBibliographyTools()" title="Phase 54.6.312 — Sanity-check and renumber the global bibliography. Use after adding new chapters/sections when the citation numbers in stored markdown look inconsistent."><svg class="icon"><use href="#i-book-open"/></svg> Bibliography tools</button>
         <button role="menuitem" onclick="takeSnapshot()" title="Snapshot the whole book's draft state — safety net before a destructive operation like autowrite-all."><svg class="icon"><use href="#i-camera"/></svg> Snapshot</button>
+        <button role="menuitem" onclick="doAutowriteBook()" title="Phase 54.6.x — autowrite EVERY section of EVERY chapter in book order. Long-running. Existing drafts are skipped by default; the chapter-level wrapper auto-snapshots before touching each chapter so the operation is reversible from the Timeline. Take a Snapshot first if you want a single rollback point."><svg class="icon"><use href="#i-feather"/></svg> Autowrite whole book</button>
         <button role="menuitem" onclick="openExportModal()" title="Export the book to Markdown, HTML, PDF (WeasyPrint), EPUB (pandoc), LaTeX, DOCX, or BibTeX."><svg class="icon"><use href="#i-download"/></svg> Export</button>
         <button role="menuitem" onclick="openBookSettings()" title="Per-book settings: title, description, plan (leitmotiv), target chapter length, style fingerprint, per-role model assignments."><svg class="icon"><use href="#i-sliders"/></svg> Settings</button>
       </div>
@@ -1295,7 +1296,7 @@
             <span class="u-hint">&mdash; leave empty to use <code>LLM_MODEL</code>.</span>
           </label>
           <input class="u-w-full u-pill-lg u-mono u-small" type="text" id="plan-outline-model-input" placeholder="(leave empty for default)"
-                 title="Optional Ollama model tag to override the default (LLM_MODEL). Useful for experimenting with a different planner without changing .env. Leave empty to use the configured default."/>
+                 title="Optional model tag (llama-server / Ollama) to override the default (LLM_MODEL). Useful for experimenting with a different planner without changing .env. Leave empty to use the configured default."/>
         </div>
         <div class="u-flex-raw u-gap-2 u-ai-center u-mb-3 u-wrap">
           <button class="btn-primary" id="plan-outline-run-btn" onclick="runOutlineFromTab()"
@@ -1319,6 +1320,21 @@
           chapter&rsquo;s drafts but does not delete them. Section-level editing
           moves to the <strong>Sections</strong> tab.
         </p>
+        <!-- Phase 54.6.x — Autoplan chapters (additive). Surfaces the
+             same /api/book/outline/generate endpoint that powers the
+             Outline tab, so users who land on the Chapters tab don't
+             have to know about the Outline tab to discover the LLM
+             chapter-generation flow. Additive: never touches existing
+             chapters — new chapters are appended with fresh numbers. -->
+        <div class="u-flex-raw u-gap-2 u-ai-center u-mb-3 u-wrap u-p-2 u-bg-alt u-r-md">
+          <button class="btn-secondary" id="plan-autoplan-chapters-btn" onclick="autoPlanChapters()"
+                  title="Phase 54.6.x — LLM-generate chapters for the book from its leitmotiv + paper corpus. Uses the same 3-candidate tournament + density-resize as the Outline tab. Additive: existing chapters are preserved; new ones are appended with fresh numbers. Click again to re-roll if the first pass isn't right.">
+            &#129504; Auto-plan chapters
+          </button>
+          <span class="u-hint-sm" id="plan-autoplan-chapters-status"></span>
+        </div>
+        <pre id="plan-autoplan-chapters-log"
+             style="display:none;max-height:160px;overflow:auto;font-family:var(--font-mono);font-size:11px;line-height:1.4;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:8px;white-space:pre-wrap;margin-bottom:12px;"></pre>
         <div id="plan-chapters-list" style="display:flex;flex-direction:column;gap:10px;"></div>
         <div class="u-mt-3">
           <button class="btn-secondary" onclick="addPlanChapter()"
@@ -1823,7 +1839,7 @@
             suggestions. Writes to <code>drafts.review_feedback</code>.
             <em>Use when:</em> you have a draft and want to know where to fix it.
             <em>Different from Outline:</em> Outline builds structure; Review critiques prose.
-            Uses <code>BOOK_REVIEW_MODEL</code> (gemma3:27b). <em>CLI:</em> <code>book review</code>.
+            Uses <code>BOOK_REVIEW_MODEL</code> (see Book Settings &rarr; Models for the current pick). <em>CLI:</em> <code>book review</code>.
           </td></tr>
         <tr class="u-border-b"><td class="u-td-thin"><strong>Adversarial review</strong></td>
           <td class="u-td">
@@ -3502,7 +3518,26 @@
         Filter by subject substring, predicate (exact match), object substring,
         or document id. <strong>Graph</strong> shows up to 100 triples as nodes
         and edges; <strong>Table</strong> is searchable and shows up to 200.
+        Sparse graph? Click <strong>Extract / backfill KG</strong> to walk every
+        paper and populate triples (mirrors <code>sciknow wiki extract-kg</code>).
       </p>
+      <!-- Phase 54.6.x — surface extract-kg directly in the KG modal so
+           a low triple count has an obvious next-step. The Wiki tab
+           still hosts the full Backfill panel; this is a one-click
+           wrapper for the same /api/wiki/extract-kg endpoint. -->
+      <div class="u-flex-raw u-gap-2 u-ai-center u-mb-3 u-wrap u-p-2 u-bg-alt u-r-md">
+        <button class="btn-secondary" id="kg-extract-btn" onclick="kgExtractFromModal()"
+                title="Phase 54.6.x — run knowledge_graph extraction on every paper missing triples (one LLM call each, no re-summarization). When the graph looks empty (e.g. 8 triples for a 100-paper corpus) it's because wiki compile predates the combined extraction step; this button backfills. Same endpoint as Wiki → Lint → Extract / Backfill KG.">
+          &#129504; Extract / backfill KG
+        </button>
+        <label class="u-chip" title="Re-run extraction even on papers that already have triples. Expensive — only use after changing the prompt or model.">
+          <input type="checkbox" id="kg-extract-force"
+                 title="Re-extract every paper, not just orphans."> force re-extract every paper
+        </label>
+        <span class="u-hint-sm" id="kg-extract-status"></span>
+      </div>
+      <pre id="kg-extract-log"
+           style="display:none;max-height:140px;overflow:auto;font-family:var(--font-mono);font-size:11px;line-height:1.4;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:8px;white-space:pre-wrap;margin-bottom:12px;"></pre>
       <div class="field u-row-end">
         <div class="u-flex-2">
           <label>Subject contains</label>

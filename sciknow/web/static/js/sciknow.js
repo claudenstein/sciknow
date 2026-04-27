@@ -1474,6 +1474,77 @@ async function loadGapRadar() {
 
 let _kgPredicatesLoaded = false;
 let _kgTriples = [];
+let _kgExtractSource = null;
+
+// Phase 54.6.x — KG extraction wrapper surfaced directly in the KG
+// modal (parallel to the existing Wiki → Lint button). Streams the
+// same /api/wiki/extract-kg job; reloads the graph when done.
+async function kgExtractFromModal() {
+  const btn = document.getElementById('kg-extract-btn');
+  const status = document.getElementById('kg-extract-status');
+  const log = document.getElementById('kg-extract-log');
+  const force = document.getElementById('kg-extract-force').checked;
+  if (!confirm(
+    'Extract knowledge_graph triples from the corpus?\n\n'
+    + 'Runs one LLM call per paper that has no triples yet (or every '
+    + 'paper if force is checked). Long-running for big corpora — '
+    + 'cancel by closing the modal or stopping the job from the task '
+    + 'bar.'
+  )) return;
+  if (btn) btn.disabled = true;
+  if (log) { log.style.display = 'block'; log.textContent = ''; }
+  if (status) status.textContent = 'Starting…';
+  const fd = new FormData();
+  fd.append('force', force);
+  let res;
+  try {
+    res = await fetch('/api/wiki/extract-kg', {method: 'POST', body: fd});
+  } catch (exc) {
+    if (status) status.textContent = 'Request failed: ' + exc.message;
+    if (btn) btn.disabled = false;
+    return;
+  }
+  if (!res.ok) {
+    if (status) status.textContent = 'Start failed: HTTP ' + res.status;
+    if (btn) btn.disabled = false;
+    return;
+  }
+  const data = await res.json();
+  if (_kgExtractSource) _kgExtractSource.close();
+  const source = new EventSource('/api/stream/' + data.job_id);
+  _kgExtractSource = source;
+  source.onmessage = function(e) {
+    let evt;
+    try { evt = JSON.parse(e.data); } catch (_) { return; }
+    if (evt.type === 'log' && log) {
+      log.textContent += evt.text + '\n';
+      log.scrollTop = log.scrollHeight;
+    } else if (evt.type === 'progress') {
+      if (status) status.textContent = evt.detail || evt.stage || '';
+      if (evt.detail && evt.detail.startsWith('$ ') && log) {
+        log.textContent += evt.detail + '\n';
+      }
+    } else if (evt.type === 'completed') {
+      source.close(); _kgExtractSource = null;
+      if (status) status.innerHTML = '<span class="u-success">✓ Done — reloading graph…</span>';
+      if (btn) btn.disabled = false;
+      // Refresh the KG modal contents.
+      _kgPredicatesLoaded = false;
+      const sel = document.getElementById('kg-predicate');
+      if (sel) {
+        while (sel.options.length > 1) sel.remove(1);
+      }
+      try { loadKg(0); } catch (_) {}
+    } else if (evt.type === 'error') {
+      source.close(); _kgExtractSource = null;
+      if (status) status.innerHTML = '<span class="u-danger">✗ ' + (evt.message || 'error') + '</span>';
+      if (btn) btn.disabled = false;
+    } else if (evt.type === 'done') {
+      source.close(); _kgExtractSource = null;
+      if (btn) btn.disabled = false;
+    }
+  };
+}
 
 async function loadKg(offset) {
   const subject = document.getElementById('kg-subject').value.trim();
@@ -5115,6 +5186,169 @@ async function confirmAutowrite() {
       stats.done('done');
       setStreamCursor(awContent, false);
       hideStreamPanel();
+      source.close(); currentEventSource = null; currentJobId = null;
+    }
+  };
+}
+
+// ── Autowrite WHOLE BOOK (every chapter × every section) ───────────
+// Phase 54.6.x — fan out autowrite_chapter_all_sections_stream over
+// every chapter in book order. Uses the same stream-panel + live
+// preview UI as confirmAutowrite(); the only new envelope events are
+// `book_autowrite_start`, `chapter_start`, `chapter_done`, and
+// `all_chapters_complete`.
+async function doAutowriteBook() {
+  const ok = confirm(
+    "Autowrite EVERY section of EVERY chapter in this book?\n\n" +
+    "This is long-running and uses the writer model for every empty " +
+    "section. Existing drafts are skipped by default. " +
+    "Click OK to proceed, Cancel to abort."
+  );
+  if (!ok) return;
+
+  awTargetScore = 0.85;
+  awScores = [];
+
+  showStreamPanel('Autowriting whole book…');
+  startLiveWrite();
+
+  const body = document.getElementById('stream-body');
+  body.innerHTML = '<div class="aw-dashboard">'
+    + '<div class="aw-chart" id="aw-chart"><svg viewBox="0 0 400 120"></svg></div>'
+    + '<div class="aw-log" id="aw-log"></div>'
+    + '</div>'
+    + '<div id="aw-content" style="margin-top:12px;white-space:pre-wrap;line-height:1.6;font-family:var(--font-serif);font-size:15px;"></div>';
+
+  const stats = createStreamStats('main-stream-stats', 'qwen3.5:27b');
+  stats.start();
+
+  const fd = new FormData();
+  fd.append('max_iter', '3');
+  fd.append('target_score', String(awTargetScore));
+  const res = await fetch('/api/autowrite-book', {method: 'POST', body: fd});
+  const data = await res.json();
+  if (!data || !data.job_id) {
+    hideStreamPanel();
+    alert('Failed to start whole-book autowrite: ' + (data && data.error || 'unknown'));
+    return;
+  }
+
+  startGlobalJob(data.job_id, {
+    type: 'autowrite_book',
+    taskDesc: 'Autowriting whole book',
+    modelName: 'qwen3.5:27b',
+  });
+
+  currentJobId = data.job_id;
+  if (currentEventSource) currentEventSource.close();
+  const source = new EventSource('/api/stream/' + data.job_id);
+  currentEventSource = source;
+  const status = document.getElementById('stream-status');
+  const awContent = document.getElementById('aw-content');
+  const awLog = document.getElementById('aw-log');
+
+  source.onmessage = function(e) {
+    let evt;
+    try { evt = JSON.parse(e.data); } catch (_) { return; }
+    if (evt.type === 'token') {
+      const phase = evt.phase || 'writing';
+      stats.update(evt.text);
+      stats.setPhase(phase);
+      if (phase === 'writing' || phase === 'revising') {
+        setStreamCursor(awContent, false);
+        awContent.innerHTML += evt.text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        setStreamCursor(awContent, true);
+        awContent.scrollTop = awContent.scrollHeight;
+        appendLiveWrite(evt.text);
+      }
+    }
+    else if (evt.type === 'progress') {
+      status.textContent = evt.detail || evt.stage;
+    }
+    else if (evt.type === 'scores') {
+      awScores.push(evt.scores);
+      drawConvergenceChart();
+    }
+    else if (evt.type === 'book_autowrite_start') {
+      awLog.innerHTML += '<div class="u-bold u-border-t u-pt-6 u-mt-6">'
+        + '✎ Whole book autowrite: ' + evt.n_chapters + ' chapters'
+        + (evt.rebuild ? ' (rebuild mode)' : '')
+        + (evt.resume ? ' (resume mode)' : '')
+        + '</div>';
+    }
+    else if (evt.type === 'chapter_start') {
+      awLog.innerHTML += '<div class="u-semibold u-accent u-border-t u-pt-6 u-mt-6">'
+        + '◆ Chapter ' + evt.chapter_index + '/' + evt.chapter_total
+        + ': ' + (evt.chapter_title || '(untitled)') + '</div>';
+      status.textContent = 'Chapter ' + evt.chapter_index + '/' + evt.chapter_total
+        + ': ' + (evt.chapter_title || '');
+      clearLiveWrite();
+      if (awContent) awContent.innerHTML = '';
+    }
+    else if (evt.type === 'chapter_autowrite_start') {
+      awLog.innerHTML += '<div class="u-tiny u-muted">  '
+        + evt.n_sections + ' sections in this chapter</div>';
+    }
+    else if (evt.type === 'section_start') {
+      const skip = evt.skipped ? ' [SKIPPED — already drafted]' : '';
+      awLog.innerHTML += '<div class="u-md u-pl-4">  ▶ Section '
+        + evt.index + '/' + evt.total + ': ' + evt.title + skip + '</div>';
+      if (!evt.skipped) {
+        clearLiveWrite();
+        if (awContent) awContent.innerHTML = '';
+      }
+    }
+    else if (evt.type === 'section_done') {
+      const score = (evt.final_score != null) ? ' (' + evt.final_score.toFixed(2) + ')' : '';
+      const cls = evt.error ? 'log-discard' : 'log-keep';
+      const icon = evt.error ? '✗' : evt.skipped ? '—' : '✓';
+      const note = evt.error ? ' error: ' + evt.error : evt.skipped ? ' skipped' : ' done' + score;
+      awLog.innerHTML += '<div class="' + cls + '">    ' + icon + ' Section ' + evt.index + note + '</div>';
+    }
+    else if (evt.type === 'section_error') {
+      awLog.innerHTML += '<div class="log-discard">    ✗ Section ' + evt.index + ' failed: ' + evt.message + '</div>';
+    }
+    else if (evt.type === 'all_sections_complete') {
+      awLog.innerHTML += '<div class="log-keep">  ✓ chapter complete: '
+        + evt.n_completed + ' written, ' + evt.n_skipped + ' skipped, '
+        + evt.n_failed + ' failed</div>';
+      fetch('/api/chapters').then(r => r.json()).then(d => {
+        rebuildSidebar(d.chapters || d, currentDraftId);
+      }).catch(() => {});
+    }
+    else if (evt.type === 'chapter_done') {
+      // Inner all_sections_complete already logged the totals.
+    }
+    else if (evt.type === 'chapter_error') {
+      awLog.innerHTML += '<div class="log-discard">  ✗ Chapter ' + evt.chapter_index + ' failed: ' + (evt.message || '') + '</div>';
+    }
+    else if (evt.type === 'all_chapters_complete') {
+      status.textContent = 'Book autowrite complete: '
+        + evt.n_chapters_completed + '/' + evt.n_chapters + ' chapters · '
+        + evt.n_sections_completed + ' sections written';
+      awLog.innerHTML += '<div class="log-keep u-bold u-border-t u-pt-6 u-mt-6">'
+        + '✓ Book complete: ' + evt.n_chapters_completed + '/' + evt.n_chapters
+        + ' chapters · ' + evt.n_sections_completed + ' sections written, '
+        + evt.n_sections_skipped + ' skipped, '
+        + evt.n_sections_failed + ' failed</div>';
+      stats.done('done');
+      setStreamCursor(awContent, false);
+      source.close(); currentEventSource = null; currentJobId = null;
+      fetch('/api/chapters').then(r => r.json()).then(d => {
+        rebuildSidebar(d.chapters || d, currentDraftId);
+      }).catch(() => {});
+    }
+    else if (evt.type === 'error') {
+      status.textContent = 'Error: ' + evt.message;
+      awLog.innerHTML += '<div class="u-danger">' + evt.message + '</div>';
+      stats.done('error');
+      setStreamCursor(awContent, false);
+      hideStreamPanel();
+      source.close(); currentEventSource = null; currentJobId = null;
+    }
+    else if (evt.type === 'done') {
+      stats.done('done');
+      setStreamCursor(awContent, false);
       source.close(); currentEventSource = null; currentJobId = null;
     }
   };
@@ -12529,6 +12763,81 @@ function cancelOutline() {
 // migrated.
 const regenerateOutline = runOutlineFromTab;
 
+// Phase 54.6.x — Auto-plan chapters button on the Chapters tab.
+// Same backend as runOutlineFromTab (the /api/book/outline/generate
+// endpoint already produces a chapter list), but streams into the
+// Chapters tab UI so users can stay in context. Additive: the
+// endpoint never overwrites existing chapters.
+let _autoplanChaptersSource = null;
+
+async function autoPlanChapters() {
+  const status = document.getElementById('plan-autoplan-chapters-status');
+  const log = document.getElementById('plan-autoplan-chapters-log');
+  const btn = document.getElementById('plan-autoplan-chapters-btn');
+  if (!confirm(
+    'Auto-plan chapters from your paper corpus?\n\n'
+    + 'The LLM proposes chapter titles + descriptions + section slugs '
+    + 'based on the book\'s leitmotiv and the papers in your library. '
+    + 'ADDS new chapters only — existing chapters and drafts are '
+    + 'untouched. Run again to re-roll.'
+  )) return;
+
+  if (btn) btn.disabled = true;
+  if (log) { log.style.display = 'block'; log.textContent = ''; }
+  if (status) status.textContent = 'Starting auto-plan…';
+
+  let res;
+  try {
+    res = await fetch('/api/book/outline/generate', {method: 'POST', body: new FormData()});
+  } catch (exc) {
+    if (status) status.textContent = 'Request failed: ' + exc.message;
+    if (btn) btn.disabled = false;
+    return;
+  }
+  const data = await res.json();
+  if (_autoplanChaptersSource) _autoplanChaptersSource.close();
+  const source = new EventSource('/api/stream/' + data.job_id);
+  _autoplanChaptersSource = source;
+  let tokBuf = '';
+  source.onmessage = async function(e) {
+    let evt;
+    try { evt = JSON.parse(e.data); } catch (_) { return; }
+    if (evt.type === 'token') {
+      tokBuf += evt.text;
+      if (log) {
+        log.textContent = tokBuf.slice(-3000);
+        log.scrollTop = log.scrollHeight;
+      }
+      if (status) status.textContent = 'Drafting… ' + tokBuf.length + ' chars';
+    } else if (evt.type === 'progress') {
+      if (status) status.textContent = evt.detail || evt.stage;
+    } else if (evt.type === 'completed') {
+      source.close(); _autoplanChaptersSource = null;
+      if (status) {
+        status.innerHTML = '<span class="u-success">✓ Added <strong>'
+          + evt.n_inserted + '</strong> new chapter(s), <strong>'
+          + evt.n_skipped + '</strong> skipped.</span>';
+      }
+      if (btn) btn.disabled = false;
+      try {
+        const sidebarRes = await fetch('/api/chapters');
+        const sd = await sidebarRes.json();
+        const chapters = sd.chapters || sd;
+        chaptersData = chapters;
+        rebuildSidebar(chapters, currentDraftId);
+        populatePlanChaptersTab();
+      } catch (_) {}
+    } else if (evt.type === 'error') {
+      source.close(); _autoplanChaptersSource = null;
+      if (status) status.innerHTML = '<span class="u-danger">✗ ' + (evt.message || 'error') + '</span>';
+      if (btn) btn.disabled = false;
+    } else if (evt.type === 'done') {
+      source.close(); _autoplanChaptersSource = null;
+      if (btn) btn.disabled = false;
+    }
+  };
+}
+
 // ── Phase 14.3: Chapter scope modal (description + topic_query) ─────
 // Phase 18 — chapter modal carries an in-memory copy of the chapter's
 // sections list while the modal is open. Saved on Save, discarded on
@@ -14669,7 +14978,7 @@ async function loadBookSettingsModels() {
       ['LLM_MODEL',              data.llm_model,              'ask · wiki compile · extract-kg · everything without a per-role override', null],
       ['LLM_FAST_MODEL',         data.llm_fast_model,         'classify-papers · paraphrase-equations · RAPTOR · metadata fallback', 'LLM_MODEL'],
       ['BOOK_OUTLINE_MODEL',     data.book_outline_model,     'book outline (3-candidate tournament + density-driven section growth)', 'LLM_MODEL'],
-      ['BOOK_WRITE_MODEL',       data.book_write_model,       'book write · autowrite writer/scorer/verify/cove (55.6.243 split)', 'LLM_MODEL'],
+      ['BOOK_WRITE_MODEL',       data.book_write_model,       'book write · autowrite writer/scorer/verify/cove (54.6.243 split)', 'LLM_MODEL'],
       ['BOOK_REVIEW_MODEL',      data.book_review_model,      'book review (5-dim critic)', 'LLM_MODEL'],
       ['AUTOWRITE_SCORER_MODEL', data.autowrite_scorer_model, 'autowrite score + rescore (not verify/cove)', 'LLM_MODEL'],
       ['VISUALS_CAPTION_MODEL',  data.visuals_caption_model,  'db caption-visuals (figures + charts) — 54.6.74 VLM-sweep winner', 'qwen2.5vl:32b (code default)'],
