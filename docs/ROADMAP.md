@@ -505,14 +505,51 @@ booted the router with `--no-models-autoload --models-max 0`. Result:
 - No startup errors; router log printed `Available models (7)` and
   marked our five as `*` (custom presets).
 
-Not yet validated (require live load — conflicts with the autowrite
-soak that was running concurrently):
-1. `/v1/chat/completions` with `model: "writer"` actually loads + serves.
-2. `/embeddings` with `model: "embedder"` works in router mode.
-3. `/rerank` with `model: "reranker"` works in router mode.
-4. Concurrent calls (writer + scorer in autowrite) — does the router
-   queue or LRU-evict? With `--models-max 1` it must serialise; with
-   `--models-max 2` and a 24 GB GPU the second model load will OOM.
+**Live validation (2026-04-27 follow-up).** Booted the router with
+`--models-max 1` against the same preset file and ran four probe
+calls in sequence. All pass:
+
+1. ✓ `POST /v1/chat/completions` with `model: "writer"` → loaded the
+   17 GB Qwen3.6-27B GGUF, decoded at **40 t/s** for a 40-token
+   reply. Cold-load took ~3 s; subsequent calls would be hot.
+2. ✓ `POST /v1/embeddings` with `model: "embedder"` → 1024-dim
+   vector returned in 1 s. The router LRU-evicted the writer first
+   (VRAM dropped from 19.4 GB → 2.0 GB). The bge-m3 GGUF works in
+   router mode with `embedding = true` in the preset.
+3. ✓ `POST /rerank` with `model: "reranker"` → sorted scores
+   returned in 2 s. Router LRU-evicted the embedder, loaded the
+   bge-reranker-v2-m3. The `reranking = true` preset key works.
+4. ✓ `POST /v1/chat/completions` with `model: "scorer"` → loaded
+   the 18 GB Gemma-4-31B-it Q4_1, decoded a 50-token reply in
+   ~15 s. Router LRU-evicted the reranker first; final state was
+   scorer alone at 23 GB / 24 GB. No OOM.
+
+Confirmed properties:
+- The router serialises model loads on a single GPU at
+  `--models-max 1`, so two big models never co-resident — exactly
+  the behaviour our `_VRAM_CONFLICTS` map enforces today, but
+  enforced by llama.cpp's native scheduler instead of our Python
+  code.
+- The OpenAI-compatible `model` field correctly drives routing.
+- `/v1/embeddings` and `/rerank` work via the `embeddings = true`
+  and `reranking = true` preset keys; router translates them to
+  the right llama-server CLI flags.
+- KV cache is per-model; switching `model` evicts the previous
+  model and its KV cache.
+
+Not yet validated:
+- Concurrent calls — autowrite issues 1 writer + 1 scorer
+  sequentially per iteration, so the single-load LRU is fine.
+  But the web layer can hold long autowrite jobs with concurrent
+  short retrieve/embed calls; need to confirm the router queues
+  rather than OOMs at `--models-max 1`.
+- mmproj for vlm — the preset loads the path but the test didn't
+  send an image-bearing request through the chat API yet.
+- Per-call timing telemetry — does router pass through the
+  `timings` object that the v1 monitor pipeline depends on?
+  (The /v1/chat probe above DID return a `timings` block, so
+  this is probably fine, but need to confirm the format matches
+  our parser.)
 
 Migration path (out of scope for this loop, gated on the four checks
 above):
