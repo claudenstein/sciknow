@@ -3594,14 +3594,28 @@ _DEFAULT_SECTIONS = ["overview", "key_evidence", "current_understanding", "open_
 
 
 def _get_chapter_sections(session, chapter_id: str) -> list[str]:
-    """Get per-chapter sections from DB, or fall back to defaults."""
+    """Get per-chapter sections from DB, or fall back to defaults.
+
+    Phase 54.6.x — sections were historically stored as a list of
+    plain strings; the deep-outline pipeline now writes them as
+    ``[{slug, title, plan, target_words}, ...]`` dicts. This helper
+    handles both shapes by delegating to
+    ``_normalize_chapter_sections`` and returning just the slug list
+    (which is all the autowrite loop needs).
+    """
     from sqlalchemy import text
+    from sciknow.core.book_ops import _normalize_chapter_sections
     row = session.execute(text(
         "SELECT sections FROM book_chapters WHERE id::text = :cid"
     ), {"cid": chapter_id}).fetchone()
-    if row and row[0] and isinstance(row[0], list) and len(row[0]) > 0:
-        # Normalize section names to lowercase slugs
-        return [s.lower().replace(" ", "_") for s in row[0]]
+    if row and row[0]:
+        try:
+            normalized = _normalize_chapter_sections(row[0])
+            slugs = [s.get("slug") for s in normalized if s.get("slug")]
+            if slugs:
+                return slugs
+        except Exception:  # noqa: BLE001
+            pass
     return _DEFAULT_SECTIONS
 
 
