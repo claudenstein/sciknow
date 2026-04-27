@@ -901,6 +901,9 @@
                   <button class="btn-secondary" onclick="deleteWikiAnnotation()" id="wiki-annotation-delete"
                           title="Delete this page's annotation. Does NOT affect the wiki content itself.">Clear</button>
                   <span id="wiki-annotation-status" class="wiki-ask-status"></span>
+                  <!-- Phase 54.6.x — autosave pill. Edits debounce-save
+                       1.5 s after the last keystroke. -->
+                  <span id="autosave-wiki-mytake" class="u-small u-ml-auto"><span class="u-muted">○ Idle</span></span>
                 </div>
               </section>
               <!-- Phase 54.3 — Ask this page inline RAG -->
@@ -1366,11 +1369,17 @@
            chapters without closing the modal. Each section row stays
            inline-editable (plan + target_words). -->
       <div class="tab-pane u-hidden" id="plan-chapter-pane">
+        <div class="u-flex-raw u-gap-6 u-ai-center u-mb-3 u-p-2 u-bg-alt u-r-md u-small">
+          <span class="u-bold">Autosave</span>
+          <span id="autosave-plan-sections"><span class="u-muted">○ Idle</span></span>
+          <button class="btn-secondary u-pill-xs u-ml-auto" onclick="savePlanChapterSections()"
+                  title="Flush any pending autosave and persist this chapter's section plans + per-section target words.">Save now</button>
+        </div>
         <p class="u-note-lg">
           Per-chapter section plans: pick a chapter, then edit each
-          section&rsquo;s plan and target word count. To rename / reorder /
-          add / delete sections themselves, use the chapter modal&rsquo;s
-          Sections tab.
+          section&rsquo;s plan and target word count. Edits autosave 1.2 s
+          after the last keystroke. To rename / reorder / add / delete
+          sections themselves, use the chapter modal&rsquo;s Sections tab.
         </p>
         <div class="u-flex-raw u-gap-2 u-ai-center u-mb-3 u-wrap">
           <label class="u-hint-sm">Chapter:</label>
@@ -1562,9 +1571,16 @@
 
       <!-- Basics tab -->
       <div id="bs-basics-pane">
+        <!-- Phase 54.6.x — autosave pill. Edits debounce-save 1.2 s
+             after the last keystroke through saveBookSettings('basics'). -->
+        <div class="u-flex-raw u-gap-6 u-ai-center u-mb-3 u-p-2 u-bg-alt u-r-md u-small">
+          <span class="u-bold">Autosave</span>
+          <span id="autosave-bs-basics"><span class="u-muted">○ Idle</span></span>
+        </div>
         <p class="u-note-mb-3">
-          Persistent per-book settings. Writes through
-          <code>PUT /api/book</code>; empty values leave the field untouched.
+          Persistent per-book settings. Edits autosave 1.2 s after you
+          stop typing. <code>PUT /api/book</code>; empty values leave the
+          field untouched.
         </p>
         <div class="field">
           <label>Title</label>
@@ -1665,11 +1681,16 @@
 
       <!-- Leitmotiv tab (the book plan) -->
       <div class="u-hidden" id="bs-leitmotiv-pane">
+        <div class="u-flex-raw u-gap-6 u-ai-center u-mb-3 u-p-2 u-bg-alt u-r-md u-small">
+          <span class="u-bold">Autosave</span>
+          <span id="autosave-bs-leitmotiv"><span class="u-muted">○ Idle</span></span>
+        </div>
         <p class="u-note">
           The book's thesis / scope document (200&ndash;500 words). Injected into
           every writer prompt so chapter sections stay aligned with the overall
-          argument. Use the <strong>&#128221; Plan</strong> quick-editor for
-          regeneration; this tab is for direct editing.
+          argument. Edits autosave 1.5 s after you stop typing. Use the
+          <strong>&#128221; Plan</strong> quick-editor for regeneration; this tab
+          is for direct editing.
         </p>
         <div class="field">
           <label>Plan / leitmotiv</label>

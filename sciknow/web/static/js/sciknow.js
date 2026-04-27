@@ -6932,6 +6932,9 @@ async function _loadWikiAnnotation(slug) {
       ts.textContent = 'last saved ' + d.updated_at.substring(0, 16).replace('T', ' ');
     }
   } catch (e) { /* silent — empty textarea is the fallback */ }
+  // Phase 54.6.x — wire debounced autosave on the "My take" textarea.
+  // Idempotent (dataset.autosaveWired guards against double-bind).
+  _wireWikiAnnotationAutosave();
 }
 
 async function saveWikiAnnotation() {
@@ -11879,6 +11882,71 @@ function _wireChaptersTabAutosave() {
   });
 }
 
+// Phase 54.6.x — wire autosave on the Book Settings modal. Two scopes:
+// basics (title/description/target_chapter_words/book_type) → save
+// runs `saveBookSettings('basics')` 1.2 s after the last keystroke.
+// leitmotiv (the bs-plan textarea) → `saveBookSettings('leitmotiv')`
+// 1.5 s after the last keystroke (longer debounce for the long-form
+// plan textarea so the user's typing pauses don't churn save calls).
+function _wireBookSettingsAutosave() {
+  const basics = ['bs-title', 'bs-description', 'bs-target-chapter-words', 'bs-book-type'];
+  basics.forEach(function(id) {
+    const el = document.getElementById(id);
+    if (!el || el.dataset.autosaveWired === '1') return;
+    el.dataset.autosaveWired = '1';
+    const handler = function() {
+      scheduleAutosave('bs-basics', 1200, async function() {
+        await saveBookSettings('basics');
+      });
+    };
+    el.addEventListener('input', handler);
+    el.addEventListener('change', handler);
+  });
+  const plan = document.getElementById('bs-plan');
+  if (plan && plan.dataset.autosaveWired !== '1') {
+    plan.dataset.autosaveWired = '1';
+    plan.addEventListener('input', function() {
+      scheduleAutosave('bs-leitmotiv', 1500, async function() {
+        await saveBookSettings('leitmotiv');
+      });
+    });
+  }
+}
+
+// Phase 54.6.x — autosave the wiki "My take" annotation.
+function _wireWikiAnnotationAutosave() {
+  const body = document.getElementById('wiki-annotation-body');
+  if (!body || body.dataset.autosaveWired === '1') return;
+  body.dataset.autosaveWired = '1';
+  body.addEventListener('input', function() {
+    scheduleAutosave('wiki-mytake', 1500, async function() {
+      await saveWikiAnnotation();
+    });
+  });
+}
+
+// Phase 54.6.x — autosave the Plan modal's Sections tab (per-chapter
+// section plans + per-section target_words). Existing flow already
+// captures edits into _editingChapterPlans / _editingChapterTargetWords;
+// debounce-call savePlanChapterSections() so those buffers flush
+// without the user clicking Save.
+function _wirePlanSectionsAutosave() {
+  const pane = document.getElementById('plan-chapter-sections');
+  if (!pane || pane.dataset.autosaveWired === '1') return;
+  pane.dataset.autosaveWired = '1';
+  // Delegated listener — the rows are re-rendered when chapter
+  // changes, so per-row binding would need re-wiring on every
+  // populatePlanChapterTab call. Capture all input/change events
+  // bubbling out of the pane.
+  const handler = function() {
+    scheduleAutosave('plan-sections', 1200, async function() {
+      await savePlanChapterSections();
+    });
+  };
+  pane.addEventListener('input', handler);
+  pane.addEventListener('change', handler);
+}
+
 // "Save all chapters now" button at the top of the Chapters tab.
 async function savePlanAllChapters() {
   flushAutosave('plan-chapters');
@@ -12336,6 +12404,9 @@ function populatePlanChapterTab(ch) {
       });
     }).catch(e => console.debug('plan-modal readout cache warm failed:', e));
   }
+  // Phase 54.6.x — wire debounced autosave on every section editor
+  // input. Idempotent (delegated listener; pane has dataset guard).
+  _wirePlanSectionsAutosave();
 }
 
 // Track plan edits for the chapter tab so save can collect them.
@@ -14495,6 +14566,9 @@ async function openBookSettings() {
   await swLoadBookTypes();
   await populateBookSettingsTypeDropdown();
   await loadBookSettings();
+  // Phase 54.6.x — wire debounced autosave on the Book Settings
+  // modal's Basics + Leitmotiv inputs.
+  _wireBookSettingsAutosave();
 }
 
 // Phase 54.6.148 — wire the Basics-tab book-type dropdown. Same
