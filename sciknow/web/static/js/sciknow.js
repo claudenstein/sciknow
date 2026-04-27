@@ -52,6 +52,24 @@ const ACTIONS = {
     e.preventDefault(); e.stopPropagation();
     deleteOrphanDraft(el.dataset.draftId);
   },
+  // Phase 54.6.x — sidebar section delete moved off inline onclick so
+  // slugs that contain apostrophes ("the_sun's_magnetic_shield") or
+  // colons ("beyond_sunspots:_the_solar_dynamo") stop breaking the
+  // attribute string. Both autowrite-generated sections and any
+  // manually-typed title with punctuation are affected.
+  'delete-section': (el, e) => {
+    e.preventDefault(); e.stopPropagation();
+    deleteSection(el.dataset.chapterId, el.dataset.secType);
+  },
+  // Phase 54.6.x — corkboard cell click. Same apostrophe-in-slug bug
+  // as the sidebar — switched to data-action dispatch.
+  'cork-open-card': (el) => {
+    if (el.dataset.draftId) {
+      loadSection(el.dataset.draftId);
+    } else {
+      writeForCell(el.dataset.chapterId, el.dataset.secType);
+    }
+  },
   'resolve-comment': (el) => resolveComment(el.dataset.commentId),
 
   // Cluster 2 — dashboard heatmap + gaps. The chapter-modal / load-
@@ -3316,16 +3334,26 @@ function rebuildSidebar(chapters, activeId) {
         // slug from sections_meta; if a draft exists, it becomes an
         // orphan in the sidebar (recoverable via the existing + adopt
         // button — fully reversible).
+        // Phase 54.6.x \u2014 slugs can carry apostrophes
+        // (`the_sun's_magnetic_shield`) and other punctuation. The
+        // previous inline onclick interpolated the raw slug into a
+        // single-quoted JS string inside a double-quoted HTML
+        // attribute, so an apostrophe closed the JS literal early
+        // and corrupted the surrounding markup, breaking neighbour
+        // section links. Switched to data-action dispatch (browsers
+        // escape data-* values automatically).
+        const slugAttr = escapeHtml(tmpl.slug);
         const delBtn = '<button class="sec-delete-btn" ' +
-          'onclick="event.preventDefault();event.stopPropagation();' +
-          'deleteSection(\'' + ch.id + '\',\'' + tmpl.slug + '\')" ' +
+          'data-action="delete-section" ' +
+          'data-chapter-id="' + ch.id + '" ' +
+          'data-sec-type="' + slugAttr + '" ' +
           'title="Remove this section from the chapter (draft becomes an orphan)">\u2717</button>';
         if (draft) {
           const active = draft.id === activeId ? 'active' : '';
           // Phase 26 — draggable for reordering
           html += '<a class="sec-link ' + active + '" href="/section/' + draft.id +
             '" draggable="true" data-draft-id="' + draft.id + '" ' +
-            'data-section-slug="' + tmpl.slug + '" title="' + planAttr + '" ' +
+            'data-section-slug="' + slugAttr + '" title="' + planAttr + '" ' +
             'onclick="return navTo(this)">' +
             '<span class="sec-status-dot drafted"></span>' +
             safeTmplTitle +
@@ -3335,10 +3363,10 @@ function rebuildSidebar(chapters, activeId) {
           // Phase 29 — preview-on-click instead of immediate doWrite()
           // Phase 42 — data-action dispatch (preview-empty-section).
           html += '<div class="sec-link sec-empty" draggable="true" ' +
-            'data-section-slug="' + tmpl.slug + '" ' +
+            'data-section-slug="' + slugAttr + '" ' +
             'title="' + planAttr + '" ' +
             'data-action="preview-empty-section" ' +
-            'data-chapter-id="' + ch.id + '" data-sec-type="' + tmpl.slug + '">' +
+            'data-chapter-id="' + ch.id + '" data-sec-type="' + slugAttr + '">' +
             '<span class="sec-status-dot empty"></span>' +
             safeTmplTitle +
             ' <span class="meta">empty \u00b7 \u270e</span>' +
@@ -3354,11 +3382,9 @@ function rebuildSidebar(chapters, activeId) {
       const display = escapeHtml(draft.title || (slug.charAt(0).toUpperCase() + slug.slice(1)));
       // Phase 22 — inline X button to delete the orphan
       // Phase 25 — also "+" button to adopt the slug into sections
-      // Inline onclick mirrors sec-delete-btn so click stops propagating
-      // BEFORE the wrapping anchor's onclick="return navTo(this)"
-      // fires — otherwise loadSection runs first, currentDraftId flips
-      // to the orphan, and the subsequent delete falls through to
-      // showDashboard() so the user feels like "nothing happened".
+      // Phase 54.6.x — same apostrophe-in-slug fix as the template
+      // path above: switched to data-action dispatch.
+      const orphanSlugAttr = escapeHtml(slug);
       html += '<a class="sec-link sec-orphan" href="/section/' + draft.id +
         '" data-draft-id="' + draft.id + '" onclick="return navTo(this)" ' +
         'title="Orphan draft. Click to inspect, + to adopt into sections, X to delete.">' +
@@ -3366,12 +3392,13 @@ function rebuildSidebar(chapters, activeId) {
         display +
         ' <span class="meta">orphan \u00b7 v' + draft.version + ' \u00b7 ' + draft.words + 'w</span>' +
         '<button class="sec-orphan-adopt" ' +
-        'onclick="event.preventDefault();event.stopPropagation();' +
-        'adoptOrphanSection(\'' + ch.id + '\',\'' + slug + '\')" ' +
+        'data-action="adopt-orphan-section" ' +
+        'data-chapter-id="' + ch.id + '" ' +
+        'data-sec-type="' + orphanSlugAttr + '" ' +
         'title="Add this section_type to the chapter sections list">+</button>' +
         '<button class="sec-orphan-delete" ' +
-        'onclick="event.preventDefault();event.stopPropagation();' +
-        'deleteOrphanDraft(\'' + draft.id + '\')" ' +
+        'data-action="delete-orphan-draft" ' +
+        'data-draft-id="' + draft.id + '" ' +
         'title="Delete this orphan draft permanently">\u2717</button>' +
         '</a>';
     });
@@ -14092,10 +14119,13 @@ async function showCorkboard() {
 
   data.cards.forEach(c => {
     const statusCls = c.status || 'to_do';
-    const onclick = c.draft_id
-      ? 'loadSection(\'' + c.draft_id + '\')'
-      : 'writeForCell(\'' + c.chapter_id + '\',\'' + c.section_type + '\')';
-    html += '<div class="cork-card" onclick="' + onclick + '">';
+    // Phase 54.6.x — switched to data-action dispatch so section_type
+    // values with apostrophes / colons stop breaking the attribute.
+    const cardAttrs = c.draft_id
+      ? ('data-action="cork-open-card" data-draft-id="' + c.draft_id + '"')
+      : ('data-action="cork-open-card" data-chapter-id="' + c.chapter_id +
+         '" data-sec-type="' + escapeHtml(c.section_type || '') + '"');
+    html += '<div class="cork-card" ' + cardAttrs + '>';
     html += '<div class="cc-head"><span class="cc-ch">Ch.' + c.chapter_num + '</span>';
     html += '<span class="cc-status ' + statusCls + '">' + statusCls.replace('_', ' ') + '</span></div>';
     html += '<div class="cc-type">' + (c.section_title || (c.section_type.charAt(0).toUpperCase() + c.section_type.slice(1))) + '</div>';
