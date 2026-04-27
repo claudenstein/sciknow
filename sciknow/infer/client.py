@@ -63,6 +63,60 @@ def _client_for(role: str) -> httpx.Client:
         return c
 
 
+# Phase 54.6.x — auto-start a role's llama-server on first use.
+# Without this, any CLI invocation (book outline, autowrite via CLI,
+# wiki compile) that runs against a host where the substrate isn't
+# already up explodes with the very unhelpful
+# ``ConnectError: [Errno 111] Connection refused`` from httpx.
+# Idempotent: if the role is already healthy, this is a sub-millisecond
+# probe.
+_autostart_lock = threading.Lock()
+
+
+def _ensure_role_up(role: str) -> None:
+    """If the role's llama-server isn't responding, start it and wait
+    for /health. Best-effort: a startup failure is re-raised with a
+    clear hint pointing at the manual `sciknow infer up` command.
+    """
+    # Quick health probe without consuming the role's main client.
+    try:
+        c = _client_for(role)
+        r = c.get("/health", timeout=httpx.Timeout(connect=0.5, read=1.0,
+                                                    write=1.0, pool=1.0))
+        if 200 <= r.status_code < 500:
+            return  # role is up (200, or 503 means loading — still up)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Server isn't up — try to start it. Serialise so concurrent callers
+    # don't race two `up()` invocations on the same role.
+    with _autostart_lock:
+        # Re-check after acquiring lock (another thread may have started it).
+        try:
+            c = _client_for(role)
+            r = c.get("/health", timeout=httpx.Timeout(connect=0.5, read=1.0,
+                                                        write=1.0, pool=1.0))
+            if 200 <= r.status_code < 500:
+                return
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            from sciknow.infer import server as _infer_srv
+            logger.info(
+                "infer client: role=%s not reachable; auto-starting via "
+                "sciknow.infer.server.up(...)", role,
+            )
+            _infer_srv.up(role, wait=True)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                f"llama-server role={role!r} is not reachable and "
+                f"auto-start failed: {type(exc).__name__}: {exc}.\n"
+                f"  Try manually: `sciknow infer up --role {role}`\n"
+                f"  Then re-run this command."
+            ) from exc
+
+
 # ── chat / completion ────────────────────────────────────────────────────
 
 
@@ -92,6 +146,7 @@ def chat_stream(
     silently ignored where llama-server doesn't expose them.
     """
     chosen_model = model or settings.writer_model_name
+    _ensure_role_up("writer")
     client = _client_for("writer")
 
     body: dict[str, Any] = {
@@ -272,6 +327,7 @@ def embed(texts: list[str], model: str | None = None) -> list[list[float]]:
     if not texts:
         return []
     chosen_model = model or settings.embedder_model_name
+    _ensure_role_up("embedder")
     client = _client_for("embedder")
     body = {"model": chosen_model, "input": texts}
     r = client.post("/v1/embeddings", json=body)
@@ -299,6 +355,7 @@ def rerank(query: str, documents: list[str], model: str | None = None) -> list[f
     if not documents:
         return []
     chosen_model = model or settings.reranker_model_name
+    _ensure_role_up("reranker")
     client = _client_for("reranker")
     body = {"model": chosen_model, "query": query, "documents": documents}
     r = client.post("/v1/rerank", json=body)
@@ -392,6 +449,7 @@ def chat_with_image(
     from pathlib import Path as _Path
 
     chosen_model = model or settings.vlm_model_name
+    _ensure_role_up(role)
     client = _client_for(role)
 
     content_parts: list[dict] = [{"type": "text", "text": user}]
