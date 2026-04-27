@@ -18,6 +18,7 @@ Commands:
 from __future__ import annotations
 
 import json as _json
+import logging
 from pathlib import Path
 from typing import Annotated
 
@@ -26,6 +27,8 @@ from rich import box
 from rich.console import Console
 from rich.rule import Rule
 from rich.table import Table
+
+logger = logging.getLogger("sciknow.cli.book")
 
 app = typer.Typer(help="Manage book projects and chapter writing.")
 chapter_app = typer.Typer(help="Manage chapters within a book.")
@@ -4014,65 +4017,93 @@ def autowrite(
 
             return Panel(tbl, title=f"Ch.{ch_num} {sec.capitalize()}", border_style="blue")
 
-        with Live(_build_display(), console=console, refresh_per_second=4, transient=True) as live:
-            for event in gen:
-                t = event.get("type")
+        # Phase 55.V4 \u2014 section-level exception isolation. A transient
+        # writer-stream drop (RemoteProtocolError, broken pipe) used to
+        # propagate out of the inner generator and abort the WHOLE
+        # multi-section run. The chapter / book engine wrappers already
+        # have try/except per-section, but `book autowrite --full` (and
+        # any --section all run) iterate `targets` directly through
+        # `autowrite_section_stream`, bypassing those wrappers. Catch
+        # the exception here so the same per-section isolation applies
+        # at the CLI layer.
+        section_errored: str | None = None
+        try:
+            with Live(_build_display(), console=console, refresh_per_second=4, transient=True) as live:
+                for event in gen:
+                    t = event.get("type")
 
-                if t == "token":
-                    tok_count += 1
-                    text_preview += event["text"]
-                    live.update(_build_display())
+                    if t == "token":
+                        tok_count += 1
+                        text_preview += event["text"]
+                        live.update(_build_display())
 
-                elif t == "progress":
-                    current_stage = event.get("stage", current_stage)
-                    live.update(_build_display())
+                    elif t == "progress":
+                        current_stage = event.get("stage", current_stage)
+                        live.update(_build_display())
 
-                elif t == "scores":
-                    last_scores = event.get("scores", {})
-                    score_history.append(last_scores.get("overall", 0))
-                    current_iter = event.get("iteration", current_iter)
-                    live.update(_build_display())
+                    elif t == "scores":
+                        last_scores = event.get("scores", {})
+                        score_history.append(last_scores.get("overall", 0))
+                        current_iter = event.get("iteration", current_iter)
+                        live.update(_build_display())
 
-                elif t == "iteration_start":
-                    current_iter = event.get("iteration", 1)
-                    iter_max = event.get("max", max_iter)
-                    text_preview = ""
-                    tok_count = 0
-                    tok_t0 = _time.monotonic()
-                    live.update(_build_display())
+                    elif t == "iteration_start":
+                        current_iter = event.get("iteration", 1)
+                        iter_max = event.get("max", max_iter)
+                        text_preview = ""
+                        tok_count = 0
+                        tok_t0 = _time.monotonic()
+                        live.update(_build_display())
 
-                elif t == "revision_verdict":
-                    action = event["action"]
-                    icon = "\u2713" if action == "KEEP" else "\u2717"
-                    color = "green" if action == "KEEP" else "red"
-                    verdicts.append(
-                        f"[{color}]{icon} {action} "
-                        f"{event['old_score']:.2f}\u2192{event['new_score']:.2f}[/{color}]"
-                    )
-                    text_preview = ""
-                    tok_count = 0
-                    tok_t0 = _time.monotonic()
-                    live.update(_build_display())
+                    elif t == "revision_verdict":
+                        action = event["action"]
+                        icon = "\u2713" if action == "KEEP" else "\u2717"
+                        color = "green" if action == "KEEP" else "red"
+                        verdicts.append(
+                            f"[{color}]{icon} {action} "
+                            f"{event['old_score']:.2f}\u2192{event['new_score']:.2f}[/{color}]"
+                        )
+                        text_preview = ""
+                        tok_count = 0
+                        tok_t0 = _time.monotonic()
+                        live.update(_build_display())
 
-                elif t == "converged":
-                    verdicts.append(
-                        f"[bold green]\u2713 CONVERGED "
-                        f"(iter {event['iteration']}, score {event['final_score']:.2f})[/bold green]"
-                    )
-                    live.update(_build_display())
+                    elif t == "converged":
+                        verdicts.append(
+                            f"[bold green]\u2713 CONVERGED "
+                            f"(iter {event['iteration']}, score {event['final_score']:.2f})[/bold green]"
+                        )
+                        live.update(_build_display())
 
-                elif t == "verification":
-                    vdata = event.get("data", {})
-                    gs = vdata.get("groundedness_score", "?")
-                    color = "green" if isinstance(gs, (int, float)) and gs >= 0.8 else "yellow"
-                    grounding = f"[{color}]Groundedness: {gs}[/{color}]"
-                    live.update(_build_display())
+                    elif t == "verification":
+                        vdata = event.get("data", {})
+                        gs = vdata.get("groundedness_score", "?")
+                        color = "green" if isinstance(gs, (int, float)) and gs >= 0.8 else "yellow"
+                        grounding = f"[{color}]Groundedness: {gs}[/{color}]"
+                        live.update(_build_display())
 
-                elif t == "completed":
-                    result = event
+                    elif t == "completed":
+                        result = event
 
-                elif t == "error":
-                    console.print(f"[red]Error:[/red] {event.get('message', '')}")
+                    elif t == "error":
+                        console.print(f"[red]Error:[/red] {event.get('message', '')}")
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            section_errored = f"{type(exc).__name__}: {exc}"
+            logger.exception(
+                "autowrite section %r (Ch.%s) crashed: %s",
+                sec, ch_num, exc,
+            )
+            console.print(
+                f"  [red]\u2717[/red] {sec.capitalize()}: failed \u2014 "
+                f"{section_errored[:200]}"
+            )
+            console.print(
+                "  [dim]Continuing to next section. "
+                "Re-run with `--resume --only-below-target` to retry.[/dim]"
+            )
+            continue
 
         # Print final summary for this section
         if result:
