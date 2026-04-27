@@ -28,6 +28,22 @@ async def api_chapters():
     from sciknow.web import app as _app
     book, chapters, drafts, gaps, comments = _app._get_book_data()
 
+    # Phase 54.6.x — fetch the chapter-level length-target columns
+    # (target_words + flexible_length) in one extra query rather than
+    # widening _get_book_data's tuple shape across every consumer.
+    target_by_id: dict[str, dict] = {}
+    if chapters:
+        with get_session() as _s_targets:
+            rows = _s_targets.execute(text("""
+                SELECT id::text, target_words, flexible_length
+                FROM book_chapters WHERE book_id::text = :bid
+            """), {"bid": _app._book_id}).fetchall()
+            for r in rows:
+                target_by_id[r[0]] = {
+                    "target_words": r[1],
+                    "flexible_length": bool(r[2]),
+                }
+
     chapter_drafts = {}
     for d in drafts:
         key = d[9] or "__none__"
@@ -50,12 +66,15 @@ async def api_chapters():
                 "id": d[0], "type": d[2] or "text",
                 "version": d[6] or 1, "words": d[4] or 0,
             })
+        target_meta = target_by_id.get(ch_id, {})
         result.append({
             "id": ch_id, "num": ch_num, "title": ch_title,
             "description": ch_desc, "topic_query": tq,
             "sections": sections,
             "sections_template": template,
             "sections_meta": template_dicts,
+            "target_words": target_meta.get("target_words"),
+            "flexible_length": bool(target_meta.get("flexible_length", False)),
         })
 
     if result:
@@ -122,8 +141,17 @@ async def update_chapter(
     title: str = Form(None),
     description: str = Form(None),
     topic_query: str = Form(None),
+    target_words: int = Form(None),
+    flexible_length: bool = Form(None),
 ):
-    """Update a chapter's title, description, or topic_query."""
+    """Update a chapter's title, description, topic_query, target_words,
+    or flexible_length flag. None on any field leaves it untouched.
+
+    Phase 54.6.x — ``flexible_length`` toggles the per-chapter opt-in
+    that lets autowrite extend up to 2× the section's target_words
+    when retrieval is rich. Resolved in the autowrite engine
+    (``autowrite.py``) at the post-retrieval stage.
+    """
     updates = []
     params: dict = {"cid": chapter_id}
     if title is not None:
@@ -135,6 +163,13 @@ async def update_chapter(
     if topic_query is not None:
         updates.append("topic_query = :tq")
         params["tq"] = topic_query
+    if target_words is not None:
+        updates.append("target_words = :tw")
+        # 0 / negative → clear the per-chapter override (NULL).
+        params["tw"] = int(target_words) if int(target_words) > 0 else None
+    if flexible_length is not None:
+        updates.append("flexible_length = :flex")
+        params["flex"] = bool(flexible_length)
 
     if not updates:
         return JSONResponse({"ok": True})

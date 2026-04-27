@@ -11,6 +11,7 @@
   --sidebar-bg: #f5f4ef;      /* warm chrome */
   --toolbar-bg: #f0ede5;      /* slightly deeper chrome */
   --code-bg: #efece3;
+  --bg-alt: #f5f4ef;          /* alt surface — toolbar bands, chip strips */
   --modal-overlay: rgba(28, 25, 23, 0.42);
   /* Text — stone, not slate */
   --fg: #1c1917;              /* stone-900 */
@@ -59,8 +60,15 @@
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Monaco, Consolas, monospace;
   /* Reader column — paper-like, not dashboard-wide */
   --reader-max: 720px;
+  /* Tell the browser to render native form controls (checkboxes,
+     radios, native scrollbars, default text inputs) in the matching
+     theme. Without this, dark-mode pages show light-mode native
+     controls — black checkbox glyphs on a dark page were the
+     reported "text along checkboxes" symptom. */
+  color-scheme: light;
 }
 [data-theme="dark"] {
+  color-scheme: dark;
   /* Phase 54.6.175 — pitch-black dark. Reader canvas is #000000
      (OLED-friendly, maximum contrast with the warm-white fg);
      sidebar + topbar lift by a single shade so they stay
@@ -71,6 +79,7 @@
   --sidebar-bg: #070707;      /* sidebar + topbar */
   --toolbar-bg: #0a0a0a;
   --code-bg: #111111;
+  --bg-alt: #121212;          /* alt surface in dark — barely lifted band */
   --modal-overlay: rgba(0, 0, 0, 0.78);
   --fg: #f5f4ef;              /* warm white */
   --fg-muted: #a8a29e;
@@ -717,8 +726,14 @@ body.sidebar-rail .sidebar-rail-btn { color: var(--accent); border-color: var(--
 .u-m-0       { margin: 0; }
 .u-bcollapse { border-collapse: collapse; }
 .u-flex-3    { flex: 3; }
-.u-bg-white  { background: #fff; }
-.u-fg-ink    { color: #111; }
+/* u-bg-white / u-fg-ink — these used to hardcode #fff / #111, which
+   silently broke on dark mode (white card on pitch-black backdrop with
+   black text on white — fine in light, white block + invisible text
+   on dark). CSS-class utilities can follow the theme via vars; pure
+   inline style="background:#fff" is unfixable from CSS (specificity
+   can't beat inline) so we still patch those at the JS render site. */
+.u-bg-white  { background: var(--bg-elevated); }
+.u-fg-ink    { color: var(--fg); }
 .u-vat       { vertical-align: top; }
 .u-w-70      { width: 70px; }
 .u-w-60      { width: 60px; }
@@ -2561,3 +2576,73 @@ body.task-bar-open { padding-top: 40px; }
   border-radius: 3px; color: var(--fg-muted);
   letter-spacing: 0.02em;
 }
+
+/* ── Phase 54.6.327 — dark-mode contrast pass ──────────────────────────────
+   Defensive overrides for elements that fall through the normal token
+   pipeline. The two big wins are at the top of the file: `color-scheme`
+   makes native form controls follow the theme, and `.u-fg-ink` /
+   `.u-bg-white` use vars instead of hardcoded #111/#fff. The block
+   below catches the remaining victims that surfaced during the
+   2026-04-26 contrast audit:
+
+   * Native form controls (text inputs, textareas, selects) outside the
+     `.field` container — relied on browser defaults and rendered with
+     light-mode chrome on dark mode.
+   * Inline `<code>` and `<pre>` outside `.reader-canvas` — easy to
+     miss because the reader styles them, but stray utility/help-text
+     code spans inherit only `color` + the global :root code-bg.
+   * `<details>` / `<summary>` — used in a few help/expand surfaces; no
+     theme-aware default. */
+
+input[type="text"], input[type="search"], input[type="number"],
+input[type="email"], input[type="url"], input[type="tel"],
+input[type="password"], textarea, select {
+  background: var(--bg-elevated);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+input[type="text"]:focus, input[type="search"]:focus,
+input[type="number"]:focus, input[type="email"]:focus,
+input[type="url"]:focus, textarea:focus, select:focus {
+  border-color: var(--accent); outline: none;
+}
+/* Native <option> elements in <select> dropdowns. Some browsers
+   (Firefox + Chromium-on-Linux without an OS-wide dark-mode pref)
+   render the popup with system colours that ignore the parent
+   background. Force the dark theme through. */
+select option {
+  background: var(--bg-elevated);
+  color: var(--fg);
+}
+input::placeholder, textarea::placeholder {
+  color: var(--fg-faint);
+  opacity: 0.85;
+}
+
+/* Native checkboxes + radios honour `color-scheme` declared in :root
+   above; the `accent-color` here just tints the checked fill so it
+   matches the page accent (teal) instead of the OS default blue. */
+input[type="checkbox"], input[type="radio"] {
+  accent-color: var(--accent);
+}
+
+/* Code spans / pre blocks outside the reader canvas. Reader prose
+   already has its own paper-style code rendering, but help text /
+   modals frequently use bare <code>foo</code>. */
+code:not(.reader-canvas code) {
+  background: var(--code-bg); color: var(--fg);
+  padding: 1px 4px; border-radius: 3px;
+  font-family: var(--font-mono); font-size: 0.92em;
+}
+pre:not(.reader-canvas pre) {
+  background: var(--code-bg); color: var(--fg);
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+}
+
+/* <details> default chevron + summary text rely on browser defaults
+   that don't follow color-scheme on every browser version. Force. */
+details summary {
+  color: var(--fg); cursor: pointer;
+}
+details summary:hover { color: var(--accent); }

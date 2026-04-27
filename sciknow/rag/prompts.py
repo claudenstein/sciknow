@@ -445,6 +445,12 @@ divulgation book (not a research paper).
 
 Rules:
 - Propose 6–12 chapters that logically build the book's narrative
+- The FIRST chapter (number 1) MUST be an Introduction that frames the book's \
+  thesis, sets up the questions the rest of the book will answer, and orients \
+  the reader. Use "Introduction" or a thesis-flavoured title (e.g. \
+  "Introduction: Rethinking the Climate Story"). Its sections should establish \
+  scope, motivation, key terms, and a roadmap of what's to come — NOT \
+  substantive evidence (that lives in later chapters).
 - Each chapter should have a clear title and a 1–2 sentence description
 - Order chapters so the argument flows from foundational concepts to conclusions
 - For EACH chapter, propose BETWEEN 3 AND 8 sections, choosing a count that \
@@ -456,12 +462,22 @@ Rules:
   Good section names: "Historical Context", "Key Evidence", "The Debate", \
   "Mechanisms", "Observations", "Implications", "Current Understanding", \
   "Unresolved Questions", "Future Outlook", etc.
+- If a book plan / leitmotiv is provided, every chapter title and description \
+  must serve that thesis directly. The plan IS the editorial brief — do not \
+  invent chapters that wander from it.
+- If a "Topic-cluster catalogue" block is provided below, USE IT as the \
+  primary signal for chapter design. Each cluster reflects what the corpus \
+  actually contains — every cluster with a meaningful paper count should \
+  map to at least one chapter or be subsumed into a related one. \
+  Per-cluster representative paper abstracts give the actual evidence shape; \
+  read them to ground each chapter's "description" and "topic_query" in \
+  what the corpus says, not generic domain knowledge.
 - Respond ONLY with valid JSON in the exact format shown"""
 
 OUTLINE_USER = """\
 Book title: {book_title}
-
-Available papers in the collection ({n_papers} total):
+{plan_block}{cluster_block}
+Available papers in the collection ({n_papers} total — most recent first):
 {paper_list}
 
 Propose a chapter structure for this book. Return JSON:
@@ -486,15 +502,85 @@ chapters based on scope and evidence depth — do not pick the same count for ev
 chapter. Think of how a popular science book structures its chapters."""
 
 
-def outline(book_title: str, papers: list[dict]) -> tuple[str, str]:
-    """papers: list of {title, year}"""
+def outline(
+    book_title: str,
+    papers: list[dict],
+    *,
+    plan: str | None = None,
+    clusters: list[dict] | None = None,
+) -> tuple[str, str]:
+    """Build the OUTLINE prompt pair.
+
+    Args:
+        book_title: the book's display title.
+        papers: list of {title, year}.
+        plan: optional book plan / leitmotiv (the 200–500-word thesis
+            from ``books.plan``). When provided, the prompt is
+            grounded in this thesis so the LLM proposes chapters that
+            serve the user's argument, not just the corpus contents.
+        clusters: optional topic-cluster catalogue derived from
+            ``paper_metadata.topic_cluster`` + a few representative
+            papers' abstracts per cluster. Shape:
+            ``[{name, count, papers: [{title, year, abstract}]}, ...]``.
+            When provided, the prompt grows a "Topic-cluster
+            catalogue" block so the LLM has a real picture of what
+            the corpus actually contains, not just paper titles.
+            ``abstract`` is expected to be already truncated by the
+            caller.
+
+    Phase 54.6.x — passing ``clusters`` is the "use the full corpus"
+    path: 814 paper titles + 19 cluster summaries × 3 representatives
+    × 200-char abstracts ≈ 7-8 K tokens, leaving headroom in a 16 K
+    context for the leitmotiv + system prompt + JSON output. Without
+    abstracts the prompt was effectively blind to what each paper
+    actually said.
+    """
     lines = []
     for i, p in enumerate(papers[:150], 1):  # cap at 150 to fit context
         yr = f" ({p['year']})" if p.get("year") else ""
         lines.append(f"{i}. {p['title']}{yr}")
     paper_list = "\n".join(lines)
+    plan_text = (plan or "").strip()
+    if plan_text:
+        plan_block = (
+            "\nBook plan / leitmotiv (the editorial brief — every "
+            "chapter must serve this thesis):\n"
+            f"{plan_text}\n"
+        )
+    else:
+        plan_block = ""
+
+    # Phase 54.6.x — topic-cluster catalogue. Per cluster: name + count
+    # + up to 3 representative paper titles with truncated abstracts.
+    # The caller is responsible for picking representatives + truncating
+    # abstracts so this builder stays purely format-the-prompt.
+    cluster_block = ""
+    if clusters:
+        cluster_lines = [
+            "",
+            "Topic-cluster catalogue (from BERTopic — what the corpus "
+            "ACTUALLY contains, with representative abstracts):",
+            "",
+        ]
+        for c in clusters:
+            cname = (c.get("name") or "").strip() or "(unnamed)"
+            n = c.get("count") or 0
+            cluster_lines.append(f"### {cname}  ({n} papers)")
+            reps = c.get("papers") or []
+            for p in reps:
+                title = (p.get("title") or "").strip() or "(no title)"
+                yr = f" ({p['year']})" if p.get("year") else ""
+                cluster_lines.append(f"  • {title}{yr}")
+                ab = (p.get("abstract") or "").strip()
+                if ab:
+                    cluster_lines.append(f"    {ab}")
+            cluster_lines.append("")
+        cluster_block = "\n".join(cluster_lines) + "\n"
+
     return OUTLINE_SYSTEM, OUTLINE_USER.format(
         book_title=book_title,
+        plan_block=plan_block,
+        cluster_block=cluster_block,
         n_papers=len(papers),
         paper_list=paper_list,
     )
@@ -813,11 +899,11 @@ Do NOT include:
 
 SECTION_PLAN_USER = """\
 Book: {book_title} ({book_type})
-Chapter {chapter_number}: {chapter_title}
+{book_plan_block}{prior_chapter_block}Chapter {chapter_number}: {chapter_title}
 {chapter_description_line}
 Section: {section_title}
 {section_slug_line}
-
+{evidence_block}
 Produce the concept list for this section."""
 
 
@@ -843,9 +929,25 @@ def section_plan(
     section_title: str,
     section_slug: str,
     concepts_range: tuple[int, int] = (3, 4),
+    book_plan: str | None = None,
+    evidence: list[str] | None = None,
+    prior_chapters: list[dict] | None = None,
 ) -> tuple[str, str]:
-    """Phase 54.6.154 — build (system, user) prompts for section-plan
-    generation. See SECTION_PLAN_SYSTEM for the concept-list contract.
+    """Phase 54.6.154 / 54.6.x — build (system, user) prompts for
+    section-plan generation. See SECTION_PLAN_SYSTEM for the concept-list
+    contract.
+
+    New optional inputs (Phase 54.6.x — "deep" outline path):
+      book_plan: the leitmotiv from books.plan. When set, the prompt
+        carries "Book plan / leitmotiv (the editorial brief)" so the
+        section's bullets serve the global thesis.
+      evidence: a list of retrieved chunk strings (corpus excerpts).
+        When set, the prompt prepends a "Corpus evidence" block so the
+        LLM grounds bullets in what the corpus actually contains.
+        Caller is responsible for limiting + truncating chunks.
+      prior_chapters: optional list of {number, title, description}
+        dicts for chapters that come BEFORE this one. Used to keep
+        bullets from drifting into earlier chapters' territory.
     """
     lo, hi = concepts_range
     voice = _SECTION_PLAN_VOICE_HINTS.get(
@@ -861,6 +963,53 @@ def section_plan(
     slug_line = (
         f"(section slug: {section_slug})" if section_slug else ""
     )
+    plan_text = (book_plan or "").strip()
+    if plan_text:
+        book_plan_block = (
+            "Book plan / leitmotiv (the editorial brief — every concept "
+            "in this section must serve this thesis):\n"
+            f"{plan_text}\n\n"
+        )
+    else:
+        book_plan_block = ""
+
+    if prior_chapters:
+        lines = [
+            f"  Ch.{int(p.get('number') or 0)}: "
+            f"{(p.get('title') or '').strip()}"
+            + (f" — {(p.get('description') or '').strip()}"
+               if (p.get('description') or '').strip() else "")
+            for p in prior_chapters
+        ]
+        prior_chapter_block = (
+            "Earlier chapters in this book (do NOT duplicate their "
+            "concepts — each section here must cover NEW ground):\n"
+            + "\n".join(lines) + "\n\n"
+        )
+    else:
+        prior_chapter_block = ""
+
+    if evidence:
+        # Caller is expected to truncate; we cap to 8 entries here as a
+        # last-ditch guard so a runaway caller doesn't blow the context.
+        ev_lines = []
+        for i, ch in enumerate(evidence[:8], 1):
+            txt = (ch or "").strip().replace("\n", " ")
+            if not txt:
+                continue
+            ev_lines.append(f"[E{i}] {txt}")
+        if ev_lines:
+            evidence_block = (
+                "\nCorpus evidence retrieved for this section "
+                "(ground every bullet in what these passages SHOW, "
+                "not in generic domain knowledge):\n"
+                + "\n".join(ev_lines) + "\n"
+            )
+        else:
+            evidence_block = ""
+    else:
+        evidence_block = ""
+
     usr_p = SECTION_PLAN_USER.format(
         book_title=book_title,
         book_type=book_type,
@@ -869,6 +1018,9 @@ def section_plan(
         chapter_description_line=ch_desc_line,
         section_title=section_title,
         section_slug_line=slug_line,
+        book_plan_block=book_plan_block,
+        prior_chapter_block=prior_chapter_block,
+        evidence_block=evidence_block,
     )
     return sys_p, usr_p
 
@@ -1006,6 +1158,7 @@ def write_section_v2(
     prior_summaries: list[dict] | None = None,
     paragraph_plan: list[dict] | None = None,
     target_words: int | None = None,
+    target_words_max: int | None = None,
     section_plan: str | None = None,
     lessons: list[str] | None = None,
     style_fingerprint_block: str | None = None,
@@ -1187,6 +1340,24 @@ def write_section_v2(
             f"provided passages — do not pad with filler phrases like \"it is "
             f"worth noting\" or \"this raises the question\".\n"
         )
+        # Phase 54.6.x — flexible-length opt-in. When the chapter has
+        # `flexible_length` set AND the retrieval pool is rich, the
+        # caller passes a target_words_max up to 2× the base target.
+        # The writer is told it MAY extend to that ceiling but only
+        # if there's distinct evidence to cite — never to pad.
+        if (
+            target_words_max
+            and target_words_max > target_words
+        ):
+            length_block += (
+                f"- The chapter is marked as flexible-length: you MAY extend "
+                f"up to {target_words_max} words IF the retrieval clearly "
+                f"supports deeper coverage (more distinct claims, additional "
+                f"mechanism / evidence / counter-argument). Do not extend "
+                f"past the base {target_words}-word target unless every "
+                f"extra paragraph adds a citable claim that would otherwise "
+                f"be dropped.\n"
+            )
 
     # Phase 54.6.142 — rhetorically-gated figure-citation instruction.
     # Only activated when a visuals prompt block is present (i.e. the

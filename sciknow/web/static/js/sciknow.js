@@ -52,6 +52,24 @@ const ACTIONS = {
     e.preventDefault(); e.stopPropagation();
     deleteOrphanDraft(el.dataset.draftId);
   },
+  // Phase 54.6.x — sidebar section delete moved off inline onclick so
+  // slugs that contain apostrophes ("the_sun's_magnetic_shield") or
+  // colons ("beyond_sunspots:_the_solar_dynamo") stop breaking the
+  // attribute string. Both autowrite-generated sections and any
+  // manually-typed title with punctuation are affected.
+  'delete-section': (el, e) => {
+    e.preventDefault(); e.stopPropagation();
+    deleteSection(el.dataset.chapterId, el.dataset.secType);
+  },
+  // Phase 54.6.x — corkboard cell click. Same apostrophe-in-slug bug
+  // as the sidebar — switched to data-action dispatch.
+  'cork-open-card': (el) => {
+    if (el.dataset.draftId) {
+      loadSection(el.dataset.draftId);
+    } else {
+      writeForCell(el.dataset.chapterId, el.dataset.secType);
+    }
+  },
   'resolve-comment': (el) => resolveComment(el.dataset.commentId),
 
   // Cluster 2 — dashboard heatmap + gaps. The chapter-modal / load-
@@ -265,7 +283,22 @@ async function loadSection(draftId) {
     document.getElementById('draft-title').textContent = data.display_title || data.title;
     document.getElementById('draft-version').textContent = data.version;
     document.getElementById('draft-words').textContent = data.word_count;
-    document.getElementById('read-view').innerHTML = data.content_html;
+    // When the draft has no body (autowrite stub, freshly-deleted content,
+    // or a newly-created version that hasn't been written yet), show a
+    // visible placeholder so the user doesn't read the empty panel as
+    // "the text isn't shown" — the previous innerHTML='' silently blanked
+    // the panel and was the top soak-window UX complaint.
+    const _hasContent = (data.content_html || '').trim().length > 0;
+    if (_hasContent) {
+      document.getElementById('read-view').innerHTML = data.content_html;
+    } else {
+      const _ver = data.version || 1;
+      document.getElementById('read-view').innerHTML =
+        '<div class="empty-state"><h3>This draft is empty</h3>' +
+        '<p class="u-muted">Version ' + _ver + ' has no body yet — ' +
+        'click <strong>Write</strong> in the toolbar to draft a single shot, ' +
+        'or <strong>Autowrite</strong> to run the convergence loop.</p></div>';
+    }
     // Phase 54.6.87 — render math in the loaded draft content so $...$
     // doesn't show up as literal dollar signs.
     _renderMathInEl(document.getElementById('read-view'));
@@ -1459,6 +1492,77 @@ async function loadGapRadar() {
 
 let _kgPredicatesLoaded = false;
 let _kgTriples = [];
+let _kgExtractSource = null;
+
+// Phase 54.6.x — KG extraction wrapper surfaced directly in the KG
+// modal (parallel to the existing Wiki → Lint button). Streams the
+// same /api/wiki/extract-kg job; reloads the graph when done.
+async function kgExtractFromModal() {
+  const btn = document.getElementById('kg-extract-btn');
+  const status = document.getElementById('kg-extract-status');
+  const log = document.getElementById('kg-extract-log');
+  const force = document.getElementById('kg-extract-force').checked;
+  if (!confirm(
+    'Extract knowledge_graph triples from the corpus?\n\n'
+    + 'Runs one LLM call per paper that has no triples yet (or every '
+    + 'paper if force is checked). Long-running for big corpora — '
+    + 'cancel by closing the modal or stopping the job from the task '
+    + 'bar.'
+  )) return;
+  if (btn) btn.disabled = true;
+  if (log) { log.style.display = 'block'; log.textContent = ''; }
+  if (status) status.textContent = 'Starting…';
+  const fd = new FormData();
+  fd.append('force', force);
+  let res;
+  try {
+    res = await fetch('/api/wiki/extract-kg', {method: 'POST', body: fd});
+  } catch (exc) {
+    if (status) status.textContent = 'Request failed: ' + exc.message;
+    if (btn) btn.disabled = false;
+    return;
+  }
+  if (!res.ok) {
+    if (status) status.textContent = 'Start failed: HTTP ' + res.status;
+    if (btn) btn.disabled = false;
+    return;
+  }
+  const data = await res.json();
+  if (_kgExtractSource) _kgExtractSource.close();
+  const source = new EventSource('/api/stream/' + data.job_id);
+  _kgExtractSource = source;
+  source.onmessage = function(e) {
+    let evt;
+    try { evt = JSON.parse(e.data); } catch (_) { return; }
+    if (evt.type === 'log' && log) {
+      log.textContent += evt.text + '\n';
+      log.scrollTop = log.scrollHeight;
+    } else if (evt.type === 'progress') {
+      if (status) status.textContent = evt.detail || evt.stage || '';
+      if (evt.detail && evt.detail.startsWith('$ ') && log) {
+        log.textContent += evt.detail + '\n';
+      }
+    } else if (evt.type === 'completed') {
+      source.close(); _kgExtractSource = null;
+      if (status) status.innerHTML = '<span class="u-success">✓ Done — reloading graph…</span>';
+      if (btn) btn.disabled = false;
+      // Refresh the KG modal contents.
+      _kgPredicatesLoaded = false;
+      const sel = document.getElementById('kg-predicate');
+      if (sel) {
+        while (sel.options.length > 1) sel.remove(1);
+      }
+      try { loadKg(0); } catch (_) {}
+    } else if (evt.type === 'error') {
+      source.close(); _kgExtractSource = null;
+      if (status) status.innerHTML = '<span class="u-danger">✗ ' + (evt.message || 'error') + '</span>';
+      if (btn) btn.disabled = false;
+    } else if (evt.type === 'done') {
+      source.close(); _kgExtractSource = null;
+      if (btn) btn.disabled = false;
+    }
+  };
+}
 
 async function loadKg(offset) {
   const subject = document.getElementById('kg-subject').value.trim();
@@ -3141,6 +3245,16 @@ async function refreshAfterJob(newDraftId) {
 
 function rebuildSidebar(chapters, activeId) {
   const container = document.getElementById('sidebar-sections');
+  // Phase 54.6.x — keep the chaptersData global in sync with what
+  // the sidebar is actually rendering. Without this, a long-running
+  // autowrite session (page loaded yesterday, autowrite ran overnight,
+  // user clicks a section in the morning) leaves the global pinned
+  // to the page-load snapshot — sections that finished overnight
+  // still look "empty" to selectChapter / previewEmptySection /
+  // showChapterEmptyState, even though the sidebar visibly shows
+  // them as drafted. Result: clicking such a section opened the
+  // chapter empty-state instead of loading the new draft.
+  if (Array.isArray(chapters)) chaptersData = chapters;
   let html = '';
   chapters.forEach(ch => {
     const safeTitle = escapeHtml(ch.title || '');
@@ -3230,16 +3344,26 @@ function rebuildSidebar(chapters, activeId) {
         // slug from sections_meta; if a draft exists, it becomes an
         // orphan in the sidebar (recoverable via the existing + adopt
         // button — fully reversible).
+        // Phase 54.6.x \u2014 slugs can carry apostrophes
+        // (`the_sun's_magnetic_shield`) and other punctuation. The
+        // previous inline onclick interpolated the raw slug into a
+        // single-quoted JS string inside a double-quoted HTML
+        // attribute, so an apostrophe closed the JS literal early
+        // and corrupted the surrounding markup, breaking neighbour
+        // section links. Switched to data-action dispatch (browsers
+        // escape data-* values automatically).
+        const slugAttr = escapeHtml(tmpl.slug);
         const delBtn = '<button class="sec-delete-btn" ' +
-          'onclick="event.preventDefault();event.stopPropagation();' +
-          'deleteSection(\'' + ch.id + '\',\'' + tmpl.slug + '\')" ' +
+          'data-action="delete-section" ' +
+          'data-chapter-id="' + ch.id + '" ' +
+          'data-sec-type="' + slugAttr + '" ' +
           'title="Remove this section from the chapter (draft becomes an orphan)">\u2717</button>';
         if (draft) {
           const active = draft.id === activeId ? 'active' : '';
           // Phase 26 — draggable for reordering
           html += '<a class="sec-link ' + active + '" href="/section/' + draft.id +
             '" draggable="true" data-draft-id="' + draft.id + '" ' +
-            'data-section-slug="' + tmpl.slug + '" title="' + planAttr + '" ' +
+            'data-section-slug="' + slugAttr + '" title="' + planAttr + '" ' +
             'onclick="return navTo(this)">' +
             '<span class="sec-status-dot drafted"></span>' +
             safeTmplTitle +
@@ -3249,10 +3373,10 @@ function rebuildSidebar(chapters, activeId) {
           // Phase 29 — preview-on-click instead of immediate doWrite()
           // Phase 42 — data-action dispatch (preview-empty-section).
           html += '<div class="sec-link sec-empty" draggable="true" ' +
-            'data-section-slug="' + tmpl.slug + '" ' +
+            'data-section-slug="' + slugAttr + '" ' +
             'title="' + planAttr + '" ' +
             'data-action="preview-empty-section" ' +
-            'data-chapter-id="' + ch.id + '" data-sec-type="' + tmpl.slug + '">' +
+            'data-chapter-id="' + ch.id + '" data-sec-type="' + slugAttr + '">' +
             '<span class="sec-status-dot empty"></span>' +
             safeTmplTitle +
             ' <span class="meta">empty \u00b7 \u270e</span>' +
@@ -3268,7 +3392,9 @@ function rebuildSidebar(chapters, activeId) {
       const display = escapeHtml(draft.title || (slug.charAt(0).toUpperCase() + slug.slice(1)));
       // Phase 22 — inline X button to delete the orphan
       // Phase 25 — also "+" button to adopt the slug into sections
-      // Phase 42 — data-action dispatch for orphan +/✗ buttons.
+      // Phase 54.6.x — same apostrophe-in-slug fix as the template
+      // path above: switched to data-action dispatch.
+      const orphanSlugAttr = escapeHtml(slug);
       html += '<a class="sec-link sec-orphan" href="/section/' + draft.id +
         '" data-draft-id="' + draft.id + '" onclick="return navTo(this)" ' +
         'title="Orphan draft. Click to inspect, + to adopt into sections, X to delete.">' +
@@ -3277,10 +3403,12 @@ function rebuildSidebar(chapters, activeId) {
         ' <span class="meta">orphan \u00b7 v' + draft.version + ' \u00b7 ' + draft.words + 'w</span>' +
         '<button class="sec-orphan-adopt" ' +
         'data-action="adopt-orphan-section" ' +
-        'data-chapter-id="' + ch.id + '" data-sec-type="' + slug + '" ' +
+        'data-chapter-id="' + ch.id + '" ' +
+        'data-sec-type="' + orphanSlugAttr + '" ' +
         'title="Add this section_type to the chapter sections list">+</button>' +
         '<button class="sec-orphan-delete" ' +
-        'data-action="delete-orphan-draft" data-draft-id="' + draft.id + '" ' +
+        'data-action="delete-orphan-draft" ' +
+        'data-draft-id="' + draft.id + '" ' +
         'title="Delete this orphan draft permanently">\u2717</button>' +
         '</a>';
     });
@@ -3666,9 +3794,38 @@ function writeForCell(chapterId, sectionType) {
 //   - click "Autowrite" to fire doAutowrite (with iterations)
 //   - click another section in the sidebar to navigate away
 // All without an LLM call happening accidentally on a single click.
-function previewEmptySection(chapterId, sectionType) {
+async function previewEmptySection(chapterId, sectionType) {
   currentChapterId = chapterId;
   currentSectionType = sectionType;
+
+  // Phase 54.6.x — re-validate that the section is actually empty.
+  // The sidebar can lag behind the database when autowrite ran in
+  // the background and the in-memory chaptersData snapshot is stale
+  // (e.g. tab opened yesterday, autowrite finished overnight). If
+  // the slug now has a draft, route to loadSection instead so the
+  // user sees the real content instead of the "Start writing" stub.
+  try {
+    const r = await fetch('/api/chapters');
+    if (r.ok) {
+      const fresh = await r.json();
+      const freshChapters = fresh.chapters || fresh;
+      if (Array.isArray(freshChapters)) {
+        chaptersData = freshChapters;
+        const fch = freshChapters.find(c => c.id === chapterId);
+        if (fch && Array.isArray(fch.sections)) {
+          const target = (sectionType || '').toLowerCase();
+          const draft = fch.sections.find(
+            d => (d.type || '').toLowerCase() === target
+          );
+          if (draft && draft.id) {
+            rebuildSidebar(freshChapters, draft.id);
+            loadSection(draft.id);
+            return;
+          }
+        }
+      }
+    }
+  } catch (_) { /* fall through to the normal empty-state preview */ }
 
   // Look up the section meta from the in-memory chapters cache
   const ch = chaptersData.find(c => c.id === chapterId);
@@ -5095,6 +5252,169 @@ async function confirmAutowrite() {
       stats.done('done');
       setStreamCursor(awContent, false);
       hideStreamPanel();
+      source.close(); currentEventSource = null; currentJobId = null;
+    }
+  };
+}
+
+// ── Autowrite WHOLE BOOK (every chapter × every section) ───────────
+// Phase 54.6.x — fan out autowrite_chapter_all_sections_stream over
+// every chapter in book order. Uses the same stream-panel + live
+// preview UI as confirmAutowrite(); the only new envelope events are
+// `book_autowrite_start`, `chapter_start`, `chapter_done`, and
+// `all_chapters_complete`.
+async function doAutowriteBook() {
+  const ok = confirm(
+    "Autowrite EVERY section of EVERY chapter in this book?\n\n" +
+    "This is long-running and uses the writer model for every empty " +
+    "section. Existing drafts are skipped by default. " +
+    "Click OK to proceed, Cancel to abort."
+  );
+  if (!ok) return;
+
+  awTargetScore = 0.85;
+  awScores = [];
+
+  showStreamPanel('Autowriting whole book…');
+  startLiveWrite();
+
+  const body = document.getElementById('stream-body');
+  body.innerHTML = '<div class="aw-dashboard">'
+    + '<div class="aw-chart" id="aw-chart"><svg viewBox="0 0 400 120"></svg></div>'
+    + '<div class="aw-log" id="aw-log"></div>'
+    + '</div>'
+    + '<div id="aw-content" style="margin-top:12px;white-space:pre-wrap;line-height:1.6;font-family:var(--font-serif);font-size:15px;"></div>';
+
+  const stats = createStreamStats('main-stream-stats', 'qwen3.5:27b');
+  stats.start();
+
+  const fd = new FormData();
+  fd.append('max_iter', '3');
+  fd.append('target_score', String(awTargetScore));
+  const res = await fetch('/api/autowrite-book', {method: 'POST', body: fd});
+  const data = await res.json();
+  if (!data || !data.job_id) {
+    hideStreamPanel();
+    alert('Failed to start whole-book autowrite: ' + (data && data.error || 'unknown'));
+    return;
+  }
+
+  startGlobalJob(data.job_id, {
+    type: 'autowrite_book',
+    taskDesc: 'Autowriting whole book',
+    modelName: 'qwen3.5:27b',
+  });
+
+  currentJobId = data.job_id;
+  if (currentEventSource) currentEventSource.close();
+  const source = new EventSource('/api/stream/' + data.job_id);
+  currentEventSource = source;
+  const status = document.getElementById('stream-status');
+  const awContent = document.getElementById('aw-content');
+  const awLog = document.getElementById('aw-log');
+
+  source.onmessage = function(e) {
+    let evt;
+    try { evt = JSON.parse(e.data); } catch (_) { return; }
+    if (evt.type === 'token') {
+      const phase = evt.phase || 'writing';
+      stats.update(evt.text);
+      stats.setPhase(phase);
+      if (phase === 'writing' || phase === 'revising') {
+        setStreamCursor(awContent, false);
+        awContent.innerHTML += evt.text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        setStreamCursor(awContent, true);
+        awContent.scrollTop = awContent.scrollHeight;
+        appendLiveWrite(evt.text);
+      }
+    }
+    else if (evt.type === 'progress') {
+      status.textContent = evt.detail || evt.stage;
+    }
+    else if (evt.type === 'scores') {
+      awScores.push(evt.scores);
+      drawConvergenceChart();
+    }
+    else if (evt.type === 'book_autowrite_start') {
+      awLog.innerHTML += '<div class="u-bold u-border-t u-pt-6 u-mt-6">'
+        + '✎ Whole book autowrite: ' + evt.n_chapters + ' chapters'
+        + (evt.rebuild ? ' (rebuild mode)' : '')
+        + (evt.resume ? ' (resume mode)' : '')
+        + '</div>';
+    }
+    else if (evt.type === 'chapter_start') {
+      awLog.innerHTML += '<div class="u-semibold u-accent u-border-t u-pt-6 u-mt-6">'
+        + '◆ Chapter ' + evt.chapter_index + '/' + evt.chapter_total
+        + ': ' + (evt.chapter_title || '(untitled)') + '</div>';
+      status.textContent = 'Chapter ' + evt.chapter_index + '/' + evt.chapter_total
+        + ': ' + (evt.chapter_title || '');
+      clearLiveWrite();
+      if (awContent) awContent.innerHTML = '';
+    }
+    else if (evt.type === 'chapter_autowrite_start') {
+      awLog.innerHTML += '<div class="u-tiny u-muted">  '
+        + evt.n_sections + ' sections in this chapter</div>';
+    }
+    else if (evt.type === 'section_start') {
+      const skip = evt.skipped ? ' [SKIPPED — already drafted]' : '';
+      awLog.innerHTML += '<div class="u-md u-pl-4">  ▶ Section '
+        + evt.index + '/' + evt.total + ': ' + evt.title + skip + '</div>';
+      if (!evt.skipped) {
+        clearLiveWrite();
+        if (awContent) awContent.innerHTML = '';
+      }
+    }
+    else if (evt.type === 'section_done') {
+      const score = (evt.final_score != null) ? ' (' + evt.final_score.toFixed(2) + ')' : '';
+      const cls = evt.error ? 'log-discard' : 'log-keep';
+      const icon = evt.error ? '✗' : evt.skipped ? '—' : '✓';
+      const note = evt.error ? ' error: ' + evt.error : evt.skipped ? ' skipped' : ' done' + score;
+      awLog.innerHTML += '<div class="' + cls + '">    ' + icon + ' Section ' + evt.index + note + '</div>';
+    }
+    else if (evt.type === 'section_error') {
+      awLog.innerHTML += '<div class="log-discard">    ✗ Section ' + evt.index + ' failed: ' + evt.message + '</div>';
+    }
+    else if (evt.type === 'all_sections_complete') {
+      awLog.innerHTML += '<div class="log-keep">  ✓ chapter complete: '
+        + evt.n_completed + ' written, ' + evt.n_skipped + ' skipped, '
+        + evt.n_failed + ' failed</div>';
+      fetch('/api/chapters').then(r => r.json()).then(d => {
+        rebuildSidebar(d.chapters || d, currentDraftId);
+      }).catch(() => {});
+    }
+    else if (evt.type === 'chapter_done') {
+      // Inner all_sections_complete already logged the totals.
+    }
+    else if (evt.type === 'chapter_error') {
+      awLog.innerHTML += '<div class="log-discard">  ✗ Chapter ' + evt.chapter_index + ' failed: ' + (evt.message || '') + '</div>';
+    }
+    else if (evt.type === 'all_chapters_complete') {
+      status.textContent = 'Book autowrite complete: '
+        + evt.n_chapters_completed + '/' + evt.n_chapters + ' chapters · '
+        + evt.n_sections_completed + ' sections written';
+      awLog.innerHTML += '<div class="log-keep u-bold u-border-t u-pt-6 u-mt-6">'
+        + '✓ Book complete: ' + evt.n_chapters_completed + '/' + evt.n_chapters
+        + ' chapters · ' + evt.n_sections_completed + ' sections written, '
+        + evt.n_sections_skipped + ' skipped, '
+        + evt.n_sections_failed + ' failed</div>';
+      stats.done('done');
+      setStreamCursor(awContent, false);
+      source.close(); currentEventSource = null; currentJobId = null;
+      fetch('/api/chapters').then(r => r.json()).then(d => {
+        rebuildSidebar(d.chapters || d, currentDraftId);
+      }).catch(() => {});
+    }
+    else if (evt.type === 'error') {
+      status.textContent = 'Error: ' + evt.message;
+      awLog.innerHTML += '<div class="u-danger">' + evt.message + '</div>';
+      stats.done('error');
+      setStreamCursor(awContent, false);
+      hideStreamPanel();
+      source.close(); currentEventSource = null; currentJobId = null;
+    }
+    else if (evt.type === 'done') {
+      stats.done('done');
+      setStreamCursor(awContent, false);
       source.close(); currentEventSource = null; currentJobId = null;
     }
   };
@@ -6612,6 +6932,9 @@ async function _loadWikiAnnotation(slug) {
       ts.textContent = 'last saved ' + d.updated_at.substring(0, 16).replace('T', ' ');
     }
   } catch (e) { /* silent — empty textarea is the fallback */ }
+  // Phase 54.6.x — wire debounced autosave on the "My take" textarea.
+  // Idempotent (dataset.autosaveWired guards against double-bind).
+  _wireWikiAnnotationAutosave();
 }
 
 async function saveWikiAnnotation() {
@@ -8157,8 +8480,8 @@ function renderMonitor(snap) {
         + '<th style="width:9em;">Last updated</th></tr>';
       for (const c of chapters) {
         const p = c.completion_pct || 0;
-        const col = p >= 80 ? '#080' : p >= 30 ? '#b70' : 'var(--fg-muted)';
-        const bar = '<div style="display:flex;height:0.85em;border-radius:3px;overflow:hidden;background:#eee;">'
+        const col = p >= 80 ? 'var(--success)' : p >= 30 ? 'var(--warn)' : 'var(--fg-muted)';
+        const bar = '<div style="display:flex;height:0.85em;border-radius:3px;overflow:hidden;background:var(--border);">'
           + '<div style="background:' + col + ';width:' + p.toFixed(0) + '%;"></div>'
           + '</div>';
         const updated = c.last_updated_iso
@@ -8418,9 +8741,9 @@ function renderMonitor(snap) {
       + '<th style="width:6em;text-align:right;">Missing</th></tr>';
     for (const f of fields) {
       const pctPresent = 100 - f.pct_missing;
-      const col = pctPresent >= 80 ? '#080'
-        : pctPresent >= 50 ? '#b70' : '#c33';
-      const bar = '<div style="display:flex;height:0.9em;border-radius:3px;overflow:hidden;background:#eee;">'
+      const col = pctPresent >= 80 ? 'var(--success)'
+        : pctPresent >= 50 ? 'var(--warn)' : 'var(--danger)';
+      const bar = '<div style="display:flex;height:0.9em;border-radius:3px;overflow:hidden;background:var(--border);">'
         + '<div style="background:' + col + ';width:' + pctPresent.toFixed(1) + '%;"></div>'
         + '</div>';
       html += '<tr><td><code>' + _escHTML(f.name) + '</code></td>'
@@ -8855,20 +9178,32 @@ function renderMonitor(snap) {
 
   // Phase 54.6.244 — model assignments per role. Mirrors the CLI
   // "gpu · models" panel — the user can see the whole LLM wiring at
-  // a glance without opening Book Settings → Models tab. Overrides
-  // that fall back to llm_main render the main model name with a
-  // "(↑LLM_MODEL)" suffix so the user can tell "explicitly pinned
-  // to llm_main" apart from "inherits llm_main".
+  // a glance without opening Book Settings → Models tab.
+  // v2 Phase A — when v2_writer_active is true, the writer GGUF
+  // handles every writer-class role, so the per-role rows
+  // (BOOK_WRITE_MODEL, BOOK_REVIEW_MODEL, AUTOWRITE_SCORER_MODEL,
+  // LLM_FAST_MODEL) are not honored at runtime and we hide them.
+  // The v1 fallback path (USE_LLAMACPP_WRITER=False) restores the
+  // full per-role table so .env-configured Ollama tags stay
+  // auditable.
   const models = snap.model_assignments || {};
   if (models.llm_main) {
     const main = models.llm_main;
+    const v2Writer = !!models.v2_writer_active;
     const fmt = (val, inherits) => {
       if (val) return '<code>' + _escHTML(val) + '</code>';
       if (inherits && main) return '<code>' + _escHTML(main)
         + '</code> <span class="u-muted">(↑LLM_MODEL)</span>';
       return '<em class="u-muted">(unset)</em>';
     };
-    const rows = [
+    const v2Rows = [
+      ['Writer',          main,                      false],
+      ['Caption VLM',     models.caption_vlm,        false],
+      ['MinerU VLM',      models.mineru_vlm_model,   false],
+      ['Embedder',        models.embedder,           false],
+      ['Reranker',        models.reranker,           false],
+    ];
+    const v1Rows = [
       ['LLM_MODEL',              main,                      false],
       ['LLM_FAST_MODEL',         models.llm_fast,           false],
       ['BOOK_WRITE_MODEL',       models.book_write,         true],
@@ -8879,7 +9214,11 @@ function renderMonitor(snap) {
       ['EMBEDDING_MODEL',        models.embedder,           false],
       ['RERANKER_MODEL',         models.reranker,           false],
     ];
-    let html = '<h4>Model assignments</h4>'
+    const rows = v2Writer ? v2Rows : v1Rows;
+    const heading = v2Writer
+      ? 'Model assignments <span class="u-muted">(v2 substrate · single canonical writer)</span>'
+      : 'Model assignments <span class="u-muted">(v1 fallback · per-role Ollama tags)</span>';
+    let html = '<h4>' + heading + '</h4>'
       + '<table class="stats-table" style="width:100%;">'
       + '<tr><th>Role</th><th>Model</th></tr>';
     for (const [role, val, inherits] of rows) {
@@ -8999,57 +9338,12 @@ function renderMonitor(snap) {
     sections.push(html);
   }
 
-  // Phase 54.6.294 — slow-ingest leaderboard.  Top N docs by total
-  // wall-clock with per-stage breakdown so operators can see
-  // which stage dominated (usually convert, sometimes embedding
-  // on very-long docs).  Silent when the leaderboard is empty.
-  if (slowDocs.length) {
-    let html = '<h4>Slow ingest (top ' + slowDocs.length + ')</h4>'
-      + '<table class="stats-table" style="width:100%;font-size:0.9em;">'
-      + '<tr><th style="width:5em;">Total</th><th>Title</th>'
-      + '<th title="Fraction of wall-clock in each pipeline stage">Stage breakdown</th></tr>';
-    for (const d of slowDocs) {
-      const totalS = (d.total_ms || 0) / 1000;
-      const col = totalS > 600 ? '#c33'
-        : totalS > 120 ? '#b70' : 'var(--fg-muted)';
-      const totalStr = totalS >= 60
-        ? (totalS / 60).toFixed(1) + ' min'
-        : totalS.toFixed(0) + ' s';
-      const stages = d.stage_ms || {};
-      // Mini stacked bar per stage
-      const stagePalette = {
-        convert: '#6aa', metadata: '#7a5',
-        chunking: '#38a', embedding: '#a58',
-      };
-      let bar = '<div style="display:flex;height:0.8em;border-radius:3px;overflow:hidden;'
-        + 'min-width:120px;">';
-      const stageKeys = Object.keys(stages).sort((a, b) => stages[b] - stages[a]);
-      for (const k of stageKeys) {
-        const pct = d.total_ms ? (stages[k] / d.total_ms * 100) : 0;
-        const c = stagePalette[k] || '#666';
-        bar += '<div style="background:' + c + ';width:' + pct + '%;" '
-          + 'title="' + _escHTML(k) + ': ' + (stages[k] / 1000).toFixed(1)
-          + 's (' + pct.toFixed(0) + '%)"></div>';
-      }
-      bar += '</div>';
-      // Legend: list the stages with their seconds
-      const legendBits = stageKeys.map(k => {
-        const c = stagePalette[k] || '#666';
-        return '<span style="margin-right:0.6em;font-size:0.85em;">'
-          + '<span style="display:inline-block;width:0.65em;height:0.65em;background:'
-          + c + ';margin-right:0.2em;vertical-align:middle;"></span>'
-          + _escHTML(k) + ' ' + (stages[k] / 1000).toFixed(1) + 's</span>';
-      }).join('');
-      html += '<tr><td style="color:' + col + ';font-weight:bold;">'
-        + _escHTML(totalStr) + '</td>'
-        + '<td>' + _escHTML((d.title || '?').slice(0, 80)) + '</td>'
-        + '<td>' + bar
-        + '<div style="color:var(--fg-muted);margin-top:0.2em;">' + legendBits + '</div>'
-        + '</td></tr>';
-    }
-    html += '</table>';
-    sections.push(html);
-  }
+  // Phase 54.6.294 — slow-ingest leaderboard removed from the GUI
+  // (2026-04-26). Was visually noisy (5 rows per render, ~120 px
+  // tall stacked-bar each) and rarely actionable on a stable corpus.
+  // The data still ships in `snap.slow_docs` for any downstream
+  // JSON consumer; just no longer rendered in the System Monitor
+  // modal.
 
   // Top failure classes — summary of worst offenders in last 24h
   if (topFailures.length) {
@@ -11418,6 +11712,11 @@ async function openPlanModal(context) {
       document.getElementById('plan-status').textContent =
         data.plan.split(/\s+/).filter(Boolean).length + ' words in book plan';
     }
+    // Phase 54.6.x — wire debounced autosave on the Book tab inputs
+    // so edits persist 1.2 s after the last keystroke without
+    // requiring a Save click.
+    _wireBookTabAutosave();
+    _setAutosaveStatus('plan-book', 'idle');
   } catch (e) {
     document.getElementById('plan-status').textContent = 'Error loading book: ' + e.message;
   }
@@ -11479,6 +11778,192 @@ function switchPlanTab(name) {
   if (name === 'plan-outline') _populateOutlineMethodPicker();
 }
 
+// ── Phase 54.6.x — Plan modal autosave ─────────────────────────────────
+// One debounced timer per "scope key" (plan-book, plan-chapters,
+// plan-chapter-row:<cid>, …). Status indicator slot is `#autosave-<key>`
+// so each tab can show its own state without colliding with the
+// modal's footer status line. Save Now buttons just call
+// `flushAutosave(key)` to skip the debounce.
+const _planAutosaveTimers = {};
+const _planAutosaveStatus = {};
+
+function _setAutosaveStatus(key, state, detail) {
+  _planAutosaveStatus[key] = state;
+  const el = document.getElementById('autosave-' + key);
+  if (!el) return;
+  if (state === 'pending') {
+    el.innerHTML = '<span class="u-muted">⏳ unsaved edits…</span>';
+  } else if (state === 'saving') {
+    el.innerHTML = '<span class="u-muted">… saving</span>';
+  } else if (state === 'saved') {
+    const stamp = new Date();
+    const hh = String(stamp.getHours()).padStart(2, '0');
+    const mm = String(stamp.getMinutes()).padStart(2, '0');
+    const ss = String(stamp.getSeconds()).padStart(2, '0');
+    el.innerHTML = '<span class="u-success">✓ saved at ' + hh + ':' + mm + ':' + ss + '</span>';
+  } else if (state === 'error') {
+    el.innerHTML = '<span class="u-danger">✗ ' + (detail || 'save failed — click Save now to retry') + '</span>';
+  } else {
+    el.innerHTML = '<span class="u-muted">○ Idle</span>';
+  }
+}
+
+function scheduleAutosave(key, delayMs, fn) {
+  if (_planAutosaveTimers[key]) clearTimeout(_planAutosaveTimers[key]);
+  _setAutosaveStatus(key, 'pending');
+  _planAutosaveTimers[key] = setTimeout(async () => {
+    _planAutosaveTimers[key] = null;
+    _setAutosaveStatus(key, 'saving');
+    try {
+      await fn();
+      _setAutosaveStatus(key, 'saved');
+    } catch (e) {
+      _setAutosaveStatus(key, 'error', e && e.message);
+    }
+  }, delayMs);
+}
+
+function flushAutosave(key) {
+  // Cancels the debounce — caller is expected to invoke the save fn
+  // synchronously (e.g. via a Save Now button that calls savePlanBook(true)).
+  if (_planAutosaveTimers[key]) {
+    clearTimeout(_planAutosaveTimers[key]);
+    _planAutosaveTimers[key] = null;
+  }
+}
+
+// Wire input/change events for the Book tab inputs to the autosave
+// helper. Idempotent: each input gets a `dataset.autosaveWired` flag
+// so re-running on tab re-entry doesn't double-bind.
+function _wireBookTabAutosave() {
+  const ids = [
+    'plan-title-input',
+    'plan-desc-input',
+    'plan-text-input',
+    'plan-target-words-input',
+  ];
+  ids.forEach(function(id) {
+    const el = document.getElementById(id);
+    if (!el || el.dataset.autosaveWired === '1') return;
+    el.dataset.autosaveWired = '1';
+    const handler = function() {
+      scheduleAutosave('plan-book', 1200, function() {
+        return savePlanBook(false);
+      });
+    };
+    el.addEventListener('input', handler);
+    el.addEventListener('change', handler);
+  });
+}
+
+// Wire input/change events for every chapter row in the Chapters tab.
+// Saves are debounced per-row (key includes cid) so editing two
+// chapters in succession doesn't lose the first one.
+function _wireChaptersTabAutosave() {
+  const rows = document.querySelectorAll('#plan-chapters-list .plan-ch-row');
+  rows.forEach(function(row) {
+    const cid = row.dataset.cid;
+    if (!cid || row.dataset.autosaveWired === '1') return;
+    row.dataset.autosaveWired = '1';
+    const inputs = row.querySelectorAll(
+      '.plan-ch-title, .plan-ch-desc, .plan-ch-tq, .plan-ch-target, .plan-ch-flex'
+    );
+    inputs.forEach(function(inp) {
+      const handler = function() {
+        // Reflect into the tab-level pill too so the user sees the
+        // global state at the top, in addition to the row-level Save.
+        scheduleAutosave('plan-chapters', 1000, async function() {
+          await savePlanChapterRow(cid);
+        });
+      };
+      inp.addEventListener('input', handler);
+      inp.addEventListener('change', handler);
+    });
+  });
+}
+
+// Phase 54.6.x — wire autosave on the Book Settings modal. Two scopes:
+// basics (title/description/target_chapter_words/book_type) → save
+// runs `saveBookSettings('basics')` 1.2 s after the last keystroke.
+// leitmotiv (the bs-plan textarea) → `saveBookSettings('leitmotiv')`
+// 1.5 s after the last keystroke (longer debounce for the long-form
+// plan textarea so the user's typing pauses don't churn save calls).
+function _wireBookSettingsAutosave() {
+  const basics = ['bs-title', 'bs-description', 'bs-target-chapter-words', 'bs-book-type'];
+  basics.forEach(function(id) {
+    const el = document.getElementById(id);
+    if (!el || el.dataset.autosaveWired === '1') return;
+    el.dataset.autosaveWired = '1';
+    const handler = function() {
+      scheduleAutosave('bs-basics', 1200, async function() {
+        await saveBookSettings('basics');
+      });
+    };
+    el.addEventListener('input', handler);
+    el.addEventListener('change', handler);
+  });
+  const plan = document.getElementById('bs-plan');
+  if (plan && plan.dataset.autosaveWired !== '1') {
+    plan.dataset.autosaveWired = '1';
+    plan.addEventListener('input', function() {
+      scheduleAutosave('bs-leitmotiv', 1500, async function() {
+        await saveBookSettings('leitmotiv');
+      });
+    });
+  }
+}
+
+// Phase 54.6.x — autosave the wiki "My take" annotation.
+function _wireWikiAnnotationAutosave() {
+  const body = document.getElementById('wiki-annotation-body');
+  if (!body || body.dataset.autosaveWired === '1') return;
+  body.dataset.autosaveWired = '1';
+  body.addEventListener('input', function() {
+    scheduleAutosave('wiki-mytake', 1500, async function() {
+      await saveWikiAnnotation();
+    });
+  });
+}
+
+// Phase 54.6.x — autosave the Plan modal's Sections tab (per-chapter
+// section plans + per-section target_words). Existing flow already
+// captures edits into _editingChapterPlans / _editingChapterTargetWords;
+// debounce-call savePlanChapterSections() so those buffers flush
+// without the user clicking Save.
+function _wirePlanSectionsAutosave() {
+  const pane = document.getElementById('plan-chapter-sections');
+  if (!pane || pane.dataset.autosaveWired === '1') return;
+  pane.dataset.autosaveWired = '1';
+  // Delegated listener — the rows are re-rendered when chapter
+  // changes, so per-row binding would need re-wiring on every
+  // populatePlanChapterTab call. Capture all input/change events
+  // bubbling out of the pane.
+  const handler = function() {
+    scheduleAutosave('plan-sections', 1200, async function() {
+      await savePlanChapterSections();
+    });
+  };
+  pane.addEventListener('input', handler);
+  pane.addEventListener('change', handler);
+}
+
+// "Save all chapters now" button at the top of the Chapters tab.
+async function savePlanAllChapters() {
+  flushAutosave('plan-chapters');
+  const rows = document.querySelectorAll('#plan-chapters-list .plan-ch-row');
+  if (!rows.length) return;
+  _setAutosaveStatus('plan-chapters', 'saving');
+  try {
+    for (const row of rows) {
+      const cid = row.dataset.cid;
+      if (cid) await savePlanChapterRow(cid);
+    }
+    _setAutosaveStatus('plan-chapters', 'saved');
+  } catch (e) {
+    _setAutosaveStatus('plan-chapters', 'error', e && e.message);
+  }
+}
+
 // ── Phase 54.6.66 — Chapters tab: book-wide chapter manager ────────────
 
 function populatePlanChaptersTab() {
@@ -11527,15 +12012,38 @@ function populatePlanChaptersTab() {
          +  'placeholder="Short description (1-2 sentences)" '
          +  '>'
          +  escapeHtml(ch.description || '') + '</textarea>'
-         +  '<div class="u-flex-raw u-gap-6 u-ai-center">'
+         +  '<div class="u-flex-raw u-gap-6 u-ai-center u-mb-6">'
          +  '<label style="font-size:11px;color:var(--fg-muted);min-width:80px;">Topic query:</label>'
          +  '<input type="text" class="plan-ch-tq" value="' + escapeHtml(ch.topic_query || '')
          +  '" placeholder="3-6 word retrieval phrase" '
          +  'style="flex:1;padding:3px 8px;font-size:12px;">'
          +  '</div>'
+         // Phase 54.6.x — per-chapter length controls. target_words
+         // overrides the book-level chapter target; flexible_length
+         // lets autowrite extend up to 2× when retrieval is rich.
+         +  '<div class="u-flex-raw u-gap-6 u-ai-center u-wrap">'
+         +  '<label style="font-size:11px;color:var(--fg-muted);min-width:80px;" '
+         +  'title="Per-chapter length target (words). Empty = inherit the book-level target. Set to 0 to clear an existing override.">Target words:</label>'
+         +  '<input type="number" class="plan-ch-target" min="0" step="500" '
+         +  'value="' + (ch.target_words ? String(ch.target_words) : '') + '" '
+         +  'placeholder="(book default)" '
+         +  'style="width:120px;padding:3px 8px;font-size:12px;" '
+         +  'title="Per-chapter length target. Empty = inherit book-level target. 0 clears the override.">'
+         +  '<label class="u-chip" '
+         +  'title="Phase 54.6.x — when checked, autowrite may extend up to 2× the target if the section\'s retrieval pool is rich (≥24 chunks). Only ever bigger, never smaller. The base target is still the scoring anchor.">'
+         +  '<input type="checkbox" class="plan-ch-flex" '
+         +  (ch.flexible_length ? 'checked ' : '')
+         +  '> flexible (≤2× if corpus supports it)'
+         +  '</label>'
+         +  '</div>'
          +  '</div>';
   });
   list.innerHTML = html;
+  // Phase 54.6.x — wire debounced autosave on every chapter row so
+  // edits persist 1 s after the last keystroke without needing a
+  // per-row Save click. Idempotent on re-render via row.dataset.autosaveWired.
+  _wireChaptersTabAutosave();
+  _setAutosaveStatus('plan-chapters', 'idle');
 }
 
 async function savePlanChapterRow(cid) {
@@ -11544,10 +12052,20 @@ async function savePlanChapterRow(cid) {
   const title = row.querySelector('.plan-ch-title').value.trim();
   const desc = row.querySelector('.plan-ch-desc').value.trim();
   const tq = row.querySelector('.plan-ch-tq').value.trim();
+  // Phase 54.6.x — per-chapter length controls.
+  const targetEl = row.querySelector('.plan-ch-target');
+  const flexEl = row.querySelector('.plan-ch-flex');
   const fd = new FormData();
   fd.append('title', title);
   fd.append('description', desc);
   fd.append('topic_query', tq);
+  if (targetEl) {
+    const tw = parseInt(targetEl.value || '0', 10);
+    fd.append('target_words', isNaN(tw) ? 0 : tw);
+  }
+  if (flexEl) {
+    fd.append('flexible_length', flexEl.checked ? 'true' : 'false');
+  }
   const status = document.getElementById('plan-status');
   status.textContent = 'Saving chapter…';
   try {
@@ -11561,6 +12079,11 @@ async function savePlanChapterRow(cid) {
       ch.title = title;
       ch.description = desc;
       ch.topic_query = tq;
+      if (targetEl) {
+        const tw = parseInt(targetEl.value || '0', 10);
+        ch.target_words = (!isNaN(tw) && tw > 0) ? tw : null;
+      }
+      if (flexEl) ch.flexible_length = !!flexEl.checked;
     }
     populatePlanSectionsPicker(
       document.getElementById('plan-sections-chapter-picker').value || null
@@ -11881,6 +12404,9 @@ function populatePlanChapterTab(ch) {
       });
     }).catch(e => console.debug('plan-modal readout cache warm failed:', e));
   }
+  // Phase 54.6.x — wire debounced autosave on every section editor
+  // input. Idempotent (delegated listener; pane has dataset guard).
+  _wirePlanSectionsAutosave();
 }
 
 // Track plan edits for the chapter tab so save can collect them.
@@ -12213,12 +12739,26 @@ async function savePlan() {
   }
 }
 
-async function savePlanBook() {
+async function savePlanBook(viaSaveNow) {
+  // Phase 54.6.x — `viaSaveNow=true` means the user clicked Save Now;
+  // we cancel any pending autosave debounce and run synchronously
+  // through the same code path. Both autosave + Save Now feed the
+  // tab-level autosave status pill (#autosave-plan-book) so the
+  // user has a single source of truth for save state.
+  if (viaSaveNow) {
+    flushAutosave('plan-book');
+    _setAutosaveStatus('plan-book', 'saving');
+  }
   const title = document.getElementById('plan-title-input').value.trim();
   const desc = document.getElementById('plan-desc-input').value.trim();
   const plan = document.getElementById('plan-text-input').value.trim();
   const tcwRaw = document.getElementById('plan-target-words-input').value.trim();
-  document.getElementById('plan-status').textContent = 'Saving...';
+  if (!viaSaveNow) {
+    // Autosave path — keep the footer status line quiet; the pill
+    // above the tab is the canonical surface.
+  } else {
+    document.getElementById('plan-status').textContent = 'Saving...';
+  }
   const fd = new FormData();
   fd.append('title', title);
   fd.append('description', desc);
@@ -12230,9 +12770,12 @@ async function savePlanBook() {
   try {
     const res = await fetch('/api/book', {method: 'PUT', body: fd});
     if (!res.ok) throw new Error('save failed');
-    document.getElementById('plan-status').innerHTML =
-      '<span class="u-success">Saved.</span> ' +
-      plan.split(/\s+/).filter(Boolean).length + ' words. The new plan will be injected into all future writes.';
+    if (viaSaveNow) {
+      document.getElementById('plan-status').innerHTML =
+        '<span class="u-success">Saved.</span> ' +
+        plan.split(/\s+/).filter(Boolean).length + ' words. The new plan will be injected into all future writes.';
+      _setAutosaveStatus('plan-book', 'saved');
+    }
     if (title) document.querySelector('.sidebar h2').textContent = title;
     if (tcwRaw !== '') {
       const n = parseInt(tcwRaw, 10);
@@ -12244,7 +12787,10 @@ async function savePlanBook() {
       window._chapterWordTarget = n > 0 ? n : 6000;
     }
   } catch (e) {
-    document.getElementById('plan-status').textContent = 'Save failed: ' + e.message;
+    if (viaSaveNow) {
+      document.getElementById('plan-status').textContent = 'Save failed: ' + e.message;
+    }
+    throw e;  // bubble so scheduleAutosave can mark the pill as error
   }
 }
 
@@ -12485,6 +13031,21 @@ async function runOutlineFromTab() {
       status.textContent = 'Drafting… ' + String(tokBuf.length) + ' chars';
     } else if (evt.type === 'progress') {
       status.textContent = evt.detail || evt.stage;
+    } else if (evt.type === 'deep_plan_start') {
+      window._outlineDeepN = evt.n_sections_total || 0;
+      window._outlineDeepDone = 0; window._outlineDeepFailed = 0;
+      status.textContent = 'Deep planning ' + window._outlineDeepN + ' section(s)…';
+    } else if (evt.type === 'deep_plan_section_start') {
+      status.textContent = 'Deep planning Ch.' + evt.chapter_index
+        + '/' + evt.chapter_total + ' §' + evt.section_index
+        + '/' + evt.section_total + ': ' + (evt.section_title || '');
+    } else if (evt.type === 'deep_plan_section_done') {
+      window._outlineDeepDone = (window._outlineDeepDone || 0) + 1;
+      if (evt.error) window._outlineDeepFailed = (window._outlineDeepFailed || 0) + 1;
+    } else if (evt.type === 'deep_plan_complete') {
+      const _planned = evt.n_planned != null ? evt.n_planned : ((window._outlineDeepDone || 0) - (window._outlineDeepFailed || 0));
+      const _failed = evt.n_failed != null ? evt.n_failed : (window._outlineDeepFailed || 0);
+      status.textContent = 'Deep planning done — ' + _planned + ' section(s) planned, ' + _failed + ' failed.';
     } else if (evt.type === 'completed') {
       source.close(); _outlineSource = null;
       status.innerHTML = '<span class="u-success">\u2713 Outline generated — <strong>'
@@ -12537,6 +13098,134 @@ function cancelOutline() {
 // name. Keep it pointing at the new implementation until they're all
 // migrated.
 const regenerateOutline = runOutlineFromTab;
+
+// Phase 54.6.x — Add an Introduction chapter at position 1, renumbering
+// any existing chapters by +1. Used to retrofit the standard
+// scientific-book front-matter shape onto a book that was outlined
+// before the Introduction-required prompt landed.
+async function insertIntroductionChapter() {
+  const btn = document.getElementById('plan-insert-intro-btn');
+  const status = document.getElementById('plan-autoplan-chapters-status');
+  if (!confirm(
+    'Insert an Introduction chapter at position 1?\n\n'
+    + 'Every existing chapter will be renumbered +1 (Ch.1 → Ch.2, etc). '
+    + 'Drafts are preserved — they move with their chapters. The new '
+    + 'Introduction has the standard sections: Motivation & Stakes / '
+    + 'Scope of the Argument / Key Terms / Roadmap of the Book.\n\n'
+    + 'No-op if Ch.1 already looks like an introduction.'
+  )) return;
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = 'Inserting Introduction…';
+  try {
+    const res = await fetch('/api/book/insert-introduction', {method: 'POST'});
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      if (status) status.innerHTML = '<span class="u-danger">✗ ' + (data.error || res.status) + '</span>';
+      if (btn) btn.disabled = false;
+      return;
+    }
+    if (status) {
+      const cls = data.noop ? 'u-muted' : 'u-success';
+      const icon = data.noop ? '—' : '✓';
+      status.innerHTML = '<span class="' + cls + '">' + icon + ' ' + data.message + '</span>';
+    }
+    // Refresh the sidebar + Chapters tab so the renumber is visible.
+    try {
+      const sidebarRes = await fetch('/api/chapters');
+      const sd = await sidebarRes.json();
+      const chapters = sd.chapters || sd;
+      rebuildSidebar(chapters, currentDraftId);
+      populatePlanChaptersTab();
+    } catch (_) {}
+  } catch (exc) {
+    if (status) status.innerHTML = '<span class="u-danger">✗ ' + exc.message + '</span>';
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// Phase 54.6.x — Auto-plan chapters button on the Chapters tab.
+// Same backend as runOutlineFromTab (the /api/book/outline/generate
+// endpoint already produces a chapter list), but streams into the
+// Chapters tab UI so users can stay in context. Additive: the
+// endpoint never overwrites existing chapters.
+let _autoplanChaptersSource = null;
+
+async function autoPlanChapters() {
+  const status = document.getElementById('plan-autoplan-chapters-status');
+  const log = document.getElementById('plan-autoplan-chapters-log');
+  const btn = document.getElementById('plan-autoplan-chapters-btn');
+  if (!confirm(
+    'Auto-plan chapters from your paper corpus?\n\n'
+    + 'The LLM proposes chapter titles + descriptions + section slugs '
+    + 'based on the book\'s leitmotiv and the papers in your library. '
+    + 'ADDS new chapters only — existing chapters and drafts are '
+    + 'untouched. Run again to re-roll.'
+  )) return;
+
+  if (btn) btn.disabled = true;
+  if (log) { log.style.display = 'block'; log.textContent = ''; }
+  if (status) status.textContent = 'Starting auto-plan…';
+
+  let res;
+  try {
+    res = await fetch('/api/book/outline/generate', {method: 'POST', body: new FormData()});
+  } catch (exc) {
+    if (status) status.textContent = 'Request failed: ' + exc.message;
+    if (btn) btn.disabled = false;
+    return;
+  }
+  const data = await res.json();
+  if (_autoplanChaptersSource) _autoplanChaptersSource.close();
+  const source = new EventSource('/api/stream/' + data.job_id);
+  _autoplanChaptersSource = source;
+  let tokBuf = '';
+  source.onmessage = async function(e) {
+    let evt;
+    try { evt = JSON.parse(e.data); } catch (_) { return; }
+    if (evt.type === 'token') {
+      tokBuf += evt.text;
+      if (log) {
+        log.textContent = tokBuf.slice(-3000);
+        log.scrollTop = log.scrollHeight;
+      }
+      if (status) status.textContent = 'Drafting… ' + tokBuf.length + ' chars';
+    } else if (evt.type === 'progress') {
+      if (status) status.textContent = evt.detail || evt.stage;
+    } else if (evt.type === 'deep_plan_section_start') {
+      if (status) status.textContent = 'Deep planning Ch.' + evt.chapter_index
+        + '/' + evt.chapter_total + ' §' + evt.section_index
+        + '/' + evt.section_total + ': ' + (evt.section_title || '');
+    } else if (evt.type === 'deep_plan_complete') {
+      if (status) status.textContent = 'Deep planning done — '
+        + (evt.n_planned || 0) + ' section(s) planned, '
+        + (evt.n_failed || 0) + ' failed.';
+    } else if (evt.type === 'completed') {
+      source.close(); _autoplanChaptersSource = null;
+      if (status) {
+        status.innerHTML = '<span class="u-success">✓ Added <strong>'
+          + evt.n_inserted + '</strong> new chapter(s), <strong>'
+          + evt.n_skipped + '</strong> skipped.</span>';
+      }
+      if (btn) btn.disabled = false;
+      try {
+        const sidebarRes = await fetch('/api/chapters');
+        const sd = await sidebarRes.json();
+        const chapters = sd.chapters || sd;
+        chaptersData = chapters;
+        rebuildSidebar(chapters, currentDraftId);
+        populatePlanChaptersTab();
+      } catch (_) {}
+    } else if (evt.type === 'error') {
+      source.close(); _autoplanChaptersSource = null;
+      if (status) status.innerHTML = '<span class="u-danger">✗ ' + (evt.message || 'error') + '</span>';
+      if (btn) btn.disabled = false;
+    } else if (evt.type === 'done') {
+      source.close(); _autoplanChaptersSource = null;
+      if (btn) btn.disabled = false;
+    }
+  };
+}
 
 // ── Phase 14.3: Chapter scope modal (description + topic_query) ─────
 // Phase 18 — chapter modal carries an in-memory copy of the chapter's
@@ -13792,10 +14481,13 @@ async function showCorkboard() {
 
   data.cards.forEach(c => {
     const statusCls = c.status || 'to_do';
-    const onclick = c.draft_id
-      ? 'loadSection(\'' + c.draft_id + '\')'
-      : 'writeForCell(\'' + c.chapter_id + '\',\'' + c.section_type + '\')';
-    html += '<div class="cork-card" onclick="' + onclick + '">';
+    // Phase 54.6.x — switched to data-action dispatch so section_type
+    // values with apostrophes / colons stop breaking the attribute.
+    const cardAttrs = c.draft_id
+      ? ('data-action="cork-open-card" data-draft-id="' + c.draft_id + '"')
+      : ('data-action="cork-open-card" data-chapter-id="' + c.chapter_id +
+         '" data-sec-type="' + escapeHtml(c.section_type || '') + '"');
+    html += '<div class="cork-card" ' + cardAttrs + '>';
     html += '<div class="cc-head"><span class="cc-ch">Ch.' + c.chapter_num + '</span>';
     html += '<span class="cc-status ' + statusCls + '">' + statusCls.replace('_', ' ') + '</span></div>';
     html += '<div class="cc-type">' + (c.section_title || (c.section_type.charAt(0).toUpperCase() + c.section_type.slice(1))) + '</div>';
@@ -13897,6 +14589,9 @@ async function openBookSettings() {
   await swLoadBookTypes();
   await populateBookSettingsTypeDropdown();
   await loadBookSettings();
+  // Phase 54.6.x — wire debounced autosave on the Book Settings
+  // modal's Basics + Leitmotiv inputs.
+  _wireBookSettingsAutosave();
 }
 
 // Phase 54.6.148 — wire the Basics-tab book-type dropdown. Same
@@ -14678,7 +15373,7 @@ async function loadBookSettingsModels() {
       ['LLM_MODEL',              data.llm_model,              'ask · wiki compile · extract-kg · everything without a per-role override', null],
       ['LLM_FAST_MODEL',         data.llm_fast_model,         'classify-papers · paraphrase-equations · RAPTOR · metadata fallback', 'LLM_MODEL'],
       ['BOOK_OUTLINE_MODEL',     data.book_outline_model,     'book outline (3-candidate tournament + density-driven section growth)', 'LLM_MODEL'],
-      ['BOOK_WRITE_MODEL',       data.book_write_model,       'book write · autowrite writer/scorer/verify/cove (55.6.243 split)', 'LLM_MODEL'],
+      ['BOOK_WRITE_MODEL',       data.book_write_model,       'book write · autowrite writer/scorer/verify/cove (54.6.243 split)', 'LLM_MODEL'],
       ['BOOK_REVIEW_MODEL',      data.book_review_model,      'book review (5-dim critic)', 'LLM_MODEL'],
       ['AUTOWRITE_SCORER_MODEL', data.autowrite_scorer_model, 'autowrite score + rescore (not verify/cove)', 'LLM_MODEL'],
       ['VISUALS_CAPTION_MODEL',  data.visuals_caption_model,  'db caption-visuals (figures + charts) — 54.6.74 VLM-sweep winner', 'qwen2.5vl:32b (code default)'],
@@ -15602,7 +16297,7 @@ async function loadVisuals(append) {
             ? '<div class="u-xxs u-muted u-mb-6"><strong>Columns:</strong> '
                 + v.table_headers.map(h => _escHtml(String(h))).join(' · ') + '</div>'
             : '';
-          parsed = '<div style="padding:8px;background:#fafafa;border-radius:4px;border:1px solid #eee;margin-bottom:8px;">'
+          parsed = '<div style="padding:8px;background:var(--bg-alt, var(--bg-elevated));border-radius:4px;border:1px solid var(--border);margin-bottom:8px;">'
             + title + summary + hdrs + '</div>';
         }
         return parsed
@@ -16337,6 +17032,69 @@ function renderProjectSwitchBanner(newSlug, runningSlug) {
     + '</div>';
 }
 
+// Phase 54.6.x — top-level "Close server / exit session" flow.
+// Distinct from the Projects-modal restart flow (shutdownServer below)
+// because it lives outside the project-switching context and offers
+// the option to also stop the llama-server substrate. Reuses the
+// /api/server/shutdown endpoint with body.stop_substrate = true|false.
+function openShutdownModal() {
+  const cb = document.getElementById('shutdown-stop-substrate');
+  if (cb) cb.checked = false;
+  const btn = document.getElementById('shutdown-confirm-btn');
+  if (btn) btn.disabled = false;
+  // Close the Book menu dropdown if it's open.
+  document.querySelectorAll('.nav-dropdown.open').forEach(d => d.classList.remove('open'));
+  openModal('shutdown-modal');
+}
+
+async function confirmShutdown() {
+  const cb = document.getElementById('shutdown-stop-substrate');
+  const stopSubstrate = !!(cb && cb.checked);
+  const btn = document.getElementById('shutdown-confirm-btn');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '⏻ Stopping…';
+  }
+  let payload = {stop_substrate: stopSubstrate};
+  let resp;
+  try {
+    const r = await fetch('/api/server/shutdown', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    resp = await r.json().catch(() => ({}));
+  } catch (_) {
+    // Connection drop is the expected outcome — uvicorn shuts down
+    // ~200 ms after the response flushes, so the fetch may race the
+    // close. Treat as success and render the goodbye screen anyway.
+    resp = {ok: true, stopped_substrate_roles: []};
+  }
+  closeModal('shutdown-modal');
+  const stoppedRoles = (resp && resp.stopped_substrate_roles) || [];
+  document.body.innerHTML =
+    '<div style="padding:48px;max-width:640px;margin:64px auto;'
+    + 'font-family:-apple-system,Inter Tight,sans-serif;'
+    + 'border:1px solid var(--border,#ccc);border-radius:10px;'
+    + 'background:var(--bg-elevated,#fff);color:var(--fg,#111);'
+    + 'box-shadow:0 4px 16px rgba(0,0,0,0.08);">'
+    + '<h2 style="margin:0 0 12px;">SciKnow server stopped</h2>'
+    + '<p style="font-size:14px;line-height:1.55;color:var(--fg-muted,#555);">'
+    + 'Your terminal is back at <code>$</code>. '
+    + (stoppedRoles.length
+        ? 'Also stopped llama-server roles: <code>' + stoppedRoles.join(', ') + '</code>. '
+        : 'The llama-server substrate is still running (use <code>sciknow infer down</code> to stop it).')
+    + '</p>'
+    + '<p style="font-size:14px;line-height:1.55;">To restart the reader, run:</p>'
+    + '<pre style="padding:12px 14px;background:var(--bg,#f5f4ef);border:1px solid var(--border,#e7e5e0);'
+    + 'border-radius:6px;font-size:13px;font-family:JetBrains Mono,ui-monospace,monospace;'
+    + 'color:var(--fg,#111);overflow-x:auto;">'
+    + 'sciknow book serve "&lt;book title&gt;"</pre>'
+    + '<p style="font-size:12px;color:var(--fg-faint,#999);margin:14px 0 0;">'
+    + 'Then reload this browser tab.</p>'
+    + '</div>';
+}
+
 async function shutdownServer() {
   if (!confirm(
     'Stop the running sciknow server?\n\n'
@@ -16349,12 +17107,14 @@ async function shutdownServer() {
     await fetch('/api/server/shutdown', {method: 'POST'});
     document.body.innerHTML =
       '<div style="padding:40px;max-width:620px;margin:60px auto;font-family:-apple-system,sans-serif;'
-      + 'border:1px solid #ddd;border-radius:8px;background:#f8f8f8;">'
+      + 'border:1px solid var(--border);border-radius:8px;background:var(--bg-elevated);'
+      + 'color:var(--fg);">'
       + '<h2 style="margin:0 0 12px;">Server stopped</h2>'
       + '<p>Your terminal is back at <code>$</code>. To pick up the new active project, run:</p>'
-      + '<pre style="padding:10px;background:#fff;border:1px solid #ddd;border-radius:4px;">'
+      + '<pre style="padding:10px;background:var(--bg);border:1px solid var(--border);'
+      + 'border-radius:4px;color:var(--fg);">'
       + 'sciknow book serve "&lt;book title&gt;"</pre>'
-      + '<p style="font-size:12px;color:#666;margin:12px 0 0;">Then reload this browser tab.</p>'
+      + '<p style="font-size:12px;color:var(--fg-muted);margin:12px 0 0;">Then reload this browser tab.</p>'
       + '</div>';
   } catch (exc) {
     _projMsg('Shutdown request failed: ' + exc, 'error');
@@ -16423,3 +17183,295 @@ async function destroyProject(slug) {
   }
 }
 
+
+
+// ── Phase 54.6.328 (snapshot-versioning Phase 5) — Timeline modal ──────────
+//
+// Unified replacement for the old History modal + Snapshots modal. Three
+// scopes (Section / Chapter / Book) accessed via tabs; each row carries
+// the diff brief from the meta column. Compare-any-two via row checkboxes
+// + the existing /api/diff endpoint.
+
+let _tlScope = 'section';        // 'section' | 'chapter' | 'book'
+let _tlSelected = [];            // up to 2 row ids for compare
+
+function _tlBriefHtml(meta) {
+  if (!meta || typeof meta !== 'object') return '<span class="u-muted">—</span>';
+  const totals = meta.totals || meta;  // bundle vs prose shape
+  const wa = totals.words_added || 0;
+  const wr = totals.words_removed || 0;
+  const pa = totals.paragraphs_added || 0;
+  const pr = totals.paragraphs_removed || 0;
+  const ca = totals.citations_added || 0;
+  const cr = totals.citations_removed || 0;
+  const bits = [];
+  if (wa || wr) bits.push('+' + wa.toLocaleString() + '/-' + wr.toLocaleString() + 'w');
+  if (pa || pr) bits.push('+' + pa + '/-' + pr + '¶');
+  if (ca || cr) bits.push('+' + ca + '/-' + cr + 'cite');
+  if (meta.totals && (meta.totals.sections_total != null)) {
+    bits.push((meta.totals.sections_changed || 0) + '/' + meta.totals.sections_total + '§');
+  }
+  const struct = meta.structural;
+  if (struct) {
+    const sa = (struct.added_chapters || []).length;
+    const sr = (struct.removed_chapters || []).length;
+    const sn = (struct.renamed_chapters || []).length;
+    if (sa) bits.push('+' + sa + 'ch');
+    if (sr) bits.push('-' + sr + 'ch');
+    if (sn) bits.push('~' + sn + 'ch');
+  }
+  return bits.length
+    ? '<span class="u-muted">' + bits.join(' · ') + '</span>'
+    : '<span class="u-muted">—</span>';
+}
+
+function _tlSetActiveTab(scope) {
+  document.querySelectorAll('#tl-tabs button[data-tl-scope]').forEach(b => {
+    if (b.dataset.tlScope === scope) {
+      b.classList.add('active');
+      b.setAttribute('aria-selected', 'true');
+    } else {
+      b.classList.remove('active');
+      b.setAttribute('aria-selected', 'false');
+    }
+  });
+}
+
+async function tlSwitchScope(scope) {
+  _tlScope = scope;
+  _tlSelected = [];
+  _tlSetActiveTab(scope);
+  document.getElementById('tl-compare').classList.add('u-hidden');
+  document.getElementById('tl-body').innerHTML = '<p class="u-muted">Loading…</p>';
+  await tlRender();
+}
+
+async function tlRender() {
+  const body = document.getElementById('tl-body');
+  const status = document.getElementById('tl-status');
+  if (_tlScope === 'section') {
+    if (!currentDraftId) {
+      body.innerHTML = '<p class="u-muted">Open a section first to see its history.</p>';
+      status.textContent = '';
+      return;
+    }
+    const r = await fetch('/api/timeline/section/' + currentDraftId);
+    if (!r.ok) { body.innerHTML = '<p class="u-muted">No data.</p>'; return; }
+    const data = await r.json();
+    const entries = data.entries || [];
+    status.textContent = entries.length + ' entries';
+    body.innerHTML = _tlSectionHtml(entries);
+  } else if (_tlScope === 'chapter') {
+    if (!currentChapterId) {
+      body.innerHTML = '<p class="u-muted">Open a chapter or one of its sections first.</p>';
+      status.textContent = '';
+      return;
+    }
+    const r = await fetch('/api/timeline/chapter/' + currentChapterId);
+    if (!r.ok) { body.innerHTML = '<p class="u-muted">No data.</p>'; return; }
+    const data = await r.json();
+    status.textContent =
+      (data.sections || []).length + ' sections · ' +
+      (data.snapshots || []).length + ' snapshots';
+    body.innerHTML = _tlChapterHtml(data);
+  } else if (_tlScope === 'book') {
+    const bid = (window.SCIKNOW_BOOTSTRAP && window.SCIKNOW_BOOTSTRAP.bookId) || '';
+    if (!bid) {
+      body.innerHTML = '<p class="u-muted">No active book.</p>';
+      status.textContent = '';
+      return;
+    }
+    const r = await fetch('/api/timeline/book/' + bid);
+    if (!r.ok) { body.innerHTML = '<p class="u-muted">No data.</p>'; return; }
+    const data = await r.json();
+    const snaps = data.snapshots || [];
+    status.textContent = snaps.length + ' snapshots';
+    body.innerHTML = _tlBookHtml(snaps);
+  }
+}
+
+function _tlSectionHtml(entries) {
+  if (!entries.length) return '<p class="u-muted">No history yet for this section.</p>';
+  let html = '<table class="stats-table" style="width:100%;font-size:13px;">'
+    + '<tr><th style="width:32px;">·</th>'
+    + '<th>Version / snapshot</th><th>Date</th>'
+    + '<th style="text-align:right;">Words</th><th>Δ</th><th>Actions</th></tr>';
+  for (const e of entries) {
+    const checked = _tlSelected.includes(e.id) ? 'checked' : '';
+    const activeBadge = e.is_active
+      ? ' <span class="u-faint" style="color:var(--accent);">✓ active</span>'
+      : '';
+    const score = (e.extra && typeof e.extra.final_overall === 'number')
+      ? ' <span class="u-muted">score=' + e.extra.final_overall.toFixed(2) + '</span>'
+      : '';
+    html += '<tr><td><input type="checkbox" data-tl-id="' + _escHTML(e.id) + '" '
+      + checked + ' onchange="tlOnSelect(this)"></td>'
+      + '<td>'
+        + '<code>' + _escHTML(e.id.slice(0, 8)) + '</code> '
+        + '<span class="u-muted">' + _escHTML(e.kind) + '</span> '
+        + '<strong>' + _escHTML(e.label) + '</strong>'
+        + activeBadge + score
+      + '</td>'
+      + '<td class="u-muted">' + _escHTML(e.created_at.slice(0, 19)) + '</td>'
+      + '<td style="text-align:right;">' + (e.word_count || 0).toLocaleString() + '</td>'
+      + '<td>' + _tlBriefHtml(e.meta) + '</td>'
+      + '<td>'
+        + (e.kind === 'draft' && !e.is_active
+            ? '<button class="btn btn--sm" onclick="tlActivateDraft(\'' + _escHTML(e.id) + '\')" '
+              + 'title="Mark this draft version active so the reader + bibliography pick it up.">Activate</button> '
+            : '')
+        + (e.kind === 'snapshot'
+            ? '<button class="btn btn--sm" onclick="tlRestoreSnapshot(\'' + _escHTML(e.id) + '\')" '
+              + 'title="Insert this snapshot as a NEW draft version (non-destructive).">Restore</button>'
+            : '')
+      + '</td></tr>';
+  }
+  html += '</table>';
+  return html;
+}
+
+function _tlChapterHtml(data) {
+  let html = '';
+  const secs = data.sections || [];
+  if (secs.length) {
+    html += '<h4>Latest per section</h4>'
+      + '<table class="stats-table" style="width:100%;font-size:13px;">'
+      + '<tr><th>Section</th><th>v</th><th>Date</th>'
+      + '<th style="text-align:right;">Words</th><th>·</th></tr>';
+    for (const s of secs) {
+      html += '<tr><td>'
+        + (s.is_active ? '<span style="color:var(--accent);">✓</span> ' : '')
+        + _escHTML(s.section_type) + '</td>'
+        + '<td>' + (s.version || 0) + '</td>'
+        + '<td class="u-muted">' + _escHTML(s.created_at.slice(0, 19)) + '</td>'
+        + '<td style="text-align:right;">' + (s.word_count || 0).toLocaleString() + '</td>'
+        + '<td><button class="btn btn--sm" onclick="loadSection(\'' + _escHTML(s.id) + '\');closeModal(\'timeline-modal\');" '
+          + 'title="Open this section in the reader.">Open</button></td>'
+        + '</tr>';
+    }
+    html += '</table>';
+  }
+  const snaps = data.snapshots || [];
+  if (snaps.length) {
+    html += '<h4 style="margin-top:18px;">Chapter snapshots</h4>';
+    html += _tlSnapshotsTable(snaps, 'chapter');
+  }
+  return html || '<p class="u-muted">No history yet for this chapter.</p>';
+}
+
+function _tlBookHtml(snaps) {
+  if (!snaps.length) return '<p class="u-muted">No snapshots yet for this book.</p>';
+  return _tlSnapshotsTable(snaps, 'book');
+}
+
+function _tlSnapshotsTable(snaps, kind) {
+  let html = '<table class="stats-table" style="width:100%;font-size:13px;">'
+    + '<tr><th style="width:32px;">·</th>'
+    + '<th>Snapshot</th><th>Scope</th><th>Date</th>'
+    + '<th style="text-align:right;">Words</th><th>Δ</th><th>Actions</th></tr>';
+  for (const s of snaps) {
+    const checked = _tlSelected.includes(s.id) ? 'checked' : '';
+    const scopeTag = (s.scope === 'book')
+      ? '<span class="u-muted">book</span>'
+      : ('<span class="u-muted">chapter Ch.' + (s.chapter_number || '?') + '</span>');
+    html += '<tr><td><input type="checkbox" data-tl-id="' + _escHTML(s.id) + '" '
+      + checked + ' onchange="tlOnSelect(this)"></td>'
+      + '<td><code>' + _escHTML(s.id.slice(0, 8)) + '</code> '
+      + _escHTML(s.name || '') + '</td>'
+      + '<td>' + scopeTag + '</td>'
+      + '<td class="u-muted">' + _escHTML((s.created_at || '').slice(0, 19)) + '</td>'
+      + '<td style="text-align:right;">' + (s.word_count || 0).toLocaleString() + '</td>'
+      + '<td>' + _tlBriefHtml(s.meta) + '</td>'
+      + '<td><button class="btn btn--sm" onclick="tlRestoreSnapshot(\'' + _escHTML(s.id) + '\')" '
+        + 'title="Insert this snapshot as a NEW draft bundle (non-destructive).">Restore</button></td>'
+      + '</tr>';
+  }
+  html += '</table>';
+  return html;
+}
+
+function tlOnSelect(checkbox) {
+  const id = checkbox.dataset.tlId;
+  if (checkbox.checked) {
+    if (_tlSelected.length >= 2) {
+      const ev = _tlSelected.shift();
+      const old = document.querySelector(
+        '#tl-body input[data-tl-id="' + ev + '"]'
+      );
+      if (old) old.checked = false;
+    }
+    _tlSelected.push(id);
+  } else {
+    _tlSelected = _tlSelected.filter(x => x !== id);
+  }
+  if (_tlSelected.length === 2) {
+    tlShowCompare(_tlSelected[0], _tlSelected[1]);
+  } else {
+    document.getElementById('tl-compare').classList.add('u-hidden');
+  }
+}
+
+async function tlShowCompare(a, b) {
+  const pane = document.getElementById('tl-compare');
+  pane.classList.remove('u-hidden');
+  pane.innerHTML = '<p class="u-muted">Loading diff…</p>';
+  try {
+    const r = await fetch('/api/diff/' + encodeURIComponent(a) + '/' + encodeURIComponent(b));
+    if (!r.ok) {
+      pane.innerHTML = '<p class="u-muted">Diff endpoint requires both refs to be drafts. '
+        + 'Use `sciknow book diff &lt;a&gt; &lt;b&gt;` from the CLI for snapshot-vs-snapshot diffs.</p>';
+      return;
+    }
+    const data = await r.json();
+    pane.innerHTML = '<h4>Compare</h4>'
+      + '<div style="line-height:1.5;font-family:var(--font-serif);">'
+      + (data.diff_html || '<em class="u-muted">No textual differences.</em>')
+      + '</div>';
+  } catch (exc) {
+    pane.innerHTML = '<p class="u-muted">Diff failed: ' + _escHTML(String(exc)) + '</p>';
+  }
+}
+
+async function tlActivateDraft(id) {
+  if (!id) return;
+  const r = await fetch('/api/draft/' + id + '/activate', {method: 'POST'});
+  if (!r.ok) {
+    alert('Activate failed (' + r.status + ')');
+    return;
+  }
+  await tlRender();
+  if (currentDraftId) loadSection(currentDraftId);
+}
+
+async function tlRestoreSnapshot(id) {
+  if (!id) return;
+  if (!confirm('Restore this snapshot? Bundles insert NEW draft versions; section snapshots overwrite the active draft.')) return;
+  // Try the bundle restore endpoint (works for chapter + book scope).
+  let r = await fetch('/api/snapshot/restore-bundle/' + id, {method: 'POST'});
+  if (!r.ok && r.status === 400) {
+    // Probably scope='draft' — fall back to overwriting active draft.
+    const cr = await fetch('/api/snapshot-content/' + id);
+    if (!cr.ok) { alert('Snapshot not found'); return; }
+    const sd = await cr.json();
+    if (currentDraftId) {
+      const fd = new FormData();
+      fd.append('content', sd.content || '');
+      await fetch('/edit/' + currentDraftId, {method: 'POST', body: fd});
+      loadSection(currentDraftId);
+    }
+  }
+  if (r.ok) {
+    await refreshAfterJob(null);
+    await tlRender();
+  }
+}
+
+function openTimelineModal(scope) {
+  _tlSelected = [];
+  openModal('timeline-modal');
+  // Default scope: section if a draft is open, else chapter, else book.
+  const initial = scope || (
+    currentDraftId ? 'section' : (currentChapterId ? 'chapter' : 'book')
+  );
+  tlSwitchScope(initial);
+}

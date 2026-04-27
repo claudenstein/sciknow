@@ -962,6 +962,12 @@ async def api_server_shutdown(request: Request):
 
     The frontend confirms twice before calling this (it IS a destructive
     UX — any unsaved job is killed).
+
+    Phase 54.6.x — body field ``stop_substrate=true`` also stops every
+    running llama-server role (writer / embedder / reranker / vlm) so
+    the user gets a fully-quiesced machine in one click. Best-effort:
+    a substrate-down failure is logged but does NOT prevent the server
+    shutdown — the whole point is "stop everything cleanly".
     """
     import os as _os
     import signal as _signal
@@ -972,13 +978,36 @@ async def api_server_shutdown(request: Request):
         body = await request.json()
     except Exception:
         pass
+    stop_substrate = bool(body.get("stop_substrate", False))
+    stopped_roles: list[str] = []
+    if stop_substrate:
+        from sciknow.web import app as _app
+        try:
+            from sciknow.infer import server as _infer_srv
+            for r in ("writer", "embedder", "reranker", "vlm"):
+                try:
+                    if _infer_srv.down(r, timeout=3.0):
+                        stopped_roles.append(r)
+                except Exception as exc:  # noqa: BLE001
+                    _app.logger.warning(
+                        "shutdown: substrate.down(%s) failed: %s — continuing", r, exc,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            _app.logger.warning(
+                "shutdown: importing infer.server failed: %s — skipping substrate stop",
+                exc,
+            )
     # Delay 200ms so the HTTP response can flush before the process dies.
     def _fire():
         _time.sleep(0.2)
         _os.kill(_os.getpid(), _signal.SIGTERM)
     _threading.Thread(target=_fire, daemon=True).start()
+    msg = "Server shutting down."
+    if stopped_roles:
+        msg += f" Stopped llama-server roles: {', '.join(stopped_roles)}."
+    msg += " Re-run `sciknow book serve <book>` in your terminal to start again."
     return JSONResponse({
         "ok": True,
-        "message": "Server shutting down. Re-run `sciknow book serve <book>`"
-                   " in your terminal to pick up the new active project.",
+        "stopped_substrate_roles": stopped_roles,
+        "message": msg,
     })

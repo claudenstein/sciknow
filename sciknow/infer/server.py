@@ -45,19 +45,61 @@ ROLE_DEFAULTS: dict[str, dict] = {
     },
     "embedder": {
         "port": 8091,
+        # V2_FINAL Stage 3: --ctx-size is the *total* context across all
+        # parallel slots. With --parallel 4 + --ctx-size 8192, each slot
+        # gets only 2048 tokens — too tight for real corpus chunks (some
+        # exceed 2048 tokens after tokenisation). Bumping to 32768 gives
+        # each of 4 slots its own 8192 window, matching bge-m3's max.
         "model": settings.embedder_model_gguf,
-        "ctx_size": 8192,
+        "ctx_size": 32768,
         "n_gpu_layers": 999,
         "parallel": 4,
-        "extra_flags": ["--embedding", "--pooling", "mean"],
+        # --ubatch-size must be >= the longest single input or
+        # llama-server returns 500 "input too large to process".
+        # bge-m3 honours up to 8192 tokens; chunker.py already caps at
+        # 8192, so matching ubatch to per-slot ctx is the safe default.
+        "extra_flags": [
+            "--embedding", "--pooling", "mean",
+            "--batch-size", "8192",
+            "--ubatch-size", "8192",
+        ],
     },
     "reranker": {
         "port": 8092,
         "model": settings.reranker_model_gguf,
-        "ctx_size": 4096,
+        # bge-reranker-v2-m3 supports 8192 max sequence length. We set
+        # ctx_size, batch_size, and ubatch_size all to 8192 because the
+        # reranker receives (query, document) pairs where the document
+        # can be a RAPTOR summary node (full summary_text up to ~700
+        # tokens) — the prior 4096/512 defaults rejected pairs > 512
+        # tokens with `input is too large to process. increase the
+        # physical batch size`. Same reasoning as the embedder role.
+        "ctx_size": 8192,
         "n_gpu_layers": 999,
         "parallel": 1,
-        "extra_flags": ["--reranking"],
+        "extra_flags": [
+            "--reranking",
+            "--batch-size", "8192",
+            "--ubatch-size", "8192",
+        ],
+    },
+    # v2.0 — visuals captioner. Loads a multimodal Qwen3-VL GGUF
+    # + the mmproj sidecar that bridges the vision encoder into the
+    # LM embedding space. Hot-swaps with the writer on a 3090 (both
+    # ~17 GB) — `corpus caption-visuals` manages the down/up cycle
+    # so users don't have to think about VRAM pressure during a
+    # captioning batch.
+    "vlm": {
+        "port": 8093,
+        "model": settings.vlm_model_gguf,
+        "mmproj": settings.vlm_mmproj_gguf,
+        "ctx_size": 16384,
+        "n_gpu_layers": 999,
+        "parallel": 1,
+        "extra_flags": [
+            "--cont-batching",
+            "--flash-attn", "on",
+        ],
     },
 }
 
@@ -126,6 +168,7 @@ def _resolve_url(role: str) -> str:
         "writer": settings.infer_writer_url,
         "embedder": settings.infer_embedder_url,
         "reranker": settings.infer_reranker_url,
+        "vlm": settings.infer_vlm_url,
     }[role]
 
 
@@ -177,6 +220,15 @@ def _build_argv(role: str, profile: str = "default") -> list[str]:
         "--parallel", str(cfg["parallel"]),
         "--log-colors", "off",
     ]
+    # Multimodal projector — required for vision-capable roles.
+    mmproj = cfg.get("mmproj")
+    if mmproj:
+        if not Path(str(mmproj)).exists():
+            raise RuntimeError(
+                f"Multimodal projector not found at {mmproj!r}. Set "
+                f"{role.upper()}_MMPROJ_GGUF in .env."
+            )
+        argv += ["--mmproj", str(mmproj)]
 
     # Profile overrides
     if profile == "low-vram" and role in ("embedder", "reranker"):
@@ -320,6 +372,112 @@ def _tail_log(path: Path, n: int = 40) -> str:
 
 def tail_log(role: str, n: int = 40) -> str:
     return _tail_log(_log_file(role), n=n)
+
+
+def pause_for_ingest(
+    roles: list[str] | None = None,
+    *,
+    restart_on_exit: bool = True,
+):
+    """Context manager that stops the writer/embedder/reranker for the
+    duration of an ingest call so MinerU / Marker get the GPU.
+
+    Phase 54.6.x — the user's own complaint: if I'm ingesting, I'm not
+    writing, so why is the writer holding 18 GB of VRAM and forcing
+    MinerU onto CPU? This helper:
+
+      1. Snapshots which configured roles currently have a healthy
+         llama-server (writer / embedder / reranker by default).
+      2. Stops each one (SIGTERM, fall back to SIGKILL).
+      3. Yields.
+      4. On exit, restarts every role that was up at entry — best-effort.
+         A restart failure is logged but does NOT raise; the user can
+         always re-up manually.
+
+    Used by the PDF converter (when it detects GPU pressure caused by
+    sciknow's own llama-server processes) and by the corpus / db
+    ingest commands as a defensive wrap.
+
+    Returns the list of (role, ProcInfo-at-entry) tuples for callers
+    that want to log what was paused.
+    """
+    import contextlib
+    import logging as _logging
+    log = _logging.getLogger("sciknow.infer.server")
+
+    if roles is None:
+        # The three roles that can pin VRAM. vlm intentionally NOT
+        # paused — the converter MIGHT use it (the auto VLM-Pro path
+        # doesn't go through the substrate today, but if it does in
+        # future, we don't want to kill the very process the converter
+        # is about to call).
+        roles = ["writer", "embedder", "reranker"]
+
+    @contextlib.contextmanager
+    def _ctx():
+        snapshots: list[tuple[str, "ProcInfo"]] = []
+        for r in roles:
+            try:
+                pid = _read_pid(r)
+                if pid and health(r, timeout=0.3):
+                    cfg = ROLE_DEFAULTS.get(r) or {}
+                    snapshots.append((r, ProcInfo(
+                        role=r,
+                        port=int(cfg.get("port", 0)),
+                        pid=pid,
+                        model=str(cfg.get("model", "")),
+                        healthy=True,
+                        log_path=_log_file(r),
+                    )))
+            except Exception as exc:  # noqa: BLE001
+                log.debug("pause_for_ingest: snapshot %s failed: %s", r, exc)
+
+        for r, _info in snapshots:
+            try:
+                down(r, timeout=5.0)
+                log.info(
+                    "pause_for_ingest: stopped role=%s to free GPU for ingest",
+                    r,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "pause_for_ingest: down(%s) raised %s — continuing", r, exc,
+                )
+
+        try:
+            yield snapshots
+        finally:
+            if not restart_on_exit:
+                return
+            for r, _info in snapshots:
+                try:
+                    up(r, wait=False)
+                    log.info("pause_for_ingest: restarting role=%s", r)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "pause_for_ingest: up(%s) failed on restart: %s — "
+                        "user can re-up manually with `sciknow infer up "
+                        "--role %s`",
+                        r, exc, r,
+                    )
+
+    return _ctx()
+
+
+def running_role_pids() -> set[int]:
+    """Return the set of PIDs that the substrate is currently
+    managing (writer/embedder/reranker/vlm). Used by the PDF
+    converter to decide whether GPU pressure is "our own" (safe to
+    pause) vs. external (must fall back to CPU)."""
+    pids: set[int] = set()
+    for role in ROLE_DEFAULTS:
+        try:
+            pid = _read_pid(role)
+            if pid:
+                pids.add(int(pid))
+        except Exception:  # noqa: BLE001
+            pass
+    return pids
 
 
 # Best-effort: if this Python process started a writer subprocess and

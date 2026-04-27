@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     infer_writer_url: str = "http://127.0.0.1:8090"
     infer_embedder_url: str = "http://127.0.0.1:8091"
     infer_reranker_url: str = "http://127.0.0.1:8092"
+    # v2.0 visuals captioner — Qwen3-VL via llama-server. Replaces the
+    # v1 Ollama qwen2.5vl path that was kept-by-design through v2.0.
+    # Hot-swaps with the writer role (both are ~17 GB, can't co-reside
+    # on a 3090); `corpus caption-visuals` manages the swap automatically.
+    infer_vlm_url: str = "http://127.0.0.1:8093"
     # Profile name passed to `sciknow infer up`. "default" = three roles
     # co-resident on the GPU; "low-vram" = embedder/reranker on CPU;
     # "spec-dec" = writer + draft model for speculative decoding.
@@ -77,8 +82,15 @@ class Settings(BaseSettings):
     llama_server_binary: str = "/home/kartofel/Claude/llama.cpp-build/llama.cpp/build/bin/llama-server"
     # GGUF paths or HF ids per role. Empty string → role can't start.
     writer_model_gguf: str = "/home/kartofel/Claude/huggingface/unsloth-Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_M.gguf"
-    embedder_model_gguf: str = "/home/kartofel/Claude/huggingface/bge-m3-gguf/bge-m3-Q8_0.gguf"
-    reranker_model_gguf: str = "/home/kartofel/Claude/huggingface/bge-reranker-v2-m3-gguf/bge-reranker-v2-m3-Q8_0.gguf"
+    embedder_model_gguf: str = "/home/kartofel/Claude/huggingface/gpustack-bge-m3-gguf/bge-m3-Q8_0.gguf"
+    reranker_model_gguf: str = "/home/kartofel/Claude/huggingface/gpustack-bge-reranker-v2-m3-gguf/bge-reranker-v2-m3-Q8_0.gguf"
+    # v2.0 visuals captioner — Qwen3-VL-30B-A3B-Instruct (MoE, 3B
+    # active / 30B total). Optimised for figure/chart/equation
+    # captioning. ``vlm_mmproj_gguf`` is the multimodal projector
+    # sidecar (vision encoder → LM embedding bridge). Both are
+    # required for the role to start.
+    vlm_model_gguf: str = "/home/kartofel/Claude/huggingface/unsloth-Qwen3-VL-30B-A3B-Instruct-GGUF/Qwen3-VL-30B-A3B-Instruct-Q4_K_M.gguf"
+    vlm_mmproj_gguf: str = "/home/kartofel/Claude/huggingface/unsloth-Qwen3-VL-30B-A3B-Instruct-GGUF/mmproj-F16.gguf"
     # Optional draft model for spec-dec profile.
     draft_model_gguf: str = ""
     # Logical model names (used in /v1/chat requests' "model" field +
@@ -87,6 +99,7 @@ class Settings(BaseSettings):
     writer_model_name: str = "qwen3.6-27b"
     embedder_model_name: str = "bge-m3"
     reranker_model_name: str = "bge-reranker-v2-m3"
+    vlm_model_name: str = "qwen3-vl-30b-a3b"
     # Phase A bridge: when True, rag.llm dispatches to sciknow.infer.client
     # (llama-server). When False, uses the v1 ollama path. Default True
     # for v2; flip to False to roll back to v1 within a single commit.
@@ -101,6 +114,12 @@ class Settings(BaseSettings):
     # work: a sparse sidecar role.
     use_llamacpp_embedder: bool = True
     use_llamacpp_reranker: bool = True
+    # v2.0 visuals captioner toggle. When True (default), `corpus
+    # caption-visuals` dispatches to the llama-server vlm role
+    # (port 8093) with the configured Qwen3-VL GGUF + mmproj
+    # sidecar. When False, falls back to the v1 Ollama qwen2.5vl
+    # path (rollback hatch — ``uv add ollama`` first).
+    use_llamacpp_vlm: bool = True
 
     # Models
     embedding_model: str = "BAAI/bge-m3"
@@ -256,6 +275,24 @@ class Settings(BaseSettings):
     # explicitly pins the deprecated pipeline backend (emits a
     # one-shot deprecation warning).
     pdf_converter_backend: str = "auto"
+
+    # Phase 54.6.x — PDF converter device selection. Values:
+    #   "auto" — use GPU if ≥ pdf_converter_min_free_vram_gib free,
+    #             otherwise fall back to CPU automatically (default).
+    #   "gpu"  — force GPU; OOM if VRAM is short.
+    #   "cpu"  — force CPU; slower but works alongside an active
+    #             writer model that has VRAM pinned.
+    # The auto-fallback is what most users want when running ingest
+    # while `sciknow book serve` is up: the writer pins ~18 GiB and
+    # the GPU MinerU/Marker backends OOM. Auto picks CPU for that
+    # session and the user doesn't have to think about it.
+    pdf_converter_device: str = "auto"
+
+    # Minimum free VRAM (GiB) on GPU 0 for "auto" device mode to
+    # stay on GPU. Below this threshold ingest falls back to CPU.
+    # 6 GiB ≈ MinerU pipeline footprint; tune higher if you're also
+    # running a non-sciknow GPU job. Phase 54.6.x.
+    pdf_converter_min_free_vram_gib: float = 6.0
 
     # Phase 21 — explicit override for the VLM model name when running
     # MinerU 2.5-Pro. Empty string falls back to the package default

@@ -3303,31 +3303,47 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
     # now?"). Compact two-col: role → model (trimmed to 28 chars).
     # Phase 54.6.244 — added book writer / reviewer / autowrite
     # scorer / caption VLM rows so the whole book pipeline is
-    # auditable from the dashboard. Inherited slots (override = None)
-    # render with a subtle "↑llm" suffix so the user can tell
-    # "explicitly set to llm_main" apart from "inherits llm_main".
+    # auditable from the dashboard.
+    # v2 Phase A — when ``v2_writer_active`` is True, the writer GGUF
+    # handles ALL writer-class roles (single canonical writer per
+    # spec §2.1), so the per-role rows would all repeat the same
+    # value. We collapse them in v2 mode and only show llm + the
+    # roles that genuinely differ (caption VLM, mineru VLM,
+    # embedder, reranker). On v1 fallback (USE_LLAMACPP_WRITER=False)
+    # the per-role overrides come back so .env-configured per-role
+    # tags are auditable.
     if models:
         gpu_tbl.add_row("")
         gpu_tbl.add_row(Text("models", style=C_DIM))
         llm_main = models.get("llm_main")
-        rows_to_show: list[tuple[str, str | None, bool]] = [
-            ("llm",      llm_main, False),
-            ("fast",     models.get("llm_fast")
-                         if models.get("llm_fast") != llm_main else None,
-                         False),
-            ("book-out", models.get("book_outline") or llm_main,
-                         models.get("book_outline") is None),
-            ("book-wr",  models.get("book_write")  or llm_main,
-                         models.get("book_write") is None),
-            ("book-rv",  models.get("book_review") or llm_main,
-                         models.get("book_review") is None),
-            ("aw-score", models.get("autowrite_scorer") or llm_main,
-                         models.get("autowrite_scorer") is None),
-            ("caption",  models.get("caption_vlm"), False),
-            ("vlm-pro",  models.get("mineru_vlm_model"), False),
-            ("embedder", models.get("embedder"), False),
-            ("reranker", models.get("reranker"), False),
-        ]
+        v2_writer = bool(models.get("v2_writer_active"))
+        if v2_writer:
+            rows_to_show: list[tuple[str, str | None, bool]] = [
+                ("writer",   llm_main, False),
+                ("caption",  models.get("caption_vlm"), False),
+                ("vlm-pro",  models.get("mineru_vlm_model"), False),
+                ("embedder", models.get("embedder"), False),
+                ("reranker", models.get("reranker"), False),
+            ]
+        else:
+            rows_to_show = [
+                ("llm",      llm_main, False),
+                ("fast",     models.get("llm_fast")
+                             if models.get("llm_fast") != llm_main else None,
+                             False),
+                ("book-out", models.get("book_outline") or llm_main,
+                             models.get("book_outline") is None),
+                ("book-wr",  models.get("book_write")  or llm_main,
+                             models.get("book_write") is None),
+                ("book-rv",  models.get("book_review") or llm_main,
+                             models.get("book_review") is None),
+                ("aw-score", models.get("autowrite_scorer") or llm_main,
+                             models.get("autowrite_scorer") is None),
+                ("caption",  models.get("caption_vlm"), False),
+                ("vlm-pro",  models.get("mineru_vlm_model"), False),
+                ("embedder", models.get("embedder"), False),
+                ("reranker", models.get("reranker"), False),
+            ]
         for role, name, inherited in rows_to_show:
             if not name:
                 continue
@@ -3739,40 +3755,13 @@ def _build_monitor_layout(snap: dict, *, days: int, watch: int):
                 + Text(f"   ×{tf['count']}", style=C_ERR),
             )
 
-    # Phase 54.6.294 — slow-ingest leaderboard. Shows the top-5 docs
-    # by total ingest wall-clock so the operator can identify
-    # outlier PDFs eating pipeline time.  Each row shows the
-    # dominant stage for that doc as a compact tag.
-    slow_docs = snap.get("slow_docs") or []
-    if slow_docs:
-        footer_tbl.add_row("")
-        footer_tbl.add_row(
-            Text("slow docs  ", style=C_DIM)
-            + Text("(top 5 by total wall-clock)", style=C_DIM),
-        )
-        for d in slow_docs:
-            total_s = (d.get("total_ms", 0) or 0) / 1000
-            title = (d.get("title") or "?")[:55]
-            stage_ms = d.get("stage_ms") or {}
-            if stage_ms:
-                dom_stage = max(stage_ms, key=stage_ms.get)
-                dom_ms = stage_ms[dom_stage]
-                dom_pct = (dom_ms / max(1, d["total_ms"])) * 100
-                dom_tag = f"{dom_stage}·{dom_pct:.0f}%"
-            else:
-                dom_tag = "?"
-            colour = (
-                C_ERR if total_s > 600 else
-                C_WARN if total_s > 120 else C_DIM
-            )
-            row = Table.grid(padding=(0, 1), expand=True)
-            row.add_column(width=9, justify="right", style=colour)
-            row.add_column(width=15, style=C_DIM)
-            row.add_column(ratio=1, style=C_VALUE)
-            row.add_row(
-                f"{total_s:.0f}s", dom_tag, title,
-            )
-            footer_tbl.add_row(row)
+    # Phase 54.6.294 — slow-ingest leaderboard removed from the
+    # dashboard footer (2026-04-26). Was visually noisy (5 rows of
+    # title + stage tag) and rarely actionable on a stable corpus —
+    # the same data still ships in `snap['slow_docs']` for any
+    # downstream JSON consumer that wants it. The helper function
+    # `_slow_docs_leaderboard` and the snapshot key are preserved so
+    # `library monitor --json` consumers don't break.
 
     # Phase 54.6.236 — system summary footer bundling
     # cost + visuals coverage + RAPTOR shape. Uses empty space in
@@ -6666,7 +6655,11 @@ def expand(
                 _log(f"INGEST {ref_key}  | {title}  (already in DB)")
             elif status == "failed":
                 failed_ingest += 1
-                _say("✗", "red", "INGEST-FAIL", (error or "")[:50])
+                # Phase 54.6.x — drop the 50-char truncation so the
+                # CLI shows the real remediation hint. expand.log
+                # still records the multi-line error in full.
+                err_line = (error or "").splitlines()[0] if error else ""
+                _say("✗", "red", "INGEST-FAIL", err_line)
                 _log(f"INGEST_FAIL {ref_key}  | {title}  | {error or ''}")
                 # Phase 49.1 — persist the failure so the next run
                 # skips this ref by default. User can force a retry
@@ -9041,7 +9034,12 @@ def download_dois(
                 _say("⏭", "dim", "INGEST-SKIP", "already in DB (hash match)")
             elif status == "failed":
                 failed_ingest += 1
-                _say("✗", "red", "INGEST-FAIL", (error or "")[:50])
+                # Phase 54.6.x — the previous 50-char truncation hid
+                # the actual "lib<name>.so missing" / "uv pip install
+                # ..." remediation lines from the user. First line
+                # only, but no length cap so the diagnosis is visible.
+                err_line = (error or "").splitlines()[0] if error else ""
+                _say("✗", "red", "INGEST-FAIL", err_line)
 
         ingest_results = {"done": 0, "skipped": 0, "failed": 0}
         ingest_failed_files: list[tuple[str, str]] = []
@@ -10030,15 +10028,11 @@ def link_visual_mentions_cmd(
 def caption_visuals_cmd(
     model: str = typer.Option(
         None, "--model",
-        help="Vision-LLM tag to use via Ollama. Default: "
-             "settings.visuals_caption_model if set (let the 54.6.74 "
-             "VLM sweep winner persist via .env) else qwen2.5vl:32b. "
-             "(~19 GB Q4, fits a 3090 with the main LLM unloaded — "
-             "strongest open VLM that fits for document+chart quality). "
-             "For faster / lower-VRAM: qwen2.5vl:7b (~6 GB, co-resident "
-             "with an LLM). Other options: internvl3:14b, llama3.2-vision:11b, "
-             "minicpm-v:8b. `ollama ps` to unload other models; "
-             "`ollama pull <model>` to fetch.",
+        help="Vision model label sent to llama-server. Default: "
+             "settings.vlm_model_name (qwen3-vl-30b-a3b). The actual "
+             "GGUF + mmproj sidecar are configured via VLM_MODEL_GGUF "
+             "and VLM_MMPROJ_GGUF in .env; this flag is just the label "
+             "stamped on each row's ai_caption_model column.",
     ),
     kind: str = typer.Option(
         "figure,chart", "--kind",
@@ -10059,44 +10053,53 @@ def caption_visuals_cmd(
         help="If set, skip rows whose existing caption is short — forces "
              "re-caption of thin placeholders without re-doing good ones.",
     ),
+    keep_writer: bool = typer.Option(
+        False, "--keep-writer",
+        help="Don't auto-stop the writer role to free VRAM for the VLM. "
+             "By default we hot-swap (writer down → vlm up → caption batch "
+             "→ vlm down → writer up) because both are ~17 GB and don't "
+             "co-reside on a 3090. Set this flag if you have a card with "
+             "enough headroom (e.g. DGX Spark) or if writer was already "
+             "down before invocation.",
+    ),
 ):
-    """Phase 54.6.72 (#1) — run a vision LLM over every image visual and
-    store a one-paragraph caption in the `ai_caption` column.
+    """Run a multimodal LLM over every image visual and store a
+    one-paragraph caption in the ``ai_caption`` column.
 
-    Hydrates the 9,988 silent MinerU-extracted figures + charts for
-    semantic retrieval and for real previews in the wiki Visuals tab.
+    Hydrates the silent MinerU-extracted figures + charts for semantic
+    retrieval and for real previews in the wiki Visuals tab.
 
-    Model is invoked via Ollama's image endpoint. Requires the model
-    to already be pulled — this command does NOT auto-pull (the pull
-    is a ~6-20 GB download and we want it explicit).
+    v2.0 — captioning runs through the llama-server `vlm` role on
+    port 8093 (Qwen3-VL-30B-A3B-Instruct by default). Requires the
+    GGUF + mmproj sidecar to be configured via ``VLM_MODEL_GGUF`` /
+    ``VLM_MMPROJ_GGUF`` in .env.
 
-    Quality note: default flipped from qwen2.5vl:7b → qwen2.5vl:32b in
-    Phase 54.6.73 after the user directive "always optimize for best
-    quality". On the 3090 the 32B variant (Q4 quant, ~19 GB VRAM) fits
-    only when other models are unloaded (``ollama stop <current>``); it
-    runs ~3-4× slower than 7B but produces materially better captions
-    for scientific plots and tables (MinerU's own PDF parser is
-    Qwen2-VL-derived, so Qwen2.5-VL inherits the document lineage).
-    Pass ``--model qwen2.5vl:7b`` to trade quality for speed /
-    co-residence with the LLM.
+    On a 3090 the writer (~17 GB) and the VLM (~17 GB) can't
+    co-reside, so this command hot-swaps:
+
+        writer down → vlm up → caption batch → vlm down → writer up
+
+    The swap costs ~10-15 s of cold-loads each direction, amortised
+    over the whole batch (typically hundreds of figures × ~3-5 s
+    each). Pass ``--keep-writer`` to skip the swap when running on
+    a card with more headroom.
 
     Examples:
 
-      ollama pull qwen2.5vl:32b                       # recommended
-      ollama stop qwen3:30b-a3b-instruct-2507-q4_K_M  # free VRAM
-      sciknow db caption-visuals                       # caption all pending
-      sciknow db caption-visuals -n 20 --force         # re-caption first 20
-      sciknow db caption-visuals --kind figure         # figures only
-      sciknow db caption-visuals --model qwen2.5vl:7b  # faster, lower quality
+      sciknow corpus caption-visuals                    # caption all pending
+      sciknow corpus caption-visuals -n 20 --force      # re-caption first 20
+      sciknow corpus caption-visuals --kind figure      # figures only
+      sciknow corpus caption-visuals --keep-writer      # skip auto-swap
     """
     from sciknow.cli import preflight
     preflight(qdrant=False)
 
-    import ollama
     from sciknow.config import settings
     from sciknow.core.visuals_caption import (
         PROMPT_SYSTEM, PROMPT_USER, resolve_asset_path,
     )
+    from sciknow.infer import client as infer_client
+    from sciknow.infer import server as infer_server
     from sciknow.storage.db import get_session
     from sqlalchemy import text as sql_text
 
@@ -10105,26 +10108,44 @@ def caption_visuals_cmd(
         console.print("[red]--kind must be a non-empty comma-separated list[/red]")
         raise typer.Exit(2)
 
-    # Phase 54.6.74 — resolve the effective model: explicit --model
-    # wins, else settings.visuals_caption_model (set by .env after
-    # the VLM sweep picks a winner), else the CLI default.
+    # Resolve the model label that gets stamped on each row. The
+    # actual GGUF + mmproj sidecar served by llama-server is
+    # configured separately via VLM_MODEL_GGUF / VLM_MMPROJ_GGUF.
     if model is None:
-        model = settings.visuals_caption_model or "qwen2.5vl:32b"
+        model = settings.vlm_model_name
 
-    # Sanity-check model availability up front so we fail fast.
-    client = ollama.Client(host=settings.ollama_host)
-    try:
-        installed = {m.model for m in client.list().models}
-    except Exception as exc:
-        console.print(f"[red]Ollama unreachable:[/red] {exc}")
-        raise typer.Exit(1)
-    if model not in installed:
+    # Hot-swap: ensure the vlm role is healthy. On a 3090 we have to
+    # take the writer down first because the VLM needs the same
+    # ~17 GB the writer is holding. Track which roles we touched so
+    # we can restore them after the captioning batch.
+    writer_was_up = False
+    swapped = False
+    if not infer_server.health("vlm"):
+        if not keep_writer and infer_server.health("writer"):
+            writer_was_up = True
+            console.print(
+                "[dim]Hot-swap: stopping writer to free VRAM for the VLM…[/dim]"
+            )
+            infer_server.down("writer")
         console.print(
-            f"[red]Model {model!r} not installed.[/red] Run:\n"
-            f"  [bold]ollama pull {model}[/bold]\n"
-            f"and retry."
+            f"[dim]Starting vlm role on :{infer_server.ROLE_DEFAULTS['vlm']['port']}…[/dim]"
         )
-        raise typer.Exit(1)
+        try:
+            info = infer_server.up("vlm")
+            swapped = True
+        except Exception as exc:
+            console.print(f"[red]Failed to start VLM role:[/red] {exc}")
+            if writer_was_up:
+                console.print("[dim]Restoring writer…[/dim]")
+                try:
+                    infer_server.up("writer")
+                except Exception:
+                    pass
+            raise typer.Exit(1)
+        console.print(
+            f"[green]✓ vlm healthy[/green] :{info.port} pid={info.pid} "
+            f"model={Path(info.model).name}"
+        )
 
     # Fetch pending rows.
     kind_ph = ", ".join(f":k{i}" for i, _ in enumerate(kinds))
@@ -10154,67 +10175,84 @@ def caption_visuals_cmd(
     captioned = 0
     skipped = 0
     t0 = time.monotonic()
-    for idx, (vid, doc_id, vkind, asset_path, existing_caption, fig_num) in enumerate(rows, 1):
-        img_path = resolve_asset_path(doc_id, asset_path)
-        if img_path is None:
-            skipped += 1
-            console.print(f"  [dim][{idx}/{total}][/dim] "
-                          f"[yellow]⊘ SKIP[/yellow]  "
-                          f"{fig_num or vkind} · image file missing on disk")
-            continue
+    try:
+        for idx, (vid, doc_id, vkind, asset_path, existing_caption, fig_num) in enumerate(rows, 1):
+            img_path = resolve_asset_path(doc_id, asset_path)
+            if img_path is None:
+                skipped += 1
+                console.print(f"  [dim][{idx}/{total}][/dim] "
+                              f"[yellow]⊘ SKIP[/yellow]  "
+                              f"{fig_num or vkind} · image file missing on disk")
+                continue
 
-        # Compose a short, targeted prompt. Existing MinerU caption is
-        # usually empty or the raw "Figure 1" line — we pass it as
-        # context anyway so the VLM can refine rather than ignore it.
-        user_prompt = PROMPT_USER.format(
-            kind=vkind,
-            existing_caption=(existing_caption or "").strip() or "(none)",
-        )
-        try:
-            resp = client.chat(
-                model=model,
-                messages=[
-                    {"role": "system", "content": PROMPT_SYSTEM},
-                    {"role": "user", "content": user_prompt,
-                     "images": [str(img_path)]},
-                ],
-                options={"temperature": 0.2, "num_predict": 300},
-                keep_alive=-1,
+            # Compose a short, targeted prompt. Existing MinerU caption is
+            # usually empty or the raw "Figure 1" line — we pass it as
+            # context anyway so the VLM can refine rather than ignore it.
+            user_prompt = PROMPT_USER.format(
+                kind=vkind,
+                existing_caption=(existing_caption or "").strip() or "(none)",
             )
-            ai_caption = (resp.get("message") or {}).get("content", "").strip()
-        except Exception as exc:
-            skipped += 1
-            console.print(f"  [dim][{idx}/{total}][/dim] "
-                          f"[red]⚠ FAIL[/red]  {fig_num or vkind}  · {exc}")
-            continue
+            try:
+                ai_caption = infer_client.chat_with_image(
+                    system=PROMPT_SYSTEM,
+                    user=user_prompt,
+                    image_paths=[img_path],
+                    model=model,
+                    temperature=0.2,
+                    num_predict=300,
+                )
+            except Exception as exc:
+                skipped += 1
+                console.print(f"  [dim][{idx}/{total}][/dim] "
+                              f"[red]⚠ FAIL[/red]  {fig_num or vkind}  · {exc}")
+                continue
 
-        if not ai_caption or len(ai_caption) < 20:
-            skipped += 1
-            console.print(f"  [dim][{idx}/{total}][/dim] "
-                          f"[yellow]⊘ SKIP[/yellow]  {fig_num or vkind}  · "
-                          f"caption too short")
-            continue
+            if not ai_caption or len(ai_caption) < 20:
+                skipped += 1
+                console.print(f"  [dim][{idx}/{total}][/dim] "
+                              f"[yellow]⊘ SKIP[/yellow]  {fig_num or vkind}  · "
+                              f"caption too short")
+                continue
 
-        with get_session() as session:
-            session.execute(sql_text("""
-                UPDATE visuals SET
-                  ai_caption = :cap,
-                  ai_caption_model = :mdl,
-                  ai_captioned_at = now()
-                WHERE id::text = :vid
-            """), {"cap": ai_caption.replace("\x00", ""),
-                   "mdl": model, "vid": vid})
-            session.commit()
-        captioned += 1
-        preview = ai_caption[:70].replace("\n", " ")
-        console.print(
-            f"  [dim][{idx}/{total}][/dim] "
-            f"[green]✓ CAP[/green]  {fig_num or vkind}  · {preview}"
-        )
-        if idx % 50 == 0:
-            rate = idx / max(0.01, time.monotonic() - t0)
-            eta = (total - idx) / max(0.01, rate)
-            console.print(f"  [dim]… {rate:.2f}/s, eta {eta:.0f}s[/dim]")
+            with get_session() as session:
+                session.execute(sql_text("""
+                    UPDATE visuals SET
+                      ai_caption = :cap,
+                      ai_caption_model = :mdl,
+                      ai_captioned_at = now()
+                    WHERE id::text = :vid
+                """), {"cap": ai_caption.replace("\x00", ""),
+                       "mdl": model, "vid": vid})
+                session.commit()
+            captioned += 1
+            preview = ai_caption[:70].replace("\n", " ")
+            console.print(
+                f"  [dim][{idx}/{total}][/dim] "
+                f"[green]✓ CAP[/green]  {fig_num or vkind}  · {preview}"
+            )
+            if idx % 50 == 0:
+                rate = idx / max(0.01, time.monotonic() - t0)
+                eta = (total - idx) / max(0.01, rate)
+                console.print(f"  [dim]… {rate:.2f}/s, eta {eta:.0f}s[/dim]")
+    finally:
+        # Restore the substrate to its pre-batch shape: stop the vlm
+        # role we started, bring the writer back. Best-effort — never
+        # block the captioning batch's success on a swap-back failure.
+        if swapped:
+            try:
+                infer_server.down("vlm")
+                console.print("[dim]Hot-swap: vlm role stopped.[/dim]")
+            except Exception as exc:
+                console.print(f"[yellow]Failed to stop vlm: {exc}[/yellow]")
+        if writer_was_up:
+            try:
+                infer_server.up("writer")
+                console.print("[dim]Hot-swap: writer back online.[/dim]")
+            except Exception as exc:
+                console.print(
+                    f"[yellow]Failed to restart writer: {exc}[/yellow] "
+                    f"— start it manually with `sciknow infer up --role writer`."
+                )
 
     console.print(
         f"\n[green]✓ Captioned {captioned}[/green] · "
@@ -10934,8 +10972,8 @@ def caption_bench_cmd(
     _resolved_model = model or settings.llm_fast_model or settings.llm_model
 
     def _llm_grade(row) -> tuple[str, str, str, str]:
-        import ollama as _ollama
-        client = _ollama.Client(host=settings.ollama_host, timeout=60)
+        # V2_FINAL Stage 2: route via rag.llm.complete (substrate dispatch).
+        from sciknow.rag.llm import complete as _llm_complete
         prompt = _CAPTION_GRADE_PROMPT.format(
             kind=row[2],
             title=(row[7] or "(unknown)")[:150],
@@ -10945,13 +10983,14 @@ def caption_bench_cmd(
             ai_caption=(row[5] or "")[:1500],
         )
         try:
-            resp = client.chat(
+            content = _llm_complete(
+                "You are a careful caption-quality judge.",
+                prompt,
                 model=_resolved_model,
-                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                num_predict=300,
                 format="json",
-                options={"temperature": 0.0, "num_predict": 300},
             )
-            content = (resp.get("message") or {}).get("content", "")
             data = _json.loads(content)
             acc = str(data.get("accuracy", "")).strip().lower()
             hall = str(data.get("hallucination", "")).strip().lower()
@@ -11250,21 +11289,22 @@ def equation_bench_cmd(
     _resolved_model = model or settings.llm_fast_model or settings.llm_model
 
     def _llm_grade(row) -> tuple[str, str, str]:
-        import ollama as _ollama
-        client = _ollama.Client(host=settings.ollama_host, timeout=60)
+        # V2_FINAL Stage 2: route via rag.llm.complete (substrate dispatch).
+        from sciknow.rag.llm import complete as _llm_complete
         prompt = _EQ_GRADE_PROMPT.format(
             latex=(row[2] or "")[:2000],
             paraphrase=(row[3] or "")[:1500],
             surrounding_text=(row[4] or "")[:500],
         )
         try:
-            resp = client.chat(
+            content = _llm_complete(
+                "You are a careful equation-paraphrase judge.",
+                prompt,
                 model=_resolved_model,
-                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                num_predict=250,
                 format="json",
-                options={"temperature": 0.0, "num_predict": 250},
             )
-            content = (resp.get("message") or {}).get("content", "")
             data = _json.loads(content)
             lv = str(data.get("latex_valid", "")).strip().lower()
             pm_ = str(data.get("paraphrase_matches", "")).strip().lower()

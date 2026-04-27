@@ -1252,6 +1252,8 @@ def _run_generator_in_thread(job_id: str, generator_fn, loop):
 # ── Corpus actions — subprocess-backed, stream stdout as SSE ─────────────────
 
 import os  # noqa: E402 — kept local-ish with the block that uses it
+import shlex  # noqa: E402 — used by _spawn_cli_streaming for shell-safe quoting
+import subprocess  # noqa: E402 — used by _spawn_cli_streaming
 # ── Phase 21.b — Visuals API ────────────────────────────────────────────────
 
 _EQUATIONS_DIAGNOSTIC_TEMPLATE = (
@@ -1789,6 +1791,23 @@ def _render_sidebar(items, active_id):
             sec_v = int(sec.get("version") or 0)
             sec_w = int(sec.get("words") or 0)
 
+            # Phase 32.4 — inline ✗ delete button mirrors what
+            # rebuildSidebar() in sciknow.js renders. Without this, the
+            # section ✗ button only existed AFTER a JS rebuild fired
+            # (e.g. after deleting a chapter / adopting an orphan); on
+            # initial page load users had no way to remove a section
+            # from a chapter's sections_meta. Inline onclick stops the
+            # click from bubbling to the wrapping anchor's
+            # onclick="return navTo(this)" — same pattern as the
+            # sec-orphan-delete button above.
+            sec_del_btn = (
+                f'<button class="sec-delete-btn" '
+                f'onclick="event.preventDefault();event.stopPropagation();'
+                f'deleteSection(\'{ch_id}\',\'{sec_type}\')" '
+                f'title="Remove this section from the chapter '
+                f'(draft becomes an orphan)">\u2717</button>'
+            )
+
             if status == "empty":
                 # Phase 26 — draggable for reordering empty slots before drafting.
                 # Phase 29 — clicking an empty section now PREVIEWS it
@@ -1808,7 +1827,8 @@ def _render_sidebar(items, active_id):
                     f'data-sec-type="{sec_type}">'
                     f'<span class="sec-status-dot empty"></span>'
                     f'{display}'
-                    f'<span class="meta">empty \u00b7 \u270e</span></div>'
+                    f'<span class="meta">empty \u00b7 \u270e</span>'
+                    f'{sec_del_btn}</div>'
                 )
             elif status == "orphan":
                 # Phase 22 — inline X button on orphan drafts so the
@@ -1816,9 +1836,12 @@ def _render_sidebar(items, active_id):
                 # Phase 25 — also show a "+" button that adopts the
                 # slug into the chapter's sections list, re-classifying
                 # the draft from "orphan" to "drafted".
-                # Phase 42 — orphan +/✗ buttons switched to data-action.
-                # The dispatcher handler calls preventDefault+stopPropagation
-                # internally so the anchor's navigation doesn't fire.
+                # Inline onclick mirrors sec-delete-btn so the click
+                # stops propagating BEFORE the wrapping anchor's
+                # onclick="return navTo(this)" fires — otherwise
+                # loadSection runs first, currentDraftId flips to the
+                # orphan, and the subsequent delete falls through to
+                # showDashboard() so the user feels like nothing happened.
                 out += (
                     f'<a class="sec-link sec-orphan" href="/section/{sec_id}" '
                     f'data-draft-id="{sec_id}" onclick="return navTo(this)" '
@@ -1827,13 +1850,12 @@ def _render_sidebar(items, active_id):
                     f'{display} '
                     f'<span class="meta">orphan \u00b7 v{sec_v} \u00b7 {sec_w}w</span>'
                     f'<button class="sec-orphan-adopt" '
-                    f'data-action="adopt-orphan-section" '
-                    f'data-chapter-id="{ch_id}" '
-                    f'data-sec-type="{sec_type}" '
+                    f'onclick="event.preventDefault();event.stopPropagation();'
+                    f'adoptOrphanSection(\'{ch_id}\',\'{sec_type}\')" '
                     f'title="Add this section_type to the chapter\u2019s sections list (idempotent)">+</button>'
                     f'<button class="sec-orphan-delete" '
-                    f'data-action="delete-orphan-draft" '
-                    f'data-draft-id="{sec_id}" '
+                    f'onclick="event.preventDefault();event.stopPropagation();'
+                    f'deleteOrphanDraft(\'{sec_id}\')" '
                     f'title="Delete this orphan draft permanently">\u2717</button>'
                     f'</a>'
                 )
@@ -1842,6 +1864,10 @@ def _render_sidebar(items, active_id):
                 # The click handler (navTo) still fires on plain clicks;
                 # the browser distinguishes click from drag based on
                 # whether the cursor moved during mousedown.
+                # Phase 32.4 — sec_del_btn appended inside the anchor
+                # so users can remove the section from sections_meta
+                # without first triggering a JS rebuild via some other
+                # action.
                 out += (
                     f'<a class="sec-link {active}" href="/section/{sec_id}" '
                     f'draggable="true" '
@@ -1851,7 +1877,8 @@ def _render_sidebar(items, active_id):
                     f'onclick="return navTo(this)">'
                     f'<span class="sec-status-dot drafted"></span>'
                     f'{display} '
-                    f'<span class="meta">v{sec_v} \u00b7 {sec_w}w</span></a>'
+                    f'<span class="meta">v{sec_v} \u00b7 {sec_w}w</span>'
+                    f'{sec_del_btn}</a>'
                 )
         if not ch["sections"]:
             out += (
@@ -2005,7 +2032,7 @@ from sciknow.web.routes.snapshots import (  # noqa: E402, F401
     create_chapter_snapshot, create_book_snapshot,
     list_chapter_snapshots, list_book_snapshots,
     restore_snapshot_bundle,
-    _snapshot_chapter_drafts, _restore_chapter_bundle,
+    _snapshot_chapter_drafts, _snapshot_book_drafts, _restore_chapter_bundle,
 )
 from sciknow.web.routes.wiki import (  # noqa: E402, F401
     api_wiki_pages, api_wiki_annotation_get, api_wiki_annotation_put,

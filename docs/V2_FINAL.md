@@ -1,10 +1,22 @@
 # SciKnow v2 — Final Stretch
 
-**Companion to:** `docs/SCIKNOW_V2_ROADMAP.md` (the original phase plan, all 7 phases shipped) and `MIGRATION.md` (the verb / settings reference).
+**Companions:** [`docs/SCIKNOW_V2_ROADMAP.md`](SCIKNOW_V2_ROADMAP.md) (the original v1→v2 phase plan, all 7 phases shipped), [`MIGRATION.md`](../MIGRATION.md) (verb / settings reference), and — once Stage 5 closes — [`docs/POST_V2_ROADMAP.md`](POST_V2_ROADMAP.md) (the shipping order for v2.1, v2.2, DGX Spark, and the data-gated learning passes).
 
 This document covers the **post-shipment items** the original roadmap required but never marked done. The substrate code is fully landed and the L1+L2 contract suites are green; what's missing is the *verification layer* — proof that the substrate actually works end-to-end on a pure-v2 install (no Ollama, no FlagEmbedding) and that the spec's three decision gates have measured data behind them.
 
 Each stage below is one to a handful of commits. Stages 1-4 are mechanical; stage 5 is calendar time. Once stages 1-5 land, `v2.0.0` is mergeable to `main`.
+
+## Status (2026-04-25)
+
+| Stage | Status | Commit | Note |
+|---|---|---|---|
+| 1 — v2-only L3 suite | ✅ DONE | `584f93c` | 8 new `l3_v2_*` tests; all pass against running substrate |
+| 2 — ollama import audit + L1 contract | ✅ DONE | `34d0817` | 5 sites routed via `rag.llm.complete()`, 8 kept-by-design with reasons; L1 catcher in place |
+| 3 — `sciknow bench --layer v2` | ✅ DONE | `158192b` | Gates A/B/D measured; embedder ubatch fix shipped as drive-by |
+| 4 — BENCHMARKS.md gate entries | ✅ DONE | `7c946b3` | Headline table: A PASS (+12.5%), B PASS-by-construction, D PASS (within noise) |
+| 5 — Soak + tag | ⏳ in progress | — | SMOKE layer passes end-to-end on substrate (2026-04-25); calendar window open until ~2026-05-02 |
+
+All four mechanical stages landed in one continuous session (2026-04-25). The substrate was the active backend throughout; both L1 (158 tests, ~10s) and L2 (full integration, ~3 min) stayed green across every commit, and SMOKE (extract-kg + wiki compile + autowrite + num_predict cap + extract JSON canary) ran clean against the running llama-server roles after Stage 2 routed five formerly-Ollama sites through `rag.llm.complete()`.
 
 ---
 
@@ -86,18 +98,44 @@ Each entry: one short paragraph, the metric, the verdict, and a link to the JSON
 
 **Goal:** real-world v2 use catches latent regressions before the `2.0.0` git tag.
 
-**Scope:** for the next week or so, do all routine sciknow work against the v2 substrate exclusively (no `USE_LLAMACPP_*=False` overrides). At minimum:
+**Soak scope** (do all routine sciknow work against the v2 substrate exclusively for ~1 week, no `USE_LLAMACPP_*=False` overrides):
 - Run `sciknow corpus ingest directory` on a fresh batch of papers.
 - Run `sciknow wiki compile` on the resulting docs.
 - Run `sciknow book autowrite` on at least one chapter.
 - Watch `sciknow library doctor --watch 60` during all of the above; record any new alerts in `docs/PHASE_LOG.md` as a follow-up entry.
 
-**Exit criteria:** zero rollback-class incidents over the soak window. After that:
-1. Bump version: `pyproject.toml` + (optionally) the CHANGELOG entry.
-2. `git tag v2.0.0` on `v2-llamacpp`.
-3. `git checkout main && git merge --no-ff v2-llamacpp -m "feat: v2.0.0 — llama-server substrate, library + corpus subapps"`.
-4. Push tag + branch.
-5. Update README's "v2 ships on the v2-llamacpp branch" callout to "v2.0.0 is the current release on `main`."
+**Day-0 (2026-04-25) sanity already done.** SMOKE layer (`uv run sciknow test --layer SMOKE`) ran 5/5 ✓ against the substrate after Stage 2 landed:
+- `l3_extract_model_produces_clean_json` — 4 concepts + 6 triples in 12.8 s
+- `l3_wiki_compile_single_paper_smoke` — 377-word summary in 44 s
+- `l3_wiki_extract_kg_single_paper_smoke` — 10 triples + 13 entities in 29 s
+- `l3_autowrite_one_iteration_smoke` — 660-char draft in 4 s
+- `l3_llm_num_predict_cap_honored` — cap honored at 111 chars in 0.9 s
+
+So the writer-LLM hot pipelines work end-to-end on substrate routing today. The soak window is now about *catching the long-tail*: papers with weird metadata, bulk runs that exhaust connections, anything that only shows up under sustained use.
+
+**Exit criteria:** zero rollback-class incidents over the soak window. After that, the tag is mechanical:
+
+```bash
+# 1. Bump version (RC1 → 2.0.0).
+sed -i 's/^version = "2.0.0rc1"/version = "2.0.0"/' pyproject.toml
+git add pyproject.toml
+git commit -m "chore: bump to 2.0.0 — substrate verified, gates passed, soak clean"
+
+# 2. Tag and push.
+git tag v2.0.0 -m "v2.0.0 — llama-server substrate, library + corpus subapps, decision gates A/B/D passed"
+
+# 3. Merge to main as a single feature commit.
+git checkout main
+git merge --no-ff v2-llamacpp -m "feat: v2.0.0 — llama-server substrate, library + corpus subapps"
+
+# 4. Push.
+git push origin main v2.0.0
+
+# 5. Update README's `v2 ships on the v2-llamacpp branch` callout.
+#    The two lines to flip live in README.md near the top.
+```
+
+**Rollback hatch.** v1 stays reachable at the `last-ollama-build` tag on `main`; the dispatch facade (`rag/llm.py`) keeps both branches so `USE_LLAMACPP_WRITER=False` + `uv add ollama` reverts at runtime.
 
 ---
 

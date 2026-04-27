@@ -797,11 +797,8 @@ def llm_recover_title(
         logger.debug("llm_recover_title: PDF open failed: %s", exc)
         return None
 
-    try:
-        import ollama
-    except ImportError:
-        return None
-
+    # V2_FINAL Stage 2: route via rag.llm.complete (dispatches to
+    # llama-server when USE_LLAMACPP_WRITER=True, Ollama otherwise).
     prompt = (
         "You will be given the first few pages of a scientific paper. "
         "Return ONLY the paper's title as a single line of text — no "
@@ -812,18 +809,17 @@ def llm_recover_title(
         "Text:\n" + text
     )
     try:
-        client = ollama.Client(
-            host=settings.ollama_host, timeout=45
-        )
-        response = client.chat(
+        from sciknow.rag.llm import complete as _llm_complete
+        raw = (_llm_complete(
+            "You are a careful scientific bibliographer.",
+            prompt,
             model=settings.llm_fast_model,
-            messages=[{"role": "user", "content": prompt}],
-            options={"temperature": 0, "num_predict": 120},
+            temperature=0,
+            num_predict=120,
             keep_alive=-1,
-        )
-        raw = (response.message.content or "").strip()
+        ) or "").strip()
     except Exception as exc:
-        logger.debug("llm_recover_title: Ollama call failed: %s", exc)
+        logger.debug("llm_recover_title: LLM call failed: %s", exc)
         return None
 
     if not raw or raw == "NO_TITLE":

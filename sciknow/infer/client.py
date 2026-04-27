@@ -51,6 +51,7 @@ def _client_for(role: str) -> httpx.Client:
         "writer": settings.infer_writer_url,
         "embedder": settings.infer_embedder_url,
         "reranker": settings.infer_reranker_url,
+        "vlm": settings.infer_vlm_url,
     }[role]
     with _clients_lock:
         c = _clients.get(role)
@@ -354,3 +355,103 @@ def health(role: str = "writer") -> bool:
         return r.status_code == 200
     except Exception:
         return False
+
+
+# ── multimodal (vlm role) ────────────────────────────────────────────────
+
+
+_IMAGE_MIME_BY_EXT: dict[str, str] = {
+    "jpg": "jpeg", "jpeg": "jpeg",
+    "png": "png", "webp": "webp", "gif": "gif",
+}
+
+
+def chat_with_image(
+    system: str,
+    user: str,
+    image_paths: list,
+    model: str | None = None,
+    temperature: float = 0.2,
+    num_predict: int | None = None,
+    role: str = "vlm",
+) -> str:
+    """Send a chat completion to a multimodal llama-server role with one
+    or more attached images, return the assistant's full text reply.
+
+    Used by `corpus caption-visuals` (figure/chart/equation captioning)
+    via the vlm role on port 8093 (Qwen3-VL-30B-A3B-Instruct + mmproj
+    sidecar). Images are inlined as data URLs — no shared filesystem
+    is required between the caller and the llama-server process.
+
+    Non-streaming because captioning callers want the whole caption
+    in one shot for storage; the wrapper loop in caption-visuals
+    handles per-image error reporting. Add a streaming variant if/when
+    a future user surface needs token-level updates.
+    """
+    import base64
+    from pathlib import Path as _Path
+
+    chosen_model = model or settings.vlm_model_name
+    client = _client_for(role)
+
+    content_parts: list[dict] = [{"type": "text", "text": user}]
+    for p in image_paths:
+        path = _Path(str(p))
+        ext = path.suffix.lower().lstrip(".")
+        mime = _IMAGE_MIME_BY_EXT.get(ext, "jpeg")
+        b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+        content_parts.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/{mime};base64,{b64}"},
+        })
+
+    body: dict = {
+        "model": chosen_model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": content_parts},
+        ],
+        "stream": False,
+        "temperature": temperature,
+        "cache_prompt": True,
+    }
+    if num_predict is not None:
+        body["max_tokens"] = num_predict
+
+    t0 = time.monotonic()
+    try:
+        r = client.post("/v1/chat/completions", json=body)
+    except Exception as exc:
+        elapsed = time.monotonic() - t0
+        logger.error(
+            "INFER vlm FAILED model=%s after=%.1fs error=%s: %s",
+            chosen_model, elapsed, type(exc).__name__, exc,
+        )
+        raise
+
+    if r.status_code != 200:
+        raise RuntimeError(
+            f"llama-server (vlm) /v1/chat/completions status="
+            f"{r.status_code}: {r.text[:500]}"
+        )
+    data = r.json()
+    out = (
+        ((data.get("choices") or [{}])[0].get("message") or {})
+        .get("content") or ""
+    ).strip()
+
+    # Capture timings for the same pulse pipeline writer/embedder use.
+    timings = data.get("timings") or {}
+    if data.get("usage"):
+        timings = (timings or {}) | {"usage": data["usage"]}
+    if timings:
+        stats = _coerce_timings_to_v1(chosen_model, timings)
+        if stats.get("eval_count"):
+            _record_call_stats(stats)
+
+    elapsed = time.monotonic() - t0
+    logger.info(
+        "INFER vlm done model=%s images=%d chars=%d elapsed=%.1fs",
+        chosen_model, len(image_paths), len(out), elapsed,
+    )
+    return out

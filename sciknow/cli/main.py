@@ -192,9 +192,11 @@ def bench_cmd(
     layer: str = typer.Option(
         "fast", "--layer", "-l",
         help="Which bench layer to run: fast (descriptive only), live "
-             "(adds hybrid_search + embedder + reranker), llm (adds "
-             "Ollama throughput), sweep (per-model speed comparison on "
-             "extract-kg / compile / write_section), quality (deep "
+             "(adds hybrid_search + embedder + reranker), llm (writer "
+             "throughput via the dispatch facade — backend tag in output), "
+             "v2 (V2_FINAL Stage 3: Decision Gates A/B/D against the "
+             "llama-server substrate), sweep (per-model speed comparison "
+             "on extract-kg / compile / write_section), quality (deep "
              "writing-quality benchmarks with NLI faithfulness + ALCE "
              "citation quality + LLM-judge pairwise), vlm-sweep "
              "(54.6.74 — VLM captioning sweep with pairwise judge), "
@@ -220,7 +222,16 @@ def bench_cmd(
     Layers:
       fast   — DB + Qdrant stats, descriptive only, no model calls (~5s).
       live   — adds 1 embedder pass + hybrid_search round trip (~30s cold).
-      llm    — adds Ollama fast + main model throughput (~60–180s cold).
+      llm    — fast + main model throughput via the rag.llm dispatch facade
+               (routes to llama-server when USE_LLAMACPP_WRITER=True, Ollama
+               otherwise). Output stamps the backend so the operator sees
+               which path was timed (~60–180s cold).
+      v2     — V2_FINAL Stage 3: Decision Gates A (writer tps via
+               infer.client.chat_complete, appended to writer_tps.jsonl),
+               B (embedder throughput via infer.client.embed), D
+               (retrieval recall@10 against the synthetic probe set;
+               run `sciknow bench retrieval-gen` first if missing).
+               (~5–10 min for 5 writer iters + 256-chunk embed batch.)
       sweep  — per-model comparison: runs every candidate in
                model_sweep.CANDIDATE_MODELS against extract-kg,
                compile-summary, and write-section on fixed paper 4092d6ad.

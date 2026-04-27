@@ -69,7 +69,10 @@ plan → outline → (per chapter) sentence plan → write → review → revise
 |---|---|---|
 | PostgreSQL 16 | 5432 | Relational storage, full-text search |
 | Qdrant | 6333 | Vector store (dense + sparse) |
-| Ollama | 11434 | Local LLM inference |
+| llama-server (writer)   | 8090  | Writer LLM via OpenAI-compat API (Qwen3.6-27B) |
+| llama-server (embedder) | 8091  | bge-m3 dense+sparse via `/v1/embeddings` |
+| llama-server (reranker) | 8092  | bge-reranker-v2-m3 cross-encoder via `/v1/rerank` |
+| Ollama (optional, v1 rollback or visuals VLM) | 11434 | Only used in v2 for `corpus caption-visuals` (qwen2.5vl); writer/embedder/reranker on v1 fallback paths |
 
 ---
 
@@ -130,7 +133,7 @@ sciknow/
     │   ├── self_rag.py         # retrieval evaluation + grounding checks
     │   └── multimodal.py       # table/equation tagging
     ├── rag/
-    │   ├── llm.py              # Ollama streaming/completion wrapper
+    │   ├── llm.py              # Dispatch facade: routes to llama-server (v2) or Ollama (v1 rollback)
     │   ├── prompts.py          # prompt templates (Q&A, synthesis, write, finetune)
     │   └── wiki_prompts.py     # wiki compilation prompt templates
     ├── storage/
@@ -222,23 +225,24 @@ Primary model for all generation, analysis, and reasoning (~5-30 s/call):
 ### Model lifecycle by pipeline phase
 
 ```
-INGESTION:    MinerU (GPU) → LLM_FAST_MODEL (metadata fallback) → bge-m3 (GPU)
-RETRIEVAL:    bge-m3 (GPU) → [LLM_FAST_MODEL for --expand] → bge-reranker (GPU)
-WIKI:         LLM_FAST_MODEL (summaries, entities, KG) → bge-m3 (wiki page embedding)
-RAG/WRITING:  LLM_MODEL (all generation) + LLM_FAST_MODEL (draft summaries)
-EXPANSION:    bge-m3 (GPU, relevance filter) → no model (reference extraction)
+INGESTION:    MinerU 2.5-Pro VLM (GPU) → writer LLM (metadata cascade L4) → bge-m3 embedder
+RETRIEVAL:    bge-m3 embedder → [writer for --expand relevance filter] → bge-reranker
+WIKI:         writer LLM (summaries, entities, KG) → bge-m3 (wiki page embedding)
+RAG/WRITING:  writer LLM (all generation) — single canonical writer per spec §2.1
+EXPANSION:    bge-m3 embedder (relevance filter) → no model (reference extraction)
 ```
 
-All LLM calls go through Ollama at `OLLAMA_HOST`. Any command with `--model` can override the default for that invocation.
+In v2, all LLM/embed/rerank calls dispatch through `sciknow.infer.client` to llama-server (writer :8090, embedder :8091, reranker :8092). `sciknow.rag.llm` is a thin facade so v1 callers keep working when `USE_LLAMACPP_WRITER=False` flips back to the Ollama path. Any command with `--model` can override the default for that invocation (only meaningful on the v1 fallback path; on v2 the loaded GGUF is the writer).
 
 ### Recommended Model Configuration
 
 For the best balance of quality and speed on an RTX 3090 (24 GB):
 
-| Model | Architecture | Speed on 3090 | Best for |
-|---|---|---|---|
-| `qwen3.5:27b` (Q4_K_M) | 27B dense | 25-35 tok/s | Writing, review, revise, verify, argue |
-| `qwen3:30b-a3b` (Q4_K_M) | 30B MoE (3.3B active) | 40-111 tok/s | Clustering, summaries, metadata, expansion |
+| Model | Architecture | Quant | Speed on 3090 | Role |
+|---|---|---|---|---|
+| `Qwen3.6-27B-UD-Q4_K_XL.gguf` (Unsloth Dynamic 2.0) | 27B dense, 262K ctx native | UD-Q4_K_XL (~17.6 GB) | 30-40 tok/s decode | Writer (book write/autowrite/review/argue, wiki compile, extract-kg, RAG synthesis, metadata L4) |
+| `bge-m3-Q8_0.gguf` (gpustack mirror) | xlm-roberta-large-class, dense + sparse | Q8 (~0.6 GB) | <20 ms / chunk | Embedder (ingestion + query-side) |
+| `bge-reranker-v2-m3-Q8_0.gguf` (gpustack mirror) | xlm-roberta-large cross-encoder | Q8 (~0.6 GB) | <50 ms / pair | Reranker (top-50 RRF → top-k) |
 
 ---
 
@@ -262,18 +266,24 @@ Managed by `uv` via `pyproject.toml`. Key packages:
 
 | Package | Purpose |
 |---|---|
-| `mineru[core]` | PDF→JSON conversion (MinerU 2.5 pipeline backend, primary) |
-| `marker-pdf` | PDF→JSON/Markdown conversion (Marker, fallback) |
-| `FlagEmbedding` | BAAI/bge-m3 embedder and bge-reranker-v2-m3 cross-encoder |
+| `mineru[vllm]` | PDF→JSON conversion via MinerU 2.5-Pro VLM (primary). `mineru[core]` (pipeline mode) and `marker-pdf` are layered fallbacks. |
+| `marker-pdf` | PDF→JSON/Markdown conversion (Marker, last-resort fallback) |
+| `httpx` | OpenAI-compat HTTP client to llama-server (writer/embedder/reranker) + Crossref + arXiv |
 | `qdrant-client` | Qdrant vector store client |
 | `sqlalchemy` + `psycopg2-binary` | PostgreSQL ORM + driver |
 | `alembic` | Database migrations |
-| `httpx` | Crossref + other async HTTP calls |
 | `pymupdf` | Embedded PDF metadata extraction |
 | `arxiv` | arXiv API client |
-| `ollama` | Ollama Python client |
 | `tiktoken` | Token counting for chunking |
 | `typer` + `rich` | CLI framework + terminal UI |
 | `pydantic` + `pydantic-settings` | Data validation and config management |
 | `fastapi` + `uvicorn` | Web reader / authoring platform |
 | `bertopic` + `umap-learn` + `hdbscan` | Topic clustering |
+
+**Rollback-only extras** (not pulled by default, opt-in via `uv add` when `USE_LLAMACPP_*=False`):
+
+| Package | Activated by |
+|---|---|
+| `ollama` | `USE_LLAMACPP_WRITER=False` (v1 writer path); also used by `corpus caption-visuals` for the qwen2.5vl visuals model in v2 by design |
+| `FlagEmbedding` | `USE_LLAMACPP_EMBEDDER=False` (v1 in-process bge-m3) |
+| `sentence-transformers` | `USE_LLAMACPP_RERANKER=False` (v1 in-process cross-encoder) |

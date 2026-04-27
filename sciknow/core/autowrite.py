@@ -55,6 +55,7 @@ from sciknow.core.book_ops import (  # noqa: F401
     _finalize_autowrite_run,
     _get_book_length_target,
     _get_chapter_num_sections,
+    _get_chapter_flexible_length,
     _get_chapter_sections_normalized,
     _get_prior_summaries,
     _get_relevant_lessons,
@@ -454,6 +455,52 @@ def _autowrite_section_body(
         except Exception as exc:  # noqa: BLE001
             logger.debug("retrieval_density_adjust skipped: %s", exc)
 
+    # Phase 54.6.x — flexible-length per-chapter opt-in. When the
+    # chapter row has flexible_length=TRUE AND the retrieval pool is
+    # rich enough (≥ FLEXIBLE_RICH_THRESHOLD chunks), the writer is
+    # allowed to extend up to 2× the base target. The base target
+    # remains the SCORING anchor (length score = min(1, actual /
+    # target)) so a flexible chapter at 1× target still scores 1.0;
+    # only the writer's prompt sees the larger ceiling. This is what
+    # the user asked for: "only bigger, at most the double, only if
+    # the corpus is good enough".
+    FLEXIBLE_RICH_THRESHOLD = 24
+    flexible_max_words: int | None = None
+    try:
+        with get_session() as _s_flex:
+            if _get_chapter_flexible_length(_s_flex, ch_id):
+                if len(results) >= FLEXIBLE_RICH_THRESHOLD:
+                    flexible_max_words = int(effective_target_words * 2)
+                    log.event(
+                        "flexible_length_enabled",
+                        base=effective_target_words,
+                        max=flexible_max_words,
+                        n_chunks=len(results),
+                    )
+                    yield {
+                        "type": "flexible_length_enabled",
+                        "base_target": effective_target_words,
+                        "max_target": flexible_max_words,
+                        "n_chunks": len(results),
+                        "explanation": (
+                            f"chapter is flexible-length and retrieval is "
+                            f"rich ({len(results)} chunks ≥ "
+                            f"{FLEXIBLE_RICH_THRESHOLD}); writer may extend "
+                            f"to {flexible_max_words} words if evidence "
+                            f"supports it"
+                        ),
+                    }
+                else:
+                    log.event(
+                        "flexible_length_skipped",
+                        base=effective_target_words,
+                        n_chunks=len(results),
+                        threshold=FLEXIBLE_RICH_THRESHOLD,
+                        reason="retrieval too thin",
+                    )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("flexible_length resolve skipped: %s", exc)
+
     # Phase 54.6.151 — digital-section soft ceiling (RESEARCH.md §24
     # Guideline 3, Delgado 2018 screen-reading comprehension penalty).
     # Checks the FINAL effective target (after optional 54.6.150 widener)
@@ -696,6 +743,7 @@ def _autowrite_section_body(
             book_plan=b_plan, prior_summaries=prior_summaries,
             paragraph_plan=paragraph_plan,
             target_words=effective_target_words,
+            target_words_max=flexible_max_words,
             section_plan=section_plan,
             lessons=relevant_lessons,
             style_fingerprint_block=style_fingerprint_block,
@@ -1598,6 +1646,37 @@ def _autowrite_section_body(
     }
 
 
+def _prune_chapter_unnamed_snapshots(session, chapter_id: str, *, keep: int) -> int:
+    """Phase 54.6.328 (Phase 4) — keep the N newest auto-trigger
+    snapshots per chapter, drop older ones.
+
+    Auto-trigger snapshots have names that start with one of the
+    well-known machine prefixes (``pre-autowrite-``, ``pre-revise-``,
+    etc. — anything matching ``pre-<word>-`` where the suffix carries
+    a timestamp). User-named snapshots (anything else) are NEVER
+    pruned by this helper — they're the explicit "I want this
+    forever" anchors.
+
+    Returns the number of rows deleted.
+    """
+    from sqlalchemy import text
+    rows = session.execute(text("""
+        SELECT id::text FROM draft_snapshots
+        WHERE chapter_id::text = :cid
+          AND scope = 'chapter'
+          AND name ~ '^pre-[a-z0-9_-]+-[0-9]'
+        ORDER BY created_at DESC
+        OFFSET :keep
+    """), {"cid": chapter_id, "keep": int(keep)}).fetchall()
+    if not rows:
+        return 0
+    ids = [r[0] for r in rows]
+    n = session.execute(text(
+        "DELETE FROM draft_snapshots WHERE id::text = ANY(:ids)"
+    ), {"ids": ids}).rowcount or 0
+    return int(n)
+
+
 def autowrite_chapter_all_sections_stream(
     book_id: str,
     chapter_id: str,
@@ -1658,6 +1737,60 @@ def autowrite_chapter_all_sections_stream(
     # rebuild wins over resume if both somehow get passed.
     if rebuild and resume:
         resume = False
+
+    # Phase 54.6.328 (snapshot-versioning Phase 4) — auto-snapshot the
+    # chapter's current draft state BEFORE letting autowrite touch it.
+    # No-ops cleanly when the chapter is empty (snapshot returns None).
+    # Snapshot name encodes the trigger so the Timeline can group by
+    # source. Best-effort: a snapshot failure must never block the
+    # autowrite from running.
+    import datetime as _dt
+    try:
+        from sciknow.web.routes.snapshots import (
+            _snapshot_chapter_drafts as _snap_ch,
+        )
+        from sciknow.core.snapshot_diff import compute_bundle_brief
+        with get_session() as _sess:
+            _bundle = _snap_ch(_sess, chapter_id)
+            if _bundle.get("drafts"):
+                _stamp = _dt.datetime.now(_dt.timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
+                _snap_name = f"pre-autowrite-{_stamp}"
+                _prev = _sess.execute(text("""
+                    SELECT content FROM draft_snapshots
+                    WHERE chapter_id::text = :cid AND scope = 'chapter'
+                    ORDER BY created_at DESC LIMIT 1
+                """), {"cid": chapter_id}).fetchone()
+                _prev_bundle = None
+                if _prev and _prev[0]:
+                    try:
+                        import json as _json_mod
+                        _prev_bundle = _json_mod.loads(_prev[0])
+                    except Exception:
+                        _prev_bundle = None
+                _meta = compute_bundle_brief(_bundle, _prev_bundle)
+                import json as _json_mod
+                _wc = sum(d.get("word_count") or 0 for d in _bundle["drafts"])
+                _sess.execute(text("""
+                    INSERT INTO draft_snapshots
+                        (chapter_id, scope, name, content, word_count, meta)
+                    VALUES
+                        (CAST(:cid AS uuid), 'chapter', :name, :content, :wc,
+                         CAST(:meta AS jsonb))
+                """), {"cid": chapter_id, "name": _snap_name,
+                       "content": _json_mod.dumps(_bundle),
+                       "wc": _wc,
+                       "meta": _json_mod.dumps(_meta)})
+                _sess.commit()
+                # Prune unnamed older snapshots (keep last 14 per chapter).
+                _prune_chapter_unnamed_snapshots(_sess, chapter_id, keep=14)
+                _sess.commit()
+    except Exception:  # noqa: BLE001
+        # Snapshot is the safety net for the user, but it cannot
+        # become a blocker. Failure to snapshot is logged via the
+        # existing autowrite event stream's later steps if relevant.
+        pass
 
     # Resolve the chapter's sections list (slug + title + plan).
     with get_session() as session:
@@ -1840,6 +1973,135 @@ def autowrite_chapter_all_sections_stream(
         "n_skipped": n_skipped,
         "n_failed": n_failed,
         "drafts": final_drafts,
+    }
+
+
+def autowrite_book_all_chapters_stream(
+    book_id: str,
+    *,
+    model: str | None = None,
+    max_iter: int = 3,
+    target_score: float = 0.85,
+    target_words: int | None = None,
+    rebuild: bool = False,
+    resume: bool = False,
+    include_visuals: bool = False,
+) -> Iterator[Event]:
+    """Phase 54.6.x — autowrite EVERY section of EVERY chapter in the book.
+
+    Iterates the book's chapters in their stored order and chains
+    ``autowrite_chapter_all_sections_stream`` for each one. The same
+    rebuild / resume / skip semantics apply at the per-section level
+    inside each chapter; this wrapper just walks the chapter list.
+
+    Cancellation propagates through GeneratorExit on the inner generator
+    just like the chapter-level wrapper, so the in-flight section's
+    streaming-save flush still runs before the whole-book run unwinds.
+    """
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+
+    if rebuild and resume:
+        resume = False
+
+    with get_session() as session:
+        rows = session.execute(text("""
+            SELECT id::text, number, title
+            FROM book_chapters
+            WHERE book_id::text = :bid
+            ORDER BY number ASC
+        """), {"bid": book_id}).fetchall()
+
+    chapters = [{"id": r[0], "number": r[1], "title": r[2] or ""} for r in rows]
+    n_chapters = len(chapters)
+
+    yield {
+        "type": "book_autowrite_start",
+        "book_id": book_id,
+        "n_chapters": n_chapters,
+        "chapters": chapters,
+        "rebuild": rebuild,
+        "resume": resume,
+    }
+
+    if n_chapters == 0:
+        yield {
+            "type": "all_chapters_complete",
+            "n_chapters": 0,
+            "n_chapters_completed": 0,
+            "n_sections_completed": 0,
+            "n_sections_skipped": 0,
+            "n_sections_failed": 0,
+            "message": "no chapters in this book — add chapters first",
+        }
+        return
+
+    n_chapters_completed = 0
+    total_sections_completed = 0
+    total_sections_skipped = 0
+    total_sections_failed = 0
+
+    for ci, ch in enumerate(chapters, start=1):
+        yield {
+            "type": "chapter_start",
+            "chapter_index": ci, "chapter_total": n_chapters,
+            "chapter_id": ch["id"],
+            "chapter_number": ch["number"],
+            "chapter_title": ch["title"],
+        }
+        try:
+            inner = autowrite_chapter_all_sections_stream(
+                book_id=book_id,
+                chapter_id=ch["id"],
+                model=model,
+                max_iter=max_iter,
+                target_score=target_score,
+                target_words=target_words,
+                rebuild=rebuild,
+                resume=resume,
+                include_visuals=include_visuals,
+            )
+            for event in inner:
+                event = dict(event)
+                event["chapter_index"] = ci
+                event["chapter_total"] = n_chapters
+                event["chapter_id"] = ch["id"]
+                if event.get("type") == "all_sections_complete":
+                    total_sections_completed += int(event.get("n_completed", 0) or 0)
+                    total_sections_skipped += int(event.get("n_skipped", 0) or 0)
+                    total_sections_failed += int(event.get("n_failed", 0) or 0)
+                yield event
+        except GeneratorExit:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "autowrite_book chapter %r failed: %s", ch["id"], exc,
+            )
+            yield {
+                "type": "chapter_error",
+                "chapter_index": ci, "chapter_id": ch["id"],
+                "message": str(exc),
+            }
+            yield {
+                "type": "chapter_done",
+                "chapter_index": ci, "chapter_id": ch["id"],
+                "error": str(exc),
+            }
+            continue
+
+        n_chapters_completed += 1
+        yield {
+            "type": "chapter_done",
+            "chapter_index": ci, "chapter_id": ch["id"],
+        }
+
+    yield {
+        "type": "all_chapters_complete",
+        "n_chapters": n_chapters,
+        "n_chapters_completed": n_chapters_completed,
+        "n_sections_completed": total_sections_completed,
+        "n_sections_skipped": total_sections_skipped,
+        "n_sections_failed": total_sections_failed,
     }
 
 

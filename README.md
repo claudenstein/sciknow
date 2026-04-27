@@ -25,13 +25,13 @@ A local-first scientific knowledge system that ingests papers, builds a compiled
 - **Metadata extraction** — 4-layer cascade: embedded PDF → Crossref → arXiv → LLM
 - **Citation graph** — extracts references, cross-links corpus papers, boosts highly-cited papers in search
 - **Five corpus-expansion vectors**, all sharing a **preview-and-select** flow in the browser (checkbox shortlist, per-row relevance score, "Download selected"):
-  - `db expand` — **outbound** citations (follow references in existing papers)
-  - `db expand-author` — every paper by a **named author** across OpenAlex + Crossref
-  - `db expand-cites` — **inbound** citations (papers that cite yours — forward-in-time mirror)
-  - `db expand-topic` — **free-text topic** search (solves the bootstrap + sideways-expansion problem)
-  - `db expand-coauthors` — **invisible college** (papers by coauthors of your corpus authors)
+  - `corpus expand` — **outbound** citations (follow references in existing papers)
+  - `corpus expand-author` — every paper by a **named author** across OpenAlex + Crossref
+  - `corpus expand-cites` — **inbound** citations (papers that cite yours — forward-in-time mirror)
+  - `corpus expand-topic` — **free-text topic** search (solves the bootstrap + sideways-expansion problem)
+  - `corpus expand-coauthors` — **invisible college** (papers by coauthors of your corpus authors)
   - `book auto-expand` — **gap-driven** auto-expansion: every open `book gaps` entry becomes its own topic search, candidates merged + ranked so papers that close multiple gaps rise to the top
-- **Cross-project dedup** — `db cleanup-downloads --cross-project` (default ON) checks every sciknow project's DB by SHA-256, so a PDF downloaded into project B that's already ingested in project A is recognised and cleaned
+- **Cross-project dedup** — `corpus cleanup-downloads --cross-project` (default ON) checks every sciknow project's DB by SHA-256, so a PDF downloaded into project B that's already ingested in project A is recognised and cleaned
 - **Pending downloads panel** — ~50% of expand selections typically have no legal OA PDF; those rows auto-persist to `pending_downloads` with full metadata (title, authors, year, source-method) so you can retry (the 6-source cascade bypasses `.no_oa_cache`), mark manually-acquired, abandon with a note, or export to CSV for ILL. Surfaced as the "📋 Pending downloads" entry in the top-bar **🌱 Corpus ▾** dropdown and `sciknow corpus pending list|retry|mark-done|abandon|export` from the CLI
 - **Topic clustering** — BERTopic (UMAP + HDBSCAN + c-TF-IDF) assigns papers to named thematic clusters in seconds
 
@@ -54,9 +54,11 @@ A local-first scientific knowledge system that ingests papers, builds a compiled
 - **Method catalogues** — 24 elicitation + 24 brainstorming methods (also adapted from BMAD, MIT): "Tree of Thoughts", "Pre-mortem", "Peer Review Simulation", "Strong Inference", "Reverse Brainstorming", "Five Whys", "Scope Boundaries", etc. Surface as a dropdown on the Plan modal (steers outline generation) and an interactive prompt on the Gaps button (steers gap analysis)
 - **Autowrite** — autonomous convergence loop: generates, scores, verifies, revises until quality target is met
 - **TreeWriter planning** — hierarchical paragraph-level plans before drafting
-- **Web reader** — browser-based authoring with a full-width top bar that's organised around five dropdowns (Plan + Dashboard stay direct for high-frequency access): **📖 Book ▾** (Corkboard / History / Snapshot / Export / Settings) · **🔍 Explore ▾** (Ask Corpus / Wiki Query / Browse Papers) · **🌱 Corpus ▾** (Enrich / Expand citations / Expand by author / Inbound cites / Topic search / Coauthors / Cleanup / Pending downloads) · **📊 Visualize ▾** (Knowledge Graph + the six ECharts tabs) · **🛠 Manage ▾** (Tools / Setup / Projects). The per-chapter toolbar keeps the five-button **Write loop** flat (Edit / Autowrite / Write / Review / Revise — hit constantly) and collapses the rest into three dropdowns: **🔎 Verify ▾** (Verify / Insert Citations / Scores) · **🧠 Critique ▾** (Argue / Gaps / Adversarial / Edge cases) · **📦 Extras ▾** (Bundles / Chapter reader). Live LLM streaming, corkboard view, chapter reader, argument maps, citation popovers, snapshots, version diffs
+- **Web reader** — browser-based authoring with a full-width top bar that's organised around five dropdowns (Plan + Dashboard stay direct for high-frequency access): **📖 Book ▾** (Corkboard / History / Snapshot / **Autowrite whole book** / Export / Settings) · **🔍 Explore ▾** (Ask Corpus / Wiki Query / Browse Papers) · **🌱 Corpus ▾** (Enrich / Expand citations / Expand by author / Inbound cites / Topic search / Coauthors / Cleanup / Pending downloads) · **📊 Visualize ▾** (Knowledge Graph + the six ECharts tabs) · **🛠 Manage ▾** (Tools / Setup / Projects). The per-chapter toolbar keeps the five-button **Write loop** flat (Edit / Autowrite / Write / Review / Revise — hit constantly) and collapses the rest into three dropdowns: **🔎 Verify ▾** (Verify / Insert Citations / Scores) · **🧠 Critique ▾** (Argue / Gaps / Adversarial / Edge cases) · **📦 Extras ▾** (Bundles / Chapter reader). Live LLM streaming, corkboard view, chapter reader, argument maps, citation popovers, snapshots, version diffs
 - **Knowledge wiki in the browser** — the Wiki modal has four tabs: Query (RAG-streamed answer over compiled pages), Browse (paginated page index with detail view, KaTeX math, backlinks, related pages, per-page inline Ask + personal "My take" notes), **Lint** (broken links, stale pages, orphaned concepts, optional LLM contradiction detection, **Extract / Backfill KG** button for wikis compiled before the combined entity+KG extraction step), **Consensus** (strong / moderate / weak / contested claim classification for a topic with supporting vs contradicting papers)
-- **Regenerate chapter outline from the browser** — the Plans modal now has a "📖 Generate outline" button that runs `sciknow book outline` against your paper library, streams the LLM response, parses the proposed chapter list, and adds any new chapters without touching existing drafts
+- **Regenerate chapter outline from the browser** — the Plans modal now has a "📖 Generate outline" button that runs `sciknow book outline` against your paper library, streams the LLM response, parses the proposed chapter list, and adds any new chapters without touching existing drafts. The same flow is now also surfaced as a "🧠 Auto-plan chapters" button on the Plans modal's **Chapters** tab so users who land there don't have to know about the Outline tab to discover it
+- **Autowrite the whole book in one click** — the Book menu's "✎ Autowrite whole book" item iterates every chapter × every section in book order. Existing drafts are skipped by default; the chapter-level wrapper auto-snapshots before touching each chapter so the operation is reversible from the Timeline. Long-running — the persistent task bar shows live tok/s, current chapter, and current section throughout
+- **Backfill KG triples from inside the Knowledge Graph modal** — the KG modal now has its own "🧠 Extract / backfill KG" button (mirrors `sciknow wiki extract-kg`) so a sparse graph has an obvious next step without hunting through the Wiki tab
 - **Six-way corpus visualization** — **📊 Visualize ▾** dropdown in the top bar with six direct links, all backed by ECharts (zoom / pan / tooltips / legend toggles built in). **Topic map** (UMAP 2D of abstract embeddings, coloured by BERTopic cluster, cached per project), **RAPTOR sunburst** (drill-in hierarchical cluster tree), **Consensus landscape** (claims scattered on supporting × contradicting axes, coloured by consensus_level — runs `wiki consensus` synchronously), **Timeline river** (stacked-area of papers-per-cluster over years with brush-zoom), **Ego radial** (top-K nearest papers around one document on the abstract-embedding cosine, drawn on a polar plot), and **Gap radar** (per-chapter section-coverage polygon derived from `book_gaps`). All six share a **theming bar**: 7 palette chips (Paper, Deep Space, Blueprint, Solarized, Solarized Light, Terminal, Neon — same presets as the Knowledge Graph), invert-to-paired-theme, BG + label custom colour pickers, typography dropdown (Sans / Serif / Mono / Condensed / Display), label-size slider, fullscreen, and download-PNG. Theme + font + scale persist in localStorage — one choice applies across every tab, theme swaps re-render without re-fetching the data
 - **Compute dashboard** — book-level GPU compute ledger: cumulative tokens, wall time, and per-operation breakdown (write/review/revise/argue/gaps/autowrite) across every LLM call
 - **Tools panel** — CLI-parity in the browser: hybrid corpus search, similarity search, multi-paper synthesis, topic-cluster browser. Corpus-growing tools were split out into their own top-bar **🌱 Corpus ▾** dropdown (six preview-and-select expansion flows — Enrich / Expand citations / Expand by author / Inbound cites / Topic search / Coauthors — plus a one-click "🧹 Cleanup downloads + failed" that reclaims disk by deleting already-ingested duplicates **and** nuking the failed-ingest archive + matching `documents` rows, and a Pending-downloads manager)
@@ -505,7 +507,7 @@ journal) across all complete documents. Surfaces a compact
 `enrich  doi 73% · abst 30% · auth 86%` row in the CLI corpus
 panel and a full Coverage table + stacked bars in the web modal.
 `enrichment_gap` info-level alert fires when any actionable field
-(excluding year) is missing on >50% of docs, with `sciknow db
+(excluding year) is missing on >50% of docs, with `sciknow corpus
 enrich` as the suggested fix. Live corpus: 70.5% missing abstract
 — big gap for ColBERT / abstracts collection quality.
 
@@ -827,18 +829,23 @@ every Phase commit. Most recent batches:
 
 ## Quick Start
 
-> **v2 ships on the `v2-llamacpp` branch** (production-ready; merge to
-> `main` is a separate operational decision). All seven roadmap phases
-> are shipped. The substrate is a single `llama-server` stack (writer
+> **v2 is at `2.0.0rc2` on the `v2-llamacpp` branch** (all seven
+> roadmap phases shipped; the four V2_FINAL post-shipment stages —
+> v2-only L3 suite, ollama import audit, decision-gate bench harness,
+> BENCHMARKS.md gate entries — also landed on 2026-04-25). The
+> remaining gate before tagging `v2.0.0` and merging to `main` is the
+> calendar soak window (real-world v2 use for ~1 week to catch the
+> long tail). The substrate is a single `llama-server` stack (writer
 > + embedder + reranker on one process tree) replacing v1's Ollama +
 > in-process FlagEmbedding/sentence-transformers. CLI verbs renamed:
 > `sciknow db` → `sciknow library` (lifecycle) + `sciknow corpus`
 > (growth/maintenance) with a one-release deprecation shim. See
 > [MIGRATION.md](MIGRATION.md) for the full v1→v2 verb / settings /
-> migration-path reference, and [PHASE_LOG.md](docs/PHASE_LOG.md)
-> for the per-phase summary. The Quick Start below is the v2 path;
-> v1 (Ollama) install instructions live in
-> [docs/INSTALLATION.md](docs/INSTALLATION.md).
+> migration-path reference, [docs/V2_FINAL.md](docs/V2_FINAL.md) for
+> the post-shipment status + soak/tag procedure, and
+> [PHASE_LOG.md](docs/PHASE_LOG.md) for the per-phase summary. The
+> Quick Start below is the v2 path; v1 (Ollama) install instructions
+> live in [docs/INSTALLATION.md](docs/INSTALLATION.md).
 
 ```bash
 # 1. Clone and set up the venv + system deps
@@ -917,6 +924,7 @@ Project planning and release history:
 | Document | Contents |
 |---|---|
 | **[Roadmap](docs/ROADMAP.md)** | Open items by source (QA, research runners-up, hardware-gated, compound-learning layers) |
+| **[Post-v2 roadmap](docs/POST_V2_ROADMAP.md)** | Shipping order from v2.0.0rc2 → v2.0.0 → v2.1 cleanup → v2.2 features → DGX Spark unlock → data-gated learning |
 | **[Ingestion roadmap](docs/ROADMAP_INGESTION.md)** | 43 research proposals for improving `sciknow refresh` / ingest — by pipeline stage + cross-cutting, priority-ranked |
 | **[Phase log](docs/PHASE_LOG.md)** | Release notes per phase commit, newest first |
 | **[Strategy](docs/STRATEGY.md)** | Long-range direction; why certain trade-offs were chosen |
@@ -949,9 +957,15 @@ Research notes (reading material, not authoritative for current behaviour):
 | Storage | 500 GB SSD | 2 TB NVMe |
 | OS | Ubuntu 22.04+ | Ubuntu 22.04+ |
 
-**VRAM budget on 3090 (24 GB):** bge-m3 (~2.2 GB) + qwen3.5:27b (~18 GB) + bge-reranker (~0.5 GB) = fits comfortably.
+**VRAM budget on 3090 (24 GB):** llama-server writer (Qwen3.6-27B-UD-Q4_K_XL ~17.6 GB) + embedder (bge-m3-Q8 ~0.6 GB) + reranker (bge-reranker-v2-m3-Q8 ~0.6 GB) = fits comfortably with ~5 GB headroom for KV cache + activations.
 
-**Remote GPU:** Set `OLLAMA_HOST=http://your-gpu-server:11434` in `.env`. Zero code changes.
+**Remote GPU:** Point the three v2 substrate URLs at the remote host in `.env`:
+```bash
+INFER_WRITER_URL=http://your-gpu-server:8090
+INFER_EMBEDDER_URL=http://your-gpu-server:8091
+INFER_RERANKER_URL=http://your-gpu-server:8092
+```
+Run `sciknow infer up --role <writer|embedder|reranker>` on the remote host. Zero code changes locally. (v1 rollback path: `OLLAMA_HOST=http://your-gpu-server:11434` after `USE_LLAMACPP_WRITER=False`.)
 
 ---
 

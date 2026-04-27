@@ -20,6 +20,49 @@ from fastapi.responses import JSONResponse
 router = APIRouter()
 
 
+@router.post("/api/autowrite-book")
+async def api_autowrite_book(
+    max_iter: int = Form(3),
+    target_score: float = Form(0.85),
+    model: str = Form(None),
+    target_words: int = Form(None),
+    rebuild: bool = Form(False),
+    resume: bool = Form(False),
+    include_visuals: bool = Form(False),
+):
+    """Phase 54.6.x — autowrite EVERY section of EVERY chapter in the
+    book in a single job.
+
+    Wraps ``autowrite_book_all_chapters_stream`` (which itself iterates
+    over ``autowrite_chapter_all_sections_stream``). The chapter-level
+    wrapper already handles the pre-autowrite snapshot + the
+    rebuild / resume semantics; this endpoint just kicks off one job
+    that fans out across the whole book.
+    """
+    from sciknow.core.book_ops import autowrite_book_all_chapters_stream
+    from sciknow.web import app as _app
+
+    job_id, queue = _app._create_job("autowrite_book")
+    loop = asyncio.get_event_loop()
+
+    def gen():
+        return autowrite_book_all_chapters_stream(
+            book_id=_app._book_id,
+            model=model or None,
+            max_iter=max_iter, target_score=target_score,
+            target_words=target_words if target_words and target_words > 0 else None,
+            rebuild=rebuild,
+            resume=resume,
+            include_visuals=include_visuals,
+        )
+
+    thread = threading.Thread(
+        target=_app._run_generator_in_thread, args=(job_id, gen, loop), daemon=True)
+    thread.start()
+
+    return JSONResponse({"job_id": job_id})
+
+
 @router.post("/api/autowrite-chapter")
 async def api_autowrite_chapter(
     chapter_id: str = Form(...),

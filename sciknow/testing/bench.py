@@ -909,15 +909,23 @@ def b_model_reranker_throughput() -> Iterable[BenchMetric]:
 
 
 def b_model_llm_fast_throughput() -> Iterable[BenchMetric]:
-    """Ollama fast-model tokens/sec (LLM_FAST_MODEL, for metadata extract).
-    A single short generation call — fast models are used inside the
-    ingestion hot path so latency dominates over throughput."""
+    """Fast-model tokens/sec (LLM_FAST_MODEL, used inside the metadata
+    extract hot path) via the dispatch facade `rag.llm.stream`. A single
+    short generation — fast models are latency-dominated so the absolute
+    number isn't the headline; the comparison v1↔v2 is what matters.
+
+    V2_FINAL Stage 3: dispatch flips on `USE_LLAMACPP_WRITER`; the
+    first emitted metric tags the backend so the operator sees which
+    path the number reflects.
+    """
     from sciknow.config import settings
-    from sciknow.rag.llm import stream
+    from sciknow.rag.llm import stream, _use_llamacpp
     prompt_user = (
         "Respond with 2-3 sentences on why scientific papers "
         "should have a methods section. Be concrete."
     )
+    backend = "llama-server" if _use_llamacpp() else "ollama"
+    yield BenchMetric("backend", backend, "")
     tokens: list[str] = []
     t0 = time.monotonic()
     try:
@@ -927,7 +935,7 @@ def b_model_llm_fast_throughput() -> Iterable[BenchMetric]:
             if time.monotonic() - t0 > 30:
                 break
     except Exception as exc:
-        skip(f"fast LLM unreachable: {exc}")
+        skip(f"fast LLM unreachable ({backend}): {exc}")
     dt = time.monotonic() - t0
     yield BenchMetric("model",       settings.llm_fast_model, "")
     yield BenchMetric("tokens",      len(tokens), "")
@@ -936,16 +944,24 @@ def b_model_llm_fast_throughput() -> Iterable[BenchMetric]:
 
 
 def b_model_llm_main_throughput() -> Iterable[BenchMetric]:
-    """Ollama main-model tokens/sec (used for book writing). A single
-    short generation — on a cold model this includes load time, so the
-    number is pessimistic."""
+    """Main-model tokens/sec (used for book writing) via the dispatch
+    facade `rag.llm.stream`. Single short generation — on a cold model
+    this includes load time, so the number is pessimistic.
+
+    V2_FINAL Stage 3: this now dispatches via `llm.stream`, which
+    routes to llama-server when `USE_LLAMACPP_WRITER=True` (default)
+    and Ollama otherwise. The first emitted metric tags which backend
+    was timed so the operator sees which path the number reflects.
+    """
     from sciknow.config import settings
-    from sciknow.rag.llm import stream
+    from sciknow.rag.llm import stream, _use_llamacpp
     prompt_user = (
         "Write a 2-paragraph critique of the hypothesis that "
         "solar irradiance variability explains recent climate trends. "
         "Be specific about what evidence would be needed."
     )
+    backend = "llama-server" if _use_llamacpp() else "ollama"
+    yield BenchMetric("backend", backend, "")
     tokens: list[str] = []
     t0 = time.monotonic()
     try:
@@ -957,13 +973,179 @@ def b_model_llm_main_throughput() -> Iterable[BenchMetric]:
             if time.monotonic() - t0 > 120:
                 break
     except Exception as exc:
-        skip(f"main LLM unreachable: {exc}")
+        skip(f"main LLM unreachable ({backend}): {exc}")
     dt = time.monotonic() - t0
     yield BenchMetric("model",          settings.llm_model, "")
     yield BenchMetric("tokens",         len(tokens), "")
     yield BenchMetric("wall_time",      round(dt, 2), "s")
     yield BenchMetric("tokens_per_sec", round(len(tokens) / dt, 1), "tok/s",
                       note="includes cold-model load on first call")
+
+
+# ════════════════════════════════════════════════════════════════════
+# V2_FINAL Stage 3 — substrate benches (Decision Gates A / B / D)
+# ════════════════════════════════════════════════════════════════════
+
+
+def b_writer_tps_substrate() -> Iterable[BenchMetric]:
+    """Decision Gate A — writer tok/s on the llama-server substrate.
+
+    Calls `infer.client.chat_complete` 5 times against a fixed prompt,
+    reports decode_tps / prompt_tps / first_token_s / output_tokens
+    aggregated as median+mean. Appends per-iteration JSONL to
+    `data/bench/writer_tps.jsonl` so the cumulative comparison vs the
+    v1 baseline survives across runs.
+
+    Skips cleanly when the writer role isn't reachable.
+    """
+    import json as _json
+    from sciknow.config import settings
+    from sciknow.infer import client as infer_client
+    if not infer_client.health("writer"):
+        skip(f"writer substrate unreachable at {settings.infer_writer_url}")
+
+    sys_p = "You are a careful scientific writer."
+    usr_p = (
+        "Write a single 1500-token paragraph reviewing the relationship "
+        "between Atlantic multidecadal oscillation and Sahel rainfall "
+        "variability. Cite the major studies and their disagreements. "
+        "Be concrete and specific."
+    )
+    target_tokens = 1500
+    out_path = _bench_dir() / "writer_tps.jsonl"
+    samples: list[dict] = []
+    for i in range(5):
+        infer_client.drain_call_stats()  # clear thread-local
+        t0 = time.monotonic()
+        try:
+            text = infer_client.chat_complete(
+                sys_p, usr_p,
+                temperature=0.0,
+                num_predict=target_tokens,
+            )
+        except Exception as exc:
+            skip(f"writer substrate call failed iter={i}: {exc}")
+        elapsed = time.monotonic() - t0
+        stats_list = infer_client.drain_call_stats()
+        if not stats_list:
+            samples.append({
+                "backend": "llamacpp",
+                "model": settings.writer_model_name,
+                "elapsed_s": elapsed,
+                "output_chars": len(text or ""),
+                "iter": i,
+            })
+            continue
+        st = stats_list[-1]
+        eval_count = st.get("eval_count", 0) or 0
+        eval_ns = st.get("eval_duration_ns", 0) or 0
+        prompt_count = st.get("prompt_eval_count", 0) or 0
+        prompt_ns = st.get("prompt_eval_duration_ns", 0) or 0
+        decode_tps = (eval_count / (eval_ns / 1e9)) if eval_ns > 0 else 0.0
+        prompt_tps = (prompt_count / (prompt_ns / 1e9)) if prompt_ns > 0 else 0.0
+        # first_token_s isn't directly emitted by llama-server's timings
+        # block; estimate as prompt_eval_duration (the time before the
+        # first decode token leaves the server).
+        first_token_s = (prompt_ns / 1e9) if prompt_ns > 0 else 0.0
+        samples.append({
+            "backend": "llamacpp",
+            "model": settings.writer_model_name,
+            "elapsed_s": elapsed,
+            "output_tokens": eval_count,
+            "prompt_tokens": prompt_count,
+            "decode_tps": decode_tps,
+            "prompt_tps": prompt_tps,
+            "first_token_s": first_token_s,
+            "output_chars": len(text or ""),
+        })
+    # Append per-iteration rows (matching the v1-era schema in writer_tps.jsonl)
+    with out_path.open("a") as fh:
+        for s in samples:
+            fh.write(_json.dumps(s) + "\n")
+    decode = sorted([s.get("decode_tps", 0) or 0 for s in samples])
+    if not decode or max(decode) == 0:
+        skip("no decode timings captured from substrate — llama-server "
+             "may not be emitting timings on the final SSE chunk")
+    median = decode[len(decode) // 2]
+    mean = sum(decode) / len(decode)
+    yield BenchMetric("backend",          "llamacpp", "")
+    yield BenchMetric("model",            settings.writer_model_name, "")
+    yield BenchMetric("samples",          len(samples), "")
+    yield BenchMetric("decode_tps_median", round(median, 2), "tok/s")
+    yield BenchMetric("decode_tps_mean",   round(mean, 2), "tok/s")
+    yield BenchMetric("data_path", str(out_path.relative_to(out_path.parent.parent.parent)), "",
+                      note="appended cumulative — diff against v1 ollama rows")
+
+
+def b_embedder_throughput_substrate() -> Iterable[BenchMetric]:
+    """Decision Gate B — embedder throughput on the llama-server substrate.
+
+    Embeds a fixed batch of up to 256 chunks via `infer.client.embed`;
+    reports chunks/sec and vectors/sec. Compares to FlagEmbedding's
+    in-process baseline measured by `b_model_embedder_throughput`.
+
+    Spec gate: substrate ≥ 0.8 × FlagEmbedding baseline.
+    """
+    from sqlalchemy import text as _t
+    from sciknow.config import settings
+    from sciknow.infer import client as infer_client
+    from sciknow.storage.db import get_session
+    if not infer_client.health("embedder"):
+        skip(f"embedder substrate unreachable at {settings.infer_embedder_url}")
+
+    with get_session() as session:
+        rows = session.execute(_t("""
+            SELECT content FROM chunks
+            WHERE length(content) BETWEEN 200 AND 4000
+            ORDER BY random() LIMIT 256
+        """)).fetchall()
+    texts = [r[0] for r in rows]
+    if len(texts) < 32:
+        skip(f"need 32+ sample chunks, got {len(texts)} — corpus may be empty")
+
+    # Warmup
+    try:
+        _ = infer_client.embed(texts[:4])
+    except Exception as exc:
+        skip(f"embedder warmup failed: {exc}")
+
+    total_chars = sum(len(t) for t in texts)
+    t0 = time.monotonic()
+    try:
+        vecs = infer_client.embed(texts)
+    except Exception as exc:
+        skip(f"embedder bench call failed: {exc}")
+    dt = time.monotonic() - t0
+    assert len(vecs) == len(texts), (
+        f"embedder returned {len(vecs)} vectors for {len(texts)} inputs"
+    )
+    yield BenchMetric("backend",      "llama-server", "")
+    yield BenchMetric("model",        settings.embedder_model_name, "")
+    yield BenchMetric("total_chunks", len(texts), "")
+    yield BenchMetric("wall_time",    round(dt, 2), "s")
+    yield BenchMetric("chunks_per_sec",
+                      round(len(texts) / dt, 2), "chunks/s",
+                      note="bge-m3 dense via /v1/embeddings")
+    yield BenchMetric("chars_per_sec", int(total_chars / dt), "char/s")
+    yield BenchMetric("vectors_per_sec",
+                      round(len(vecs) / dt, 2), "vec/s")
+
+
+def b_retrieval_recall_at_10() -> Iterable[BenchMetric]:
+    """Decision Gate D — retrieval recall@10 on the active corpus.
+
+    Wraps the existing `b_retrieval_recall` (Phase 54.6.69), which
+    runs the synthetic probe set under `data/bench/retrieval_queries.jsonl`
+    through the full hybrid search + rerank pipeline and reports
+    recall@10 + MRR@10 + NDCG@10.
+
+    Skips with a generation hint when no probe set exists. The probe
+    set is corpus-specific (ground truth = source chunk IDs), so it
+    can't be committed as a fixture — generate it once per project
+    with `sciknow bench retrieval-gen`.
+    """
+    from sciknow.testing.retrieval_eval import b_retrieval_recall as _fn
+    yield from _fn()
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -1315,6 +1497,14 @@ _LLM: list[tuple[str, BenchFn]] = [
     ("models", b_model_llm_main_throughput),
 ]
 
+# V2_FINAL Stage 3 — Decision Gate measurements. Self-contained: assumes
+# llama-server roles up, populates writer_tps.jsonl + recall report.
+_V2: list[tuple[str, BenchFn]] = [
+    ("models",    b_writer_tps_substrate),         # Gate A
+    ("models",    b_embedder_throughput_substrate), # Gate B
+    ("retrieval", b_retrieval_recall_at_10),       # Gate D
+]
+
 def _sweep_layer() -> list[tuple[str, BenchFn]]:
     """Import sweep benches lazily — model_sweep imports wiki_prompts
     which has heavier transitive deps than bench.py wants to pay for
@@ -1351,7 +1541,8 @@ LAYERS: dict[str, list[tuple[str, BenchFn]]] = {
     "fast":  _FAST,
     "live":  _LIVE,
     "llm":   _LLM,
-    "full":  _FAST + _LIVE + _LLM,
+    "v2":    _V2,                          # V2_FINAL Stage 3: Gates A/B/D
+    "full":  _FAST + _LIVE + _LLM + _V2,
 }
 
 # "sweep", "quality", "vlm-sweep", "specter2" are pseudo-layers: not

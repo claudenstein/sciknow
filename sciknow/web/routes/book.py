@@ -256,7 +256,7 @@ async def api_book_outline_generate(
 
         with get_session() as session:
             book = session.execute(text("""
-                SELECT id::text, title, description, project_type
+                SELECT id::text, title, description, project_type, plan
                 FROM books WHERE id::text = :bid
             """), {"bid": _app._book_id}).fetchone()
             if not book:
@@ -276,11 +276,74 @@ async def api_book_outline_generate(
                 ORDER BY pm.year DESC NULLS LAST LIMIT 200
             """)).fetchall()
 
-        paper_list = [{"title": r[0], "year": r[1]} for r in papers if r[0]]
-        yield {"type": "progress", "stage": "generating",
-               "detail": f"Drafting outline from {len(paper_list)} papers…"}
+            # Phase 54.6.x — gather topic-cluster catalogue + per-cluster
+            # representative abstracts so the LLM sees what the corpus
+            # actually contains, not just paper titles. We pull every
+            # cluster (paper count >= 2) and the 3 most-recent papers
+            # in each one; per-paper abstracts are truncated to 280
+            # chars so 19 clusters × 3 papers × 280 ≈ 16 KB, well
+            # within a 16K context after the rest of the prompt.
+            cluster_rows = session.execute(text("""
+                SELECT pm.topic_cluster, COUNT(*) AS n
+                FROM paper_metadata pm
+                JOIN documents d ON d.id = pm.document_id
+                WHERE d.ingestion_status = 'complete'
+                  AND pm.topic_cluster IS NOT NULL
+                  AND pm.topic_cluster != ''
+                GROUP BY pm.topic_cluster
+                HAVING COUNT(*) >= 2
+                ORDER BY COUNT(*) DESC
+            """)).fetchall()
+            cluster_catalogue: list[dict] = []
+            for cname, n in cluster_rows:
+                rep_rows = session.execute(text("""
+                    SELECT pm.title, pm.year, pm.abstract
+                    FROM paper_metadata pm
+                    JOIN documents d ON d.id = pm.document_id
+                    WHERE d.ingestion_status = 'complete'
+                      AND pm.topic_cluster = :tc
+                      AND pm.title IS NOT NULL
+                    ORDER BY pm.year DESC NULLS LAST,
+                             LENGTH(COALESCE(pm.abstract, '')) DESC
+                    LIMIT 3
+                """), {"tc": cname}).fetchall()
+                cluster_catalogue.append({
+                    "name": cname,
+                    "count": int(n or 0),
+                    "papers": [
+                        {
+                            "title": r[0],
+                            "year": r[1],
+                            "abstract": (
+                                (r[2] or "").strip().replace("\n", " ")[:280]
+                            ),
+                        }
+                        for r in rep_rows
+                    ],
+                })
 
-        sys_p, usr_p = rag_prompts.outline(book_title=book[1], papers=paper_list)
+        paper_list = [{"title": r[0], "year": r[1]} for r in papers if r[0]]
+        plan_text = book[4] if len(book) > 4 else None
+        n_clusters = len(cluster_catalogue)
+        yield {"type": "progress", "stage": "generating",
+               "detail": (
+                   f"Drafting outline from {len(paper_list)} papers"
+                   + (f" + {n_clusters} topic clusters" if n_clusters else "")
+                   + (" + book plan" if plan_text and plan_text.strip() else "")
+                   + "…"
+               )}
+
+        # Phase 54.6.x — book.plan (the leitmotiv) AND topic-cluster
+        # catalogue (with abstracts) are now explicit inputs. Without
+        # them, the prompt was effectively blind: just paper titles
+        # and the book title, with no signal about what the corpus
+        # actually says or how it groups topically.
+        sys_p, usr_p = rag_prompts.outline(
+            book_title=book[1],
+            papers=paper_list,
+            plan=plan_text,
+            clusters=cluster_catalogue,
+        )
         # Inject method preamble if the user picked one.
         if method and method.strip():
             m = get_method("elicitation", method)
@@ -324,12 +387,37 @@ async def api_book_outline_generate(
             from sciknow.core.book_ops import resize_sections_by_density as _resize
             yield {"type": "progress", "stage": "resizing",
                    "detail": "Resizing sections by corpus evidence density…"}
-            # Phase 54.6.297 — pass the outline-specific model into
-            # _grow_sections_llm so the resize step agrees with the
-            # generation step on model choice.
             chapters = _resize(chapters, model=effective_model)
         except Exception as exc:
             logger.warning("density resize failed: %s", exc)
+
+        # Phase 54.6.x — DEEP outline post-pass. For every chapter ×
+        # section, run hybrid retrieval and call SECTION_PLAN with the
+        # leitmotiv + retrieved evidence + earlier chapters to produce
+        # bullet-list concept plans. After this, sections are saved as
+        # full {slug, title, plan, target_words} dicts and are
+        # immediately ready for autowrite without a manual auto-plan
+        # pass. Failures per section degrade gracefully — the section
+        # is still inserted, just without a plan.
+        try:
+            from sciknow.core.book_ops import deep_plan_outline_chapters as _deep
+            yield {"type": "progress", "stage": "deep_planning",
+                   "detail": (
+                       "Deep section planning (per-section retrieval + "
+                       "leitmotiv-grounded concept lists)…"
+                   )}
+            for evt in _deep(
+                chapters,
+                book_title=book[1],
+                book_type=(book[3] if len(book) > 3 else None) or "scientific_book",
+                book_plan=plan_text,
+                model=effective_model,
+            ):
+                # Forward every event to the SSE stream so the GUI shows
+                # per-section progress.
+                yield evt
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("deep section planning failed: %s", exc)
 
         # Additive insert — skip numbers that already exist so the
         # user can re-run without destroying manual edits.
@@ -370,6 +458,93 @@ async def api_book_outline_generate(
         target=_app._run_generator_in_thread, args=(job_id, gen, loop), daemon=True
     ).start()
     return JSONResponse({"job_id": job_id})
+
+
+@router.post("/api/book/insert-introduction")
+async def api_book_insert_introduction():
+    """Phase 54.6.x — prepend an Introduction chapter at position 1.
+
+    Standard front-matter for a scientific divulgation book: every
+    existing chapter is renumbered ``+1`` and a new chapter ``number=1``
+    titled "Introduction" is inserted with framing-style sections
+    (motivation / scope / key terms / roadmap). Idempotent guard: if
+    chapter 1 already looks like an introduction (title matches
+    /introduction/i), the call is a no-op.
+
+    Sections list mirrors the project-type Introduction template:
+    "Motivation & Stakes", "Scope of the Argument", "Key Terms",
+    "Roadmap of the Book". Existing drafts are NOT touched — they
+    move with their chapters via the +1 number bump.
+    """
+    import json as _json
+    from sciknow.web import app as _app
+
+    intro_sections = [
+        "Motivation & Stakes",
+        "Scope of the Argument",
+        "Key Terms",
+        "Roadmap of the Book",
+    ]
+
+    with get_session() as session:
+        chapters = session.execute(text("""
+            SELECT number, title FROM book_chapters
+            WHERE book_id::text = :bid ORDER BY number ASC
+        """), {"bid": _app._book_id}).fetchall()
+
+        if chapters and (chapters[0][1] or "").strip().lower().startswith(
+            "introduction"
+        ):
+            return JSONResponse({
+                "ok": True,
+                "renumbered": 0,
+                "noop": True,
+                "message": "Chapter 1 already looks like an introduction.",
+            })
+
+        # Two-step renumber to dodge the (book_id, number) UNIQUE check:
+        # bump every existing chapter by N+1 (out of the way) first,
+        # then bring them back to (n+1) so chapter 1 is free.
+        n_existing = len(chapters)
+        if n_existing:
+            session.execute(text("""
+                UPDATE book_chapters
+                   SET number = number + :bump
+                 WHERE book_id::text = :bid
+            """), {"bid": _app._book_id, "bump": n_existing + 100})
+            session.execute(text("""
+                UPDATE book_chapters
+                   SET number = number - :unwind
+                 WHERE book_id::text = :bid
+            """), {"bid": _app._book_id, "unwind": n_existing + 100 - 1})
+
+        session.execute(text("""
+            INSERT INTO book_chapters
+                (book_id, number, title, description, topic_query, sections)
+            VALUES (CAST(:bid AS uuid), 1, :title, :desc, :tq,
+                    CAST(:secs AS jsonb))
+        """), {
+            "bid": _app._book_id,
+            "title": "Introduction",
+            "desc": (
+                "Frames the book's thesis, motivates the questions the "
+                "rest of the book answers, and orients the reader. No "
+                "substantive evidence here — that lives in later chapters."
+            ),
+            "tq": "introduction overview scope motivation",
+            "secs": _json.dumps(intro_sections),
+        })
+        session.commit()
+
+    return JSONResponse({
+        "ok": True,
+        "renumbered": n_existing,
+        "noop": False,
+        "message": (
+            f"Introduction inserted as Ch.1. {n_existing} existing "
+            f"chapter(s) renumbered to 2..{n_existing + 1}."
+        ),
+    })
 
 
 @router.post("/api/book/auto-expand/preview")

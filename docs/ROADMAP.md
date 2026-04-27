@@ -9,6 +9,11 @@ This doc replaces ad-hoc "planned" sections that were scattered across
 `docs/RESEARCH.md` and the auto-memory files. When something here
 ships, move it to a Phase commit and delete the entry.
 
+> **Companion:** [`docs/POST_V2_ROADMAP.md`](POST_V2_ROADMAP.md) is the
+> shipping-order view (v2.0.0 → v2.1 → v2.2 → Spark → data-gated). It
+> *references* this doc's open items rather than duplicating them, so
+> when something ships here, the Post-v2 doc tracks the milestone.
+
 ---
 
 ## 1. Deferred QA findings (Phase 22 audit)

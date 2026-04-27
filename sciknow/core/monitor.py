@@ -1548,42 +1548,107 @@ def _model_assignments() -> dict:
     mapping that the user configures via .env — useful for "wait,
     which model is autowrite using right now?" moments.
 
-    Phase 54.6.244 — added per-role book writer / reviewer / autowrite
-    scorer keys. Pre-244 the monitor showed only ``llm_main`` /
-    ``llm_fast``, so the four overrides
-    (``BOOK_WRITE_MODEL`` new in 54.6.243, ``BOOK_REVIEW_MODEL``,
-    ``AUTOWRITE_SCORER_MODEL``, ``VISUALS_CAPTION_MODEL``) were
-    invisible from the dashboard. Each key falls back to ``llm_main``
-    in the consumer UI so an unset override renders explicitly
-    rather than as ``null``.
+    v2 Phase A — when ``USE_LLAMACPP_WRITER=True`` (default), every
+    writer-class role dispatches to the single llama-server writer
+    GGUF, so the legacy v1 per-role Ollama tags (``LLM_MODEL``,
+    ``BOOK_WRITE_MODEL`` etc.) are NOT honored at runtime. We surface
+    the actual GGUF basename instead, and zero-out the per-role
+    overrides so the dashboard reflects what's running rather than
+    what's left over in .env. The per-role keys flip back on when the
+    user opts into the v1 rollback path.
+
+    v2 Phase B — same treatment for embedder + reranker: when the
+    llamacpp toggle is on, surface the GGUF basename (what's actually
+    being served by llama-server) instead of the HF label.
+
+    Phase 54.6.244 — per-role book writer / reviewer / autowrite
+    scorer / caption VLM keys are present so the consumer UI can
+    render their inheritance explicitly. On v2 they read None and
+    the CLI panel hides them (single-canonical-writer per spec §2.1).
     """
+    from pathlib import Path
+
+    def _gguf_basename(path: str | None) -> str | None:
+        if not path:
+            return None
+        return Path(path).name
+
     try:
         from sciknow.config import settings
-        return {
-            "llm_main": settings.llm_model or None,
-            "llm_fast": settings.llm_fast_model or None,
-            # Per-role book pipeline overrides (None → inherits llm_main)
-            "book_write": getattr(settings, "book_write_model", None),
-            "book_outline": getattr(settings, "book_outline_model", None),
-            "book_review": getattr(settings, "book_review_model", None),
-            "autowrite_scorer": getattr(
+        use_v2_writer = bool(getattr(settings, "use_llamacpp_writer", True))
+        use_v2_embedder = bool(getattr(settings, "use_llamacpp_embedder", True))
+        use_v2_reranker = bool(getattr(settings, "use_llamacpp_reranker", True))
+        use_v2_vlm = bool(getattr(settings, "use_llamacpp_vlm", True))
+
+        # Writer slot: on v2 surface the single writer GGUF and
+        # explicitly null out the v1 per-role keys (they don't dispatch).
+        if use_v2_writer:
+            writer_label = (
+                _gguf_basename(getattr(settings, "writer_model_gguf", None))
+                or getattr(settings, "writer_model_name", None)
+                or "writer"
+            )
+            llm_main = f"{writer_label} (llama-server)"
+            llm_fast = None
+            book_write = None
+            book_outline = None
+            book_review = None
+            autowrite_scorer = None
+        else:
+            llm_main = settings.llm_model or None
+            llm_fast = settings.llm_fast_model or None
+            book_write = getattr(settings, "book_write_model", None)
+            book_outline = getattr(settings, "book_outline_model", None)
+            book_review = getattr(settings, "book_review_model", None)
+            autowrite_scorer = getattr(
                 settings, "autowrite_scorer_model", None,
-            ),
-            # Visual captioning
-            "caption_vlm": (
+            )
+
+        embedder_label = (
+            f"{_gguf_basename(getattr(settings, 'embedder_model_gguf', None))} "
+            f"(llama-server)"
+            if use_v2_embedder else
+            (settings.embedding_model or None)
+        )
+        reranker_label = (
+            f"{_gguf_basename(getattr(settings, 'reranker_model_gguf', None))} "
+            f"(llama-server)"
+            if use_v2_reranker else
+            getattr(settings, "reranker_model", None)
+        )
+
+        # Caption VLM: on v2 surface the GGUF basename actually being
+        # served by the vlm role; on v1 fallback fall back to the
+        # Ollama tag the user configured (qwen2.5vl by default).
+        if use_v2_vlm:
+            caption_label = (
+                f"{_gguf_basename(getattr(settings, 'vlm_model_gguf', None))} "
+                f"(llama-server)"
+            )
+        else:
+            caption_label = (
                 getattr(settings, "visuals_caption_model", None)
                 or getattr(settings, "caption_vlm_model", None)
                 or getattr(settings, "vlm_model", None)
-            ),
-            "embedder": settings.embedding_model or None,
-            "reranker": (
-                getattr(settings, "reranker_model", None)
-            ),
+            )
+
+        return {
+            "llm_main": llm_main,
+            "llm_fast": llm_fast,
+            "book_write": book_write,
+            "book_outline": book_outline,
+            "book_review": book_review,
+            "autowrite_scorer": autowrite_scorer,
+            "caption_vlm": caption_label,
+            "embedder": embedder_label,
+            "reranker": reranker_label,
             "pdf_backend": getattr(settings, "pdf_converter_backend", None),
             "mineru_vlm_backend": getattr(
                 settings, "mineru_vlm_backend", None
             ),
             "mineru_vlm_model": getattr(settings, "mineru_vlm_model", None),
+            "v2_writer_active": use_v2_writer,
+            "v2_vlm_active": use_v2_vlm,
         }
     except Exception:
         return {}
@@ -3181,11 +3246,16 @@ def _infer_substrate_snapshot() -> list[dict]:
             getattr(_s, "use_llamacpp_writer", True)
             or getattr(_s, "use_llamacpp_embedder", True)
             or getattr(_s, "use_llamacpp_reranker", True)
+            or getattr(_s, "use_llamacpp_vlm", True)
         )
         if not on:
             return []
         from sciknow.infer.server import status as _status
         rows = _status()
+        # The vlm role hot-swaps with the writer (`corpus caption-visuals`
+        # toggles it for the duration of a captioning batch and stops it
+        # after). Surface it only when actually running so the dashboard
+        # doesn't flag it as ✗ down at all times — that's expected.
         return [
             {
                 "role": p.role,
@@ -3195,6 +3265,7 @@ def _infer_substrate_snapshot() -> list[dict]:
                 "healthy": bool(p.healthy),
             }
             for p in rows
+            if p.role != "vlm" or p.pid is not None
         ]
     except Exception as exc:
         logger.debug("infer_substrate snapshot failed: %s", exc)

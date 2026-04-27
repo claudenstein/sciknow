@@ -272,6 +272,24 @@ class LintSummaryEvent(_BaseEvent):
     type: Literal["lint_summary"]
 
 
+# Phase 54.6.x — deep outline post-pass (per-section corpus-grounded
+# concept plans). Yielded by core.book_ops.deep_plan_outline_chapters.
+class DeepPlanStartEvent(_BaseEvent):
+    type: Literal["deep_plan_start"]
+
+
+class DeepPlanSectionStartEvent(_BaseEvent):
+    type: Literal["deep_plan_section_start"]
+
+
+class DeepPlanSectionDoneEvent(_BaseEvent):
+    type: Literal["deep_plan_section_done"]
+
+
+class DeepPlanCompleteEvent(_BaseEvent):
+    type: Literal["deep_plan_complete"]
+
+
 # ── union (discriminator: "type") ───────────────────────────────────────
 
 SciknowEvent = Annotated[
@@ -293,6 +311,8 @@ SciknowEvent = Annotated[
         SectionStartEvent, SectionDoneEvent, SectionErrorEvent,
         SectionLengthWarningEvent, RefinementGateEvent,
         ResumeInfoEvent, RetrievalDensityAdjustEvent, LintSummaryEvent,
+        DeepPlanStartEvent, DeepPlanSectionStartEvent,
+        DeepPlanSectionDoneEvent, DeepPlanCompleteEvent,
     ],
     Field(discriminator="type"),
 ]
@@ -319,6 +339,8 @@ KNOWN_EVENT_TYPES: frozenset[str] = frozenset({
     "section_start", "section_done", "section_error",
     "section_length_warning", "refinement_gate",
     "resume_info", "retrieval_density_adjust", "lint_summary",
+    "deep_plan_start", "deep_plan_section_start",
+    "deep_plan_section_done", "deep_plan_complete",
 })
 
 

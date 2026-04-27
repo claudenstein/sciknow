@@ -1,7 +1,7 @@
 """`sciknow infer` — manage the llama-server inference substrate.
 
 Subcommands:
-    up     [--role writer|embedder|reranker|all] [--profile P]
+    up     [--role writer|embedder|reranker|vlm|all] [--profile P]
     down   [--role …]
     status
     swap   <role> <model.gguf>
@@ -22,18 +22,24 @@ from sciknow.infer import server as infer_server
 
 app = typer.Typer(
     name="infer",
-    help="Manage the llama-server inference substrate (writer/embedder/reranker).",
+    help="Manage the llama-server inference substrate (writer/embedder/reranker/vlm).",
     no_args_is_help=True,
 )
 console = Console()
 
 
-_VALID_ROLES = ["writer", "embedder", "reranker"]
+# Order matters for `--role all`: bring up the cheap roles first
+# (embedder + reranker stay tiny) so the writer is the last big load
+# and any VRAM error surfaces with the others already up.
+# vlm is excluded from `all` because it hot-swaps with the writer
+# (both ~17 GB) — `corpus caption-visuals` manages the swap.
+_VALID_ROLES = ["writer", "embedder", "reranker", "vlm"]
+_ALL_BY_DEFAULT = ["writer", "embedder", "reranker"]
 
 
 def _resolve_roles(role: str) -> list[str]:
     if role == "all":
-        return list(_VALID_ROLES)
+        return list(_ALL_BY_DEFAULT)
     if role not in _VALID_ROLES:
         console.print(f"[red]Unknown role:[/red] {role!r}. "
                       f"Use one of {_VALID_ROLES + ['all']}")

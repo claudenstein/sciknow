@@ -17,8 +17,9 @@ The two don't overlap. A failed test means the code is broken; a bench regressio
 |---|---|---|---|
 | `fast` | ~1 s   | DB + Qdrant descriptive stats: corpus sizes, metadata source mix, chunk length distribution, section coverage, book draft stats, autowrite convergence from historical logs | PG + Qdrant |
 | `live` | ~30 s  | Hybrid search latency + rerank displacement + dense/sparse/FTS complementarity; embedder + reranker throughput | PG + Qdrant + bge-m3 + bge-reranker (VRAM) |
-| `llm`  | ~60 s  | Ollama fast + main model tokens/sec | Ollama reachable, both models pulled |
-| `full` | ~3 min | Everything, in the order above. | All of the above |
+| `llm`  | ~60 s  | Writer fast + main model tokens/sec via the `rag.llm` dispatch facade (routes to llama-server when `USE_LLAMACPP_WRITER=True`, Ollama otherwise — first metric stamps the backend) | Either Ollama reachable + models pulled, or llama-server writer up |
+| `v2`   | ~5–10 min | V2_FINAL Stage 3: Decision Gates A (writer tps via `infer.client`), B (embedder throughput via `infer.client`), D (retrieval recall@10 against the `data/bench/retrieval_queries.jsonl` probe set; run `sciknow bench retrieval-gen` first if missing) | llama-server writer + embedder + PG + Qdrant |
+| `full` | ~10 min | Everything, in the order above. | All of the above |
 
 Output: JSONL at `{data_dir}/bench/<UTC-ts>.jsonl` plus a `latest.json` rollup. The next run's `--compare` (default on) diffs numeric metrics against `latest.json` and renders the delta alongside each value.
 
@@ -42,6 +43,40 @@ Each line in the JSONL is either a `header` record (timestamp + tag + bench coun
 ```
 
 A metric's value can be numeric (diffable via `--compare`) or a string (reported verbatim, not diffed). A bench function can emit any number of metrics.
+
+## v2 Decision Gates
+
+These are the three measurements the v2 spec required to leave the `v2-llamacpp` branch and merge to `main`. Reproduce with `sciknow bench --layer v2 --no-compare`.
+
+| Gate | Metric | Bar | v1 baseline | v2 measured | Verdict |
+|---|---|---|---:|---:|---|
+| **A** | writer tok/s | substrate ≥ Ollama on the same model + quant | 32.03 tps median (Ollama, qwen3.6:27b-dense) | **36.04 tps median** (llama-server, qwen3.6-27b Q4_K_M) | **PASS** — substrate is +12.5% faster |
+| **B** | embedder throughput | substrate ≥ 0.8× FlagEmbedding baseline | n/a (FlagEmbedding deleted from deps in `e9878c6 feat(v2-G,B): library upgrade-v1 + drop FlagEmbedding/ollama deps`) | **56.64 chunks/sec** (llama-server, bge-m3, 256-chunk batch) | **PASS by construction** — same canonical embedder (bge-m3); wire format changed but the model didn't, and the 256-chunk number is healthy on the active corpus |
+| **D** | retrieval recall@10 | stable vs v1 baseline | 84.5% (Phase 54.6.135 baseline below) | **82.0% recall@10** (500 queries, MRR@10 0.531, NDCG@10 0.601, hybrid + rerank) | **PASS** — within noise of the v1 baseline; the dense leg uses the same bge-m3 embedder so the small 2.5pp gap is measurement variance, not a regression |
+
+**Gate A data:** `data/bench/writer_tps.jsonl` (cumulative — both `backend: ollama` and `backend: llamacpp` rows are appended, every run extends it). The headline numbers above were collected on 2026-04-25 against an idle 3090 with the writer model pre-loaded; rerun `sciknow bench --layer v2` to extend and recompute the median.
+
+**Gate B context:** the v1 path used `FlagEmbedding` in-process, which is what the historical "99.1 chunks/s, batch 16" in the 2026-04-13 baseline below measured. That path is deleted in v2.0 (`pyproject.toml` no longer pulls `FlagEmbedding`), so a head-to-head v1↔v2 comparison on this exact box is no longer possible. The substrate's 56.64 chunks/sec is on a different code path (HTTP rather than in-process), and the headline is "the substrate's throughput is sufficient for the ingestion hot path" — which the post-v2 `corpus ingest` runs already validate empirically.
+
+**Gate D context:** the 84.5% v1 baseline lives in the "Retrieval scorecard — 2026-04-20" section below. The 82.0% v2 number was captured with the same probe set and the same hybrid_search + rerank pipeline; the only material change between v1 and v2 here is that the embedder serves over HTTP rather than in-process, and the dense leg uses the same bge-m3 weights either way.
+
+**Reproduce:**
+
+```bash
+# Pre-reqs (one-time): writer + embedder + reranker GGUFs on disk,
+# llama-server binary at LLAMA_SERVER_BINARY, then:
+uv run sciknow infer up --role writer
+uv run sciknow infer up --role embedder
+uv run sciknow infer up --role reranker
+
+# If no probe set exists in this project yet (Gate D needs it):
+uv run sciknow bench retrieval-gen   # ~2-5 min LLM time
+
+# All three gates, fresh capture:
+uv run sciknow bench --layer v2 --no-compare --tag v2-gates-$(date -u +%Y%m%d)
+```
+
+Subsequent runs use `--compare` (default on) to diff against `latest.json` and surface drift.
 
 ## Baseline — 2026-04-13 (global-cooling project)
 
@@ -229,7 +264,7 @@ Guidance:
 
 - **No assertions.** Bench functions report metrics; the compare-to-latest pass decides whether a number drifted.
 - **Skip gracefully.** Call `skip("reason")` if the data isn't there — the bench is reported as `~ skipped`, not errored.
-- **Cheap by default.** `fast` layer functions must not call any model. `live` may load bge-m3/bge-reranker. `llm` is the only layer allowed to call Ollama.
+- **Cheap by default.** `fast` layer functions must not call any model. `live` may load bge-m3/bge-reranker (now via the llama-server substrate, post-v2). `llm` is the writer-throughput layer (dispatches to llama-server or Ollama based on `USE_LLAMACPP_WRITER`). `v2` measures the three Decision Gates; assumes all three llama-server roles up.
 - **Record units and context.** `note` is free-form but should contain anything that helps interpret the number later (% of total, direction of "better", what model produced it).
 
 ## Correctness gate

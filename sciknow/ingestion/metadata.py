@@ -912,14 +912,14 @@ def _layer_arxiv(meta: PaperMeta) -> None:
 _LLM_PROMPT = """\
 Extract bibliographic metadata from the beginning of this scientific paper.
 Return ONLY valid JSON with these fields (use null for missing fields):
-{
+{{
   "title": "...",
   "abstract": "...",
   "year": 2023,
-  "authors": [{"name": "First Last"}, ...],
+  "authors": [{{"name": "First Last"}}, ...],
   "journal": "...",
   "doi": "..."
-}
+}}
 
 Paper text:
 {text}
@@ -996,35 +996,26 @@ def _layer_semantic_scholar(candidate_title: str, meta: PaperMeta) -> None:
 
 def _layer_llm(text: str, meta: PaperMeta) -> None:
     try:
-        import ollama
-
-        # Phase 54.6.23 — explicit timeout. Pre-fix, ollama.Client
-        # had no timeout, so a hung/slow Ollama (model loading, OOM,
-        # dropped socket) would block the entire ingestion pipeline
-        # indefinitely on a single paper. 60s is generous for the
-        # 7B-class fast model on this prompt; if Ollama genuinely
-        # takes longer than that, the paper should fail metadata to
-        # "unknown" (cascade outcome below) and the ingest moves on.
-        client = ollama.Client(host=settings.ollama_host, timeout=60)
-        # Phase 54.6.30 — keep_alive=-1 so the fast model stays resident
-        # across the N papers in a bulk ingest. Pre-fix, each paper in
-        # `sciknow ingest directory` hit this call with Ollama's default
-        # 5-minute TTL, which meant the model reloaded when PDF parsing
-        # of the previous paper took longer than 5 min (MinerU is slow
-        # on heavy figure-laden PDFs). With keep_alive=-1 the model
-        # stays loaded for the entire ingest run.
-        # Phase 54.6.32 — num_predict=1024 cap on metadata JSON output
-        # (typical response is ~200-400 tokens; 1024 is generous for
-        # papers with many authors or long abstracts).
-        response = client.chat(
+        # V2_FINAL Stage 2: route via rag.llm.complete which dispatches
+        # to llama-server when USE_LLAMACPP_WRITER=True (default) and
+        # falls back to Ollama otherwise. Substrate handles `format="json"`
+        # via OpenAI-style response_format. The historical ollama-specific
+        # tuning (timeout, keep_alive=-1, num_predict cap) survives via
+        # the wrapper's parameter contract:
+        #   * timeout — substrate has its own 600s read timeout (httpx)
+        #   * keep_alive=-1 — substrate keeps the model resident forever
+        #     for the process lifetime; the param is accepted+ignored
+        #   * num_predict=1024 — same cap shape as before
+        from sciknow.rag.llm import complete as _llm_complete
+        raw = _llm_complete(
+            "You extract structured paper metadata as JSON.",
+            _LLM_PROMPT.format(text=text),
             model=settings.llm_fast_model,
-            messages=[{"role": "user", "content": _LLM_PROMPT.format(text=text)}],
-            format="json",
-            options={"temperature": 0, "num_predict": 1024},
+            temperature=0,
+            num_predict=1024,
             keep_alive=-1,
+            format="json",
         )
-
-        raw = response.message.content
         data = json.loads(raw)
 
         if data.get("title"):

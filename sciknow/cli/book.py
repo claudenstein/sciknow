@@ -1143,6 +1143,23 @@ def outline(
     save:  bool = typer.Option(True,  "--save/--no-save",
                                 help="Save proposed chapters to the database."),
     model: str | None = typer.Option(None, "--model", help="Override LLM model."),
+    overwrite: str | None = typer.Option(
+        None, "--overwrite",
+        help="Re-outline an already-outlined book. One of: 'archive' "
+             "(drop chapters, KEEP drafts as orphans — recoverable via the "
+             "sidebar's + adopt button or via snapshot-restore), or 'hard' "
+             "(drop chapters AND delete drafts; irreversible without a "
+             "snapshot). Both modes auto-snapshot first as a safety net "
+             "(skip with --no-snapshot). Without this flag, existing "
+             "chapters are preserved and the LLM's new chapters are "
+             "merged in by `number` (the legacy behaviour).",
+    ),
+    snapshot_first: bool = typer.Option(
+        True, "--snapshot/--no-snapshot",
+        help="With --overwrite, take a book-wide draft snapshot before "
+             "wiping anything. Default ON; pass --no-snapshot to skip "
+             "(only sensible when you've just snapshotted by hand).",
+    ),
 ):
     """
     Generate a proposed chapter structure using the LLM and your paper collection.
@@ -1151,7 +1168,9 @@ def outline(
 
       sciknow book outline "Global Cooling"
 
-      sciknow book outline "Global Cooling" --no-save   # preview only
+      sciknow book outline "Global Cooling" --no-save                # preview only
+      sciknow book outline "Global Cooling" --overwrite=archive      # drafts → orphans
+      sciknow book outline "Global Cooling" --overwrite=hard         # delete drafts too
     """
     import json
     from sqlalchemy import text
@@ -1161,6 +1180,12 @@ def outline(
     from sciknow.storage.db import get_session
 
     from sciknow.core.project_type import get_project_type
+
+    if overwrite is not None and overwrite not in ("archive", "hard"):
+        console.print(
+            f"[red]--overwrite must be 'archive' or 'hard'; got {overwrite!r}.[/red]"
+        )
+        raise typer.Exit(2)
 
     # Phase 54.6.297 — per-role outline model override.  CLI `--model`
     # arg wins > BOOK_OUTLINE_MODEL env > LLM_MODEL (default in the
@@ -1195,11 +1220,61 @@ def outline(
             "SELECT title, year FROM paper_metadata ORDER BY year DESC NULLS LAST"
         )).fetchall()
 
-    console.print(f"Generating outline for [bold]{book[1]}[/bold] from {len(papers)} papers…")
+        # Phase 54.6.x — gather topic-cluster catalogue with
+        # per-cluster representative abstracts so the LLM sees what
+        # the corpus actually contains. Mirrors the web flow in
+        # web/routes/book.py:api_book_outline_generate.
+        cluster_rows = session.execute(text("""
+            SELECT pm.topic_cluster, COUNT(*) AS n
+            FROM paper_metadata pm
+            JOIN documents d ON d.id = pm.document_id
+            WHERE d.ingestion_status = 'complete'
+              AND pm.topic_cluster IS NOT NULL
+              AND pm.topic_cluster != ''
+            GROUP BY pm.topic_cluster
+            HAVING COUNT(*) >= 2
+            ORDER BY COUNT(*) DESC
+        """)).fetchall()
+        cluster_catalogue: list[dict] = []
+        for cname, n in cluster_rows:
+            rep_rows = session.execute(text("""
+                SELECT pm.title, pm.year, pm.abstract
+                FROM paper_metadata pm
+                JOIN documents d ON d.id = pm.document_id
+                WHERE d.ingestion_status = 'complete'
+                  AND pm.topic_cluster = :tc
+                  AND pm.title IS NOT NULL
+                ORDER BY pm.year DESC NULLS LAST,
+                         LENGTH(COALESCE(pm.abstract, '')) DESC
+                LIMIT 3
+            """), {"tc": cname}).fetchall()
+            cluster_catalogue.append({
+                "name": cname,
+                "count": int(n or 0),
+                "papers": [
+                    {
+                        "title": r[0],
+                        "year": r[1],
+                        "abstract": (
+                            (r[2] or "").strip().replace("\n", " ")[:280]
+                        ),
+                    }
+                    for r in rep_rows
+                ],
+            })
+
+    n_clusters = len(cluster_catalogue)
+    cluster_msg = f" + {n_clusters} topic clusters" if n_clusters else ""
+    console.print(
+        f"Generating outline for [bold]{book[1]}[/bold] from "
+        f"{len(papers)} papers{cluster_msg}…"
+    )
 
     system, user = prompts.outline(
         book_title=book[1],
         papers=[{"title": p[0], "year": p[1]} for p in papers if p[0]],
+        plan=book[5] if len(book) > 5 else None,
+        clusters=cluster_catalogue,
     )
 
     from sciknow.rag.llm import complete_with_status
@@ -1286,9 +1361,55 @@ def outline(
     # reachable; offline invocations fall through silently.
     from sciknow.core.book_ops import resize_sections_by_density as _resize
     console.print("  [dim]Resizing sections by corpus evidence density…[/dim]")
-    # Phase 54.6.297 — _grow_sections_llm uses the same outline model
-    # override; pass it through so both steps agree.
     chapters = _resize(chapters, model=effective_model)
+
+    # Phase 54.6.x — DEEP outline post-pass. Mirror of the web flow:
+    # for every chapter × section, run hybrid retrieval, build a
+    # SECTION_PLAN prompt grounded in leitmotiv + evidence + earlier
+    # chapters, and attach the resulting bullet list + target_words
+    # to each section so it's saved as a full
+    # {slug, title, plan, target_words} dict.
+    from sciknow.core.book_ops import deep_plan_outline_chapters as _deep
+    book_type = (book[6] if len(book) > 6 else None) or "scientific_book"
+    book_plan_text = book[5] if len(book) > 5 else None
+    console.print(
+        "  [dim]Deep section planning "
+        "(per-section retrieval + leitmotiv-grounded concept lists)…[/dim]"
+    )
+    n_planned_total = 0
+    n_failed_total = 0
+    for evt in _deep(
+        chapters,
+        book_title=book[1],
+        book_type=book_type,
+        book_plan=book_plan_text,
+        model=effective_model,
+    ):
+        et = evt.get("type")
+        if et == "deep_plan_section_start":
+            console.print(
+                f"     [dim]Ch.{evt['chapter_index']}/{evt['chapter_total']} "
+                f"§{evt['section_index']}/{evt['section_total']} — "
+                f"{evt['section_title']}[/dim]"
+            )
+        elif et == "deep_plan_section_done":
+            if evt.get("error"):
+                n_failed_total += 1
+            else:
+                n_planned_total += 1
+        elif et == "deep_plan_complete":
+            n_planned_total = evt.get("n_planned", n_planned_total)
+            n_failed_total = evt.get("n_failed", n_failed_total)
+    console.print(
+        f"  [dim]Deep planning: "
+        f"{n_planned_total} section(s) planned, "
+        f"{n_failed_total} failed.[/dim]"
+    )
+
+    def _section_label(s) -> str:
+        if isinstance(s, dict):
+            return s.get("title") or s.get("slug") or "?"
+        return str(s)
 
     # Display
     console.print()
@@ -1301,7 +1422,10 @@ def outline(
         if ch.get("topic_query"):
             console.print(f"         [dim]Query: {ch['topic_query']}[/dim]")
         if ch.get("sections"):
-            console.print(f"         Sections: {' → '.join(ch['sections'])}")
+            console.print(
+                f"         Sections: "
+                f"{' → '.join(_section_label(s) for s in ch['sections'])}"
+            )
         di = ch.get("_density_info")
         if di:
             note = f"{di['n_papers']} papers → target {di['target']}"
@@ -1314,6 +1438,81 @@ def outline(
 
     if save:
         with get_session() as session:
+            # Inspect current chapter/draft counts so we can prompt the
+            # user when they're about to clobber something.
+            n_existing_chapters = session.execute(text(
+                "SELECT COUNT(*) FROM book_chapters WHERE book_id::text = :bid"
+            ), {"bid": book[0]}).scalar() or 0
+            n_existing_drafts = session.execute(text(
+                "SELECT COUNT(*) FROM drafts WHERE book_id::text = :bid"
+            ), {"bid": book[0]}).scalar() or 0
+
+            # Refuse merge-mode (--overwrite unset) when the book already
+            # has an outline AND would silently re-skip every proposed
+            # chapter. The legacy "INSERT only when number doesn't exist"
+            # path stays for the rare case where a user manually deleted
+            # one chapter and wants a top-up — that produces non-zero
+            # inserts even with chapters present, so we only block when
+            # EVERY proposed number collides.
+            if overwrite is None and n_existing_chapters > 0:
+                proposed_nums = {int(ch["number"]) for ch in chapters}
+                existing_nums = {
+                    int(r[0]) for r in session.execute(text(
+                        "SELECT number FROM book_chapters "
+                        "WHERE book_id::text = :bid"
+                    ), {"bid": book[0]}).fetchall()
+                }
+                if proposed_nums.issubset(existing_nums):
+                    console.print(
+                        f"[yellow]Book already has {n_existing_chapters} "
+                        f"chapter(s); every proposed number collides.[/yellow]"
+                    )
+                    console.print(
+                        "Re-run with one of:\n"
+                        "  [bold]--overwrite=archive[/bold]  drop chapters, "
+                        "keep drafts as orphans (recoverable)\n"
+                        "  [bold]--overwrite=hard[/bold]     drop chapters "
+                        "AND delete drafts (irreversible without snapshot)\n"
+                        "Both modes auto-snapshot first."
+                    )
+                    raise typer.Exit(1)
+
+            # Overwrite path — snapshot then wipe.
+            if overwrite is not None and n_existing_chapters > 0:
+                if snapshot_first and n_existing_drafts > 0:
+                    from sciknow.web.app import _snapshot_book_drafts
+                    snap_id = _snapshot_book_drafts(
+                        session, book[0],
+                        name=f"pre-reoutline-{overwrite}",
+                    )
+                    console.print(
+                        f"[dim]Snapshot {str(snap_id)[:8]} captured "
+                        f"({n_existing_drafts} drafts). Restore with: "
+                        f"sciknow book snapshot-restore {str(snap_id)[:8]}[/dim]"
+                    )
+                if overwrite == "hard":
+                    n_drafts_deleted = session.execute(text(
+                        "DELETE FROM drafts WHERE book_id::text = :bid"
+                    ), {"bid": book[0]}).rowcount or 0
+                    console.print(
+                        f"[yellow]Deleted {n_drafts_deleted} draft(s).[/yellow]"
+                    )
+                else:  # archive
+                    n_archived = session.execute(text(
+                        "UPDATE drafts SET chapter_id = NULL "
+                        "WHERE book_id::text = :bid AND chapter_id IS NOT NULL"
+                    ), {"bid": book[0]}).rowcount or 0
+                    console.print(
+                        f"[dim]Unlinked {n_archived} draft(s) from chapters "
+                        f"(now visible as orphans in the sidebar).[/dim]"
+                    )
+                n_chapters_dropped = session.execute(text(
+                    "DELETE FROM book_chapters WHERE book_id::text = :bid"
+                ), {"bid": book[0]}).rowcount or 0
+                console.print(
+                    f"[yellow]Dropped {n_chapters_dropped} chapter(s).[/yellow]"
+                )
+
             for ch in chapters:
                 existing = session.execute(text("""
                     SELECT id FROM book_chapters WHERE book_id = :bid AND number = :num
@@ -2010,33 +2209,110 @@ def _print_ledger_row(row, indent: str = "", prefix: str = "") -> None:
 @app.command()
 def snapshot(
     book_title: Annotated[str, typer.Argument(
-        help="Book title (or book-id prefix) to snapshot.")],
+        help="Book title (or book-id prefix) to snapshot. Pass '-' "
+             "with --draft to skip the book lookup (the draft id "
+             "carries enough context).")],
     chapter: int = typer.Option(
         0, "--chapter", "-c",
         help="Chapter number to snapshot (default 0 = whole book).",
     ),
+    draft: str | None = typer.Option(
+        None, "--draft", "-d",
+        help="Section-scope snapshot: snapshot just this single draft's "
+             "current content. Accepts a full draft UUID or any prefix "
+             "(min 6 chars). Produces a scope='draft' row that the web's "
+             "/api/snapshot-content/<id> endpoint and `book snapshot-restore` "
+             "(coming Phase 3) consume identically to legacy per-draft "
+             "snapshots. Mutex with --chapter.",
+    ),
     name: str = typer.Option("", "--name", help="Optional snapshot label."),
 ):
-    """Phase 54.6.75 (#13) — snapshot every draft in a book or a chapter
-    so autowrite-all can be rolled back with one command.
+    """Snapshot a book / chapter / single section so you can roll back.
 
-    Mirrors the web reader's snapshot buttons (`POST /api/snapshot/book/{id}`,
-    `POST /api/snapshot/chapter/{id}`). Captures the latest draft per
-    (chapter, section_type) into one `draft_snapshots` row with
-    scope='chapter' or 'book'. Non-destructive — nothing is overwritten.
+    Mirrors the web reader's snapshot buttons. Captures the latest
+    draft per (chapter, section_type) into one ``draft_snapshots``
+    row with the appropriate scope. Non-destructive — nothing is
+    overwritten.
+
+    Phase 54.6.328 — every snapshot now carries a diff brief in the
+    ``meta`` column, computed at create time vs the prior snapshot
+    in the same scope. Renders as a "Δ +1,247/-380w · 4¶" line on
+    save and in `book snapshots` listings.
 
     Examples:
 
-      sciknow book snapshot "Global Cooling"                  # whole book
-      sciknow book snapshot "Global Cooling" --chapter 3      # one chapter
-      sciknow book snapshot "Global Cooling" --name "pre-rewrite"
+      sciknow book snapshot "Global Cooling"                    # whole book
+      sciknow book snapshot "Global Cooling" --chapter 3        # one chapter
+      sciknow book snapshot - --draft cd7cdee2 --name "pre-revise"
+                                                                # one section
     """
     import datetime as _dt
     from sqlalchemy import text as _text
     from sciknow.storage.db import get_session
-    from sciknow.web.app import (
-        _snapshot_chapter_drafts,
+    from sciknow.core.snapshot_diff import (
+        compute_bundle_brief, compute_prose_diff,
+        render_brief_one_line,
     )
+    from sciknow.web.app import (
+        _snapshot_chapter_drafts, _snapshot_book_drafts,
+    )
+    from sciknow.web.routes.snapshots import _prev_bundle_content
+
+    if draft is not None and chapter > 0:
+        console.print("[red]--draft and --chapter are mutually exclusive.[/red]")
+        raise typer.Exit(2)
+
+    # Section-scope path — short-circuits the book lookup so callers
+    # that only have a draft id (the GUI's editor toolbar) can snapshot
+    # without naming the enclosing book.
+    if draft is not None:
+        if len(draft) < 6:
+            console.print(
+                "[red]--draft id too short[/red] (min 6 chars to disambiguate)."
+            )
+            raise typer.Exit(2)
+        with get_session() as session:
+            row = session.execute(_text("""
+                SELECT id::text, title, content, word_count
+                FROM drafts WHERE id::text LIKE :q LIMIT 2
+            """), {"q": f"{draft}%"}).fetchall()
+            if not row:
+                console.print(f"[red]No draft matches {draft!r}.[/red]")
+                raise typer.Exit(1)
+            if len(row) > 1:
+                console.print(
+                    f"[red]Ambiguous draft prefix {draft!r}[/red] — "
+                    f"matches {len(row)} rows."
+                )
+                raise typer.Exit(1)
+            did, dtitle, dcontent, dwc = row[0]
+            prev = session.execute(_text("""
+                SELECT content FROM draft_snapshots
+                WHERE draft_id::text = :did
+                ORDER BY created_at DESC LIMIT 1
+            """), {"did": did}).fetchone()
+            prev_content = prev[0] if prev else ""
+            meta = compute_prose_diff(prev_content, dcontent or "")
+            snap_name = name.strip() or (
+                f"{(dtitle or 'draft')[:40]} — "
+                f"{_dt.datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            )
+            session.execute(_text("""
+                INSERT INTO draft_snapshots
+                    (draft_id, scope, name, content, word_count, meta)
+                VALUES
+                    (CAST(:did AS uuid), 'draft', :name, :content, :wc,
+                     CAST(:meta AS jsonb))
+            """), {"did": did, "name": snap_name,
+                   "content": dcontent or "", "wc": dwc or 0,
+                   "meta": __import__("json").dumps(meta)})
+            session.commit()
+        console.print(
+            f"[green]✓ Snapshot saved:[/green] {snap_name}\n"
+            f"  scope=draft  draft={did[:8]}  words={dwc or 0:,}\n"
+            f"  diff: {render_brief_one_line(meta)}"
+        )
+        return
 
     with get_session() as session:
         book = _get_book(session, book_title)
@@ -2062,55 +2338,47 @@ def snapshot(
                 f"{_dt.datetime.now().strftime('%Y-%m-%d %H:%M')}"
             )
             total_words = sum(d.get("word_count") or 0 for d in bundle["drafts"])
+            prev_bundle = _prev_bundle_content(
+                session, scope="chapter", container_id=ch[0],
+            )
+            meta = compute_bundle_brief(bundle, prev_bundle)
             session.execute(_text("""
                 INSERT INTO draft_snapshots
-                    (chapter_id, scope, name, content, word_count)
+                    (chapter_id, scope, name, content, word_count, meta)
                 VALUES
-                    (CAST(:cid AS uuid), 'chapter', :name, :content, :wc)
+                    (CAST(:cid AS uuid), 'chapter', :name, :content, :wc,
+                     CAST(:meta AS jsonb))
             """), {"cid": ch[0], "name": snap_name,
-                   "content": _json.dumps(bundle), "wc": total_words})
+                   "content": _json.dumps(bundle), "wc": total_words,
+                   "meta": _json.dumps(meta)})
             session.commit()
             console.print(
                 f"[green]✓ Snapshot saved:[/green] {snap_name}\n"
                 f"  scope=chapter  drafts={len(bundle['drafts'])}  "
-                f"words={total_words:,}"
+                f"words={total_words:,}\n"
+                f"  diff: {render_brief_one_line(meta)}"
             )
             return
 
-        # Whole-book path
-        chapters = session.execute(_text(
-            "SELECT id::text, number, title FROM book_chapters "
-            "WHERE book_id::text = :bid ORDER BY number"
-        ), {"bid": book_id}).fetchall()
-        chapter_bundles: list[dict] = []
-        grand = 0
-        for ch in chapters:
-            b = _snapshot_chapter_drafts(session, ch[0])
-            if not b["drafts"]:
-                continue
-            b["chapter_number"] = ch[1]
-            b["chapter_title"] = ch[2] or ""
-            chapter_bundles.append(b)
-            grand += sum(d.get("word_count") or 0 for d in b["drafts"])
-        if not chapter_bundles:
+        # Whole-book path — delegate to the shared helper which handles
+        # bundle assembly + brief computation in one call.
+        snap_id = _snapshot_book_drafts(session, book_id, name=name.strip())
+        if not snap_id:
             console.print(f"[yellow]Book has no drafts to snapshot.[/yellow]")
             raise typer.Exit(0)
-        snap_name = name.strip() or (
-            f"{book[1]} — {_dt.datetime.now().strftime('%Y-%m-%d %H:%M')}"
-        )
-        payload = _json.dumps({"book_id": book_id, "chapters": chapter_bundles})
-        session.execute(_text("""
-            INSERT INTO draft_snapshots
-                (book_id, scope, name, content, word_count)
-            VALUES
-                (CAST(:bid AS uuid), 'book', :name, :content, :wc)
-        """), {"bid": book_id, "name": snap_name,
-               "content": payload, "wc": grand})
         session.commit()
-    console.print(
-        f"[green]✓ Snapshot saved:[/green] {snap_name}\n"
-        f"  scope=book  chapters={len(chapter_bundles)}  words={grand:,}"
-    )
+        # Read back the persisted row so we can render the same brief
+        # the helper computed.
+        row = session.execute(_text(
+            "SELECT name, word_count, meta FROM draft_snapshots "
+            "WHERE id::text = :sid"
+        ), {"sid": snap_id}).fetchone()
+        if row:
+            console.print(
+                f"[green]✓ Snapshot saved:[/green] {row[0]}\n"
+                f"  scope=book  words={row[1] or 0:,}\n"
+                f"  diff: {render_brief_one_line(row[2] or {})}"
+            )
 
 
 @app.command()
@@ -2133,6 +2401,7 @@ def snapshots(
     """
     from sqlalchemy import text as _text
     from sciknow.storage.db import get_session
+    from sciknow.core.snapshot_diff import render_brief_one_line
 
     with get_session() as session:
         book = _get_book(session, book_title)
@@ -2149,7 +2418,8 @@ def snapshots(
                 console.print(f"[red]Chapter {chapter} not found.[/red]")
                 raise typer.Exit(1)
             rows = session.execute(_text("""
-                SELECT id::text, name, word_count, created_at, scope
+                SELECT id::text, name, word_count, created_at, scope, meta,
+                       NULL AS ch_num
                 FROM draft_snapshots
                 WHERE chapter_id::text = :cid AND scope = 'chapter'
                 ORDER BY created_at DESC
@@ -2157,7 +2427,7 @@ def snapshots(
         else:
             rows = session.execute(_text("""
                 SELECT s.id::text, s.name, s.word_count, s.created_at, s.scope,
-                       bc.number
+                       s.meta, bc.number
                 FROM draft_snapshots s
                 LEFT JOIN book_chapters bc ON bc.id = s.chapter_id
                 WHERE s.book_id::text = :bid
@@ -2172,11 +2442,16 @@ def snapshots(
     console.print()
     for r in rows:
         sid, nm, wc, ts, scope = r[0], r[1], r[2] or 0, str(r[3] or ""), r[4]
-        ch_num = r[5] if len(r) > 5 and r[5] is not None else "—"
+        meta = r[5] if isinstance(r[5], dict) else {}
+        ch_num = r[6] if len(r) > 6 and r[6] is not None else "—"
         scope_tag = (f"[dim]scope=book[/dim]" if scope == "book"
                      else f"[dim]scope=chapter Ch.{ch_num}[/dim]")
-        console.print(f"  [cyan]{sid[:8]}[/cyan]  {ts[:19]}  "
-                      f"{scope_tag}  words={wc:,}  {nm}")
+        brief = render_brief_one_line(meta)
+        console.print(
+            f"  [cyan]{sid[:8]}[/cyan]  {ts[:19]}  "
+            f"{scope_tag}  words={wc:,}  {nm}\n"
+            f"           [dim]Δ {brief}[/dim]"
+        )
 
 
 @app.command(name="snapshot-restore")
@@ -2263,6 +2538,347 @@ def snapshot_restore(
         f"  [dim]Existing drafts are preserved as prior versions — "
         f"use `book snapshots` to snapshot before trying another restore.[/dim]"
     )
+
+
+# ── history / diff (Phase 54.6.328 snapshot-versioning Phase 3) ───────────
+
+@app.command(name="history")
+def history(
+    target: Annotated[str, typer.Argument(
+        help="What to walk: '<chapter>:<section>' for one section's "
+             "version chain (e.g. '3:solar_dynamo'), or just a book "
+             "title for a book-level rollup.")],
+    book_title: str | None = typer.Option(
+        None, "--book", "-b",
+        help="Book title (only needed when target is just <chapter>:<section>; "
+             "the active book is used otherwise).",
+    ),
+    chapter: int = typer.Option(
+        0, "--chapter", "-c",
+        help="With a book title target, scope the rollup to one chapter "
+             "instead of the whole book.",
+    ),
+    limit: int = typer.Option(
+        50, "--limit", "-n",
+        help="Cap rows printed. Default 50; section history is rarely "
+             "longer in practice.",
+    ),
+):
+    """Walk a section / chapter / book version timeline with diff briefs.
+
+    For a section target ('<ch-num>:<section-slug>'), prints every
+    drafts.version row interleaved with any draft-scope snapshots,
+    each with a one-line diff brief vs the immediately-prior entry.
+
+    For a book or chapter target, rolls up to the latest active draft
+    per section + the most recent chapter/book snapshots.
+
+    Examples:
+
+      sciknow book history 3:solar_dynamo_behavior_over_millennia
+      sciknow book history "Global Cooling" --chapter 3
+      sciknow book history "Global Cooling"
+    """
+    from sqlalchemy import text as _text
+    from sciknow.storage.db import get_session
+    from sciknow.core.snapshot_diff import render_brief_one_line
+    from sciknow.core.version_history import list_section_history
+
+    # Section view: target shape ch:slug
+    if ":" in target and not target.endswith(":"):
+        try:
+            ch_part, slug = target.split(":", 1)
+            ch_num = int(ch_part)
+        except ValueError:
+            console.print(
+                "[red]Invalid section target.[/red] Use '<chapter>:<section-slug>'."
+            )
+            raise typer.Exit(2)
+        with get_session() as session:
+            ch = session.execute(_text("""
+                SELECT bc.id::text, bc.title FROM book_chapters bc
+                JOIN books b ON b.id = bc.book_id
+                WHERE bc.number = :n
+                ORDER BY b.created_at DESC LIMIT 1
+            """), {"n": ch_num}).fetchone()
+            if not ch:
+                console.print(f"[red]No chapter with number {ch_num}.[/red]")
+                raise typer.Exit(1)
+            entries = list_section_history(
+                session, chapter_id=ch[0], section_slug=slug,
+            )
+        if not entries:
+            console.print(f"[dim]No history for {ch_num}:{slug}.[/dim]")
+            return
+        console.print()
+        console.print(
+            f"  [bold]Ch.{ch_num}[/bold] · {ch[1] or '?'} · "
+            f"[cyan]{slug}[/cyan]  ({len(entries)} entries)"
+        )
+        console.print()
+        for e in entries[:limit]:
+            kind_tag = (
+                "[bold]✓ active[/bold]" if e.is_active
+                else f"[dim]{e.kind}[/dim]"
+            )
+            score = e.extra.get("final_overall")
+            score_tag = (
+                f" score={score:.2f}" if isinstance(score, (int, float))
+                else ""
+            )
+            label = e.label
+            if e.kind == "draft":
+                label = f"v{e.version or 0}"
+            ts = (e.created_at or "")[:19]
+            console.print(
+                f"  [cyan]{e.id[:8]}[/cyan]  {label:<10s}  {ts}  "
+                f"{e.word_count:>6,d}w  {kind_tag}{score_tag}"
+            )
+            console.print(
+                f"           [dim]Δ {render_brief_one_line(e.meta)}[/dim]"
+            )
+        return
+
+    # Book / chapter rollup view.
+    with get_session() as session:
+        book = _get_book(session, target)
+        if not book:
+            console.print(f"[red]Book not found:[/red] {target}")
+            raise typer.Exit(1)
+        book_id = book[0]
+
+        if chapter > 0:
+            ch = session.execute(_text("""
+                SELECT id::text, title FROM book_chapters
+                WHERE book_id::text = :bid AND number = :n LIMIT 1
+            """), {"bid": book_id, "n": chapter}).fetchone()
+            if not ch:
+                console.print(f"[red]Chapter {chapter} not found.[/red]")
+                raise typer.Exit(1)
+            ch_filter = "WHERE chapter_id::text = :cid"
+            params = {"cid": ch[0]}
+            scope_label = f"Ch.{chapter} {ch[1] or ''}"
+        else:
+            ch_filter = (
+                "WHERE chapter_id IN ("
+                "  SELECT id FROM book_chapters WHERE book_id::text = :bid"
+                ")"
+            )
+            params = {"bid": book_id}
+            scope_label = book[1]
+
+        # Latest active draft per (chapter, section_type), with brief
+        # = diff vs the prior version in that chain.
+        sec_rows = session.execute(_text(f"""
+            SELECT DISTINCT ON (chapter_id, section_type)
+                id::text, chapter_id::text, section_type, version,
+                word_count, content, created_at,
+                COALESCE((custom_metadata->>'is_active')::boolean, FALSE) AS active
+            FROM drafts
+            {ch_filter}
+            ORDER BY chapter_id, section_type,
+                     COALESCE((custom_metadata->>'is_active')::boolean, FALSE) DESC,
+                     CASE WHEN content IS NULL OR LENGTH(content) < 50
+                          THEN 1 ELSE 0 END,
+                     version DESC
+        """), params).fetchall()
+
+        # Bundle snapshots in scope.
+        snap_q = (
+            "SELECT id::text, name, word_count, created_at, scope, meta "
+            "FROM draft_snapshots "
+        )
+        if chapter > 0:
+            snap_q += "WHERE chapter_id::text = :cid AND scope='chapter' "
+            snap_params = {"cid": ch[0]}
+        else:
+            snap_q += (
+                "WHERE book_id::text = :bid OR chapter_id IN ("
+                "  SELECT id FROM book_chapters WHERE book_id::text = :bid"
+                ") "
+            )
+            snap_params = {"bid": book_id}
+        snap_q += "ORDER BY created_at DESC LIMIT 20"
+        snap_rows = session.execute(_text(snap_q), snap_params).fetchall()
+
+    console.print()
+    console.print(f"  [bold]{scope_label}[/bold]  ({len(sec_rows)} sections)")
+    console.print()
+    for r in sec_rows[:limit]:
+        did, _cid, slug, ver, wc, _content, ts, active = r
+        active_tag = "[bold]✓[/bold]" if active else " "
+        console.print(
+            f"  {active_tag}  [cyan]{did[:8]}[/cyan]  "
+            f"v{ver or 0:<3d}  {(slug or '')[:50]:<50s}  "
+            f"{wc or 0:>6,d}w  [dim]{str(ts or '')[:19]}[/dim]"
+        )
+    if snap_rows:
+        console.print()
+        console.print("  [dim]bundle snapshots[/dim]")
+        for s in snap_rows:
+            sid, nm, wc, ts, scope, meta = s
+            meta = meta if isinstance(meta, dict) else {}
+            console.print(
+                f"     [cyan]{sid[:8]}[/cyan]  "
+                f"[dim]scope={scope:<7s}[/dim]  "
+                f"{wc or 0:>6,d}w  {(nm or '')[:50]}"
+            )
+            console.print(
+                f"              [dim]Δ {render_brief_one_line(meta)} · "
+                f"{str(ts or '')[:19]}[/dim]"
+            )
+
+
+@app.command(name="diff")
+def diff(
+    ref_a: Annotated[str, typer.Argument(
+        help="First version ref (older). Accepts a draft/snapshot id "
+             "or prefix (≥6 chars), or '<ch>:<slug>:vN' / "
+             "'<ch>:<slug>:latest'.")],
+    ref_b: Annotated[str, typer.Argument(
+        help="Second version ref (newer). Same shapes as ref_a.")],
+    json_out: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead "
+        "of unified diff text.",
+    ),
+    context: int = typer.Option(
+        3, "--context", "-U",
+        help="Lines of context for the unified diff (default 3).",
+    ),
+):
+    """Word-level diff between any two versions.
+
+    Examples:
+
+      sciknow book diff 3a9e1b2c d7c3   # two draft prefixes
+      sciknow book diff 3:solar_dynamo:v6 3:solar_dynamo:latest
+      sciknow book diff 3a9e1b2c 3:solar_dynamo:latest --json
+    """
+    import difflib as _difflib
+    import json as _json
+    from sqlalchemy import text as _text  # noqa: F401
+    from sciknow.storage.db import get_session
+    from sciknow.core.snapshot_diff import (
+        compute_prose_diff, compute_outline_structural_diff,
+        _outline_chapters,
+    )
+    from sciknow.core.version_history import resolve_version_ref
+
+    with get_session() as session:
+        a = resolve_version_ref(session, ref_a)
+        b = resolve_version_ref(session, ref_b)
+    if not a:
+        console.print(f"[red]Couldn't resolve {ref_a!r}.[/red]")
+        raise typer.Exit(1)
+    if not b:
+        console.print(f"[red]Couldn't resolve {ref_b!r}.[/red]")
+        raise typer.Exit(1)
+
+    brief = compute_prose_diff(a["content"], b["content"])
+
+    # Phase 54.6.328 (snapshot-versioning Phase 6) — when both refs are
+    # book-scope snapshots, parse out the chapter shape and add the
+    # structural diff so the user sees outline-level change first.
+    structural = None
+    if a.get("kind") == "snapshot" and b.get("kind") == "snapshot":
+        try:
+            ab = _json.loads(a["content"]) if a["content"] else {}
+            bb = _json.loads(b["content"]) if b["content"] else {}
+            if isinstance(ab, dict) and "chapters" in ab \
+                    and isinstance(bb, dict) and "chapters" in bb:
+                structural = compute_outline_structural_diff(
+                    _outline_chapters(ab.get("chapters") or []),
+                    _outline_chapters(bb.get("chapters") or []),
+                )
+        except Exception:
+            structural = None
+
+    if json_out:
+        out = {
+            "a": {k: v for k, v in a.items() if k != "content"},
+            "b": {k: v for k, v in b.items() if k != "content"},
+            "brief": brief,
+        }
+        if structural is not None:
+            out["structural"] = structural
+        console.print(_json.dumps(out, indent=2))
+        return
+
+    console.print()
+    console.print(f"  [dim]A:[/dim] {a['label']}  ({a['word_count']:,}w)")
+    console.print(f"  [dim]B:[/dim] {b['label']}  ({b['word_count']:,}w)")
+    console.print(
+        f"  [dim]Δ +{brief['words_added']:,}/-{brief['words_removed']:,}w · "
+        f"+{brief['paragraphs_added']}/-{brief['paragraphs_removed']}¶ · "
+        f"+{brief['citations_added']}/-{brief['citations_removed']}cite[/dim]"
+    )
+    if structural is not None and any(
+        structural.get(k) for k in (
+            "added_chapters", "removed_chapters",
+            "renamed_chapters", "section_changes",
+        )
+    ):
+        console.print()
+        console.print("  [bold]Outline changes[/bold]")
+        for c in structural.get("added_chapters") or []:
+            console.print(
+                f"    [green]+ Ch.{c.get('number')}[/green]  "
+                f"{c.get('title', '')}"
+            )
+        for c in structural.get("removed_chapters") or []:
+            console.print(
+                f"    [red]- Ch.{c.get('number')}[/red]  "
+                f"{c.get('title', '')}"
+            )
+        for c in structural.get("renamed_chapters") or []:
+            kind = c.get("kind", "renamed")
+            if kind == "renumbered":
+                console.print(
+                    f"    [yellow]~ Ch.{c.get('from_number')} → "
+                    f"Ch.{c.get('to_number')}[/yellow]  {c.get('title', '')}"
+                )
+            else:
+                console.print(
+                    f"    [yellow]~ Ch.{c.get('number')}[/yellow]  "
+                    f"{c.get('from_title', '')!r} → "
+                    f"{c.get('to_title', '')!r}"
+                )
+        for ch in structural.get("section_changes") or []:
+            n = ch.get("chapter_number")
+            t = ch.get("chapter_title", "")
+            added = ch.get("added") or []
+            removed = ch.get("removed") or []
+            console.print(
+                f"    [dim]Ch.{n}[/dim] {t!r}: "
+                f"[green]+{len(added)}[/green]/[red]-{len(removed)}[/red] sections"
+            )
+            for s in added:
+                console.print(f"        [green]+ {s}[/green]")
+            for s in removed:
+                console.print(f"        [red]- {s}[/red]")
+    console.print()
+    diff_text = "\n".join(_difflib.unified_diff(
+        (a["content"] or "").splitlines(),
+        (b["content"] or "").splitlines(),
+        fromfile=a["label"],
+        tofile=b["label"],
+        n=context,
+        lineterm="",
+    ))
+    if not diff_text:
+        console.print("[dim]No textual differences.[/dim]")
+        return
+    for line in diff_text.splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            console.print(f"[bold]{line}[/bold]")
+        elif line.startswith("+"):
+            console.print(f"[green]{line}[/green]")
+        elif line.startswith("-"):
+            console.print(f"[red]{line}[/red]")
+        elif line.startswith("@@"):
+            console.print(f"[cyan]{line}[/cyan]")
+        else:
+            console.print(line)
 
 
 # ── review ─────────────────────────────────────────────────────────────────────
@@ -2739,6 +3355,169 @@ def auto_expand(
 
 # ── serve (web reader) ─────────────────────────────────────────────────────────
 
+
+def _kill_stale_serve(host: str, port: int, *, wait_s: float = 5.0) -> None:
+    """Phase 54.6.x — preflight: if another sciknow book-serve already
+    holds the bind port, SIGTERM it cleanly so this invocation can
+    proceed without the cryptic "[Errno 98] address already in use"
+    crash + manual `lsof + kill` ritual.
+
+    Safety rails:
+      1. Only kills processes whose cmdline contains both `sciknow`
+         and `book serve` (or `serve`) — never random listeners.
+      2. Skips our own PID.
+      3. SIGTERM first, escalate to SIGKILL only after `wait_s`
+         seconds.
+      4. Polls socket bind to confirm the port actually freed before
+         returning; raises typer.Exit if it didn't.
+
+    No-op when the port is free.
+    """
+    import socket as _socket
+    import signal as _signal
+    import time as _time
+    import os as _os
+
+    # Probe: try to bind. If it fails with EADDRINUSE, find the
+    # holder. Otherwise return immediately.
+    try:
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+            s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+            s.bind((host, int(port)))
+        return  # port is free
+    except OSError:
+        pass
+
+    # Port is busy. Identify the holder via /proc (no lsof dep).
+    holder_pid: int | None = None
+    try:
+        # /proc/net/tcp shows local_address as hex IP:PORT.
+        with open("/proc/net/tcp", "r") as fh:
+            for line in fh.readlines()[1:]:
+                parts = line.split()
+                if len(parts) < 4:
+                    continue
+                local = parts[1]  # "0100007F:223D" → 127.0.0.1:8765
+                state = parts[3]  # "0A" = LISTEN
+                if state != "0A":
+                    continue
+                try:
+                    _hex_ip, hex_port = local.split(":")
+                    if int(hex_port, 16) != int(port):
+                        continue
+                except Exception:  # noqa: BLE001
+                    continue
+                inode = parts[9]
+                # Walk /proc/*/fd to find the PID owning this socket.
+                for entry in _os.listdir("/proc"):
+                    if not entry.isdigit():
+                        continue
+                    fd_dir = f"/proc/{entry}/fd"
+                    try:
+                        for fd in _os.listdir(fd_dir):
+                            try:
+                                tgt = _os.readlink(f"{fd_dir}/{fd}")
+                                if tgt == f"socket:[{inode}]":
+                                    holder_pid = int(entry)
+                                    break
+                            except OSError:
+                                continue
+                    except (PermissionError, FileNotFoundError):
+                        continue
+                    if holder_pid is not None:
+                        break
+                if holder_pid is not None:
+                    break
+    except FileNotFoundError:
+        # Non-Linux fallback: no /proc. Refuse rather than killing
+        # blind — the user can clean up manually.
+        console.print(
+            f"[yellow]Port {port} is in use, but I can't identify the "
+            f"holder on this OS. Stop it manually and retry.[/yellow]"
+        )
+        raise typer.Exit(1)
+
+    if holder_pid is None or holder_pid == _os.getpid():
+        console.print(
+            f"[yellow]Port {port} is in use but no PID found via /proc. "
+            f"Stop the process holding it and retry.[/yellow]"
+        )
+        raise typer.Exit(1)
+
+    # Confirm cmdline looks like sciknow.
+    cmdline = ""
+    try:
+        with open(f"/proc/{holder_pid}/cmdline", "rb") as fh:
+            cmdline = fh.read().replace(b"\x00", b" ").decode(
+                "utf-8", errors="replace"
+            )
+    except Exception:  # noqa: BLE001
+        cmdline = ""
+    looks_like_sciknow = (
+        "sciknow" in cmdline and ("book serve" in cmdline or " serve " in cmdline)
+    )
+    if not looks_like_sciknow:
+        console.print(
+            f"[red]Port {port} is held by PID {holder_pid} "
+            f"(not a sciknow process):[/red] {cmdline.strip()[:180]}\n"
+            f"  Refusing to kill — stop it manually and retry."
+        )
+        raise typer.Exit(1)
+
+    console.print(
+        f"[dim]Port {port} is held by stale sciknow process "
+        f"PID {holder_pid}; sending SIGTERM…[/dim]"
+    )
+    try:
+        _os.kill(holder_pid, _signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        console.print(
+            f"[red]Cannot SIGTERM PID {holder_pid} (permission denied). "
+            f"Stop it manually and retry.[/red]"
+        )
+        raise typer.Exit(1)
+
+    # Wait for the port to free.
+    deadline = _time.monotonic() + wait_s
+    while _time.monotonic() < deadline:
+        try:
+            with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+                s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+                s.bind((host, int(port)))
+            console.print(f"[green]Port {port} freed; starting server.[/green]")
+            return
+        except OSError:
+            _time.sleep(0.2)
+
+    # Last resort: SIGKILL.
+    console.print(
+        f"[yellow]PID {holder_pid} did not exit after {wait_s}s; "
+        f"sending SIGKILL.[/yellow]"
+    )
+    try:
+        _os.kill(holder_pid, _signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+    deadline = _time.monotonic() + 3.0
+    while _time.monotonic() < deadline:
+        try:
+            with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+                s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+                s.bind((host, int(port)))
+            return
+        except OSError:
+            _time.sleep(0.1)
+
+    console.print(
+        f"[red]Could not free port {port} after SIGKILL. "
+        f"Please investigate manually.[/red]"
+    )
+    raise typer.Exit(1)
+
+
 @app.command()
 def serve(
     book_title: Annotated[str, typer.Argument(help="Book title or ID fragment.")],
@@ -2779,6 +3558,15 @@ def serve(
         if active.is_default
         else f"[dim]project: {active.slug}[/dim]"
     )
+
+    # Phase 54.6.x — pre-flight port check. If another sciknow book
+    # serve is already bound to this port, SIGTERM it before binding
+    # ourselves. The "address already in use" uvicorn error otherwise
+    # exits with no useful guidance and the user has to hunt the PID
+    # by hand. We only kill processes that look like sciknow's own
+    # `sciknow book serve` — never anything else (Brave, postgres,
+    # etc.). Confirmation via the cmdline match.
+    _kill_stale_serve(host, port)
 
     console.print(f"\n[bold]SciKnow Book Reader[/bold]: {book[1]}")
     console.print(f"  {project_label}")

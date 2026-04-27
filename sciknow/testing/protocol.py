@@ -1125,6 +1125,312 @@ def l3_embedder_loads() -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# V2_FINAL Stage 1 — v2-only L3 suite
+#
+# Rationale: the v1 L3 tests above all reach Ollama or the in-process
+# FlagEmbedding loader. We need parallel tests that prove the
+# llama-server substrate (writer/embedder/reranker subprocesses on
+# ports 8090/8091/8092) actually works end-to-end without Ollama.
+#
+# Each l3_v2_* test:
+#   * skips cleanly if its specific role isn't reachable (so the suite
+#     can run on a CI box without the GGUFs);
+#   * touches `infer.client.*` directly (NOT `rag.llm` which can
+#     dispatch either way);
+#   * for the dispatch / autowrite tests, asserts that no `ollama`
+#     module gets imported as a side-effect on a v2-only run.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _v2_health(role: str) -> bool:
+    """Per-role llama-server health probe used by the l3_v2_* skip gates."""
+    try:
+        from sciknow.infer import client as infer_client
+        return bool(infer_client.health(role))
+    except Exception:
+        return False
+
+
+def l3_v2_writer_health() -> None:
+    """Writer llama-server (:8090) is up and the configured GGUF exists.
+
+    Establishes the precondition for every other writer-side l3_v2_*
+    test. Skips cleanly if the role isn't running so the suite stays
+    runnable on a CI box without the GGUFs.
+    """
+    import os
+    from sciknow.config import settings
+    if not _v2_health("writer"):
+        return TestResult.skip(
+            "l3_v2_writer_health",
+            f"skipped — writer role not reachable at {settings.infer_writer_url}",
+        )
+    gguf = settings.writer_model_gguf
+    assert gguf, "WRITER_MODEL_GGUF is empty in settings"
+    assert os.path.exists(gguf), f"WRITER_MODEL_GGUF does not exist on disk: {gguf}"
+    return TestResult.ok(
+        name="l3_v2_writer_health",
+        message=f"writer up at {settings.infer_writer_url}, gguf={os.path.basename(gguf)}",
+    )
+
+
+def l3_v2_embedder_health() -> None:
+    """Embedder llama-server (:8091) is up and the configured GGUF exists."""
+    import os
+    from sciknow.config import settings
+    if not _v2_health("embedder"):
+        return TestResult.skip(
+            "l3_v2_embedder_health",
+            f"skipped — embedder role not reachable at {settings.infer_embedder_url}",
+        )
+    gguf = settings.embedder_model_gguf
+    assert gguf, "EMBEDDER_MODEL_GGUF is empty in settings"
+    assert os.path.exists(gguf), f"EMBEDDER_MODEL_GGUF does not exist on disk: {gguf}"
+    return TestResult.ok(
+        name="l3_v2_embedder_health",
+        message=f"embedder up at {settings.infer_embedder_url}, gguf={os.path.basename(gguf)}",
+    )
+
+
+def l3_v2_reranker_health() -> None:
+    """Reranker llama-server (:8092) is up and the configured GGUF exists."""
+    import os
+    from sciknow.config import settings
+    if not _v2_health("reranker"):
+        return TestResult.skip(
+            "l3_v2_reranker_health",
+            f"skipped — reranker role not reachable at {settings.infer_reranker_url}",
+        )
+    gguf = settings.reranker_model_gguf
+    assert gguf, "RERANKER_MODEL_GGUF is empty in settings"
+    assert os.path.exists(gguf), f"RERANKER_MODEL_GGUF does not exist on disk: {gguf}"
+    return TestResult.ok(
+        name="l3_v2_reranker_health",
+        message=f"reranker up at {settings.infer_reranker_url}, gguf={os.path.basename(gguf)}",
+    )
+
+
+def l3_v2_writer_complete_smoke() -> None:
+    """`infer.client.chat_complete(...)` returns a non-empty string fast.
+
+    Uses the substrate directly (NOT `rag.llm.complete`, which can
+    dispatch either way — that test would silently pass on Ollama if
+    `USE_LLAMACPP_WRITER=False`).
+    """
+    import time
+    from sciknow.config import settings
+    from sciknow.infer import client as infer_client
+    if not _v2_health("writer"):
+        return TestResult.skip(
+            "l3_v2_writer_complete_smoke",
+            "skipped — writer role not reachable",
+        )
+    t0 = time.monotonic()
+    out = infer_client.chat_complete(
+        "You are a brief assistant.",
+        "Reply with the single word: ok",
+        temperature=0.0,
+        num_predict=8,
+    )
+    elapsed = time.monotonic() - t0
+    assert isinstance(out, str) and len(out) > 0, (
+        f"empty response from writer substrate: {out!r}"
+    )
+    assert elapsed < 30.0, (
+        f"writer substrate took {elapsed:.1f}s for a 1-token reply — "
+        f"either the model isn't pre-loaded or something is very wrong"
+    )
+    return TestResult.ok(
+        name="l3_v2_writer_complete_smoke",
+        message=f"got {len(out)} chars from {settings.writer_model_name} in {elapsed:.1f}s",
+    )
+
+
+def l3_v2_embedder_roundtrip() -> None:
+    """`infer.client.embed([text])` returns a 1024-dim list of floats.
+
+    bge-m3's dense head is 1024-dim; any deviation indicates the
+    embedder server loaded the wrong model file.
+    """
+    from sciknow.config import settings
+    from sciknow.infer import client as infer_client
+    if not _v2_health("embedder"):
+        return TestResult.skip(
+            "l3_v2_embedder_roundtrip",
+            "skipped — embedder role not reachable",
+        )
+    vecs = infer_client.embed(["smoke test"])
+    assert isinstance(vecs, list) and len(vecs) == 1, (
+        f"expected exactly 1 vector for 1 input, got {len(vecs) if isinstance(vecs, list) else vecs!r}"
+    )
+    v = vecs[0]
+    assert isinstance(v, list) and len(v) == settings.embedding_dim, (
+        f"expected {settings.embedding_dim}-dim vector, got len={len(v) if isinstance(v, list) else v!r}"
+    )
+    assert all(isinstance(x, (int, float)) for x in v[:8]), (
+        f"vector contains non-numeric values; first 8: {v[:8]!r}"
+    )
+    return TestResult.ok(
+        name="l3_v2_embedder_roundtrip",
+        message=f"embed returned {len(v)}-dim vector",
+    )
+
+
+def l3_v2_reranker_roundtrip() -> None:
+    """`infer.client.rerank(...)` returns float scores ordered correctly.
+
+    The query "what is photosynthesis" should rank doc[0] (relevant)
+    above doc[1] (off-topic). Asserts both shape and ordering.
+    """
+    from sciknow.infer import client as infer_client
+    if not _v2_health("reranker"):
+        return TestResult.skip(
+            "l3_v2_reranker_roundtrip",
+            "skipped — reranker role not reachable",
+        )
+    query = "what is photosynthesis"
+    docs = [
+        "Photosynthesis is the biological process by which plants convert "
+        "light energy into chemical energy stored in glucose.",
+        "Quarterly revenue for Q3 2024 increased 12% over the prior year, "
+        "driven by stronger margins in the enterprise segment.",
+    ]
+    scores = infer_client.rerank(query, docs)
+    assert isinstance(scores, list) and len(scores) == 2, (
+        f"expected 2 scores for 2 docs, got {scores!r}"
+    )
+    assert all(isinstance(s, float) for s in scores), (
+        f"non-float score in {scores!r}"
+    )
+    assert scores[0] > scores[1], (
+        f"reranker ranked off-topic doc above relevant one — "
+        f"scores={scores!r}. Either the model is loaded wrong or the "
+        f"sigmoid normalization broke."
+    )
+    return TestResult.ok(
+        name="l3_v2_reranker_roundtrip",
+        message=f"scores={[round(s, 3) for s in scores]} (doc0 > doc1 ✓)",
+    )
+
+
+def l3_v2_autowrite_uses_llamacpp() -> None:
+    """One autowrite-style writer call dispatches via llamacpp on a v2 box.
+
+    Asserts (a) `_use_llamacpp()` is True at call time and (b) the
+    `ollama` module isn't imported as a side-effect of the call. The
+    latter catches a regression where a code path silently re-imports
+    ollama on the v2 happy path (e.g. a `from ollama import Client`
+    inside a function body).
+    """
+    import sys
+    from sciknow.config import settings
+    from sciknow.rag import prompts
+    from sciknow.rag.llm import _use_llamacpp, stream as llm_stream
+    if not _v2_health("writer"):
+        return TestResult.skip(
+            "l3_v2_autowrite_uses_llamacpp",
+            "skipped — writer role not reachable",
+        )
+    if not getattr(settings, "use_llamacpp_writer", True):
+        return TestResult.skip(
+            "l3_v2_autowrite_uses_llamacpp",
+            "skipped — USE_LLAMACPP_WRITER=False (v1 fallback active)",
+        )
+    assert _use_llamacpp(), (
+        "_use_llamacpp() returned False even though USE_LLAMACPP_WRITER=True"
+    )
+    sys_w, usr_w = prompts.write_section_v2(
+        section="introduction", topic="A smoke-test topic",
+        results=[],
+        book_plan="Smoke book plan.",
+        prior_summaries=None, paragraph_plan=None,
+        target_words=50, section_plan=None,
+        lessons=None, style_fingerprint_block=None,
+    )
+    ollama_in_modules_before = "ollama" in sys.modules
+    toks: list[str] = []
+    for tok in llm_stream(sys_w, usr_w, num_ctx=2048, num_predict=80):
+        toks.append(tok)
+        if len(toks) >= 80:
+            break
+    content = "".join(toks)
+    assert len(content) > 30, (
+        f"writer produced only {len(content)} chars — substrate may be "
+        f"misrouted. Output: {content[:200]!r}"
+    )
+    if not ollama_in_modules_before:
+        assert "ollama" not in sys.modules, (
+            "the v2 dispatch path imported `ollama` as a side-effect — "
+            "look for an unguarded `import ollama` in the writer call chain"
+        )
+    return TestResult.ok(
+        name="l3_v2_autowrite_uses_llamacpp",
+        message=f"wrote {len(content)} chars via substrate, ollama not imported",
+    )
+
+
+def l3_v2_dispatch_audit() -> None:
+    """Static audit: `rag/llm.py`'s public entry points reach `infer.client`
+    on the v2 path (USE_LLAMACPP_*=True).
+
+    Walks the bytecode of `complete`, `stream`, `warm_up` and
+    `drain_call_stats` and asserts each either (a) contains `_use_llamacpp`
+    + a reference to the `infer` substrate module, or (b) delegates to
+    another wrapper that does. Catches regressions where someone removes
+    the v2 branch from a wrapper but leaves the function intact, silently
+    routing every call to Ollama.
+    """
+    import dis
+    from sciknow.rag import llm as rag_llm
+    targets = ("complete", "stream", "warm_up", "drain_call_stats")
+    # Wrappers that themselves carry the v2 branch — delegating to one of
+    # these counts as "audited transitively".
+    delegators = {"stream", "complete", "chat_complete", "chat_stream"}
+    failures: list[str] = []
+    for name in targets:
+        fn = getattr(rag_llm, name, None)
+        if fn is None:
+            failures.append(f"{name}: not found in rag.llm")
+            continue
+        names_seen: set[str] = set()
+        for instr in dis.get_instructions(fn):
+            if instr.opname in ("LOAD_GLOBAL", "LOAD_NAME", "LOAD_DEREF"):
+                if instr.argval:
+                    names_seen.add(instr.argval)
+            if instr.opname == "IMPORT_NAME" and instr.argval:
+                names_seen.add(instr.argval)
+            if instr.opname == "IMPORT_FROM" and instr.argval:
+                names_seen.add(instr.argval)
+        # Path (b): delegates to an already-audited wrapper.
+        if names_seen & (delegators - {name}):
+            continue
+        # Path (a): contains the v2 branch directly.
+        if "_use_llamacpp" not in names_seen:
+            failures.append(
+                f"{name}: neither references `_use_llamacpp` nor delegates "
+                f"to a v2-aware wrapper — v2 branch may have been removed"
+            )
+            continue
+        # The v2 branch must reference `infer` (the client module import).
+        # `from sciknow.infer import client as infer_client` lands as
+        # IMPORT_NAME 'sciknow.infer' / IMPORT_FROM 'client' / STORE_FAST
+        # 'infer_client'. Accept any of these.
+        v2_refs = {"infer", "infer_client", "sciknow.infer", "client"}
+        if not (names_seen & v2_refs):
+            failures.append(
+                f"{name}: references `_use_llamacpp` but no `infer.client` — "
+                f"the v2 branch is gated but doesn't reach the substrate"
+            )
+    assert not failures, (
+        "rag/llm.py dispatch audit failed:\n  - " + "\n  - ".join(failures)
+    )
+    return TestResult.ok(
+        name="l3_v2_dispatch_audit",
+        message=f"all {len(targets)} dispatch wrappers reach infer.client on v2 path",
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Phase 54.6.39 — Single-example LLM pipeline smoke tests
 #
 # Rationale (from today's memory: feedback_test_single_before_bulk.md):
@@ -8301,18 +8607,28 @@ def l1_phase54_6_21_audit_fixes() -> None:
         "concept UPDATE must dedupe before array_append"
     )
 
-    # K) metadata LLM fallback now has timeout (54.6.23)
+    # K) metadata LLM fallback dispatches via rag.llm.complete (V2_FINAL
+    # Stage 2) so it picks up either the substrate's httpx 600s read
+    # timeout or Ollama's per-client timeout depending on
+    # USE_LLAMACPP_WRITER. The original 54.6.23 assertion was that a
+    # slow LLM can't block the pipeline indefinitely; routing through
+    # the dispatch facade preserves that contract.
     from sciknow.ingestion import metadata as _metadata
     meta_src = _inspect.getsource(_metadata._layer_llm)
-    assert "timeout=" in meta_src, (
-        "_layer_llm must pass an explicit timeout to ollama.Client "
-        "so a slow/hung model can't block the pipeline indefinitely"
+    assert ("from sciknow.rag.llm import" in meta_src
+            and "complete" in meta_src), (
+        "_layer_llm must dispatch via sciknow.rag.llm.complete so the "
+        "substrate↔Ollama choice (and the per-backend timeouts) flow "
+        "through the central facade"
     )
-    # Phase 54.6.30 — _layer_llm now passes keep_alive=-1 to avoid
-    # model reloads across the N papers in a bulk ingest.
+    # Phase 54.6.30 — _layer_llm passes keep_alive=-1 to avoid model
+    # reloads across the N papers in a bulk ingest. The substrate
+    # accepts+ignores keep_alive (model is resident for the process
+    # lifetime); Ollama uses it as before.
     assert "keep_alive=-1" in meta_src, (
         "_layer_llm must pass keep_alive=-1 to keep the fast model "
-        "resident across papers in a bulk ingest"
+        "resident across papers in a bulk ingest (no-op on substrate, "
+        "load-time saver on Ollama)"
     )
 
     # L) Phase 54.6.30 — llm.py wrapper defaults
@@ -9374,27 +9690,24 @@ def l1_phase54_6_72_visuals_caption_surface() -> None:
     for col in ("ai_caption", "ai_caption_model", "ai_captioned_at"):
         assert hasattr(Visual, col), f"Visual model missing {col!r}"
 
-    # C) CLI command registered AND the default model is the quality-first
-    # pick (Phase 54.6.73 directive — "always optimize for best quality").
-    # Flipping the default back to a 7B variant without documenting why
-    # should trip this test.
+    # C) CLI command registered AND the v2 substrate path is wired:
+    # caption-visuals dispatches to the llama-server vlm role with
+    # the configured Qwen3-VL GGUF. Hot-swap with the writer is the
+    # contract on a 3090 (both ~17 GB).
     assert hasattr(_db_cli, "caption_visuals_cmd"), (
-        "CLI must expose `sciknow db caption-visuals`"
+        "CLI must expose `sciknow corpus caption-visuals`"
     )
-    # Resolution chain: --model > settings.visuals_caption_model >
-    # qwen2.5vl:32b (per the 54.6.73 quality-first directive). Check
-    # the body contains both the settings lookup and the qwen2.5vl:32b
-    # fallback — flipping the fallback silently should trip this test.
     import inspect as _inspect
     cmd_src = _inspect.getsource(_db_cli.caption_visuals_cmd)
-    assert 'settings.visuals_caption_model' in cmd_src, (
-        "caption-visuals must honor settings.visuals_caption_model "
-        "(54.6.74 — lets the VLM sweep winner persist via .env)"
+    assert 'infer_client.chat_with_image' in cmd_src, (
+        "caption-visuals must call infer_client.chat_with_image — the "
+        "v2.0 substrate path. Don't reintroduce the v1 ollama.Client.chat() "
+        "call without first migrating the rest of the captioning pipeline."
     )
-    assert '"qwen2.5vl:32b"' in cmd_src, (
-        "caption-visuals fallback must remain the quality pick "
-        "(qwen2.5vl:32b) per the 54.6.73 directive; "
-        "to lower the fallback, document the reason in the CLI docstring"
+    assert 'infer_server.health("vlm")' in cmd_src, (
+        "caption-visuals must check the vlm role's health before kicking "
+        "off the batch — the hot-swap contract requires bringing it up "
+        "(and stopping the writer to free VRAM) when not already running."
     )
 
     # D) /api/visuals hydrates ai_caption
@@ -13018,6 +13331,415 @@ def l1_phase54_6_297_book_outline_model() -> None:
     )
 
 
+def l1_snapshot_diff_brief_helper() -> None:
+    """Phase 54.6.328 (snapshot-versioning Phase 1) — diff brief helper
+    contract + plumbing into the snapshot create paths.
+
+    Guards:
+
+      A) `core/snapshot_diff.py` exports compute_prose_diff,
+         compute_bundle_brief, compute_outline_structural_diff,
+         render_brief_one_line.
+      B) compute_prose_diff returns the documented 6-key shape with
+         non-negative ints.
+      C) compute_bundle_brief returns sections + totals; totals
+         carries the 6 prose deltas + sections_total + sections_changed.
+      D) compute_outline_structural_diff returns added_chapters,
+         removed_chapters, renamed_chapters, section_changes.
+      E) draft_snapshots.meta column exists in the SQLAlchemy model
+         (the alembic migration is verified at L2).
+      F) /api/snapshot/{draft_id} writes meta on insert
+         (web/routes/snapshots.py source-grep).
+      G) _snapshot_book_drafts writes meta on insert.
+      H) cli/book.py::snapshots renders render_brief_one_line.
+    """
+    import inspect as _inspect
+    from sciknow.core import snapshot_diff as _sd
+
+    # A — public API
+    for name in (
+        "compute_prose_diff", "compute_bundle_brief",
+        "compute_outline_structural_diff", "render_brief_one_line",
+    ):
+        assert hasattr(_sd, name), (
+            f"sciknow.core.snapshot_diff must export {name!r}"
+        )
+
+    # B — prose diff shape
+    out = _sd.compute_prose_diff("foo bar [1].", "foo bar baz [1] [2].\n\nNew para.")
+    for key in (
+        "words_added", "words_removed",
+        "paragraphs_added", "paragraphs_removed",
+        "citations_added", "citations_removed",
+    ):
+        assert key in out, f"prose diff missing key {key!r}"
+        assert isinstance(out[key], int) and out[key] >= 0, (
+            f"prose diff {key} must be a non-negative int, got {out[key]!r}"
+        )
+    assert out["words_added"] >= 1, "diff should detect added words"
+    assert out["citations_added"] >= 1, "diff should detect added [N] markers"
+
+    # C — bundle brief shape
+    bundle = {"drafts": [
+        {"section_type": "intro", "content": "alpha beta",
+         "word_count": 2, "chapter_id": "c1"},
+        {"section_type": "methods", "content": "gamma delta",
+         "word_count": 2, "chapter_id": "c1"},
+    ]}
+    bbrief = _sd.compute_bundle_brief(bundle, None)
+    assert "sections" in bbrief and "totals" in bbrief
+    assert bbrief["totals"]["sections_total"] == 2
+    assert bbrief["totals"]["words_added"] >= 4
+
+    # D — structural diff shape
+    sd = _sd.compute_outline_structural_diff(
+        [{"number": 1, "title": "Old", "sections": ["a", "b"]}],
+        [{"number": 1, "title": "Old", "sections": ["a", "c"]},
+         {"number": 2, "title": "New", "sections": []}],
+    )
+    for key in ("added_chapters", "removed_chapters",
+                "renamed_chapters", "section_changes"):
+        assert key in sd, f"structural diff missing key {key!r}"
+    assert any(c["number"] == 2 for c in sd["added_chapters"])
+    assert any(c["chapter_number"] == 1 and "c" in c["added"]
+               for c in sd["section_changes"])
+
+    # E — meta column on the ORM model
+    from sciknow.storage.models import DraftSnapshot
+    assert hasattr(DraftSnapshot, "meta"), (
+        "DraftSnapshot must expose meta column (Phase 54.6.328 migration "
+        "0041 must be applied)"
+    )
+
+    # F — web routes write meta
+    from sciknow.web.routes import snapshots as _snap_routes
+    src = _inspect.getsource(_snap_routes)
+    assert "meta = compute_prose_diff" in src or "meta = compute_bundle_brief" in src, (
+        "/api/snapshot/* endpoints must compute the diff brief at create time"
+    )
+    assert ":meta" in src, (
+        "INSERT INTO draft_snapshots must persist the meta column"
+    )
+
+    # G — _snapshot_book_drafts writes meta (used by `book outline --overwrite`)
+    book_helper_src = _inspect.getsource(_snap_routes._snapshot_book_drafts)
+    assert "compute_bundle_brief" in book_helper_src, (
+        "_snapshot_book_drafts must compute the bundle brief"
+    )
+    assert "meta" in book_helper_src, (
+        "_snapshot_book_drafts must persist meta"
+    )
+
+    # H — CLI list renders the brief
+    from sciknow.cli import book as _book_cli
+    cli_src = _inspect.getsource(_book_cli.snapshots)
+    assert "render_brief_one_line" in cli_src, (
+        "sciknow book snapshots must render the diff brief column"
+    )
+
+
+def l1_snapshot_timeline_modal() -> None:
+    """Phase 54.6.328 (snapshot-versioning Phase 5) — Timeline GUI.
+
+    Guards:
+      A) Three /api/timeline/{section,chapter,book}/{id} routes exist.
+      B) Timeline modal is in the template + Book menu has a trigger.
+      C) JS exposes openTimelineModal + tlSwitchScope and renders the
+         brief column.
+    """
+    import inspect as _inspect
+    from sciknow.web.routes import snapshots as _snap_routes
+
+    # A — three timeline routes
+    routes_src = _inspect.getsource(_snap_routes)
+    for path in (
+        "/api/timeline/section/{draft_id}",
+        "/api/timeline/chapter/{chapter_id}",
+        "/api/timeline/book/{book_id}",
+    ):
+        assert path in routes_src, (
+            f"Phase 5 must expose {path}"
+        )
+
+    # B — modal exists + Book menu has trigger
+    from sciknow.testing.helpers import web_app_full_source
+    template_src = web_app_full_source()
+    assert 'id="timeline-modal"' in template_src, (
+        "Timeline modal must be present in the book reader template"
+    )
+    assert "openTimelineModal" in template_src, (
+        "Book menu must wire a button to openTimelineModal"
+    )
+
+    # C — JS surface
+    from pathlib import Path as _P
+    js_src = _P(
+        "sciknow/web/static/js/sciknow.js"
+    ).read_text(encoding="utf-8")
+    for fn in ("openTimelineModal", "tlSwitchScope", "tlRender",
+               "_tlBriefHtml", "tlActivateDraft", "tlRestoreSnapshot"):
+        assert fn in js_src, (
+            f"sciknow.js must define {fn} for Phase 5 Timeline modal"
+        )
+
+
+def l1_snapshot_outline_structural_diff() -> None:
+    """Phase 54.6.328 (snapshot-versioning Phase 6) — outline-level
+    structural diff for book-scope snapshots.
+
+    Guards:
+      A) compute_bundle_brief auto-includes a `structural` block when
+         both bundles carry a `chapters` array.
+      B) _outline_chapters helper exists and projects to the minimal
+         {number, title, sections} shape.
+      C) _snapshot_book_drafts enriches each chapter bundle with
+         `sections_meta` (slug list).
+      D) cli/book.py::diff renders the structural section when both
+         refs are book-scope snapshots.
+    """
+    import inspect as _inspect
+    from sciknow.core import snapshot_diff as _sd
+
+    # A
+    bundle_src = _inspect.getsource(_sd.compute_bundle_brief)
+    assert "structural" in bundle_src and "compute_outline_structural_diff" in bundle_src, (
+        "compute_bundle_brief must auto-include structural diff for "
+        "book-scope bundles"
+    )
+
+    # B
+    assert hasattr(_sd, "_outline_chapters"), (
+        "Phase 6 must export the _outline_chapters projector"
+    )
+    out = _sd._outline_chapters([
+        {"chapter_number": 1, "chapter_title": "X", "sections_meta": ["a", "b"]}
+    ])
+    assert out and out[0]["sections"] == ["a", "b"], (
+        "_outline_chapters must surface sections_meta as the minimal "
+        "{number, title, sections} shape"
+    )
+
+    # C
+    from sciknow.web.routes import snapshots as _snap_routes
+    book_helper_src = _inspect.getsource(_snap_routes._snapshot_book_drafts)
+    assert "sections_meta" in book_helper_src, (
+        "_snapshot_book_drafts must enrich chapter bundles with "
+        "sections_meta so structural diffs see slugs"
+    )
+
+    # D
+    from sciknow.cli import book as _book_cli
+    diff_src = _inspect.getsource(_book_cli.diff)
+    assert "compute_outline_structural_diff" in diff_src, (
+        "book diff must call the structural-diff helper for book-scope refs"
+    )
+    assert "Outline changes" in diff_src, (
+        "book diff must render the structural diff under an 'Outline changes' heading"
+    )
+
+
+def l1_snapshot_autowrite_auto_trigger() -> None:
+    """Phase 54.6.328 (snapshot-versioning Phase 4) — autowrite-chapter
+    auto-snapshots before running, with prune.
+
+    Guards:
+      A) autowrite_chapter_all_sections_stream calls
+         _snapshot_chapter_drafts before iterating.
+      B) The auto-snapshot is named with a `pre-autowrite-` prefix +
+         timestamp so the prune regex matches.
+      C) The prune helper exists with a regex bound to that prefix
+         pattern.
+      D) The auto-snapshot path is wrapped in try/except so a failure
+         to snapshot never blocks autowrite.
+    """
+    import inspect as _inspect
+    from sciknow.core import autowrite as _aw
+
+    src = _inspect.getsource(_aw.autowrite_chapter_all_sections_stream)
+    assert "_snapshot_chapter_drafts" in src or "_snap_ch" in src, (
+        "autowrite_chapter must snapshot before iterating sections"
+    )
+    assert "pre-autowrite" in src, (
+        "auto-snapshot name must include `pre-autowrite-` prefix so "
+        "the prune regex matches"
+    )
+    assert "compute_bundle_brief" in src, (
+        "auto-snapshot must compute the diff brief"
+    )
+    assert "except Exception" in src and "pass" in src, (
+        "snapshot failures must never block autowrite"
+    )
+
+    assert hasattr(_aw, "_prune_chapter_unnamed_snapshots"), (
+        "Phase 4 prune helper must exist"
+    )
+    prune_src = _inspect.getsource(_aw._prune_chapter_unnamed_snapshots)
+    assert "pre-" in prune_src and "DELETE FROM draft_snapshots" in prune_src, (
+        "prune helper must target pre-<trigger>-<timestamp> snapshots"
+    )
+
+
+def l1_snapshot_history_diff_cli() -> None:
+    """Phase 54.6.328 (snapshot-versioning Phase 3) — book history +
+    book diff CLI verbs.
+
+    Guards:
+      A) version_history exports list_section_history + resolve_version_ref.
+      B) cli/book exposes `history` and `diff` verbs.
+      C) `history` body imports list_section_history.
+      D) `diff` body imports resolve_version_ref + compute_prose_diff
+         and uses difflib.unified_diff for prose output.
+    """
+    import inspect as _inspect
+    from sciknow.core import version_history as _vh
+    from sciknow.cli import book as _book_cli
+
+    for name in ("list_section_history", "resolve_version_ref"):
+        assert hasattr(_vh, name), (
+            f"sciknow.core.version_history must export {name!r}"
+        )
+
+    for verb in ("history", "diff"):
+        assert hasattr(_book_cli, verb), (
+            f"sciknow book {verb} must be a registered CLI verb"
+        )
+
+    hist_src = _inspect.getsource(_book_cli.history)
+    assert "list_section_history" in hist_src, (
+        "book history must call list_section_history"
+    )
+    assert "render_brief_one_line" in hist_src, (
+        "book history must render the diff brief column"
+    )
+
+    diff_src = _inspect.getsource(_book_cli.diff)
+    assert "resolve_version_ref" in diff_src, (
+        "book diff must call resolve_version_ref"
+    )
+    assert "compute_prose_diff" in diff_src, (
+        "book diff must compute the prose diff brief"
+    )
+    assert "unified_diff" in diff_src, (
+        "book diff must produce a unified diff"
+    )
+
+
+def l1_snapshot_section_scope_cli() -> None:
+    """Phase 54.6.328 (snapshot-versioning Phase 2) — CLI parity for
+    section-scope snapshots.
+
+    Guards:
+
+      A) `book snapshot` accepts a --draft option.
+      B) --draft is mutually exclusive with --chapter (CLI rejects).
+      C) The body inserts scope='draft' rows with the diff brief.
+      D) Existing web /api/snapshot/{draft_id} behaviour is preserved
+         (no contract change to the web endpoint).
+    """
+    import inspect as _inspect
+    from sciknow.cli import book as _book_cli
+
+    # A — option present
+    sig = _inspect.signature(_book_cli.snapshot)
+    assert "draft" in sig.parameters, (
+        "book snapshot must accept a --draft option for section-scope snapshots"
+    )
+
+    # B + C — body asserts mutex + writes scope='draft' with meta
+    body = _inspect.getsource(_book_cli.snapshot)
+    assert "--draft and --chapter are mutually exclusive" in body, (
+        "book snapshot must reject --draft + --chapter together"
+    )
+    assert "'draft'" in body or '"draft"' in body, (
+        "book snapshot --draft path must insert scope='draft' rows"
+    )
+    assert "compute_prose_diff" in body, (
+        "book snapshot --draft path must compute the diff brief"
+    )
+
+    # D — web endpoint contract intact
+    from sciknow.web.routes import snapshots as _snap_routes
+    web_src = _inspect.getsource(_snap_routes.create_snapshot)
+    assert "scope" not in web_src or "draft" in web_src, (
+        "/api/snapshot/{draft_id} must keep its draft-scope semantics"
+    )
+
+
+def l1_book_outline_overwrite_flag() -> None:
+    """v2.0 — `book outline --overwrite=archive|hard` for re-outlining
+    a book whose chapter graph already exists.
+
+    Guards:
+
+      A) `book outline` accepts an `overwrite` parameter and rejects
+         values other than 'archive' / 'hard'.
+      B) The CLI body branches on the overwrite mode:
+         - 'hard' deletes drafts (`DELETE FROM drafts`)
+         - 'archive' nulls chapter_id (`UPDATE drafts SET chapter_id =
+           NULL`) so they survive as orphans
+         - both modes drop chapters (`DELETE FROM book_chapters`)
+      C) When a snapshot is requested (default), the body calls
+         `_snapshot_book_drafts` BEFORE the wipe so a restore is possible.
+      D) Without --overwrite, the body refuses to clobber an outline
+         whose every chapter number collides with the new proposal —
+         pointing the user at the two valid overwrite modes.
+      E) `_snapshot_book_drafts` is exported from `web.app` and lives
+         in `web/routes/snapshots.py`.
+    """
+    import inspect as _inspect
+    from sciknow.cli import book as _book_cli
+
+    # A — parameter exists, validation rejects bad values.
+    sig = _inspect.signature(_book_cli.outline)
+    assert "overwrite" in sig.parameters, (
+        "book outline must accept an --overwrite option"
+    )
+    assert "snapshot_first" in sig.parameters, (
+        "book outline must accept a --snapshot/--no-snapshot option for "
+        "the overwrite path's safety net"
+    )
+    body = _inspect.getsource(_book_cli.outline)
+    for token in ('"archive"', '"hard"'):
+        assert token in body, (
+            f"book outline must validate --overwrite against {token}"
+        )
+
+    # B — wipe branches.
+    assert "DELETE FROM drafts" in body, (
+        "--overwrite=hard branch must delete drafts"
+    )
+    assert "UPDATE drafts SET chapter_id = NULL" in body, (
+        "--overwrite=archive branch must null drafts.chapter_id so "
+        "drafts survive as orphans"
+    )
+    assert "DELETE FROM book_chapters" in body, (
+        "both overwrite modes must drop existing chapters"
+    )
+
+    # C — snapshot before wipe.
+    assert "_snapshot_book_drafts" in body, (
+        "overwrite path must call _snapshot_book_drafts before wiping "
+        "(safety net; user can restore via book snapshot-restore)"
+    )
+
+    # D — refusal when chapters exist + no --overwrite + every number collides.
+    assert "every proposed number collides" in body or "proposed_nums" in body, (
+        "merge-mode (--overwrite unset) must refuse when every proposed "
+        "chapter number collides with an existing chapter — print recipe"
+    )
+
+    # E — helper export surface.
+    from sciknow.web import app as _web_app
+    assert hasattr(_web_app, "_snapshot_book_drafts"), (
+        "_snapshot_book_drafts must be re-exported from web.app for "
+        "cli/book.py to import"
+    )
+    from sciknow.web.routes import snapshots as _snap_routes
+    assert hasattr(_snap_routes, "_snapshot_book_drafts"), (
+        "_snapshot_book_drafts must be defined in web/routes/snapshots.py"
+    )
+
+
 def l1_phase54_6_296_payload_index_health() -> None:
     """Phase 54.6.296 — Qdrant payload-index health check.
 
@@ -13123,13 +13845,17 @@ def l1_phase54_6_295_sidecar_deep_audit() -> None:
 def l1_phase54_6_294_slow_docs_leaderboard() -> None:
     """Phase 54.6.294 — top-N slow-ingest leaderboard in the monitor.
 
-    Guards:
+    Render contract relaxed 2026-04-26: the leaderboard panel was
+    pulled from CLI dashboard + GUI System Monitor modal (visually
+    noisy on a stable corpus, rarely actionable). The data API is
+    preserved for any downstream JSON consumer.
+
+    Guards (post-2026-04-26):
 
       A) `_slow_docs_leaderboard` exists with document_id / title /
          total_ms / stage_ms fields.
       B) Snapshot exposes `slow_docs`.
-      C) CLI renders the "slow docs" footer block.
-      D) Web modal renders a "Slow ingest" heading.
+      C+D removed — render no longer required.
     """
     import inspect as _inspect
     from sciknow.core import monitor as _mon
@@ -13148,22 +13874,7 @@ def l1_phase54_6_294_slow_docs_leaderboard() -> None:
 
     snap_src = _inspect.getsource(_mon.collect_monitor_snapshot)
     assert '"slow_docs"' in snap_src, (
-        "54.6.294 snapshot must expose slow_docs"
-    )
-
-    from sciknow.cli import db as _db_cli
-    cli_src = _inspect.getsource(_db_cli._build_monitor_layout)
-    assert "slow_docs" in cli_src and "slow docs" in cli_src, (
-        "54.6.294 CLI must read + render slow_docs"
-    )
-
-    from sciknow.testing.helpers import web_app_full_source
-    web_src = web_app_full_source()
-    assert "snap.slow_docs" in web_src, (
-        "54.6.294 web must read snap.slow_docs"
-    )
-    assert "Slow ingest" in web_src, (
-        "54.6.294 web must render a 'Slow ingest' heading"
+        "54.6.294 snapshot must expose slow_docs (data API preserved)"
     )
 
 
@@ -17457,16 +18168,25 @@ def l1_phase54_6_212_vlm_pro_default_dispatch() -> None:
         f"got {settings.mineru_vlm_backend!r}"
     )
 
-    # B) VLM-Pro tried before pipeline in "auto" branch
+    # B) VLM-Pro tried before pipeline in "auto" branch.
+    # Phase 54.6.x — the body now runs inside a try/finally that
+    # restores TORCH_DEVICE / CUDA_VISIBLE_DEVICES after CPU-mode
+    # fallback. Indentation deepened by 4 spaces; pattern matches
+    # at any indentation depth so future wraps don't break this.
+    import re as _re
     convert_src = _inspect.getsource(conv_mod.convert)
-    auto_vlm_pos = convert_src.find(
-        '    if backend_setting == "auto":\n'
-        "        try:\n"
-        "            return _convert_mineru("
+    auto_vlm_match = _re.search(
+        r'\n( +)if backend_setting == "auto":\n'
+        r'\1    try:\n'
+        r'\1        return _convert_mineru\(',
+        convert_src,
     )
-    auto_pipeline_pos = convert_src.find(
-        '    if backend_setting in ("auto", "mineru"):'
+    auto_pipeline_match = _re.search(
+        r'\n +if backend_setting in \("auto", "mineru"\):',
+        convert_src,
     )
+    auto_vlm_pos = auto_vlm_match.start() if auto_vlm_match else -1
+    auto_pipeline_pos = auto_pipeline_match.start() if auto_pipeline_match else -1
     assert auto_vlm_pos != -1, (
         "convert() must have a dedicated `if backend_setting == 'auto'` "
         "branch that tries VLM-Pro first — post-54.6.212 ordering"
@@ -18173,6 +18893,120 @@ def l1_v2_route_handlers_resolve_all_names() -> None:
     )
 
 
+# ════════════════════════════════════════════════════════════════════
+# V2_FINAL Stage 2 — ollama import audit
+#
+# Catalogue every `import ollama` site under sciknow/. Each must be
+# either:
+#   (a) inside the `KEPT_BY_DESIGN` list below — explicitly v1-only
+#       paths (VLM, doctor probes, model-tag bench tools), OR
+#   (b) inside `rag/llm.py` (the dispatch facade itself — the rollback
+#       escape hatch when USE_LLAMACPP_WRITER=False).
+#
+# Adding a new `import ollama` outside both lists is a regression: the
+# v2 substrate already covers the writer-LLM use case via
+# `rag.llm.complete()` which dispatches via `_use_llamacpp()`.
+# ════════════════════════════════════════════════════════════════════
+
+
+# Files where an ollama import is intentional and stays in v2 by design.
+# Format: { "path/from/repo/root.py": "one-line reason" }.
+_OLLAMA_KEPT_BY_DESIGN: dict[str, str] = {
+    # The dispatch facade itself — `rag/llm.py` keeps an Ollama branch as
+    # the rollback hatch when `USE_LLAMACPP_WRITER=False`.
+    "sciknow/rag/llm.py":
+        "dispatch facade — Ollama branch is the v1 rollback hatch",
+    # Doctor probes Ollama explicitly so it can detect a v1-style outage
+    # even on a v2 deployment (operators sometimes still have Ollama
+    # running for the VLM / sweep tools).
+    "sciknow/core/monitor.py":
+        "doctor probes Ollama for backwards compatibility + release-vram",
+    # Web mirror of the doctor's release-vram action; same rationale.
+    "sciknow/web/routes/system.py":
+        "release-vram parity with monitor.py for v1 ollama",
+    # finalize_draft's L3 figure-claim verifier dispatches to the
+    # llama-server vlm role on v2; the `import ollama` line remains
+    # only as the v1 rollback branch (USE_LLAMACPP_VLM=False). Drop
+    # this entry when the v1 rollback hatch is removed in v2.2+.
+    "sciknow/core/finalize_draft.py":
+        "L3 figure verifier — v1 rollback branch (USE_LLAMACPP_VLM=False)",
+    # v1-era model comparison benches — they iterate over Ollama-tag
+    # named model variants (qwen3:30b-a3b vs qwen2.5:32b-instruct etc.)
+    # which the substrate's one-GGUF-per-role model doesn't expose.
+    "sciknow/testing/model_sweep.py":
+        "v1-era per-model bench (Ollama tag-named variants)",
+    "sciknow/testing/quality.py":
+        "v1-era quality bench (Ollama tag-named variants)",
+    "sciknow/testing/vlm_sweep.py":
+        "VLM benchmarking — vision models served by Ollama",
+}
+
+
+def l1_v2_no_unguarded_ollama_imports() -> None:
+    """V2_FINAL Stage 2 — every `import ollama` site is accounted for.
+
+    Walks the source under `sciknow/` for `import ollama` (top-level or
+    function-scoped) and asserts each line lives in a file listed in
+    `_OLLAMA_KEPT_BY_DESIGN`. Any new ollama import outside that list
+    fails the test until either (a) the call site is routed via
+    `rag.llm.complete()` (which already dispatches via `_use_llamacpp()`)
+    or (b) the file is added to the keep list with a one-line reason.
+    """
+    import re
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[2]
+    pkg_root = repo_root / "sciknow"
+    pat = re.compile(r"^\s*(?:import\s+ollama\b|from\s+ollama\b)", re.MULTILINE)
+
+    offenders: list[str] = []
+    found_paths: set[str] = set()
+    for py in pkg_root.rglob("*.py"):
+        rel = str(py.relative_to(repo_root))
+        # Skip caches + the test harness itself (which references
+        # ollama in docstrings + dispatch-audit text).
+        if "__pycache__" in rel:
+            continue
+        if rel == "sciknow/testing/protocol.py":
+            continue
+        try:
+            src = py.read_text()
+        except OSError:
+            continue
+        if not pat.search(src):
+            continue
+        found_paths.add(rel)
+        if rel in _OLLAMA_KEPT_BY_DESIGN:
+            continue
+        # Surface every offending line with line numbers for fast triage.
+        for i, line in enumerate(src.splitlines(), start=1):
+            if pat.match(line):
+                offenders.append(f"{rel}:{i}  {line.strip()}")
+
+    assert not offenders, (
+        "V2_FINAL Stage 2 — unguarded `import ollama` lines found. "
+        "Either route the call through `sciknow.rag.llm.complete()` "
+        "(which dispatches to llama-server when USE_LLAMACPP_WRITER=True) "
+        "or add the file to `_OLLAMA_KEPT_BY_DESIGN` with a reason. "
+        "Offenders:\n  - " + "\n  - ".join(offenders)
+    )
+
+    # Sanity: the keep list itself shouldn't drift. Surface entries that
+    # no longer correspond to any actual `import ollama` (so we keep
+    # the list pruned).
+    stale = sorted(set(_OLLAMA_KEPT_BY_DESIGN) - found_paths)
+    assert not stale, (
+        "V2_FINAL Stage 2 — `_OLLAMA_KEPT_BY_DESIGN` lists files with "
+        "no matching `import ollama` line; prune these:\n  - "
+        + "\n  - ".join(stale)
+    )
+
+    return TestResult.ok(
+        name="l1_v2_no_unguarded_ollama_imports",
+        message=(f"{len(found_paths)} files with `import ollama`, "
+                 f"all kept-by-design or in dispatch facade"),
+    )
+
+
 def l1_v2_dual_embedder_deprecation_warning() -> None:
     """v2 Phase D — Settings emits a deprecation warning when the
     dual-embedder split (DENSE_EMBEDDER_MODEL) is still configured.
@@ -18841,6 +19675,21 @@ L1_TESTS: list[Callable] = [
     l1_phase54_6_295_sidecar_deep_audit,
     l1_phase54_6_296_payload_index_health,
     l1_phase54_6_297_book_outline_model,
+    # v2.0 — book outline --overwrite=archive|hard for re-outlining a
+    # book that already has chapters; auto-snapshots first.
+    l1_book_outline_overwrite_flag,
+    # Phase 54.6.328 — diff-brief column on draft_snapshots + helper.
+    l1_snapshot_diff_brief_helper,
+    # Phase 54.6.328 (snapshot-versioning Phase 2) — book snapshot --draft
+    l1_snapshot_section_scope_cli,
+    # Phase 54.6.328 (snapshot-versioning Phase 3) — book history + book diff
+    l1_snapshot_history_diff_cli,
+    # Phase 54.6.328 (snapshot-versioning Phase 4) — autowrite auto-snapshot
+    l1_snapshot_autowrite_auto_trigger,
+    # Phase 54.6.328 (snapshot-versioning Phase 6) — structural outline diff
+    l1_snapshot_outline_structural_diff,
+    # Phase 54.6.328 (snapshot-versioning Phase 5) — Timeline GUI modal
+    l1_snapshot_timeline_modal,
     l1_phase54_6_298_enrichment_coverage,
     l1_phase54_6_299_hnsw_drift_check,
     l1_phase54_6_301_retrieval_latency_buffer,
@@ -18909,6 +19758,10 @@ L1_TESTS: list[Callable] = [
     # v2 — package version readable from python (sciknow.__version__),
     # CLI (--version), and HTTP (/openapi.json info.version)
     l1_v2_package_version_surface,
+    # V2_FINAL Stage 2 — every `import ollama` site is either inside
+    # the dispatch facade (rag/llm.py) or in the kept-by-design list
+    # (VLM, doctor probes, model-tag bench tools).
+    l1_v2_no_unguarded_ollama_imports,
 ]
 
 L2_TESTS: list[Callable] = [
@@ -18938,6 +19791,15 @@ L3_TESTS: list[Callable] = [
     l3_ollama_reachable,
     l3_llm_complete_smoke,
     l3_embedder_loads,
+    # V2_FINAL Stage 1 — v2-only substrate tests (cheap; skip if role down).
+    l3_v2_writer_health,
+    l3_v2_embedder_health,
+    l3_v2_reranker_health,
+    l3_v2_writer_complete_smoke,
+    l3_v2_embedder_roundtrip,
+    l3_v2_reranker_roundtrip,
+    l3_v2_autowrite_uses_llamacpp,
+    l3_v2_dispatch_audit,
     # Phase 54.6.39 — single-example pipeline smokes.
     # Order matters: cheap sanity checks first, expensive end-to-end last.
     l3_llm_num_predict_cap_honored,           # ~5s   — catches Ollama/wrapper num_predict regressions
@@ -18989,8 +19851,17 @@ def run_layer(
         if not qd_ok():
             return ([TestResult.skip("L2", "skipped — Qdrant not reachable")], 0)
     if layer_name == "L3":
-        if not _ollama_reachable():
-            return ([TestResult.skip("L3", "skipped — Ollama not reachable")], 0)
+        # V2_FINAL Stage 1 — accept either v1 (Ollama) OR v2 (llama-server
+        # writer) as a usable backend. Each individual test still skips
+        # itself when its specific role/backend isn't reachable, so the
+        # layer can run on a pure-v2 box without Ollama.
+        v1_ok = _ollama_reachable()
+        v2_ok = _v2_health("writer") or _v2_health("embedder") or _v2_health("reranker")
+        if not (v1_ok or v2_ok):
+            return ([TestResult.skip(
+                "L3",
+                "skipped — neither Ollama nor any llama-server role reachable",
+            )], 0)
 
     tests = LAYERS.get(layer_name, [])
     results: list[TestResult] = []
