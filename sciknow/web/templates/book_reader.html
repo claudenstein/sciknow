@@ -365,6 +365,7 @@
         <button role="menuitem" onclick="openPlanModal()" title="View / edit / regenerate the book plan (the leitmotiv)."><svg class="icon"><use href="#i-file-text"/></svg> Plan</button>
         <button role="menuitem" onclick="showCorkboard()" title="Book-wide corkboard view: every chapter's sections as cards you can drag + reorder."><svg class="icon"><use href="#i-layout-grid"/></svg> Corkboard</button>
         <button role="menuitem" onclick="showVersions()" title="Per-draft version history. Every save keeps the prior version so you can diff or revert."><svg class="icon"><use href="#i-history"/></svg> History</button>
+        <button role="menuitem" onclick="openTimelineModal()" title="Phase 54.6.328 — unified Timeline modal. Tabs for Section / Chapter / Book each show the version chain or snapshot list with a one-line diff brief per row. Tick two rows to compare them."><svg class="icon"><use href="#i-clock"/></svg> Timeline (snapshots + versions)</button>
         <button role="menuitem" onclick="openBibliographyTools()" title="Phase 54.6.312 — Sanity-check and renumber the global bibliography. Use after adding new chapters/sections when the citation numbers in stored markdown look inconsistent."><svg class="icon"><use href="#i-book-open"/></svg> Bibliography tools</button>
         <button role="menuitem" onclick="takeSnapshot()" title="Snapshot the whole book's draft state — safety net before a destructive operation like autowrite-all."><svg class="icon"><use href="#i-camera"/></svg> Snapshot</button>
         <button role="menuitem" onclick="openExportModal()" title="Export the book to Markdown, HTML, PDF (WeasyPrint), EPUB (pandoc), LaTeX, DOCX, or BibTeX."><svg class="icon"><use href="#i-download"/></svg> Export</button>
@@ -1094,6 +1095,47 @@
       <div class="modal-stream" id="ask-stream"></div>
       <div id="ask-stream-stats" class="stream-stats"></div>
       <div class="modal-sources u-hidden" id="ask-sources"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Phase 54.6.328 (snapshot-versioning Phase 5) — unified Timeline modal -->
+<div class="modal-overlay" id="timeline-modal" onclick="if(event.target===this)closeModal('timeline-modal')">
+  <div class="modal" style="max-width:920px;width:96vw;height:80vh;display:flex;flex-direction:column;">
+    <div class="modal-header">
+      <h3><svg class="icon icon--lg"><use href="#i-clock"/></svg>
+        <span id="tl-title">Timeline</span>
+      </h3>
+      <button class="modal-close" onclick="closeModal('timeline-modal')"
+              title="Close the Timeline modal.">&times;</button>
+    </div>
+    <div class="modal-body" style="padding-top:0;flex:1;overflow:auto;display:flex;flex-direction:column;gap:12px;">
+      <!-- Tabs -->
+      <div class="u-row-click u-gap-3" id="tl-tabs" role="tablist"
+           style="border-bottom:1px solid var(--border);padding-bottom:8px;">
+        <button class="btn btn--sm" data-tl-scope="section"
+                onclick="tlSwitchScope('section')"
+                title="Walk this section's draft.version chain interleaved with any draft-scope snapshots.">
+          Section
+        </button>
+        <button class="btn btn--sm" data-tl-scope="chapter"
+                onclick="tlSwitchScope('chapter')"
+                title="Latest active draft per section in this chapter, plus chapter snapshots.">
+          Chapter
+        </button>
+        <button class="btn btn--sm" data-tl-scope="book"
+                onclick="tlSwitchScope('book')"
+                title="All bundle snapshots in this book (book + chapter scope).">
+          Book
+        </button>
+        <span style="margin-left:auto;color:var(--fg-muted);font-size:11px;"
+              id="tl-status" title="Polled scope + entry count."></span>
+      </div>
+      <!-- Body — populated by tlRender() -->
+      <div id="tl-body" style="flex:1;overflow:auto;"></div>
+      <!-- Compare drawer — shows when two rows are selected -->
+      <div id="tl-compare" class="u-hidden"
+           style="border-top:1px solid var(--border);padding-top:8px;max-height:50vh;overflow:auto;"></div>
     </div>
   </div>
 </div>

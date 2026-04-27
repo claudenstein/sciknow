@@ -13438,6 +13438,51 @@ def l1_snapshot_diff_brief_helper() -> None:
     )
 
 
+def l1_snapshot_timeline_modal() -> None:
+    """Phase 54.6.328 (snapshot-versioning Phase 5) — Timeline GUI.
+
+    Guards:
+      A) Three /api/timeline/{section,chapter,book}/{id} routes exist.
+      B) Timeline modal is in the template + Book menu has a trigger.
+      C) JS exposes openTimelineModal + tlSwitchScope and renders the
+         brief column.
+    """
+    import inspect as _inspect
+    from sciknow.web.routes import snapshots as _snap_routes
+
+    # A — three timeline routes
+    routes_src = _inspect.getsource(_snap_routes)
+    for path in (
+        "/api/timeline/section/{draft_id}",
+        "/api/timeline/chapter/{chapter_id}",
+        "/api/timeline/book/{book_id}",
+    ):
+        assert path in routes_src, (
+            f"Phase 5 must expose {path}"
+        )
+
+    # B — modal exists + Book menu has trigger
+    from sciknow.testing.helpers import web_app_full_source
+    template_src = web_app_full_source()
+    assert 'id="timeline-modal"' in template_src, (
+        "Timeline modal must be present in the book reader template"
+    )
+    assert "openTimelineModal" in template_src, (
+        "Book menu must wire a button to openTimelineModal"
+    )
+
+    # C — JS surface
+    from pathlib import Path as _P
+    js_src = _P(
+        "sciknow/web/static/js/sciknow.js"
+    ).read_text(encoding="utf-8")
+    for fn in ("openTimelineModal", "tlSwitchScope", "tlRender",
+               "_tlBriefHtml", "tlActivateDraft", "tlRestoreSnapshot"):
+        assert fn in js_src, (
+            f"sciknow.js must define {fn} for Phase 5 Timeline modal"
+        )
+
+
 def l1_snapshot_outline_structural_diff() -> None:
     """Phase 54.6.328 (snapshot-versioning Phase 6) — outline-level
     structural diff for book-scope snapshots.
@@ -19634,6 +19679,8 @@ L1_TESTS: list[Callable] = [
     l1_snapshot_autowrite_auto_trigger,
     # Phase 54.6.328 (snapshot-versioning Phase 6) — structural outline diff
     l1_snapshot_outline_structural_diff,
+    # Phase 54.6.328 (snapshot-versioning Phase 5) — Timeline GUI modal
+    l1_snapshot_timeline_modal,
     l1_phase54_6_298_enrichment_coverage,
     l1_phase54_6_299_hnsw_drift_check,
     l1_phase54_6_301_retrieval_latency_buffer,

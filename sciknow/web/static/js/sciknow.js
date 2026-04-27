@@ -16416,3 +16416,295 @@ async function destroyProject(slug) {
   }
 }
 
+
+
+// ── Phase 54.6.328 (snapshot-versioning Phase 5) — Timeline modal ──────────
+//
+// Unified replacement for the old History modal + Snapshots modal. Three
+// scopes (Section / Chapter / Book) accessed via tabs; each row carries
+// the diff brief from the meta column. Compare-any-two via row checkboxes
+// + the existing /api/diff endpoint.
+
+let _tlScope = 'section';        // 'section' | 'chapter' | 'book'
+let _tlSelected = [];            // up to 2 row ids for compare
+
+function _tlBriefHtml(meta) {
+  if (!meta || typeof meta !== 'object') return '<span class="u-muted">—</span>';
+  const totals = meta.totals || meta;  // bundle vs prose shape
+  const wa = totals.words_added || 0;
+  const wr = totals.words_removed || 0;
+  const pa = totals.paragraphs_added || 0;
+  const pr = totals.paragraphs_removed || 0;
+  const ca = totals.citations_added || 0;
+  const cr = totals.citations_removed || 0;
+  const bits = [];
+  if (wa || wr) bits.push('+' + wa.toLocaleString() + '/-' + wr.toLocaleString() + 'w');
+  if (pa || pr) bits.push('+' + pa + '/-' + pr + '¶');
+  if (ca || cr) bits.push('+' + ca + '/-' + cr + 'cite');
+  if (meta.totals && (meta.totals.sections_total != null)) {
+    bits.push((meta.totals.sections_changed || 0) + '/' + meta.totals.sections_total + '§');
+  }
+  const struct = meta.structural;
+  if (struct) {
+    const sa = (struct.added_chapters || []).length;
+    const sr = (struct.removed_chapters || []).length;
+    const sn = (struct.renamed_chapters || []).length;
+    if (sa) bits.push('+' + sa + 'ch');
+    if (sr) bits.push('-' + sr + 'ch');
+    if (sn) bits.push('~' + sn + 'ch');
+  }
+  return bits.length
+    ? '<span class="u-muted">' + bits.join(' · ') + '</span>'
+    : '<span class="u-muted">—</span>';
+}
+
+function _tlSetActiveTab(scope) {
+  document.querySelectorAll('#tl-tabs button[data-tl-scope]').forEach(b => {
+    if (b.dataset.tlScope === scope) {
+      b.classList.add('active');
+      b.setAttribute('aria-selected', 'true');
+    } else {
+      b.classList.remove('active');
+      b.setAttribute('aria-selected', 'false');
+    }
+  });
+}
+
+async function tlSwitchScope(scope) {
+  _tlScope = scope;
+  _tlSelected = [];
+  _tlSetActiveTab(scope);
+  document.getElementById('tl-compare').classList.add('u-hidden');
+  document.getElementById('tl-body').innerHTML = '<p class="u-muted">Loading…</p>';
+  await tlRender();
+}
+
+async function tlRender() {
+  const body = document.getElementById('tl-body');
+  const status = document.getElementById('tl-status');
+  if (_tlScope === 'section') {
+    if (!currentDraftId) {
+      body.innerHTML = '<p class="u-muted">Open a section first to see its history.</p>';
+      status.textContent = '';
+      return;
+    }
+    const r = await fetch('/api/timeline/section/' + currentDraftId);
+    if (!r.ok) { body.innerHTML = '<p class="u-muted">No data.</p>'; return; }
+    const data = await r.json();
+    const entries = data.entries || [];
+    status.textContent = entries.length + ' entries';
+    body.innerHTML = _tlSectionHtml(entries);
+  } else if (_tlScope === 'chapter') {
+    if (!currentChapterId) {
+      body.innerHTML = '<p class="u-muted">Open a chapter or one of its sections first.</p>';
+      status.textContent = '';
+      return;
+    }
+    const r = await fetch('/api/timeline/chapter/' + currentChapterId);
+    if (!r.ok) { body.innerHTML = '<p class="u-muted">No data.</p>'; return; }
+    const data = await r.json();
+    status.textContent =
+      (data.sections || []).length + ' sections · ' +
+      (data.snapshots || []).length + ' snapshots';
+    body.innerHTML = _tlChapterHtml(data);
+  } else if (_tlScope === 'book') {
+    const bid = (window.SCIKNOW_BOOTSTRAP && window.SCIKNOW_BOOTSTRAP.bookId) || '';
+    if (!bid) {
+      body.innerHTML = '<p class="u-muted">No active book.</p>';
+      status.textContent = '';
+      return;
+    }
+    const r = await fetch('/api/timeline/book/' + bid);
+    if (!r.ok) { body.innerHTML = '<p class="u-muted">No data.</p>'; return; }
+    const data = await r.json();
+    const snaps = data.snapshots || [];
+    status.textContent = snaps.length + ' snapshots';
+    body.innerHTML = _tlBookHtml(snaps);
+  }
+}
+
+function _tlSectionHtml(entries) {
+  if (!entries.length) return '<p class="u-muted">No history yet for this section.</p>';
+  let html = '<table class="stats-table" style="width:100%;font-size:13px;">'
+    + '<tr><th style="width:32px;">·</th>'
+    + '<th>Version / snapshot</th><th>Date</th>'
+    + '<th style="text-align:right;">Words</th><th>Δ</th><th>Actions</th></tr>';
+  for (const e of entries) {
+    const checked = _tlSelected.includes(e.id) ? 'checked' : '';
+    const activeBadge = e.is_active
+      ? ' <span class="u-faint" style="color:var(--accent);">✓ active</span>'
+      : '';
+    const score = (e.extra && typeof e.extra.final_overall === 'number')
+      ? ' <span class="u-muted">score=' + e.extra.final_overall.toFixed(2) + '</span>'
+      : '';
+    html += '<tr><td><input type="checkbox" data-tl-id="' + _escHTML(e.id) + '" '
+      + checked + ' onchange="tlOnSelect(this)"></td>'
+      + '<td>'
+        + '<code>' + _escHTML(e.id.slice(0, 8)) + '</code> '
+        + '<span class="u-muted">' + _escHTML(e.kind) + '</span> '
+        + '<strong>' + _escHTML(e.label) + '</strong>'
+        + activeBadge + score
+      + '</td>'
+      + '<td class="u-muted">' + _escHTML(e.created_at.slice(0, 19)) + '</td>'
+      + '<td style="text-align:right;">' + (e.word_count || 0).toLocaleString() + '</td>'
+      + '<td>' + _tlBriefHtml(e.meta) + '</td>'
+      + '<td>'
+        + (e.kind === 'draft' && !e.is_active
+            ? '<button class="btn btn--sm" onclick="tlActivateDraft(\'' + _escHTML(e.id) + '\')" '
+              + 'title="Mark this draft version active so the reader + bibliography pick it up.">Activate</button> '
+            : '')
+        + (e.kind === 'snapshot'
+            ? '<button class="btn btn--sm" onclick="tlRestoreSnapshot(\'' + _escHTML(e.id) + '\')" '
+              + 'title="Insert this snapshot as a NEW draft version (non-destructive).">Restore</button>'
+            : '')
+      + '</td></tr>';
+  }
+  html += '</table>';
+  return html;
+}
+
+function _tlChapterHtml(data) {
+  let html = '';
+  const secs = data.sections || [];
+  if (secs.length) {
+    html += '<h4>Latest per section</h4>'
+      + '<table class="stats-table" style="width:100%;font-size:13px;">'
+      + '<tr><th>Section</th><th>v</th><th>Date</th>'
+      + '<th style="text-align:right;">Words</th><th>·</th></tr>';
+    for (const s of secs) {
+      html += '<tr><td>'
+        + (s.is_active ? '<span style="color:var(--accent);">✓</span> ' : '')
+        + _escHTML(s.section_type) + '</td>'
+        + '<td>' + (s.version || 0) + '</td>'
+        + '<td class="u-muted">' + _escHTML(s.created_at.slice(0, 19)) + '</td>'
+        + '<td style="text-align:right;">' + (s.word_count || 0).toLocaleString() + '</td>'
+        + '<td><button class="btn btn--sm" onclick="loadSection(\'' + _escHTML(s.id) + '\');closeModal(\'timeline-modal\');" '
+          + 'title="Open this section in the reader.">Open</button></td>'
+        + '</tr>';
+    }
+    html += '</table>';
+  }
+  const snaps = data.snapshots || [];
+  if (snaps.length) {
+    html += '<h4 style="margin-top:18px;">Chapter snapshots</h4>';
+    html += _tlSnapshotsTable(snaps, 'chapter');
+  }
+  return html || '<p class="u-muted">No history yet for this chapter.</p>';
+}
+
+function _tlBookHtml(snaps) {
+  if (!snaps.length) return '<p class="u-muted">No snapshots yet for this book.</p>';
+  return _tlSnapshotsTable(snaps, 'book');
+}
+
+function _tlSnapshotsTable(snaps, kind) {
+  let html = '<table class="stats-table" style="width:100%;font-size:13px;">'
+    + '<tr><th style="width:32px;">·</th>'
+    + '<th>Snapshot</th><th>Scope</th><th>Date</th>'
+    + '<th style="text-align:right;">Words</th><th>Δ</th><th>Actions</th></tr>';
+  for (const s of snaps) {
+    const checked = _tlSelected.includes(s.id) ? 'checked' : '';
+    const scopeTag = (s.scope === 'book')
+      ? '<span class="u-muted">book</span>'
+      : ('<span class="u-muted">chapter Ch.' + (s.chapter_number || '?') + '</span>');
+    html += '<tr><td><input type="checkbox" data-tl-id="' + _escHTML(s.id) + '" '
+      + checked + ' onchange="tlOnSelect(this)"></td>'
+      + '<td><code>' + _escHTML(s.id.slice(0, 8)) + '</code> '
+      + _escHTML(s.name || '') + '</td>'
+      + '<td>' + scopeTag + '</td>'
+      + '<td class="u-muted">' + _escHTML((s.created_at || '').slice(0, 19)) + '</td>'
+      + '<td style="text-align:right;">' + (s.word_count || 0).toLocaleString() + '</td>'
+      + '<td>' + _tlBriefHtml(s.meta) + '</td>'
+      + '<td><button class="btn btn--sm" onclick="tlRestoreSnapshot(\'' + _escHTML(s.id) + '\')" '
+        + 'title="Insert this snapshot as a NEW draft bundle (non-destructive).">Restore</button></td>'
+      + '</tr>';
+  }
+  html += '</table>';
+  return html;
+}
+
+function tlOnSelect(checkbox) {
+  const id = checkbox.dataset.tlId;
+  if (checkbox.checked) {
+    if (_tlSelected.length >= 2) {
+      const ev = _tlSelected.shift();
+      const old = document.querySelector(
+        '#tl-body input[data-tl-id="' + ev + '"]'
+      );
+      if (old) old.checked = false;
+    }
+    _tlSelected.push(id);
+  } else {
+    _tlSelected = _tlSelected.filter(x => x !== id);
+  }
+  if (_tlSelected.length === 2) {
+    tlShowCompare(_tlSelected[0], _tlSelected[1]);
+  } else {
+    document.getElementById('tl-compare').classList.add('u-hidden');
+  }
+}
+
+async function tlShowCompare(a, b) {
+  const pane = document.getElementById('tl-compare');
+  pane.classList.remove('u-hidden');
+  pane.innerHTML = '<p class="u-muted">Loading diff…</p>';
+  try {
+    const r = await fetch('/api/diff/' + encodeURIComponent(a) + '/' + encodeURIComponent(b));
+    if (!r.ok) {
+      pane.innerHTML = '<p class="u-muted">Diff endpoint requires both refs to be drafts. '
+        + 'Use `sciknow book diff &lt;a&gt; &lt;b&gt;` from the CLI for snapshot-vs-snapshot diffs.</p>';
+      return;
+    }
+    const data = await r.json();
+    pane.innerHTML = '<h4>Compare</h4>'
+      + '<div style="line-height:1.5;font-family:var(--font-serif);">'
+      + (data.diff_html || '<em class="u-muted">No textual differences.</em>')
+      + '</div>';
+  } catch (exc) {
+    pane.innerHTML = '<p class="u-muted">Diff failed: ' + _escHTML(String(exc)) + '</p>';
+  }
+}
+
+async function tlActivateDraft(id) {
+  if (!id) return;
+  const r = await fetch('/api/draft/' + id + '/activate', {method: 'POST'});
+  if (!r.ok) {
+    alert('Activate failed (' + r.status + ')');
+    return;
+  }
+  await tlRender();
+  if (currentDraftId) loadSection(currentDraftId);
+}
+
+async function tlRestoreSnapshot(id) {
+  if (!id) return;
+  if (!confirm('Restore this snapshot? Bundles insert NEW draft versions; section snapshots overwrite the active draft.')) return;
+  // Try the bundle restore endpoint (works for chapter + book scope).
+  let r = await fetch('/api/snapshot/restore-bundle/' + id, {method: 'POST'});
+  if (!r.ok && r.status === 400) {
+    // Probably scope='draft' — fall back to overwriting active draft.
+    const cr = await fetch('/api/snapshot-content/' + id);
+    if (!cr.ok) { alert('Snapshot not found'); return; }
+    const sd = await cr.json();
+    if (currentDraftId) {
+      const fd = new FormData();
+      fd.append('content', sd.content || '');
+      await fetch('/edit/' + currentDraftId, {method: 'POST', body: fd});
+      loadSection(currentDraftId);
+    }
+  }
+  if (r.ok) {
+    await refreshAfterJob(null);
+    await tlRender();
+  }
+}
+
+function openTimelineModal(scope) {
+  _tlSelected = [];
+  openModal('timeline-modal');
+  // Default scope: section if a draft is open, else chapter, else book.
+  const initial = scope || (
+    currentDraftId ? 'section' : (currentChapterId ? 'chapter' : 'book')
+  );
+  tlSwitchScope(initial);
+}

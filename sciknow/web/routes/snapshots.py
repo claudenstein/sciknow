@@ -472,3 +472,103 @@ async def restore_snapshot_bundle(snapshot_id: str):
         "chapters_restored": chapters_touched,
         "drafts_created": total_drafts,
     })
+
+
+# ── Phase 54.6.328 (snapshot-versioning Phase 5) — Timeline endpoints ─────
+
+
+@router.get("/api/timeline/section/{draft_id}")
+async def timeline_section(draft_id: str):
+    """Section-scope timeline: drafts.version chain + draft-scope
+    snapshots, interleaved by created_at, briefs per row.
+    """
+    from sciknow.core.version_history import list_section_history
+    with get_session() as session:
+        entries = list_section_history(session, draft_id=draft_id)
+    return {
+        "scope": "section",
+        "entries": [
+            {
+                "kind": e.kind, "id": e.id, "label": e.label,
+                "created_at": e.created_at, "word_count": e.word_count,
+                "version": e.version, "is_active": e.is_active,
+                "meta": e.meta or {}, "extra": e.extra or {},
+            }
+            for e in entries
+        ],
+    }
+
+
+@router.get("/api/timeline/chapter/{chapter_id}")
+async def timeline_chapter(chapter_id: str):
+    """Chapter-scope timeline: latest active draft per section
+    + all chapter-scope snapshots in this chapter.
+    """
+    with get_session() as session:
+        sec_rows = session.execute(text("""
+            SELECT DISTINCT ON (section_type)
+                id::text, section_type, version, word_count, created_at,
+                COALESCE((custom_metadata->>'is_active')::boolean, FALSE) AS active
+            FROM drafts
+            WHERE chapter_id::text = :cid
+            ORDER BY section_type,
+                     COALESCE((custom_metadata->>'is_active')::boolean, FALSE) DESC,
+                     CASE WHEN content IS NULL OR LENGTH(content) < 50
+                          THEN 1 ELSE 0 END,
+                     version DESC
+        """), {"cid": chapter_id}).fetchall()
+        snap_rows = session.execute(text("""
+            SELECT id::text, name, word_count, created_at, meta
+            FROM draft_snapshots
+            WHERE chapter_id::text = :cid AND scope = 'chapter'
+            ORDER BY created_at DESC
+        """), {"cid": chapter_id}).fetchall()
+    return {
+        "scope": "chapter",
+        "sections": [
+            {
+                "id": r[0], "section_type": r[1],
+                "version": int(r[2] or 0), "word_count": int(r[3] or 0),
+                "created_at": str(r[4] or ""), "is_active": bool(r[5]),
+            }
+            for r in sec_rows
+        ],
+        "snapshots": [
+            {
+                "id": r[0], "name": r[1], "word_count": int(r[2] or 0),
+                "created_at": str(r[3] or ""),
+                "meta": (r[4] if isinstance(r[4], dict) else {}) or {},
+            }
+            for r in snap_rows
+        ],
+    }
+
+
+@router.get("/api/timeline/book/{book_id}")
+async def timeline_book(book_id: str):
+    """Book-scope timeline: all chapter + book snapshots in this book."""
+    with get_session() as session:
+        snap_rows = session.execute(text("""
+            SELECT s.id::text, s.name, s.word_count, s.created_at,
+                   s.scope, s.meta, bc.number, bc.title
+            FROM draft_snapshots s
+            LEFT JOIN book_chapters bc ON bc.id = s.chapter_id
+            WHERE s.book_id::text = :bid
+               OR s.chapter_id IN (
+                   SELECT id FROM book_chapters WHERE book_id::text = :bid
+               )
+            ORDER BY s.created_at DESC
+        """), {"bid": book_id}).fetchall()
+    return {
+        "scope": "book",
+        "snapshots": [
+            {
+                "id": r[0], "name": r[1], "word_count": int(r[2] or 0),
+                "created_at": str(r[3] or ""), "scope": r[4],
+                "meta": (r[5] if isinstance(r[5], dict) else {}) or {},
+                "chapter_number": r[6],
+                "chapter_title": r[7] or "",
+            }
+            for r in snap_rows
+        ],
+    }
