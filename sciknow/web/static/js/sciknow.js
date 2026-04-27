@@ -17009,6 +17009,69 @@ function renderProjectSwitchBanner(newSlug, runningSlug) {
     + '</div>';
 }
 
+// Phase 54.6.x — top-level "Close server / exit session" flow.
+// Distinct from the Projects-modal restart flow (shutdownServer below)
+// because it lives outside the project-switching context and offers
+// the option to also stop the llama-server substrate. Reuses the
+// /api/server/shutdown endpoint with body.stop_substrate = true|false.
+function openShutdownModal() {
+  const cb = document.getElementById('shutdown-stop-substrate');
+  if (cb) cb.checked = false;
+  const btn = document.getElementById('shutdown-confirm-btn');
+  if (btn) btn.disabled = false;
+  // Close the Book menu dropdown if it's open.
+  document.querySelectorAll('.nav-dropdown.open').forEach(d => d.classList.remove('open'));
+  openModal('shutdown-modal');
+}
+
+async function confirmShutdown() {
+  const cb = document.getElementById('shutdown-stop-substrate');
+  const stopSubstrate = !!(cb && cb.checked);
+  const btn = document.getElementById('shutdown-confirm-btn');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '⏻ Stopping…';
+  }
+  let payload = {stop_substrate: stopSubstrate};
+  let resp;
+  try {
+    const r = await fetch('/api/server/shutdown', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    resp = await r.json().catch(() => ({}));
+  } catch (_) {
+    // Connection drop is the expected outcome — uvicorn shuts down
+    // ~200 ms after the response flushes, so the fetch may race the
+    // close. Treat as success and render the goodbye screen anyway.
+    resp = {ok: true, stopped_substrate_roles: []};
+  }
+  closeModal('shutdown-modal');
+  const stoppedRoles = (resp && resp.stopped_substrate_roles) || [];
+  document.body.innerHTML =
+    '<div style="padding:48px;max-width:640px;margin:64px auto;'
+    + 'font-family:-apple-system,Inter Tight,sans-serif;'
+    + 'border:1px solid var(--border,#ccc);border-radius:10px;'
+    + 'background:var(--bg-elevated,#fff);color:var(--fg,#111);'
+    + 'box-shadow:0 4px 16px rgba(0,0,0,0.08);">'
+    + '<h2 style="margin:0 0 12px;">SciKnow server stopped</h2>'
+    + '<p style="font-size:14px;line-height:1.55;color:var(--fg-muted,#555);">'
+    + 'Your terminal is back at <code>$</code>. '
+    + (stoppedRoles.length
+        ? 'Also stopped llama-server roles: <code>' + stoppedRoles.join(', ') + '</code>. '
+        : 'The llama-server substrate is still running (use <code>sciknow infer down</code> to stop it).')
+    + '</p>'
+    + '<p style="font-size:14px;line-height:1.55;">To restart the reader, run:</p>'
+    + '<pre style="padding:12px 14px;background:var(--bg,#f5f4ef);border:1px solid var(--border,#e7e5e0);'
+    + 'border-radius:6px;font-size:13px;font-family:JetBrains Mono,ui-monospace,monospace;'
+    + 'color:var(--fg,#111);overflow-x:auto;">'
+    + 'sciknow book serve "&lt;book title&gt;"</pre>'
+    + '<p style="font-size:12px;color:var(--fg-faint,#999);margin:14px 0 0;">'
+    + 'Then reload this browser tab.</p>'
+    + '</div>';
+}
+
 async function shutdownServer() {
   if (!confirm(
     'Stop the running sciknow server?\n\n'

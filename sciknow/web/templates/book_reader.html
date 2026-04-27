@@ -371,6 +371,10 @@
         <button role="menuitem" onclick="doAutowriteBook()" title="Phase 54.6.x — autowrite EVERY section of EVERY chapter in book order. Long-running. Existing drafts are skipped by default; the chapter-level wrapper auto-snapshots before touching each chapter so the operation is reversible from the Timeline. Take a Snapshot first if you want a single rollback point."><svg class="icon"><use href="#i-feather"/></svg> Autowrite whole book</button>
         <button role="menuitem" onclick="openExportModal()" title="Export the book to Markdown, HTML, PDF (WeasyPrint), EPUB (pandoc), LaTeX, DOCX, or BibTeX."><svg class="icon"><use href="#i-download"/></svg> Export</button>
         <button role="menuitem" onclick="openBookSettings()" title="Per-book settings: title, description, plan (leitmotiv), target chapter length, style fingerprint, per-role model assignments."><svg class="icon"><use href="#i-sliders"/></svg> Settings</button>
+        <!-- Phase 54.6.x — clean exit from the GUI so the user doesn't
+             have to Ctrl+C the terminal. Confirmation dialog lets them
+             decide whether to also stop the llama-server substrate. -->
+        <button role="menuitem" onclick="openShutdownModal()" title="Phase 54.6.x — stop the sciknow web server cleanly (and optionally the llama-server writer/embedder/reranker too). Your terminal returns to $; any in-flight LLM job is killed. Re-run `sciknow book serve` to start again."><svg class="icon"><use href="#i-x"/></svg> Close server / exit session</button>
       </div>
     </div>
     <div class="nav-dropdown" id="explore-dropdown">
@@ -1140,6 +1144,52 @@
       <!-- Compare drawer — shows when two rows are selected -->
       <div id="tl-compare" class="u-hidden"
            style="border-top:1px solid var(--border);padding-top:8px;max-height:50vh;overflow:auto;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Phase 54.6.x — Shutdown / Exit Session modal -->
+<div class="modal-overlay" id="shutdown-modal" onclick="if(event.target===this)closeModal('shutdown-modal')">
+  <div class="modal" style="max-width:520px;">
+    <div class="modal-header">
+      <h3><svg class="icon icon--lg"><use href="#i-x"/></svg> Close server / exit session</h3>
+      <button class="modal-close" onclick="closeModal('shutdown-modal')" title="Close this dialog without stopping the server.">&times;</button>
+    </div>
+    <div class="modal-body">
+      <p style="font-size:13px;line-height:1.55;margin-bottom:14px;">
+        This will stop the running <code>sciknow book serve</code> cleanly &mdash;
+        your terminal returns to <code>$</code>, ready for the next invocation.
+        <strong>Any in-flight LLM job (autowrite, write, review, &hellip;) will be killed.</strong>
+      </p>
+      <div class="u-p-2 u-bg-alt u-r-md u-mb-3">
+        <label class="u-flex-raw u-gap-2 u-ai-start" style="cursor:pointer;font-size:13px;line-height:1.5;">
+          <input type="checkbox" id="shutdown-stop-substrate" style="margin-top:3px;flex-shrink:0;">
+          <span>
+            <strong>Also stop the llama-server substrate</strong>
+            (writer / embedder / reranker / vlm).
+            <br>
+            <span class="u-tiny u-muted">
+              Frees ~20+ GiB of VRAM. The substrate restarts automatically the next time
+              you launch <code>sciknow book serve</code>; otherwise it stays running so
+              prompt caches stay warm across reader sessions.
+            </span>
+          </span>
+        </label>
+      </div>
+      <div class="u-p-2 u-bg-alt u-r-md u-tiny u-muted u-mb-3">
+        <strong>Tip:</strong> if you just want to free GPU memory <em>during</em> ingestion,
+        you don&rsquo;t need to stop the server &mdash; the PDF converter now auto-pauses the
+        substrate during MinerU runs and restarts it after.
+      </div>
+    </div>
+    <div class="modal-footer u-wrap u-gap-6">
+      <button class="btn-secondary" onclick="closeModal('shutdown-modal')"
+              title="Dismiss without stopping anything.">Cancel</button>
+      <button class="btn-primary u-ml-auto" onclick="confirmShutdown()" id="shutdown-confirm-btn"
+              style="background:var(--danger,#a23934);border-color:var(--danger,#a23934);"
+              title="Send SIGTERM to this server. The page will replace itself with a confirmation message once the connection drops.">
+        &#9211; Stop server now
+      </button>
     </div>
   </div>
 </div>
