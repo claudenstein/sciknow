@@ -3657,6 +3657,19 @@ def autowrite(
             "existing workflows are untouched."
         ),
     ),
+    flexible_length: bool | None = typer.Option(
+        None, "--flexible-length/--no-flexible-length",
+        help=(
+            "Phase 54.6.x — set the per-chapter flexible_length flag "
+            "before running. When ON, autowrite is permitted to extend "
+            "up to 2× the section's target_words IF the retrieval pool "
+            "is rich enough (≥24 chunks). Persists to "
+            "book_chapters.flexible_length so future runs inherit it. "
+            "With --full this applies to every chapter; with a single "
+            "chapter argument, only that chapter is toggled. Omit to "
+            "leave per-chapter flags untouched."
+        ),
+    ),
 ):
     """
     Autonomous write → review → revise convergence loop (inspired by Karpathy's autoresearch).
@@ -3748,6 +3761,37 @@ def autowrite(
         console.print(
             f"[bold]Autowrite:[/bold] {b_title} — "
             f"{len(targets)} section(s), max {max_iter} iter, target {target_score}"
+        )
+
+    # Phase 54.6.x — apply the --flexible-length toggle before running.
+    # The flag is persisted on book_chapters.flexible_length so the
+    # autowrite engine's _get_chapter_flexible_length() picks it up
+    # via the same code path used by the GUI checkbox. Scope:
+    #   - --full: every chapter in the book
+    #   - single chapter argument: only that chapter
+    if flexible_length is not None:
+        with get_session() as session:
+            if full:
+                n = session.execute(text("""
+                    UPDATE book_chapters SET flexible_length = :flex
+                    WHERE book_id::text = :bid
+                """), {"flex": bool(flexible_length), "bid": book_id}).rowcount
+            else:
+                # Targets list contains one or more (ch_id, ch_num, …)
+                # tuples for the resolved chapter; we only need to flip
+                # that single chapter id.
+                target_ch_ids = sorted({t[0] for t in targets})
+                n = 0
+                for cid in target_ch_ids:
+                    n += session.execute(text("""
+                        UPDATE book_chapters SET flexible_length = :flex
+                        WHERE id::text = :cid
+                    """), {"flex": bool(flexible_length), "cid": cid}).rowcount
+            session.commit()
+        state = "ON" if flexible_length else "OFF"
+        console.print(
+            f"[dim]flexible_length={state} on {n} chapter(s) "
+            f"(persisted to book_chapters.flexible_length).[/dim]"
         )
 
     # Phase 28 — rebuild and resume are mutually exclusive
