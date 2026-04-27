@@ -174,7 +174,7 @@ def _snapshot_book_drafts(session, book_id: str, *, name: str = "") -> str | Non
     """
     import datetime as _dt
     chapters = session.execute(text(
-        "SELECT id::text, number, title FROM book_chapters "
+        "SELECT id::text, number, title, sections FROM book_chapters "
         "WHERE book_id::text = :bid ORDER BY number"
     ), {"bid": book_id}).fetchall()
     chapter_bundles: list[dict] = []
@@ -185,6 +185,15 @@ def _snapshot_book_drafts(session, book_id: str, *, name: str = "") -> str | Non
             continue
         b["chapter_number"] = ch[1]
         b["chapter_title"] = ch[2] or ""
+        # Phase 54.6.328 (snapshot-versioning Phase 6) — carry the
+        # chapter's sections list (slug-only projection) so the
+        # bundle brief's structural diff can detect chapter / section
+        # add/remove/rename across two book snapshots.
+        raw_sec = ch[3] if isinstance(ch[3], list) else []
+        b["sections_meta"] = [
+            (s.get("slug") if isinstance(s, dict) else str(s))
+            for s in raw_sec
+        ]
         chapter_bundles.append(b)
         grand += sum(d.get("word_count") or 0 for d in b["drafts"])
     if not chapter_bundles:
@@ -272,7 +281,7 @@ async def create_book_snapshot(book_id: str, name: str = Form("")):
         if not book:
             raise HTTPException(404, "Book not found")
         chapters = session.execute(text(
-            "SELECT id::text, number, title FROM book_chapters "
+            "SELECT id::text, number, title, sections FROM book_chapters "
             "WHERE book_id::text = :bid ORDER BY number"
         ), {"bid": book_id}).fetchall()
 
@@ -284,6 +293,11 @@ async def create_book_snapshot(book_id: str, name: str = Form("")):
                 continue
             bundle["chapter_number"] = ch[1]
             bundle["chapter_title"] = ch[2] or ""
+            raw_sec = ch[3] if isinstance(ch[3], list) else []
+            bundle["sections_meta"] = [
+                (s.get("slug") if isinstance(s, dict) else str(s))
+                for s in raw_sec
+            ]
             chapter_bundles.append(bundle)
             grand_total += sum(d.get("word_count") or 0 for d in bundle["drafts"])
 

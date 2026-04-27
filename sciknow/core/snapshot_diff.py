@@ -144,7 +144,39 @@ def compute_bundle_brief(
         ):
             totals[k] += brief[k]
 
-    return {"sections": section_briefs, "totals": totals}
+    out = {"sections": section_briefs, "totals": totals}
+
+    # Phase 6 — when both bundles are book-scope (carry a `chapters`
+    # list with chapter-shape entries), include the structural diff.
+    # Each chapter dict needs at least number + title + sections (slug
+    # list); _snapshot_book_drafts enriches the bundle accordingly.
+    if (
+        bundle and "chapters" in bundle
+        and prev_bundle and "chapters" in prev_bundle
+    ):
+        out["structural"] = compute_outline_structural_diff(
+            _outline_chapters(prev_bundle.get("chapters") or []),
+            _outline_chapters(bundle.get("chapters") or []),
+        )
+    return out
+
+
+def _outline_chapters(chapter_bundles: list[dict]) -> list[dict]:
+    """Project a list of chapter snapshot bundles to the minimum
+    structural shape ``[{number, title, sections}, ...]``.
+
+    Bundles produced before Phase 6 didn't carry the section list;
+    they fall through with empty sections, so structural diffs against
+    them just show "~added" / "~removed" chapter changes.
+    """
+    out: list[dict] = []
+    for ch in chapter_bundles or []:
+        out.append({
+            "number": ch.get("chapter_number"),
+            "title": ch.get("chapter_title", ""),
+            "sections": ch.get("sections_meta") or ch.get("sections") or [],
+        })
+    return out
 
 
 def compute_outline_structural_diff(

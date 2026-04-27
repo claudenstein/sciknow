@@ -13438,6 +13438,61 @@ def l1_snapshot_diff_brief_helper() -> None:
     )
 
 
+def l1_snapshot_outline_structural_diff() -> None:
+    """Phase 54.6.328 (snapshot-versioning Phase 6) — outline-level
+    structural diff for book-scope snapshots.
+
+    Guards:
+      A) compute_bundle_brief auto-includes a `structural` block when
+         both bundles carry a `chapters` array.
+      B) _outline_chapters helper exists and projects to the minimal
+         {number, title, sections} shape.
+      C) _snapshot_book_drafts enriches each chapter bundle with
+         `sections_meta` (slug list).
+      D) cli/book.py::diff renders the structural section when both
+         refs are book-scope snapshots.
+    """
+    import inspect as _inspect
+    from sciknow.core import snapshot_diff as _sd
+
+    # A
+    bundle_src = _inspect.getsource(_sd.compute_bundle_brief)
+    assert "structural" in bundle_src and "compute_outline_structural_diff" in bundle_src, (
+        "compute_bundle_brief must auto-include structural diff for "
+        "book-scope bundles"
+    )
+
+    # B
+    assert hasattr(_sd, "_outline_chapters"), (
+        "Phase 6 must export the _outline_chapters projector"
+    )
+    out = _sd._outline_chapters([
+        {"chapter_number": 1, "chapter_title": "X", "sections_meta": ["a", "b"]}
+    ])
+    assert out and out[0]["sections"] == ["a", "b"], (
+        "_outline_chapters must surface sections_meta as the minimal "
+        "{number, title, sections} shape"
+    )
+
+    # C
+    from sciknow.web.routes import snapshots as _snap_routes
+    book_helper_src = _inspect.getsource(_snap_routes._snapshot_book_drafts)
+    assert "sections_meta" in book_helper_src, (
+        "_snapshot_book_drafts must enrich chapter bundles with "
+        "sections_meta so structural diffs see slugs"
+    )
+
+    # D
+    from sciknow.cli import book as _book_cli
+    diff_src = _inspect.getsource(_book_cli.diff)
+    assert "compute_outline_structural_diff" in diff_src, (
+        "book diff must call the structural-diff helper for book-scope refs"
+    )
+    assert "Outline changes" in diff_src, (
+        "book diff must render the structural diff under an 'Outline changes' heading"
+    )
+
+
 def l1_snapshot_autowrite_auto_trigger() -> None:
     """Phase 54.6.328 (snapshot-versioning Phase 4) — autowrite-chapter
     auto-snapshots before running, with prune.
@@ -19577,6 +19632,8 @@ L1_TESTS: list[Callable] = [
     l1_snapshot_history_diff_cli,
     # Phase 54.6.328 (snapshot-versioning Phase 4) — autowrite auto-snapshot
     l1_snapshot_autowrite_auto_trigger,
+    # Phase 54.6.328 (snapshot-versioning Phase 6) — structural outline diff
+    l1_snapshot_outline_structural_diff,
     l1_phase54_6_298_enrichment_coverage,
     l1_phase54_6_299_hnsw_drift_check,
     l1_phase54_6_301_retrieval_latency_buffer,

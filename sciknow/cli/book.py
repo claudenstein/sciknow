@@ -2659,7 +2659,10 @@ def diff(
     import json as _json
     from sqlalchemy import text as _text  # noqa: F401
     from sciknow.storage.db import get_session
-    from sciknow.core.snapshot_diff import compute_prose_diff
+    from sciknow.core.snapshot_diff import (
+        compute_prose_diff, compute_outline_structural_diff,
+        _outline_chapters,
+    )
     from sciknow.core.version_history import resolve_version_ref
 
     with get_session() as session:
@@ -2674,12 +2677,32 @@ def diff(
 
     brief = compute_prose_diff(a["content"], b["content"])
 
+    # Phase 54.6.328 (snapshot-versioning Phase 6) — when both refs are
+    # book-scope snapshots, parse out the chapter shape and add the
+    # structural diff so the user sees outline-level change first.
+    structural = None
+    if a.get("kind") == "snapshot" and b.get("kind") == "snapshot":
+        try:
+            ab = _json.loads(a["content"]) if a["content"] else {}
+            bb = _json.loads(b["content"]) if b["content"] else {}
+            if isinstance(ab, dict) and "chapters" in ab \
+                    and isinstance(bb, dict) and "chapters" in bb:
+                structural = compute_outline_structural_diff(
+                    _outline_chapters(ab.get("chapters") or []),
+                    _outline_chapters(bb.get("chapters") or []),
+                )
+        except Exception:
+            structural = None
+
     if json_out:
-        console.print(_json.dumps({
+        out = {
             "a": {k: v for k, v in a.items() if k != "content"},
             "b": {k: v for k, v in b.items() if k != "content"},
             "brief": brief,
-        }, indent=2))
+        }
+        if structural is not None:
+            out["structural"] = structural
+        console.print(_json.dumps(out, indent=2))
         return
 
     console.print()
@@ -2690,6 +2713,50 @@ def diff(
         f"+{brief['paragraphs_added']}/-{brief['paragraphs_removed']}¶ · "
         f"+{brief['citations_added']}/-{brief['citations_removed']}cite[/dim]"
     )
+    if structural is not None and any(
+        structural.get(k) for k in (
+            "added_chapters", "removed_chapters",
+            "renamed_chapters", "section_changes",
+        )
+    ):
+        console.print()
+        console.print("  [bold]Outline changes[/bold]")
+        for c in structural.get("added_chapters") or []:
+            console.print(
+                f"    [green]+ Ch.{c.get('number')}[/green]  "
+                f"{c.get('title', '')}"
+            )
+        for c in structural.get("removed_chapters") or []:
+            console.print(
+                f"    [red]- Ch.{c.get('number')}[/red]  "
+                f"{c.get('title', '')}"
+            )
+        for c in structural.get("renamed_chapters") or []:
+            kind = c.get("kind", "renamed")
+            if kind == "renumbered":
+                console.print(
+                    f"    [yellow]~ Ch.{c.get('from_number')} → "
+                    f"Ch.{c.get('to_number')}[/yellow]  {c.get('title', '')}"
+                )
+            else:
+                console.print(
+                    f"    [yellow]~ Ch.{c.get('number')}[/yellow]  "
+                    f"{c.get('from_title', '')!r} → "
+                    f"{c.get('to_title', '')!r}"
+                )
+        for ch in structural.get("section_changes") or []:
+            n = ch.get("chapter_number")
+            t = ch.get("chapter_title", "")
+            added = ch.get("added") or []
+            removed = ch.get("removed") or []
+            console.print(
+                f"    [dim]Ch.{n}[/dim] {t!r}: "
+                f"[green]+{len(added)}[/green]/[red]-{len(removed)}[/red] sections"
+            )
+            for s in added:
+                console.print(f"        [green]+ {s}[/green]")
+            for s in removed:
+                console.print(f"        [red]- {s}[/red]")
     console.print()
     diff_text = "\n".join(_difflib.unified_diff(
         (a["content"] or "").splitlines(),
