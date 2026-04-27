@@ -387,14 +387,61 @@ def extract_text_from_content_list(content_list: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 
 def _load_mineru():
-    """Lazy-load MinerU. Raises ConversionError if not installed."""
+    """Lazy-load MinerU. Raises ConversionError with a precise hint if
+    the import fails — distinguishes "module missing" (uv add) from
+    "module imports but its native deps are broken" (almost always a
+    partial install of an `nvidia-*` wheel, where the package metadata
+    is in pip but the actual ``.so`` files are missing from
+    ``site-packages/nvidia/<name>/lib/``)."""
     try:
         from mineru.cli.common import do_parse, read_fn
         return do_parse, read_fn
     except ImportError as exc:
+        msg = str(exc)
+        # Phase 54.6.x — the original error here was always "mineru not
+        # installed", which was misleading when the real cause was a
+        # broken nvidia-* install (libcudnn / libcusparseLt / etc).
+        # Detect the missing-shared-library shape and emit the right
+        # remediation step instead.
+        m = re.search(r"(lib[\w.]+\.so(?:\.\d+)*)", msg)
+        if m:
+            so_name = m.group(1)
+            pkg_hint = ""
+            if "cudnn" in so_name:
+                pkg_hint = "nvidia-cudnn-cu12"
+            elif "cusparseLt" in so_name:
+                pkg_hint = "nvidia-cusparselt-cu12"
+            elif "nccl" in so_name:
+                pkg_hint = "nvidia-nccl-cu12"
+            elif "cublas" in so_name:
+                pkg_hint = "nvidia-cublas-cu12"
+            elif "cudart" in so_name:
+                pkg_hint = "nvidia-cuda-runtime-cu12"
+            tail = (
+                f"\n  uv pip install --force-reinstall --no-deps {pkg_hint}"
+                if pkg_hint else ""
+            )
+            raise ConversionError(
+                f"MinerU's native dep is broken — missing {so_name} "
+                f"(common cause: a partial uv install where pip "
+                f"metadata claims the nvidia-* wheel is present but "
+                f"the .so files are missing from site-packages). "
+                f"Reinstall the offending wheel:{tail}\n"
+                f"  Original error: {exc}"
+            )
+        if "No module named 'mineru'" in msg or "named 'mineru'" in msg:
+            raise ConversionError(
+                f"mineru not installed ({exc}). Run:\n"
+                f"  uv add 'mineru[core]'"
+            )
+        # Anything else (genuine bugs in mineru itself, etc.) — surface
+        # the raw error rather than masking it as "not installed".
         raise ConversionError(
-            f"mineru not installed ({exc}). Run:\n"
-            f"  uv add 'mineru[core]'"
+            f"mineru import failed ({type(exc).__name__}: {exc}). "
+            f"This is not 'not installed' — the package is on disk "
+            f"but its import chain raises. Inspect the traceback "
+            f"with: uv run python -c 'from mineru.cli.common import "
+            f"do_parse'"
         )
 
 
@@ -729,72 +776,120 @@ def convert(pdf_path: Path, output_dir: Path) -> ConversionResult:
     populated for metadata extraction.
     """
     from sciknow.config import settings
+    import os
 
     backend_setting = getattr(settings, "pdf_converter_backend", "auto")
     vlm_model_name = getattr(settings, "mineru_vlm_model", None)
     errors: list[str] = []
 
-    # ---- 0. MinerU 2.5-Pro VLM (explicit opt-in) ----
-    if backend_setting == "mineru-vlm-pro":
+    # Phase 54.6.x — device selection. The auto path checks free VRAM
+    # via nvidia-smi and falls back to CPU when the GPU is busy
+    # (typically because `sciknow book serve` has the writer model
+    # pinned in 18+ GiB). cpu / gpu force the choice. CPU mode is
+    # set by exporting TORCH_DEVICE=cpu before the backend imports
+    # torch — Marker honours it via its config; MinerU's pipeline
+    # mode picks up CUDA_VISIBLE_DEVICES="" instead. We set both
+    # for safety, scoped to this convert() call only.
+    device_setting = getattr(settings, "pdf_converter_device", "auto")
+    min_free_gib = float(getattr(settings, "pdf_converter_min_free_vram_gib", 6.0))
+    use_cpu = False
+    if device_setting == "cpu":
+        use_cpu = True
+    elif device_setting == "auto":
         try:
-            return _convert_mineru(
-                pdf_path, output_dir,
-                use_vlm_pro=True, vlm_model_name=vlm_model_name,
-            )
-        except Exception as exc:
-            # Explicit Pro mode: do not silently fall back to a worse
-            # backend, the user opted in to Pro for a reason.
-            raise ConversionError(f"MinerU 2.5-Pro VLM: {exc}") from exc
+            import shutil, subprocess
+            if shutil.which("nvidia-smi"):
+                r = subprocess.run(
+                    ["nvidia-smi",
+                     "--query-gpu=memory.free",
+                     "--format=csv,noheader,nounits", "-i", "0"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                free_mib = int((r.stdout or "0").strip().split("\n")[0])
+                if free_mib < int(min_free_gib * 1024):
+                    use_cpu = True
+                    errors.append(
+                        f"device=auto: GPU free {free_mib} MiB < "
+                        f"{int(min_free_gib*1024)} MiB; falling back to CPU"
+                    )
+        except Exception:  # noqa: BLE001
+            pass
 
-    # ---- 1. MinerU 2.5-Pro VLM (primary in "auto" post-54.6.212) ----
-    if backend_setting == "auto":
-        try:
-            return _convert_mineru(
-                pdf_path, output_dir,
-                use_vlm_pro=True, vlm_model_name=vlm_model_name,
-            )
-        except Exception as exc:
-            if _vlm_extras_missing(exc):
-                # Silent fall-through — install doesn't have the VLM
-                # deps yet; pipeline mode can still handle this PDF.
-                # We do NOT log an error here because this is the
-                # expected path on boxes where the user hasn't run
-                # `uv add 'mineru[vllm]'` yet.
-                errors.append(f"VLM-Pro: extras not installed ({exc})")
-            else:
-                # Genuine convert error (OOM, malformed PDF, model
-                # download failure). Log and fall through to pipeline
-                # since auto mode promises a fallback chain.
-                errors.append(f"VLM-Pro: {exc}")
+    _saved_env: dict[str, str | None] = {}
+    if use_cpu:
+        for k in ("CUDA_VISIBLE_DEVICES", "TORCH_DEVICE"):
+            _saved_env[k] = os.environ.get(k)
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+        os.environ["TORCH_DEVICE"] = "cpu"
 
-    # ---- 2. MinerU pipeline (fallback in "auto"; pinned in "mineru") ----
-    if backend_setting in ("auto", "mineru"):
-        if backend_setting == "mineru":
-            _warn_mineru_pipeline_deprecated()
-        try:
-            return _convert_mineru(pdf_path, output_dir, use_vlm_pro=False)
-        except Exception as exc:
-            msg = f"MinerU: {exc}"
-            errors.append(msg)
+    def _restore_env():
+        if use_cpu:
+            for k, v in _saved_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    try:
+        # ---- 0. MinerU 2.5-Pro VLM (explicit opt-in) ----
+        if backend_setting == "mineru-vlm-pro":
+            try:
+                return _convert_mineru(
+                    pdf_path, output_dir,
+                    use_vlm_pro=True, vlm_model_name=vlm_model_name,
+                )
+            except Exception as exc:
+                # Explicit Pro mode: do not silently fall back to a worse
+                # backend, the user opted in to Pro for a reason.
+                raise ConversionError(f"MinerU 2.5-Pro VLM: {exc}") from exc
+
+        # ---- 1. MinerU 2.5-Pro VLM (primary in "auto" post-54.6.212) ----
+        if backend_setting == "auto":
+            try:
+                return _convert_mineru(
+                    pdf_path, output_dir,
+                    use_vlm_pro=True, vlm_model_name=vlm_model_name,
+                )
+            except Exception as exc:
+                if _vlm_extras_missing(exc):
+                    # Silent fall-through — install doesn't have the VLM
+                    # deps yet; pipeline mode can still handle this PDF.
+                    errors.append(f"VLM-Pro: extras not installed ({exc})")
+                else:
+                    # Genuine convert error (OOM, malformed PDF, model
+                    # download failure). Log and fall through to pipeline.
+                    errors.append(f"VLM-Pro: {exc}")
+
+        # ---- 2. MinerU pipeline (fallback in "auto"; pinned in "mineru") ----
+        if backend_setting in ("auto", "mineru"):
             if backend_setting == "mineru":
-                # Explicit MinerU-only mode: do not fall back.
-                raise ConversionError(msg) from exc
+                _warn_mineru_pipeline_deprecated()
+            try:
+                return _convert_mineru(pdf_path, output_dir, use_vlm_pro=False)
+            except Exception as exc:
+                msg = f"MinerU: {exc}"
+                errors.append(msg)
+                if backend_setting == "mineru":
+                    # Explicit MinerU-only mode: do not fall back.
+                    raise ConversionError(msg) from exc
 
-    # ---- 3. Marker JSON (primary in "marker", fallback in "auto") ----
-    if backend_setting in ("auto", "marker"):
-        try:
-            return _convert_marker_json(pdf_path, output_dir)
-        except Exception as exc:
-            errors.append(f"Marker JSON: {exc}")
+        # ---- 3. Marker JSON (primary in "marker", fallback in "auto") ----
+        if backend_setting in ("auto", "marker"):
+            try:
+                return _convert_marker_json(pdf_path, output_dir)
+            except Exception as exc:
+                errors.append(f"Marker JSON: {exc}")
 
-    # ---- 4. Marker markdown (last resort for "auto" and "marker") ----
-    if backend_setting in ("auto", "marker"):
-        try:
-            return _convert_marker_markdown(pdf_path, output_dir)
-        except Exception as exc:
-            errors.append(f"Marker markdown: {exc}")
+        # ---- 4. Marker markdown (last resort for "auto" and "marker") ----
+        if backend_setting in ("auto", "marker"):
+            try:
+                return _convert_marker_markdown(pdf_path, output_dir)
+            except Exception as exc:
+                errors.append(f"Marker markdown: {exc}")
 
-    raise ConversionError(
-        f"All configured PDF converter backends failed for {pdf_path.name}:\n  "
-        + "\n  ".join(errors)
-    )
+        raise ConversionError(
+            f"All configured PDF converter backends failed for {pdf_path.name}:\n  "
+            + "\n  ".join(errors)
+        )
+    finally:
+        _restore_env()

@@ -276,6 +276,24 @@ class Settings(BaseSettings):
     # one-shot deprecation warning).
     pdf_converter_backend: str = "auto"
 
+    # Phase 54.6.x — PDF converter device selection. Values:
+    #   "auto" — use GPU if ≥ pdf_converter_min_free_vram_gib free,
+    #             otherwise fall back to CPU automatically (default).
+    #   "gpu"  — force GPU; OOM if VRAM is short.
+    #   "cpu"  — force CPU; slower but works alongside an active
+    #             writer model that has VRAM pinned.
+    # The auto-fallback is what most users want when running ingest
+    # while `sciknow book serve` is up: the writer pins ~18 GiB and
+    # the GPU MinerU/Marker backends OOM. Auto picks CPU for that
+    # session and the user doesn't have to think about it.
+    pdf_converter_device: str = "auto"
+
+    # Minimum free VRAM (GiB) on GPU 0 for "auto" device mode to
+    # stay on GPU. Below this threshold ingest falls back to CPU.
+    # 6 GiB ≈ MinerU pipeline footprint; tune higher if you're also
+    # running a non-sciknow GPU job. Phase 54.6.x.
+    pdf_converter_min_free_vram_gib: float = 6.0
+
     # Phase 21 — explicit override for the VLM model name when running
     # MinerU 2.5-Pro. Empty string falls back to the package default
     # (currently MinerU2.5-2509-1.2B). Set to a HuggingFace identifier

@@ -6655,7 +6655,11 @@ def expand(
                 _log(f"INGEST {ref_key}  | {title}  (already in DB)")
             elif status == "failed":
                 failed_ingest += 1
-                _say("✗", "red", "INGEST-FAIL", (error or "")[:50])
+                # Phase 54.6.x — drop the 50-char truncation so the
+                # CLI shows the real remediation hint. expand.log
+                # still records the multi-line error in full.
+                err_line = (error or "").splitlines()[0] if error else ""
+                _say("✗", "red", "INGEST-FAIL", err_line)
                 _log(f"INGEST_FAIL {ref_key}  | {title}  | {error or ''}")
                 # Phase 49.1 — persist the failure so the next run
                 # skips this ref by default. User can force a retry
@@ -9030,7 +9034,12 @@ def download_dois(
                 _say("⏭", "dim", "INGEST-SKIP", "already in DB (hash match)")
             elif status == "failed":
                 failed_ingest += 1
-                _say("✗", "red", "INGEST-FAIL", (error or "")[:50])
+                # Phase 54.6.x — the previous 50-char truncation hid
+                # the actual "lib<name>.so missing" / "uv pip install
+                # ..." remediation lines from the user. First line
+                # only, but no length cap so the diagnosis is visible.
+                err_line = (error or "").splitlines()[0] if error else ""
+                _say("✗", "red", "INGEST-FAIL", err_line)
 
         ingest_results = {"done": 0, "skipped": 0, "failed": 0}
         ingest_failed_files: list[tuple[str, str]] = []

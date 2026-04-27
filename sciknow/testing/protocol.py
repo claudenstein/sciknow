@@ -18168,16 +18168,25 @@ def l1_phase54_6_212_vlm_pro_default_dispatch() -> None:
         f"got {settings.mineru_vlm_backend!r}"
     )
 
-    # B) VLM-Pro tried before pipeline in "auto" branch
+    # B) VLM-Pro tried before pipeline in "auto" branch.
+    # Phase 54.6.x — the body now runs inside a try/finally that
+    # restores TORCH_DEVICE / CUDA_VISIBLE_DEVICES after CPU-mode
+    # fallback. Indentation deepened by 4 spaces; pattern matches
+    # at any indentation depth so future wraps don't break this.
+    import re as _re
     convert_src = _inspect.getsource(conv_mod.convert)
-    auto_vlm_pos = convert_src.find(
-        '    if backend_setting == "auto":\n'
-        "        try:\n"
-        "            return _convert_mineru("
+    auto_vlm_match = _re.search(
+        r'\n( +)if backend_setting == "auto":\n'
+        r'\1    try:\n'
+        r'\1        return _convert_mineru\(',
+        convert_src,
     )
-    auto_pipeline_pos = convert_src.find(
-        '    if backend_setting in ("auto", "mineru"):'
+    auto_pipeline_match = _re.search(
+        r'\n +if backend_setting in \("auto", "mineru"\):',
+        convert_src,
     )
+    auto_vlm_pos = auto_vlm_match.start() if auto_vlm_match else -1
+    auto_pipeline_pos = auto_pipeline_match.start() if auto_pipeline_match else -1
     assert auto_vlm_pos != -1, (
         "convert() must have a dedicated `if backend_setting == 'auto'` "
         "branch that tries VLM-Pro first — post-54.6.212 ordering"
