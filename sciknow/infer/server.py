@@ -578,11 +578,62 @@ def up(role: str, profile: str = "default", wait: bool = True) -> ProcInfo:
     return info
 
 
+def _find_pid_by_port(port: int) -> int | None:
+    """Phase 55.V3 — fallback for the PID-file-out-of-sync case.
+
+    When the PID file got cleared (manually rm'd, or killed by an
+    earlier `down()` mid-startup, or a stale-grace race), but the
+    process is still alive on its port, `_read_pid()` returns None
+    and `down()` would refuse to act. This helper greps lsof / ss
+    for the listening process so we can recover the PID and kill
+    it. Returns None when no listener is found.
+    """
+    # Prefer ss (procfs-backed, present on every modern Linux).
+    try:
+        out = subprocess.run(
+            ["ss", "-tlnp", "sport", f"= :{port}"],
+            capture_output=True, text=True, timeout=2,
+        ).stdout
+    except Exception:  # noqa: BLE001
+        out = ""
+    # Output line format: ``LISTEN 0 0 127.0.0.1:8090 0.0.0.0:* users:(("llama-server",pid=12345,fd=3))``
+    import re as _re
+    m = _re.search(r"pid=(\d+)", out)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            pass
+    return None
+
+
 def down(role: str, timeout: float = 5.0) -> bool:
-    """Stop the role's llama-server. Returns True if a process was killed."""
+    """Stop the role's llama-server. Returns True if a process was killed.
+
+    Phase 55.V3 — when the PID file is missing but the role's port is
+    answering /health, fall back to ``_find_pid_by_port`` so the
+    eviction still happens. Without this fallback, an out-of-sync
+    state (PID file cleared but process alive) wedges the conflict
+    map: every subsequent ``activate_phase`` would see the role as
+    healthy, refuse to evict it, and the swap silently no-ops.
+    """
     pid = _read_pid(role)
     if pid is None:
-        return False
+        # Fallback: maybe the PID file got cleared but the server is
+        # still running. Probe the port.
+        try:
+            port = ROLE_DEFAULTS[role]["port"]
+            recovered_pid = _find_pid_by_port(int(port))
+        except Exception:  # noqa: BLE001
+            recovered_pid = None
+        if recovered_pid is None:
+            return False
+        logger.warning(
+            "infer down: role=%s PID file missing but port %s answered "
+            "with pid=%s — recovering and killing", role,
+            ROLE_DEFAULTS[role]["port"], recovered_pid,
+        )
+        pid = recovered_pid
     try:
         os.killpg(os.getpgid(pid), signal.SIGTERM)
     except (ProcessLookupError, PermissionError):

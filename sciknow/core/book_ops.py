@@ -3483,6 +3483,11 @@ def write_section_stream(
         yield {"type": "error", "message": "No relevant passages found."}
         return
 
+    # Phase 55.V3 — retrieve done; everything below is writer-only
+    # (tree-plan / writing / verify). Swap to generate phase so the
+    # embedder + reranker llama-server processes are evicted.
+    _swap_to_phase("generate")
+
     # Optional hierarchical tree plan (TreeWriter pattern)
     if show_plan:
         yield {"type": "progress", "stage": "planning",
@@ -3705,6 +3710,9 @@ def review_draft_stream(
     yield {"type": "progress", "stage": "reviewing",
            "detail": f"Reviewing: {d_title}..."}
 
+    # Phase 55.V3 — review is writer-only after retrieval; swap.
+    _swap_to_phase("generate")
+
     sys_r, usr_r = rag_prompts.review(d_section, d_topic or d_title, d_content, results)
     output_tokens: list[str] = []
     for tok in llm_stream(sys_r, usr_r, model=model, keep_alive=-1):
@@ -3782,6 +3790,9 @@ def revise_draft_stream(
     yield {"type": "progress", "stage": "revising",
            "detail": f"Revising {d_title} (v{d_version} -> v{d_version + 1})..."}
 
+    # Phase 55.V3 — revise is writer-only after the optional retrieve.
+    _swap_to_phase("generate")
+
     sys_r, usr_r = rag_prompts.revise(d_content, rev_instruction, results or None)
     output_tokens: list[str] = []
     for tok in llm_stream(sys_r, usr_r, model=model, keep_alive=-1):
@@ -3834,6 +3845,9 @@ def run_gaps_stream(
     from sciknow.rag import prompts
     from sciknow.rag.llm import stream as llm_stream, complete as llm_complete
     from sciknow.storage.db import get_session
+    # Phase 55.V3 — gaps analysis is writer-only; evict retrieval roles
+    # so the writer claims the full GPU.
+    _swap_to_phase("generate")
 
     with get_session() as session:
         book = session.execute(text("""
@@ -3989,6 +4003,10 @@ def run_argue_stream(
 
     yield {"type": "progress", "stage": "arguing",
            "detail": f"Mapping argument: {claim[:60]}..."}
+
+    # Phase 55.V3 — swap to generate phase after retrieve, before the
+    # writer streams the argument map.
+    _swap_to_phase("generate")
 
     system, user = prompts.argue(claim, results)
     output_tokens: list[str] = []

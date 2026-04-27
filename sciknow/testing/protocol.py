@@ -19531,6 +19531,115 @@ def l1_phase55_s1_autowrite_routes_scoring_through_scorer_role() -> None:
         )
 
 
+def l3_phase55_v1_activate_phase_evicts_peers() -> None:
+    """Phase 55.V1 — `activate_phase("retrieve")` actually evicts the
+    writer when both are healthy.
+
+    Live test (L3, requires the substrate to be reachable). Skips on
+    a host where the writer/embedder/reranker GGUFs aren't loaded.
+    Otherwise:
+      1. Bring up writer + embedder + reranker (idempotent — already
+         up if you ran `sciknow infer up` first).
+      2. Confirm writer is healthy.
+      3. Call `activate_phase("retrieve")`.
+      4. Assert writer is now down, embedder + reranker still up.
+      5. Restore: `activate_phase("generate")` — writer back up,
+         embedder/reranker down.
+      6. Final restore: `up("embedder")` + `up("reranker")` so the
+         post-test substrate state matches the pre-test state.
+
+    This is the load-bearing contract that the L1 source-grep tests
+    can't catch — they confirm the call sites EXIST, but only this
+    test confirms the kernel-level swap actually runs and the
+    process tree reflects it.
+    """
+    from sciknow.infer import client as _client
+    # Skip when no writer
+    if not _v2_health("writer"):
+        return TestResult.skip(
+            "l3_phase55_v1_activate_phase_evicts_peers",
+            "skipped — writer role not reachable; bring up the substrate first",
+        )
+    from sciknow.infer.server import (
+        activate_phase, up, down, health, _should_evict_for_vram,
+    )
+    from sciknow.config import settings as _s
+
+    if not _should_evict_for_vram():
+        return TestResult.skip(
+            "l3_phase55_v1_activate_phase_evicts_peers",
+            "skipped — VRAM_CO_RESIDENCE_OK is true; eviction policy disabled",
+        )
+
+    # Pre-test: bring up writer + embedder + reranker so we have the
+    # full retrieve-phase + generate-phase pair to compare. This is
+    # idempotent — already-up roles return immediately.
+    try:
+        up("writer", wait=True)
+        up("embedder", wait=True)
+        up("reranker", wait=True)
+    except Exception as exc:
+        return TestResult.skip(
+            "l3_phase55_v1_activate_phase_evicts_peers",
+            f"skipped — couldn't bring up roles for the test: {exc}",
+        )
+
+    # Confirm pre-state. Note: by the time `up("reranker")` returned,
+    # the conflict map will have evicted writer + scorer + vlm. So
+    # after the three up() calls we may NOT have writer + embedder
+    # + reranker all simultaneously hot. Re-up writer to set the
+    # initial state to "writer + embedder + reranker all up". That's
+    # an additional eviction round but it's exactly the steady-state
+    # the autowrite engine starts from in production.
+    up("writer", wait=True)
+    # Final pre-state: writer + embedder + reranker all healthy.
+    # (The `up("writer")` just downed embedder + reranker via the
+    # conflict map, so we need to bring them BACK before the test.)
+    up("embedder", wait=True)
+    up("reranker", wait=True)
+    # That up("reranker") evicted writer again (it conflicts with
+    # the big roles). Reality: under the strict Phase 55.V1 conflict
+    # map, "writer + embedder + reranker simultaneously hot" cannot
+    # exist as a steady state — it's only achievable mid-transition.
+    # The right test is: after `activate_phase("retrieve")` the writer
+    # is down, embedder + reranker are up. After
+    # `activate_phase("generate")` the writer is up, others down.
+
+    # Run the actual test.
+    activate_phase("retrieve")
+    assert health("embedder", timeout=2.0), (
+        "after activate_phase('retrieve'), embedder must be healthy"
+    )
+    assert health("reranker", timeout=2.0), (
+        "after activate_phase('retrieve'), reranker must be healthy"
+    )
+    assert not health("writer", timeout=0.5), (
+        "after activate_phase('retrieve'), writer must be evicted"
+    )
+
+    activate_phase("generate")
+    assert health("writer", timeout=2.0), (
+        "after activate_phase('generate'), writer must be healthy"
+    )
+    assert not health("embedder", timeout=0.5), (
+        "after activate_phase('generate'), embedder must be evicted"
+    )
+    assert not health("reranker", timeout=0.5), (
+        "after activate_phase('generate'), reranker must be evicted"
+    )
+
+    # Post-test cleanup: bring embedder + reranker back so the user's
+    # next non-autowrite call doesn't pay the cold-start. We don't
+    # restore the writer — the next chat_stream call will lazy-up it.
+    up("embedder", wait=True)
+    up("reranker", wait=True)
+
+    return TestResult.ok(
+        name="l3_phase55_v1_activate_phase_evicts_peers",
+        message="activate_phase round-trip evicts peers as specified",
+    )
+
+
 def l1_phase55_v1_autowrite_swaps_to_phase_at_boundaries() -> None:
     """Phase 55.V1 — the autowrite engine declares its phase at every
     transition between retrieval, generation, and scoring.
@@ -20139,6 +20248,11 @@ L3_TESTS: list[Callable] = [
     l3_wiki_compile_single_paper_smoke,       # ~120s — full compile pipeline on 1 paper
     l3_wiki_extract_kg_single_paper_smoke,    # ~90s  — full extract-kg pipeline on 1 paper
     l3_autowrite_one_iteration_smoke,         # ~30s  — write_section_v2 prompt sanity
+    # Phase 55.V1 — actually exercises the eviction. Skips on hosts
+    # without the substrate up; otherwise round-trips activate_phase
+    # and asserts the writer/embedder/reranker process tree reflects
+    # the swap.
+    l3_phase55_v1_activate_phase_evicts_peers,  # ~20s — round-trip eviction
 ]
 
 # Phase 54.6.39 — SMOKE layer: focused subset of L3, only the single-example
