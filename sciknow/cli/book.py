@@ -3306,6 +3306,169 @@ def auto_expand(
 
 # ── serve (web reader) ─────────────────────────────────────────────────────────
 
+
+def _kill_stale_serve(host: str, port: int, *, wait_s: float = 5.0) -> None:
+    """Phase 54.6.x — preflight: if another sciknow book-serve already
+    holds the bind port, SIGTERM it cleanly so this invocation can
+    proceed without the cryptic "[Errno 98] address already in use"
+    crash + manual `lsof + kill` ritual.
+
+    Safety rails:
+      1. Only kills processes whose cmdline contains both `sciknow`
+         and `book serve` (or `serve`) — never random listeners.
+      2. Skips our own PID.
+      3. SIGTERM first, escalate to SIGKILL only after `wait_s`
+         seconds.
+      4. Polls socket bind to confirm the port actually freed before
+         returning; raises typer.Exit if it didn't.
+
+    No-op when the port is free.
+    """
+    import socket as _socket
+    import signal as _signal
+    import time as _time
+    import os as _os
+
+    # Probe: try to bind. If it fails with EADDRINUSE, find the
+    # holder. Otherwise return immediately.
+    try:
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+            s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+            s.bind((host, int(port)))
+        return  # port is free
+    except OSError:
+        pass
+
+    # Port is busy. Identify the holder via /proc (no lsof dep).
+    holder_pid: int | None = None
+    try:
+        # /proc/net/tcp shows local_address as hex IP:PORT.
+        with open("/proc/net/tcp", "r") as fh:
+            for line in fh.readlines()[1:]:
+                parts = line.split()
+                if len(parts) < 4:
+                    continue
+                local = parts[1]  # "0100007F:223D" → 127.0.0.1:8765
+                state = parts[3]  # "0A" = LISTEN
+                if state != "0A":
+                    continue
+                try:
+                    _hex_ip, hex_port = local.split(":")
+                    if int(hex_port, 16) != int(port):
+                        continue
+                except Exception:  # noqa: BLE001
+                    continue
+                inode = parts[9]
+                # Walk /proc/*/fd to find the PID owning this socket.
+                for entry in _os.listdir("/proc"):
+                    if not entry.isdigit():
+                        continue
+                    fd_dir = f"/proc/{entry}/fd"
+                    try:
+                        for fd in _os.listdir(fd_dir):
+                            try:
+                                tgt = _os.readlink(f"{fd_dir}/{fd}")
+                                if tgt == f"socket:[{inode}]":
+                                    holder_pid = int(entry)
+                                    break
+                            except OSError:
+                                continue
+                    except (PermissionError, FileNotFoundError):
+                        continue
+                    if holder_pid is not None:
+                        break
+                if holder_pid is not None:
+                    break
+    except FileNotFoundError:
+        # Non-Linux fallback: no /proc. Refuse rather than killing
+        # blind — the user can clean up manually.
+        console.print(
+            f"[yellow]Port {port} is in use, but I can't identify the "
+            f"holder on this OS. Stop it manually and retry.[/yellow]"
+        )
+        raise typer.Exit(1)
+
+    if holder_pid is None or holder_pid == _os.getpid():
+        console.print(
+            f"[yellow]Port {port} is in use but no PID found via /proc. "
+            f"Stop the process holding it and retry.[/yellow]"
+        )
+        raise typer.Exit(1)
+
+    # Confirm cmdline looks like sciknow.
+    cmdline = ""
+    try:
+        with open(f"/proc/{holder_pid}/cmdline", "rb") as fh:
+            cmdline = fh.read().replace(b"\x00", b" ").decode(
+                "utf-8", errors="replace"
+            )
+    except Exception:  # noqa: BLE001
+        cmdline = ""
+    looks_like_sciknow = (
+        "sciknow" in cmdline and ("book serve" in cmdline or " serve " in cmdline)
+    )
+    if not looks_like_sciknow:
+        console.print(
+            f"[red]Port {port} is held by PID {holder_pid} "
+            f"(not a sciknow process):[/red] {cmdline.strip()[:180]}\n"
+            f"  Refusing to kill — stop it manually and retry."
+        )
+        raise typer.Exit(1)
+
+    console.print(
+        f"[dim]Port {port} is held by stale sciknow process "
+        f"PID {holder_pid}; sending SIGTERM…[/dim]"
+    )
+    try:
+        _os.kill(holder_pid, _signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        console.print(
+            f"[red]Cannot SIGTERM PID {holder_pid} (permission denied). "
+            f"Stop it manually and retry.[/red]"
+        )
+        raise typer.Exit(1)
+
+    # Wait for the port to free.
+    deadline = _time.monotonic() + wait_s
+    while _time.monotonic() < deadline:
+        try:
+            with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+                s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+                s.bind((host, int(port)))
+            console.print(f"[green]Port {port} freed; starting server.[/green]")
+            return
+        except OSError:
+            _time.sleep(0.2)
+
+    # Last resort: SIGKILL.
+    console.print(
+        f"[yellow]PID {holder_pid} did not exit after {wait_s}s; "
+        f"sending SIGKILL.[/yellow]"
+    )
+    try:
+        _os.kill(holder_pid, _signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+    deadline = _time.monotonic() + 3.0
+    while _time.monotonic() < deadline:
+        try:
+            with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+                s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+                s.bind((host, int(port)))
+            return
+        except OSError:
+            _time.sleep(0.1)
+
+    console.print(
+        f"[red]Could not free port {port} after SIGKILL. "
+        f"Please investigate manually.[/red]"
+    )
+    raise typer.Exit(1)
+
+
 @app.command()
 def serve(
     book_title: Annotated[str, typer.Argument(help="Book title or ID fragment.")],
@@ -3346,6 +3509,15 @@ def serve(
         if active.is_default
         else f"[dim]project: {active.slug}[/dim]"
     )
+
+    # Phase 54.6.x — pre-flight port check. If another sciknow book
+    # serve is already bound to this port, SIGTERM it before binding
+    # ourselves. The "address already in use" uvicorn error otherwise
+    # exits with no useful guidance and the user has to hunt the PID
+    # by hand. We only kill processes that look like sciknow's own
+    # `sciknow book serve` — never anything else (Brave, postgres,
+    # etc.). Confirmation via the cmdline match.
+    _kill_stale_serve(host, port)
 
     console.print(f"\n[bold]SciKnow Book Reader[/bold]: {book[1]}")
     console.print(f"  {project_label}")

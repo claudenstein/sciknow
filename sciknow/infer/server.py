@@ -374,6 +374,112 @@ def tail_log(role: str, n: int = 40) -> str:
     return _tail_log(_log_file(role), n=n)
 
 
+def pause_for_ingest(
+    roles: list[str] | None = None,
+    *,
+    restart_on_exit: bool = True,
+):
+    """Context manager that stops the writer/embedder/reranker for the
+    duration of an ingest call so MinerU / Marker get the GPU.
+
+    Phase 54.6.x — the user's own complaint: if I'm ingesting, I'm not
+    writing, so why is the writer holding 18 GB of VRAM and forcing
+    MinerU onto CPU? This helper:
+
+      1. Snapshots which configured roles currently have a healthy
+         llama-server (writer / embedder / reranker by default).
+      2. Stops each one (SIGTERM, fall back to SIGKILL).
+      3. Yields.
+      4. On exit, restarts every role that was up at entry — best-effort.
+         A restart failure is logged but does NOT raise; the user can
+         always re-up manually.
+
+    Used by the PDF converter (when it detects GPU pressure caused by
+    sciknow's own llama-server processes) and by the corpus / db
+    ingest commands as a defensive wrap.
+
+    Returns the list of (role, ProcInfo-at-entry) tuples for callers
+    that want to log what was paused.
+    """
+    import contextlib
+    import logging as _logging
+    log = _logging.getLogger("sciknow.infer.server")
+
+    if roles is None:
+        # The three roles that can pin VRAM. vlm intentionally NOT
+        # paused — the converter MIGHT use it (the auto VLM-Pro path
+        # doesn't go through the substrate today, but if it does in
+        # future, we don't want to kill the very process the converter
+        # is about to call).
+        roles = ["writer", "embedder", "reranker"]
+
+    @contextlib.contextmanager
+    def _ctx():
+        snapshots: list[tuple[str, "ProcInfo"]] = []
+        for r in roles:
+            try:
+                pid = _read_pid(r)
+                if pid and health(r, timeout=0.3):
+                    cfg = ROLE_DEFAULTS.get(r) or {}
+                    snapshots.append((r, ProcInfo(
+                        role=r,
+                        port=int(cfg.get("port", 0)),
+                        pid=pid,
+                        model=str(cfg.get("model", "")),
+                        healthy=True,
+                        log_path=_log_file(r),
+                    )))
+            except Exception as exc:  # noqa: BLE001
+                log.debug("pause_for_ingest: snapshot %s failed: %s", r, exc)
+
+        for r, _info in snapshots:
+            try:
+                down(r, timeout=5.0)
+                log.info(
+                    "pause_for_ingest: stopped role=%s to free GPU for ingest",
+                    r,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "pause_for_ingest: down(%s) raised %s — continuing", r, exc,
+                )
+
+        try:
+            yield snapshots
+        finally:
+            if not restart_on_exit:
+                return
+            for r, _info in snapshots:
+                try:
+                    up(r, wait=False)
+                    log.info("pause_for_ingest: restarting role=%s", r)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "pause_for_ingest: up(%s) failed on restart: %s — "
+                        "user can re-up manually with `sciknow infer up "
+                        "--role %s`",
+                        r, exc, r,
+                    )
+
+    return _ctx()
+
+
+def running_role_pids() -> set[int]:
+    """Return the set of PIDs that the substrate is currently
+    managing (writer/embedder/reranker/vlm). Used by the PDF
+    converter to decide whether GPU pressure is "our own" (safe to
+    pause) vs. external (must fall back to CPU)."""
+    pids: set[int] = set()
+    for role in ROLE_DEFAULTS:
+        try:
+            pid = _read_pid(role)
+            if pid:
+                pids.add(int(pid))
+        except Exception:  # noqa: BLE001
+            pass
+    return pids
+
+
 # Best-effort: if this Python process started a writer subprocess and
 # is exiting, leave the writer running. Users explicitly call
 # `sciknow infer down` to stop. We do NOT register atexit shutdown —

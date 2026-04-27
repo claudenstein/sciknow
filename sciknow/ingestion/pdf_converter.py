@@ -782,17 +782,24 @@ def convert(pdf_path: Path, output_dir: Path) -> ConversionResult:
     vlm_model_name = getattr(settings, "mineru_vlm_model", None)
     errors: list[str] = []
 
-    # Phase 54.6.x — device selection. The auto path checks free VRAM
-    # via nvidia-smi and falls back to CPU when the GPU is busy
-    # (typically because `sciknow book serve` has the writer model
-    # pinned in 18+ GiB). cpu / gpu force the choice. CPU mode is
-    # set by exporting TORCH_DEVICE=cpu before the backend imports
-    # torch — Marker honours it via its config; MinerU's pipeline
-    # mode picks up CUDA_VISIBLE_DEVICES="" instead. We set both
-    # for safety, scoped to this convert() call only.
+    # Phase 54.6.x — device selection. The auto path:
+    #   1. Probes nvidia-smi for free VRAM.
+    #   2. If free < pdf_converter_min_free_vram_gib AND the substrate
+    #      (writer/embedder/reranker llama-server processes) is what's
+    #      holding the GPU → pause the substrate, retry. Restored on
+    #      exit. This is the "if I'm ingesting I'm not writing"
+    #      principle: there's no reason to keep the writer pinned in
+    #      VRAM during a multi-PDF ingest. The pause is scoped to
+    #      this single convert() call.
+    #   3. If GPU is still tight after pause (foreign process), fall
+    #      back to CPU.
+    #   4. If "cpu" forced — never touch the substrate, never use GPU.
+    #   5. If "gpu" forced — never pause the substrate; let the GPU
+    #      backend OOM if VRAM is short (user opted in).
     device_setting = getattr(settings, "pdf_converter_device", "auto")
     min_free_gib = float(getattr(settings, "pdf_converter_min_free_vram_gib", 6.0))
     use_cpu = False
+    paused_substrate_ctx = None  # context manager handle if we pause
     if device_setting == "cpu":
         use_cpu = True
     elif device_setting == "auto":
@@ -807,11 +814,60 @@ def convert(pdf_path: Path, output_dir: Path) -> ConversionResult:
                 )
                 free_mib = int((r.stdout or "0").strip().split("\n")[0])
                 if free_mib < int(min_free_gib * 1024):
-                    use_cpu = True
-                    errors.append(
-                        f"device=auto: GPU free {free_mib} MiB < "
-                        f"{int(min_free_gib*1024)} MiB; falling back to CPU"
-                    )
+                    # Phase 54.6.x — probe the substrate for our own
+                    # llama-server PIDs. If they're the cause, pause
+                    # them so MinerU/Marker can run on GPU. Foreign
+                    # GPU pressure → fall back to CPU (we won't kill
+                    # someone else's process).
+                    own_pids: set[int] = set()
+                    try:
+                        from sciknow.infer.server import running_role_pids
+                        own_pids = running_role_pids()
+                    except Exception:  # noqa: BLE001
+                        own_pids = set()
+                    gpu_pids: set[int] = set()
+                    try:
+                        gp = subprocess.run(
+                            ["nvidia-smi",
+                             "--query-compute-apps=pid",
+                             "--format=csv,noheader", "-i", "0"],
+                            capture_output=True, text=True, timeout=5,
+                        )
+                        gpu_pids = {
+                            int(line.strip())
+                            for line in (gp.stdout or "").splitlines()
+                            if line.strip().isdigit()
+                        }
+                    except Exception:  # noqa: BLE001
+                        pass
+                    own_on_gpu = own_pids & gpu_pids
+                    if own_on_gpu:
+                        from sciknow.infer.server import pause_for_ingest
+                        paused_substrate_ctx = pause_for_ingest()
+                        paused_substrate_ctx.__enter__()
+                        # Re-probe — the writer typically takes 5-10 s
+                        # to fully release VRAM after SIGTERM.
+                        import time as _time
+                        for _ in range(20):  # up to ~10 s
+                            r2 = subprocess.run(
+                                ["nvidia-smi",
+                                 "--query-gpu=memory.free",
+                                 "--format=csv,noheader,nounits", "-i", "0"],
+                                capture_output=True, text=True, timeout=5,
+                            )
+                            free_mib = int((r2.stdout or "0").strip().split("\n")[0])
+                            if free_mib >= int(min_free_gib * 1024):
+                                break
+                            _time.sleep(0.5)
+                    if free_mib < int(min_free_gib * 1024):
+                        # Either we didn't pause (foreign process) or
+                        # pause didn't free enough. Bail to CPU.
+                        use_cpu = True
+                        errors.append(
+                            f"device=auto: GPU free {free_mib} MiB < "
+                            f"{int(min_free_gib*1024)} MiB after substrate "
+                            f"pause; falling back to CPU"
+                        )
         except Exception:  # noqa: BLE001
             pass
 
@@ -829,6 +885,13 @@ def convert(pdf_path: Path, output_dir: Path) -> ConversionResult:
                     os.environ.pop(k, None)
                 else:
                     os.environ[k] = v
+        # Phase 54.6.x — release the paused substrate. The context
+        # manager's __exit__ restarts the roles we stopped at entry.
+        if paused_substrate_ctx is not None:
+            try:
+                paused_substrate_ctx.__exit__(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
 
     try:
         # ---- 0. MinerU 2.5-Pro VLM (explicit opt-in) ----
