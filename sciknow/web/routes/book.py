@@ -276,24 +276,73 @@ async def api_book_outline_generate(
                 ORDER BY pm.year DESC NULLS LAST LIMIT 200
             """)).fetchall()
 
+            # Phase 54.6.x — gather topic-cluster catalogue + per-cluster
+            # representative abstracts so the LLM sees what the corpus
+            # actually contains, not just paper titles. We pull every
+            # cluster (paper count >= 2) and the 3 most-recent papers
+            # in each one; per-paper abstracts are truncated to 280
+            # chars so 19 clusters × 3 papers × 280 ≈ 16 KB, well
+            # within a 16K context after the rest of the prompt.
+            cluster_rows = session.execute(text("""
+                SELECT pm.topic_cluster, COUNT(*) AS n
+                FROM paper_metadata pm
+                JOIN documents d ON d.id = pm.document_id
+                WHERE d.ingestion_status = 'complete'
+                  AND pm.topic_cluster IS NOT NULL
+                  AND pm.topic_cluster != ''
+                GROUP BY pm.topic_cluster
+                HAVING COUNT(*) >= 2
+                ORDER BY COUNT(*) DESC
+            """)).fetchall()
+            cluster_catalogue: list[dict] = []
+            for cname, n in cluster_rows:
+                rep_rows = session.execute(text("""
+                    SELECT pm.title, pm.year, pm.abstract
+                    FROM paper_metadata pm
+                    JOIN documents d ON d.id = pm.document_id
+                    WHERE d.ingestion_status = 'complete'
+                      AND pm.topic_cluster = :tc
+                      AND pm.title IS NOT NULL
+                    ORDER BY pm.year DESC NULLS LAST,
+                             LENGTH(COALESCE(pm.abstract, '')) DESC
+                    LIMIT 3
+                """), {"tc": cname}).fetchall()
+                cluster_catalogue.append({
+                    "name": cname,
+                    "count": int(n or 0),
+                    "papers": [
+                        {
+                            "title": r[0],
+                            "year": r[1],
+                            "abstract": (
+                                (r[2] or "").strip().replace("\n", " ")[:280]
+                            ),
+                        }
+                        for r in rep_rows
+                    ],
+                })
+
         paper_list = [{"title": r[0], "year": r[1]} for r in papers if r[0]]
         plan_text = book[4] if len(book) > 4 else None
+        n_clusters = len(cluster_catalogue)
         yield {"type": "progress", "stage": "generating",
                "detail": (
                    f"Drafting outline from {len(paper_list)} papers"
+                   + (f" + {n_clusters} topic clusters" if n_clusters else "")
                    + (" + book plan" if plan_text and plan_text.strip() else "")
                    + "…"
                )}
 
-        # Phase 54.6.x — book.plan (the leitmotiv) is now an explicit
-        # input to the OUTLINE prompt. Without it, the previous
-        # generator only saw the title + paper-titles list, and the
-        # LLM had no idea what argument the book is making — the
-        # leitmotiv only entered later, at write/autowrite time.
+        # Phase 54.6.x — book.plan (the leitmotiv) AND topic-cluster
+        # catalogue (with abstracts) are now explicit inputs. Without
+        # them, the prompt was effectively blind: just paper titles
+        # and the book title, with no signal about what the corpus
+        # actually says or how it groups topically.
         sys_p, usr_p = rag_prompts.outline(
             book_title=book[1],
             papers=paper_list,
             plan=plan_text,
+            clusters=cluster_catalogue,
         )
         # Inject method preamble if the user picked one.
         if method and method.strip():

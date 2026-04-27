@@ -465,12 +465,19 @@ Rules:
 - If a book plan / leitmotiv is provided, every chapter title and description \
   must serve that thesis directly. The plan IS the editorial brief — do not \
   invent chapters that wander from it.
+- If a "Topic-cluster catalogue" block is provided below, USE IT as the \
+  primary signal for chapter design. Each cluster reflects what the corpus \
+  actually contains — every cluster with a meaningful paper count should \
+  map to at least one chapter or be subsumed into a related one. \
+  Per-cluster representative paper abstracts give the actual evidence shape; \
+  read them to ground each chapter's "description" and "topic_query" in \
+  what the corpus says, not generic domain knowledge.
 - Respond ONLY with valid JSON in the exact format shown"""
 
 OUTLINE_USER = """\
 Book title: {book_title}
-{plan_block}
-Available papers in the collection ({n_papers} total):
+{plan_block}{cluster_block}
+Available papers in the collection ({n_papers} total — most recent first):
 {paper_list}
 
 Propose a chapter structure for this book. Return JSON:
@@ -500,6 +507,7 @@ def outline(
     papers: list[dict],
     *,
     plan: str | None = None,
+    clusters: list[dict] | None = None,
 ) -> tuple[str, str]:
     """Build the OUTLINE prompt pair.
 
@@ -510,6 +518,22 @@ def outline(
             from ``books.plan``). When provided, the prompt is
             grounded in this thesis so the LLM proposes chapters that
             serve the user's argument, not just the corpus contents.
+        clusters: optional topic-cluster catalogue derived from
+            ``paper_metadata.topic_cluster`` + a few representative
+            papers' abstracts per cluster. Shape:
+            ``[{name, count, papers: [{title, year, abstract}]}, ...]``.
+            When provided, the prompt grows a "Topic-cluster
+            catalogue" block so the LLM has a real picture of what
+            the corpus actually contains, not just paper titles.
+            ``abstract`` is expected to be already truncated by the
+            caller.
+
+    Phase 54.6.x — passing ``clusters`` is the "use the full corpus"
+    path: 814 paper titles + 19 cluster summaries × 3 representatives
+    × 200-char abstracts ≈ 7-8 K tokens, leaving headroom in a 16 K
+    context for the leitmotiv + system prompt + JSON output. Without
+    abstracts the prompt was effectively blind to what each paper
+    actually said.
     """
     lines = []
     for i, p in enumerate(papers[:150], 1):  # cap at 150 to fit context
@@ -525,9 +549,38 @@ def outline(
         )
     else:
         plan_block = ""
+
+    # Phase 54.6.x — topic-cluster catalogue. Per cluster: name + count
+    # + up to 3 representative paper titles with truncated abstracts.
+    # The caller is responsible for picking representatives + truncating
+    # abstracts so this builder stays purely format-the-prompt.
+    cluster_block = ""
+    if clusters:
+        cluster_lines = [
+            "",
+            "Topic-cluster catalogue (from BERTopic — what the corpus "
+            "ACTUALLY contains, with representative abstracts):",
+            "",
+        ]
+        for c in clusters:
+            cname = (c.get("name") or "").strip() or "(unnamed)"
+            n = c.get("count") or 0
+            cluster_lines.append(f"### {cname}  ({n} papers)")
+            reps = c.get("papers") or []
+            for p in reps:
+                title = (p.get("title") or "").strip() or "(no title)"
+                yr = f" ({p['year']})" if p.get("year") else ""
+                cluster_lines.append(f"  • {title}{yr}")
+                ab = (p.get("abstract") or "").strip()
+                if ab:
+                    cluster_lines.append(f"    {ab}")
+            cluster_lines.append("")
+        cluster_block = "\n".join(cluster_lines) + "\n"
+
     return OUTLINE_SYSTEM, OUTLINE_USER.format(
         book_title=book_title,
         plan_block=plan_block,
+        cluster_block=cluster_block,
         n_papers=len(papers),
         paper_list=paper_list,
     )

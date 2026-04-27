@@ -1220,12 +1220,61 @@ def outline(
             "SELECT title, year FROM paper_metadata ORDER BY year DESC NULLS LAST"
         )).fetchall()
 
-    console.print(f"Generating outline for [bold]{book[1]}[/bold] from {len(papers)} papers…")
+        # Phase 54.6.x — gather topic-cluster catalogue with
+        # per-cluster representative abstracts so the LLM sees what
+        # the corpus actually contains. Mirrors the web flow in
+        # web/routes/book.py:api_book_outline_generate.
+        cluster_rows = session.execute(text("""
+            SELECT pm.topic_cluster, COUNT(*) AS n
+            FROM paper_metadata pm
+            JOIN documents d ON d.id = pm.document_id
+            WHERE d.ingestion_status = 'complete'
+              AND pm.topic_cluster IS NOT NULL
+              AND pm.topic_cluster != ''
+            GROUP BY pm.topic_cluster
+            HAVING COUNT(*) >= 2
+            ORDER BY COUNT(*) DESC
+        """)).fetchall()
+        cluster_catalogue: list[dict] = []
+        for cname, n in cluster_rows:
+            rep_rows = session.execute(text("""
+                SELECT pm.title, pm.year, pm.abstract
+                FROM paper_metadata pm
+                JOIN documents d ON d.id = pm.document_id
+                WHERE d.ingestion_status = 'complete'
+                  AND pm.topic_cluster = :tc
+                  AND pm.title IS NOT NULL
+                ORDER BY pm.year DESC NULLS LAST,
+                         LENGTH(COALESCE(pm.abstract, '')) DESC
+                LIMIT 3
+            """), {"tc": cname}).fetchall()
+            cluster_catalogue.append({
+                "name": cname,
+                "count": int(n or 0),
+                "papers": [
+                    {
+                        "title": r[0],
+                        "year": r[1],
+                        "abstract": (
+                            (r[2] or "").strip().replace("\n", " ")[:280]
+                        ),
+                    }
+                    for r in rep_rows
+                ],
+            })
+
+    n_clusters = len(cluster_catalogue)
+    cluster_msg = f" + {n_clusters} topic clusters" if n_clusters else ""
+    console.print(
+        f"Generating outline for [bold]{book[1]}[/bold] from "
+        f"{len(papers)} papers{cluster_msg}…"
+    )
 
     system, user = prompts.outline(
         book_title=book[1],
         papers=[{"title": p[0], "year": p[1]} for p in papers if p[0]],
         plan=book[5] if len(book) > 5 else None,
+        clusters=cluster_catalogue,
     )
 
     from sciknow.rag.llm import complete_with_status
