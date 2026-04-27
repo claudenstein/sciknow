@@ -3245,6 +3245,16 @@ async function refreshAfterJob(newDraftId) {
 
 function rebuildSidebar(chapters, activeId) {
   const container = document.getElementById('sidebar-sections');
+  // Phase 54.6.x — keep the chaptersData global in sync with what
+  // the sidebar is actually rendering. Without this, a long-running
+  // autowrite session (page loaded yesterday, autowrite ran overnight,
+  // user clicks a section in the morning) leaves the global pinned
+  // to the page-load snapshot — sections that finished overnight
+  // still look "empty" to selectChapter / previewEmptySection /
+  // showChapterEmptyState, even though the sidebar visibly shows
+  // them as drafted. Result: clicking such a section opened the
+  // chapter empty-state instead of loading the new draft.
+  if (Array.isArray(chapters)) chaptersData = chapters;
   let html = '';
   chapters.forEach(ch => {
     const safeTitle = escapeHtml(ch.title || '');
@@ -3784,9 +3794,38 @@ function writeForCell(chapterId, sectionType) {
 //   - click "Autowrite" to fire doAutowrite (with iterations)
 //   - click another section in the sidebar to navigate away
 // All without an LLM call happening accidentally on a single click.
-function previewEmptySection(chapterId, sectionType) {
+async function previewEmptySection(chapterId, sectionType) {
   currentChapterId = chapterId;
   currentSectionType = sectionType;
+
+  // Phase 54.6.x — re-validate that the section is actually empty.
+  // The sidebar can lag behind the database when autowrite ran in
+  // the background and the in-memory chaptersData snapshot is stale
+  // (e.g. tab opened yesterday, autowrite finished overnight). If
+  // the slug now has a draft, route to loadSection instead so the
+  // user sees the real content instead of the "Start writing" stub.
+  try {
+    const r = await fetch('/api/chapters');
+    if (r.ok) {
+      const fresh = await r.json();
+      const freshChapters = fresh.chapters || fresh;
+      if (Array.isArray(freshChapters)) {
+        chaptersData = freshChapters;
+        const fch = freshChapters.find(c => c.id === chapterId);
+        if (fch && Array.isArray(fch.sections)) {
+          const target = (sectionType || '').toLowerCase();
+          const draft = fch.sections.find(
+            d => (d.type || '').toLowerCase() === target
+          );
+          if (draft && draft.id) {
+            rebuildSidebar(freshChapters, draft.id);
+            loadSection(draft.id);
+            return;
+          }
+        }
+      }
+    }
+  } catch (_) { /* fall through to the normal empty-state preview */ }
 
   // Look up the section meta from the in-memory chapters cache
   const ch = chaptersData.find(c => c.id === chapterId);
