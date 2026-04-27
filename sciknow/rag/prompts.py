@@ -445,6 +445,12 @@ divulgation book (not a research paper).
 
 Rules:
 - Propose 6–12 chapters that logically build the book's narrative
+- The FIRST chapter (number 1) MUST be an Introduction that frames the book's \
+  thesis, sets up the questions the rest of the book will answer, and orients \
+  the reader. Use "Introduction" or a thesis-flavoured title (e.g. \
+  "Introduction: Rethinking the Climate Story"). Its sections should establish \
+  scope, motivation, key terms, and a roadmap of what's to come — NOT \
+  substantive evidence (that lives in later chapters).
 - Each chapter should have a clear title and a 1–2 sentence description
 - Order chapters so the argument flows from foundational concepts to conclusions
 - For EACH chapter, propose BETWEEN 3 AND 8 sections, choosing a count that \
@@ -456,11 +462,14 @@ Rules:
   Good section names: "Historical Context", "Key Evidence", "The Debate", \
   "Mechanisms", "Observations", "Implications", "Current Understanding", \
   "Unresolved Questions", "Future Outlook", etc.
+- If a book plan / leitmotiv is provided, every chapter title and description \
+  must serve that thesis directly. The plan IS the editorial brief — do not \
+  invent chapters that wander from it.
 - Respond ONLY with valid JSON in the exact format shown"""
 
 OUTLINE_USER = """\
 Book title: {book_title}
-
+{plan_block}
 Available papers in the collection ({n_papers} total):
 {paper_list}
 
@@ -486,15 +495,39 @@ chapters based on scope and evidence depth — do not pick the same count for ev
 chapter. Think of how a popular science book structures its chapters."""
 
 
-def outline(book_title: str, papers: list[dict]) -> tuple[str, str]:
-    """papers: list of {title, year}"""
+def outline(
+    book_title: str,
+    papers: list[dict],
+    *,
+    plan: str | None = None,
+) -> tuple[str, str]:
+    """Build the OUTLINE prompt pair.
+
+    Args:
+        book_title: the book's display title.
+        papers: list of {title, year}.
+        plan: optional book plan / leitmotiv (the 200–500-word thesis
+            from ``books.plan``). When provided, the prompt is
+            grounded in this thesis so the LLM proposes chapters that
+            serve the user's argument, not just the corpus contents.
+    """
     lines = []
     for i, p in enumerate(papers[:150], 1):  # cap at 150 to fit context
         yr = f" ({p['year']})" if p.get("year") else ""
         lines.append(f"{i}. {p['title']}{yr}")
     paper_list = "\n".join(lines)
+    plan_text = (plan or "").strip()
+    if plan_text:
+        plan_block = (
+            "\nBook plan / leitmotiv (the editorial brief — every "
+            "chapter must serve this thesis):\n"
+            f"{plan_text}\n"
+        )
+    else:
+        plan_block = ""
     return OUTLINE_SYSTEM, OUTLINE_USER.format(
         book_title=book_title,
+        plan_block=plan_block,
         n_papers=len(papers),
         paper_list=paper_list,
     )
@@ -1006,6 +1039,7 @@ def write_section_v2(
     prior_summaries: list[dict] | None = None,
     paragraph_plan: list[dict] | None = None,
     target_words: int | None = None,
+    target_words_max: int | None = None,
     section_plan: str | None = None,
     lessons: list[str] | None = None,
     style_fingerprint_block: str | None = None,
@@ -1187,6 +1221,24 @@ def write_section_v2(
             f"provided passages — do not pad with filler phrases like \"it is "
             f"worth noting\" or \"this raises the question\".\n"
         )
+        # Phase 54.6.x — flexible-length opt-in. When the chapter has
+        # `flexible_length` set AND the retrieval pool is rich, the
+        # caller passes a target_words_max up to 2× the base target.
+        # The writer is told it MAY extend to that ceiling but only
+        # if there's distinct evidence to cite — never to pad.
+        if (
+            target_words_max
+            and target_words_max > target_words
+        ):
+            length_block += (
+                f"- The chapter is marked as flexible-length: you MAY extend "
+                f"up to {target_words_max} words IF the retrieval clearly "
+                f"supports deeper coverage (more distinct claims, additional "
+                f"mechanism / evidence / counter-argument). Do not extend "
+                f"past the base {target_words}-word target unless every "
+                f"extra paragraph adds a citable claim that would otherwise "
+                f"be dropped.\n"
+            )
 
     # Phase 54.6.142 — rhetorically-gated figure-citation instruction.
     # Only activated when a visuals prompt block is present (i.e. the

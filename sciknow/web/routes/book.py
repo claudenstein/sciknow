@@ -256,7 +256,7 @@ async def api_book_outline_generate(
 
         with get_session() as session:
             book = session.execute(text("""
-                SELECT id::text, title, description, project_type
+                SELECT id::text, title, description, project_type, plan
                 FROM books WHERE id::text = :bid
             """), {"bid": _app._book_id}).fetchone()
             if not book:
@@ -277,10 +277,24 @@ async def api_book_outline_generate(
             """)).fetchall()
 
         paper_list = [{"title": r[0], "year": r[1]} for r in papers if r[0]]
+        plan_text = book[4] if len(book) > 4 else None
         yield {"type": "progress", "stage": "generating",
-               "detail": f"Drafting outline from {len(paper_list)} papers…"}
+               "detail": (
+                   f"Drafting outline from {len(paper_list)} papers"
+                   + (" + book plan" if plan_text and plan_text.strip() else "")
+                   + "…"
+               )}
 
-        sys_p, usr_p = rag_prompts.outline(book_title=book[1], papers=paper_list)
+        # Phase 54.6.x — book.plan (the leitmotiv) is now an explicit
+        # input to the OUTLINE prompt. Without it, the previous
+        # generator only saw the title + paper-titles list, and the
+        # LLM had no idea what argument the book is making — the
+        # leitmotiv only entered later, at write/autowrite time.
+        sys_p, usr_p = rag_prompts.outline(
+            book_title=book[1],
+            papers=paper_list,
+            plan=plan_text,
+        )
         # Inject method preamble if the user picked one.
         if method and method.strip():
             m = get_method("elicitation", method)
@@ -370,6 +384,93 @@ async def api_book_outline_generate(
         target=_app._run_generator_in_thread, args=(job_id, gen, loop), daemon=True
     ).start()
     return JSONResponse({"job_id": job_id})
+
+
+@router.post("/api/book/insert-introduction")
+async def api_book_insert_introduction():
+    """Phase 54.6.x — prepend an Introduction chapter at position 1.
+
+    Standard front-matter for a scientific divulgation book: every
+    existing chapter is renumbered ``+1`` and a new chapter ``number=1``
+    titled "Introduction" is inserted with framing-style sections
+    (motivation / scope / key terms / roadmap). Idempotent guard: if
+    chapter 1 already looks like an introduction (title matches
+    /introduction/i), the call is a no-op.
+
+    Sections list mirrors the project-type Introduction template:
+    "Motivation & Stakes", "Scope of the Argument", "Key Terms",
+    "Roadmap of the Book". Existing drafts are NOT touched — they
+    move with their chapters via the +1 number bump.
+    """
+    import json as _json
+    from sciknow.web import app as _app
+
+    intro_sections = [
+        "Motivation & Stakes",
+        "Scope of the Argument",
+        "Key Terms",
+        "Roadmap of the Book",
+    ]
+
+    with get_session() as session:
+        chapters = session.execute(text("""
+            SELECT number, title FROM book_chapters
+            WHERE book_id::text = :bid ORDER BY number ASC
+        """), {"bid": _app._book_id}).fetchall()
+
+        if chapters and (chapters[0][1] or "").strip().lower().startswith(
+            "introduction"
+        ):
+            return JSONResponse({
+                "ok": True,
+                "renumbered": 0,
+                "noop": True,
+                "message": "Chapter 1 already looks like an introduction.",
+            })
+
+        # Two-step renumber to dodge the (book_id, number) UNIQUE check:
+        # bump every existing chapter by N+1 (out of the way) first,
+        # then bring them back to (n+1) so chapter 1 is free.
+        n_existing = len(chapters)
+        if n_existing:
+            session.execute(text("""
+                UPDATE book_chapters
+                   SET number = number + :bump
+                 WHERE book_id::text = :bid
+            """), {"bid": _app._book_id, "bump": n_existing + 100})
+            session.execute(text("""
+                UPDATE book_chapters
+                   SET number = number - :unwind
+                 WHERE book_id::text = :bid
+            """), {"bid": _app._book_id, "unwind": n_existing + 100 - 1})
+
+        session.execute(text("""
+            INSERT INTO book_chapters
+                (book_id, number, title, description, topic_query, sections)
+            VALUES (CAST(:bid AS uuid), 1, :title, :desc, :tq,
+                    CAST(:secs AS jsonb))
+        """), {
+            "bid": _app._book_id,
+            "title": "Introduction",
+            "desc": (
+                "Frames the book's thesis, motivates the questions the "
+                "rest of the book answers, and orients the reader. No "
+                "substantive evidence here — that lives in later chapters."
+            ),
+            "tq": "introduction overview scope motivation",
+            "secs": _json.dumps(intro_sections),
+        })
+        session.commit()
+
+    return JSONResponse({
+        "ok": True,
+        "renumbered": n_existing,
+        "noop": False,
+        "message": (
+            f"Introduction inserted as Ch.1. {n_existing} existing "
+            f"chapter(s) renumbered to 2..{n_existing + 1}."
+        ),
+    })
 
 
 @router.post("/api/book/auto-expand/preview")

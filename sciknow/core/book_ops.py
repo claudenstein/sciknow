@@ -167,6 +167,29 @@ def _get_chapter_num_sections(session, chapter_id: str) -> int:
     return len(_get_chapter_sections_normalized(session, chapter_id)) or 1
 
 
+def _get_chapter_flexible_length(session, chapter_id: str) -> bool:
+    """Phase 54.6.x — read the per-chapter ``flexible_length`` opt-in.
+
+    When TRUE, the autowrite writer is allowed to extend up to 2× the
+    section's effective target_words IF the corpus retrieval pool for
+    the section is rich enough. The flag is one-directional — flexible
+    chapters never shrink below their target, only grow above it.
+
+    Defaults to False on lookup failure (missing column on a fresh DB
+    that hasn't run migration 0042 yet, or a malformed chapter_id).
+    """
+    from sqlalchemy import text
+    try:
+        row = session.execute(text("""
+            SELECT flexible_length FROM book_chapters
+            WHERE id::text = :cid LIMIT 1
+        """), {"cid": chapter_id}).fetchone()
+        return bool(row and row[0])
+    except Exception as exc:
+        logger.debug("flexible_length lookup failed: %s", exc)
+        return False
+
+
 # Phase 18 — chapter sections as first-class entities.
 #
 # Storage shape (book_chapters.sections JSONB):

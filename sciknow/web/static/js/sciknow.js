@@ -11709,6 +11709,11 @@ async function openPlanModal(context) {
       document.getElementById('plan-status').textContent =
         data.plan.split(/\s+/).filter(Boolean).length + ' words in book plan';
     }
+    // Phase 54.6.x — wire debounced autosave on the Book tab inputs
+    // so edits persist 1.2 s after the last keystroke without
+    // requiring a Save click.
+    _wireBookTabAutosave();
+    _setAutosaveStatus('plan-book', 'idle');
   } catch (e) {
     document.getElementById('plan-status').textContent = 'Error loading book: ' + e.message;
   }
@@ -11770,6 +11775,127 @@ function switchPlanTab(name) {
   if (name === 'plan-outline') _populateOutlineMethodPicker();
 }
 
+// ── Phase 54.6.x — Plan modal autosave ─────────────────────────────────
+// One debounced timer per "scope key" (plan-book, plan-chapters,
+// plan-chapter-row:<cid>, …). Status indicator slot is `#autosave-<key>`
+// so each tab can show its own state without colliding with the
+// modal's footer status line. Save Now buttons just call
+// `flushAutosave(key)` to skip the debounce.
+const _planAutosaveTimers = {};
+const _planAutosaveStatus = {};
+
+function _setAutosaveStatus(key, state, detail) {
+  _planAutosaveStatus[key] = state;
+  const el = document.getElementById('autosave-' + key);
+  if (!el) return;
+  if (state === 'pending') {
+    el.innerHTML = '<span class="u-muted">⏳ unsaved edits…</span>';
+  } else if (state === 'saving') {
+    el.innerHTML = '<span class="u-muted">… saving</span>';
+  } else if (state === 'saved') {
+    const stamp = new Date();
+    const hh = String(stamp.getHours()).padStart(2, '0');
+    const mm = String(stamp.getMinutes()).padStart(2, '0');
+    const ss = String(stamp.getSeconds()).padStart(2, '0');
+    el.innerHTML = '<span class="u-success">✓ saved at ' + hh + ':' + mm + ':' + ss + '</span>';
+  } else if (state === 'error') {
+    el.innerHTML = '<span class="u-danger">✗ ' + (detail || 'save failed — click Save now to retry') + '</span>';
+  } else {
+    el.innerHTML = '<span class="u-muted">○ Idle</span>';
+  }
+}
+
+function scheduleAutosave(key, delayMs, fn) {
+  if (_planAutosaveTimers[key]) clearTimeout(_planAutosaveTimers[key]);
+  _setAutosaveStatus(key, 'pending');
+  _planAutosaveTimers[key] = setTimeout(async () => {
+    _planAutosaveTimers[key] = null;
+    _setAutosaveStatus(key, 'saving');
+    try {
+      await fn();
+      _setAutosaveStatus(key, 'saved');
+    } catch (e) {
+      _setAutosaveStatus(key, 'error', e && e.message);
+    }
+  }, delayMs);
+}
+
+function flushAutosave(key) {
+  // Cancels the debounce — caller is expected to invoke the save fn
+  // synchronously (e.g. via a Save Now button that calls savePlanBook(true)).
+  if (_planAutosaveTimers[key]) {
+    clearTimeout(_planAutosaveTimers[key]);
+    _planAutosaveTimers[key] = null;
+  }
+}
+
+// Wire input/change events for the Book tab inputs to the autosave
+// helper. Idempotent: each input gets a `dataset.autosaveWired` flag
+// so re-running on tab re-entry doesn't double-bind.
+function _wireBookTabAutosave() {
+  const ids = [
+    'plan-title-input',
+    'plan-desc-input',
+    'plan-text-input',
+    'plan-target-words-input',
+  ];
+  ids.forEach(function(id) {
+    const el = document.getElementById(id);
+    if (!el || el.dataset.autosaveWired === '1') return;
+    el.dataset.autosaveWired = '1';
+    const handler = function() {
+      scheduleAutosave('plan-book', 1200, function() {
+        return savePlanBook(false);
+      });
+    };
+    el.addEventListener('input', handler);
+    el.addEventListener('change', handler);
+  });
+}
+
+// Wire input/change events for every chapter row in the Chapters tab.
+// Saves are debounced per-row (key includes cid) so editing two
+// chapters in succession doesn't lose the first one.
+function _wireChaptersTabAutosave() {
+  const rows = document.querySelectorAll('#plan-chapters-list .plan-ch-row');
+  rows.forEach(function(row) {
+    const cid = row.dataset.cid;
+    if (!cid || row.dataset.autosaveWired === '1') return;
+    row.dataset.autosaveWired = '1';
+    const inputs = row.querySelectorAll(
+      '.plan-ch-title, .plan-ch-desc, .plan-ch-tq, .plan-ch-target, .plan-ch-flex'
+    );
+    inputs.forEach(function(inp) {
+      const handler = function() {
+        // Reflect into the tab-level pill too so the user sees the
+        // global state at the top, in addition to the row-level Save.
+        scheduleAutosave('plan-chapters', 1000, async function() {
+          await savePlanChapterRow(cid);
+        });
+      };
+      inp.addEventListener('input', handler);
+      inp.addEventListener('change', handler);
+    });
+  });
+}
+
+// "Save all chapters now" button at the top of the Chapters tab.
+async function savePlanAllChapters() {
+  flushAutosave('plan-chapters');
+  const rows = document.querySelectorAll('#plan-chapters-list .plan-ch-row');
+  if (!rows.length) return;
+  _setAutosaveStatus('plan-chapters', 'saving');
+  try {
+    for (const row of rows) {
+      const cid = row.dataset.cid;
+      if (cid) await savePlanChapterRow(cid);
+    }
+    _setAutosaveStatus('plan-chapters', 'saved');
+  } catch (e) {
+    _setAutosaveStatus('plan-chapters', 'error', e && e.message);
+  }
+}
+
 // ── Phase 54.6.66 — Chapters tab: book-wide chapter manager ────────────
 
 function populatePlanChaptersTab() {
@@ -11818,15 +11944,38 @@ function populatePlanChaptersTab() {
          +  'placeholder="Short description (1-2 sentences)" '
          +  '>'
          +  escapeHtml(ch.description || '') + '</textarea>'
-         +  '<div class="u-flex-raw u-gap-6 u-ai-center">'
+         +  '<div class="u-flex-raw u-gap-6 u-ai-center u-mb-6">'
          +  '<label style="font-size:11px;color:var(--fg-muted);min-width:80px;">Topic query:</label>'
          +  '<input type="text" class="plan-ch-tq" value="' + escapeHtml(ch.topic_query || '')
          +  '" placeholder="3-6 word retrieval phrase" '
          +  'style="flex:1;padding:3px 8px;font-size:12px;">'
          +  '</div>'
+         // Phase 54.6.x — per-chapter length controls. target_words
+         // overrides the book-level chapter target; flexible_length
+         // lets autowrite extend up to 2× when retrieval is rich.
+         +  '<div class="u-flex-raw u-gap-6 u-ai-center u-wrap">'
+         +  '<label style="font-size:11px;color:var(--fg-muted);min-width:80px;" '
+         +  'title="Per-chapter length target (words). Empty = inherit the book-level target. Set to 0 to clear an existing override.">Target words:</label>'
+         +  '<input type="number" class="plan-ch-target" min="0" step="500" '
+         +  'value="' + (ch.target_words ? String(ch.target_words) : '') + '" '
+         +  'placeholder="(book default)" '
+         +  'style="width:120px;padding:3px 8px;font-size:12px;" '
+         +  'title="Per-chapter length target. Empty = inherit book-level target. 0 clears the override.">'
+         +  '<label class="u-chip" '
+         +  'title="Phase 54.6.x — when checked, autowrite may extend up to 2× the target if the section\'s retrieval pool is rich (≥24 chunks). Only ever bigger, never smaller. The base target is still the scoring anchor.">'
+         +  '<input type="checkbox" class="plan-ch-flex" '
+         +  (ch.flexible_length ? 'checked ' : '')
+         +  '> flexible (≤2× if corpus supports it)'
+         +  '</label>'
+         +  '</div>'
          +  '</div>';
   });
   list.innerHTML = html;
+  // Phase 54.6.x — wire debounced autosave on every chapter row so
+  // edits persist 1 s after the last keystroke without needing a
+  // per-row Save click. Idempotent on re-render via row.dataset.autosaveWired.
+  _wireChaptersTabAutosave();
+  _setAutosaveStatus('plan-chapters', 'idle');
 }
 
 async function savePlanChapterRow(cid) {
@@ -11835,10 +11984,20 @@ async function savePlanChapterRow(cid) {
   const title = row.querySelector('.plan-ch-title').value.trim();
   const desc = row.querySelector('.plan-ch-desc').value.trim();
   const tq = row.querySelector('.plan-ch-tq').value.trim();
+  // Phase 54.6.x — per-chapter length controls.
+  const targetEl = row.querySelector('.plan-ch-target');
+  const flexEl = row.querySelector('.plan-ch-flex');
   const fd = new FormData();
   fd.append('title', title);
   fd.append('description', desc);
   fd.append('topic_query', tq);
+  if (targetEl) {
+    const tw = parseInt(targetEl.value || '0', 10);
+    fd.append('target_words', isNaN(tw) ? 0 : tw);
+  }
+  if (flexEl) {
+    fd.append('flexible_length', flexEl.checked ? 'true' : 'false');
+  }
   const status = document.getElementById('plan-status');
   status.textContent = 'Saving chapter…';
   try {
@@ -11852,6 +12011,11 @@ async function savePlanChapterRow(cid) {
       ch.title = title;
       ch.description = desc;
       ch.topic_query = tq;
+      if (targetEl) {
+        const tw = parseInt(targetEl.value || '0', 10);
+        ch.target_words = (!isNaN(tw) && tw > 0) ? tw : null;
+      }
+      if (flexEl) ch.flexible_length = !!flexEl.checked;
     }
     populatePlanSectionsPicker(
       document.getElementById('plan-sections-chapter-picker').value || null
@@ -12504,12 +12668,26 @@ async function savePlan() {
   }
 }
 
-async function savePlanBook() {
+async function savePlanBook(viaSaveNow) {
+  // Phase 54.6.x — `viaSaveNow=true` means the user clicked Save Now;
+  // we cancel any pending autosave debounce and run synchronously
+  // through the same code path. Both autosave + Save Now feed the
+  // tab-level autosave status pill (#autosave-plan-book) so the
+  // user has a single source of truth for save state.
+  if (viaSaveNow) {
+    flushAutosave('plan-book');
+    _setAutosaveStatus('plan-book', 'saving');
+  }
   const title = document.getElementById('plan-title-input').value.trim();
   const desc = document.getElementById('plan-desc-input').value.trim();
   const plan = document.getElementById('plan-text-input').value.trim();
   const tcwRaw = document.getElementById('plan-target-words-input').value.trim();
-  document.getElementById('plan-status').textContent = 'Saving...';
+  if (!viaSaveNow) {
+    // Autosave path — keep the footer status line quiet; the pill
+    // above the tab is the canonical surface.
+  } else {
+    document.getElementById('plan-status').textContent = 'Saving...';
+  }
   const fd = new FormData();
   fd.append('title', title);
   fd.append('description', desc);
@@ -12521,9 +12699,12 @@ async function savePlanBook() {
   try {
     const res = await fetch('/api/book', {method: 'PUT', body: fd});
     if (!res.ok) throw new Error('save failed');
-    document.getElementById('plan-status').innerHTML =
-      '<span class="u-success">Saved.</span> ' +
-      plan.split(/\s+/).filter(Boolean).length + ' words. The new plan will be injected into all future writes.';
+    if (viaSaveNow) {
+      document.getElementById('plan-status').innerHTML =
+        '<span class="u-success">Saved.</span> ' +
+        plan.split(/\s+/).filter(Boolean).length + ' words. The new plan will be injected into all future writes.';
+      _setAutosaveStatus('plan-book', 'saved');
+    }
     if (title) document.querySelector('.sidebar h2').textContent = title;
     if (tcwRaw !== '') {
       const n = parseInt(tcwRaw, 10);
@@ -12535,7 +12716,10 @@ async function savePlanBook() {
       window._chapterWordTarget = n > 0 ? n : 6000;
     }
   } catch (e) {
-    document.getElementById('plan-status').textContent = 'Save failed: ' + e.message;
+    if (viaSaveNow) {
+      document.getElementById('plan-status').textContent = 'Save failed: ' + e.message;
+    }
+    throw e;  // bubble so scheduleAutosave can mark the pill as error
   }
 }
 
@@ -12828,6 +13012,51 @@ function cancelOutline() {
 // name. Keep it pointing at the new implementation until they're all
 // migrated.
 const regenerateOutline = runOutlineFromTab;
+
+// Phase 54.6.x — Add an Introduction chapter at position 1, renumbering
+// any existing chapters by +1. Used to retrofit the standard
+// scientific-book front-matter shape onto a book that was outlined
+// before the Introduction-required prompt landed.
+async function insertIntroductionChapter() {
+  const btn = document.getElementById('plan-insert-intro-btn');
+  const status = document.getElementById('plan-autoplan-chapters-status');
+  if (!confirm(
+    'Insert an Introduction chapter at position 1?\n\n'
+    + 'Every existing chapter will be renumbered +1 (Ch.1 → Ch.2, etc). '
+    + 'Drafts are preserved — they move with their chapters. The new '
+    + 'Introduction has the standard sections: Motivation & Stakes / '
+    + 'Scope of the Argument / Key Terms / Roadmap of the Book.\n\n'
+    + 'No-op if Ch.1 already looks like an introduction.'
+  )) return;
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = 'Inserting Introduction…';
+  try {
+    const res = await fetch('/api/book/insert-introduction', {method: 'POST'});
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      if (status) status.innerHTML = '<span class="u-danger">✗ ' + (data.error || res.status) + '</span>';
+      if (btn) btn.disabled = false;
+      return;
+    }
+    if (status) {
+      const cls = data.noop ? 'u-muted' : 'u-success';
+      const icon = data.noop ? '—' : '✓';
+      status.innerHTML = '<span class="' + cls + '">' + icon + ' ' + data.message + '</span>';
+    }
+    // Refresh the sidebar + Chapters tab so the renumber is visible.
+    try {
+      const sidebarRes = await fetch('/api/chapters');
+      const sd = await sidebarRes.json();
+      const chapters = sd.chapters || sd;
+      rebuildSidebar(chapters, currentDraftId);
+      populatePlanChaptersTab();
+    } catch (_) {}
+  } catch (exc) {
+    if (status) status.innerHTML = '<span class="u-danger">✗ ' + exc.message + '</span>';
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
 
 // Phase 54.6.x — Auto-plan chapters button on the Chapters tab.
 // Same backend as runOutlineFromTab (the /api/book/outline/generate

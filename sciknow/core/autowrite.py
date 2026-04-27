@@ -55,6 +55,7 @@ from sciknow.core.book_ops import (  # noqa: F401
     _finalize_autowrite_run,
     _get_book_length_target,
     _get_chapter_num_sections,
+    _get_chapter_flexible_length,
     _get_chapter_sections_normalized,
     _get_prior_summaries,
     _get_relevant_lessons,
@@ -454,6 +455,52 @@ def _autowrite_section_body(
         except Exception as exc:  # noqa: BLE001
             logger.debug("retrieval_density_adjust skipped: %s", exc)
 
+    # Phase 54.6.x — flexible-length per-chapter opt-in. When the
+    # chapter row has flexible_length=TRUE AND the retrieval pool is
+    # rich enough (≥ FLEXIBLE_RICH_THRESHOLD chunks), the writer is
+    # allowed to extend up to 2× the base target. The base target
+    # remains the SCORING anchor (length score = min(1, actual /
+    # target)) so a flexible chapter at 1× target still scores 1.0;
+    # only the writer's prompt sees the larger ceiling. This is what
+    # the user asked for: "only bigger, at most the double, only if
+    # the corpus is good enough".
+    FLEXIBLE_RICH_THRESHOLD = 24
+    flexible_max_words: int | None = None
+    try:
+        with get_session() as _s_flex:
+            if _get_chapter_flexible_length(_s_flex, ch_id):
+                if len(results) >= FLEXIBLE_RICH_THRESHOLD:
+                    flexible_max_words = int(effective_target_words * 2)
+                    log.event(
+                        "flexible_length_enabled",
+                        base=effective_target_words,
+                        max=flexible_max_words,
+                        n_chunks=len(results),
+                    )
+                    yield {
+                        "type": "flexible_length_enabled",
+                        "base_target": effective_target_words,
+                        "max_target": flexible_max_words,
+                        "n_chunks": len(results),
+                        "explanation": (
+                            f"chapter is flexible-length and retrieval is "
+                            f"rich ({len(results)} chunks ≥ "
+                            f"{FLEXIBLE_RICH_THRESHOLD}); writer may extend "
+                            f"to {flexible_max_words} words if evidence "
+                            f"supports it"
+                        ),
+                    }
+                else:
+                    log.event(
+                        "flexible_length_skipped",
+                        base=effective_target_words,
+                        n_chunks=len(results),
+                        threshold=FLEXIBLE_RICH_THRESHOLD,
+                        reason="retrieval too thin",
+                    )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("flexible_length resolve skipped: %s", exc)
+
     # Phase 54.6.151 — digital-section soft ceiling (RESEARCH.md §24
     # Guideline 3, Delgado 2018 screen-reading comprehension penalty).
     # Checks the FINAL effective target (after optional 54.6.150 widener)
@@ -696,6 +743,7 @@ def _autowrite_section_body(
             book_plan=b_plan, prior_summaries=prior_summaries,
             paragraph_plan=paragraph_plan,
             target_words=effective_target_words,
+            target_words_max=flexible_max_words,
             section_plan=section_plan,
             lessons=relevant_lessons,
             style_fingerprint_block=style_fingerprint_block,

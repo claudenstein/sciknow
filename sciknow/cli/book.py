@@ -1225,6 +1225,7 @@ def outline(
     system, user = prompts.outline(
         book_title=book[1],
         papers=[{"title": p[0], "year": p[1]} for p in papers if p[0]],
+        plan=book[5] if len(book) > 5 else None,
     )
 
     from sciknow.rag.llm import complete_with_status

@@ -1216,13 +1216,22 @@
     <div class="modal-body">
       <!-- Book tab — the leitmotiv (existing) -->
       <div class="tab-pane active" id="plan-book-pane">
+        <!-- Phase 54.6.x — autosave status pill + Save Now button at
+             the top of every Plan tab. Edits are debounced-saved to
+             /api/book; the pill shows the current state so the user
+             can see at a glance whether their work is persisted.
+             Save Now flushes the debounce immediately. -->
+        <div class="u-flex-raw u-gap-6 u-ai-center u-mb-3 u-p-2 u-bg-alt u-r-md u-small">
+          <span class="u-bold">Autosave</span>
+          <span id="autosave-plan-book"><span class="u-muted">○ Idle</span></span>
+          <button class="btn-secondary u-pill-xs u-ml-auto" onclick="savePlanBook(true)"
+                  title="Flush any pending autosave immediately and persist title / description / leitmotiv / target words.">Save now</button>
+        </div>
         <p class="u-note-lg">
           The book plan is a 200&ndash;500 word document defining the central thesis,
           scope, intended audience, and key terms. It is injected into every
           <code>book write</code> / <code>autowrite</code> call so all chapters stay
-          aligned with the same argument. Edit it manually below, or click
-          <strong>Regenerate with LLM</strong> to draft a new one from your chapters
-          and paper corpus.
+          aligned with the same argument. Edits autosave after 1.2 s of no typing.
         </p>
         <div class="field">
           <label>Book title</label>
@@ -1314,11 +1323,18 @@
            Uses existing /api/chapters, /api/chapters/{{id}},
            /api/chapters/reorder, DELETE /api/chapters/{{id}}. -->
       <div class="tab-pane u-hidden" id="plan-chapters-pane">
+        <div class="u-flex-raw u-gap-6 u-ai-center u-mb-3 u-p-2 u-bg-alt u-r-md u-small">
+          <span class="u-bold">Autosave</span>
+          <span id="autosave-plan-chapters"><span class="u-muted">○ Idle</span></span>
+          <button class="btn-secondary u-pill-xs u-ml-auto" onclick="savePlanAllChapters()"
+                  title="Save every chapter row in this tab now (title / description / topic query / target words / flexible-length flag).">Save all chapters now</button>
+        </div>
         <p class="u-note-lg">
-          Book-wide chapter plan: every chapter&rsquo;s title, description, and
-          retrieval query. Reorder with &uarr; / &darr;. Delete unlinks the
-          chapter&rsquo;s drafts but does not delete them. Section-level editing
-          moves to the <strong>Sections</strong> tab.
+          Book-wide chapter plan: every chapter&rsquo;s title, description,
+          retrieval query, length target, and the <em>flexible-length</em>
+          opt-in. Reorder with &uarr; / &darr;. Delete unlinks the
+          chapter&rsquo;s drafts but does not delete them. Edits autosave per
+          row after 1 s of no typing.
         </p>
         <!-- Phase 54.6.x — Autoplan chapters (additive). Surfaces the
              same /api/book/outline/generate endpoint that powers the
@@ -1330,6 +1346,10 @@
           <button class="btn-secondary" id="plan-autoplan-chapters-btn" onclick="autoPlanChapters()"
                   title="Phase 54.6.x — LLM-generate chapters for the book from its leitmotiv + paper corpus. Uses the same 3-candidate tournament + density-resize as the Outline tab. Additive: existing chapters are preserved; new ones are appended with fresh numbers. Click again to re-roll if the first pass isn't right.">
             &#129504; Auto-plan chapters
+          </button>
+          <button class="btn-secondary" id="plan-insert-intro-btn" onclick="insertIntroductionChapter()"
+                  title="Phase 54.6.x — prepend an Introduction chapter at position 1. Existing chapters renumber +1. Sections: Motivation & Stakes / Scope of the Argument / Key Terms / Roadmap of the Book. No-op if Ch.1 already looks like an introduction.">
+            &#128214; Add Introduction chapter
           </button>
           <span class="u-hint-sm" id="plan-autoplan-chapters-status"></span>
         </div>
