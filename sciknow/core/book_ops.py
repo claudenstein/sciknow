@@ -949,6 +949,276 @@ def resize_sections_by_density(chapters: list[dict], *,
     return chapters
 
 
+def deep_plan_outline_chapters(
+    chapters: list[dict],
+    *,
+    book_title: str,
+    book_type: str,
+    book_plan: str | None,
+    model: str | None = None,
+    n_chunks: int = 8,
+    chunk_chars: int = 320,
+):
+    """Phase 54.6.x — "deep" outline post-pass.
+
+    For every chapter × every section in the LLM's proposed outline:
+      1. Slugify the section name (matches what _normalize_chapter_sections
+         produces at read time).
+      2. Run hybrid retrieval against ``"{chapter_topic_query} —
+         {section_title}"`` and pick the top-N chunks.
+      3. Call ``prompts.section_plan`` with the leitmotiv + retrieved
+         evidence + earlier chapters (so the LLM doesn't drift into
+         already-covered territory).
+      4. Attach the bullet plan and a derived ``target_words`` (using
+         the project type's wpc range × bullet count) onto the
+         section dict so the section is saved as
+         ``{slug, title, plan, target_words}`` instead of a plain
+         string.
+
+    Yields progress events as a generator so the caller can stream
+    them to the GUI:
+      - {type: "deep_plan_start", n_chapters, n_sections_total}
+      - {type: "deep_plan_section_start", chapter_index, chapter_total,
+                section_index, section_total, chapter_title,
+                section_title}
+      - {type: "deep_plan_section_done", n_concepts, target_words,
+                error?: str}
+      - {type: "deep_plan_complete", n_planned, n_failed}
+
+    Mutates ``chapters`` in place (each section becomes a dict).
+    Returns nothing — generator semantics.
+
+    Cost: ~1 retrieval (~0.2s) + 1 LLM_FAST_MODEL call (~3-5s) per
+    section. For an 8-chapter × 5-section outline that's ~3 minutes.
+    """
+    from sciknow.config import settings as _settings
+    from sciknow.rag import prompts as _prompts
+    from sciknow.rag.llm import complete as _llm_complete
+    from sciknow.retrieval import hybrid_search as _hs
+    from sciknow.storage.db import get_session
+    from sciknow.storage.qdrant import get_client
+    from sciknow.core.project_type import get_project_type
+
+    try:
+        qdrant = get_client()
+    except Exception as exc:
+        logger.warning("deep_plan_outline_chapters: qdrant unavailable: %s", exc)
+        yield {
+            "type": "deep_plan_complete",
+            "n_planned": 0, "n_failed": 0,
+            "skipped_reason": f"qdrant_unavailable: {exc}",
+        }
+        return
+
+    try:
+        pt = get_project_type(book_type)
+        concepts_range = pt.concepts_per_section_range
+        wpc_lo, wpc_hi = pt.words_per_concept_range
+    except Exception:
+        concepts_range = (3, 4)
+        wpc_lo, wpc_hi = (500, 800)
+    wpc_mid = (wpc_lo + wpc_hi) // 2
+
+    effective_model = (
+        model or _settings.llm_fast_model or _settings.llm_model
+    )
+
+    # Count work upfront so the GUI can show a progress denominator.
+    work_units: list[tuple[int, int]] = []  # (ch_idx, sec_idx)
+    for ci, ch in enumerate(chapters):
+        secs = list(ch.get("sections") or [])
+        for si in range(len(secs)):
+            work_units.append((ci, si))
+
+    yield {
+        "type": "deep_plan_start",
+        "n_chapters": len(chapters),
+        "n_sections_total": len(work_units),
+    }
+
+    n_planned = 0
+    n_failed = 0
+
+    with get_session() as session:
+        for ci, ch in enumerate(chapters):
+            secs = list(ch.get("sections") or [])
+            ch_title = (ch.get("title") or "").strip()
+            ch_desc = (ch.get("description") or "").strip()
+            ch_num = int(ch.get("number") or (ci + 1))
+            topic_query = (ch.get("topic_query") or ch_title).strip()
+
+            # Earlier chapters this LLM run is producing; helps the
+            # plan-LLM avoid duplicating coverage.
+            prior_chapters = [
+                {
+                    "number": chapters[j].get("number") or (j + 1),
+                    "title": chapters[j].get("title") or "",
+                    "description": chapters[j].get("description") or "",
+                }
+                for j in range(ci)
+            ]
+
+            new_secs: list = []
+            for si, sec in enumerate(secs):
+                if isinstance(sec, dict):
+                    section_title = (
+                        sec.get("title") or sec.get("slug") or "Section"
+                    ).strip()
+                    section_slug = (
+                        sec.get("slug") or _slugify_section_name(section_title)
+                    )
+                    existing_plan = (sec.get("plan") or "").strip()
+                else:
+                    section_title = str(sec).strip()
+                    section_slug = _slugify_section_name(section_title)
+                    existing_plan = ""
+
+                yield {
+                    "type": "deep_plan_section_start",
+                    "chapter_index": ci + 1,
+                    "chapter_total": len(chapters),
+                    "section_index": si + 1,
+                    "section_total": len(secs),
+                    "chapter_title": ch_title,
+                    "section_title": section_title,
+                }
+
+                if existing_plan:
+                    new_secs.append({
+                        "slug": section_slug,
+                        "title": section_title,
+                        "plan": existing_plan,
+                        "target_words": (
+                            sec.get("target_words")
+                            if isinstance(sec, dict) else None
+                        ),
+                    })
+                    n_planned += 1
+                    yield {
+                        "type": "deep_plan_section_done",
+                        "n_concepts": _count_plan_concepts(existing_plan),
+                        "target_words": (
+                            sec.get("target_words") if isinstance(sec, dict) else None
+                        ),
+                        "skipped_reason": "already_has_plan",
+                    }
+                    continue
+
+                # ---- 1. retrieval ----
+                evidence_strings: list[str] = []
+                try:
+                    retrieve_q = f"{topic_query} — {section_title}"
+                    candidates = _hs.search(
+                        retrieve_q, qdrant, session, candidate_k=24,
+                    )
+                    for c in candidates[:n_chunks]:
+                        txt = (
+                            getattr(c, "text", None)
+                            or getattr(c, "content", None)
+                            or ""
+                        )
+                        if txt:
+                            evidence_strings.append(
+                                txt.strip().replace("\n", " ")[:chunk_chars]
+                            )
+                except Exception as exc:
+                    logger.warning(
+                        "deep_plan: retrieval for %r/%r failed: %s",
+                        ch_title, section_title, exc,
+                    )
+
+                # ---- 2. LLM concept-list ----
+                sys_p, usr_p = _prompts.section_plan(
+                    book_title=book_title,
+                    book_type=book_type,
+                    chapter_number=ch_num,
+                    chapter_title=ch_title,
+                    chapter_description=ch_desc,
+                    section_title=section_title,
+                    section_slug=section_slug,
+                    concepts_range=concepts_range,
+                    book_plan=book_plan,
+                    evidence=evidence_strings,
+                    prior_chapters=prior_chapters,
+                )
+                new_plan = ""
+                err: str | None = None
+                try:
+                    raw = _llm_complete(
+                        sys_p, usr_p,
+                        model=effective_model,
+                        temperature=0.3,
+                        num_ctx=8192,  # bigger than baseline because of evidence
+                        num_predict=400,
+                        keep_alive=-1,
+                    )
+                    cleaned = re.sub(
+                        r"<think>.*?</think>\s*", "", raw, flags=re.DOTALL,
+                    ).strip()
+                    cleaned = re.sub(
+                        r"^```(?:\w+)?\s*|\s*```$", "", cleaned,
+                        flags=re.MULTILINE,
+                    ).strip()
+                    kept = []
+                    for ln in cleaned.splitlines():
+                        if re.match(
+                            r"^\s*(?:[-*•‣]|\d+\s*[.\)])\s+\S", ln,
+                        ):
+                            kept.append(ln.strip())
+                    new_plan = "\n".join(kept).strip()
+                except Exception as exc:  # noqa: BLE001
+                    err = f"{type(exc).__name__}: {exc}"
+                    logger.warning(
+                        "deep_plan: LLM call failed for %r/%r: %s",
+                        ch_title, section_title, exc,
+                    )
+
+                n_concepts = _count_plan_concepts(new_plan)
+                # Concept-density bottom-up sizing:
+                # target_words = N bullets × wpc_mid
+                tw = (
+                    int(n_concepts * wpc_mid)
+                    if n_concepts > 0 else None
+                )
+
+                if n_concepts == 0 or err:
+                    n_failed += 1
+                    new_secs.append({
+                        "slug": section_slug,
+                        "title": section_title,
+                        "plan": "",
+                        "target_words": None,
+                    })
+                    yield {
+                        "type": "deep_plan_section_done",
+                        "n_concepts": 0,
+                        "target_words": None,
+                        "error": err or "llm_returned_no_bullets",
+                    }
+                    continue
+
+                new_secs.append({
+                    "slug": section_slug,
+                    "title": section_title,
+                    "plan": new_plan,
+                    "target_words": tw,
+                })
+                n_planned += 1
+                yield {
+                    "type": "deep_plan_section_done",
+                    "n_concepts": n_concepts,
+                    "target_words": tw,
+                }
+
+            ch["sections"] = new_secs
+
+    yield {
+        "type": "deep_plan_complete",
+        "n_planned": n_planned,
+        "n_failed": n_failed,
+    }
+
+
 def _get_book(session, title_or_id: str):
     from sqlalchemy import text
     return session.execute(text("""

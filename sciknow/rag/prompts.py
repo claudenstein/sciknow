@@ -899,11 +899,11 @@ Do NOT include:
 
 SECTION_PLAN_USER = """\
 Book: {book_title} ({book_type})
-Chapter {chapter_number}: {chapter_title}
+{book_plan_block}{prior_chapter_block}Chapter {chapter_number}: {chapter_title}
 {chapter_description_line}
 Section: {section_title}
 {section_slug_line}
-
+{evidence_block}
 Produce the concept list for this section."""
 
 
@@ -929,9 +929,25 @@ def section_plan(
     section_title: str,
     section_slug: str,
     concepts_range: tuple[int, int] = (3, 4),
+    book_plan: str | None = None,
+    evidence: list[str] | None = None,
+    prior_chapters: list[dict] | None = None,
 ) -> tuple[str, str]:
-    """Phase 54.6.154 — build (system, user) prompts for section-plan
-    generation. See SECTION_PLAN_SYSTEM for the concept-list contract.
+    """Phase 54.6.154 / 54.6.x — build (system, user) prompts for
+    section-plan generation. See SECTION_PLAN_SYSTEM for the concept-list
+    contract.
+
+    New optional inputs (Phase 54.6.x — "deep" outline path):
+      book_plan: the leitmotiv from books.plan. When set, the prompt
+        carries "Book plan / leitmotiv (the editorial brief)" so the
+        section's bullets serve the global thesis.
+      evidence: a list of retrieved chunk strings (corpus excerpts).
+        When set, the prompt prepends a "Corpus evidence" block so the
+        LLM grounds bullets in what the corpus actually contains.
+        Caller is responsible for limiting + truncating chunks.
+      prior_chapters: optional list of {number, title, description}
+        dicts for chapters that come BEFORE this one. Used to keep
+        bullets from drifting into earlier chapters' territory.
     """
     lo, hi = concepts_range
     voice = _SECTION_PLAN_VOICE_HINTS.get(
@@ -947,6 +963,53 @@ def section_plan(
     slug_line = (
         f"(section slug: {section_slug})" if section_slug else ""
     )
+    plan_text = (book_plan or "").strip()
+    if plan_text:
+        book_plan_block = (
+            "Book plan / leitmotiv (the editorial brief — every concept "
+            "in this section must serve this thesis):\n"
+            f"{plan_text}\n\n"
+        )
+    else:
+        book_plan_block = ""
+
+    if prior_chapters:
+        lines = [
+            f"  Ch.{int(p.get('number') or 0)}: "
+            f"{(p.get('title') or '').strip()}"
+            + (f" — {(p.get('description') or '').strip()}"
+               if (p.get('description') or '').strip() else "")
+            for p in prior_chapters
+        ]
+        prior_chapter_block = (
+            "Earlier chapters in this book (do NOT duplicate their "
+            "concepts — each section here must cover NEW ground):\n"
+            + "\n".join(lines) + "\n\n"
+        )
+    else:
+        prior_chapter_block = ""
+
+    if evidence:
+        # Caller is expected to truncate; we cap to 8 entries here as a
+        # last-ditch guard so a runaway caller doesn't blow the context.
+        ev_lines = []
+        for i, ch in enumerate(evidence[:8], 1):
+            txt = (ch or "").strip().replace("\n", " ")
+            if not txt:
+                continue
+            ev_lines.append(f"[E{i}] {txt}")
+        if ev_lines:
+            evidence_block = (
+                "\nCorpus evidence retrieved for this section "
+                "(ground every bullet in what these passages SHOW, "
+                "not in generic domain knowledge):\n"
+                + "\n".join(ev_lines) + "\n"
+            )
+        else:
+            evidence_block = ""
+    else:
+        evidence_block = ""
+
     usr_p = SECTION_PLAN_USER.format(
         book_title=book_title,
         book_type=book_type,
@@ -955,6 +1018,9 @@ def section_plan(
         chapter_description_line=ch_desc_line,
         section_title=section_title,
         section_slug_line=slug_line,
+        book_plan_block=book_plan_block,
+        prior_chapter_block=prior_chapter_block,
+        evidence_block=evidence_block,
     )
     return sys_p, usr_p
 

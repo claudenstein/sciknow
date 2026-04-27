@@ -1361,9 +1361,55 @@ def outline(
     # reachable; offline invocations fall through silently.
     from sciknow.core.book_ops import resize_sections_by_density as _resize
     console.print("  [dim]Resizing sections by corpus evidence density…[/dim]")
-    # Phase 54.6.297 — _grow_sections_llm uses the same outline model
-    # override; pass it through so both steps agree.
     chapters = _resize(chapters, model=effective_model)
+
+    # Phase 54.6.x — DEEP outline post-pass. Mirror of the web flow:
+    # for every chapter × section, run hybrid retrieval, build a
+    # SECTION_PLAN prompt grounded in leitmotiv + evidence + earlier
+    # chapters, and attach the resulting bullet list + target_words
+    # to each section so it's saved as a full
+    # {slug, title, plan, target_words} dict.
+    from sciknow.core.book_ops import deep_plan_outline_chapters as _deep
+    book_type = (book[6] if len(book) > 6 else None) or "scientific_book"
+    book_plan_text = book[5] if len(book) > 5 else None
+    console.print(
+        "  [dim]Deep section planning "
+        "(per-section retrieval + leitmotiv-grounded concept lists)…[/dim]"
+    )
+    n_planned_total = 0
+    n_failed_total = 0
+    for evt in _deep(
+        chapters,
+        book_title=book[1],
+        book_type=book_type,
+        book_plan=book_plan_text,
+        model=effective_model,
+    ):
+        et = evt.get("type")
+        if et == "deep_plan_section_start":
+            console.print(
+                f"     [dim]Ch.{evt['chapter_index']}/{evt['chapter_total']} "
+                f"§{evt['section_index']}/{evt['section_total']} — "
+                f"{evt['section_title']}[/dim]"
+            )
+        elif et == "deep_plan_section_done":
+            if evt.get("error"):
+                n_failed_total += 1
+            else:
+                n_planned_total += 1
+        elif et == "deep_plan_complete":
+            n_planned_total = evt.get("n_planned", n_planned_total)
+            n_failed_total = evt.get("n_failed", n_failed_total)
+    console.print(
+        f"  [dim]Deep planning: "
+        f"{n_planned_total} section(s) planned, "
+        f"{n_failed_total} failed.[/dim]"
+    )
+
+    def _section_label(s) -> str:
+        if isinstance(s, dict):
+            return s.get("title") or s.get("slug") or "?"
+        return str(s)
 
     # Display
     console.print()
@@ -1376,7 +1422,10 @@ def outline(
         if ch.get("topic_query"):
             console.print(f"         [dim]Query: {ch['topic_query']}[/dim]")
         if ch.get("sections"):
-            console.print(f"         Sections: {' → '.join(ch['sections'])}")
+            console.print(
+                f"         Sections: "
+                f"{' → '.join(_section_label(s) for s in ch['sections'])}"
+            )
         di = ch.get("_density_info")
         if di:
             note = f"{di['n_papers']} papers → target {di['target']}"

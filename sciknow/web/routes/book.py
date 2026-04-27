@@ -387,12 +387,37 @@ async def api_book_outline_generate(
             from sciknow.core.book_ops import resize_sections_by_density as _resize
             yield {"type": "progress", "stage": "resizing",
                    "detail": "Resizing sections by corpus evidence density…"}
-            # Phase 54.6.297 — pass the outline-specific model into
-            # _grow_sections_llm so the resize step agrees with the
-            # generation step on model choice.
             chapters = _resize(chapters, model=effective_model)
         except Exception as exc:
             logger.warning("density resize failed: %s", exc)
+
+        # Phase 54.6.x — DEEP outline post-pass. For every chapter ×
+        # section, run hybrid retrieval and call SECTION_PLAN with the
+        # leitmotiv + retrieved evidence + earlier chapters to produce
+        # bullet-list concept plans. After this, sections are saved as
+        # full {slug, title, plan, target_words} dicts and are
+        # immediately ready for autowrite without a manual auto-plan
+        # pass. Failures per section degrade gracefully — the section
+        # is still inserted, just without a plan.
+        try:
+            from sciknow.core.book_ops import deep_plan_outline_chapters as _deep
+            yield {"type": "progress", "stage": "deep_planning",
+                   "detail": (
+                       "Deep section planning (per-section retrieval + "
+                       "leitmotiv-grounded concept lists)…"
+                   )}
+            for evt in _deep(
+                chapters,
+                book_title=book[1],
+                book_type=(book[3] if len(book) > 3 else None) or "scientific_book",
+                book_plan=plan_text,
+                model=effective_model,
+            ):
+                # Forward every event to the SSE stream so the GUI shows
+                # per-section progress.
+                yield evt
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("deep section planning failed: %s", exc)
 
         # Additive insert — skip numbers that already exist so the
         # user can re-run without destroying manual edits.

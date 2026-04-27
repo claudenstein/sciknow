@@ -13031,6 +13031,21 @@ async function runOutlineFromTab() {
       status.textContent = 'Drafting… ' + String(tokBuf.length) + ' chars';
     } else if (evt.type === 'progress') {
       status.textContent = evt.detail || evt.stage;
+    } else if (evt.type === 'deep_plan_start') {
+      window._outlineDeepN = evt.n_sections_total || 0;
+      window._outlineDeepDone = 0; window._outlineDeepFailed = 0;
+      status.textContent = 'Deep planning ' + window._outlineDeepN + ' section(s)…';
+    } else if (evt.type === 'deep_plan_section_start') {
+      status.textContent = 'Deep planning Ch.' + evt.chapter_index
+        + '/' + evt.chapter_total + ' §' + evt.section_index
+        + '/' + evt.section_total + ': ' + (evt.section_title || '');
+    } else if (evt.type === 'deep_plan_section_done') {
+      window._outlineDeepDone = (window._outlineDeepDone || 0) + 1;
+      if (evt.error) window._outlineDeepFailed = (window._outlineDeepFailed || 0) + 1;
+    } else if (evt.type === 'deep_plan_complete') {
+      const _planned = evt.n_planned != null ? evt.n_planned : ((window._outlineDeepDone || 0) - (window._outlineDeepFailed || 0));
+      const _failed = evt.n_failed != null ? evt.n_failed : (window._outlineDeepFailed || 0);
+      status.textContent = 'Deep planning done — ' + _planned + ' section(s) planned, ' + _failed + ' failed.';
     } else if (evt.type === 'completed') {
       source.close(); _outlineSource = null;
       status.innerHTML = '<span class="u-success">\u2713 Outline generated — <strong>'
@@ -13177,6 +13192,14 @@ async function autoPlanChapters() {
       if (status) status.textContent = 'Drafting… ' + tokBuf.length + ' chars';
     } else if (evt.type === 'progress') {
       if (status) status.textContent = evt.detail || evt.stage;
+    } else if (evt.type === 'deep_plan_section_start') {
+      if (status) status.textContent = 'Deep planning Ch.' + evt.chapter_index
+        + '/' + evt.chapter_total + ' §' + evt.section_index
+        + '/' + evt.section_total + ': ' + (evt.section_title || '');
+    } else if (evt.type === 'deep_plan_complete') {
+      if (status) status.textContent = 'Deep planning done — '
+        + (evt.n_planned || 0) + ' section(s) planned, '
+        + (evt.n_failed || 0) + ' failed.';
     } else if (evt.type === 'completed') {
       source.close(); _autoplanChaptersSource = null;
       if (status) {
