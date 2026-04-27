@@ -444,7 +444,16 @@ function startStream(jobId) {
       // Phase 15.5 — model name now shown only in the stats footer (which
       // already pulls it via setModel below). The previous in-body line
       // duplicated the same info redundantly.
+      // Phase 55.S1 — surface the cross-family scorer when configured
+      // so users know writer vs scorer is split. One-time info note,
+      // matching the autowrite-modal renderer below.
       stats.setModel(evt.writer_model || 'qwen3.5:27b');
+      if (evt.scorer_model) {
+        body.innerHTML += '<div class="u-muted u-tiny u-mt-1">'
+          + '⚖︎ writer: ' + _escHTML(evt.writer_model || '?')
+          + ' · scorer: ' + _escHTML(evt.scorer_model)
+          + ' (cross-family)</div>';
+      }
     }
     else if (evt.type === 'checkpoint') {
       // Phase 15.1 — incremental save reached. Briefly note in the body.
@@ -5306,7 +5315,18 @@ async function confirmAutowrite() {
       // Phase 15.5 — model name shown only in the stats footer; the
       // previous awLog line duplicated information that's already in
       // the live stats pill above the dashboard.
+      // Phase 55.S1 — when a cross-family scorer is configured, the
+      // model label switches as the engine transitions between phases.
+      // The stats pill follows the writer for the writing phase by
+      // default; we surface the scorer name in the awLog as a one-time
+      // info line so the user knows what's running where.
       stats.setModel(evt.writer_model || 'qwen3.5:27b');
+      if (evt.scorer_model) {
+        awLog.innerHTML += '<div class="u-muted u-tiny u-mt-1">'
+          + '⚖︎ writer: ' + _escHTML(evt.writer_model || '?')
+          + ' · scorer: ' + _escHTML(evt.scorer_model)
+          + ' (cross-family — score / verify / CoVe / rescore)</div>';
+      }
     }
     else if (evt.type === 'checkpoint') {
       // Phase 15.1 — incremental save checkpoint reached. Show a brief
@@ -8289,16 +8309,35 @@ function renderMonitor(snap) {
       ['infer_writer', 'Writer'],
       ['infer_embedder', 'Embedder'],
       ['infer_reranker', 'Reranker'],
+      // Phase 55.S1 — scorer pill only appears when the role is
+      // configured (use_llamacpp_scorer + SCORER_MODEL_GGUF), so
+      // `services.infer_scorer` is the truth signal. Same pattern
+      // as ollama (only shown on v1 fallback).
+      ['infer_scorer', 'Scorer'],
       ['ollama', 'Ollama'],
     ];
+    // Phase 55.V1 — when ANY big-model role is up, peer infer_*
+    // roles being down isn't a service failure — it's an expected
+    // mid-swap state. Render them as a dim hourglass instead of a
+    // red ✗ so the operator's eye doesn't pattern-match "broken".
+    const bigRolesUp = ['infer_writer', 'infer_scorer', 'infer_vlm']
+      .some(r => services[r] && services[r].up);
     const svcBits = [];
     for (const [key, label] of svcOrder) {
       const info = services[key];
       if (!info) continue;
-      const c = info.up ? '#080' : '#c33';
+      // A peer role is "swapped out" iff the role is down AND some
+      // big-model role is currently up. Matches the alert-demotion
+      // logic in core/monitor.py:_build_alerts.
+      const swappedOut = !info.up && bigRolesUp && key.startsWith('infer_');
+      const c = info.up ? '#080' : (swappedOut ? '#888' : '#c33');
+      const icon = info.up ? '●' : (swappedOut ? '⏸' : '✗');
       const lat = info.latency_ms !== undefined ? info.latency_ms + 'ms' : '?';
-      svcBits.push('<span style="color:' + c + ';" title="' + _escHTML(info.error || '')
-        + '">' + (info.up ? '●' : '✗') + ' <strong>' + label + '</strong> '
+      const tip = swappedOut
+        ? 'swapped out — auto-swap will restore on demand'
+        : (info.error || '');
+      svcBits.push('<span style="color:' + c + ';" title="' + _escHTML(tip)
+        + '">' + icon + ' <strong>' + label + '</strong> '
         + _escHTML(lat) + '</span>');
     }
     if (svcBits.length) {

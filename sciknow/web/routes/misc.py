@@ -964,10 +964,12 @@ async def api_server_shutdown(request: Request):
     UX — any unsaved job is killed).
 
     Phase 54.6.x — body field ``stop_substrate=true`` also stops every
-    running llama-server role (writer / embedder / reranker / vlm) so
-    the user gets a fully-quiesced machine in one click. Best-effort:
-    a substrate-down failure is logged but does NOT prevent the server
-    shutdown — the whole point is "stop everything cleanly".
+    running llama-server role (writer / embedder / reranker / vlm /
+    scorer) so the user gets a fully-quiesced machine in one click.
+    Best-effort: a substrate-down failure is logged but does NOT
+    prevent the server shutdown — the whole point is "stop everything
+    cleanly". Phase 55.S1 — scorer added so the cross-family Gemma
+    instance doesn't linger pinning ~18 GB.
     """
     import os as _os
     import signal as _signal
@@ -984,7 +986,7 @@ async def api_server_shutdown(request: Request):
         from sciknow.web import app as _app
         try:
             from sciknow.infer import server as _infer_srv
-            for r in ("writer", "embedder", "reranker", "vlm"):
+            for r in ("writer", "embedder", "reranker", "vlm", "scorer"):
                 try:
                     if _infer_srv.down(r, timeout=3.0):
                         stopped_roles.append(r)

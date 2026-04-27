@@ -2704,7 +2704,8 @@ def _build_alerts(snap: dict) -> list[dict]:
         else:
             severity = "error" if is_critical else "warn"
             msg_prefix = f"{name} unreachable"
-        err_snippet = (info.get("error") or "").splitlines()[0][:80]
+        err_lines = (info.get("error") or "").splitlines()
+        err_snippet = (err_lines[0][:80] if err_lines else "")
         alerts.append({
             "severity": severity,
             "code": "service_down",
@@ -3292,15 +3293,28 @@ def _infer_substrate_snapshot() -> list[dict]:
             or getattr(_s, "use_llamacpp_embedder", True)
             or getattr(_s, "use_llamacpp_reranker", True)
             or getattr(_s, "use_llamacpp_vlm", True)
+            # Phase 55.S1 — scorer counted only when both the toggle
+            # and the GGUF are set (otherwise the role can't be
+            # started; surfacing it would just clutter the panel).
+            or (
+                getattr(_s, "use_llamacpp_scorer", False)
+                and bool(getattr(_s, "scorer_model_gguf", ""))
+            )
         )
         if not on:
             return []
         from sciknow.infer.server import status as _status
         rows = _status()
-        # The vlm role hot-swaps with the writer (`corpus caption-visuals`
-        # toggles it for the duration of a captioning batch and stops it
-        # after). Surface it only when actually running so the dashboard
-        # doesn't flag it as ✗ down at all times — that's expected.
+        # Phase 55.V1 — surface vlm + scorer only when actually
+        # running. Both are on-demand / opt-in (vlm hot-swaps with
+        # writer during caption-visuals; scorer is the cross-family
+        # autowrite scorer). Always-showing them as ✗ down clutters
+        # the panel since they spend most of their time evicted by
+        # design.
+        scorer_configured = (
+            getattr(_s, "use_llamacpp_scorer", False)
+            and bool(getattr(_s, "scorer_model_gguf", ""))
+        )
         return [
             {
                 "role": p.role,
@@ -3310,7 +3324,9 @@ def _infer_substrate_snapshot() -> list[dict]:
                 "healthy": bool(p.healthy),
             }
             for p in rows
-            if p.role != "vlm" or p.pid is not None
+            if (p.role not in ("vlm", "scorer")
+                or p.pid is not None
+                or (p.role == "scorer" and scorer_configured))
         ]
     except Exception as exc:
         logger.debug("infer_substrate snapshot failed: %s", exc)

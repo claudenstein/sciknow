@@ -374,7 +374,7 @@
         <!-- Phase 54.6.x — clean exit from the GUI so the user doesn't
              have to Ctrl+C the terminal. Confirmation dialog lets them
              decide whether to also stop the llama-server substrate. -->
-        <button role="menuitem" onclick="openShutdownModal()" title="Phase 54.6.x — stop the sciknow web server cleanly (and optionally the llama-server writer/embedder/reranker too). Your terminal returns to $; any in-flight LLM job is killed. Re-run `sciknow book serve` to start again."><svg class="icon"><use href="#i-x"/></svg> Close server / exit session</button>
+        <button role="menuitem" onclick="openShutdownModal()" title="Phase 54.6.x — stop the sciknow web server cleanly (and optionally the llama-server writer / embedder / reranker / vlm / scorer too). Your terminal returns to $; any in-flight LLM job is killed. Re-run `sciknow book serve` to start again."><svg class="icon"><use href="#i-x"/></svg> Close server / exit session</button>
       </div>
     </div>
     <div class="nav-dropdown" id="explore-dropdown">
@@ -1166,7 +1166,7 @@
           <input type="checkbox" id="shutdown-stop-substrate" style="margin-top:3px;flex-shrink:0;">
           <span>
             <strong>Also stop the llama-server substrate</strong>
-            (writer / embedder / reranker / vlm).
+            (writer / embedder / reranker / vlm / scorer).
             <br>
             <span class="u-tiny u-muted">
               Frees ~20+ GiB of VRAM. The substrate restarts automatically the next time

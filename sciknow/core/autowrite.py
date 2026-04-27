@@ -372,10 +372,36 @@ def _autowrite_section_body(
         model = settings.book_write_model
     resolved_model = model or settings.llm_model
 
-    yield {"type": "model_info", "writer_model": resolved_model,
-           "fast_model": settings.llm_fast_model,
-           "writer_role": "writing/scoring/verification/CoVe (flagship)",
-           "fast_role": "step-back retrieval (utility)"}
+    # Phase 55.S1 — when the cross-family scorer is configured, score
+    # / verify / CoVe / rescore route through it, not the writer. The
+    # GUI's model_info renderer uses these fields to label the active
+    # roles correctly so users don't see "scoring on writer" when a
+    # gemma scorer is doing the work.
+    _scorer_configured = (
+        getattr(settings, "use_llamacpp_scorer", False)
+        and bool(getattr(settings, "scorer_model_gguf", ""))
+    )
+    _scorer_model_label = (
+        getattr(settings, "scorer_model_name", "scorer")
+        if _scorer_configured else None
+    )
+
+    yield {
+        "type": "model_info",
+        "writer_model": resolved_model,
+        "fast_model": settings.llm_fast_model,
+        "scorer_model": _scorer_model_label,
+        "writer_role": (
+            "writing / revising"
+            if _scorer_configured
+            else "writing / scoring / verification / CoVe (flagship)"
+        ),
+        "scorer_role": (
+            "scoring / verification / CoVe (cross-family)"
+            if _scorer_configured else None
+        ),
+        "fast_role": "step-back retrieval (utility)",
+    }
     yield {"type": "length_target", "target_words": effective_target_words}
     yield {"type": "progress", "stage": "setup",
            "detail": (
