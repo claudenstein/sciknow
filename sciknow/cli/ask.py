@@ -69,6 +69,12 @@ def _retrieve(
 
 def _stream_answer(system: str, user: str, model: str | None) -> None:
     from sciknow.rag.llm import stream as llm_stream
+    # Phase 55.V3 — every `ask` flow does retrieve→generate. Retrieval
+    # already swapped to retrieve phase via `_retrieve` in book_ops;
+    # swap to generate now so the writer claims the full GPU before
+    # streaming the answer.
+    from sciknow.core.book_ops import _swap_to_phase
+    _swap_to_phase("generate")
 
     for token in llm_stream(system, user, model=model):
         console.print(token, end="", highlight=False)

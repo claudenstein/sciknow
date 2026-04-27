@@ -479,7 +479,7 @@ Spec:
   per section (not per iteration today), so the per-section overhead
   is ~16 s — acceptable.
 
-### Phase 55.V2 — Router-mode migration **[deferred]**
+### Phase 55.V2 — Router-mode migration **[deferred — prototype green]**
 
 llama.cpp shipped a native router mode (build ≥ b6620, present in our
 build at `llama.cpp-build/.../bin/llama-server`). With
@@ -489,19 +489,48 @@ when N is reached, and the OpenAI `model` field selects the target.
 This collapses the five ports → one port and replaces our
 `_VRAM_CONFLICTS` machinery with the router's eviction policy.
 
-Migration path (out of scope for this loop):
+**Prototype validation (2026-04-27).** Wrote
+`scripts/llama-server-router.ini` mapping our five roles
+(writer/embedder/reranker/scorer/vlm) into a single preset file and
+booted the router with `--no-models-autoload --models-max 0`. Result:
 
-- Configure a single router on `:8090` with a `presets.ini` mapping
-  the five roles to the five GGUFs (per-model `ctx-size`, `--lora`,
-  `--mmproj` for the vlm).
+- `GET /models` correctly enumerated all five custom presets plus
+  the cached HF aliases. Each entry exposed `id`, `status` (`unloaded`),
+  `preset` (raw INI block), and the resolved `args` array showing
+  the per-model llama-server flags the router would invoke on demand.
+- Preset keys we already use translated cleanly to llama-server flags:
+  `ctx-size`, `flash-attn`, `cont-batching`, `embedding`/`embeddings`,
+  `pooling`, `batch-size`, `ubatch-size`, `reranking`, `mmproj`. The
+  router auto-normalised `embedding = true` → `--embeddings`.
+- No startup errors; router log printed `Available models (7)` and
+  marked our five as `*` (custom presets).
+
+Not yet validated (require live load — conflicts with the autowrite
+soak that was running concurrently):
+1. `/v1/chat/completions` with `model: "writer"` actually loads + serves.
+2. `/embeddings` with `model: "embedder"` works in router mode.
+3. `/rerank` with `model: "reranker"` works in router mode.
+4. Concurrent calls (writer + scorer in autowrite) — does the router
+   queue or LRU-evict? With `--models-max 1` it must serialise; with
+   `--models-max 2` and a 24 GB GPU the second model load will OOM.
+
+Migration path (out of scope for this loop, gated on the four checks
+above):
+
+- Configure a single router on `:8090` with the existing
+  `scripts/llama-server-router.ini`, `--models-max 1` on the 3090
+  (since two big models can't co-reside).
 - Replace `_resolve_url(role)` in `infer/server.py` with a single base
   URL + a `model_for(role)` map; the request's OpenAI `model` field
   carries the routing decision.
 - Decide whether to keep our `infer up --role <r>` UX (probably yes —
   it just becomes `POST /models/load` against the router) or expose
   router state directly.
-- Validate that router mode supports per-model `--ctx-size`, the
-  embedding endpoint (`/embedding`), and reranking (`/rerank`).
+- Migrate `_VRAM_CONFLICTS` + `activate_phase` to no-ops when the
+  toggle is on (the router handles eviction natively).
+- Audit `pause_for_ingest` and `caption-visuals` hot-swap helpers —
+  they may need to translate to router `/models/load` + `/unload`
+  calls.
 
 Rejected alternative: **llama-swap** ([github.com/mostlygeek/llama-swap](https://github.com/mostlygeek/llama-swap))
 is the mature third-party proxy with a richer DSL (groups, evict_costs,
