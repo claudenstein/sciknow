@@ -1,0 +1,15 @@
+% Template-specific preamble for kaobook.
+
+% kaobook ships its own kao.sty / kaorefs.sty / kaobiblio.sty / kaotheorems.sty
+% which are loaded automatically by kaobook.cls.
+
+% A few small overrides for sciknow content:
+\setcounter{secnumdepth}{2}    % section + subsection numbered
+\setcounter{tocdepth}{2}
+
+% Margin notes are kaobook's signature feature; keep them readable.
+\setlength{\marginparwidth}{4cm}
+\renewcommand*{\marginfont}{\footnotesize}
+
+% Allow line breaks in long URLs.
+\PassOptionsToPackage{hyphens}{url}

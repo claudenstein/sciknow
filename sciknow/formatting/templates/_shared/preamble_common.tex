@@ -1,0 +1,62 @@
+% Shared preamble fragments included by every template.
+% This file is dropped into the compile dir as-is; templates \input it.
+
+% ── Core packages ────────────────────────────────────────────────────
+\usepackage[utf8]{inputenc}      % no-op under lualatex/xelatex but harmless
+\usepackage[T1]{fontenc}
+\usepackage{microtype}
+% xcolor with dvipsnames so classicthesis (and any user-side template
+% that picks named colours like "Maroon" or "RoyalBlue") can resolve them.
+\usepackage[dvipsnames]{xcolor}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{amsmath, amssymb, amsfonts}
+\usepackage{booktabs}            % \toprule, \midrule, \bottomrule
+\usepackage{longtable}           % pandoc-converted tables sometimes use this
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{listings}            % code blocks (no shell-escape needed)
+\usepackage{csquotes}
+\usepackage{textcomp}            % extra symbols (e.g. \textcelsius)
+
+% ── Hyperref colours ────────────────────────────────────────────────
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  urlcolor=blue!60!black,
+  citecolor=blue!60!black,
+  bookmarksopen=true,
+  pdfborder={0 0 0},
+}
+
+% ── listings style for code blocks ──────────────────────────────────
+\definecolor{sciknowcode}{RGB}{40,40,40}
+\definecolor{sciknowcomment}{RGB}{120,120,120}
+\definecolor{sciknowstring}{RGB}{0,120,0}
+\definecolor{sciknowkeyword}{RGB}{0,0,180}
+\definecolor{sciknowbg}{RGB}{248,248,248}
+\lstset{
+  basicstyle=\ttfamily\small,
+  commentstyle=\color{sciknowcomment}\itshape,
+  stringstyle=\color{sciknowstring},
+  keywordstyle=\color{sciknowkeyword}\bfseries,
+  backgroundcolor=\color{sciknowbg},
+  frame=single,
+  framerule=0pt,
+  rulecolor=\color{sciknowbg},
+  xleftmargin=0.5em,
+  xrightmargin=0.5em,
+  aboveskip=0.8em,
+  belowskip=0.8em,
+  breaklines=true,
+  breakatwhitespace=true,
+  showstringspaces=false,
+  columns=fullflexible,
+  tabsize=2,
+  upquote=true,
+}
+
+% ── Sane defaults for figures and tables ────────────────────────────
+\setlength{\abovecaptionskip}{6pt}
+\setlength{\belowcaptionskip}{0pt}

@@ -1,0 +1,61 @@
+((# REVTeX 4.2 — APS/AIP physics journal layout. #))
+\documentclass[
+  ((( options.font_size_pt )))pt,
+  ((( options.paper ))),
+  ((* if options.two_column *))twocolumn((* else *))onecolumn((* endif *)),
+  amsmath, amssymb,
+  prl,
+]{revtex4-2}
+
+\input{preamble_common.tex}
+\input{preamble.tex}
+
+((( font_package | safe )))
+
+\bibliographystyle{apsrev4-2}
+
+\begin{document}
+
+\title{((( front.title | tex_escape )))((* if front.subtitle *)): ((( front.subtitle | tex_escape )))((* endif *))}
+
+((* for author in front.authors *))
+\author{((( author | tex_escape )))}
+((* endfor *))
+
+((* if front.affiliations *))
+((* for aff in front.affiliations *))
+\affiliation{((( aff | tex_escape )))}
+((* endfor *))
+((* endif *))
+
+((* if abstract_section *))
+\begin{abstract}
+((( abstract_section.blocks | blocks_to_latex(0) )))
+\end{abstract}
+((* elif front.abstract *))
+\begin{abstract}
+((( front.abstract | tex_escape )))
+\end{abstract}
+((* endif *))
+
+\maketitle
+
+((* if is_flat *))
+((* for s in body_sections *))
+((( s | section_to_latex )))
+((* endfor *))
+((* else *))
+((* for ch in chapters *))
+\section{((( ch.title | tex_escape )))}
+((* for s in ch.sections *))
+\subsection{((( s.title | tex_escape )))}
+((( s.blocks | blocks_to_latex(1) )))
+((* endfor *))
+((* endfor *))
+((* endif *))
+
+((* if bib_entries *))
+\bibliography{refs}
+((* endif *))
+
+\end{document}

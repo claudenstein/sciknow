@@ -1,0 +1,48 @@
+((# Plain memoir — the safe-default book class with sane typography. #))
+\documentclass[((( options.font_size_pt )))pt, ((( options.paper )))]{memoir}
+
+((( font_package | safe )))
+
+\input{preamble_common.tex}
+\input{preamble.tex}
+
+\usepackage[backend=biber,style=((( bib_style )))]{biblatex}
+\addbibresource{refs.bib}
+
+\title{((( front.title | tex_escape )))((* if front.subtitle *)): ((( front.subtitle | tex_escape )))((* endif *))}
+\author{((( front.authors | join(', ') | tex_escape )))}
+\date{((* if front.date *))((( front.date | tex_escape )))((* else *))\today((* endif *))}
+
+\begin{document}
+\frontmatter
+\maketitle
+((* if front.dedication *))
+\cleardoublepage\thispagestyle{empty}\vspace*{0.3\textheight}
+\begin{center}\itshape ((( front.dedication | tex_escape ))) \end{center}\vfill
+((* endif *))
+((* if options.table_of_contents *))
+\tableofcontents
+((* endif *))
+\mainmatter
+
+((* if is_flat *))
+((* if chapters and chapters[0].sections *))
+\chapter{((( chapters[0].title | tex_escape )))}
+((* for s in chapters[0].sections if (s.section_type or '').lower() != 'abstract' *))
+((( s | section_to_latex )))
+((* endfor *))
+((* endif *))
+((* else *))
+((* for ch in chapters *))
+((( ch | chapter_to_latex )))
+((* endfor *))
+((* endif *))
+
+\backmatter
+((* if front.acknowledgements *))
+\chapter*{Acknowledgements}((( front.acknowledgements | tex_escape )))
+((* endif *))
+((* if bib_entries *))
+\printbibliography[heading=bibintoc]
+((* endif *))
+\end{document}

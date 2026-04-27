@@ -1,0 +1,112 @@
+((# kaobook template — modern monograph with side-margin notes.
+    Vendored under templates/kaobook/. Engine: lualatex. #))
+\documentclass[
+  ((( options.paper ))),
+  fontsize=((( options.font_size_pt )))pt,
+  twoside=true,
+  cleardoublepage=plain,
+  numbers=noenddot,
+  open=right,
+  parskip=half,
+  headings=optiontoheadandtoc,
+]{kaobook}
+
+((( font_package | safe )))
+
+\input{preamble_common.tex}
+\input{preamble.tex}
+
+\usepackage[english]{babel}
+\usepackage[backend=biber,style=((( bib_style ))),citestyle=((( bib_style )))]{biblatex}
+\addbibresource{refs.bib}
+
+\title{((( front.title | tex_escape )))((* if front.subtitle *)): ((( front.subtitle | tex_escape )))((* endif *))}
+\subtitle{((* if front.subtitle *))((( front.subtitle | tex_escape )))((* endif *))}
+\author{((( front.authors | join(', ') | tex_escape )))}
+\date{((* if front.date *))((( front.date | tex_escape )))((* else *))\today((* endif *))}
+
+\begin{document}
+
+\frontmatter
+
+((* if options.cover_page *))
+\begin{titlepage}
+  \centering
+  \vspace*{2cm}
+  {\Huge\bfseries ((( front.title | tex_escape )))\par}
+  ((* if front.subtitle *))
+  \vspace{0.5cm}
+  {\Large ((( front.subtitle | tex_escape ))) \par}
+  ((* endif *))
+  \vfill
+  {\large ((( front.authors | join(', ') | tex_escape )))\par}
+  ((* if front.affiliations *))
+  \vspace{0.3cm}
+  {\itshape ((( front.affiliations | join('; ') | tex_escape ))) \par}
+  ((* endif *))
+  \vspace{1.5cm}
+  ((* if front.date *))((( front.date | tex_escape ))) ((* else *))\today((* endif *))
+\end{titlepage}
+((* else *))
+\maketitle
+((* endif *))
+
+((* if front.dedication *))
+\cleardoublepage
+\thispagestyle{empty}
+\vspace*{0.3\textheight}
+\begin{center}
+  \itshape ((( front.dedication | tex_escape )))
+\end{center}
+\vfill
+((* endif *))
+
+((* if front.abstract or abstract_section *))
+\cleardoublepage
+\chapter*{Abstract}
+((* if abstract_section *))
+((( abstract_section.blocks | blocks_to_latex(0) )))
+((* else *))
+((( front.abstract | tex_escape )))
+((* endif *))
+((* endif *))
+
+((* if options.table_of_contents *))
+\tableofcontents
+((* endif *))
+((* if options.list_of_figures *))
+\listoffigures
+((* endif *))
+((* if options.list_of_tables *))
+\listoftables
+((* endif *))
+
+\mainmatter
+
+((* if is_flat *))
+((# Paper-style content inside a book template: one chapter, sections inside. #))
+((* if chapters and chapters[0].sections *))
+\chapter{((( chapters[0].title | tex_escape )))}
+((* for s in chapters[0].sections if (s.section_type or '').lower() != 'abstract' *))
+((( s | section_to_latex )))
+((* endfor *))
+((* endif *))
+((* else *))
+((# Book layout: one \chapter per Chapter, \section per Section. #))
+((* for ch in chapters *))
+((( ch | chapter_to_latex )))
+((* endfor *))
+((* endif *))
+
+\backmatter
+
+((* if front.acknowledgements *))
+\chapter*{Acknowledgements}
+((( front.acknowledgements | tex_escape )))
+((* endif *))
+
+((* if bib_entries *))
+\printbibliography[heading=bibintoc]
+((* endif *))
+
+\end{document}

@@ -1,0 +1,85 @@
+((# Memoir-narrative — popular-science book layout.
+    Veelo chapter style + drop caps + accent colour. Engine: lualatex. #))
+\documentclass[((( options.font_size_pt )))pt, ((( options.paper )))]{memoir}
+
+((( font_package | safe )))
+
+\input{preamble_common.tex}
+\input{preamble.tex}
+
+\usepackage[backend=biber,style=((( bib_style )))]{biblatex}
+\addbibresource{refs.bib}
+
+\title{((( front.title | tex_escape )))((* if front.subtitle *)): ((( front.subtitle | tex_escape )))((* endif *))}
+\author{((( front.authors | join(', ') | tex_escape )))}
+\date{((* if front.date *))((( front.date | tex_escape )))((* else *))\today((* endif *))}
+
+\begin{document}
+\frontmatter
+
+((* if options.cover_page *))
+\thispagestyle{empty}
+\begin{center}
+  \vspace*{3cm}
+  {\color{NarrativeAccent}\rule{8cm}{1pt}}\par
+  \vspace{1cm}
+  {\Huge\bfseries\sffamily ((( front.title | tex_escape )))\par}
+  ((* if front.subtitle *))
+  \vspace{0.6cm}
+  {\Large\itshape ((( front.subtitle | tex_escape )))\par}
+  ((* endif *))
+  \vspace{0.8cm}
+  {\color{NarrativeAccent}\rule{8cm}{1pt}}\par
+  \vfill
+  {\Large ((( front.authors | join(' \\ ') | tex_escape ))) \par}
+  \vspace{1cm}
+  ((* if front.date *))((( front.date | tex_escape ))) ((* else *))\today((* endif *))
+\end{center}
+\cleardoublepage
+((* else *))
+\maketitle
+((* endif *))
+
+((* if front.dedication *))
+\thispagestyle{empty}
+\vspace*{0.3\textheight}
+\begin{center}\itshape ((( front.dedication | tex_escape ))) \end{center}
+\vfill
+\cleardoublepage
+((* endif *))
+
+((* if options.table_of_contents *))
+\tableofcontents
+((* endif *))
+
+\mainmatter
+
+((# Lettrine drop cap on the first paragraph of each chapter.
+    The IR currently doesn't mark chapter openings, so we use memoir's
+    \chapterprecistoc to ensure the description renders cleanly. #))
+
+((* if is_flat *))
+((* if chapters and chapters[0].sections *))
+\chapter{((( chapters[0].title | tex_escape )))}
+((* for s in chapters[0].sections if (s.section_type or '').lower() != 'abstract' *))
+((( s | section_to_latex )))
+((* endfor *))
+((* endif *))
+((* else *))
+((* for ch in chapters *))
+((( ch | chapter_to_latex )))
+((* endfor *))
+((* endif *))
+
+\backmatter
+
+((* if front.acknowledgements *))
+\chapter*{Acknowledgements}
+((( front.acknowledgements | tex_escape )))
+((* endif *))
+
+((* if bib_entries *))
+\printbibliography[heading=bibintoc]
+((* endif *))
+
+\end{document}

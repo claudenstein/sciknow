@@ -3954,38 +3954,156 @@
   </div>
 </div>
 
-<!-- Phase 30 — Export Modal -->
+<!-- Phase 30 / Phase 55 (LaTeX export) — Export Modal -->
 <div class="modal-overlay" id="export-modal" onclick="if(event.target===this)closeModal('export-modal')">
-  <div class="modal">
+  <div class="modal" style="max-width: 920px;">
     <div class="modal-header">
       <h3><svg class="icon icon--lg"><use href="#i-download"/></svg> Export</h3>
       <button class="modal-close" onclick="closeModal('export-modal')" title="Close the Export modal.">&times;</button>
     </div>
     <div class="modal-body">
-      <p class="u-small u-muted u-mb-14">
-        <strong>PDF</strong> is rendered server-side via weasyprint &mdash; ready for
-        printing or sharing. <strong>HTML</strong> is the same content with print-friendly
-        CSS, useful as a fallback or for editing in another tool.
-        <strong>Markdown</strong> preserves all formatting and citations.
-        <strong>Text</strong> is plain prose with the markdown stripped.
-      </p>
-      <div class="export-grid">
-        <div>
-          <h4>This section</h4>
-          <p class="export-target" id="export-section-name">(no draft selected)</p>
-          <div class="export-btns" id="export-section-btns"></div>
+
+      <!-- ── Quick-export grid (Phase 30 — markdown / HTML / weasyprint PDF) ── -->
+      <details open>
+        <summary style="cursor:pointer;font-weight:600;margin-bottom:8px;">Quick export (one click)</summary>
+        <p class="u-small u-muted u-mb-14">
+          <strong>PDF</strong> here is HTML→PDF via weasyprint &mdash; fast and good enough for
+          printing or sharing. For the polished, journal-grade LaTeX path see the next panel.
+          <strong>Markdown</strong> preserves all formatting and citations.
+          <strong>Text</strong> is plain prose with the markdown stripped.
+        </p>
+        <div class="export-grid">
+          <div>
+            <h4>This section</h4>
+            <p class="export-target" id="export-section-name">(no draft selected)</p>
+            <div class="export-btns" id="export-section-btns"></div>
+          </div>
+          <div>
+            <h4>This chapter</h4>
+            <p class="export-target" id="export-chapter-name">(no chapter selected)</p>
+            <div class="export-btns" id="export-chapter-btns"></div>
+          </div>
+          <div>
+            <h4>Whole book</h4>
+            <p class="export-target" id="export-book-name">&nbsp;</p>
+            <div class="export-btns" id="export-book-btns"></div>
+          </div>
         </div>
-        <div>
-          <h4>This chapter</h4>
-          <p class="export-target" id="export-chapter-name">(no chapter selected)</p>
-          <div class="export-btns" id="export-chapter-btns"></div>
+      </details>
+
+      <!-- ── Pro PDF (Phase 55 — LaTeX → latexmk → PDF) ────────────────────── -->
+      <details open style="margin-top:18px;border-top:1px solid var(--border, #2a2a2a);padding-top:14px;">
+        <summary style="cursor:pointer;font-weight:600;margin-bottom:8px;">
+          Professional PDF (LaTeX)
+        </summary>
+        <p class="u-small u-muted u-mb-14">
+          Compiles your book through a real LaTeX template
+          (kaobook / classicthesis / elsarticle / &hellip;) to a journal-grade PDF.
+          Takes 10&ndash;60s depending on book length. Outputs go to your downloads.
+        </p>
+
+        <div class="pro-export-grid"
+             style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px 18px;">
+          <label>Template
+            <select id="pro-export-template" style="width:100%;"
+                    title="LaTeX template package. Default depends on the book's project type.">
+              <option value="">(auto)</option>
+            </select>
+          </label>
+          <label>Font family
+            <select id="pro-export-font" style="width:100%;"
+                    title="Type family. Latin Modern is the safe default.">
+            </select>
+          </label>
+          <label>Font size
+            <select id="pro-export-fontsize" style="width:100%;"
+                    title="Body font size in points.">
+              <option value="10">10 pt</option>
+              <option value="11" selected>11 pt</option>
+              <option value="12">12 pt</option>
+            </select>
+          </label>
+          <label>Paper
+            <select id="pro-export-paper" style="width:100%;"
+                    title="Page size for the printed output.">
+              <option value="a4paper" selected>A4</option>
+              <option value="letterpaper">US Letter</option>
+            </select>
+          </label>
+          <label>Bibliography style
+            <select id="pro-export-bibstyle" style="width:100%;"
+                    title="Citation/bibliography style. Numeric is the universal default.">
+            </select>
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;margin-top:18px;">
+            <input type="checkbox" id="pro-export-twocolumn" />
+            Two-column (papers only)
+          </label>
         </div>
-        <div>
-          <h4>Whole book</h4>
-          <p class="export-target" id="export-book-name">&nbsp;</p>
-          <div class="export-btns" id="export-book-btns"></div>
+
+        <div class="pro-export-grid"
+             style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:6px 18px;margin-top:10px;">
+          <label style="display:flex;align-items:center;gap:6px;">
+            <input type="checkbox" id="pro-export-cover" checked /> Cover page
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;">
+            <input type="checkbox" id="pro-export-toc" checked /> Table of contents
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;">
+            <input type="checkbox" id="pro-export-lof" /> List of figures
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;">
+            <input type="checkbox" id="pro-export-lot" /> List of tables
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;">
+            <input type="checkbox" id="pro-export-bib" checked /> Include bibliography
+          </label>
         </div>
-      </div>
+
+        <details style="margin-top:12px;">
+          <summary style="cursor:pointer;font-size:0.9em;color:var(--muted,#888);">
+            Front-matter overrides (optional)
+          </summary>
+          <div class="pro-export-grid"
+               style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px 14px;margin-top:8px;">
+            <label>Author override
+              <input id="pro-export-author" type="text" placeholder="(book metadata)" style="width:100%;" />
+            </label>
+            <label>Affiliation
+              <input id="pro-export-affiliation" type="text" placeholder="(none)" style="width:100%;" />
+            </label>
+            <label>Dedication
+              <input id="pro-export-dedication" type="text" placeholder="(none)" style="width:100%;" />
+            </label>
+            <label>Acknowledgements
+              <input id="pro-export-acks" type="text" placeholder="(none)" style="width:100%;" />
+            </label>
+            <label style="grid-column:1/-1;">Abstract override
+              <textarea id="pro-export-abstract" rows="3" placeholder="(use existing abstract section)" style="width:100%;"></textarea>
+            </label>
+          </div>
+        </details>
+
+        <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+          <button class="btn btn--primary" id="pro-export-pdf-btn"
+                  onclick="startProExport('pdf')"
+                  title="Compile a polished PDF via latexmk and download it.">
+            <svg class="icon"><use href="#i-download"/></svg> Compile PDF
+          </button>
+          <button class="btn" id="pro-export-tex-btn"
+                  onclick="startProExport('tex-bundle')"
+                  title="Download main.tex + refs.bib + figures as a .zip — compile yourself or hand off to a co-author.">
+            <svg class="icon"><use href="#i-download"/></svg> Download .tex bundle
+          </button>
+          <span id="pro-export-status" class="u-small u-muted"></span>
+        </div>
+
+        <details id="pro-export-log-wrap" style="margin-top:10px;display:none;">
+          <summary style="cursor:pointer;font-size:0.9em;">Compile log</summary>
+          <pre id="pro-export-log" style="max-height:280px;overflow:auto;background:#0d0d0d;color:#e0e0e0;padding:8px;border-radius:4px;font-size:0.78em;"></pre>
+        </details>
+      </details>
+
     </div>
   </div>
 </div>

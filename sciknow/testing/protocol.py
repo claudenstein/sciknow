@@ -125,6 +125,127 @@ def l1_all_modules_import() -> None:
     import sciknow.cli.wiki          # noqa: F401
     import sciknow.cli.draft         # noqa: F401
     import sciknow.web.app           # noqa: F401
+    import sciknow.formatting        # noqa: F401
+    import sciknow.formatting.ir     # noqa: F401
+    import sciknow.formatting.markdown_to_ir  # noqa: F401
+    import sciknow.formatting.latex_renderer  # noqa: F401
+    import sciknow.formatting.compile  # noqa: F401
+    import sciknow.formatting.bibtex  # noqa: F401
+    import sciknow.formatting.build  # noqa: F401
+
+
+def l1_formatting_renders_minimal_doc() -> None:
+    """Formatting module: a synthetic Document renders to compilable LaTeX
+    without touching Postgres, Qdrant, or any LLM. This catches breakage
+    in the IR → Jinja → string pipeline before it reaches a real book."""
+    from sciknow.formatting.ir import (
+        Chapter, Document, FrontMatter, Paragraph, Section, TextRun,
+    )
+    from sciknow.formatting.latex_renderer import render_document
+    from sciknow.formatting.options import ExportOptions
+
+    front = FrontMatter(
+        title="Smoke Test",
+        authors=["Tester One"],
+        abstract="A short abstract.",
+    )
+    doc = Document(
+        front_matter=front,
+        project_type="scientific_paper",
+        is_flat=True,
+        chapters=[Chapter(
+            number=1, title="Body",
+            sections=[
+                Section(title="Introduction", section_type="introduction",
+                        blocks=[Paragraph(inlines=[TextRun(text="Hello world.")])]),
+                Section(title="Conclusion", section_type="conclusion",
+                        blocks=[Paragraph(inlines=[TextRun(text="The end.")])]),
+            ],
+        )],
+    )
+    tex, spec = render_document(doc, ExportOptions(template_slug="elsarticle"))
+    assert "\\documentclass" in tex, "no \\documentclass in rendered tex"
+    assert "elsarticle" in tex, "elsarticle class missing"
+    assert "Smoke Test" in tex, "title missing from tex"
+    assert "Hello world" in tex, "section content missing from tex"
+    assert spec.slug == "elsarticle"
+
+
+def l1_formatting_markdown_citations() -> None:
+    """Markdown → IR converts ``[1]`` markers into Citation nodes that
+    resolve to the supplied citekey map. Unknown numbers are kept as
+    text so dangling refs surface in the rendered PDF."""
+    from sciknow.formatting.ir import Citation, Paragraph, TextRun
+    from sciknow.formatting.markdown_to_ir import markdown_to_blocks
+
+    cite_map = {1: "smith2022_a3f1", 2: "jones2023_b9c2"}
+    blocks = markdown_to_blocks(
+        "Solar minima drove cooling [1] and confirmed proxies [2].\n\n"
+        "Unknown reference [99] should pass through.",
+        cite_map,
+        figure_assets={},
+    )
+    assert len(blocks) == 2
+    p1 = blocks[0]
+    assert isinstance(p1, Paragraph)
+    cites = [i for i in p1.inlines if isinstance(i, Citation)]
+    assert len(cites) == 2
+    assert cites[0].citekeys == ["smith2022_a3f1"]
+    assert cites[1].citekeys == ["jones2023_b9c2"]
+    p2 = blocks[1]
+    assert "[99]" in "".join(i.text for i in p2.inlines if isinstance(i, TextRun))
+
+
+def l1_formatting_handles_rich_blocks() -> None:
+    """The markdown→IR pass produces typed blocks for code, display math,
+    tables, lists, and blockquotes — F3's content-richness contract.
+    Inline math (``$E=mc^2$``) and inline citations are also exercised."""
+    from sciknow.formatting.ir import (
+        CodeBlock, EquationBlock, ListBlock, QuoteBlock, TableBlock,
+    )
+    from sciknow.formatting.markdown_to_ir import markdown_to_blocks
+
+    md = (
+        "Inline math: $E = mc^2$ and a citation [1].\n\n"
+        "```python\nprint('hi')\n```\n\n"
+        "$$\n\\int_0^1 x\\,dx = 1/2\n$$\n\n"
+        "| a | b |\n|---|---|\n| 1 | 2 |\n\n"
+        "> a quote\n\n"
+        "- one\n- two\n"
+    )
+    blocks = markdown_to_blocks(md, {1: "k_test"}, figure_assets={})
+    kinds = {type(b).__name__ for b in blocks}
+    assert "CodeBlock" in kinds, f"missing CodeBlock in {kinds}"
+    assert "EquationBlock" in kinds, f"missing EquationBlock in {kinds}"
+    assert "TableBlock" in kinds, f"missing TableBlock in {kinds}"
+    assert "QuoteBlock" in kinds, f"missing QuoteBlock in {kinds}"
+    assert "ListBlock" in kinds, f"missing ListBlock in {kinds}"
+
+
+def l1_formatting_template_registry_complete() -> None:
+    """Every project type from sciknow.core.project_type has at least
+    one template in the registry, and every template has a main.tex.j2
+    on disk (so the picker can never offer a non-existent template)."""
+    from pathlib import Path
+    from sciknow.core.project_type import PROJECT_TYPES
+    from sciknow.formatting.options import TEMPLATES, list_templates_for_type
+    from sciknow.formatting.latex_renderer import TEMPLATES_DIR
+
+    for slug in PROJECT_TYPES:
+        templates = list_templates_for_type(slug)
+        assert templates, f"no templates for project type {slug!r}"
+    # Every template either has a directory under templates/ with a
+    # main.tex.j2, or it's not yet built (acceptable until F2 ships
+    # all six). Once F2 closes, this assertion can tighten to require
+    # all templates from the registry.
+    seen_dirs = {p.name for p in TEMPLATES_DIR.iterdir() if p.is_dir()}
+    seen_dirs.discard("_shared")
+    assert "elsarticle" in seen_dirs, (
+        "elsarticle template directory missing — F1 introduced it as "
+        "the smoke-test template"
+    )
+    elsa_main = TEMPLATES_DIR / "elsarticle" / "main.tex.j2"
+    assert elsa_main.is_file(), f"missing {elsa_main}"
 
 
 def l1_prompts_phase7_hedging() -> None:
@@ -19267,6 +19388,10 @@ def l1_v2_autowrite_module_reexports_book_ops_engine() -> None:
 
 L1_TESTS: list[Callable] = [
     l1_all_modules_import,
+    l1_formatting_renders_minimal_doc,
+    l1_formatting_markdown_citations,
+    l1_formatting_handles_rich_blocks,
+    l1_formatting_template_registry_complete,
     l1_prompts_phase7_hedging,
     l1_prompts_phase8_entity_bridge,
     l1_prompts_phase9_pdtb_relations,

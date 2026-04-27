@@ -1,0 +1,28 @@
+% Popular-science narrative layout: memoir + veelo chapter style +
+% lettrine drop caps + an accent colour.
+
+\definecolor{NarrativeAccent}{RGB}{210,90,40}    % warm orange (Legrand-ish)
+
+\usepackage{lettrine}                            % drop caps for first paragraphs
+% memoir already provides changepage's \begin{adjustwidth}, so we don't
+% reload the package — that triggers an option clash.
+
+% Memoir's "veelo" chapter style: large title block with a vertical
+% accent rule. Looks great for narrative non-fiction.
+\chapterstyle{veelo}
+
+% Tweak the chapter colours to match the accent.
+\renewcommand{\chapnumfont}{\fontsize{60}{72}\sffamily\color{NarrativeAccent}}
+\renewcommand{\chaptitlefont}{\Huge\sffamily\color{NarrativeAccent}}
+
+% Tighter sectional headings to match the narrative flow.
+\setsecheadstyle{\Large\sffamily\color{NarrativeAccent}}
+\setsubsecheadstyle{\large\sffamily}
+
+% Slightly looser leading for readable narrative prose.
+\OnehalfSpacing
+
+% Numbering: chapter only; sections silent within chapters for that
+% novel-y feel. Uncomment the line below to re-enable section numbers.
+\setsecnumdepth{section}
+\settocdepth{section}

@@ -1,0 +1,56 @@
+((# IEEEtran — IEEE journal/conference layout, two-column. #))
+\documentclass[((( options.font_size_pt )))pt, ((( options.paper )))((* if not options.two_column *)), onecolumn((* endif *)), journal]{IEEEtran}
+
+\input{preamble_common.tex}
+\input{preamble.tex}
+
+((( font_package | safe )))
+
+\bibliographystyle{IEEEtran}
+
+\begin{document}
+
+\title{((( front.title | tex_escape )))((* if front.subtitle *)): ((( front.subtitle | tex_escape )))((* endif *))}
+
+\author{((( front.authors | join(', ') | tex_escape )))((* if front.affiliations *))%
+\thanks{((( front.affiliations | join('; ') | tex_escape )))}%
+((* endif *))%
+}
+
+\maketitle
+
+((* if abstract_section *))
+\begin{abstract}
+((( abstract_section.blocks | blocks_to_latex(0) )))
+\end{abstract}
+((* elif front.abstract *))
+\begin{abstract}
+((( front.abstract | tex_escape )))
+\end{abstract}
+((* endif *))
+
+((* if front.keywords *))
+\begin{IEEEkeywords}
+((( front.keywords | join(', ') | tex_escape )))
+\end{IEEEkeywords}
+((* endif *))
+
+((* if is_flat *))
+((* for s in body_sections *))
+((( s | section_to_latex )))
+((* endfor *))
+((* else *))
+((* for ch in chapters *))
+\section{((( ch.title | tex_escape )))}
+((* for s in ch.sections *))
+\subsection{((( s.title | tex_escape )))}
+((( s.blocks | blocks_to_latex(1) )))
+((* endfor *))
+((* endfor *))
+((* endif *))
+
+((* if bib_entries *))
+\bibliography{refs}
+((* endif *))
+
+\end{document}

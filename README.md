@@ -68,6 +68,7 @@ A local-first scientific knowledge system that ingests papers, builds a compiled
 - **Book Settings panel** — one tabbed modal consolidates title, description, leitmotiv, target word count, and the style fingerprint (with on-demand refresh) so per-book config isn't scattered across four surfaces
 - **Projects modal with graceful restart** — switch active project from the browser; when a restart is required (DB / Qdrant singletons can't hot-swap), a one-click "⏻ Stop this server" button cleanly SIGTERMs the process so the terminal returns to `$` ready for the next `sciknow book serve` invocation
 - **Multi-format export** — Markdown, HTML, PDF (WeasyPrint), EPUB (pandoc), BibTeX, LaTeX, DOCX with global citation dedup, available from both the CLI and the web reader
+- **Professional LaTeX PDFs** — `sciknow book export --format pdf-pro --template <slug>` (or the **Export** modal in the web reader) drives a full Markdown→IR→Jinja→latexmk pipeline through real journal/book classes (kaobook, classicthesis, elsarticle, IEEEtran, REVTeX, memoir, tufte-book, +5 more). Per-template font + bib-style + cover-page + ToC controls; all 12 templates compile out of the box (lualatex). See [docs/FORMATTING.md](docs/FORMATTING.md).
 
 **Infrastructure**
 - **All local** — PostgreSQL + Qdrant + Ollama, no cloud APIs, no Docker
@@ -910,6 +911,7 @@ Core guides — how to use sciknow, how it works, how to extend it:
 | **[Ingestion Pipeline](docs/INGESTION.md)** | PDF conversion (MinerU/Marker), metadata, chunking, embedding |
 | **[Retrieval & RAG](docs/RETRIEVAL.md)** | Hybrid search, RRF fusion, reranking, corrective RAG |
 | **[Book Writing System](docs/BOOK.md)** | Book workflow, autowrite convergence, web reader, export |
+| **[Formatting / LaTeX export](docs/FORMATTING.md)** | Professional PDF pipeline (12 templates), `pdf-pro`/`tex-bundle` formats, GUI Export tab |
 | **[Book Actions Reference](docs/BOOK_ACTIONS.md)** | Every AI button (outline/review/autowrite/verify/align/…) + the 24 elicitation + 24 brainstorming methods |
 | **[Multi-Project](docs/PROJECTS.md)** | Per-project isolation (DB + Qdrant + `data/`), lifecycle CLI |
 | **[Operations](docs/OPERATIONS.md)** | Backup/restore, expand, enrich, citations, dev notes |

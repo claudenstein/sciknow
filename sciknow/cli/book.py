@@ -4042,29 +4042,46 @@ def export(
     include_sources: bool = typer.Option(True, "--sources/--no-sources",
                                           help="Include source citations per chapter."),
     fmt:        str = typer.Option("markdown", "--format", "-f",
-                                    help="Export format: markdown, html, pdf, epub, bibtex, latex, docx."),
+                                    help="markdown, html, pdf, epub, bibtex, latex, docx, "
+                                         "pdf-pro (LaTeX-compiled), tex-bundle (.zip)."),
+    template:   str | None = typer.Option(None, "--template",
+                                           help="LaTeX template slug for pdf-pro / tex-bundle "
+                                                "(elsarticle, kaobook, classicthesis, …). "
+                                                "Default: project type's first template."),
+    font_family: str = typer.Option("lmodern", "--font",
+                                     help="Font family: lmodern, libertinus, termes, "
+                                          "ebgaramond, palatino, sourceserif."),
+    font_size: int = typer.Option(11, "--font-size",
+                                   help="Font size in pt: 10, 11, 12."),
+    paper:      str = typer.Option("a4paper", "--paper",
+                                    help="a4paper or letterpaper."),
+    bib_style:  str = typer.Option("numeric", "--bib-style",
+                                    help="numeric, authoryear, ieee, apa, chicago."),
 ):
     """
     Compile all chapter drafts into a single document.
 
     Formats:
-      markdown  — Markdown with inline [N] citations + bibliography (default)
-      html      — self-contained static reader (same look as the web reader)
-      pdf       — HTML → PDF via weasyprint (Phase 40 — parity with the web export)
-      epub      — Markdown → EPUB via Pandoc (Phase 40; requires pandoc installed)
-      bibtex    — .bib file from all cited papers' metadata
-      latex     — Markdown → LaTeX via Pandoc (requires pandoc installed)
-      docx      — Markdown → DOCX via Pandoc (requires pandoc installed)
+      markdown    — Markdown with inline [N] citations + bibliography (default)
+      html        — self-contained static reader (same look as the web reader)
+      pdf         — HTML → PDF via weasyprint (legacy, Phase 40)
+      pdf-pro     — Markdown → IR → LaTeX → PDF via latexmk (professional)
+      tex-bundle  — Same as pdf-pro but emits a .zip with main.tex/refs.bib/figures
+      epub        — Markdown → EPUB via Pandoc
+      bibtex      — .bib file from all cited papers' metadata
+      latex       — Markdown → LaTeX via Pandoc (legacy; pdf-pro is recommended)
+      docx        — Markdown → DOCX via Pandoc
 
     Examples:
 
       sciknow book export "Global Cooling"
 
-      sciknow book export "Global Cooling" --format pdf -o book.pdf
+      sciknow book export "Global Cooling" --format pdf-pro --template kaobook
 
-      sciknow book export "Global Cooling" --format epub -o book.epub
+      sciknow book export "Global Cooling" --format pdf-pro --template elsarticle \\
+          --font ebgaramond --font-size 11 --bib-style authoryear
 
-      sciknow book export "Global Cooling" --format bibtex -o refs.bib
+      sciknow book export "Global Cooling" --format tex-bundle -o gc-source.zip
     """
     from sqlalchemy import text
     from sciknow.storage.db import get_session
@@ -4079,6 +4096,52 @@ def export(
         if not book:
             console.print(f"[red]Book not found:[/red] {book_title}")
             raise typer.Exit(1)
+
+    # ── pdf-pro / tex-bundle short-circuit ─────────────────────────────
+    # The professional LaTeX path doesn't share the markdown-build path
+    # below (it operates directly off Postgres + the formatting module),
+    # so handle it here before the legacy pipeline kicks in.
+    if fmt in ("pdf-pro", "tex-bundle"):
+        from sciknow.formatting import (
+            ExportOptions,
+            build_book_pdf,
+            build_book_tex_bundle,
+            LatexCompileError,
+        )
+        opts = ExportOptions(
+            template_slug=template,
+            font_family=font_family,
+            font_size_pt=font_size,
+            paper=paper,
+            bib_style=bib_style,
+        )
+        safe = book[1].lower().replace(" ", "_").replace("/", "-")[:50]
+        try:
+            if fmt == "pdf-pro":
+                pdf, _log, _tex = build_book_pdf(book[0], opts)
+                out_path = output or Path(f"{safe}.pdf")
+                out_path.write_bytes(pdf)
+                console.print(
+                    f"[green]✓ PDF (pro) exported:[/green] [bold]{out_path}[/bold] "
+                    f"({len(pdf):,} bytes)"
+                )
+            else:
+                zip_bytes, _tex = build_book_tex_bundle(book[0], opts)
+                out_path = output or Path(f"{safe}-tex-bundle.zip")
+                out_path.write_bytes(zip_bytes)
+                console.print(
+                    f"[green]✓ LaTeX bundle exported:[/green] [bold]{out_path}[/bold] "
+                    f"({len(zip_bytes):,} bytes)"
+                )
+        except LatexCompileError as e:
+            console.print(f"[red]LaTeX compile failed:[/red] {e}")
+            log_path = Path(f"{safe}-latex.log")
+            log_path.write_text(getattr(e, "log_text", "") or "", encoding="utf-8")
+            tex_path = Path(f"{safe}-failed.tex")
+            tex_path.write_text(getattr(e, "tex_source", "") or "", encoding="utf-8")
+            console.print(f"[dim]Wrote {log_path} (full log) and {tex_path} (source).[/dim]")
+            raise typer.Exit(1)
+        return
 
         chapters = session.execute(text("""
             SELECT id::text, number, title, description
