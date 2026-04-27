@@ -3684,6 +3684,19 @@ def autowrite(
             "leave per-chapter flags untouched."
         ),
     ),
+    only_below_target: bool = typer.Option(
+        False, "--only-below-target",
+        help=(
+            "Skip sections whose latest draft already reached "
+            "--target-score (i.e. custom_metadata.final_overall >= "
+            "--target-score). Useful for re-running the convergence "
+            "loop only on sections that plateaued. Implies --resume "
+            "when neither --resume nor --rebuild is set, since iterating "
+            "on existing below-target drafts is the natural pairing. "
+            "With --rebuild, only below-target drafts are rewritten "
+            "from scratch."
+        ),
+    ),
 ):
     """
     Autonomous write → review → revise convergence loop (inspired by Karpathy's autoresearch).
@@ -3813,12 +3826,24 @@ def autowrite(
         console.print("[yellow]Both --rebuild and --resume given; --rebuild wins.[/yellow]")
         resume = False
 
+    # --only-below-target without --rebuild implies --resume (the natural
+    # pairing: re-iterate on sections that haven't yet crossed the target).
+    if only_below_target and not rebuild and not resume:
+        console.print(
+            "[dim]--only-below-target → implying --resume "
+            "(re-iterating on below-target drafts).[/dim]"
+        )
+        resume = True
+
     # Build a slug → latest draft id map. Used by:
     #   - default mode: skip sections that already have a draft
     #   - resume mode: pass the draft id to autowrite_section_stream
     #     so it loads the existing content as the iteration starting point
+    #   - --only-below-target: filter out sections at-or-above target_score
+    # We always build it when --only-below-target is set, even with
+    # --rebuild, so the filter can compare against final_overall.
     existing_by_key: dict[tuple[str, str], dict] = {}
-    if not rebuild:
+    if not rebuild or only_below_target:
         with get_session() as session:
             existing_rows = session.execute(text("""
                 SELECT DISTINCT ON (chapter_id, section_type)
@@ -3834,6 +3859,40 @@ def autowrite(
                 "custom_metadata": r[3],
                 "word_count": r[4] or 0,
             }
+
+        # --only-below-target filter: drop sections whose latest draft
+        # already crossed target_score. Sections without any draft, or
+        # with a draft whose final_overall is None (never finalized,
+        # partial, or non-autowrite), are preserved.
+        if only_below_target:
+            from sciknow.core.book_ops import _extract_draft_final_overall
+            before = len(targets)
+            kept: list = []
+            already_at_target = 0
+            for cid, cn, ct, sec in targets:
+                existing = existing_by_key.get((cid, sec))
+                if existing is None:
+                    kept.append((cid, cn, ct, sec))
+                    continue
+                final_overall = _extract_draft_final_overall(
+                    existing["custom_metadata"]
+                )
+                if final_overall is not None and final_overall >= target_score:
+                    already_at_target += 1
+                    continue
+                kept.append((cid, cn, ct, sec))
+            targets = kept
+            if already_at_target:
+                console.print(
+                    f"[dim]--only-below-target: skipping {already_at_target} "
+                    f"section(s) already at-or-above {target_score:.2f}.[/dim]"
+                )
+            if not targets:
+                console.print(
+                    f"[green]All {before} sections already at-or-above "
+                    f"{target_score:.2f}; nothing to do.[/green]"
+                )
+                raise typer.Exit(0)
 
         if not resume:
             # Default: skip existing drafts

@@ -28,6 +28,7 @@ async def api_autowrite_book(
     target_words: int = Form(None),
     rebuild: bool = Form(False),
     resume: bool = Form(False),
+    only_below_target: bool = Form(False),
     include_visuals: bool = Form(False),
 ):
     """Phase 54.6.x — autowrite EVERY section of EVERY chapter in the
@@ -53,6 +54,7 @@ async def api_autowrite_book(
             target_words=target_words if target_words and target_words > 0 else None,
             rebuild=rebuild,
             resume=resume,
+            only_below_target=only_below_target,
             include_visuals=include_visuals,
         )
 
@@ -72,6 +74,7 @@ async def api_autowrite_chapter(
     target_words: int = Form(None),
     rebuild: bool = Form(False),
     resume: bool = Form(False),
+    only_below_target: bool = Form(False),
     include_visuals: bool = Form(False),
 ):
     """Phase 20 — autowrite EVERY section of a chapter in sequence.
@@ -99,6 +102,7 @@ async def api_autowrite_chapter(
             target_words=target_words if target_words and target_words > 0 else None,
             rebuild=rebuild,
             resume=resume,
+            only_below_target=only_below_target,
             include_visuals=include_visuals,
         )
 

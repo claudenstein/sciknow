@@ -13,11 +13,13 @@ cleanly on Ctrl-C because we register an atexit hook.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import json
 import logging
 import os
 import signal
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -101,6 +103,35 @@ ROLE_DEFAULTS: dict[str, dict] = {
             "--flash-attn", "on",
         ],
     },
+    # Phase 55.S1 — autowrite scorer. Independent llama-server instance
+    # loaded with a NON-Qwen GGUF so the score / rescore phases break
+    # the same-family self-bias documented in arXiv:2506.22316 /
+    # 2508.06709. Default candidate (when SCORER_MODEL_GGUF is set):
+    # gemma-4-31B-it-Q4_1.gguf.
+    #
+    # Phase 55.V1 — ctx_size restored to 16384. The earlier 8192 cap
+    # was a workaround for OOM-during-load with the embedder +
+    # reranker still resident. Phase 55.V1 evicts them too (see
+    # `_VRAM_CONFLICTS` below), so the scorer now gets the full
+    # 16K context that score / verify / CoVe prompts need on long
+    # sections. The conflict map is what makes this safe; do NOT
+    # raise ctx_size without keeping the eviction policy in place.
+    #
+    # The role won't start unless SCORER_MODEL_GGUF is set; `infer up
+    # --role scorer` no-ops with a clear error otherwise. On a 3090
+    # the scorer cannot co-reside with the writer — the auto-swap in
+    # `up()` handles this transparently.
+    "scorer": {
+        "port": 8094,
+        "model": settings.scorer_model_gguf,
+        "ctx_size": 16384,
+        "n_gpu_layers": 999,
+        "parallel": 1,
+        "extra_flags": [
+            "--cont-batching",
+            "--flash-attn", "on",
+        ],
+    },
 }
 
 
@@ -169,6 +200,7 @@ def _resolve_url(role: str) -> str:
         "embedder": settings.infer_embedder_url,
         "reranker": settings.infer_reranker_url,
         "vlm": settings.infer_vlm_url,
+        "scorer": settings.infer_scorer_url,
     }[role]
 
 
@@ -246,11 +278,253 @@ def _build_argv(role: str, profile: str = "default") -> list[str]:
     return argv
 
 
+# Phase 55.V1 — VRAM conflict map. Each role names the OTHER roles
+# that cannot co-reside on a single 24 GB GPU.
+#
+# The three big-model roles (writer Qwen3.6-27B ~17 GB, scorer
+# Gemma-4-31B ~18 GB, vlm Qwen3-VL-30B-A3B ~17 GB) each occupy enough
+# VRAM that any pair would OOM. They also pin enough that even the
+# small embedder (~1.1 GB bge-m3) + reranker (~700 MB bge-reranker-v2-m3)
+# co-residency tips the scorer over the 24 GB ceiling at 16K KV cache
+# (verified empirically 2026-04-27: compute_pp buffer alloc 522 MB
+# failed at peak). So Phase 55.V1 makes embedder/reranker conflict
+# with the big roles too: when running writer or scorer, evict
+# everything else; when running retrieval, evict the big roles.
+#
+# This is bidirectional and intentionally aggressive — the user's
+# directive (2026-04-27): "always when using either the writer or
+# the scorer unload any other model from the vram". The retrieve→
+# generate transition costs ~6 s of swap; that's accepted in exchange
+# for full-quality (16K context, no KV cache hack) generation.
+#
+# When `up(role)` is called, we down every healthy conflicting role
+# first and wait for VRAM to actually free (the CUDA context release
+# lags process exit by ~0.5–1.5 s).
+#
+# DGX Spark note: with 128 GB unified memory, the conflict map can
+# legitimately become empty. For now we keep the conservative 3090
+# defaults; a future config flag (``vram_co_residence_ok=True``) lets
+# Spark users skip the swap entirely. The conflict-resolver respects
+# this flag — see `_should_evict_for_vram()`.
+_VRAM_CONFLICTS: dict[str, set[str]] = {
+    "writer":   {"scorer", "vlm", "embedder", "reranker"},
+    "scorer":   {"writer", "vlm", "embedder", "reranker"},
+    "vlm":      {"writer", "scorer", "embedder", "reranker"},
+    "embedder": {"writer", "scorer", "vlm"},
+    "reranker": {"writer", "scorer", "vlm"},
+}
+
+# Empirical grace after llama-server SIGTERM exit before the GPU's
+# VRAM is fully reclaimed. CUDA context teardown is async; if we
+# start the next role before this lands, llama.cpp's cuMemAlloc may
+# still see the old allocation and OOM. 1.5 s is enough on the 3090
+# for the 17–18 GB models we route through here.
+_VRAM_RELEASE_GRACE_S = 1.5
+
+_swap_lock = threading.Lock()
+
+
+def _should_evict_for_vram() -> bool:
+    """Return True iff the conflict-driven eviction policy is in effect.
+
+    Phase 55.V1 — DGX Spark and other big-VRAM hosts can co-reside
+    every role; setting `VRAM_CO_RESIDENCE_OK=true` in the env makes
+    `_free_vram_for` and `activate_phase` no-op. Default False (the
+    24 GB 3090 case).
+    """
+    return not bool(getattr(settings, "vram_co_residence_ok", False))
+
+
+def _free_vram_for(role: str, *, exclude: set[str] | None = None) -> list[str]:
+    """Stop every healthy role that conflicts with ``role`` for VRAM.
+
+    Returns the list of role names that were actually downed. A no-op
+    when no conflict is healthy (the common steady-state case once a
+    role has been hot for a while). Holds ``_swap_lock`` so two
+    concurrent up() calls don't race the conflict resolution.
+
+    ``exclude`` lets callers protect specific roles from eviction
+    (used by `activate_phase` to keep peer roles co-resident — e.g.
+    keep the embedder up when bringing the reranker up for retrieval).
+    """
+    if not _should_evict_for_vram():
+        return []
+    conflicts = _VRAM_CONFLICTS.get(role, set())
+    if exclude:
+        conflicts = conflicts - exclude
+    if not conflicts:
+        return []
+    downed: list[str] = []
+    with _swap_lock:
+        for c in conflicts:
+            try:
+                if health(c, timeout=0.3):
+                    logger.info(
+                        "infer: role=%s starting → freeing VRAM by stopping "
+                        "conflicting role=%s", role, c,
+                    )
+                    if down(c, timeout=5.0):
+                        downed.append(c)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "infer: free_vram_for(%s) failed to down(%s): %s — "
+                    "continuing; the start may OOM",
+                    role, c, exc,
+                )
+        # CUDA context release lags process exit. Wait for VRAM to
+        # actually free before letting the caller start the new role.
+        if downed:
+            time.sleep(_VRAM_RELEASE_GRACE_S)
+            logger.info(
+                "infer: freed %s for role=%s (waited %.1fs for CUDA release)",
+                ",".join(downed), role, _VRAM_RELEASE_GRACE_S,
+            )
+    return downed
+
+
+# Phase 55.V1 — phase → required-roles map. Each phase declares which
+# roles it needs hot at the same time. `activate_phase(name)` ensures
+# every required role is up and every other role (per `_VRAM_CONFLICTS`)
+# is down. Callers pass through this single API instead of issuing
+# `up(...)` calls one at a time, so the conflict resolver can reason
+# about the full set rather than evicting peers one role at a time.
+#
+# Phase semantics:
+#   "retrieve"  — embedder + reranker up; big models down. Used before
+#                 every retrieval / lessons-fetch / RAPTOR / step-back.
+#   "generate"  — writer up alone. Used for all writer-driven prose.
+#   "score"     — scorer up alone (or writer when scorer is unconfigured;
+#                 the rag.llm fallback handles model resolution).
+#   "vlm"       — vlm up alone. Used for caption-visuals.
+_PHASE_ROLES: dict[str, set[str]] = {
+    "retrieve": {"embedder", "reranker"},
+    "generate": {"writer"},
+    "score":    {"scorer"},
+    "vlm":      {"vlm"},
+}
+
+
+def activate_phase(phase: str, *, wait_healthy_s: float = 120.0) -> dict:
+    """Bring up the roles required for ``phase`` and evict everything else.
+
+    Returns a dict ``{"up": [...], "down": [...]}`` — actually-changed
+    role names — so callers (and tests) can observe the swap. No-op
+    when the substrate is already in the desired state, which is the
+    happy path for back-to-back calls in the same phase.
+
+    Phase 55.V1 — the autowrite engine and any code that bridges a
+    retrieval step to a generation step should call this at the
+    boundary (not before every llm call — once per phase transition
+    is enough). Doing so once is the load-bearing fix for the
+    long-standing "embedder + reranker linger in VRAM during writer
+    generation" bug that tanked decode rate from 30 t/s to ~4 t/s
+    pre-Phase 55.V1.
+
+    On VRAM_CO_RESIDENCE_OK=True hosts (DGX Spark) eviction is skipped
+    entirely; the function still up()s the required roles.
+    """
+    if phase not in _PHASE_ROLES:
+        raise ValueError(
+            f"Unknown phase: {phase!r}. Choose from {sorted(_PHASE_ROLES)}"
+        )
+    required = _PHASE_ROLES[phase]
+    # Validate the required roles are actually configured (e.g.
+    # don't try to bring up scorer if SCORER_MODEL_GGUF is empty).
+    runnable = {r for r in required if ROLE_DEFAULTS.get(r, {}).get("model")}
+    if not runnable:
+        # The "score" phase falls through to writer when scorer isn't
+        # configured — the rag.llm dispatch handles the rerouting.
+        # Other phases with no runnable roles are a misconfiguration
+        # but we'd rather no-op than crash here.
+        if phase == "score":
+            runnable = {"writer"}
+        else:
+            logger.warning(
+                "activate_phase(%s): no runnable roles in %s; no-op",
+                phase, sorted(required),
+            )
+            return {"up": [], "down": []}
+
+    # Evict every conflicting role across the entire required set,
+    # *excluding* the required roles themselves (so e.g. activating
+    # "retrieve" doesn't evict the embedder when bringing up the
+    # reranker, since they intentionally co-reside).
+    out_down: list[str] = []
+    out_up: list[str] = []
+    if _should_evict_for_vram():
+        with _swap_lock:
+            # Compute the union of every conflict set, minus the
+            # required roles.
+            conflicts: set[str] = set()
+            for r in runnable:
+                conflicts |= _VRAM_CONFLICTS.get(r, set())
+            conflicts -= runnable
+            for c in conflicts:
+                try:
+                    if health(c, timeout=0.3):
+                        if down(c, timeout=5.0):
+                            out_down.append(c)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "activate_phase(%s): down(%s) failed: %s",
+                        phase, c, exc,
+                    )
+            if out_down:
+                time.sleep(_VRAM_RELEASE_GRACE_S)
+                logger.info(
+                    "activate_phase(%s): evicted %s (waited %.1fs)",
+                    phase, ",".join(out_down), _VRAM_RELEASE_GRACE_S,
+                )
+
+    # Bring up the required roles. up() will internally call
+    # _free_vram_for() too, but with `exclude=runnable` so it doesn't
+    # tear down the peer we just brought up in the same phase.
+    for r in runnable:
+        try:
+            if not health(r, timeout=0.3):
+                up(r, wait=True)
+                out_up.append(r)
+            # else: already healthy, no-op
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "activate_phase(%s): up(%s) failed: %s",
+                phase, r, exc,
+            )
+            raise
+
+    return {"up": out_up, "down": out_down}
+
+
+@contextlib.contextmanager
+def hot_phase(phase: str):
+    """Context-manager wrapper around activate_phase.
+
+    Usage:
+        with hot_phase("retrieve"):
+            results = retrieve(...)
+        with hot_phase("generate"):
+            text = stream_writer(...)
+
+    Doesn't tear down the phase on exit — the *next* phase activation
+    handles the eviction. This avoids unnecessary up/down churn when
+    consecutive blocks happen to share the same phase.
+    """
+    activate_phase(phase)
+    try:
+        yield
+    finally:
+        pass
+
+
 def up(role: str, profile: str = "default", wait: bool = True) -> ProcInfo:
     """Start a llama-server for the role if not already healthy.
 
     Idempotent: returns the existing ProcInfo if a healthy process is
     already running on the configured port.
+
+    Phase 55.S1 — before starting, downs any role that conflicts with
+    this one for VRAM (see ``_VRAM_CONFLICTS``) so that loading the
+    new model never OOMs against a stale residency.
     """
     if role not in ROLE_DEFAULTS:
         raise ValueError(f"Unknown role: {role!r}. Choose from {list(ROLE_DEFAULTS)}")
@@ -263,6 +537,12 @@ def up(role: str, profile: str = "default", wait: bool = True) -> ProcInfo:
         return ProcInfo(role=role, port=cfg["port"], pid=pid,
                         model=str(cfg["model"]), healthy=True,
                         log_path=_log_file(role))
+
+    # Free VRAM by stopping any conflicting big-model role before we
+    # spend ~5–10 s loading this one. Without this guard, an autowrite
+    # iteration with USE_LLAMACPP_SCORER=true would CUDA-OOM the moment
+    # it transitions writer → scorer (both ~17–18 GB on a 24 GB GPU).
+    _free_vram_for(role)
 
     argv = _build_argv(role, profile=profile)
     log_path = _log_file(role)
@@ -406,12 +686,14 @@ def pause_for_ingest(
     log = _logging.getLogger("sciknow.infer.server")
 
     if roles is None:
-        # The three roles that can pin VRAM. vlm intentionally NOT
-        # paused — the converter MIGHT use it (the auto VLM-Pro path
-        # doesn't go through the substrate today, but if it does in
-        # future, we don't want to kill the very process the converter
-        # is about to call).
-        roles = ["writer", "embedder", "reranker"]
+        # The roles that can pin VRAM. vlm intentionally NOT paused —
+        # the converter MIGHT use it (the auto VLM-Pro path doesn't go
+        # through the substrate today, but if it does in future, we
+        # don't want to kill the very process the converter is about
+        # to call). Phase 55.S1: scorer added — when the user has
+        # USE_LLAMACPP_SCORER=true and the autowrite scorer was the
+        # last loaded role, ingest needs to evict it too (~18 GB).
+        roles = ["writer", "embedder", "reranker", "scorer"]
 
     @contextlib.contextmanager
     def _ctx():

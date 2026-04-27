@@ -52,6 +52,7 @@ from sciknow.core.book_ops import (  # noqa: F401
     _count_plan_concepts,
     _cove_verify_streaming,
     _create_autowrite_run,
+    _extract_draft_final_overall,
     _finalize_autowrite_run,
     _get_book_length_target,
     _get_chapter_num_sections,
@@ -68,6 +69,7 @@ from sciknow.core.book_ops import (  # noqa: F401
     _persist_autowrite_iteration,
     _persist_autowrite_retrievals,
     _release_gpu_models,
+    _swap_to_phase,
     _retrieve,
     _retrieve_visuals,
     _retrieve_with_step_back,
@@ -595,6 +597,14 @@ def _autowrite_section_body(
         log.stage("planning")
         yield {"type": "progress", "stage": "planning",
                "detail": "Building paragraph plan with discourse relations..."}
+        # Phase 55.V1 — swap to generate phase before the writer-side
+        # tree-plan call. Retrieval just left the embedder + reranker
+        # hot (~1.8 GB); evict them so the writer's planning call has
+        # the full 24 GB to work with.
+        try:
+            _swap_to_phase("generate")
+        except Exception:
+            pass
         try:
             sys_p, usr_p = rag_prompts.tree_plan(
                 section_type, topic, results,
@@ -632,6 +642,12 @@ def _autowrite_section_body(
     # Exclude ``rejected_idea`` — that kind is for the gap-finder gate
     # (Phase 47.2), NOT for the writer (the writer shouldn't try to
     # actively AVOID writing about a topic; that's a planner-level gate).
+    # Phase 55.V1 — lessons fetch embeds via bge-m3; needs the
+    # embedder up. Tree-plan above left the writer hot; swap now.
+    try:
+        _swap_to_phase("retrieve")
+    except Exception:
+        pass
     relevant_lessons = _get_relevant_lessons(
         book_id, section_type, _lessons_query,
         kinds=("knowledge", "idea", "decision", "paper", "episode"),
@@ -647,6 +663,13 @@ def _autowrite_section_body(
     # 30+ t/s to ~4 t/s.  This call returns the GPU to a clean state
     # so the writer gets the full 22 GB it needs for 16k context.
     _release_gpu_models()
+    # Phase 55.V1 — declarative phase swap. The lessons fetch is the
+    # last retrieval-side work in the autowrite preamble; everything
+    # below (writer warm-up, initial draft) is generation. Activate
+    # the generate phase so the embedder + reranker llama-server
+    # processes are evicted, freeing ~1.8 GB of VRAM for the writer
+    # to use 16K context at full decode speed.
+    _swap_to_phase("generate")
     if relevant_lessons:
         by_kind: dict[str, int] = {}
         for l in relevant_lessons:
@@ -953,8 +976,14 @@ def _autowrite_section_body(
         # bge-m3 + reranker re-loaded by the previous iteration's
         # retrieve step are still resident; the scorer's 27B model
         # would partial-load with the embedder co-resident.
+        # Phase 55.V1 — replaced the v1-only `_release_gpu_models`
+        # path with the v2-aware `_swap_to_phase("score")`. This
+        # actually downs the embedder + reranker llama-server
+        # processes (the v1 dance was a no-op in v2), AND swaps the
+        # writer→scorer for cross-family scoring when configured.
         try:
             _release_gpu_models()
+            _swap_to_phase("score")
         except Exception:
             pass
         # Phase 54.6.306 — when the scorer is a different model from
@@ -978,10 +1007,15 @@ def _autowrite_section_body(
             logger.debug("pre-scorer writer release failed: %s", exc)
         try:
             sys_s, usr_s = rag_prompts.score_draft(section_type, topic, content, results)
+            # Phase 55.S1 — route through the dedicated scorer role
+            # when configured, falling back to writer otherwise (the
+            # rag.llm dispatch handles the fallback if the scorer GGUF
+            # isn't loaded). The role param is plumbed through
+            # _stream_phase via **kw → llm_stream → infer.client.chat_stream.
             score_raw = yield from _stream_phase(
                 sys_s, usr_s, "scoring",
                 model=scorer_model, temperature=0.0, num_ctx=16384,
-                token_observer=log.token,
+                token_observer=log.token, role="scorer",
             )
             scores = json.loads(_clean_json(score_raw), strict=False)
         except Exception as exc:
@@ -1093,16 +1127,25 @@ def _autowrite_section_body(
         # spilled to CPU — decode collapsed from 30+ t/s to ~4 t/s.
         # This is the same pattern 54.6.305 fixed for the writer
         # entry path; missing here was the in-loop verify phase.
+        # Phase 55.V1 — also swap to score phase for v2 substrate.
         try:
             _release_gpu_models()
+            _swap_to_phase("score")
         except Exception:
             pass
         try:
             sys_v, usr_v = rag_prompts.verify_claims(content, results)
+            # Phase 55.S1 — verify is a judging task, so route it
+            # through the scorer role (Gemma 4 31B when configured) for
+            # cross-family signal. Falls back to writer when
+            # USE_LLAMACPP_SCORER=false via the rag.llm safety net.
+            # Bonus: keeps llama-server's prompt cache warm across the
+            # score → verify → CoVe block on the scorer side, saving
+            # ~1-2s of prefill on each successive call.
             verify_raw = yield from _stream_phase(
                 sys_v, usr_v, "verifying",
-                model=model, temperature=0.0, num_ctx=16384,
-                token_observer=log.token,
+                model=scorer_model, temperature=0.0, num_ctx=16384,
+                token_observer=log.token, role="scorer",
             )
             vdata = json.loads(_clean_json(verify_raw), strict=False)
             groundedness = vdata.get("groundedness_score", 1.0)
@@ -1170,8 +1213,13 @@ def _autowrite_section_body(
                 yield {"type": "progress", "stage": "cove",
                        "detail": "Running Chain-of-Verification (decoupled fact check)..."}
                 # Phase 54.6.320 — eviction before CoVe's batched-N call.
+                # Phase 55.V1 — already in score phase from verify
+                # above; swap_to_phase("score") is a fast no-op when
+                # the scorer is already up. Keeps the explicit hint
+                # close to the call site for readability.
                 try:
                     _release_gpu_models()
+                    _swap_to_phase("score")
                 except Exception:
                     pass
                 try:
@@ -1179,7 +1227,14 @@ def _autowrite_section_body(
                     # generation + each independent answer flow as token
                     # events instead of going dark for 1 + N silent
                     # llm_complete calls.
-                    cove = yield from _cove_verify_streaming(content, results, model=model)
+                    # Phase 55.S1 — CoVe is a judging task; route to
+                    # scorer role for cross-family signal + prompt-cache
+                    # reuse with the score/verify block above. Falls
+                    # back to writer via rag.llm safety net when
+                    # USE_LLAMACPP_SCORER=false.
+                    cove = yield from _cove_verify_streaming(
+                        content, results, model=scorer_model, role="scorer",
+                    )
                     yield {"type": "cove_verification", "data": cove}
 
                     high_sev = [m for m in cove.get("mismatches", [])
@@ -1366,6 +1421,13 @@ def _autowrite_section_body(
         if auto_expand and missing:
             yield {"type": "progress", "stage": "expanding",
                    "detail": f"Checking corpus coverage for: {', '.join(missing[:3])}"}
+            # Phase 55.V1 — swap to retrieve phase before any embedder
+            # hits. Score-phase prep (above) just brought up the scorer;
+            # we now need the embedder + reranker for these probe-queries.
+            try:
+                _swap_to_phase("retrieve")
+            except Exception:
+                pass
             weak_topics = []
             with get_session() as session:
                 for topic_q in missing[:3]:
@@ -1389,6 +1451,13 @@ def _autowrite_section_body(
         # evidence it didn't have in the initial write pass. The extra
         # results are APPENDED to the existing results, not replaced.
         if missing and weakest in ("completeness", "length"):
+            # Phase 55.V1 — same retrieve-phase swap as auto-expand.
+            # Idempotent if already in retrieve phase from auto-expand
+            # above. Cheap when the embedder + reranker are already hot.
+            try:
+                _swap_to_phase("retrieve")
+            except Exception:
+                pass
             for gap_query in missing[:2]:
                 try:
                     with get_session() as session:
@@ -1407,6 +1476,16 @@ def _autowrite_section_body(
         log.stage("revising", iteration=iteration + 1)
         yield {"type": "progress", "stage": "revising",
                "detail": f"Revising (targeting {weakest})..."}
+
+        # Phase 55.V1 — swap from score → generate phase. The previous
+        # block (verify + CoVe + maybe adaptive_retrieval) leaves the
+        # scorer hot (or, if adaptive_retrieval fired, the embedder/
+        # reranker hot). Bring the writer up and evict everything else
+        # before the revision call so the writer gets the full 24 GB.
+        try:
+            _swap_to_phase("generate")
+        except Exception:
+            pass
 
         sys_r, usr_r = rag_prompts.revise(content, instruction, results)
 
@@ -1447,8 +1526,11 @@ def _autowrite_section_body(
         log.stage("rescoring", iteration=iteration + 1)
         yield {"type": "progress", "stage": "scoring", "detail": "Re-scoring revision..."}
         # Phase 54.6.320 — eviction before re-scoring too.
+        # Phase 55.V1 — also swap to score phase (writer→scorer) for
+        # v2 substrate; the writer just produced the revision.
         try:
             _release_gpu_models()
+            _swap_to_phase("score")
         except Exception:
             pass
         # Phase 54.6.306 — same sticky-LLM swap problem as the initial
@@ -1464,10 +1546,11 @@ def _autowrite_section_body(
             logger.debug("pre-rescorer writer release failed: %s", exc)
         try:
             sys_rs, usr_rs = rag_prompts.score_draft(section_type, topic, revised, results)
+            # Phase 55.S1 — same scorer-role routing as the initial score.
             rescore_raw = yield from _stream_phase(
                 sys_rs, usr_rs, "rescoring",
                 model=scorer_model, temperature=0.0, num_ctx=16384,
-                token_observer=log.token,
+                token_observer=log.token, role="scorer",
             )
             new_scores = json.loads(_clean_json(rescore_raw), strict=False)
         except Exception:
@@ -1692,6 +1775,7 @@ def autowrite_chapter_all_sections_stream(
     target_words: int | None = None,
     rebuild: bool = False,
     resume: bool = False,
+    only_below_target: bool = False,
     include_visuals: bool = False,   # Phase 54.6.144
 ) -> Iterator[Event]:
     """Phase 20 — autowrite EVERY section of a chapter in sequence.
@@ -1737,6 +1821,12 @@ def autowrite_chapter_all_sections_stream(
     # rebuild wins over resume if both somehow get passed.
     if rebuild and resume:
         resume = False
+
+    # --only-below-target without --rebuild implies --resume — same
+    # convention as the CLI: re-iterate on below-target drafts rather
+    # than skipping them as the default mode would.
+    if only_below_target and not rebuild and not resume:
+        resume = True
 
     # Phase 54.6.328 (snapshot-versioning Phase 4) — auto-snapshot the
     # chapter's current draft state BEFORE letting autowrite touch it.
@@ -1835,6 +1925,7 @@ def autowrite_chapter_all_sections_stream(
         "sections": [{"slug": s["slug"], "title": s["title"]} for s in sections],
         "rebuild": rebuild,
         "resume": resume,
+        "only_below_target": only_below_target,
     }
 
     for i, sec in enumerate(sections, start=1):
@@ -1842,6 +1933,32 @@ def autowrite_chapter_all_sections_stream(
         title = sec["title"]
         existing = existing_by_slug.get(slug)
         already_exists = existing is not None
+
+        # --only-below-target filter — runs BEFORE the rebuild/resume/skip
+        # mode logic so it overrides a "rebuild all" or "resume all" run
+        # for sections that have already crossed the target. Sections
+        # without a draft, or whose final_overall is None (partial /
+        # non-autowrite), are not skipped here.
+        if only_below_target and already_exists:
+            final_overall = _extract_draft_final_overall(
+                existing["custom_metadata"]
+            )
+            if final_overall is not None and final_overall >= target_score:
+                n_skipped += 1
+                yield {
+                    "type": "section_start", "index": i, "total": n_total,
+                    "slug": slug, "title": title, "skipped": True,
+                    "reason": (
+                        f"already at target "
+                        f"({final_overall:.2f} >= {target_score:.2f})"
+                    ),
+                }
+                yield {
+                    "type": "section_done", "index": i,
+                    "slug": slug, "skipped": True,
+                    "final_score": final_overall,
+                }
+                continue
 
         # Phase 28 — three-way handling of existing drafts.
         resume_draft_id: str | None = None
@@ -1985,6 +2102,7 @@ def autowrite_book_all_chapters_stream(
     target_words: int | None = None,
     rebuild: bool = False,
     resume: bool = False,
+    only_below_target: bool = False,
     include_visuals: bool = False,
 ) -> Iterator[Event]:
     """Phase 54.6.x — autowrite EVERY section of EVERY chapter in the book.
@@ -2004,6 +2122,9 @@ def autowrite_book_all_chapters_stream(
     if rebuild and resume:
         resume = False
 
+    if only_below_target and not rebuild and not resume:
+        resume = True
+
     with get_session() as session:
         rows = session.execute(text("""
             SELECT id::text, number, title
@@ -2022,6 +2143,7 @@ def autowrite_book_all_chapters_stream(
         "chapters": chapters,
         "rebuild": rebuild,
         "resume": resume,
+        "only_below_target": only_below_target,
     }
 
     if n_chapters == 0:
@@ -2059,6 +2181,7 @@ def autowrite_book_all_chapters_stream(
                 target_words=target_words,
                 rebuild=rebuild,
                 resume=resume,
+                only_below_target=only_below_target,
                 include_visuals=include_visuals,
             )
             for event in inner:

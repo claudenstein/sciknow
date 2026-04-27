@@ -271,6 +271,265 @@ explicitly rejected; **do NOT relitigate**:
 
 ---
 
+## 7. Autowrite plateau-breakers (2026-04-27 research sweep)
+
+Sourced from a literature scan after a user reported that sections
+plateau below the 0.85 target after 5 iterations. Five well-documented
+root causes line up with what the current loop does (write → score →
+revise, same model, same evidence, single-shot revise):
+
+1. **Self-correction is intrinsically weak** when the critic has no more info than the generator (Huang et al. ICLR 2024, [arXiv:2310.01798](https://arxiv.org/abs/2310.01798); Kamoi TACL 2024 critical survey).
+2. **Self-bias** of the scorer LLM toward its own family ([arXiv:2506.22316](https://arxiv.org/abs/2506.22316), [arXiv:2508.06709](https://arxiv.org/abs/2508.06709)) — same-family writer/scorer (Qwen ↔ Qwen) inflates the first impression and ceilings around the model's preferred mean.
+3. **Likert collapse** to a central tendency without anchored exemplars ([LLM-Rubric arXiv:2501.00274](https://arxiv.org/abs/2501.00274), [REVISEVAL ICLR 2025](https://openreview.net/pdf?id=1tBvzOYTLF)).
+4. **Single-shot revise oscillates** — the KEEP-if-better gate blocks regressions but cannot find revisions that go *worse on the weakest dim, better overall* (Reflexion arXiv:2303.11366).
+5. **Same evidence pool every iteration** — revisions paraphrase rather than bring in new grounding ([Self-RAG arXiv:2310.11511](https://arxiv.org/abs/2310.11511); [CRITIC arXiv:2305.11738](https://arxiv.org/abs/2305.11738)).
+
+### 7a. Tier 1 — break the plateau (highest impact / cost ratio)
+
+- [ ] **Phase 55.S1 — Cross-family scorer LLM (Gemma 4 31B as autowrite scorer).**
+  The current scorer config (`AUTOWRITE_SCORER_MODEL=gemopus4:26b-a4b-q4_K_M`)
+  is **silently ignored in v2 mode** because `infer/client.py:chat_stream`
+  always routes to the writer port (8090) regardless of the requested
+  model — so the actual scorer today is whatever the writer has loaded
+  (Qwen3.6-27B). This is the worst case for self-bias root-cause #2.
+  Plan: add a `scorer` role to the llama-server substrate (port 8094,
+  configurable via `INFER_SCORER_URL` + `SCORER_MODEL_GGUF`) and route
+  scoring/rescoring/verification calls through it when
+  `USE_LLAMACPP_SCORER=true`. Default candidate: `unsloth-gemma-4-31B-
+  it-GGUF/gemma-4-31B-it-Q4_1.gguf` (18 GB, present in
+  `~/Claude/huggingface/`). On the 3090 the writer (Qwen3.6 Q4_K_XL
+  ~17 GB) and Gemma 4 31B Q4_1 (~18 GB) cannot be co-resident, so the
+  initial integration uses sequential mode (writer down → scorer up →
+  scorer down → writer up), which is acceptable for occasional rescore
+  passes but adds wall-time to every iteration. **DGX Spark is the
+  right home** for full-time co-residence. Smaller alternatives that
+  *do* co-reside on the 3090: `unsloth-gemma-4-26B-A4B-it-GGUF` (~16 GB
+  Q5, but stays in the Gemma family — fine for cross-family signal) or
+  `unsloth-Mistral-Small-3.2-24B-Instruct-2506-GGUF` (~16 GB Q5_K_M,
+  fully cross-family). **Effort:** 1 day for the role plumbing, half a
+  day to bench against the current scorer on a control chapter.
+
+- [ ] **Phase 55.S2 — Best-of-N revise + pairwise judge tournament.**
+  Replace the single-shot revise call with N=3–5 diverse revisions at
+  temperature 0.7–0.9 and pick the best by a *pairwise* judge tournament
+  (not absolute Likert). Pairwise comparison eliminates score-ID and
+  rubric-order bias ([arXiv:2502.18581 Self-Certainty BoN](https://arxiv.org/abs/2502.18581);
+  [pairwise-RM knockout](https://medium.com/@techsachin/pairwise-rm-test-time-scaling-of-llm-via-best-of-n-sampling-with-knockout-tournament-0d36287f95f5)).
+  Patch: replace `_revise_inner` with a fan-out helper + a
+  `_tournament_select(candidates, evidence)` pairwise judge call.
+  Reuse the existing scoring prompt swapped to pairwise. Keep the
+  outer KEEP-if-better gate as a safety net. **Effort:** 2 days.
+  **Cost:** N× wall time per revision (mitigated by smaller `max_iter`).
+
+- [ ] **Phase 55.S3 — Anchor-calibrated rubric + binary checks.**
+  Replace the 0.0–1.0 Likert per dimension with (a) a rubric that has
+  2–3 written anchor examples per score band (0.5 / 0.7 / 0.9), and
+  (b) a decomposition into 4–6 *binary* yes/no checks per dimension
+  (LLM-Rubric arXiv:2501.00274; [Autorubric arXiv:2603.00077](https://arxiv.org/abs/2603.00077)).
+  Aggregate to a continuous score by mean-of-binaries. Binary checks
+  are dramatically more reliable than Likert; anchors break the
+  central-tendency collapse pinning scores at ~0.80. The judge stops
+  "feeling" a score and starts counting checks — a different
+  distribution shape that lets revisions actually move past 0.85.
+  Patch: rewrite the scoring prompt in `rag/prompts.py` to emit a JSON
+  list of `{check: str, pass: bool}` per dimension; aggregator computes
+  `score = sum(pass)/n`. Add a small `eval/anchors.json` with 2–3
+  hand-graded snippets per band — this is the load-bearing piece, do
+  not skip it. **Effort:** 2 days for the prompt rewrite + 1 day to
+  hand-grade the anchor set on the user's own corpus.
+
+### 7b. Tier 2 — meaningful research upgrades
+
+- [ ] **Phase 55.S4 — Re-retrieve per weakest dim, every iteration.**
+  Currently the step-back / RAPTOR / dense-search re-retrieval only
+  fires when the scorer reports `missing_topics`. Ungate it
+  per-dimension: every iteration, generate a new retrieval query
+  conditioned on the *weakest dim* — for "groundedness" pull more
+  specific chunks; for "coherence" pull adjacent-section drafts (not
+  new corpus chunks); for "hedging" pull chunks containing uncertainty
+  markers. Append fresh chunks to the evidence set; maintain a
+  per-iteration "evidence delta" so the writer sees what's new.
+  Patch site: in the revise-loop driver, always call
+  `retrieve_for_dim(weakest_dim, draft, leitmotiv)`. **Effort:** 1 day.
+
+- [ ] **Phase 55.S5 — Adversarial reviewer pass.**
+  Add a second LLM persona — adversarial reviewer ("find the weakest
+  claim, the worst citation, the muddiest paragraph") — that runs
+  *after* the scorer and emits a revision instruction list. AgentReview
+  pattern (used inside PaperOrchestra): the next iteration only KEEPs
+  if **scorer score ≥ prior AND reviewer net-non-negative**. Multi-agent
+  debate evidence ([EMNLP 2024 Encouraging Divergent Thinking](https://aclanthology.org/2024.emnlp-main.992/))
+  confirms heterogeneous critics break self-bias. Critically, give the
+  reviewer a *different system prompt* (or different temperature /
+  sampling) so it doesn't share the writer's priors. Combine with
+  Phase 55.S1 (Gemma scorer) for full cross-family signal.
+  Patch: add `_adversarial_review(draft, evidence)` in
+  `core/book_ops.py` that returns a structured weakness list. Cost:
+  +1 LLM call per iteration. **Effort:** 1 day.
+
+- [ ] **Phase 55.S6 — Curriculum on `target_score` + section-type-aware dimension weights.**
+  Start `target=0.78` for iteration 1, ramp to `0.85` by iteration 5.
+  Different section types get different dimension weights: methods
+  sections weight groundedness + citation_accuracy heavily; discussion
+  weights coherence + hedging; intro weights completeness. The 0.85
+  hard-target locks every section into ≥4 iterations regardless of
+  actual quality; a ramp lets early "good enough" drafts converge fast
+  and saves iterations for genuinely hard sections. Per-section
+  weighting also stops the writer from being penalized for legitimately
+  not having (e.g.) heavy hedging in a methods section. Theory
+  reference: [Self-Evolving Curriculum arXiv:2505.14970](https://arxiv.org/abs/2505.14970).
+  Patch: a small `target_for(iteration, section_type) → float` and
+  `weights_for(section_type) → dict[dim, float]` table. Two dozen
+  lines. Cheapest item on the list, surprisingly impactful.
+  **Effort:** half a day.
+
+### 7c. Tier 3 — honourable mentions
+
+- [ ] **CoVe on the *delta* only.** Current CoVe verifies the whole
+  draft every iteration; restrict to sentences *added* in the revision.
+  Cheaper and catches revision-introduced hallucinations, a documented
+  failure mode of self-refine ([CoVe arXiv:2309.11495](https://arxiv.org/abs/2309.11495)).
+- [ ] **Section-context awareness for the writer.** Pass the previous
+  and next section's headline + one-paragraph summary into the writer.
+  Coherence ceilings because the writer is blind to neighbours
+  ([LongWriter arXiv:2408.07055](https://arxiv.org/abs/2408.07055);
+  [WriteHERE EMNLP 2025 arXiv:2503.08275](https://arxiv.org/abs/2503.08275)).
+- [ ] **Tree-of-Thoughts on outline-level revision.** When a section
+  fails after 2 iterations, branch at the *outline* level (re-plan the
+  section structure) rather than rewriting prose. Cheap escape hatch
+  from local minima ([ToT arXiv:2305.10601](https://arxiv.org/abs/2305.10601)).
+- [ ] **Lessons → scorer few-shot, not just writer.** §4b Layer 1
+  already mines KEEP/DISCARD pairs for DPO; also use the top-K KEEPs
+  as **anchors injected into the scorer prompt**. Closes the
+  calibration loop on the judge side.
+- [ ] **Drop the same-evidence constraint for the scorer.** The scorer
+  should retrieve *its own* evidence to verify claims, independent of
+  what the writer used (CiteGuard pattern, [arXiv:2510.17853](https://arxiv.org/abs/2510.17853)).
+  Currently the scorer can only check internal consistency, not
+  external truth.
+
+### Anti-patterns to avoid
+
+- More multi-agent debate rounds (homogeneous-model debate inherits the
+  same biases — [ICLR 2025 blog](https://d2jud02ci9yv69.cloudfront.net/2025-04-28-mad-159/blog/mad/)
+  finds majority-voting accounts for most apparent gain on writing
+  tasks).
+- Training a reward model from scratch instead of DPO on existing
+  KEEP/DISCARD pairs (already a §4b anti-pattern — re-stated here for
+  scope discipline on Phase 55.S2).
+- Increasing `max_iter` beyond 5–6 — the literature consistently shows
+  self-refine plateaus after 3–4 iterations regardless of cap.
+
+---
+
+## 8. VRAM discipline (2026-04-27)
+
+### Why this exists
+
+The 24 GB 3090 is the binding constraint on every phase of autowrite.
+The current substrate runs five named llama-server roles (writer 17 GB,
+scorer 18 GB, vlm 17 GB, embedder 1.1 GB, reranker 0.7 GB) on five
+distinct ports. Phase 55.S1 added `_VRAM_CONFLICTS` to evict peer
+big-model roles before loading another one, but **only across
+writer/scorer/vlm** — embedder and reranker stay resident. That worked
+for the writer alone, but with the new scorer (Gemma 4 31B Q4_1, 18 GB)
+the math no longer fits: even after evicting the writer (~17 GB) the
+embedder + reranker (~1.8 GB combined + KV cache) keep ~3 GB of VRAM
+pinned, and the Gemma load partial-fails with "compute_pp buffer alloc
+failed".
+
+The interim hack — cutting the scorer's `ctx_size` from 16384 to 8192 —
+is a quality regression we should not pay for. We should evict the
+embedder + reranker while a big writer/scorer/vlm role is hot, and
+re-load them transparently when retrieval needs them.
+
+### Phase 55.V1 — Phase-aware VRAM activation **[active, this loop]**
+
+Spec:
+
+- [x] Extend `_VRAM_CONFLICTS` so writer / scorer / vlm each conflict
+  with `embedder` and `reranker` too. (Bidirectional: loading the
+  embedder evicts the writer.)
+- [x] Restore the scorer's `ctx_size` to 16384 (drop the KV-cache
+  hack now that the embedder/reranker are evicted).
+- [x] Add `infer.server.activate_phase(phase)` (alias `with hot_phase(phase): …`)
+  that takes one of `"retrieve"`, `"generate"`, `"score"`, `"vlm"`,
+  ensures the right combination of roles is up, and evicts the rest.
+  - `"retrieve"` → up: embedder + reranker; down: writer + scorer + vlm.
+  - `"generate"` → up: writer; down: embedder + reranker + scorer + vlm.
+  - `"score"` → up: scorer (or writer when scorer is unconfigured);
+    down: embedder + reranker + writer + vlm.
+  - `"vlm"` → up: vlm; down: writer + scorer + embedder + reranker.
+- [x] Replace the (dead-in-v2) `_release_gpu_models()` calls in
+  `core/autowrite.py` with `activate_phase(...)` at the proper
+  transitions.
+- [x] Wire `_ensure_role_up` (in `infer/client.py`) to call
+  `_free_vram_for(role)` for the role being requested, so even
+  uncoordinated callers don't OOM the GPU.
+- [x] Update the monitor alert demotion in `_build_alerts` so down
+  states for evicted roles surface as **info**, not warn/error,
+  whenever a peer big-model role is loaded. (Already in place for
+  writer↔scorer; generalised to all big-vs-small role pairs.)
+- [x] Add an L1 test — assert `_VRAM_CONFLICTS` covers the
+  cartesian product (writer/scorer/vlm) × (embedder/reranker), and
+  that `activate_phase` calls down the right set.
+- [ ] Document the swap cost budget: a writer→retrieve swap costs ~6 s
+  on this hardware (down 0.7 + 1.1 GB → load 0.7 + 1.1 GB), a
+  retrieve→writer swap costs ~10 s. Autowrite does retrieval once
+  per section (not per iteration today), so the per-section overhead
+  is ~16 s — acceptable.
+
+### Phase 55.V2 — Router-mode migration **[deferred]**
+
+llama.cpp shipped a native router mode (build ≥ b6620, present in our
+build at `llama.cpp-build/.../bin/llama-server`). With
+`llama-server --models-dir … --models-preset config.ini --models-max N`
+the same process serves all roles; the router LRU-evicts on demand
+when N is reached, and the OpenAI `model` field selects the target.
+This collapses the five ports → one port and replaces our
+`_VRAM_CONFLICTS` machinery with the router's eviction policy.
+
+Migration path (out of scope for this loop):
+
+- Configure a single router on `:8090` with a `presets.ini` mapping
+  the five roles to the five GGUFs (per-model `ctx-size`, `--lora`,
+  `--mmproj` for the vlm).
+- Replace `_resolve_url(role)` in `infer/server.py` with a single base
+  URL + a `model_for(role)` map; the request's OpenAI `model` field
+  carries the routing decision.
+- Decide whether to keep our `infer up --role <r>` UX (probably yes —
+  it just becomes `POST /models/load` against the router) or expose
+  router state directly.
+- Validate that router mode supports per-model `--ctx-size`, the
+  embedding endpoint (`/embedding`), and reranking (`/rerank`).
+
+Rejected alternative: **llama-swap** ([github.com/mostlygeek/llama-swap](https://github.com/mostlygeek/llama-swap))
+is the mature third-party proxy with a richer DSL (groups, evict_costs,
+ttl, matrix sets) but adds a separate process to operate, and our
+needs are simpler than its feature set warrants. Stick with the native
+router.
+
+### Phase 55.V3 — propagate VRAM discipline to other engines **[deferred]**
+
+Phase 55.V1 wired `_swap_to_phase` into the autowrite engine. Other
+LLM-heavy workflows (`wiki compile`, `extract-kg`, `argue`, `gaps`)
+still rely on `_ensure_role_up`'s lazy startup, which only evicts
+peer roles when the requested role is currently DOWN. In steady-state
+where the embedder is already up, a writer-only wiki page generation
+inherits the ~1.8 GB pin from the resident embedder + reranker.
+
+The right fix mirrors the autowrite pattern: each engine's hot loop
+declares its phase with `_swap_to_phase("generate")` at the writer
+entry and `_swap_to_phase("retrieve")` before any embedding hit.
+Cheap per-engine, but enough sites that it's a separate sweep.
+
+Sources:
+- [llama.cpp model management blog](https://huggingface.co/blog/ggml-org/model-management-in-llamacpp)
+- [llama.cpp tools/server README](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)
+- [llama-swap project](https://github.com/mostlygeek/llama-swap)
+
+---
+
 ## How to use this doc
 
 When picking the next phase:
