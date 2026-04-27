@@ -19531,6 +19531,38 @@ def l1_phase55_s1_autowrite_routes_scoring_through_scorer_role() -> None:
         )
 
 
+def l1_phase55_v3_down_recovers_when_pid_file_missing() -> None:
+    """Phase 55.V3 — `down(role)` falls back to lsof/ss-by-port when
+    the PID file is missing.
+
+    Caught a real bug: a llama-server's PID file got cleared (manual
+    rm, mid-startup race, or stale-grace sequence) but the process
+    was still alive. `_read_pid` returned None, `down` returned False
+    without acting, and the next `activate_phase` couldn't evict the
+    role — the swap silently no-op'd, and the eviction policy was
+    broken. The fix: `down()` calls `_find_pid_by_port(port)` as a
+    fallback when `_read_pid` returns None.
+
+    Source-grep contract — confirms the fallback path is in place.
+    Live behaviour is covered by L3 (the actual round-trip test).
+    """
+    import inspect
+    from sciknow.infer import server as _srv
+
+    assert callable(getattr(_srv, "_find_pid_by_port", None)), (
+        "_find_pid_by_port helper missing — substrate self-heal "
+        "regression"
+    )
+    src = inspect.getsource(_srv.down)
+    assert "_find_pid_by_port" in src, (
+        "down() must reference _find_pid_by_port as a PID-file-missing "
+        "fallback. Without it, a lost PID file wedges the conflict "
+        "map: every subsequent activate_phase silently no-ops."
+    )
+    # The fallback must be triggered when _read_pid returns None.
+    assert "_read_pid" in src, "down() must consult _read_pid first"
+
+
 def l3_phase55_v1_activate_phase_evicts_peers() -> None:
     """Phase 55.V1 — `activate_phase("retrieve")` actually evicts the
     writer when both are healthy.
@@ -20203,6 +20235,9 @@ L1_TESTS: list[Callable] = [
     # cross-family scoring actually hits the gemma port; _client_for
     # has the "scorer" url-map entry (regression caught at 55.V1)
     l1_phase55_s1_autowrite_routes_scoring_through_scorer_role,
+    # Phase 55.V3 — down() recovers from a missing PID file via
+    # _find_pid_by_port lsof/ss fallback (substrate self-heal)
+    l1_phase55_v3_down_recovers_when_pid_file_missing,
 ]
 
 L2_TESTS: list[Callable] = [
