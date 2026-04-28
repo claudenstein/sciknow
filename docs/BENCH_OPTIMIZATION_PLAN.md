@@ -1,5 +1,72 @@
 # Substrate optimization benchmark plan (Phase 55.V10/V15)
 
+## 2026-04-28 results — slates #1, #1b, #3 measured
+
+3090 (24 GB) + Qwen3.6-27B-UD-Q4_K_XL (17.6 GB on disk), llama.cpp from
+`LLAMA_SERVER_BINARY`. Baseline = expert (np 1, fa on, ngl 999).
+Workload = `typical` (5K input + 1500 output, reps=3).
+
+```
+   ctx           f16             q8_0            q4_0
+ 16384    37.8 t/s · 18.4 GB    36.5 · 17.9    36.1 · 17.7
+ 24576    37.9 t/s · 18.9 GB    36.5 · 18.2    36.0 · 17.8
+ 65536    37.8 t/s · 21.4 GB    36.4 · 19.5    36.0 · 18.5
+131072         OOM              35.5 · 21.8    36.0 · 19.8
+262144         OOM                 OOM         36.0 · 22.4
+```
+
+(VRAM ±0.5 GB — bench occasionally samples after teardown starts.)
+
+**Settled findings:**
+
+- **"262K on 24 GB" claim verified for q4_0 only.** q8_0 needs ~10 GB
+  KV at 262K → can't fit (proved on both Q4_K_M and Q4_K_XL). f16
+  OOMs at 131K and beyond.
+- **f16 is fastest where it fits** (37.8 t/s, ≤65K) — no dequant
+  overhead.
+- **q4_0 beats q8_0 at 131K** (36.0 vs 35.5 t/s) — bandwidth wins
+  over dequant cost once cache is large.
+- **Decode TPS is essentially flat across context inside the feasible
+  region.** Only q8_0 shows a measurable drop (~2.5%, 65K→131K).
+  The viral "flat 40 t/s curve" claim has the right shape, just at
+  ~36-38 t/s on this hardware/build.
+- **q8_0:q4_0 asymmetric K:V is structurally broken** on this
+  llama.cpp build. Server boots, inference hangs past 300s at every
+  ctx tested (16K, 262K). Likely a missing fused flash-attn kernel
+  for asymmetric K/V quants. Tracked separately; do not promote.
+
+**Production decision (with slate #2 quality probe parked):**
+
+- ≤65K ctx: any cache type works; **f16 wins on speed**. Production
+  default writer ctx=24K should stay on f16 KV.
+- 65K–131K: **q4_0** wins (faster than q8_0 at 131K, more headroom).
+- ≥131K: **q4_0 only.**
+
+Production-relevant ctx for autowrite is ≤24K (5–18K input), so the
+current f16 KV default is correct. Don't promote q4_0 just for
+memory savings — it costs ~1.7 t/s decode at typical workloads.
+
+**Methodology note (bug):** the bench harness's `--workload large`
+estimate of "18K input tokens" actually emits ~35.6K tokens (the
+chunk-token-per-block heuristic at `bench_substrate_sweep.py:142` is
+off by ~2×). Slate #4 cells at ctx=24K and ctx=32K therefore fail
+with HTTP 400 ("request exceeds ctx"). Cells ≥49K succeed. Fix
+deferred — the surviving cells still produce useful prefill-scaling
+data, just at a different size than advertised.
+
+**Open issues (don't promote until resolved):**
+
+- **Verifier MISREPRESENTED false-positives** — claim verifier flags
+  100% of writer's `[N]` citations as MISREPRESENTED (51/51 on a
+  993-word draft). Was silently no-op'ing pre-Phase-55.S1; now runs
+  reliably and dominates score. Slate #2 (quality probe) is parked
+  on this. See memory `project_verifier_misrepresented_bug.md`.
+- **Asymmetric K:V hang** — see above.
+
+---
+
+
+
 Two big-model roles drive every long-running flow on this stack:
 
 | Role | GGUF | Current config | Used for |
@@ -14,6 +81,81 @@ knob per single-mode run** — sweeping two at once makes deltas
 unattributable. The `--matrix-knob` mode is explicit and produces
 a full grid for the few cases where you need a 2-D map (typically
 `cache-type × ctx-size`).
+
+## Slate #2 redesign — once the writer-fabrication / weak-retrieval bugs are fixed
+
+The original slate #2 (autowrite-section quality probe across 4 cache
+types) was the binding gate for "does KV quant hurt quality?". When
+run today (2026-04-28) it produced unusable data: all cells scored
+groundedness=0.0 not because of cache-type effects but because the
+writer fabricates citations regardless of cache type. The probe
+measured pipeline brokenness, not substrate quality.
+
+The verifier diagnostic (`scripts/debug_verifier.py`) confirmed:
+chunk [1] for `the_science_of_sunspots` was a 52-char header
+("Solar Influences\n\nON") with no body text. The writer cited it
+34 times for specific sunspot claims. This is independent of cache
+type; the bench cannot measure substrate quality through this lens
+until the upstream fabrication is gone.
+
+### Pre-conditions for re-running slate #2
+
+Before the autowrite-section probe is meaningful, three fixes must
+land (each is its own work item — see follow-up task list / memory
+`project_verifier_misrepresented_bug.md`):
+
+1. **Corpus audit + cleanup**: filter or re-ingest empty / header-
+   only chunks. Min content length at retrieval time would be a
+   one-line guard.
+2. **Autowrite retrieval query**: replace `f"{section_type} {topic}"`
+   (slug + chapter topic_query) with the section's actual title /
+   description from `book_chapters.sections[].title|description`.
+3. **Writer-prompt tightening**: explicit instruction to refuse
+   fabrication. "If a claim cannot be supported by a specific chunk's
+   text, omit it entirely. Do NOT cite a chunk that doesn't address
+   the claim."
+
+Validation gate: after fixes, debug_verifier.py on a fresh draft
+should show groundedness_score > 0.7 (currently 0.0). Then the
+autowrite-section bench probe is worth running.
+
+### Slate #2-bis — controlled synthetic quality probe (alternative)
+
+Even after fabrication is fixed, the autowrite-section probe is
+NOISY — it measures the full retrieval+writer+score+verify pipeline,
+and noise dominates the cache-type signal. A cleaner alternative for
+"does KV quant cost quality?" is a controlled synthetic probe:
+
+```
+For each cache type ∈ {f16, q8_0, q4_0} at ctx=65536:
+  For each known passage P (10-20 hand-curated):
+    1. Feed writer the passage P + ask: "summarize the key claim and
+       its supporting evidence in 200 words. Cite specific sentences
+       from the passage with [Px:y] notation."
+    2. Score: LLM-as-judge with a strict rubric (faithfulness, claim
+       coverage, no-fabrication, citation accuracy) against the
+       known-correct ground truth.
+  Aggregate: mean score per cache type.
+```
+
+This bypasses retrieval quality entirely (each passage IS the
+retrieval result), bypasses revision (it's a one-shot summarize),
+and isolates the cache-type signal. Slow per-cell (~30s × 20 passages
+× 3 cache types ≈ 30 min) but high signal-to-noise.
+
+Hand-curated passage set: pull 10-20 chunks from the corpus that have
+substantial body content, span multiple topics, and have unambiguous
+key claims. The user (climate research domain) should pick or
+validate these — bench harness can drive once the set is defined.
+
+### When to run
+
+After all three pre-condition fixes ship AND the synthetic probe set
+is curated. Likely 1-2 weeks of work. Priority is lower than the
+fabrication fixes themselves — those affect production book quality,
+the bench just observes.
+
+---
 
 ## Phase 55.V15/V16: quality-first, with two competing baselines
 

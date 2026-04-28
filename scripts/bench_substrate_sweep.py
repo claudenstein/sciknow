@@ -428,7 +428,12 @@ def _run_autowrite_section_workload(
     pre-bring-up roles. ROLE_DEFAULTS patching survives the swaps
     because the engine reads ROLE_DEFAULTS at each up() call-site.
     """
-    from sciknow.core.autowrite import autowrite_section_stream
+    # Import via the book_ops re-export — book_ops.py:5412 deliberately
+    # re-exports the autowrite engine entry points so external callers
+    # don't trip the autowrite ↔ book_ops circular import (autowrite.py:42
+    # has a top-level `from book_ops import ...`; book_ops.py loads
+    # autowrite at the bottom only after its own names are all bound).
+    from sciknow.core.book_ops import autowrite_section_stream
 
     t0 = time.monotonic()
     completed: dict | None = None
@@ -481,12 +486,18 @@ def _run_one_config(
     matrix_knob: str | None = None, matrix_value: str | None = None,
     autowrite_section_args: dict | None = None,
     baseline: str = "expert",
+    ctx_override: int | None = None,
 ) -> dict:
     """Patch → up → run reps → down → restore. Returns averaged dict.
 
     Phase 55.V15 — applies ``baseline`` first (default expert), then
     patches the swept knob, then optionally a matrix knob (for the
     paired sweep). All rolled back at tear-down.
+
+    Phase 55.V16b — `ctx_override` pins ctx_size after the baseline is
+    applied (and before the swept knob), so a quality probe can hold
+    ctx constant at a fittable value (e.g. 65536) while sweeping
+    cache-type. Incompatible with `knob == "ctx-size"` (caller checks).
     """
     wcfg = WORKLOADS[workload]
     is_autowrite = wcfg.get("kind") == "autowrite"
@@ -501,6 +512,8 @@ def _run_one_config(
     # Apply the chosen baseline FIRST so non-swept params start from a
     # known config, not whatever ROLE_DEFAULTS was at script start.
     _apply_baseline(role, baseline)
+    if ctx_override is not None:
+        srv.ROLE_DEFAULTS[role]["ctx_size"] = int(ctx_override)
     backup = _patch_role_for_run(role, knob, value)
     if matrix_knob and matrix_value is not None:
         # Stack a second patch on top of the same backup so one
@@ -568,6 +581,7 @@ def _run_one_config(
         "matrix_knob": matrix_knob,
         "matrix_value": matrix_value,
         "baseline": baseline,
+        "ctx_override": ctx_override,
         "workload": workload,
         "approx_input_tokens": wcfg.get("approx_input_tokens"),
         "max_predict": max_predict,
@@ -690,6 +704,13 @@ def main():
                         "(ctx 262144, q4_0 KV, fa on, np 1, ngl 99). "
                         "'current' = whatever ROLE_DEFAULTS holds at start. "
                         "Default: expert.")
+    p.add_argument("--ctx-override", type=int, default=None,
+                   help="Phase 55.V16b — pin ctx_size after the baseline is "
+                        "applied. Use to hold ctx constant while sweeping a "
+                        "different knob (e.g. cache-type quality probe at a "
+                        "ctx where ALL candidates fit on the GPU). "
+                        "Incompatible with --knob ctx-size and "
+                        "--matrix-knob ctx-size.")
     p.add_argument("--autowrite-section-slug", default=None,
                    help="Slug of the section to drive the autowrite-section "
                         "workload. Default: first section of the active book.")
@@ -719,6 +740,12 @@ def main():
                          if v.strip()]
         if not matrix_values:
             console.print("[red]--matrix-values produced an empty list.[/red]")
+            return 2
+
+    if args.ctx_override is not None:
+        if args.knob == "ctx-size" or args.matrix_knob == "ctx-size":
+            console.print("[red]--ctx-override is incompatible with sweeping "
+                          "ctx-size (it would silently shadow the swept value).[/red]")
             return 2
 
     out_dir = args.out_dir or Path(settings.data_dir) / "bench" / "substrate_sweep"
@@ -769,6 +796,7 @@ def main():
                 matrix_knob=args.matrix_knob, matrix_value=mv,
                 autowrite_section_args=aw_args,
                 baseline=args.baseline,
+                ctx_override=args.ctx_override,
             )
             r["timestamp"] = datetime.now(timezone.utc).isoformat()
             fh.write(json.dumps(r) + "\n")
