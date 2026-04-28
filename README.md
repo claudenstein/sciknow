@@ -711,6 +711,33 @@ See [`docs/PROJECTS.md`](docs/PROJECTS.md) for the full design.
 sciknow is active; the [`docs/PHASE_LOG.md`](docs/PHASE_LOG.md) records
 every Phase commit. Most recent batches:
 
+- **55.S1 + 55.V1 (April 2026).** Cross-family autowrite scorer +
+  VRAM discipline. **(S1)** Adds an opt-in fifth llama-server role
+  on `:8094` for a non-Qwen scorer GGUF (default candidate Gemma 4
+  31B Q4_1, ~18 GB) so the score / verify / CoVe / rescore phases
+  break the same-family self-bias documented in
+  [arXiv:2506.22316](https://arxiv.org/abs/2506.22316) /
+  [arXiv:2508.06709](https://arxiv.org/abs/2508.06709). Threaded a
+  `role=` kwarg through `rag.llm.stream` → `infer.client.chat_stream`
+  so callers can pick which port handles the request. **(V1)**
+  Extends the Phase 55.S1 `_VRAM_CONFLICTS` map bidirectionally:
+  writer / scorer / vlm now also conflict with embedder + reranker,
+  evicting them whenever a big-model role loads (and vice-versa
+  when retrieval needs the embedder). New `activate_phase("retrieve"
+  | "generate" | "score" | "vlm")` API in `infer/server.py` brings
+  up the right combination of roles and evicts everything else with
+  a 1.5 s CUDA-context-release grace; the autowrite engine declares
+  its phase via `_swap_to_phase(...)` at every retrieve↔generate↔
+  score boundary. Scorer's `ctx_size` restored 8192 → 16384 (the KV
+  hack from earlier in the day is no longer needed once embedder /
+  reranker are evicted). Live verification: 1-iter run produced 1836
+  words at score 0.89 with gemma decode at 30 t/s during scoring;
+  2-iter run hit 0.87 final. VRAM observed: writer alone 18.9 GB,
+  gemma alone 22.4 GB, embedder + reranker alone 1 GB during retrieve
+  — never co-resident with a big model. `VRAM_CO_RESIDENCE_OK=true`
+  short-circuits the eviction policy on big-VRAM hosts (DGX Spark,
+  A100 80 GB). Phase 55.V2 deferred: native `llama-server
+  --models-dir` router-mode migration (collapses 5 ports → 1).
 - **54.6.165-201 (April 2026).** Full web UI redesign — "scholar's
   editor, not LLM dashboard." 37-commit arc replaces the Tailwind-
   starter look with a considered writing environment. **Real
@@ -866,6 +893,15 @@ sciknow infer up --role writer
 sciknow infer up --role embedder
 sciknow infer up --role reranker
 sciknow infer status                 # all three should report ✓ healthy
+# Optional: cross-family autowrite scorer (Phase 55.S1, opt-in).
+# Set USE_LLAMACPP_SCORER=true + SCORER_MODEL_GGUF=/path/to/non-Qwen.gguf
+# (e.g. Gemma 4 31B Q4_1, ~18 GB) in .env, then:
+#   sciknow infer up --role scorer    # :8094
+# Phase 55.V1 — on a 24 GB GPU the scorer cannot co-reside with the
+# writer; the substrate auto-swaps via _VRAM_CONFLICTS at every
+# autowrite phase boundary (writer → scorer ~7 s, scorer → writer
+# ~10 s). Set VRAM_CO_RESIDENCE_OK=true on hosts where they fit
+# together (DGX Spark / A100 80 GB) to skip the swap.
 
 # 5. Initialise PostgreSQL + Qdrant
 sciknow library init                 # was: sciknow library init
@@ -890,9 +926,11 @@ PDFs ──→ MinerU 2.5 ──→ Metadata ──→ Chunker ──→ bge-m3 
 Query ──→ Dense + FTS ──→ RRF fusion ──→ Reranker ──→ Ranked results
                                           (llama-server :8092)                │
                                               Writer LLM (llama-server :8090) ──→ Answer
+                                              + cross-family Scorer (:8094, opt-in, Phase 55.S1)
+                                              + VLM (:8093, on-demand, caption-visuals)
 ```
 
-Three services, all native (no Docker): **PostgreSQL 16** (relational + full-text), **Qdrant** (vectors), **llama-server** (writer + embedder + reranker via the OpenAI-compatible API).
+Three services, all native (no Docker): **PostgreSQL 16** (relational + full-text), **Qdrant** (vectors), **llama-server** (writer + embedder + reranker + optional vlm + optional scorer via the OpenAI-compatible API). Phase 55.V1 — the substrate auto-swaps big-model roles on the 24 GB 3090 via `_VRAM_CONFLICTS` + `activate_phase()`, so the scorer doesn't OOM against a still-resident writer.
 
 See [Architecture](docs/ARCHITECTURE.md) for the full system diagram, database schema, AI model details, and project structure.
 
@@ -959,15 +997,17 @@ Research notes (reading material, not authoritative for current behaviour):
 | Storage | 500 GB SSD | 2 TB NVMe |
 | OS | Ubuntu 22.04+ | Ubuntu 22.04+ |
 
-**VRAM budget on 3090 (24 GB):** llama-server writer (Qwen3.6-27B-UD-Q4_K_XL ~17.6 GB) + embedder (bge-m3-Q8 ~0.6 GB) + reranker (bge-reranker-v2-m3-Q8 ~0.6 GB) = fits comfortably with ~5 GB headroom for KV cache + activations.
+**VRAM budget on 3090 (24 GB):** llama-server writer (Qwen3.6-27B-UD-Q4_K_XL ~17.6 GB) + embedder (bge-m3-Q8 ~0.6 GB) + reranker (bge-reranker-v2-m3-Q8 ~0.6 GB) = fits comfortably with ~5 GB headroom for KV cache + activations. Phase 55.S1 added an optional cross-family scorer role (Gemma 4 31B Q4_1, ~18 GB) for autowrite — that one cannot co-reside with the writer on a 24 GB card, so Phase 55.V1 added a `_VRAM_CONFLICTS` map + `activate_phase()` API in `infer/server.py` that auto-swaps writer ↔ scorer at every retrieve↔generate↔score boundary in autowrite (~7-10 s per swap, ~2 swaps per iteration). Embedder + reranker are also evicted during the big-model phases on the 3090; set `VRAM_CO_RESIDENCE_OK=true` on hosts where everything fits together (DGX Spark, A100 80 GB) to skip the swap.
 
-**Remote GPU:** Point the three v2 substrate URLs at the remote host in `.env`:
+**Remote GPU:** Point the substrate URLs at the remote host in `.env`:
 ```bash
 INFER_WRITER_URL=http://your-gpu-server:8090
 INFER_EMBEDDER_URL=http://your-gpu-server:8091
 INFER_RERANKER_URL=http://your-gpu-server:8092
+INFER_VLM_URL=http://your-gpu-server:8093     # optional, for caption-visuals
+INFER_SCORER_URL=http://your-gpu-server:8094  # optional, Phase 55.S1
 ```
-Run `sciknow infer up --role <writer|embedder|reranker>` on the remote host. Zero code changes locally. (v1 rollback path: `OLLAMA_HOST=http://your-gpu-server:11434` after `USE_LLAMACPP_WRITER=False`.)
+Run `sciknow infer up --role <writer|embedder|reranker|vlm|scorer>` on the remote host. Zero code changes locally. (v1 rollback path: `OLLAMA_HOST=http://your-gpu-server:11434` after `USE_LLAMACPP_WRITER=False`.)
 
 ---
 

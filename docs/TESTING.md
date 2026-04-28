@@ -104,6 +104,46 @@ L3 needs Ollama too. Run it when:
 
 L3 is the slowest layer because the first LLM call typically loads a model into VRAM (~3 minutes for a 30B model). Once the model is hot, subsequent calls are fast.
 
+### Phase 55 VRAM-discipline tests
+
+Phase 55.S1 added a cross-family autowrite scorer; Phase 55.V1 added
+the `_VRAM_CONFLICTS` map + `activate_phase` API + `_swap_to_phase`
+bridge so every retrieve↔generate↔score boundary in autowrite (and
+since 55.V3, in wiki/raptor/argue/gaps/write/review/revise) explicitly
+evicts conflicting roles. Four contracts gate the regression:
+
+- **`l1_phase55_v1_vram_conflict_map_and_phase_activation`** — the
+  conflict map covers the cartesian product (writer/scorer/vlm) ×
+  (embedder/reranker), bidirectional. Embedder ↔ reranker do NOT
+  conflict (intentional retrieve-phase pair). `activate_phase` and
+  `hot_phase` exported. `vram_co_residence_ok` setting exists.
+- **`l1_phase55_v1_autowrite_swaps_to_phase_at_boundaries`** —
+  `core/autowrite.py` + `core/book_ops.py` together carry ≥4
+  `_swap_to_phase("score")`, ≥3 `_swap_to_phase("generate")`, ≥5
+  `_swap_to_phase("retrieve")` call sites. Below those thresholds
+  means an engine path is back to lazy `_ensure_role_up` startup
+  eviction, which doesn't evict already-up peers.
+- **`l1_phase55_s1_autowrite_routes_scoring_through_scorer_role`** —
+  4 score-side phases pass `role="scorer"`; `_client_for` URL map
+  has the `"scorer"` entry (the regression that made scoring
+  silently fall back to overall=0.5).
+- **`l1_phase55_v3_down_recovers_when_pid_file_missing`** — `down()`
+  calls `_find_pid_by_port` as a fallback when the PID file got
+  cleared but the process is still alive on its port. Without this
+  fallback, an out-of-sync state silently wedges the conflict map.
+
+Live behaviour gate (L3, run on a host with the substrate up):
+
+- **`l3_phase55_v1_activate_phase_evicts_peers`** — round-trips
+  `activate_phase("retrieve") → activate_phase("generate")` and
+  asserts the kernel-level process tree reflects the swap.
+  Skips cleanly on hosts without the writer up or with
+  `VRAM_CO_RESIDENCE_OK=true`.
+
+Run the L3 gate after touching `sciknow/infer/server.py`,
+`sciknow/core/book_ops.py:_swap_to_phase`, or any
+`activate_phase` call site.
+
 ## How to add a new check
 
 A test is a function. Open `sciknow/testing/protocol.py`, write the function in the appropriate layer section, and append it to the layer's list at the bottom of the file. That's it.

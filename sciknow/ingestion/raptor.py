@@ -697,6 +697,14 @@ def build_raptor_tree(
     """
     from sciknow.storage.db import get_session
     from sciknow.storage.qdrant import ensure_node_level_index, get_client
+    # Phase 55.V3 — RAPTOR is a long writer-only loop (cluster →
+    # summarise via LLM → embed). The summarise pass dominates wall
+    # time and benefits from the writer claiming the full GPU. The
+    # subsequent embed pass goes through the embedder llama-server
+    # again (which up()s with a fresh _free_vram_for cycle), so the
+    # ping-pong cost is bounded and amortised across many summaries.
+    from sciknow.core.book_ops import _swap_to_phase
+    _swap_to_phase("generate")
 
     qdrant = get_client()
 

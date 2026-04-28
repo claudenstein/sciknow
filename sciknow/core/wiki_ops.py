@@ -307,6 +307,13 @@ def compile_paper_summary(
     from sciknow.rag import wiki_prompts
     from sciknow.rag.llm import stream as llm_stream
     from sciknow.storage.db import get_session
+    # Phase 55.V3 — wiki compile is a long writer-only loop. Evict the
+    # embedder + reranker once at entry so the writer gets the full GPU
+    # for its 600+ paper-summary calls. Idempotent across thread-pool
+    # workers (the first call evicts; subsequent see no peer up and
+    # return immediately).
+    from sciknow.core.book_ops import _swap_to_phase
+    _swap_to_phase("generate")
 
     model = _wiki_model(model)
 
@@ -674,6 +681,9 @@ def _extract_entities_and_kg(
     from sciknow.rag.llm import complete as llm_complete
     from sciknow.storage.db import get_session
     from sqlalchemy import text
+    # Phase 55.V3 — entity + KG extraction is writer-only.
+    from sciknow.core.book_ops import _swap_to_phase
+    _swap_to_phase("generate")
 
     sys_e, usr_e = wiki_prompts.wiki_extract_entities(
         title=title, authors=authors, year=year,
@@ -828,6 +838,9 @@ def update_concepts_for_paper(
     from sciknow.rag import wiki_prompts
     from sciknow.rag.llm import complete as llm_complete
     from sciknow.storage.db import get_session
+    # Phase 55.V3 — concept-page update is writer-only.
+    from sciknow.core.book_ops import _swap_to_phase
+    _swap_to_phase("generate")
 
     # Use the same model as the caller (avoids Ollama model-swap OOM).
     # Previously used llm_fast_model, but on a single GPU the swap from
@@ -1232,6 +1245,10 @@ def compile_synthesis(
     from sciknow.rag.llm import stream as llm_stream
     from sciknow.storage.db import get_session
     from sqlalchemy import text
+    # Phase 55.V3 — synthesis is writer-only; evict embedder + reranker
+    # so the writer keeps the full GPU.
+    from sciknow.core.book_ops import _swap_to_phase
+    _swap_to_phase("generate")
 
     slug = _slugify(f"synthesis-{topic}")
 
@@ -1303,6 +1320,14 @@ def query_wiki(
     model = _wiki_model(model)
     from sciknow.rag.llm import stream as llm_stream
     from sciknow.storage.qdrant import WIKI_COLLECTION, get_client
+    # Phase 55.V3 — wiki query is mixed: encode the question (embedder),
+    # then answer (writer). Embedder here uses the in-process FlagEmbedding
+    # path (`ingestion.embedder._get_model`), not the llama-server
+    # embedder, so it doesn't trigger an `up("embedder")` cascade. The
+    # writer call below DOES need the full GPU though — swap to generate
+    # before the LLM stream so any lingering bge-m3-llama-server
+    # process gets evicted.
+    from sciknow.core.book_ops import _swap_to_phase
 
     yield {"type": "progress", "stage": "searching", "detail": "Searching wiki..."}
 
@@ -1385,6 +1410,11 @@ def query_wiki(
 
     yield {"type": "progress", "stage": "answering", "detail": "Generating answer..."}
 
+    # Phase 55.V3 — swap to generate phase before the writer streams
+    # the answer. Evicts any llama-server embedder/reranker processes
+    # so the writer claims the full GPU.
+    _swap_to_phase("generate")
+
     for tok in llm_stream(system, user, model=model, num_ctx=16384):
         yield {"type": "token", "text": tok}
 
@@ -1409,6 +1439,9 @@ def consensus_map(
     from sciknow.rag.llm import complete as llm_complete
     from sciknow.storage.db import get_session
     from sqlalchemy import text
+    # Phase 55.V3 — consensus_map is writer-only.
+    from sciknow.core.book_ops import _swap_to_phase
+    _swap_to_phase("generate")
 
     yield {"type": "progress", "stage": "gathering",
            "detail": f"Gathering evidence for: {topic}..."}
@@ -1625,6 +1658,9 @@ def lint_wiki(
 
         from sciknow.rag import wiki_prompts
         from sciknow.rag.llm import complete as llm_complete
+        # Phase 55.V3 — deep-lint is writer-only; evict embedder + reranker.
+        from sciknow.core.book_ops import _swap_to_phase
+        _swap_to_phase("generate")
 
         concept_dir = settings.wiki_dir / "concepts"
         if concept_dir.exists():

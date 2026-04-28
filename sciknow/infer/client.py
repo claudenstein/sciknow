@@ -52,6 +52,12 @@ def _client_for(role: str) -> httpx.Client:
         "embedder": settings.infer_embedder_url,
         "reranker": settings.infer_reranker_url,
         "vlm": settings.infer_vlm_url,
+        # Phase 55.S1 — autowrite scorer port. KeyError here would
+        # surface as "scoring_failed: 'scorer'" inside the autowrite
+        # log, with no visible upstream cause (the CLI just reports a
+        # 0.5 fallback score). The url is read in `chat_stream` /
+        # `chat_complete` whenever a caller passes role="scorer".
+        "scorer": settings.infer_scorer_url,
     }[role]
     with _clients_lock:
         c = _clients.get(role)
@@ -133,8 +139,9 @@ def chat_stream(
     think: bool | None = None,           # accepted for v1 parity, ignored
     top_p: float | None = None,
     top_k: int | None = None,
+    role: str = "writer",
 ) -> Iterator[str]:
-    """Stream chat completion tokens from the writer server.
+    """Stream chat completion tokens from the role's llama-server.
 
     Translates the v1 ``rag/llm.py:stream`` signature to llama-server's
     OpenAI-compatible ``/v1/chat/completions`` (SSE). Yields content
@@ -144,10 +151,22 @@ def chat_stream(
 
     Args mirrored from v1 — extra Ollama-specific args are accepted but
     silently ignored where llama-server doesn't expose them.
+
+    ``role`` (default ``"writer"``) selects which llama-server instance
+    handles the request. Phase 55.S1 added the ``"scorer"`` role for
+    autowrite's score / rescore calls — passing ``role="scorer"`` hits
+    port 8094 instead of 8090, breaking same-family self-bias when the
+    user has loaded a non-Qwen GGUF there.
     """
-    chosen_model = model or settings.writer_model_name
-    _ensure_role_up("writer")
-    client = _client_for("writer")
+    if role == "scorer":
+        # Default the model name to the configured scorer label so
+        # logs read meaningfully when no explicit model= override
+        # was passed.
+        chosen_model = model or settings.scorer_model_name
+    else:
+        chosen_model = model or settings.writer_model_name
+    _ensure_role_up(role)
+    client = _client_for(role)
 
     body: dict[str, Any] = {
         "model": chosen_model,
@@ -187,47 +206,81 @@ def chat_stream(
         "INFER stream model=%s system=%dc user=%dc temp=%s",
         chosen_model, len(system), len(user), temperature,
     )
+    # Phase 55.V4 — retry-once on connection drop BEFORE any tokens
+    # have been yielded. The user's full-book autowrite died on a
+    # `RemoteProtocolError: peer closed connection without sending
+    # complete message body` mid-revise. Once tokens have been
+    # yielded we cannot replay them safely (the consumer would see
+    # them twice), so the retry only fires if the stream dies before
+    # the first token. After-token drops still propagate so the
+    # autowrite engine can see the partial output and the
+    # section-level handler can mark it failed cleanly.
+    _retry_left = 1
     try:
-        with client.stream("POST", "/v1/chat/completions", json=body) as resp:
-            if resp.status_code != 200:
-                body_txt = resp.read().decode("utf-8", errors="replace")
-                raise RuntimeError(
-                    f"llama-server /v1/chat/completions status="
-                    f"{resp.status_code}: {body_txt[:500]}"
+        while True:
+            try:
+                with client.stream("POST", "/v1/chat/completions", json=body) as resp:
+                    if resp.status_code != 200:
+                        body_txt = resp.read().decode("utf-8", errors="replace")
+                        raise RuntimeError(
+                            f"llama-server /v1/chat/completions status="
+                            f"{resp.status_code}: {body_txt[:500]}"
+                        )
+                    for line in resp.iter_lines():
+                        if not line:
+                            continue
+                        if not line.startswith("data:"):
+                            continue
+                        payload = line[5:].strip()
+                        if payload == "[DONE]":
+                            break
+                        try:
+                            evt = json.loads(payload)
+                        except json.JSONDecodeError:
+                            continue
+                        # Capture timings if llama-server provided them on this chunk.
+                        if "timings" in evt:
+                            last_timings = evt["timings"]
+                        if "usage" in evt and evt["usage"]:
+                            last_timings = (last_timings or {}) | {"usage": evt["usage"]}
+                        choices = evt.get("choices") or []
+                        if not choices:
+                            continue
+                        delta = choices[0].get("delta") or {}
+                        content = delta.get("content")
+                        if content:
+                            token_count += 1
+                            yield content
+                        # Some models (Qwen3.x) emit reasoning_content even when
+                        # thinking is disabled — surface it only if think=True
+                        # was explicitly requested. Otherwise drop it.
+                        if think:
+                            rc = delta.get("reasoning_content")
+                            if rc:
+                                token_count += 1
+                                yield rc
+                # Stream completed cleanly.
+                break
+            except (httpx.RemoteProtocolError, httpx.ReadError,
+                    httpx.ConnectError, httpx.NetworkError) as drop_exc:
+                if token_count > 0:
+                    # Already yielded tokens — caller has partial output.
+                    # Don't retry; let them decide what to do.
+                    raise
+                if _retry_left <= 0:
+                    raise
+                _retry_left -= 1
+                logger.warning(
+                    "INFER stream pre-token drop (%s) — re-upping role=%s "
+                    "and retrying once", type(drop_exc).__name__, role,
                 )
-            for line in resp.iter_lines():
-                if not line:
-                    continue
-                if not line.startswith("data:"):
-                    continue
-                payload = line[5:].strip()
-                if payload == "[DONE]":
-                    break
-                try:
-                    evt = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
-                # Capture timings if llama-server provided them on this chunk.
-                if "timings" in evt:
-                    last_timings = evt["timings"]
-                if "usage" in evt and evt["usage"]:
-                    last_timings = (last_timings or {}) | {"usage": evt["usage"]}
-                choices = evt.get("choices") or []
-                if not choices:
-                    continue
-                delta = choices[0].get("delta") or {}
-                content = delta.get("content")
-                if content:
-                    token_count += 1
-                    yield content
-                # Some models (Qwen3.x) emit reasoning_content even when
-                # thinking is disabled — surface it only if think=True
-                # was explicitly requested. Otherwise drop it.
-                if think:
-                    rc = delta.get("reasoning_content")
-                    if rc:
-                        token_count += 1
-                        yield rc
+                # Wait a beat for the role to actually finish dying before
+                # `_ensure_role_up` re-probes /health. Without this, the
+                # re-up call sees the dying server's stale port and may
+                # skip the restart.
+                time.sleep(2.0)
+                _ensure_role_up(role)
+                continue
     except Exception as exc:
         elapsed = time.monotonic() - t0
         logger.error("INFER FAILED model=%s after=%.1fs error=%s: %s",
@@ -290,13 +343,14 @@ def chat_complete(
     think: bool | None = None,
     top_p: float | None = None,
     top_k: int | None = None,
+    role: str = "writer",
 ) -> str:
     """Non-streaming completion. Concatenates chat_stream output."""
     return "".join(chat_stream(
         system, user, model=model, temperature=temperature,
         num_ctx=num_ctx, num_batch=num_batch, num_predict=num_predict,
         keep_alive=keep_alive, format=format, think=think,
-        top_p=top_p, top_k=top_k,
+        top_p=top_p, top_k=top_k, role=role,
     ))
 
 

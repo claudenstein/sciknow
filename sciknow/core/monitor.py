@@ -2649,23 +2649,69 @@ def _build_alerts(snap: dict) -> list[dict]:
     # v2 Phase A — `infer_writer` is critical (no LLM = no autowrite);
     # `infer_embedder` and `infer_reranker` are warn (retrieval still
     # answers via FTS-only fallback if embedder is down).
+    #
+    # Phase 55.V1 — VRAM-discipline-aware service alerts. The infer
+    # substrate's auto-swap (sciknow.infer.server._free_vram_for) evicts
+    # peer big-model roles before loading the requested one, and
+    # phase-aware autowrite additionally evicts embedder + reranker
+    # while a big writer/scorer/vlm role is hot. So whenever ANY
+    # big-model role is currently up on the GPU, every other infer_*
+    # role being down is **expected mid-cycle** — the next call into
+    # that role will swap it back in via _ensure_role_up. Demote those
+    # to info so the alerts panel doesn't scream during normal autowrite.
+    #
+    # The escape hatch: if no big-model role is up either, then a
+    # missing writer (etc.) is a real outage and stays at error/warn.
+    from sciknow.config import settings as _settings
     services = snap.get("services") or {}
+    BIG_ROLES = ("writer", "scorer", "vlm")
+    SMALL_ROLES = ("embedder", "reranker")
+    big_roles_up = {
+        r for r in BIG_ROLES
+        if bool((services.get(f"infer_{r}") or {}).get("up"))
+    }
+    swap_in_progress = bool(big_roles_up)
     CRITICAL_SERVICES = {"postgres", "qdrant", "infer_writer"}
     INFER_FIX = {
         "infer_writer":   "sciknow infer up --role writer",
         "infer_embedder": "sciknow infer up --role embedder",
         "infer_reranker": "sciknow infer up --role reranker",
+        "infer_scorer":   "sciknow infer up --role scorer",
+        "infer_vlm":      "sciknow infer up --role vlm",
     }
     for name, info in services.items():
         if info.get("up"):
             continue
         is_critical = name in CRITICAL_SERVICES
-        err_snippet = (info.get("error") or "").splitlines()[0][:80]
+        # Demote infer_* roles that are down because the substrate
+        # swapped them out for a hotter role. Only fires when at least
+        # one big-model role IS up (otherwise it's a real outage).
+        is_infer_role = name.startswith("infer_")
+        role_short = name[len("infer_"):] if is_infer_role else None
+        is_big = role_short in BIG_ROLES
+        is_small = role_short in SMALL_ROLES
+        peer_loaded = (
+            (is_big and big_roles_up - {role_short})
+            or (is_small and swap_in_progress)
+        )
+        if is_infer_role and peer_loaded:
+            severity = "info"
+            peer_names = ",".join(sorted(big_roles_up)) or "another role"
+            msg_prefix = (
+                f"{name} swapped out (peer {peer_names} is loaded; "
+                "auto-swap will restore on demand)"
+            )
+        else:
+            severity = "error" if is_critical else "warn"
+            msg_prefix = f"{name} unreachable"
+        err_lines = (info.get("error") or "").splitlines()
+        err_snippet = (err_lines[0][:80] if err_lines else "")
         alerts.append({
-            "severity": "error" if is_critical else "warn",
+            "severity": severity,
             "code": "service_down",
             "message": (
-                f"{name} unreachable — {err_snippet or 'no response'}"
+                f"{msg_prefix} — {err_snippet or 'no response'}"
+                if severity != "info" else msg_prefix
             ),
             "action": (
                 INFER_FIX.get(name)
@@ -3247,15 +3293,28 @@ def _infer_substrate_snapshot() -> list[dict]:
             or getattr(_s, "use_llamacpp_embedder", True)
             or getattr(_s, "use_llamacpp_reranker", True)
             or getattr(_s, "use_llamacpp_vlm", True)
+            # Phase 55.S1 — scorer counted only when both the toggle
+            # and the GGUF are set (otherwise the role can't be
+            # started; surfacing it would just clutter the panel).
+            or (
+                getattr(_s, "use_llamacpp_scorer", False)
+                and bool(getattr(_s, "scorer_model_gguf", ""))
+            )
         )
         if not on:
             return []
         from sciknow.infer.server import status as _status
         rows = _status()
-        # The vlm role hot-swaps with the writer (`corpus caption-visuals`
-        # toggles it for the duration of a captioning batch and stops it
-        # after). Surface it only when actually running so the dashboard
-        # doesn't flag it as ✗ down at all times — that's expected.
+        # Phase 55.V1 — surface vlm + scorer only when actually
+        # running. Both are on-demand / opt-in (vlm hot-swaps with
+        # writer during caption-visuals; scorer is the cross-family
+        # autowrite scorer). Always-showing them as ✗ down clutters
+        # the panel since they spend most of their time evicted by
+        # design.
+        scorer_configured = (
+            getattr(_s, "use_llamacpp_scorer", False)
+            and bool(getattr(_s, "scorer_model_gguf", ""))
+        )
         return [
             {
                 "role": p.role,
@@ -3265,7 +3324,9 @@ def _infer_substrate_snapshot() -> list[dict]:
                 "healthy": bool(p.healthy),
             }
             for p in rows
-            if p.role != "vlm" or p.pid is not None
+            if (p.role not in ("vlm", "scorer")
+                or p.pid is not None
+                or (p.role == "scorer" and scorer_configured))
         ]
     except Exception as exc:
         logger.debug("infer_substrate snapshot failed: %s", exc)
@@ -3343,7 +3404,19 @@ def _services_health() -> dict:
         "writer":   getattr(_s, "use_llamacpp_writer", True),
         "embedder": getattr(_s, "use_llamacpp_embedder", True),
         "reranker": getattr(_s, "use_llamacpp_reranker", True),
+        # Phase 55.S1 — scorer role only probed when both the toggle
+        # AND a configured GGUF are in place (otherwise the role can't
+        # actually start, so probing it would just spam "down" alerts).
+        "scorer":   (
+            getattr(_s, "use_llamacpp_scorer", False)
+            and bool(getattr(_s, "scorer_model_gguf", ""))
+        ),
     }
+    # vlm is intentionally NOT in `use_llamacpp` — it's an on-demand
+    # role started only by `corpus caption-visuals`, so its steady-
+    # state is "down". Probing it would generate a constant "vlm
+    # unreachable" warn. The alert demotion logic in _build_alerts
+    # tolerates the missing key (treats it as not-up).
     for role, on in use_llamacpp.items():
         if on:
             probes[f"infer_{role}"] = (lambda r=role: _ping_infer_role(r))

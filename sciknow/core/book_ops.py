@@ -2472,6 +2472,12 @@ def _release_gpu_models():
     Falls through to the v1 release sequence whenever any role is on
     the in-process fallback (someone flipped a USE_LLAMACPP_* toggle
     to False), so the rollback path keeps working unchanged.
+
+    Phase 55.V1 — this function is kept for v1 fallback only. The v2
+    code path uses `_swap_to_phase()` (below) which actually evicts
+    the llama-server embedder + reranker processes via
+    `infer.server.activate_phase(...)`. New autowrite call sites
+    should call `_swap_to_phase` directly with an explicit phase name.
     """
     from sciknow.config import settings as _s
     if (
@@ -2486,6 +2492,39 @@ def _release_gpu_models():
     release_embed_model()
     release_model()
     release_reranker()
+
+
+def _swap_to_phase(phase: str) -> dict | None:
+    """Phase 55.V1 — VRAM-aware phase activation.
+
+    Bridges the autowrite/book-ops layer to
+    ``sciknow.infer.server.activate_phase``. In v2 mode (the default)
+    this brings up the role(s) required for ``phase`` and evicts every
+    other role per the conflict map. In v1 mode (legacy Ollama) this
+    is a no-op — the v1 codepath uses ``release_llm`` + the in-process
+    ``_release_gpu_models`` dance, both of which already exist at the
+    legacy call sites.
+
+    Phase names: "retrieve", "generate", "score", "vlm".
+    See ``infer.server._PHASE_ROLES`` for the role mapping.
+
+    Returns the activate_phase dict ({"up": [...], "down": [...]}) in
+    v2 mode, or None in v1 mode. Best-effort: any swap failure is
+    logged and swallowed — the next real call into a missing role
+    will hit a clear connection error from llama-server.
+    """
+    from sciknow.config import settings as _s
+    if not getattr(_s, "use_llamacpp_writer", True):
+        return None
+    try:
+        from sciknow.infer.server import activate_phase
+        return activate_phase(phase)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "_swap_to_phase(%s) failed: %s — autowrite will continue but "
+            "may OOM if conflicting roles are still resident", phase, exc,
+        )
+        return None
 
 
 def _stream_phase(system: str, user: str, phase: str, *, model=None,
@@ -2721,6 +2760,28 @@ def _is_resumable_draft(custom_metadata, word_count: int | None) -> tuple[bool, 
         f"draft has unknown checkpoint state '{checkpoint}' — "
         "refusing to resume (run with --rebuild to start fresh)"
     )
+
+
+def _extract_draft_final_overall(custom_metadata) -> float | None:
+    """Return the autowrite final_overall score for a draft, or None.
+
+    Used by the ``--only-below-target`` filter to skip sections whose
+    last autowrite run already crossed the target. ``None`` means
+    "no final score recorded" — which we treat as below-target so the
+    filter doesn't hide partial / non-autowrite drafts.
+    """
+    meta = custom_metadata or {}
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except Exception:
+            return None
+    if not isinstance(meta, dict):
+        return None
+    val = meta.get("final_overall")
+    if isinstance(val, (int, float)):
+        return float(val)
+    return None
 
 
 def _next_draft_version(session, book_id: str, chapter_id: str, section_type: str) -> int:
@@ -3100,6 +3161,12 @@ def _retrieve(session, qdrant, query: str, candidate_k: int = 50,
     from sciknow.retrieval import context_builder, hybrid_search, reranker
     from sciknow.rag.prompts import format_sources
 
+    # Phase 55.V1 — ensure the embedder + reranker are up and the
+    # big-model roles (writer/scorer/vlm) are evicted before the
+    # hybrid search runs. Idempotent when the substrate is already
+    # in retrieve phase.
+    _swap_to_phase("retrieve")
+
     candidates = hybrid_search.search(
         query=query, qdrant_client=qdrant, session=session,
         candidate_k=candidate_k, year_from=year_from, year_to=year_to,
@@ -3253,6 +3320,12 @@ def _retrieve_with_step_back(
         sb_query = _generate_step_back_query(query, model=model)
         if sb_query and sb_query.lower() == query.lower():
             sb_query = None
+
+    # Phase 55.V1 — step-back gen above runs against the writer; the
+    # search below needs the embedder + reranker. Swap roles now (down
+    # writer, up embedder + reranker) so the upcoming search doesn't
+    # OOM against a still-resident writer.
+    _swap_to_phase("retrieve")
 
     candidates = hybrid_search.search(
         query=query, qdrant_client=qdrant, session=session,
@@ -3409,6 +3482,11 @@ def write_section_stream(
     if not results:
         yield {"type": "error", "message": "No relevant passages found."}
         return
+
+    # Phase 55.V3 — retrieve done; everything below is writer-only
+    # (tree-plan / writing / verify). Swap to generate phase so the
+    # embedder + reranker llama-server processes are evicted.
+    _swap_to_phase("generate")
 
     # Optional hierarchical tree plan (TreeWriter pattern)
     if show_plan:
@@ -3632,6 +3710,9 @@ def review_draft_stream(
     yield {"type": "progress", "stage": "reviewing",
            "detail": f"Reviewing: {d_title}..."}
 
+    # Phase 55.V3 — review is writer-only after retrieval; swap.
+    _swap_to_phase("generate")
+
     sys_r, usr_r = rag_prompts.review(d_section, d_topic or d_title, d_content, results)
     output_tokens: list[str] = []
     for tok in llm_stream(sys_r, usr_r, model=model, keep_alive=-1):
@@ -3709,6 +3790,9 @@ def revise_draft_stream(
     yield {"type": "progress", "stage": "revising",
            "detail": f"Revising {d_title} (v{d_version} -> v{d_version + 1})..."}
 
+    # Phase 55.V3 — revise is writer-only after the optional retrieve.
+    _swap_to_phase("generate")
+
     sys_r, usr_r = rag_prompts.revise(d_content, rev_instruction, results or None)
     output_tokens: list[str] = []
     for tok in llm_stream(sys_r, usr_r, model=model, keep_alive=-1):
@@ -3761,6 +3845,9 @@ def run_gaps_stream(
     from sciknow.rag import prompts
     from sciknow.rag.llm import stream as llm_stream, complete as llm_complete
     from sciknow.storage.db import get_session
+    # Phase 55.V3 — gaps analysis is writer-only; evict retrieval roles
+    # so the writer claims the full GPU.
+    _swap_to_phase("generate")
 
     with get_session() as session:
         book = session.execute(text("""
@@ -3916,6 +4003,10 @@ def run_argue_stream(
 
     yield {"type": "progress", "stage": "arguing",
            "detail": f"Mapping argument: {claim[:60]}..."}
+
+    # Phase 55.V3 — swap to generate phase after retrieve, before the
+    # writer streams the argument map.
+    _swap_to_phase("generate")
 
     system, user = prompts.argue(claim, results)
     output_tokens: list[str] = []
@@ -4378,7 +4469,8 @@ def _cove_verify(draft_content, results, model=None, max_questions: int = 6):
     }
 
 
-def _cove_verify_streaming(draft_content, results, model=None, max_questions: int = 6):
+def _cove_verify_streaming(draft_content, results, model=None, max_questions: int = 6,
+                            role: str = "writer"):
     """Phase 15.3 — generator variant of _cove_verify that yields token
     events for both the question generation pass and each independent
     answer pass. Returns the final mismatch report dict via
@@ -4387,6 +4479,14 @@ def _cove_verify_streaming(draft_content, results, model=None, max_questions: in
     Without this, CoVe runs 1 + N silent llm_complete calls and the GUI's
     token counter sits at 0 for the entire CoVe phase (often the longest
     silent stretch in autowrite).
+
+    Phase 55.S1 — accepts a ``role`` parameter so the autowrite engine
+    can route CoVe through the dedicated scorer role (Gemma 4 31B) when
+    USE_LLAMACPP_SCORER=true. CoVe is a judging task — running it on the
+    scorer breaks same-family self-bias AND keeps the scorer block
+    (score → verify → CoVe) hot in llama-server's prompt cache, so the
+    second and third calls in that block save 1-2 s of prefill each.
+    Defaults to "writer" for back-compat with non-autowrite callers.
     """
     from sciknow.rag import prompts as rag_prompts
 
@@ -4395,7 +4495,7 @@ def _cove_verify_streaming(draft_content, results, model=None, max_questions: in
         sys_q, usr_q = rag_prompts.cove_questions(draft_content)
         raw_q = yield from _stream_phase(
             sys_q, usr_q, "cove_questions",
-            model=model, temperature=0.1, num_ctx=16384,
+            model=model, temperature=0.1, num_ctx=16384, role=role,
         )
         q_clean = re.sub(r'<think>.*?</think>\s*', '', raw_q, flags=re.DOTALL).strip()
         q_data = json.loads(_clean_json(q_clean), strict=False)
@@ -4443,7 +4543,7 @@ def _cove_verify_streaming(draft_content, results, model=None, max_questions: in
         raw_a = yield from _stream_phase(
             sys_a, usr_a, "cove_answers_batch",
             model=model, temperature=0.0, num_ctx=16384,
-            num_predict=2048,
+            num_predict=2048, role=role,
         )
         a_clean = re.sub(r'<think>.*?</think>\s*', '', raw_a, flags=re.DOTALL).strip()
         a_data = json.loads(_clean_json(a_clean), strict=False)
@@ -4459,6 +4559,7 @@ def _cove_verify_streaming(draft_content, results, model=None, max_questions: in
                 raw_a = yield from _stream_phase(
                     sys_a, usr_a, f"cove_answer_{q_idx}",
                     model=model, temperature=0.0, num_ctx=16384,
+                    role=role,
                 )
                 a_clean = re.sub(r'<think>.*?</think>\s*', '', raw_a, flags=re.DOTALL).strip()
                 a_data = json.loads(_clean_json(a_clean), strict=False)

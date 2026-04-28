@@ -444,7 +444,16 @@ function startStream(jobId) {
       // Phase 15.5 — model name now shown only in the stats footer (which
       // already pulls it via setModel below). The previous in-body line
       // duplicated the same info redundantly.
+      // Phase 55.S1 — surface the cross-family scorer when configured
+      // so users know writer vs scorer is split. One-time info note,
+      // matching the autowrite-modal renderer below.
       stats.setModel(evt.writer_model || 'qwen3.5:27b');
+      if (evt.scorer_model) {
+        body.innerHTML += '<div class="u-muted u-tiny u-mt-1">'
+          + '⚖︎ writer: ' + _escHTML(evt.writer_model || '?')
+          + ' · scorer: ' + _escHTML(evt.scorer_model)
+          + ' (cross-family)</div>';
+      }
     }
     else if (evt.type === 'checkpoint') {
       // Phase 15.1 — incremental save reached. Briefly note in the body.
@@ -5146,6 +5155,8 @@ function doAutowrite() {
   document.querySelectorAll('.aw-mode-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.mode === 'skip');
   });
+  const obtEl = document.getElementById('aw-config-only-below-target');
+  if (obtEl) obtEl.checked = false;
 
   // Show the mode section only when running all sections AND some already
   // have drafts — otherwise mode choice is irrelevant.
@@ -5209,6 +5220,12 @@ async function confirmAutowrite() {
   fd.append('target_score', String(awTargetScore));
   if (isAllSections && modeRebuild) fd.append('rebuild', 'true');
   if (isAllSections && modeResume) fd.append('resume', 'true');
+  // Only sections below target score — applies to chapter-all-sections.
+  // For single-section runs the user explicitly chose the section, so
+  // there's nothing to filter; we still send the flag for symmetry but
+  // the engine ignores it on single-section calls.
+  const obtEl = document.getElementById('aw-config-only-below-target');
+  if (isAllSections && obtEl && obtEl.checked) fd.append('only_below_target', 'true');
   // Phase 54.6.144 — visuals-in-writer opt-in.
   const incVisEl = document.getElementById('aw-config-include-visuals');
   if (incVisEl && incVisEl.checked) fd.append('include_visuals', 'true');
@@ -5298,7 +5315,18 @@ async function confirmAutowrite() {
       // Phase 15.5 — model name shown only in the stats footer; the
       // previous awLog line duplicated information that's already in
       // the live stats pill above the dashboard.
+      // Phase 55.S1 — when a cross-family scorer is configured, the
+      // model label switches as the engine transitions between phases.
+      // The stats pill follows the writer for the writing phase by
+      // default; we surface the scorer name in the awLog as a one-time
+      // info line so the user knows what's running where.
       stats.setModel(evt.writer_model || 'qwen3.5:27b');
+      if (evt.scorer_model) {
+        awLog.innerHTML += '<div class="u-muted u-tiny u-mt-1">'
+          + '⚖︎ writer: ' + _escHTML(evt.writer_model || '?')
+          + ' · scorer: ' + _escHTML(evt.scorer_model)
+          + ' (cross-family — score / verify / CoVe / rescore)</div>';
+      }
     }
     else if (evt.type === 'checkpoint') {
       // Phase 15.1 — incremental save checkpoint reached. Show a brief
@@ -5358,10 +5386,12 @@ async function confirmAutowrite() {
     else if (evt.type === 'chapter_autowrite_start') {
       awLog.innerHTML += '<div class="u-bold u-border-t u-pt-6 u-mt-6">' +
         '\u270e Chapter autowrite: ' + evt.n_sections + ' sections' +
-        (evt.rebuild ? ' (rebuild mode)' : '') + '</div>';
+        (evt.rebuild ? ' (rebuild mode)' : '') +
+        (evt.only_below_target ? ' (only below target)' : '') + '</div>';
     }
     else if (evt.type === 'section_start') {
-      const skip = evt.skipped ? ' [SKIPPED — already drafted]' : '';
+      const skipReason = evt.reason || 'already drafted';
+      const skip = evt.skipped ? ' [SKIPPED — ' + skipReason + ']' : '';
       awLog.innerHTML += '<div class="u-semibold u-accent u-border-t u-pt-6 u-mt-6">' +
         '\u25b6 Section ' + evt.index + '/' + evt.total + ': ' + evt.title + skip + '</div>';
       status.textContent = 'Section ' + evt.index + '/' + evt.total + ': ' + evt.title +
@@ -5376,7 +5406,9 @@ async function confirmAutowrite() {
       const score = (evt.final_score != null) ? ' (' + evt.final_score.toFixed(2) + ')' : '';
       const cls = evt.error ? 'log-discard' : 'log-keep';
       const icon = evt.error ? '\u2717' : evt.skipped ? '\u2014' : '\u2713';
-      const note = evt.error ? ' error: ' + evt.error : evt.skipped ? ' skipped' : ' done' + score;
+      const note = evt.error ? ' error: ' + evt.error
+        : evt.skipped ? ' skipped' + score
+        : ' done' + score;
       awLog.innerHTML += '<div class="' + cls + '">' + icon + ' Section ' + evt.index + note + '</div>';
     }
     else if (evt.type === 'section_error') {
@@ -5431,6 +5463,17 @@ async function doAutowriteBook() {
   );
   if (!ok) return;
 
+  // Second prompt: only re-iterate on sections below the 0.85 target?
+  // OK ⇒ only-below-target (auto-resume); Cancel ⇒ default skip-existing.
+  // The two-confirm pattern is acceptable here because whole-book
+  // autowrite is itself an explicit destructive action.
+  const onlyBelowTarget = confirm(
+    "Only re-iterate on sections currently BELOW the target score?\n\n" +
+    "OK = yes, skip every section already at-or-above 0.85 and resume " +
+    "the convergence loop on the rest.\n" +
+    "Cancel = no, use the default mode (skip sections that already have any draft)."
+  );
+
   awTargetScore = 0.85;
   awScores = [];
 
@@ -5450,6 +5493,7 @@ async function doAutowriteBook() {
   const fd = new FormData();
   fd.append('max_iter', '3');
   fd.append('target_score', String(awTargetScore));
+  if (onlyBelowTarget) fd.append('only_below_target', 'true');
   const res = await fetch('/api/autowrite-book', {method: 'POST', body: fd});
   const data = await res.json();
   if (!data || !data.job_id) {
@@ -5499,6 +5543,7 @@ async function doAutowriteBook() {
         + '✎ Whole book autowrite: ' + evt.n_chapters + ' chapters'
         + (evt.rebuild ? ' (rebuild mode)' : '')
         + (evt.resume ? ' (resume mode)' : '')
+        + (evt.only_below_target ? ' (only below target)' : '')
         + '</div>';
     }
     else if (evt.type === 'chapter_start') {
@@ -5515,7 +5560,8 @@ async function doAutowriteBook() {
         + evt.n_sections + ' sections in this chapter</div>';
     }
     else if (evt.type === 'section_start') {
-      const skip = evt.skipped ? ' [SKIPPED — already drafted]' : '';
+      const skipReason = evt.reason || 'already drafted';
+      const skip = evt.skipped ? ' [SKIPPED — ' + skipReason + ']' : '';
       awLog.innerHTML += '<div class="u-md u-pl-4">  ▶ Section '
         + evt.index + '/' + evt.total + ': ' + evt.title + skip + '</div>';
       if (!evt.skipped) {
@@ -5527,7 +5573,9 @@ async function doAutowriteBook() {
       const score = (evt.final_score != null) ? ' (' + evt.final_score.toFixed(2) + ')' : '';
       const cls = evt.error ? 'log-discard' : 'log-keep';
       const icon = evt.error ? '✗' : evt.skipped ? '—' : '✓';
-      const note = evt.error ? ' error: ' + evt.error : evt.skipped ? ' skipped' : ' done' + score;
+      const note = evt.error ? ' error: ' + evt.error
+        : evt.skipped ? ' skipped' + score
+        : ' done' + score;
       awLog.innerHTML += '<div class="' + cls + '">    ' + icon + ' Section ' + evt.index + note + '</div>';
     }
     else if (evt.type === 'section_error') {
@@ -8261,16 +8309,35 @@ function renderMonitor(snap) {
       ['infer_writer', 'Writer'],
       ['infer_embedder', 'Embedder'],
       ['infer_reranker', 'Reranker'],
+      // Phase 55.S1 — scorer pill only appears when the role is
+      // configured (use_llamacpp_scorer + SCORER_MODEL_GGUF), so
+      // `services.infer_scorer` is the truth signal. Same pattern
+      // as ollama (only shown on v1 fallback).
+      ['infer_scorer', 'Scorer'],
       ['ollama', 'Ollama'],
     ];
+    // Phase 55.V1 — when ANY big-model role is up, peer infer_*
+    // roles being down isn't a service failure — it's an expected
+    // mid-swap state. Render them as a dim hourglass instead of a
+    // red ✗ so the operator's eye doesn't pattern-match "broken".
+    const bigRolesUp = ['infer_writer', 'infer_scorer', 'infer_vlm']
+      .some(r => services[r] && services[r].up);
     const svcBits = [];
     for (const [key, label] of svcOrder) {
       const info = services[key];
       if (!info) continue;
-      const c = info.up ? '#080' : '#c33';
+      // A peer role is "swapped out" iff the role is down AND some
+      // big-model role is currently up. Matches the alert-demotion
+      // logic in core/monitor.py:_build_alerts.
+      const swappedOut = !info.up && bigRolesUp && key.startsWith('infer_');
+      const c = info.up ? '#080' : (swappedOut ? '#888' : '#c33');
+      const icon = info.up ? '●' : (swappedOut ? '⏸' : '✗');
       const lat = info.latency_ms !== undefined ? info.latency_ms + 'ms' : '?';
-      svcBits.push('<span style="color:' + c + ';" title="' + _escHTML(info.error || '')
-        + '">' + (info.up ? '●' : '✗') + ' <strong>' + label + '</strong> '
+      const tip = swappedOut
+        ? 'swapped out — auto-swap will restore on demand'
+        : (info.error || '');
+      svcBits.push('<span style="color:' + c + ';" title="' + _escHTML(tip)
+        + '">' + icon + ' <strong>' + label + '</strong> '
         + _escHTML(lat) + '</span>');
     }
     if (svcBits.length) {

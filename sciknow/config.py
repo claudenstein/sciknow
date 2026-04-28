@@ -72,6 +72,16 @@ class Settings(BaseSettings):
     # Hot-swaps with the writer role (both are ~17 GB, can't co-reside
     # on a 3090); `corpus caption-visuals` manages the swap automatically.
     infer_vlm_url: str = "http://127.0.0.1:8093"
+    # Phase 55.S1 — cross-family autowrite scorer. Independent
+    # llama-server instance loaded with a non-Qwen GGUF (default
+    # candidate: Gemma 4 31B Q4_1) so the score / rescore phases stop
+    # being judged by a Qwen-family scorer (self-bias root-cause #2 in
+    # docs/ROADMAP.md §7). Disabled by default; flip
+    # USE_LLAMACPP_SCORER=true + set SCORER_MODEL_GGUF to enable.
+    # On the 3090 the scorer cannot co-reside with the writer (both
+    # ~17–18 GB); use sequential mode (manual `infer down --role
+    # writer` before scoring batches) until DGX Spark arrives.
+    infer_scorer_url: str = "http://127.0.0.1:8094"
     # Profile name passed to `sciknow infer up`. "default" = three roles
     # co-resident on the GPU; "low-vram" = embedder/reranker on CPU;
     # "spec-dec" = writer + draft model for speculative decoding.
@@ -93,6 +103,17 @@ class Settings(BaseSettings):
     vlm_mmproj_gguf: str = "/home/kartofel/Claude/huggingface/unsloth-Qwen3-VL-30B-A3B-Instruct-GGUF/mmproj-F16.gguf"
     # Optional draft model for spec-dec profile.
     draft_model_gguf: str = ""
+    # Phase 55.S1 — cross-family scorer GGUF for the autowrite scoring
+    # role. Empty by default → scoring routes through the writer port
+    # (Qwen3.6) just like every other v2 LLM call (the prior behaviour
+    # silently ignored AUTOWRITE_SCORER_MODEL because chat_stream
+    # always hits the writer port). Set to a non-Qwen GGUF + flip
+    # USE_LLAMACPP_SCORER=true to break the same-family self-bias
+    # documented in arXiv:2506.22316 / 2508.06709. Default candidate
+    # path on this machine: gemma-4-31B-it-Q4_1.gguf (18 GB; cannot
+    # co-reside with the writer on a 24 GB GPU — sequential mode
+    # only until DGX Spark arrives).
+    scorer_model_gguf: str = ""
     # Logical model names (used in /v1/chat requests' "model" field +
     # logging). llama-server doesn't validate them against the loaded
     # GGUF; they're labels only.
@@ -100,6 +121,10 @@ class Settings(BaseSettings):
     embedder_model_name: str = "bge-m3"
     reranker_model_name: str = "bge-reranker-v2-m3"
     vlm_model_name: str = "qwen3-vl-30b-a3b"
+    # Phase 55.S1 — logical name for the scorer role's /v1/chat model
+    # field. Defaults to a generic label; override via env when you
+    # want it to read meaningfully in the autowrite logs.
+    scorer_model_name: str = "scorer"
     # Phase A bridge: when True, rag.llm dispatches to sciknow.infer.client
     # (llama-server). When False, uses the v1 ollama path. Default True
     # for v2; flip to False to roll back to v1 within a single commit.
@@ -120,6 +145,28 @@ class Settings(BaseSettings):
     # sidecar. When False, falls back to the v1 Ollama qwen2.5vl
     # path (rollback hatch — ``uv add ollama`` first).
     use_llamacpp_vlm: bool = True
+    # Phase 55.S1 — opt-in cross-family scorer routing. When True AND
+    # SCORER_MODEL_GGUF is set, autowrite's score / rescore phases hit
+    # a separate llama-server instance (port INFER_SCORER_URL, default
+    # 8094) loaded with the configured GGUF (e.g. Gemma 4 31B). When
+    # False (default), scoring keeps using the writer port — same
+    # behaviour as the v2.0 release. The autowrite engine still passes
+    # the requested scorer model name through; with this False that
+    # name is metadata only. Verify / CoVe stay on the writer either
+    # way for now (those phases benefit less from cross-family signal
+    # and would double the swap cost on the 3090).
+    use_llamacpp_scorer: bool = False
+    # Phase 55.V1 — VRAM eviction policy escape hatch. Default False
+    # on the 24 GB 3090 (the binding case): the conflict map in
+    # `infer/server.py` aggressively evicts peer roles before bringing
+    # up writer/scorer/vlm, AND `activate_phase("generate")` /
+    # `activate_phase("score")` evicts the embedder + reranker so the
+    # big writer/scorer model gets the full 24 GB. Set True on hosts
+    # where the math works out for full co-residency (DGX Spark, A100,
+    # etc.) — `_should_evict_for_vram()` will short-circuit and the
+    # substrate keeps every started role hot. Does NOT disable the
+    # `_ensure_role_up` lazy-startup logic (which is always safe).
+    vram_co_residence_ok: bool = False
 
     # Models
     embedding_model: str = "BAAI/bge-m3"

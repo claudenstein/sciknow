@@ -180,6 +180,12 @@ def _name_clusters(
 ) -> dict[int, str]:
     """Use a single LLM call to name all clusters from their keywords."""
     from sciknow.rag.llm import complete as llm_complete
+    # Phase 55.V3 — single writer call; evict retrieval roles so the
+    # writer claims the full GPU. Cluster naming runs after the
+    # embedding-driven cluster pass (which left embedder hot), so
+    # this swap genuinely reclaims VRAM.
+    from sciknow.core.book_ops import _swap_to_phase
+    _swap_to_phase("generate")
 
     lines = []
     for cid in sorted(keywords.keys()):

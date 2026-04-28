@@ -236,6 +236,7 @@ def stream(
     keep_alive: str | int | None = -1,
     format: dict | str | None = None,
     think: bool | None = None,
+    role: str = "writer",
     top_p: float | None = None,
     top_k: int | None = None,
 ) -> Iterator[str]:
@@ -269,12 +270,26 @@ def stream(
     """
     if _use_llamacpp():
         from sciknow.infer import client as infer_client
+        # Phase 55.S1 — when the caller asked for the scorer role but
+        # the substrate isn't configured for it (no SCORER_MODEL_GGUF
+        # or USE_LLAMACPP_SCORER=False), silently fall back to the
+        # writer role so the call still works. The autowrite engine
+        # makes the role decision based on the same toggles, so this
+        # branch usually doesn't fire — it's a safety net for direct
+        # callers that bypass the engine.
+        effective_role = role
+        if role == "scorer" and not (
+            getattr(settings, "use_llamacpp_scorer", False)
+            and getattr(settings, "scorer_model_gguf", "")
+        ):
+            effective_role = "writer"
         yield from infer_client.chat_stream(
             system, user,
             model=model, temperature=temperature,
             num_ctx=num_ctx, num_batch=num_batch,
             num_predict=num_predict, keep_alive=keep_alive,
             format=format, think=think, top_p=top_p, top_k=top_k,
+            role=effective_role,
         )
         return
     client = _get_client()

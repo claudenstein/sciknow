@@ -18,6 +18,7 @@ Commands:
 from __future__ import annotations
 
 import json as _json
+import logging
 from pathlib import Path
 from typing import Annotated
 
@@ -26,6 +27,8 @@ from rich import box
 from rich.console import Console
 from rich.rule import Rule
 from rich.table import Table
+
+logger = logging.getLogger("sciknow.cli.book")
 
 app = typer.Typer(help="Manage book projects and chapter writing.")
 chapter_app = typer.Typer(help="Manage chapters within a book.")
@@ -3684,6 +3687,19 @@ def autowrite(
             "leave per-chapter flags untouched."
         ),
     ),
+    only_below_target: bool = typer.Option(
+        False, "--only-below-target",
+        help=(
+            "Skip sections whose latest draft already reached "
+            "--target-score (i.e. custom_metadata.final_overall >= "
+            "--target-score). Useful for re-running the convergence "
+            "loop only on sections that plateaued. Implies --resume "
+            "when neither --resume nor --rebuild is set, since iterating "
+            "on existing below-target drafts is the natural pairing. "
+            "With --rebuild, only below-target drafts are rewritten "
+            "from scratch."
+        ),
+    ),
 ):
     """
     Autonomous write → review → revise convergence loop (inspired by Karpathy's autoresearch).
@@ -3813,12 +3829,24 @@ def autowrite(
         console.print("[yellow]Both --rebuild and --resume given; --rebuild wins.[/yellow]")
         resume = False
 
+    # --only-below-target without --rebuild implies --resume (the natural
+    # pairing: re-iterate on sections that haven't yet crossed the target).
+    if only_below_target and not rebuild and not resume:
+        console.print(
+            "[dim]--only-below-target → implying --resume "
+            "(re-iterating on below-target drafts).[/dim]"
+        )
+        resume = True
+
     # Build a slug → latest draft id map. Used by:
     #   - default mode: skip sections that already have a draft
     #   - resume mode: pass the draft id to autowrite_section_stream
     #     so it loads the existing content as the iteration starting point
+    #   - --only-below-target: filter out sections at-or-above target_score
+    # We always build it when --only-below-target is set, even with
+    # --rebuild, so the filter can compare against final_overall.
     existing_by_key: dict[tuple[str, str], dict] = {}
-    if not rebuild:
+    if not rebuild or only_below_target:
         with get_session() as session:
             existing_rows = session.execute(text("""
                 SELECT DISTINCT ON (chapter_id, section_type)
@@ -3834,6 +3862,40 @@ def autowrite(
                 "custom_metadata": r[3],
                 "word_count": r[4] or 0,
             }
+
+        # --only-below-target filter: drop sections whose latest draft
+        # already crossed target_score. Sections without any draft, or
+        # with a draft whose final_overall is None (never finalized,
+        # partial, or non-autowrite), are preserved.
+        if only_below_target:
+            from sciknow.core.book_ops import _extract_draft_final_overall
+            before = len(targets)
+            kept: list = []
+            already_at_target = 0
+            for cid, cn, ct, sec in targets:
+                existing = existing_by_key.get((cid, sec))
+                if existing is None:
+                    kept.append((cid, cn, ct, sec))
+                    continue
+                final_overall = _extract_draft_final_overall(
+                    existing["custom_metadata"]
+                )
+                if final_overall is not None and final_overall >= target_score:
+                    already_at_target += 1
+                    continue
+                kept.append((cid, cn, ct, sec))
+            targets = kept
+            if already_at_target:
+                console.print(
+                    f"[dim]--only-below-target: skipping {already_at_target} "
+                    f"section(s) already at-or-above {target_score:.2f}.[/dim]"
+                )
+            if not targets:
+                console.print(
+                    f"[green]All {before} sections already at-or-above "
+                    f"{target_score:.2f}; nothing to do.[/green]"
+                )
+                raise typer.Exit(0)
 
         if not resume:
             # Default: skip existing drafts
@@ -3955,65 +4017,111 @@ def autowrite(
 
             return Panel(tbl, title=f"Ch.{ch_num} {sec.capitalize()}", border_style="blue")
 
-        with Live(_build_display(), console=console, refresh_per_second=4, transient=True) as live:
-            for event in gen:
-                t = event.get("type")
+        # Phase 55.V4 \u2014 section-level exception isolation. A transient
+        # writer-stream drop (RemoteProtocolError, broken pipe) used to
+        # propagate out of the inner generator and abort the WHOLE
+        # multi-section run. The chapter / book engine wrappers already
+        # have try/except per-section, but `book autowrite --full` (and
+        # any --section all run) iterate `targets` directly through
+        # `autowrite_section_stream`, bypassing those wrappers. Catch
+        # the exception here so the same per-section isolation applies
+        # at the CLI layer.
+        section_errored: str | None = None
+        try:
+            with Live(_build_display(), console=console, refresh_per_second=4, transient=True) as live:
+                for event in gen:
+                    t = event.get("type")
 
-                if t == "token":
-                    tok_count += 1
-                    text_preview += event["text"]
-                    live.update(_build_display())
+                    if t == "token":
+                        tok_count += 1
+                        text_preview += event["text"]
+                        live.update(_build_display())
 
-                elif t == "progress":
-                    current_stage = event.get("stage", current_stage)
-                    live.update(_build_display())
+                    elif t == "progress":
+                        current_stage = event.get("stage", current_stage)
+                        live.update(_build_display())
 
-                elif t == "scores":
-                    last_scores = event.get("scores", {})
-                    score_history.append(last_scores.get("overall", 0))
-                    current_iter = event.get("iteration", current_iter)
-                    live.update(_build_display())
+                    elif t == "scores":
+                        last_scores = event.get("scores", {})
+                        score_history.append(last_scores.get("overall", 0))
+                        current_iter = event.get("iteration", current_iter)
+                        live.update(_build_display())
 
-                elif t == "iteration_start":
-                    current_iter = event.get("iteration", 1)
-                    iter_max = event.get("max", max_iter)
-                    text_preview = ""
-                    tok_count = 0
-                    tok_t0 = _time.monotonic()
-                    live.update(_build_display())
+                    elif t == "iteration_start":
+                        current_iter = event.get("iteration", 1)
+                        iter_max = event.get("max", max_iter)
+                        text_preview = ""
+                        tok_count = 0
+                        tok_t0 = _time.monotonic()
+                        live.update(_build_display())
 
-                elif t == "revision_verdict":
-                    action = event["action"]
-                    icon = "\u2713" if action == "KEEP" else "\u2717"
-                    color = "green" if action == "KEEP" else "red"
-                    verdicts.append(
-                        f"[{color}]{icon} {action} "
-                        f"{event['old_score']:.2f}\u2192{event['new_score']:.2f}[/{color}]"
-                    )
-                    text_preview = ""
-                    tok_count = 0
-                    tok_t0 = _time.monotonic()
-                    live.update(_build_display())
+                    elif t == "revision_verdict":
+                        action = event["action"]
+                        icon = "\u2713" if action == "KEEP" else "\u2717"
+                        color = "green" if action == "KEEP" else "red"
+                        verdicts.append(
+                            f"[{color}]{icon} {action} "
+                            f"{event['old_score']:.2f}\u2192{event['new_score']:.2f}[/{color}]"
+                        )
+                        text_preview = ""
+                        tok_count = 0
+                        tok_t0 = _time.monotonic()
+                        live.update(_build_display())
 
-                elif t == "converged":
-                    verdicts.append(
-                        f"[bold green]\u2713 CONVERGED "
-                        f"(iter {event['iteration']}, score {event['final_score']:.2f})[/bold green]"
-                    )
-                    live.update(_build_display())
+                    elif t == "converged":
+                        verdicts.append(
+                            f"[bold green]\u2713 CONVERGED "
+                            f"(iter {event['iteration']}, score {event['final_score']:.2f})[/bold green]"
+                        )
+                        live.update(_build_display())
 
-                elif t == "verification":
-                    vdata = event.get("data", {})
-                    gs = vdata.get("groundedness_score", "?")
-                    color = "green" if isinstance(gs, (int, float)) and gs >= 0.8 else "yellow"
-                    grounding = f"[{color}]Groundedness: {gs}[/{color}]"
-                    live.update(_build_display())
+                    elif t == "verification":
+                        vdata = event.get("data", {})
+                        gs = vdata.get("groundedness_score", "?")
+                        color = "green" if isinstance(gs, (int, float)) and gs >= 0.8 else "yellow"
+                        grounding = f"[{color}]Groundedness: {gs}[/{color}]"
+                        live.update(_build_display())
 
-                elif t == "completed":
-                    result = event
+                    elif t == "completed":
+                        result = event
 
-                elif t == "error":
-                    console.print(f"[red]Error:[/red] {event.get('message', '')}")
+                    elif t == "error":
+                        console.print(f"[red]Error:[/red] {event.get('message', '')}")
+
+                    elif t == "section_error":
+                        # Phase 55.V6 \u2014 engine emitted a section_error
+                        # event (e.g. planning+writing both overflowed
+                        # the context window). The yield-event path
+                        # means no exception propagates here; we still
+                        # want to surface the failure so the user
+                        # sees it.
+                        section_errored = (
+                            f"{event.get('error_type', 'Error')}: "
+                            f"{event.get('message', '')}"
+                        )
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            section_errored = f"{type(exc).__name__}: {exc}"
+            logger.exception(
+                "autowrite section %r (Ch.%s) crashed: %s",
+                sec, ch_num, exc,
+            )
+
+        # Phase 55.V4 + V6 \u2014 handle both raised exceptions (caught
+        # above) and yielded section_error events (caught in the
+        # event loop). Either way, print a uniform \u2717 line and
+        # continue to the next section.
+        if section_errored:
+            console.print(
+                f"  [red]\u2717[/red] {sec.capitalize()}: failed \u2014 "
+                f"{section_errored[:200]}"
+            )
+            console.print(
+                "  [dim]Continuing to next section. "
+                "Re-run with `--resume --only-below-target` to retry.[/dim]"
+            )
+            continue
 
         # Print final summary for this section
         if result:

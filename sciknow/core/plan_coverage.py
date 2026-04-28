@@ -59,24 +59,42 @@ MIN_BULLET_LENGTH = 15           # chars — skip fragments like "etc." or "i.e.
 _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9(\"'])")
 # Also split on clear list separators so "covers A; B; C" becomes 3 bullets.
 _LIST_SPLIT = re.compile(r"\s*[;•]\s+|\s+\|\s+")
+# Markdown / dash-list bullets — every section_plan in book_chapters.sections
+# is stored as ``- bullet1\n- bullet2\n- bullet3`` (see book_ops + the plan
+# blocks shown by `book autowrite --full` runs). Without this splitter
+# atomize_plan fell into the [t] fallback, NLI got fed the whole plan as
+# a single proposition (which almost never entails atomically), and every
+# section's plan_coverage stayed pinned at 0.0 — dragging non-corpus-rich
+# sections under the 0.85 target. Fix added 2026-04-27 after a full-book
+# run showed `n_bullets=1, n_covered=0` on every iteration of every
+# section.
+_BULLET_LINE_SPLIT = re.compile(r"(?:^|\n)\s*[-*•]\s+")
 
 
 def atomize_plan(plan_text: str) -> list[str]:
     """Return the plan's atomic bullets. Empty list if the plan text is
     blank / too short to form a single bullet.
 
-    Strategy: try sentence split first. If that yields <2 bullets but
-    the text contains semicolons or pipes, split on those instead. A
-    single remaining short bullet falls back to returning the whole
+    Strategy: try markdown-bullet split first (the canonical plan
+    format), then sentence split, then list-style separators (`;`, `|`).
+    A single remaining short bullet falls back to returning the whole
     plan as one bullet so coverage still gets a score.
     """
     t = (plan_text or "").strip()
     if not t or len(t) < MIN_BULLET_LENGTH:
         return []
 
-    parts = [p.strip() for p in _SENT_SPLIT.split(t) if p.strip()]
+    # Phase 55.V5 — markdown-bullet split FIRST. The actual section
+    # plan format is ``- bullet1\n- bullet2\n- bullet3``; the prior
+    # sentence-split approach yielded one bullet because none of the
+    # bullets contained sentence-ending punctuation followed by a
+    # capital letter.
+    parts = [p.strip() for p in _BULLET_LINE_SPLIT.split(t) if p.strip()]
     if len(parts) < 2:
-        # Try list-style splits
+        # Sentence split fallback (bullet-less prose plans).
+        parts = [p.strip() for p in _SENT_SPLIT.split(t) if p.strip()]
+    if len(parts) < 2:
+        # List-style splits (semicolons, pipes).
         alt = [p.strip() for p in _LIST_SPLIT.split(t) if p.strip()]
         if len(alt) >= 2:
             parts = alt

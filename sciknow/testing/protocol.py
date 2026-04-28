@@ -19381,6 +19381,423 @@ def l1_v2_autowrite_module_reexports_book_ops_engine() -> None:
         )
 
 
+def l1_phase55_v1_vram_conflict_map_and_phase_activation() -> None:
+    """Phase 55.V1 — VRAM discipline contract.
+
+    Asserts:
+      1. ``_VRAM_CONFLICTS`` makes the big-model roles (writer/scorer/vlm)
+         conflict with each other AND with the small retrieval roles
+         (embedder/reranker). Bidirectional: embedder/reranker also
+         name the big-model roles in their conflict sets. This is the
+         load-bearing contract that lets ``activate_phase("generate")``
+         actually evict the embedder + reranker (the regression that
+         tanked decode rate from 30 t/s → 4 t/s pre-Phase 55.V1).
+      2. ``_PHASE_ROLES`` covers the four phases the autowrite engine
+         depends on: retrieve, generate, score, vlm.
+      3. ``activate_phase`` and ``hot_phase`` are exported from
+         ``sciknow.infer.server`` and importable.
+      4. ``_swap_to_phase`` is exported from ``sciknow.core.book_ops``
+         (the autowrite engine's bridge into activate_phase).
+      5. The ``vram_co_residence_ok`` setting exists (the DGX Spark
+         escape hatch).
+      6. ``rag.llm.stream`` accepts a ``role=`` kwarg so the autowrite
+         engine can route score/verify/CoVe calls to the scorer port.
+    """
+    from sciknow.infer.server import (
+        _VRAM_CONFLICTS, _PHASE_ROLES, activate_phase, hot_phase,
+        _should_evict_for_vram,
+    )
+    BIG = ("writer", "scorer", "vlm")
+    SMALL = ("embedder", "reranker")
+
+    # 1a. Each big role conflicts with the other two big roles.
+    for r in BIG:
+        for peer in BIG:
+            if peer == r:
+                continue
+            assert peer in _VRAM_CONFLICTS[r], (
+                f"_VRAM_CONFLICTS[{r!r}] must contain peer {peer!r} "
+                f"(big-model roles cannot co-reside on a 24 GB GPU)"
+            )
+    # 1b. Each big role conflicts with both small roles (Phase 55.V1).
+    for r in BIG:
+        for s in SMALL:
+            assert s in _VRAM_CONFLICTS[r], (
+                f"_VRAM_CONFLICTS[{r!r}] must contain {s!r} so "
+                f"activate_phase('{r}-phase') evicts retrieval roles"
+            )
+    # 1c. Each small role conflicts with each big role (bidirectional).
+    for s in SMALL:
+        for r in BIG:
+            assert r in _VRAM_CONFLICTS[s], (
+                f"_VRAM_CONFLICTS[{s!r}] must contain big role {r!r} "
+                f"so activate_phase('retrieve') evicts the writer"
+            )
+    # 1d. Embedder ↔ reranker do NOT conflict (~1.8 GB combined fits
+    # alongside other small things; co-residency is by design).
+    for s in SMALL:
+        for s2 in SMALL:
+            if s == s2:
+                continue
+            assert s2 not in _VRAM_CONFLICTS[s], (
+                f"{s!r} should NOT conflict with {s2!r} — they are "
+                f"meant to co-reside in the retrieve phase"
+            )
+
+    # 2. Phase coverage.
+    for phase in ("retrieve", "generate", "score", "vlm"):
+        assert phase in _PHASE_ROLES, f"_PHASE_ROLES missing {phase!r}"
+    assert _PHASE_ROLES["retrieve"] == {"embedder", "reranker"}
+    assert _PHASE_ROLES["generate"] == {"writer"}
+    assert _PHASE_ROLES["score"] == {"scorer"}
+    assert _PHASE_ROLES["vlm"] == {"vlm"}
+
+    # 3. Activate / hot context manager symbols exist + import OK.
+    assert callable(activate_phase)
+    assert callable(hot_phase)
+    assert callable(_should_evict_for_vram)
+
+    # 4. Bridge in book_ops imports cleanly.
+    from sciknow.core.book_ops import _swap_to_phase
+    assert callable(_swap_to_phase), "_swap_to_phase must be callable"
+
+    # 5. Settings flag.
+    from sciknow.config import settings as _s
+    assert hasattr(_s, "vram_co_residence_ok"), (
+        "settings.vram_co_residence_ok missing — DGX Spark escape "
+        "hatch for the conflict-map eviction"
+    )
+
+    # 6. rag.llm.stream accepts role= kwarg (Phase 55.S1 plumbing).
+    import inspect
+    from sciknow.rag import llm as rag_llm
+    sig = inspect.signature(rag_llm.stream)
+    assert "role" in sig.parameters, (
+        "rag.llm.stream missing role= kwarg — autowrite cannot route "
+        "score/verify/CoVe calls to the scorer port without it"
+    )
+
+
+def l1_phase55_s1_autowrite_routes_scoring_through_scorer_role() -> None:
+    """Phase 55.S1 — score/verify/CoVe/rescore route through the
+    scorer role.
+
+    The previous bug: chat_stream always hit port 8090 (writer)
+    regardless of the requested model name, so AUTOWRITE_SCORER_MODEL
+    was silently ignored. The fix added a ``role=`` kwarg threaded
+    through ``_stream_phase`` → ``llm_stream`` → ``chat_stream``;
+    every score-side call must pass ``role="scorer"`` for the
+    cross-family scorer (Gemma 4 31B) to actually receive the prompt.
+
+    Also asserts that ``_client_for("scorer")`` resolves to a URL
+    (not a KeyError) — that was the regression caught at
+    Phase 55.V1 verification: scoring would silently fail with
+    ``"scoring_failed: 'scorer'"`` and fall back to overall=0.5.
+    """
+    import inspect
+    from sciknow.core import autowrite as aw
+    from sciknow.core import book_ops as bo
+
+    aw_src = inspect.getsource(aw) + inspect.getsource(bo)
+
+    # Each score-side phase must pass role="scorer". We grep for the
+    # _stream_phase call sites with their role kwarg.
+    scorer_role_count = aw_src.count('role="scorer"')
+    assert scorer_role_count >= 4, (
+        f'role="scorer" routing only at {scorer_role_count} sites in '
+        f'autowrite/book_ops; expected >= 4 (score / verify / CoVe '
+        f'/ rescore). Without role="scorer", chat_stream falls back '
+        f'to the writer port and AUTOWRITE_SCORER_MODEL is silently '
+        f'ignored.'
+    )
+
+    # _client_for("scorer") must resolve to a URL (not raise KeyError).
+    # Phase 55.V1 caught this regression — the URL map missed the
+    # scorer entry, autowrite scoring failed silently, the section's
+    # score collapsed to the 0.5 fallback.
+    from sciknow.infer.client import _client_for
+    from sciknow.config import settings as _s
+    # The function returns an httpx.Client — we just need it to
+    # resolve without KeyError. The actual port doesn't matter to
+    # this contract test (the live llama-server may not be running).
+    _ = _client_for  # ensure import works
+    url_map_keys = ("writer", "embedder", "reranker", "vlm", "scorer")
+    import inspect as _i
+    src = _i.getsource(_client_for)
+    for k in url_map_keys:
+        assert f'"{k}":' in src, (
+            f"_client_for is missing the {k!r} entry — "
+            f"a chat_stream(role={k!r}) call would KeyError"
+        )
+
+
+def l1_phase55_v3_down_recovers_when_pid_file_missing() -> None:
+    """Phase 55.V3 — `down(role)` falls back to lsof/ss-by-port when
+    the PID file is missing.
+
+    Caught a real bug: a llama-server's PID file got cleared (manual
+    rm, mid-startup race, or stale-grace sequence) but the process
+    was still alive. `_read_pid` returned None, `down` returned False
+    without acting, and the next `activate_phase` couldn't evict the
+    role — the swap silently no-op'd, and the eviction policy was
+    broken. The fix: `down()` calls `_find_pid_by_port(port)` as a
+    fallback when `_read_pid` returns None.
+
+    Source-grep contract — confirms the fallback path is in place.
+    Live behaviour is covered by L3 (the actual round-trip test).
+    """
+    import inspect
+    from sciknow.infer import server as _srv
+
+    assert callable(getattr(_srv, "_find_pid_by_port", None)), (
+        "_find_pid_by_port helper missing — substrate self-heal "
+        "regression"
+    )
+    src = inspect.getsource(_srv.down)
+    assert "_find_pid_by_port" in src, (
+        "down() must reference _find_pid_by_port as a PID-file-missing "
+        "fallback. Without it, a lost PID file wedges the conflict "
+        "map: every subsequent activate_phase silently no-ops."
+    )
+    # The fallback must be triggered when _read_pid returns None.
+    assert "_read_pid" in src, "down() must consult _read_pid first"
+
+
+def l1_phase55_v6_autowrite_emits_section_error_on_failure() -> None:
+    """Phase 55.V6 — `autowrite_section_stream` yields a
+    `section_error` event when the inner body raises, instead of
+    letting the exception propagate out.
+
+    Real cases caught in a 2026-04-27/28 full-book run:
+    7 sections silently failed when both the planning and writing
+    prompts overflowed the writer's 16K context window — they ended
+    with `end total_tokens=0` and no `completed` event, while the
+    raised HTTP-400 exception bubbled out. The CLI's per-section
+    try/except (Phase 55.V4) caught the exception but couldn't tell
+    a context-overflow apart from any other crash, so the user just
+    saw a generic ✗ line. The yielded event now carries `error_type`
+    + `message` so consumers can branch.
+
+    This test asserts:
+    1. `autowrite_section_stream` source contains a `yield {... "type":
+       "section_error" ...}` block AND a matching `except Exception`
+       handler that doesn't re-raise (the "swallow → yield → continue"
+       pattern, not "log → re-raise").
+    2. `core/events.py` knows about the `section_error` event type so
+       SSE / structured consumers don't drop it.
+    """
+    import inspect
+    from sciknow.core import autowrite as aw
+
+    src = inspect.getsource(aw.autowrite_section_stream)
+    assert '"type": "section_error"' in src, (
+        "autowrite_section_stream must yield a section_error event on "
+        "exception (Phase 55.V6)"
+    )
+    assert "except Exception" in src and "error_type" in src, (
+        "autowrite_section_stream must catch and convert generic "
+        "exceptions into a section_error event with error_type"
+    )
+    # Confirm the event schema knows about it.
+    from sciknow.core.events import KNOWN_EVENT_TYPES
+    assert "section_error" in KNOWN_EVENT_TYPES, (
+        "core/events.py:KNOWN_EVENT_TYPES missing 'section_error' — "
+        "SSE consumers will drop the event"
+    )
+
+
+def l1_phase55_v5_plan_coverage_atomizes_markdown_bullets() -> None:
+    """Phase 55.V5 — `atomize_plan` splits markdown-bullet plans
+    correctly.
+
+    Real bug observed in a full-book autowrite run on 2026-04-27:
+    every section emitted `plan_coverage: 0.0, n_bullets=1, n_covered=0`.
+    Cause: the canonical plan format is ``- bullet1\\n- bullet2\\n-...``
+    but `atomize_plan` only knew about sentence boundaries (``.!?``)
+    and ``;``/``|`` separators, neither of which fire on
+    newline-prefixed dashes. Every plan fell into the [whole_text]
+    fallback, NLI couldn't entail it as a single proposition, and
+    plan_coverage was pinned at 0 — dragging hard-topic sections
+    under the convergence target.
+
+    This test feeds the canonical markdown-bullet format and asserts
+    we get >=4 atomic bullets back (matching the actual chapter-plan
+    layout — see `sections[*].plan` in book_chapters JSONB).
+    """
+    from sciknow.core.plan_coverage import atomize_plan
+
+    plan = (
+        "- Differential rotation and meridional circulation drive the solar dynamo\n"
+        "- The alpha-omega mechanism generates the Sun's magnetic field\n"
+        "- Magnetic flux emergence creates sunspots\n"
+        "- Dynamo cycle phases dictate transitions between solar maxima and minima"
+    )
+    bullets = atomize_plan(plan)
+    assert len(bullets) >= 4, (
+        f"atomize_plan must split markdown-bullet plans into >=4 atomic "
+        f"bullets; got {len(bullets)}: {bullets!r}. The whole-plan "
+        f"fallback path makes plan_coverage pin at 0 for every section."
+    )
+    # Bullets should not contain leading dashes after splitting.
+    for b in bullets:
+        assert not b.startswith("-"), f"Bullet still has leading dash: {b!r}"
+        assert len(b) >= 15, f"Bullet too short to be atomic: {b!r}"
+
+
+def l3_phase55_v1_activate_phase_evicts_peers() -> None:
+    """Phase 55.V1 — `activate_phase("retrieve")` actually evicts the
+    writer when both are healthy.
+
+    Live test (L3, requires the substrate to be reachable). Skips on
+    a host where the writer/embedder/reranker GGUFs aren't loaded.
+    Otherwise:
+      1. Bring up writer + embedder + reranker (idempotent — already
+         up if you ran `sciknow infer up` first).
+      2. Confirm writer is healthy.
+      3. Call `activate_phase("retrieve")`.
+      4. Assert writer is now down, embedder + reranker still up.
+      5. Restore: `activate_phase("generate")` — writer back up,
+         embedder/reranker down.
+      6. Final restore: `up("embedder")` + `up("reranker")` so the
+         post-test substrate state matches the pre-test state.
+
+    This is the load-bearing contract that the L1 source-grep tests
+    can't catch — they confirm the call sites EXIST, but only this
+    test confirms the kernel-level swap actually runs and the
+    process tree reflects it.
+    """
+    from sciknow.infer import client as _client
+    # Skip when no writer
+    if not _v2_health("writer"):
+        return TestResult.skip(
+            "l3_phase55_v1_activate_phase_evicts_peers",
+            "skipped — writer role not reachable; bring up the substrate first",
+        )
+    from sciknow.infer.server import (
+        activate_phase, up, down, health, _should_evict_for_vram,
+    )
+    from sciknow.config import settings as _s
+
+    if not _should_evict_for_vram():
+        return TestResult.skip(
+            "l3_phase55_v1_activate_phase_evicts_peers",
+            "skipped — VRAM_CO_RESIDENCE_OK is true; eviction policy disabled",
+        )
+
+    # Pre-test: bring up writer + embedder + reranker so we have the
+    # full retrieve-phase + generate-phase pair to compare. This is
+    # idempotent — already-up roles return immediately.
+    try:
+        up("writer", wait=True)
+        up("embedder", wait=True)
+        up("reranker", wait=True)
+    except Exception as exc:
+        return TestResult.skip(
+            "l3_phase55_v1_activate_phase_evicts_peers",
+            f"skipped — couldn't bring up roles for the test: {exc}",
+        )
+
+    # Confirm pre-state. Note: by the time `up("reranker")` returned,
+    # the conflict map will have evicted writer + scorer + vlm. So
+    # after the three up() calls we may NOT have writer + embedder
+    # + reranker all simultaneously hot. Re-up writer to set the
+    # initial state to "writer + embedder + reranker all up". That's
+    # an additional eviction round but it's exactly the steady-state
+    # the autowrite engine starts from in production.
+    up("writer", wait=True)
+    # Final pre-state: writer + embedder + reranker all healthy.
+    # (The `up("writer")` just downed embedder + reranker via the
+    # conflict map, so we need to bring them BACK before the test.)
+    up("embedder", wait=True)
+    up("reranker", wait=True)
+    # That up("reranker") evicted writer again (it conflicts with
+    # the big roles). Reality: under the strict Phase 55.V1 conflict
+    # map, "writer + embedder + reranker simultaneously hot" cannot
+    # exist as a steady state — it's only achievable mid-transition.
+    # The right test is: after `activate_phase("retrieve")` the writer
+    # is down, embedder + reranker are up. After
+    # `activate_phase("generate")` the writer is up, others down.
+
+    # Run the actual test.
+    activate_phase("retrieve")
+    assert health("embedder", timeout=2.0), (
+        "after activate_phase('retrieve'), embedder must be healthy"
+    )
+    assert health("reranker", timeout=2.0), (
+        "after activate_phase('retrieve'), reranker must be healthy"
+    )
+    assert not health("writer", timeout=0.5), (
+        "after activate_phase('retrieve'), writer must be evicted"
+    )
+
+    activate_phase("generate")
+    assert health("writer", timeout=2.0), (
+        "after activate_phase('generate'), writer must be healthy"
+    )
+    assert not health("embedder", timeout=0.5), (
+        "after activate_phase('generate'), embedder must be evicted"
+    )
+    assert not health("reranker", timeout=0.5), (
+        "after activate_phase('generate'), reranker must be evicted"
+    )
+
+    # Post-test cleanup: bring embedder + reranker back so the user's
+    # next non-autowrite call doesn't pay the cold-start. We don't
+    # restore the writer — the next chat_stream call will lazy-up it.
+    up("embedder", wait=True)
+    up("reranker", wait=True)
+
+    return TestResult.ok(
+        name="l3_phase55_v1_activate_phase_evicts_peers",
+        message="activate_phase round-trip evicts peers as specified",
+    )
+
+
+def l1_phase55_v1_autowrite_swaps_to_phase_at_boundaries() -> None:
+    """Phase 55.V1 — the autowrite engine declares its phase at every
+    transition between retrieval, generation, and scoring.
+
+    Reads ``core/autowrite.py`` and ``core/book_ops.py`` source and
+    asserts a minimum count of ``_swap_to_phase(...)`` call sites per
+    phase. Below these thresholds means the engine is back to relying
+    on lazy ``_ensure_role_up`` startup, which doesn't evict already-up
+    peer roles — exactly the regression that pinned ~1.8 GB of
+    embedder/reranker VRAM during writer generation.
+    """
+    import inspect
+    from sciknow.core import autowrite as aw
+    from sciknow.core import book_ops as bo
+
+    aw_src = inspect.getsource(aw)
+    bo_src = inspect.getsource(bo)
+    combined = aw_src + bo_src
+
+    score_count = combined.count('_swap_to_phase("score")')
+    generate_count = combined.count('_swap_to_phase("generate")')
+    retrieve_count = combined.count('_swap_to_phase("retrieve")')
+
+    # Per the engine flow:
+    #   - "score" fires before each of: scoring / verify / CoVe / rescore
+    #     ⇒ ≥ 4 sites.
+    #   - "generate" fires before: tree-plan, initial draft, revise
+    #     ⇒ ≥ 3 sites.
+    #   - "retrieve" fires inside: _retrieve, _retrieve_with_step_back,
+    #     lessons fetch, auto-expand, adaptive_retrieval ⇒ ≥ 5 sites.
+    assert score_count >= 4, (
+        f'_swap_to_phase("score") only at {score_count} sites; expected '
+        f'>= 4 (score / verify / CoVe / rescore)'
+    )
+    assert generate_count >= 3, (
+        f'_swap_to_phase("generate") only at {generate_count} sites; '
+        f'expected >= 3 (tree-plan / initial draft / revise)'
+    )
+    assert retrieve_count >= 5, (
+        f'_swap_to_phase("retrieve") only at {retrieve_count} sites; '
+        f'expected >= 5 (the two _retrieve helpers + lessons + '
+        f'auto-expand + adaptive_retrieval)'
+    )
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Layer registry — append new tests here.
 # ════════════════════════════════════════════════════════════════════════════
@@ -19887,6 +20304,31 @@ L1_TESTS: list[Callable] = [
     # the dispatch facade (rag/llm.py) or in the kept-by-design list
     # (VLM, doctor probes, model-tag bench tools).
     l1_v2_no_unguarded_ollama_imports,
+    # Phase 55.V1 — VRAM discipline contract (conflict map covers the
+    # cartesian product big-roles × small-roles; activate_phase /
+    # hot_phase exposed; vram_co_residence_ok exists; rag.llm.stream
+    # accepts role= kwarg)
+    l1_phase55_v1_vram_conflict_map_and_phase_activation,
+    # Phase 55.V1 — autowrite calls _swap_to_phase at every phase
+    # transition (retrieve ↔ generate ↔ score)
+    l1_phase55_v1_autowrite_swaps_to_phase_at_boundaries,
+    # Phase 55.S1 — score/verify/CoVe/rescore pass role="scorer" so
+    # cross-family scoring actually hits the gemma port; _client_for
+    # has the "scorer" url-map entry (regression caught at 55.V1)
+    l1_phase55_s1_autowrite_routes_scoring_through_scorer_role,
+    # Phase 55.V3 — down() recovers from a missing PID file via
+    # _find_pid_by_port lsof/ss fallback (substrate self-heal)
+    l1_phase55_v3_down_recovers_when_pid_file_missing,
+    # Phase 55.V5 — plan_coverage.atomize_plan splits markdown-bullet
+    # plans (regression: it was returning [whole_plan] for every
+    # section, pinning plan_coverage at 0 + dragging hard-topic
+    # sections under the convergence target)
+    l1_phase55_v5_plan_coverage_atomizes_markdown_bullets,
+    # Phase 55.V6 — autowrite_section_stream yields a section_error
+    # event on inner failure instead of propagating, so silent
+    # context-overflow fails surface as a uniform yield-event
+    # instead of a 0-token `end` with no signal.
+    l1_phase55_v6_autowrite_emits_section_error_on_failure,
 ]
 
 L2_TESTS: list[Callable] = [
@@ -19932,6 +20374,11 @@ L3_TESTS: list[Callable] = [
     l3_wiki_compile_single_paper_smoke,       # ~120s — full compile pipeline on 1 paper
     l3_wiki_extract_kg_single_paper_smoke,    # ~90s  — full extract-kg pipeline on 1 paper
     l3_autowrite_one_iteration_smoke,         # ~30s  — write_section_v2 prompt sanity
+    # Phase 55.V1 — actually exercises the eviction. Skips on hosts
+    # without the substrate up; otherwise round-trips activate_phase
+    # and asserts the writer/embedder/reranker process tree reflects
+    # the swap.
+    l3_phase55_v1_activate_phase_evicts_peers,  # ~20s — round-trip eviction
 ]
 
 # Phase 54.6.39 — SMOKE layer: focused subset of L3, only the single-example
