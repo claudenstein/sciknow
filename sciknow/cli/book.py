@@ -3700,6 +3700,20 @@ def autowrite(
             "from scratch."
         ),
     ),
+    force_resume: bool = typer.Option(
+        False, "--force-resume",
+        help=(
+            "Phase 55.V7 — bypass the partial-state safety gate. Resume "
+            "even from drafts marked `writing_in_progress` / "
+            "`iteration_*_revising` / `placeholder` — the partial "
+            "content is loaded as the iteration starting point. Use "
+            "this when an autowrite was interrupted mid-revision and "
+            "the next `--resume` keeps skipping the section with "
+            "'not safe to resume'. The partial content may end "
+            "mid-sentence; the convergence loop will smooth it out "
+            "in the next revision pass."
+        ),
+    ),
 ):
     """
     Autonomous write → review → revise convergence loop (inspired by Karpathy's autoresearch).
@@ -3934,13 +3948,30 @@ def autowrite(
                     existing["custom_metadata"], existing["word_count"],
                 )
                 if not ok:
-                    console.print(
-                        f"[bold]Section {i}/{total}:[/bold] Ch.{ch_num} {ch_title} — {sec}\n"
-                        f"  [yellow]Skipping resume: {reason}[/yellow]"
-                    )
-                    console.print(f"{'=' * 72}")
-                    continue
-                resume_draft_id = existing["draft_id"]
+                    if force_resume:
+                        # Phase 55.V7 — user passed --force-resume to
+                        # override the safety gate. Use the partial
+                        # content as-is; the convergence loop will
+                        # treat any mid-sentence cut-off as just
+                        # "this is the draft to revise".
+                        console.print(
+                            f"[bold]Section {i}/{total}:[/bold] Ch.{ch_num} {ch_title} — {sec}\n"
+                            f"  [yellow]--force-resume:[/yellow] using partial draft anyway "
+                            f"({reason})"
+                        )
+                        resume_draft_id = existing["draft_id"]
+                    else:
+                        console.print(
+                            f"[bold]Section {i}/{total}:[/bold] Ch.{ch_num} {ch_title} — {sec}\n"
+                            f"  [yellow]Skipping resume: {reason}[/yellow]\n"
+                            f"  [dim]Pass --force-resume to override, or run "
+                            f"`sciknow book draft rollback <draft_id>` to "
+                            f"restore the prior KEEP state.[/dim]"
+                        )
+                        console.print(f"{'=' * 72}")
+                        continue
+                else:
+                    resume_draft_id = existing["draft_id"]
 
         mode_label = " [dim](resume)[/dim]" if resume_draft_id else ""
         console.print(
@@ -3956,6 +3987,7 @@ def autowrite(
             target_words=target_words,
             resume_from_draft_id=resume_draft_id,
             include_visuals=include_visuals,
+            force_resume=force_resume,
         )
 
         # Live dashboard state
@@ -4751,6 +4783,115 @@ def draft_scores(
     final = meta.get("final_overall")
     if final is not None:
         console.print(f"\n[dim]Final overall: {final:.3f}  ·  target: {meta.get('target_score', '?')}  ·  max_iter: {meta.get('max_iter', '?')}[/dim]")
+
+
+@draft_app.command(name="rollback")
+def draft_rollback(
+    draft_id: Annotated[str, typer.Argument(help="Draft ID or prefix.")],
+    target: str = typer.Option(
+        "auto", "--target",
+        help=(
+            "Checkpoint to restore. 'auto' (default) picks the most "
+            "recent KEEP iteration in score_history; 'initial' resets "
+            "to the post-write pre-iteration state; or pass an explicit "
+            "checkpoint string like 'iteration_2_keep'."
+        ),
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y",
+        help="Skip the confirmation prompt.",
+    ),
+):
+    """
+    Phase 55.V7 — surgical recovery for drafts stuck in a partial state.
+
+    A draft in `iteration_N_revising` (revision stream interrupted) or
+    `writing_in_progress` (initial write interrupted) refuses
+    `--resume` because the content may end mid-sentence. This command
+    rewrites the draft's `custom_metadata.checkpoint` string to a
+    resumable value so the next `book autowrite --resume` picks it up.
+
+    The content itself is NOT modified — only the metadata flag. The
+    convergence loop will smooth out any dangling sentences in the
+    next revision pass.
+
+    Examples:
+
+      sciknow book draft rollback 3f2a1b4c                    # auto
+      sciknow book draft rollback 3f2a1b4c --target=initial   # reset
+      sciknow book draft rollback 3f2a1b4c --target=iteration_2_keep
+    """
+    from sciknow.cli import preflight
+    preflight(qdrant=False)
+    from sciknow.storage.db import get_session
+    from sqlalchemy import text as sql_text
+    import json as _json
+
+    with get_session() as session:
+        row = session.execute(sql_text("""
+            SELECT id::text, custom_metadata, content, word_count
+            FROM drafts
+            WHERE id::text LIKE :q
+            ORDER BY updated_at DESC
+            LIMIT 1
+        """), {"q": f"{draft_id}%"}).fetchone()
+
+    if not row:
+        console.print(f"[red]Draft not found: {draft_id}[/red]")
+        raise typer.Exit(1)
+
+    full_id, custom_meta, content, wc = row
+    meta = custom_meta or {}
+    if isinstance(meta, str):
+        try:
+            meta = _json.loads(meta)
+        except Exception:
+            meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+
+    cur_checkpoint = (meta.get("checkpoint") or "").strip() or "<none>"
+    history = meta.get("score_history") or []
+
+    # Resolve the target checkpoint string.
+    if target == "auto":
+        # Walk score_history backwards looking for the most recent
+        # iteration that has KEEP / DISCARD outcome — those rows
+        # mark a finished iteration boundary.
+        new_checkpoint = "initial"
+        for entry in reversed(history):
+            iteration = entry.get("iteration")
+            verdict = (entry.get("verdict") or "").upper()
+            if isinstance(iteration, int) and verdict in ("KEEP", "DISCARD"):
+                new_checkpoint = f"iteration_{iteration}_keep"
+                break
+    elif target == "initial":
+        new_checkpoint = "initial"
+    else:
+        new_checkpoint = target
+
+    console.print(f"[bold]Draft:[/bold] {full_id[:8]}... ({wc or 0} words)")
+    console.print(f"  [dim]current checkpoint:[/dim] {cur_checkpoint}")
+    console.print(f"  [dim]target checkpoint:[/dim]  [green]{new_checkpoint}[/green]")
+    console.print(f"  [dim]score history rows:[/dim] {len(history)}")
+    if not yes:
+        if not typer.confirm("Proceed?"):
+            console.print("[yellow]Aborted.[/yellow]")
+            raise typer.Exit(0)
+
+    meta["checkpoint"] = new_checkpoint
+    with get_session() as session:
+        session.execute(sql_text("""
+            UPDATE drafts
+            SET custom_metadata = CAST(:meta AS jsonb),
+                updated_at = NOW()
+            WHERE id::text = :did
+        """), {"meta": _json.dumps(meta), "did": full_id})
+        session.commit()
+    console.print(
+        f"[green]✓[/green] Draft {full_id[:8]} rolled back to "
+        f"`{new_checkpoint}`. Re-run with `--resume` to continue."
+    )
 
 
 @draft_app.command(name="compare")

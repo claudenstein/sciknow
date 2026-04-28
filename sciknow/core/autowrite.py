@@ -103,6 +103,7 @@ def autowrite_section_stream(
     target_words: int | None = None,
     resume_from_draft_id: str | None = None,
     include_visuals: bool = False,   # Phase 54.6.142
+    force_resume: bool = False,      # Phase 55.V7
 ) -> Iterator[Event]:
     """Full convergence loop for one section: write -> score -> revise -> re-score.
 
@@ -120,6 +121,13 @@ def autowrite_section_stream(
     finished state (checkpoint in {initial, iteration_*_keep,
     iteration_*_discard, final, draft}) — partial states from
     interrupted runs are refused via _is_resumable_draft.
+
+    Phase 55.V7 — `force_resume=True` bypasses the partial-state
+    safety gate so an interrupted iteration_*_revising or
+    writing_in_progress draft can still be resumed using the
+    partially-written content. Risk: the partial content may end
+    mid-sentence; the convergence loop will smooth that out in the
+    next revision pass.
 
     Tail the log with:
 
@@ -142,6 +150,7 @@ def autowrite_section_stream(
             cove_threshold=cove_threshold, target_words=target_words,
             resume_from_draft_id=resume_from_draft_id,
             include_visuals=include_visuals,
+            force_resume=force_resume,
         )
     except (GeneratorExit, KeyboardInterrupt):
         # Caller asked us to stop — propagate cleanly (the finally
@@ -199,6 +208,7 @@ def _autowrite_section_body(
     target_words: int | None = None,
     resume_from_draft_id: str | None = None,
     include_visuals: bool = False,   # Phase 54.6.142
+    force_resume: bool = False,      # Phase 55.V7
 ) -> Iterator[Event]:
     """Phase 24 — the actual autowrite implementation, extracted from
     autowrite_section_stream so the public function can wrap it in a
@@ -319,11 +329,20 @@ def _autowrite_section_body(
             return
 
         ok, reason = _is_resumable_draft(row[3], row[2])
-        if not ok:
+        if not ok and not force_resume:
             msg = f"cannot resume from draft {row[0][:8]}: {reason}"
             log.event("resume_refused", reason=reason, draft_id=row[0])
             yield {"type": "error", "message": msg}
             return
+        if not ok and force_resume:
+            # Phase 55.V7 — caller passed force_resume=True; treat the
+            # partial draft as a valid resume base. Log the override so
+            # post-mortem can correlate any odd output with the bypass.
+            log.event(
+                "resume_force_overridden",
+                reason=reason, draft_id=row[0],
+                word_count=int(row[2] or 0),
+            )
 
         resume_content = row[1] or ""
         resume_source_meta = {
