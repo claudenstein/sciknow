@@ -19697,14 +19697,21 @@ def l1_phase55_v10_substrate_sweep_harness_present() -> None:
             f"autowrite-section are required for the priority #1/#2/#3 "
             f"sweeps in BENCH_OPTIMIZATION_PLAN.md."
         )
-    # The plan doc must reference the priority slate.
+    # The plan doc must reference the priority slate (V15) AND the
+    # V16 reframe (q8_0 as community consensus, q4_0 as hypothesis,
+    # mixed K/V option, anti-patterns block).
     plan_src = plan.read_text()
     for marker in (
         "Phase 55.V15", "expert", "262144", "q4_0", "autowrite-section",
-        "priority #1",
+        # V16 additions:
+        "q8_0:q4_0",                        # mixed K/V option
+        "Quality-first decision rule",      # decision-rule heading
+        "thc1006",                           # spec-decode anti-pattern source
+        "GGML #5932",                        # q4_0 GQA-sensitivity citation
+        "TurboQuant",                        # future-work pointer
     ):
         assert marker in plan_src, (
-            f"BENCH_OPTIMIZATION_PLAN.md missing V15 marker {marker!r}"
+            f"BENCH_OPTIMIZATION_PLAN.md missing V15/V16 marker {marker!r}"
         )
 
 

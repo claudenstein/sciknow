@@ -293,7 +293,16 @@ def _patch_role_for_run(role: str, knob: str, value: str) -> dict:
         cleaned += ["--batch-size", str(bs), "--ubatch-size", str(ubs)]
         cfg["extra_flags"] = cleaned
     elif knob == "cache-type":
-        # Same value for K and V (the standard paired pattern).
+        # Phase 55.V16 — accept either a single quant (paired K=V, the
+        # standard pattern) or `K:V` for asymmetric K/V quants.
+        # Examples: "q4_0", "q8_0", "f16", "q8_0:q4_0", "f16:q8_0".
+        # The asymmetric pattern is the GGML-discussion-#5932 sweet
+        # spot for Qwen-family GQA: keep key precision (matters for
+        # retrieval-style attention) while halving V cache.
+        if ":" in str(value):
+            k_quant, v_quant = str(value).split(":", 1)
+        else:
+            k_quant = v_quant = str(value)
         cleaned: list[str] = []
         skip_next = False
         for f in cfg["extra_flags"]:
@@ -304,7 +313,8 @@ def _patch_role_for_run(role: str, knob: str, value: str) -> dict:
                 skip_next = True
                 continue
             cleaned.append(f)
-        cleaned += ["--cache-type-k", str(value), "--cache-type-v", str(value)]
+        cleaned += ["--cache-type-k", k_quant.strip(),
+                    "--cache-type-v", v_quant.strip()]
         cfg["extra_flags"] = cleaned
     elif knob == "flash-attn":
         cleaned: list[str] = []

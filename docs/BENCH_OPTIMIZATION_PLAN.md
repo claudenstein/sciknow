@@ -15,28 +15,79 @@ unattributable. The `--matrix-knob` mode is explicit and produces
 a full grid for the few cases where you need a 2-D map (typically
 `cache-type × ctx-size`).
 
-## Phase 55.V15: start from the expert baseline
+## Phase 55.V15/V16: quality-first, with two competing baselines
 
-Community-recommended Qwen3.6-27B 24-GB-3090 config (matches what
-power users post and the @Punch_Taylor 4090 bench config we cited
-in the Phase 54.6.303 commit):
+The bench has to settle a real disagreement between two
+configurations that both have community advocates:
+
+### Baseline A — `q8_0` KV (community consensus for RTX 3090 + Qwen3.6)
+
+Documented in @aminrj's Qwen3.6 RTX 3090 bench, the post-PR-#19493
+spec-decode harness, and ~every other 3090 + Qwen3.6 benchmark from
+Q1 2026. Decode at ~135 t/s on 16K context, ~80 t/s at 65K context
+on the writer-class 27B GGUF. Halves KV-cache footprint vs fp16
+(~50% memory savings) with measured perplexity delta of +0.0043 on
+Qwen2.5-Coder-7B at 128K — well within noise.
+
+```
+-ngl 99 -c 65536 -np 1 -fa on \
+   --cache-type-k q8_0 --cache-type-v q8_0
+```
+
+### Baseline B — `q4_0` KV (the viral "262K on 24 GB" claim)
+
+The power-user post: model 16 GB + q4_0 KV @ 262K = 5 GB = 21 GB
+total at 40 t/s flat from 4K to 262K, with q8 alleged to be 3×
+slower. **Multiple independent benchmarks contradict the speed
+claim** (DGX Spark + Nemotron-30B shows q4_0 actually 18-35% SLOWER
+than fp16 at long context, not faster; q8_0 not in the table). The
+memory claim is correct; the speed-and-quality claims are the
+hypotheses to test.
 
 ```
 -ngl 99 -c 262144 -np 1 -fa on \
    --cache-type-k q4_0 --cache-type-v q4_0
 ```
 
-Memory claim: model = 16 GB (Q4_K_M); KV at 262K with q4_0 K/V = 5
-GB; total = 21 GB on a 24 GB card; headroom = ~3 GB. Throughput
-claim: 40 t/s flat curve from 4K to 262K. The bench's job is to
-**verify or falsify** these claims on this hardware (RTX 3090 24
-GB) with our slightly larger Q4_K_XL writer GGUF.
+### Baseline C — `q8_0:q4_0` mixed (GGML-discussion-#5932 sweet spot)
 
-`--baseline expert` (the harness default) sets every non-swept
-parameter to the expert config so sweeps test against a known-good
-starting point rather than fresh-from-defaults. `--baseline current`
-keeps whatever's in `ROLE_DEFAULTS` for "would this delta regress
-my production config?" runs.
+A user in GGML #5932 reports keeping K-cache at q8_0 (matters for
+the GQA attention pattern Qwen-family models use heavily) while
+quantizing V-cache to q4_0. Halves total KV memory vs full q8_0;
+recovers the long-context recall q4_0 alone hurts. Not yet
+mainstream but worth measuring.
+
+```
+-ngl 99 -c 131072 -np 1 -fa on \
+   --cache-type-k q8_0 --cache-type-v q4_0
+```
+
+### Quality-first decision rule
+
+**Book writing took less than a day** with the current config — we
+do not have a speed problem. Quality is the binding constraint.
+The decision rule for promoting any of these to production:
+
+1. **Quality gate first** (sweep #2, autowrite-section). The
+   candidate must score within **1% of fp16** on
+   `final_score`. q4_0 has known long-context degradation on
+   Qwen-family GQA (GGML #5932) — the bench has to prove it
+   doesn't bite us at our 18K-token prompts.
+2. **Speed gate second** (sweep #1). Any candidate that passes
+   quality must also stay within **20% of the fastest decode
+   TPS** to be worth promoting.
+3. If `q8_0` and `q4_0` both pass, prefer `q8_0` — it's the
+   community consensus and has the better measured-quality story.
+4. If `q8_0` passes and `q4_0` fails quality, promote `q8_0`.
+5. If only `q8_0:q4_0` (mixed) clears both gates, promote it.
+6. **If everything fails**, stay on the current production config
+   (writer ctx 24576, fp16 KV) and revisit when the substrate gets
+   another upgrade pass.
+
+`--baseline expert` (the harness default) currently sets every
+non-swept parameter to baseline B (q4_0). Pass `--baseline current`
+to keep production defaults instead. Future versions of this doc
+may flip the harness default to `q8_0` once #1 + #2 settle.
 
 ## Methodology
 
@@ -97,81 +148,100 @@ work with. Total budget across the whole slate: **~8–10 GPU
 hours** assuming reps=3 + the typical/large mix; the
 autowrite-section quality probe adds ~1–2 hours per cache-type.
 
-### 1. KV-cache quantisation — VERIFY the expert claim (priority #1)
+### 1. KV-cache quantisation — speed sweep across all four candidates
 
 ```
 uv run python scripts/bench_substrate_sweep.py \
     --role writer --knob cache-type \
-    --values f16,q8_0,q4_0 \
+    --values f16,q8_0,q4_0,q8_0:q4_0 \
     --baseline expert --workload typical
 ```
 
-**This sweep is the gate.** Every non-swept param starts at the
-expert config (ctx 262144, np 1, fa on, ngl 99) so the only
+**This sweep is the speed gate.** Every non-swept param starts at
+the expert config (ctx 262144, np 1, fa on, ngl 99) so the only
 variable is the KV-cache quant.
 
-Expected outcomes per claim:
+Expected outcomes per claim, based on the V16 web-research sweep:
 
-- **fp16 KV** → expected to OOM at 262K (claim: "does not fit"). If
-  it does fit, the claim is partly wrong and we have more headroom
-  than expected.
-- **q8_0 KV** → expected ~23 GB peak. **Speed claim: 3× slower than
-  fp16/q4_0.** If decode TPS lands at ~12–15 t/s vs q4_0's 40 t/s,
-  the claim is verified. If it's only 5–10% slower (the typical
-  llama.cpp benchmark), the viral post is wrong about the speed
-  cliff.
-- **q4_0 KV** → expected ~21 GB peak at 40 t/s flat. The claim's
-  load-bearing case.
+- **fp16 KV** → expected to OOM at 262K on 24 GB (the only point
+  where the expert claim "fp16 doesn't fit" is verifiable). If
+  fp16 OOMs, that's the upper-context cliff.
+- **q8_0 KV** → expected ~135 t/s short-ctx based on aminrj /
+  thc1006 reproductions. The viral "3× slower" claim is contradicted
+  by every other 3090 + Qwen benchmark; this row is where we
+  empirically settle whether the claim holds on OUR GPU.
+- **q4_0 KV** → expected ~21 GB peak. **Watch decode TPS at 262K**
+  — Nemotron-30B benchmarks show q4_0 is actually SLOWER than fp16
+  at long context (the opposite of the viral claim), not faster.
+- **q8_0:q4_0 mixed KV** → ~75% of q8_0's memory cost, ~25% larger
+  than full q4_0; expected throughput close to q8_0 (key reads
+  dominate decode).
 
-Ship-decision rule: if q4_0 wins decode TPS AND survives the
-autowrite-section quality probe (sweep #2 below) within ~2% of fp16
-groundedness, switch the writer + scorer defaults to q4_0. Otherwise
-stay at the smaller-ctx fp16 config.
-
-### 2. Quality probe — does q4_0 KV cost autowrite groundedness?
+### 2. Quality probe — quality is the binding constraint
 
 ```
 uv run python scripts/bench_substrate_sweep.py \
     --role writer --knob cache-type \
-    --values f16,q8_0,q4_0 \
+    --values f16,q8_0,q4_0,q8_0:q4_0 \
     --workload autowrite-section --reps 1 \
     --autowrite-section-slug the_engine_of_the_sun
 ```
 
+**Book writing took less than a day on the current config — we do
+not have a speed problem.** This sweep is what decides whether any
+candidate ships.
+
 The autowrite-section workload runs one full
 `autowrite_section_stream` per cache-type, captures the scorer's
-overall + groundedness + plan_coverage. Slow (~10 min × 3 cache
-types = ~30 min wall) but it's the only way to detect a quality
-regression before deploying.
+overall + groundedness + plan_coverage. Slow (~10 min × 4 cache
+types = ~40 min wall) but the only way to catch quality
+regressions before deploying.
 
-Expected outcome:
+Expected outcomes (from the V16 research):
 
-- **fp16 KV** → reference quality.
-- **q8_0 KV** → within ~1% of fp16 (published llama.cpp benchmarks).
-- **q4_0 KV** → within ~2–3% on short contexts; degradation
-  growing on long contexts (>64K). Our autowrite prompts are
-  5–18K tokens, so the degradation should be small.
+- **fp16 KV** → reference quality. The bar.
+- **q8_0 KV** → within ~1% of fp16. GGML #5932 measured +0.0043
+  perplexity at 128K on Qwen2.5-Coder; this is the safe choice.
+- **q4_0 KV** → **GGML #5932 explicitly flagged Qwen2's 8x GQA as
+  hurt-more-than-average by aggressive KV quant.** Qwen3.6 inherits
+  the GQA pattern. Likely loses ≥2% groundedness on our 5-18K
+  prompts; long-context degradation may push that higher.
+- **q8_0:q4_0 mixed** → preserves K-cache (the side that matters
+  for GQA's attention-pattern reads), halves V-cache. Expected
+  within 0.5% of pure q8_0 quality at ~25% less memory.
 
-If `q4_0` final_score drops > 0.05 vs fp16, that's a measurable
-quality regression and we should NOT promote q4_0 to default.
+**Ship rules** (in order; the first that fires wins):
+
+1. If `q4_0` final_score drops > 0.01 vs fp16, **reject q4_0**
+   immediately — quality is the binding constraint.
+2. If `q8_0` final_score drops > 0.01 vs fp16, **reject q8_0** too
+   and stay on production defaults.
+3. If `q8_0:q4_0` mixed survives both gates AND beats `q8_0` on
+   speed by ≥10%, promote it.
+4. Otherwise promote `q8_0` (community consensus + clean quality).
+5. If everything fails the quality gate, stay on the current
+   production config (writer ctx 24576, fp16 KV).
 
 ### 3. cache-type × ctx-size matrix — locate the speed cliffs
 
 ```
 uv run python scripts/bench_substrate_sweep.py \
     --role writer \
-    --matrix-knob cache-type --matrix-values f16,q8_0,q4_0 \
+    --matrix-knob cache-type --matrix-values f16,q8_0,q4_0,q8_0:q4_0 \
     --knob ctx-size \
     --values 16384,24576,65536,131072,262144 \
     --baseline expert --workload typical
 ```
 
-3 × 5 = 15-cell grid. Answers:
+4 × 5 = 20-cell grid. Answers:
 - "Where does each cache type OOM on the 3090?"
 - "Is decode TPS flat across context (the headline q4_0 claim) or
-  does it actually drop at higher ctx?"
+  does it actually drop at higher ctx (Nemotron benchmark says
+  yes)?"
 - "If we want to bump production ctx, what's the safe ceiling per
   cache type?"
+- "Does the asymmetric `q8_0:q4_0` mixed mode beat full q8_0 at
+  long context?"
 
 ### 4. Writer ctx-size at q4_0 KV — pick the production default
 
@@ -268,12 +338,51 @@ context. Run as a control to verify.
   not tunable, it's a discipline. Disabling the eviction (set
   `VRAM_CO_RESIDENCE_OK=true` in `.env`) on the 3090 will OOM and is
   not a defensible config — don't bench it.
-- **Speculative decoding** (`--draft`): would need a smaller draft
-  model also loaded; the 3090 doesn't have headroom. Defer to DGX
-  Spark.
+- **Speculative decoding** (`--model-draft`): **proven net-negative
+  on Ampere + Qwen3.6 MoE.** Post-PR-#19493 19-config bench
+  ([thc1006 reproduction](https://github.com/thc1006/qwen3.6-speculative-decoding-rtx3090),
+  [HackMD writeup](https://hackmd.io/ODXuOQNzSiyUITz7g9mtBw)) shows
+  every spec-decode mode (ngram-cache, ngram-mod, classic
+  vocab-matched draft) loses 3–12% mean decode despite 100% draft
+  acceptance on some prompts. Cause: A3B MoE expert-saturation
+  threshold T_thres ≈ 94 is well above any realistic draft K. Each
+  drafted token pulls a fresh expert slice through the memory
+  hierarchy and the verification pass pays for the union. **Defer
+  to DGX Spark or skip entirely.**
 - **Engine knobs** (temperature, cove_threshold, retrieval `context_k`):
   these affect autowrite *quality*, not substrate throughput. They
   belong in a separate quality bench, not this throughput sweep.
+
+## Known external pitfalls (not bench problems, but check before running)
+
+- **CUDA 13.2 produces gibberish** with Qwen3.6
+  ([aminrj observation](https://aminrj.com/posts/llamacpp-qwen36-35b/)).
+  We're on driver 13.1 + nvcc/runtime 12.0 — verified safe before
+  starting this bench. If you upgrade the NVIDIA driver to 13.2 mid
+  bench, results invalidate.
+- **q4_0 KV long-context degradation is real, despite the viral
+  claim of "flat 40 t/s curve."** DGX Spark + Nemotron-30B 128K
+  ([NVIDIA dev forum benchmark](https://forums.developer.nvidia.com/t/kv-cache-quantization-benchmarks-on-dgx-spark-q4-0-vs-q8-0-vs-f16-llama-cpp-nemotron-30b-128k-context/365138))
+  shows q4_0 decode TPS drops 18–35% vs fp16 as context grows past
+  32K. Don't take the speed claim at face value; sweep and measure.
+- **Qwen-family GQA is q4_0-sensitive.** GGML #5932 explicitly
+  flags Qwen2's 8x GQA as "hurts more than less aggressive GQA"
+  with aggressive KV quant. Qwen3.6 inherits this pattern; if our
+  quality-gate sweep #2 fails for q4_0, this is why.
+- **Newer llama.cpp requires explicit `--flash-attn on/off`**, not
+  just `--flash-attn` as a flag. Our role configs already use the
+  explicit form — sanity-check after any llama.cpp build update.
+
+## TurboQuant 3-bit KV (future)
+
+[TurboQuant](https://github.com/ggml-org/llama.cpp/discussions/20969)
+is a Google Research scheme that hits ~3-bit KV with 0-class
+perplexity loss (TQ3 PPL = 6.20 vs f16 baseline 6.19; TQ4 PPL =
+6.76 vs 6.89). Would unlock 5–6× compression vs q8_0 with cleaner
+quality than q4_0. **Not yet in mainline llama.cpp** as of
+2026-04-28; Metal works in community forks, CUDA support is
+experimental, Vulkan in progress. Worth a follow-up bench once it
+lands in mainline, but out of scope for this iteration.
 
 ## How to interpret the table
 
