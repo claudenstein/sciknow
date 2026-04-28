@@ -19563,6 +19563,44 @@ def l1_phase55_v3_down_recovers_when_pid_file_missing() -> None:
     assert "_read_pid" in src, "down() must consult _read_pid first"
 
 
+def l1_phase55_v5_plan_coverage_atomizes_markdown_bullets() -> None:
+    """Phase 55.V5 — `atomize_plan` splits markdown-bullet plans
+    correctly.
+
+    Real bug observed in a full-book autowrite run on 2026-04-27:
+    every section emitted `plan_coverage: 0.0, n_bullets=1, n_covered=0`.
+    Cause: the canonical plan format is ``- bullet1\\n- bullet2\\n-...``
+    but `atomize_plan` only knew about sentence boundaries (``.!?``)
+    and ``;``/``|`` separators, neither of which fire on
+    newline-prefixed dashes. Every plan fell into the [whole_text]
+    fallback, NLI couldn't entail it as a single proposition, and
+    plan_coverage was pinned at 0 — dragging hard-topic sections
+    under the convergence target.
+
+    This test feeds the canonical markdown-bullet format and asserts
+    we get >=4 atomic bullets back (matching the actual chapter-plan
+    layout — see `sections[*].plan` in book_chapters JSONB).
+    """
+    from sciknow.core.plan_coverage import atomize_plan
+
+    plan = (
+        "- Differential rotation and meridional circulation drive the solar dynamo\n"
+        "- The alpha-omega mechanism generates the Sun's magnetic field\n"
+        "- Magnetic flux emergence creates sunspots\n"
+        "- Dynamo cycle phases dictate transitions between solar maxima and minima"
+    )
+    bullets = atomize_plan(plan)
+    assert len(bullets) >= 4, (
+        f"atomize_plan must split markdown-bullet plans into >=4 atomic "
+        f"bullets; got {len(bullets)}: {bullets!r}. The whole-plan "
+        f"fallback path makes plan_coverage pin at 0 for every section."
+    )
+    # Bullets should not contain leading dashes after splitting.
+    for b in bullets:
+        assert not b.startswith("-"), f"Bullet still has leading dash: {b!r}"
+        assert len(b) >= 15, f"Bullet too short to be atomic: {b!r}"
+
+
 def l3_phase55_v1_activate_phase_evicts_peers() -> None:
     """Phase 55.V1 — `activate_phase("retrieve")` actually evicts the
     writer when both are healthy.
@@ -20238,6 +20276,11 @@ L1_TESTS: list[Callable] = [
     # Phase 55.V3 — down() recovers from a missing PID file via
     # _find_pid_by_port lsof/ss fallback (substrate self-heal)
     l1_phase55_v3_down_recovers_when_pid_file_missing,
+    # Phase 55.V5 — plan_coverage.atomize_plan splits markdown-bullet
+    # plans (regression: it was returning [whole_plan] for every
+    # section, pinning plan_coverage at 0 + dragging hard-topic
+    # sections under the convergence target)
+    l1_phase55_v5_plan_coverage_atomizes_markdown_bullets,
 ]
 
 L2_TESTS: list[Callable] = [
