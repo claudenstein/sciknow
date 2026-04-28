@@ -275,10 +275,18 @@ def directory(
 
     # Phase 54.6.31 — warm the fast model (used for metadata fallback)
     # before the ingest loop so the first paper doesn't pay cold-start.
-    # Best-effort; ingest will still work if Ollama is unreachable
-    # since Layer 4 (LLM) only runs when the other 3 layers miss.
-    from sciknow.rag.llm import warm_up as _llm_warm_up
-    _llm_warm_up(model=settings.llm_fast_model, num_ctx=4096, num_batch=1024)
+    # Phase 55.V17 — under v2-llamacpp the warm-up loads the 17 GB
+    # writer into VRAM and triggers `_VRAM_CONFLICTS["writer"]` →
+    # embedder eviction → MinerU kill (preflight cascade) → per-paper
+    # swap thrash, costing ~30 s/paper of cold-start time. Layer 4
+    # is rare (only fires when XMP+Crossref+arXiv all miss, ~5% of
+    # mainstream papers), so paying that warm-up tax for every paper
+    # is the wrong trade. Gate the warm-up on the v1-Ollama path; v2
+    # lazy-starts the writer on the rare paper that actually hits
+    # Layer 4 via `_ensure_role_up("writer")`.
+    if not getattr(settings, "use_llamacpp_writer", True):
+        from sciknow.rag.llm import warm_up as _llm_warm_up
+        _llm_warm_up(model=settings.llm_fast_model, num_ctx=4096, num_batch=1024)
 
     results = {"done": 0, "skipped": 0, "failed": 0}
     failed_files: list[tuple[str, str]] = []
