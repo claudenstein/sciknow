@@ -1825,6 +1825,195 @@ def insert_citations(
     _consume_events(gen, console)
 
 
+# ── rank-visuals (Phase 55.V8 — bulk visuals ranker) ─────────────────────────
+
+@app.command(name="rank-visuals")
+def rank_visuals_cmd(
+    book_title: Annotated[str, typer.Argument(help="Book title or ID fragment.")],
+    chapter:    Annotated[str | None, typer.Argument(help="Chapter number or title fragment. Omit + use --all to cover the whole book.")] = None,
+    section:    str | None = typer.Option(
+        None, "--section", "-s",
+        help="Section type. Omit to rank for every section in the chapter (or whole book with --all).",
+    ),
+    all_chapters: bool = typer.Option(
+        False, "--all",
+        help="Rank visuals for every section of every chapter in the book. Required if no chapter is given.",
+    ),
+    limit: int = typer.Option(
+        10, "--limit",
+        help="Top-K visuals to keep per draft (1–30).",
+    ),
+    overwrite: bool = typer.Option(
+        False, "--overwrite",
+        help="Re-rank even drafts that already have a fresh visual_suggestions blob (matched by content_hash).",
+    ),
+):
+    """
+    Phase 55.V8 — bulk visuals ranker.
+
+    Walks the latest active draft of every section in scope, runs the
+    5-signal visuals ranker, and persists the result to
+    ``drafts.custom_metadata['visual_suggestions']`` so the right-panel
+    Visuals tab + finalize-draft pre-export check can read it without
+    re-ranking. Same payload shape the per-draft web endpoint produces.
+
+    Skips already-ranked drafts whose persisted ``content_hash`` still
+    matches the current content (use ``--overwrite`` to force re-rank).
+
+    Examples:
+
+      sciknow book rank-visuals "Global Cooling" --all              # whole book
+      sciknow book rank-visuals "Global Cooling" 3                  # one chapter
+      sciknow book rank-visuals "Global Cooling" 3 -s methods       # one section
+      sciknow book rank-visuals "Global Cooling" --all --overwrite  # force re-rank
+    """
+    from sciknow.cli import preflight
+    preflight()
+    import hashlib as _h
+    import json as _json
+    from datetime import datetime as _dt
+    from sciknow.storage.db import get_session
+    from sqlalchemy import text as sql_text
+    from sciknow.web.routes.visuals import _visuals_rank_for_draft
+
+    if chapter is None and not all_chapters:
+        console.print(
+            "[red]Either supply a CHAPTER argument or use --all to cover the whole book.[/red]"
+        )
+        raise typer.Exit(1)
+
+    # Resolve book + chapter rows.
+    with get_session() as session:
+        book_row = session.execute(sql_text("""
+            SELECT id::text, title FROM books
+            WHERE title ILIKE :t OR id::text LIKE :p
+            LIMIT 1
+        """), {"t": f"%{book_title}%", "p": f"{book_title}%"}).fetchone()
+        if not book_row:
+            console.print(f"[red]Book not found: {book_title!r}[/red]")
+            raise typer.Exit(1)
+        book_id, btitle = book_row[0], book_row[1]
+
+        if all_chapters:
+            ch_rows = session.execute(sql_text("""
+                SELECT id::text, number, title FROM book_chapters
+                WHERE book_id::text = :bid
+                ORDER BY number
+            """), {"bid": book_id}).fetchall()
+        else:
+            try:
+                num = int(chapter)
+                ch_rows = session.execute(sql_text("""
+                    SELECT id::text, number, title FROM book_chapters
+                    WHERE book_id::text = :bid AND number = :n
+                """), {"bid": book_id, "n": num}).fetchall()
+            except ValueError:
+                ch_rows = session.execute(sql_text("""
+                    SELECT id::text, number, title FROM book_chapters
+                    WHERE book_id::text = :bid AND title ILIKE :t
+                    ORDER BY number
+                """), {"bid": book_id, "t": f"%{chapter}%"}).fetchall()
+        if not ch_rows:
+            console.print(f"[red]No chapters matched.[/red]")
+            raise typer.Exit(1)
+
+        # Pull the latest active draft per (chapter, section). Same
+        # ordering rule used by autowrite + the reader.
+        ch_ids = [c[0] for c in ch_rows]
+        placeholders = ", ".join(f":c{i}" for i in range(len(ch_ids)))
+        params = {f"c{i}": cid for i, cid in enumerate(ch_ids)}
+        if section:
+            extra = "AND section_type = :sec"
+            params["sec"] = section
+        else:
+            extra = ""
+        drafts = session.execute(sql_text(f"""
+            SELECT DISTINCT ON (chapter_id, section_type)
+                   id::text, chapter_id::text, section_type, content,
+                   custom_metadata, word_count
+            FROM drafts
+            WHERE chapter_id::text IN ({placeholders})
+            {extra}
+            ORDER BY chapter_id, section_type,
+                     (custom_metadata->>'is_active')::boolean DESC NULLS LAST,
+                     version DESC
+        """), params).fetchall()
+
+    ch_map = {c[0]: (c[1], c[2]) for c in ch_rows}
+    n_total = len(drafts)
+    if n_total == 0:
+        console.print("[yellow]No drafts found in scope.[/yellow]")
+        raise typer.Exit(0)
+
+    console.print(
+        f"[bold]Rank-visuals[/bold] · book={btitle!r} · "
+        f"chapters={len(ch_rows)} · drafts={n_total}"
+    )
+
+    n_ranked = 0
+    n_skipped = 0
+    n_failed = 0
+    for d in drafts:
+        did, cid, sec, content, meta, wc = d
+        ch_num, ch_title = ch_map.get(cid, ("?", ""))
+        prefix = f"  Ch.{ch_num} {sec}".ljust(55)
+
+        if not (content or "").strip():
+            console.print(f"{prefix} [dim]skipped (empty draft)[/dim]")
+            n_skipped += 1
+            continue
+
+        # Cache check: skip if persisted blob matches current content.
+        if not overwrite and isinstance(meta, dict):
+            blob = meta.get("visual_suggestions")
+            if isinstance(blob, dict):
+                cur_hash = _h.md5((content or "").encode(
+                    "utf-8", errors="ignore")).hexdigest()
+                if blob.get("content_hash") == cur_hash:
+                    n_skipped += 1
+                    n_hits = len(blob.get("hits") or [])
+                    console.print(
+                        f"{prefix} [dim]cached ({n_hits} hits, --overwrite to re-rank)[/dim]"
+                    )
+                    continue
+
+        try:
+            payload = _visuals_rank_for_draft(did, limit=limit)
+            hits = payload.get("hits") or []
+            cur_hash = _h.md5((content or "").encode(
+                "utf-8", errors="ignore")).hexdigest()
+            blob = {
+                "hits": hits,
+                "ranked_at": _dt.utcnow().isoformat() + "Z",
+                "content_hash": cur_hash,
+                "note": payload.get("note"),
+            }
+            with get_session() as session:
+                session.execute(sql_text("""
+                    UPDATE drafts
+                       SET custom_metadata = COALESCE(custom_metadata, '{}'::jsonb)
+                                             || jsonb_build_object(
+                                                  'visual_suggestions',
+                                                  CAST(:blob AS jsonb))
+                     WHERE id::text = :did
+                """), {"did": did, "blob": _json.dumps(blob)})
+                session.commit()
+            n_ranked += 1
+            avg_score = (sum((h.get("composite_score") or 0) for h in hits)
+                         / max(len(hits), 1)) if hits else 0
+            console.print(
+                f"{prefix} [green]✓[/green] {len(hits)} hits "
+                f"(avg score {avg_score:.2f})"
+            )
+        except Exception as exc:
+            n_failed += 1
+            console.print(f"{prefix} [red]✗ {type(exc).__name__}: {exc}[/red]")
+
+    console.print(
+        f"\n[bold]Done.[/bold] ranked={n_ranked} · skipped={n_skipped} · failed={n_failed}"
+    )
+
+
 # ── finalize-draft (Phase 54.6.145 — L3 VLM verify pre-export) ──────────────────
 
 @app.command(name="finalize-draft")

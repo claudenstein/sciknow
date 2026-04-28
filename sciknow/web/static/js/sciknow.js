@@ -5627,6 +5627,68 @@ async function doAutowriteBook() {
   };
 }
 
+// Phase 55.V8 — bulk visuals ranker for the whole book. Wraps the
+// `POST /api/visuals/suggestions/batch` endpoint (added below) with
+// progress streamed via SSE. The button lives in the Book menu.
+async function doRankVisualsBook() {
+  const ok = confirm(
+    "Rank candidate visuals for every section in this book?\n\n" +
+    "Walks every active draft, runs the 5-signal visuals ranker, " +
+    "and persists the top-10 per section. Skips drafts whose " +
+    "stored ranking still matches the current content. ~1-2 s per " +
+    "section on warm cache."
+  );
+  if (!ok) return;
+  showStreamPanel('Ranking visuals (whole book)…');
+  const body = document.getElementById('stream-body');
+  body.innerHTML = '<div id="rv-log" style="font-family:var(--font-mono);'
+    + 'font-size:13px;line-height:1.55;white-space:pre-wrap;"></div>';
+  const log = document.getElementById('rv-log');
+
+  const fd = new FormData();
+  fd.append('limit', '10');
+  const res = await fetch('/api/visuals/suggestions/batch', {method: 'POST', body: fd});
+  const data = await res.json();
+  if (!data || !data.job_id) {
+    log.innerHTML += '<div class="log-discard">Failed to start: '
+      + _escHTML(JSON.stringify(data)) + '</div>';
+    return;
+  }
+  currentJobId = data.job_id;
+  const source = new EventSource('/api/stream/' + data.job_id);
+  currentEventSource = source;
+  source.onmessage = function(e) {
+    const evt = JSON.parse(e.data);
+    if (evt.type === 'progress') {
+      log.innerHTML += '<div class="log-keep">'
+        + _escHTML(evt.detail || '') + '</div>';
+    } else if (evt.type === 'rank_done') {
+      const score = (evt.avg_score != null) ? evt.avg_score.toFixed(2) : '?';
+      log.innerHTML += '<div class="log-keep">  ✓ ' + _escHTML(evt.section || '')
+        + ': ' + (evt.n_hits || 0) + ' hits (avg ' + score + ')</div>';
+    } else if (evt.type === 'rank_skipped') {
+      log.innerHTML += '<div class="u-muted">  — ' + _escHTML(evt.section || '')
+        + ': cached</div>';
+    } else if (evt.type === 'rank_failed') {
+      log.innerHTML += '<div class="log-discard">  ✗ ' + _escHTML(evt.section || '')
+        + ': ' + _escHTML(evt.error || '') + '</div>';
+    } else if (evt.type === 'completed') {
+      log.innerHTML += '<div class="log-keep" style="margin-top:1em;font-weight:bold;">'
+        + '✓ Done. ranked=' + (evt.n_ranked || 0)
+        + ' skipped=' + (evt.n_skipped || 0)
+        + ' failed=' + (evt.n_failed || 0) + '</div>';
+      source.close(); currentEventSource = null; currentJobId = null;
+    } else if (evt.type === 'error') {
+      log.innerHTML += '<div class="log-discard">Error: '
+        + _escHTML(evt.message || '') + '</div>';
+      source.close(); currentEventSource = null; currentJobId = null;
+    } else if (evt.type === 'done') {
+      source.close(); currentEventSource = null; currentJobId = null;
+    }
+  };
+}
+
+
 function drawConvergenceChart() {
   const svg = document.querySelector('#aw-chart svg');
   if (!svg || awScores.length === 0) return;
