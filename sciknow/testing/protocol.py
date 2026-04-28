@@ -19621,19 +19621,27 @@ def l1_phase55_v9_expand_section_surface() -> None:
     assert "expand-section" in corpus_src, (
         "expand-section not registered on the corpus subapp"
     )
-    # GUI wiring: web endpoint + JS handler + menu button.
-    from sciknow.web.routes.corpus import api_corpus_expand_section
+    # GUI wiring (V9 + V13): preview endpoint + auto endpoint + Corpus
+    # modal tab + JS preview handler + JS auto handler.
+    from sciknow.web.routes.corpus import (
+        api_corpus_expand_section,
+        api_corpus_expand_section_preview,
+    )
     assert callable(api_corpus_expand_section)
+    assert callable(api_corpus_expand_section_preview)
     from sciknow.testing.helpers import web_app_full_source
     full = web_app_full_source()
-    assert "doExpandSection" in full, (
-        "doExpandSection JS handler missing — Corpus-menu button "
-        "won't fire"
-    )
-    assert "/api/corpus/expand-section" in full, (
-        "expand-section endpoint not referenced in JS — handler "
-        "can't reach it"
-    )
+    for marker in (
+        "corp-section", "corp-section-pane",
+        "/api/corpus/expand-section/preview",
+        "/api/corpus/expand-section",
+        "runExpandSectionPreview",
+        "runExpandSectionAuto",
+    ):
+        assert marker in full, (
+            f"Corpus modal expand-section wiring missing: {marker!r}. "
+            f"V13 requires the canonical preview-cherry-pick pattern."
+        )
 
 
 def l1_phase55_v10_substrate_sweep_harness_present() -> None:

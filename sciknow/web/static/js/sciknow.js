@@ -5689,44 +5689,95 @@ async function doRankVisualsBook() {
 }
 
 
-// Phase 55.V9 — bulk corpus expansion for thin-coverage sections.
-// Wraps POST /api/corpus/expand-section. Default scope is "every
-// section in the active book whose latest draft scored below the
-// 0.85 convergence target". Streams the CLI's stdout via SSE.
-async function doExpandSection() {
-  // First confirm scope: only thin sections (default) vs every.
-  const onlyThin = confirm(
-    "Expand corpus for THIN-COVERAGE sections only?\n\n" +
-    "OK = only sections whose latest draft scored below 0.85 (the\n" +
-    "convergence target). The autowrite plateaued there because the\n" +
-    "evidence base is too narrow; this will pull related literature\n" +
-    "via Crossref / OpenAlex / S2 / arXiv per section's plan bullets.\n\n" +
-    "Cancel = run on every section regardless of score."
-  );
-  // Second confirm: dry-run vs live download.
-  const live = confirm(
-    "DRY-RUN first to see what would be downloaded?\n\n" +
-    "OK = LIVE (downloads + ingests).\n" +
-    "Cancel = dry-run (preview only, no changes)."
-  );
+// Phase 55.V9 — corpus expansion for thin-coverage sections.
+// Two flows:
+//   runExpandSectionPreview() — POST /api/corpus/expand-section/preview,
+//     parse the merged candidate list, open the cherry-pick modal
+//     (same _eapCandidates pipeline that Expand-by-author and
+//     Expand-by-author-refs use). User picks rows + downloads via
+//     the existing /api/corpus/expand-author/download-selected
+//     endpoint (it just consumes a list of {doi, title, year, ...}).
+//   runExpandSectionAuto() — POST /api/corpus/expand-section,
+//     skip the preview and run the full pipeline per seed.
+//
+// Both pull the form params from the corp-section pane.
 
-  showStreamPanel('Corpus expand-section…');
+function _readSecExForm() {
+  const fd = new FormData();
+  const ch  = (document.getElementById('tl-secex-chapter') || {}).value || '';
+  const sec = (document.getElementById('tl-secex-section') || {}).value || '';
+  if (ch.trim()) fd.append('chapter', ch.trim());
+  if (sec.trim()) fd.append('section', sec.trim());
+  // No specific section/chapter ⇒ default to the whole book scope.
+  fd.append('all_sections', (ch.trim() || sec.trim()) ? 'false' : 'true');
+  const onlyThin = (document.getElementById('tl-secex-only-thin') || {}).checked;
+  fd.append('only_thin', onlyThin ? 'true' : 'false');
+  fd.append('thin_threshold', String(parseFloat(
+    (document.getElementById('tl-secex-thresh') || {}).value || '0.85'
+  )));
+  fd.append('budget_per_query', String(parseInt(
+    (document.getElementById('tl-secex-budget') || {}).value || '10', 10
+  )));
+  fd.append('max_queries', String(parseInt(
+    (document.getElementById('tl-secex-maxq') || {}).value || '6', 10
+  )));
+  return fd;
+}
+
+async function runExpandSectionPreview() {
+  _eapResetModal(
+    '&#127919; Expand thin sections &mdash; Preview',
+    'Building merged candidate shortlist across all in-scope sections…',
+    '(spawns one RRF dry-run per seed query; ~30-90s per seed)'
+  );
+  try {
+    const res = await fetch('/api/corpus/expand-section/preview', {
+      method: 'POST', body: _readSecExForm(),
+    });
+    if (!res.ok) {
+      _eapShowError('HTTP ' + res.status + ': ' + await res.text());
+      return;
+    }
+    const data = await res.json();
+    _eapCandidates = data.candidates || [];
+    _eapSelected = new Set();
+    _eapCandidates.forEach(c => {
+      if (c.doi && !c.cached_status) _eapSelected.add(c.doi);
+    });
+    const info = data.info || {};
+    const note = info.message || '';
+    document.getElementById('eap-info').innerHTML =
+      `<strong>${data.n_sections || 0}</strong> section(s) in scope · `
+      + `<strong>${data.n_seeds || 0}</strong> seed quer`
+      + ((data.n_seeds === 1) ? 'y' : 'ies') + ' · '
+      + `<strong>${data.n_unique_references || 0}</strong> unique candidate(s) · `
+      + `dropped <strong>${data.dropped_in_corpus || 0}</strong> dup(s).`
+      + (note ? `<br><em>${_escHtml(note)}</em>` : '');
+    document.getElementById('eap-loading').style.display = 'none';
+    document.getElementById('eap-content').style.display = 'block';
+    if (typeof eapRender === 'function') {
+      try { eapRender(); } catch (e) {}
+    }
+  } catch (e) {
+    _eapShowError(String(e));
+  }
+}
+
+async function runExpandSectionAuto() {
+  if (!confirm(
+    "Auto-download mode: skips the preview cherry-pick and runs the\n" +
+    "FULL expand pipeline per seed query (downloads every qualifying\n" +
+    "candidate that passes the relevance threshold).\n\n" +
+    "OK to proceed; Cancel to stop and use Preview instead."
+  )) return;
+  showStreamPanel('Expand thin sections — auto…');
   const body = document.getElementById('stream-body');
   body.innerHTML = '<div id="es-log" style="font-family:var(--font-mono);'
     + 'font-size:13px;line-height:1.55;white-space:pre-wrap;'
     + 'max-height:60vh;overflow-y:auto;"></div>';
   const log = document.getElementById('es-log');
-
-  const fd = new FormData();
-  fd.append('all_sections', 'true');
-  fd.append('only_thin', onlyThin ? 'true' : 'false');
-  fd.append('thin_threshold', '0.85');
-  fd.append('budget_per_query', '10');
-  fd.append('max_queries', '6');
-  if (!live) fd.append('dry_run', 'true');
-
   const res = await fetch('/api/corpus/expand-section',
-                          {method: 'POST', body: fd});
+                          {method: 'POST', body: _readSecExForm()});
   const data = await res.json();
   if (!data || !data.job_id) {
     log.innerHTML += '<div class="log-discard">Failed to start: '
@@ -5739,18 +5790,12 @@ async function doExpandSection() {
   source.onmessage = function(e) {
     const evt = JSON.parse(e.data);
     if (evt.type === 'log') {
-      // _spawn_cli_streaming yields raw stdout lines tagged 'log'.
-      const line = evt.text || evt.line || '';
-      log.innerHTML += '<div>' + _escHTML(line) + '</div>';
-      log.scrollTop = log.scrollHeight;
-    } else if (evt.type === 'progress') {
-      log.innerHTML += '<div class="log-keep">'
-        + _escHTML(evt.detail || '') + '</div>';
+      log.innerHTML += '<div>' + _escHTML(evt.text || evt.line || '') + '</div>';
       log.scrollTop = log.scrollHeight;
     } else if (evt.type === 'completed') {
       log.innerHTML += '<div class="log-keep" '
         + 'style="margin-top:1em;font-weight:bold;">'
-        + '✓ Done. Re-run autowrite to incorporate the new evidence.'
+        + '✓ Done. Re-run autowrite to incorporate new evidence.'
         + '</div>';
       source.close(); currentEventSource = null; currentJobId = null;
     } else if (evt.type === 'error') {
@@ -5758,8 +5803,6 @@ async function doExpandSection() {
         + _escHTML(evt.message || '') + '</div>';
       source.close(); currentEventSource = null; currentJobId = null;
     } else if (evt.type === 'done') {
-      log.innerHTML += '<div class="log-keep" style="margin-top:0.5em;">'
-        + 'Stream ended.</div>';
       source.close(); currentEventSource = null; currentJobId = null;
     }
   };
@@ -5767,6 +5810,13 @@ async function doExpandSection() {
     log.innerHTML += '<div class="log-discard">SSE connection lost.</div>';
     source.close(); currentEventSource = null; currentJobId = null;
   };
+}
+
+// Backwards-compat shim — the menu button used to call doExpandSection
+// (V9-pre-tab implementation). It now opens the proper Corpus modal
+// at the new tab.
+function doExpandSection() {
+  openCorpusModal('corp-section');
 }
 
 
@@ -9950,7 +10000,8 @@ function switchCorpusTab(name) {
     t.classList.toggle('active', t.dataset.ctab === name);
   });
   ['corp-enrich', 'corp-cites', 'corp-agentic', 'corp-author',
-   'corp-author-refs', 'corp-inbound', 'corp-topic', 'corp-coauth'].forEach(n => {
+   'corp-author-refs', 'corp-inbound', 'corp-topic', 'corp-coauth',
+   'corp-section'].forEach(n => {
     const pane = document.getElementById(n + '-pane');
     if (pane) pane.style.display = (n === name) ? 'block' : 'none';
   });

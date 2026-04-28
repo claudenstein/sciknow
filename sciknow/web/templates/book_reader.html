@@ -400,7 +400,7 @@
         <button role="menuitem" onclick="openCorpusModal('corp-cites')" title="Outbound reference crawl — follow citations IN your papers to discover new work. RRF + MMR diversity + citation-context signals. Mirrors `sciknow db expand`."><svg class="icon"><use href="#i-globe"/></svg> Expand (citations)</button>
         <button role="menuitem" onclick="openCorpusModal('corp-author')" title="Fetch every paper by a named author via OpenAlex. Use when you want an author's full bibliography regardless of current citations. Mirrors `sciknow db expand-author`."><svg class="icon"><use href="#i-user"/></svg> Expand by author</button>
         <button role="menuitem" onclick="openExpandAuthorRefs()" title="Phase 54.6.309 — pick an existing author from the corpus. Aggregates every paper they cited across all their works (including self-cites), ranks by citation frequency, and lands in the cherry-pick modal before download. Mirrors `sciknow db expand-author-refs`."><svg class="icon"><use href="#i-user"/></svg> Expand by author's references</button>
-        <button role="menuitem" onclick="doExpandSection()" title="Phase 55.V9 — targeted corpus expansion for thin-coverage sections. Reads each section's plan bullets + section title, builds seed queries, and runs the standard expand pipeline per seed. Default scope: only sections whose latest draft scored below the convergence target (skips already-converged ones). Use after an autowrite plateau to grow the evidence base, then re-run autowrite. Mirrors `sciknow corpus expand-section`."><svg class="icon"><use href="#i-target"/></svg> Expand thin sections</button>
+        <button role="menuitem" onclick="openCorpusModal('corp-section')" title="Phase 55.V9 — targeted corpus expansion for thin-coverage sections. Reads each section's plan bullets + section title, builds seed queries, and runs the standard expand pipeline per seed. Default scope: only sections whose latest draft scored below the convergence target (skips already-converged ones). Opens the Corpus — Enrich & Expand modal at the 'Expand thin sections' tab where you can preview candidates + cherry-pick, or run auto-download. Mirrors `sciknow corpus expand-section`."><svg class="icon"><use href="#i-target"/></svg> Expand thin sections</button>
         <button role="menuitem" onclick="openCorpusModal('corp-inbound')" title="Forward-in-time mirror of Expand: find papers that CITE your corpus. Mirrors `sciknow db expand-inbound`."><svg class="icon"><use href="#i-inbox"/></svg> Inbound cites</button>
         <button role="menuitem" onclick="openCorpusModal('corp-topic')" title="OpenAlex free-text topic search ranked by citation count. Good for kickstarting a new project."><svg class="icon"><use href="#i-tag"/></svg> Topic search</button>
         <button role="menuitem" onclick="openCorpusModal('corp-coauth')" title="Find people who coauthored with your corpus's authors. Useful for invisible-college expansion."><svg class="icon"><use href="#i-users"/></svg> Coauthors</button>
@@ -2955,6 +2955,8 @@
                   title="Free-text OpenAlex search. Push-based expansion — solves bootstrap / sideways-expansion problem.">&#128269; Topic search</button>
           <button class="tab" data-ctab="corp-coauth" onclick="switchCorpusTab('corp-coauth')"
                   title="Snowball via coauthors of corpus papers. Captures the 'invisible college' — same-lab researchers who don't always cite each other.">&#128101; Coauthors</button>
+          <button class="tab" data-ctab="corp-section" onclick="switchCorpusTab('corp-section')"
+                  title="Phase 55.V9 — Targeted expansion for thin-coverage sections. Reads each section's plan bullets + title, builds seed queries, runs the standard expand pipeline per seed in dry-run, and shows the merged candidate list for cherry-pick. Designed for the 'autowrite plateaued at 0.7x' pattern. Mirrors `sciknow corpus expand-section`.">&#127919; Expand thin sections</button>
         </div>
 
         <!-- Enrich (metadata) panel -->
@@ -3382,6 +3384,56 @@
                     title="Build the coauthor shortlist and open the cherry-pick preview. No downloads until you approve rows.">&#128269; Preview candidates</button>
             <span class="u-hint">
               Best with a tight relevance threshold (0.6+) — this method has the noisiest recall.
+            </span>
+          </div>
+        </div>
+
+        <!-- Phase 55.V9 — Expand thin sections panel. -->
+        <div class="u-hidden-card" id="corp-section-pane">
+          <div class="u-note-md">
+            Targeted expansion for sections whose autowrite plateaued
+            (final_overall &lt; threshold). For each in-scope section,
+            uses the plan bullets + section title as seed queries,
+            spawns the standard RRF expand subprocess in dry-run per
+            seed, and merges the candidate shortlist for cherry-pick.
+            Mirrors <code>sciknow corpus expand-section</code>.
+          </div>
+          <div class="field u-row-wrap-end-tight">
+            <div class="u-col-wide"><label>Chapter (optional)</label>
+              <input type="text" id="tl-secex-chapter" value=""
+                     placeholder="(blank = whole book)"
+                     title="Chapter number (e.g. '3') or title fragment. Leave blank to cover every chapter in the book."/></div>
+            <div class="u-col-wide"><label>Section slug (optional)</label>
+              <input type="text" id="tl-secex-section" value=""
+                     placeholder="(blank = every section in scope)"
+                     title="Specific section slug like 'the_engine_of_the_sun'. Leave blank to cover every section in the chapter (or whole book)."/></div>
+            <div class="u-col-num"><label>Thin threshold</label>
+              <input type="number" id="tl-secex-thresh" value="0.85" min="0" max="1" step="0.05"
+                     title="Sections whose latest draft scored below this are considered thin. Default 0.85 = the autowrite convergence target."/></div>
+            <div class="u-col-num"><label>Budget / seed</label>
+              <input type="number" id="tl-secex-budget" value="10" min="1" max="50"
+                     title="Max papers fetched per seed query. The expand RRF ranker takes the top-N for the candidate shortlist."/></div>
+            <div class="u-col-num"><label>Max queries</label>
+              <input type="number" id="tl-secex-maxq" value="6" min="1" max="20"
+                     title="Cap on seed queries per section: section title + first N plan bullets."/></div>
+          </div>
+          <div class="field u-flex-raw u-gap-10 u-ai-center u-wrap u-mt-1">
+            <label class="u-label-row"
+                   title="Default ON: only sections with final_overall < threshold (or no draft) are expanded. Uncheck to run on every section regardless of score.">
+              <input type="checkbox" id="tl-secex-only-thin" checked> only-thin
+            </label>
+          </div>
+          <div class="u-row-mt u-flex-raw u-gap-2 u-ai-center u-wrap">
+            <button class="btn-primary" onclick="runExpandSectionPreview()"
+                    title="Build the merged candidate shortlist (across every seed query of every in-scope section) and open the cherry-pick preview. Nothing downloads until you tick rows.">
+              &#128269; Preview candidates
+            </button>
+            <button class="btn-secondary" onclick="runExpandSectionAuto()"
+                    title="Skip preview — run the full expand pipeline per seed and download every qualifying candidate that passes the relevance threshold. Logs stream below.">
+              &#9889; Auto-download (skip preview)
+            </button>
+            <span class="u-hint">
+              Preview cherry-picks; Auto runs the full pipeline. Re-run autowrite with <code>--resume --only-below-target</code> after.
             </span>
           </div>
         </div>

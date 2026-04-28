@@ -42,6 +42,206 @@ async def api_corpus_enrich(
     return JSONResponse({"job_id": job_id})
 
 
+def _expand_section_seeds(book_id: str, *, chapter: str | None,
+                          section: str | None, all_sections: bool,
+                          only_thin: bool, thin_threshold: float,
+                          max_queries: int) -> tuple[list[str], list[dict]]:
+    """Phase 55.V9 — shared scope+seed builder. Returns
+    (flat list of seed queries, list of section dicts with {chapter,
+    section, title, seeds}). The two orderings line up so the
+    candidate-aggregation step can map each candidate's
+    `_agentic_subtopic` (a seed) back to its section.
+    """
+    import re as _re
+    with get_session() as session:
+        if all_sections or not chapter:
+            ch_rows = session.execute(text("""
+                SELECT id::text, number, title, sections, topic_query
+                FROM book_chapters
+                WHERE book_id::text = :bid
+                ORDER BY number
+            """), {"bid": book_id}).fetchall()
+        else:
+            try:
+                num = int(chapter)
+                ch_rows = session.execute(text("""
+                    SELECT id::text, number, title, sections, topic_query
+                    FROM book_chapters
+                    WHERE book_id::text = :bid AND number = :n
+                """), {"bid": book_id, "n": num}).fetchall()
+            except ValueError:
+                ch_rows = session.execute(text("""
+                    SELECT id::text, number, title, sections, topic_query
+                    FROM book_chapters
+                    WHERE book_id::text = :bid AND title ILIKE :t
+                    ORDER BY number
+                """), {"bid": book_id, "t": f"%{chapter}%"}).fetchall()
+
+    sections_meta: list[dict] = []
+    for ch_id, ch_num, ch_title, sections_blob, topic_q in ch_rows:
+        sections_list = sections_blob
+        if isinstance(sections_list, str):
+            try: sections_list = json.loads(sections_list)
+            except Exception: sections_list = []
+        if not isinstance(sections_list, list):
+            sections_list = []
+        for sec in sections_list:
+            if not isinstance(sec, dict):
+                continue
+            slug = sec.get("slug") or ""
+            if section and slug != section:
+                continue
+            title = sec.get("title") or slug
+            plan = (sec.get("plan") or "").strip()
+            anchor = title or topic_q or ch_title or ""
+            seeds: list[str] = []
+            if anchor:
+                seeds.append(anchor[:80])
+            for raw in _re.split(r"(?:^|\n)\s*[-*•]\s+", plan):
+                raw = raw.strip()
+                if len(raw) >= 15:
+                    seeds.append(raw[:80])
+            if not any(len(s) >= 15 for s in seeds[1:]) and plan:
+                # Fall through to sentence split when there are no
+                # markdown bullets (rare — most plans have bullets).
+                for s in _re.split(r"(?<=[.!?])\s+", plan):
+                    s = s.strip()
+                    if len(s) >= 15:
+                        seeds.append(s[:80])
+            seeds = seeds[:max_queries]
+            sections_meta.append({
+                "chapter_id": ch_id, "chapter_number": ch_num,
+                "chapter_title": ch_title or "",
+                "section_slug": slug, "section_title": title,
+                "seeds": seeds,
+            })
+
+    # Apply thin-threshold filter against the latest active draft.
+    if only_thin and sections_meta:
+        with get_session() as session:
+            kept: list[dict] = []
+            for s in sections_meta:
+                row = session.execute(text("""
+                    SELECT custom_metadata, word_count FROM drafts
+                    WHERE chapter_id::text = :cid AND section_type = :sec
+                    ORDER BY (custom_metadata->>'is_active')::boolean DESC NULLS LAST,
+                             version DESC
+                    LIMIT 1
+                """), {"cid": s["chapter_id"], "sec": s["section_slug"]}).fetchone()
+                if not row:
+                    kept.append(s)
+                    continue
+                meta = row[0] or {}
+                if isinstance(meta, str):
+                    try: meta = json.loads(meta)
+                    except Exception: meta = {}
+                final = meta.get("final_overall") if isinstance(meta, dict) else None
+                if final is None or float(final) < thin_threshold:
+                    kept.append(s)
+            sections_meta = kept
+
+    # Flatten seeds — keep an index map for re-annotation.
+    flat: list[str] = []
+    for s in sections_meta:
+        flat.extend(s["seeds"])
+    return flat, sections_meta
+
+
+@router.post("/api/corpus/expand-section/preview")
+async def api_corpus_expand_section_preview(
+    chapter: str = Form(""),
+    section: str = Form(""),
+    all_sections: bool = Form(True),
+    only_thin: bool = Form(True),
+    thin_threshold: float = Form(0.85),
+    budget_per_query: int = Form(10),
+    max_queries: int = Form(6),
+):
+    """Phase 55.V9 — preview candidates for thin-section expansion.
+
+    Walks the in-scope sections, builds seed queries (plan bullets +
+    section title), spawns the same RRF-ranker dry-run subprocess
+    used by the agentic preview (one per seed), aggregates into a
+    deduplicated candidate list, and returns it in the same shape
+    the cherry-pick modal already consumes (`_eapCandidates`).
+
+    Each candidate carries `_section_slug`, `_section_title`, and
+    `_seed_query` so the GUI can group/badge by source.
+    """
+    from sciknow.web import app as _app
+    from sciknow.ingestion.agentic_expand import gather_candidates_for_gaps
+
+    if not _app._book_id:
+        raise HTTPException(400, "No active book")
+
+    flat_seeds, sections_meta = _expand_section_seeds(
+        _app._book_id,
+        chapter=(chapter or None), section=(section or None),
+        all_sections=all_sections, only_thin=only_thin,
+        thin_threshold=thin_threshold, max_queries=max_queries,
+    )
+
+    if not sections_meta:
+        return JSONResponse({
+            "candidates": [], "n_sections": 0, "n_seeds": 0,
+            "info": {"message": "No in-scope sections matched."},
+            "sections": [],
+        })
+    if not flat_seeds:
+        return JSONResponse({
+            "candidates": [], "n_sections": len(sections_meta), "n_seeds": 0,
+            "info": {"message": "Sections matched but produced no seed queries — empty plans?"},
+            "sections": sections_meta,
+        })
+
+    # Run the per-seed RRF dry-run shortlist build off the asyncio
+    # loop so the SSE pipe stays responsive.
+    try:
+        gathered = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: gather_candidates_for_gaps(
+                flat_seeds, budget_per_gap=int(budget_per_query),
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"error": str(exc)[:500]}, status_code=500)
+
+    # Re-annotate candidates with section context (the helper labels
+    # them only with the seed string under `_agentic_subtopic`). Map
+    # each seed back to its section by walking sections_meta.
+    seed_to_section: dict[str, dict] = {}
+    for s in sections_meta:
+        for q in s["seeds"]:
+            # First-section-wins on duplicate seeds; sections_meta is
+            # already in book order so this matches user expectation.
+            seed_to_section.setdefault(q, s)
+
+    candidates = gathered.get("candidates") or []
+    for c in candidates:
+        seed = c.get("_agentic_subtopic")
+        sec = seed_to_section.get(seed) if seed else None
+        if sec:
+            c["_section_slug"] = sec["section_slug"]
+            c["_section_title"] = sec["section_title"]
+            c["_chapter_number"] = sec["chapter_number"]
+            c["_seed_query"] = seed
+
+    return JSONResponse({
+        "candidates": candidates,
+        "n_sections": len(sections_meta),
+        "n_seeds": len(flat_seeds),
+        "n_unique_references": len(candidates),
+        "dropped_in_corpus": (gathered.get("info", {})
+                              .get("cross_gap_duplicates", 0)),
+        "sections": [
+            {k: v for k, v in s.items() if k != "chapter_id"}
+            for s in sections_meta
+        ],
+        "gaps": gathered.get("gaps") or [],
+        "info": gathered.get("info") or {},
+    })
+
+
 @router.post("/api/corpus/expand-section")
 async def api_corpus_expand_section(
     chapter: str = Form(""),
