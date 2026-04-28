@@ -1007,6 +1007,13 @@ def _layer_llm(text: str, meta: PaperMeta) -> None:
         #     for the process lifetime; the param is accepted+ignored
         #   * num_predict=1024 — same cap shape as before
         from sciknow.rag.llm import complete as _llm_complete
+        # Phase 55.V18 — route to the small `extractor` role (Qwen3.5-9B,
+        # ~6 GB) instead of the 17 GB writer. Extractor co-resides with
+        # the embedder + reranker + MinerU during ingest, so metadata
+        # extraction never triggers a writer ↔ embedder swap. When the
+        # extractor isn't configured (empty extractor_model_gguf or
+        # use_llamacpp_extractor=False), rag.llm.stream falls back to
+        # the writer transparently — the v2.0 behaviour.
         raw = _llm_complete(
             "You extract structured paper metadata as JSON.",
             _LLM_PROMPT.format(text=text),
@@ -1015,6 +1022,7 @@ def _layer_llm(text: str, meta: PaperMeta) -> None:
             num_predict=1024,
             keep_alive=-1,
             format="json",
+            role="extractor",
         )
         data = json.loads(raw)
 

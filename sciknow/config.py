@@ -82,6 +82,15 @@ class Settings(BaseSettings):
     # ~17–18 GB); use sequential mode (manual `infer down --role
     # writer` before scoring batches) until DGX Spark arrives.
     infer_scorer_url: str = "http://127.0.0.1:8094"
+    # Phase 55.V18 — metadata extractor role. A small Qwen3.5-9B
+    # instance dedicated to ingestion's metadata Layer 4 (the rare
+    # ~5% of papers where XMP/Crossref/arXiv all miss). Co-resides
+    # with embedder + reranker + MinerU on a 24 GB 3090 (~14 GB
+    # total), so ingest never has to evict anything to extract
+    # metadata. Conflicts with writer/scorer/vlm — autowrite still
+    # gets the full 24 GB when needed. Empty `extractor_model_gguf`
+    # → role can't start; metadata.py falls through to writer.
+    infer_extractor_url: str = "http://127.0.0.1:8095"
     # Profile name passed to `sciknow infer up`. "default" = three roles
     # co-resident on the GPU; "low-vram" = embedder/reranker on CPU;
     # "spec-dec" = writer + draft model for speculative decoding.
@@ -114,6 +123,12 @@ class Settings(BaseSettings):
     # co-reside with the writer on a 24 GB GPU — sequential mode
     # only until DGX Spark arrives).
     scorer_model_gguf: str = ""
+    # Phase 55.V18 — small instruct GGUF for the extractor role.
+    # Default: Qwen3.5-9B-Q5_K_M (~6.2 GB; co-resides with all
+    # retrieval-time roles on the 3090). Used by metadata Layer 4.
+    # Empty → metadata.py routes the rare LLM-fallback through the
+    # writer instead (the v2.0 behaviour).
+    extractor_model_gguf: str = "/home/kartofel/Claude/huggingface/unsloth-Qwen3.5-9B-GGUF/Qwen3.5-9B-Q5_K_M.gguf"
     # Logical model names (used in /v1/chat requests' "model" field +
     # logging). llama-server doesn't validate them against the loaded
     # GGUF; they're labels only.
@@ -125,6 +140,8 @@ class Settings(BaseSettings):
     # field. Defaults to a generic label; override via env when you
     # want it to read meaningfully in the autowrite logs.
     scorer_model_name: str = "scorer"
+    # Phase 55.V18 — logical name for the extractor role.
+    extractor_model_name: str = "extractor"
     # Phase A bridge: when True, rag.llm dispatches to sciknow.infer.client
     # (llama-server). When False, uses the v1 ollama path. Default True
     # for v2; flip to False to roll back to v1 within a single commit.
@@ -156,6 +173,13 @@ class Settings(BaseSettings):
     # way for now (those phases benefit less from cross-family signal
     # and would double the swap cost on the 3090).
     use_llamacpp_scorer: bool = False
+    # Phase 55.V18 — opt-in metadata extractor routing. When True
+    # (default) AND `extractor_model_gguf` is set, metadata Layer 4
+    # hits the small extractor on port 8095 instead of the 17 GB
+    # writer. False → Layer 4 routes through the writer (v2.0
+    # behaviour), which works but wastes the 27B's capacity on a
+    # text-identification task.
+    use_llamacpp_extractor: bool = True
     # Phase 55.V1 — VRAM eviction policy escape hatch. Default False
     # on the 24 GB 3090 (the binding case): the conflict map in
     # `infer/server.py` aggressively evicts peer roles before bringing

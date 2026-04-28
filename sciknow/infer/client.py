@@ -58,6 +58,11 @@ def _client_for(role: str) -> httpx.Client:
         # 0.5 fallback score). The url is read in `chat_stream` /
         # `chat_complete` whenever a caller passes role="scorer".
         "scorer": settings.infer_scorer_url,
+        # Phase 55.V18 — small metadata extractor. Used by ingestion
+        # Layer 4 (rare ~5% fallback). Same KeyError-becomes-silent-
+        # fallback risk as scorer; keep this map in sync with the
+        # server-side `_resolve_url`.
+        "extractor": settings.infer_extractor_url,
     }[role]
     with _clients_lock:
         c = _clients.get(role)

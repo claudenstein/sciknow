@@ -19715,6 +19715,131 @@ def l1_phase55_v10_substrate_sweep_harness_present() -> None:
         )
 
 
+def l1_phase55_v17_ingest_warmup_gated_under_v2() -> None:
+    """Phase 55.V17 — the eager writer warm-up at the top of
+    ``corpus ingest directory`` is gated on the v1-Ollama path.
+    Under v2-llamacpp the warm-up loaded the 17 GB writer into
+    VRAM at ingest start, triggering writer↔embedder swap thrash
+    on every paper. Layer 4 is rare (~5%); paying ~30 s/paper of
+    cold-start to maybe save ~10 s on a rare event was the wrong
+    trade. Lazy-start via _ensure_role_up handles the rare case.
+    """
+    import inspect
+    from sciknow.cli import ingest as ingest_cli
+    src = inspect.getsource(ingest_cli)
+    # The warm_up call must be inside a `not use_llamacpp_writer`
+    # branch — i.e. only the Ollama path warms up eagerly.
+    assert "use_llamacpp_writer" in src, (
+        "cli/ingest.py must gate _llm_warm_up on use_llamacpp_writer "
+        "(Phase 55.V17 — preventing per-paper writer↔embedder swap)"
+    )
+    # Look specifically for the gate pattern around the warm-up.
+    gate_idx = src.find("use_llamacpp_writer")
+    warmup_idx = src.find("_llm_warm_up(")
+    assert gate_idx >= 0 and warmup_idx > gate_idx, (
+        "cli/ingest.py: use_llamacpp_writer check must precede "
+        "_llm_warm_up call (the gate must guard the warm-up)"
+    )
+
+
+def l1_phase55_v18_extractor_role_for_metadata() -> None:
+    """Phase 55.V18 — dedicated metadata extractor role.
+
+    A small ~6 GB Qwen3.5-9B at port 8095 handles ingestion's
+    metadata Layer 4 fallback so the rare LLM-fallback paper no
+    longer triggers a writer ↔ embedder swap. Co-resides with
+    embedder + reranker + MinerU during ingest (~14 GB on a
+    24 GB 3090).
+
+    Asserts:
+      1. "extractor" in ROLE_DEFAULTS with port 8095.
+      2. _VRAM_CONFLICTS["extractor"] = {writer, scorer, vlm} —
+         only the big-model peers, NOT the small retrieval roles
+         (the whole point of the small extractor).
+      3. embedder + reranker do NOT name extractor in their
+         conflict sets (so starting the embedder doesn't evict
+         the extractor mid-ingest).
+      4. _resolve_url("extractor") + _client_for("extractor")
+         both resolve without KeyError (the bug pattern caught
+         at Phase 55.V1 verification for the scorer).
+      5. settings carries extractor_model_gguf, infer_extractor_url,
+         extractor_model_name, use_llamacpp_extractor.
+      6. rag.llm.stream + rag.llm.complete accept role= kwarg.
+      7. ingestion/metadata.py Layer 4 routes through role="extractor".
+    """
+    from sciknow.infer.server import (
+        ROLE_DEFAULTS, _VRAM_CONFLICTS, _resolve_url,
+    )
+    from sciknow.infer.client import _client_for as client_resolve
+    from sciknow.config import settings as _s
+
+    # 1. Role definition.
+    assert "extractor" in ROLE_DEFAULTS, (
+        "ROLE_DEFAULTS missing 'extractor' (Phase 55.V18)"
+    )
+    assert ROLE_DEFAULTS["extractor"]["port"] == 8095, (
+        f"extractor port must be 8095, got {ROLE_DEFAULTS['extractor']['port']}"
+    )
+
+    # 2. Conflict map — only big models, not small retrieval roles.
+    extractor_conflicts = _VRAM_CONFLICTS.get("extractor", set())
+    for big in ("writer", "scorer", "vlm"):
+        assert big in extractor_conflicts, (
+            f"_VRAM_CONFLICTS['extractor'] missing big peer {big!r} "
+            f"(Phase 55.V18 — extractor must evict big models on start)"
+        )
+    for small in ("embedder", "reranker"):
+        assert small not in extractor_conflicts, (
+            f"_VRAM_CONFLICTS['extractor'] should NOT contain {small!r} "
+            f"— extractor (~6 GB) co-resides with retrieval roles by design"
+        )
+
+    # 3. Bidirectional: embedder/reranker don't evict extractor.
+    for small in ("embedder", "reranker"):
+        assert "extractor" not in _VRAM_CONFLICTS.get(small, set()), (
+            f"_VRAM_CONFLICTS[{small!r}] must NOT contain 'extractor' "
+            f"— starting bge-m3 should not kill the extractor mid-ingest"
+        )
+
+    # 4. URL resolution (server side + client side).
+    server_url = _resolve_url("extractor")
+    assert server_url and server_url.startswith("http"), (
+        f"_resolve_url('extractor') must return a URL, got {server_url!r}"
+    )
+    cli_client = client_resolve("extractor")
+    assert cli_client is not None, (
+        "infer.client._client_for('extractor') KeyError — would surface "
+        "as silent fallback in metadata extraction (cf. Phase 55.V1 "
+        "scorer bug)"
+    )
+
+    # 5. Settings surface.
+    for key in ("extractor_model_gguf", "infer_extractor_url",
+                "extractor_model_name", "use_llamacpp_extractor"):
+        assert hasattr(_s, key), (
+            f"settings.{key} missing (Phase 55.V18 metadata extractor)"
+        )
+
+    # 6. rag.llm.stream + complete accept role= kwarg (already true
+    # for stream; new for complete).
+    import inspect
+    from sciknow.rag import llm as rag_llm
+    for fname in ("stream", "complete"):
+        sig = inspect.signature(getattr(rag_llm, fname))
+        assert "role" in sig.parameters, (
+            f"rag.llm.{fname} missing role= kwarg — metadata.py cannot "
+            f"route Layer 4 to the extractor port without it"
+        )
+
+    # 7. metadata.py Layer 4 passes role="extractor".
+    from sciknow.ingestion import metadata as _meta_mod
+    meta_src = inspect.getsource(_meta_mod._layer_llm)
+    assert 'role="extractor"' in meta_src or "role='extractor'" in meta_src, (
+        "metadata._layer_llm must pass role='extractor' to _llm_complete "
+        "(Phase 55.V18 — the whole point of the extractor role)"
+    )
+
+
 def l1_phase55_v6_autowrite_emits_section_error_on_failure() -> None:
     """Phase 55.V6 — `autowrite_section_stream` yields a
     `section_error` event when the inner body raises, instead of
@@ -20487,6 +20612,12 @@ L1_TESTS: list[Callable] = [
     l1_phase55_v9_expand_section_surface,
     # Phase 55.V10 — substrate flag-sweep bench harness + plan doc.
     l1_phase55_v10_substrate_sweep_harness_present,
+    # Phase 55.V17 — eager writer warm-up gated on v1-Ollama path
+    # so v2 ingest doesn't trigger per-paper writer↔embedder swap.
+    l1_phase55_v17_ingest_warmup_gated_under_v2,
+    # Phase 55.V18 — dedicated metadata extractor role (Qwen3.5-9B
+    # at port 8095) co-resides with retrieval roles + MinerU.
+    l1_phase55_v18_extractor_role_for_metadata,
 ]
 
 L2_TESTS: list[Callable] = [
