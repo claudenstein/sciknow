@@ -1,7 +1,12 @@
-"""Phase 55.V10 — llama-server flag-sweep bench harness.
+"""Phase 55.V10/V15 — llama-server flag-sweep bench harness.
 
-For one llama-server flag at a time, sweep N values against the writer
-or scorer role and measure:
+Single-knob sweeps + a 2-knob matrix mode. Default baseline matches
+the expert's recommended Qwen3.6-27B 24-GB-3090 config (Q4_K_M,
+ctx 262144, np 1, flash-attn on, q4_0 KV cache); sweeps move
+**from** that baseline so we test against a known-good starting
+point rather than fresh-from-defaults.
+
+Per (role, knob, value) we capture:
 
   - prompt-eval TPS  (server-reported)
   - decode TPS       (server-reported)
@@ -10,36 +15,56 @@ or scorer role and measure:
   - cold-load time   (s, wall — process spawn → /health=200)
   - failure mode     (OOM / context-overflow / crash / OK)
 
-Discipline: ONE knob per run. The script enforces it — pass --knob
-exactly once. Re-run with a different --knob to compare.
+Discipline: ONE knob per **single-mode** run. The 2-knob matrix
+mode is explicit (--matrix-knob) and produces a full grid.
 
-Each (role, knob, value) is timed three times and averaged with min/max
-preserved so noise is visible. Results land in
-``data/bench/substrate_sweep/<timestamp>.jsonl`` + a Rich-rendered
-summary table on stdout. Re-runs append; the JSONL is the authoritative
-record.
+Three workloads:
+  - typical:           ~5K input + 1500 output (autowrite write call)
+  - large:             ~18K input + 1500 output (push ctx upper bound)
+  - autowrite-section: real autowrite_section_stream over a fixed
+                        seed section — slow (~10 min) but captures
+                        the autowrite scorer's overall + groundedness
+                        so we can answer "does this knob change
+                        autowrite quality, not just throughput?"
+
+Results land in ``data/bench/substrate_sweep/<timestamp>.jsonl``
+plus a Rich-rendered summary on stdout. Re-runs append.
 
 Usage examples:
 
-  # Sweep writer ctx-size, the immediate question.
-  uv run python scripts/bench_substrate_sweep.py \\
-      --role writer --knob ctx-size \\
-      --values 16384,20480,24576,28672,32768
-
-  # Sweep scorer ctx-size (gemma 4 31B).
-  uv run python scripts/bench_substrate_sweep.py \\
-      --role scorer --knob ctx-size \\
-      --values 16384,20480,24576
-
-  # Paired KV-cache quant (K and V together — the standard pattern).
+  # Phase 55.V15 priority #1 — verify the q4_0 KV-cache claim.
+  # The expert claim: q4_0 KV at 262K = 21 GB total at 40 t/s flat.
+  # Sweeping cache-type at the expert's full 262K context isolates
+  # the cache-type effect at the working-extreme — exactly where it
+  # matters and where the q8 "3× slower" claim should manifest if true.
   uv run python scripts/bench_substrate_sweep.py \\
       --role writer --knob cache-type \\
-      --values f16,q8_0,q4_0
+      --values f16,q8_0,q4_0 \\
+      --baseline expert --workload typical
 
-  # Batch / ubatch — affects long-prompt prefill speed.
+  # Phase 55.V15 priority #2 — paired (cache-type × ctx-size) matrix.
+  # Locates the speed cliffs (if any) per cache type across the
+  # context-window range we actually use → 262K.
   uv run python scripts/bench_substrate_sweep.py \\
-      --role writer --knob batch-size \\
-      --values 1024,2048,4096,8192
+      --role writer \\
+      --matrix-knob cache-type --matrix-values f16,q8_0,q4_0 \\
+      --knob ctx-size --values 16384,24576,65536,131072,262144 \\
+      --baseline expert --workload typical
+
+  # Phase 55.V15 priority #3 — quality probe. Slow (~10 min/run);
+  # answers "does q4_0 KV cost autowrite groundedness".
+  uv run python scripts/bench_substrate_sweep.py \\
+      --role writer --knob cache-type \\
+      --values f16,q8_0,q4_0 \\
+      --workload autowrite-section --reps 1 \\
+      --autowrite-section-slug the_engine_of_the_sun
+
+  # Single-knob sweep starting from current production defaults
+  # (writer ctx 24576, fp16 KV) — baseline=current.
+  uv run python scripts/bench_substrate_sweep.py \\
+      --role writer --knob ctx-size \\
+      --values 16384,20480,24576,32768,65536 \\
+      --baseline current --workload large
 
 Read scripts/bench_substrate_sweep.py top-of-file for the full
 methodology; docs/BENCH_OPTIMIZATION_PLAN.md captures the planning
@@ -130,13 +155,90 @@ WORKLOADS = {
         # ~5K input tokens + 1500 output → matches autowrite write/revise.
         "approx_input_tokens": 5000,
         "max_predict": 1500,
+        "kind": "synthetic",
     },
     "large": {
         # ~18K input tokens — pushes ctx-size near 24K limit.
         "approx_input_tokens": 18000,
         "max_predict": 1500,
+        "kind": "synthetic",
+    },
+    "autowrite-section": {
+        # Real autowrite_section_stream over a fixed-seed section.
+        # SLOW (~10 min/run), but captures the autowrite scorer's
+        # overall + groundedness so we can answer "does this knob
+        # change quality, not just throughput?". Pair with --reps 1
+        # unless you have GPU time to burn.
+        "kind": "autowrite",
     },
 }
+
+
+# ── Expert / current baselines ─────────────────────────────────────────────────
+#
+# Phase 55.V15 — when sweeping a single knob, every OTHER role param
+# should be set to a defensible, known-good baseline. Two presets:
+#
+#   "expert"  — community-recommended Qwen3.6-27B 24 GB 3090 config.
+#               Comes from a power-user posting (also matches the
+#               @Punch_Taylor 4090 bench config we cited in the
+#               Phase 54.6.303 commit). The CLAIM is q4_0 KV at 262K
+#               fits in 21 GB at 40 t/s flat curve. The bench's job
+#               is to verify or falsify on this hardware + this
+#               GGUF (Q4_K_XL vs Q4_K_M is slightly bigger; that's
+#               the only knob we don't sweep).
+#
+#   "current" — whatever's currently in ROLE_DEFAULTS at the moment
+#               the script starts. Useful for "would this delta
+#               regress my production config?" sweeps.
+#
+# Default: --baseline expert. Verify-the-claim sweeps start there
+# and only change the swept knob; if the expert claim is right, the
+# unmoved-rows are at the working-extreme already.
+_EXPERT_BASELINE = {
+    "writer": {
+        "ctx_size": 262144,            # 262K — the headline claim
+        "n_gpu_layers": 999,           # -ngl 99 (offload everything)
+        "parallel": 1,                 # -np 1 (single user slot)
+        "extra_flags": [
+            "--cont-batching",
+            "--flash-attn", "on",      # -fa on
+            "--cache-type-k", "q4_0",  # the load-bearing flag
+            "--cache-type-v", "q4_0",
+        ],
+    },
+    "scorer": {
+        # Same shape applied to gemma-4-31B (~18 GB Q4_1 on disk).
+        # Headroom math: gemma 18 GB + 262K@q4_0 KV ~5 GB = ~23 GB.
+        # Tighter than the writer; expect 262K to OOM on the 3090
+        # for the scorer. The bench will confirm where it cliffs.
+        "ctx_size": 262144,
+        "n_gpu_layers": 999,
+        "parallel": 1,
+        "extra_flags": [
+            "--cont-batching",
+            "--flash-attn", "on",
+            "--cache-type-k", "q4_0",
+            "--cache-type-v", "q4_0",
+        ],
+    },
+}
+
+
+def _apply_baseline(role: str, baseline: str) -> None:
+    """Mutate ROLE_DEFAULTS[role] in place to the chosen baseline."""
+    if baseline == "current":
+        return  # whatever ROLE_DEFAULTS happens to have wins
+    if baseline != "expert":
+        raise ValueError(f"unknown baseline {baseline!r}")
+    base = _EXPERT_BASELINE.get(role)
+    if base is None:
+        return
+    cfg = srv.ROLE_DEFAULTS[role]
+    cfg["ctx_size"] = base["ctx_size"]
+    cfg["n_gpu_layers"] = base["n_gpu_layers"]
+    cfg["parallel"] = base["parallel"]
+    cfg["extra_flags"] = list(base["extra_flags"])
 
 
 # ── llama-server config patching ───────────────────────────────────────────────
@@ -146,7 +248,9 @@ def _patch_role_for_run(role: str, knob: str, value: str) -> dict:
     """Mutate ROLE_DEFAULTS[role] in place for the upcoming run.
     Returns a backup dict so the caller can restore on tear-down.
 
-    Handled knobs (one --knob per script invocation, by design):
+    Handled knobs (one --knob per single-mode script invocation; the
+    matrix mode applies _two_ patches in sequence around the same
+    backup):
       ctx-size       → cfg["ctx_size"]
       batch-size     → extra_flags --batch-size <v> --ubatch-size <v/4>
       cache-type     → extra_flags --cache-type-k <v> --cache-type-v <v>
@@ -298,34 +402,136 @@ def _run_single_request(
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
+def _run_autowrite_section_workload(
+    *, book_id: str, chapter_id: str, section_type: str,
+) -> dict:
+    """Phase 55.V15 — autowrite-section quality probe.
+
+    Runs ``autowrite_section_stream`` once with --rebuild semantics
+    (so we always start from scratch — bench results have to be
+    independent of pre-existing draft state). Captures wall time +
+    final overall + groundedness + any verification flags from the
+    `completed` event.
+
+    The autowrite engine drives its own substrate swaps via Phase
+    55.V1's ``activate_phase`` calls — this runner does NOT
+    pre-bring-up roles. ROLE_DEFAULTS patching survives the swaps
+    because the engine reads ROLE_DEFAULTS at each up() call-site.
+    """
+    from sciknow.core.autowrite import autowrite_section_stream
+
+    t0 = time.monotonic()
+    completed: dict | None = None
+    section_error: dict | None = None
+    iter_scores: list[dict] = []
+    plan_coverage: list[dict] = []
+    try:
+        for evt in autowrite_section_stream(
+            book_id=book_id, chapter_id=chapter_id,
+            section_type=section_type,
+            max_iter=2, target_score=0.99,  # force the loop to run all iters
+            auto_expand=False, use_plan=True,
+            use_step_back=True, use_cove=True,
+            cove_threshold=0.85,
+            target_words=None,
+            resume_from_draft_id=None,        # rebuild semantics
+            include_visuals=False,
+            force_resume=False,
+        ):
+            t = (evt or {}).get("type")
+            if t == "completed":
+                completed = evt
+            elif t == "section_error":
+                section_error = evt
+            elif t == "scores":
+                iter_scores.append(evt)
+            elif t == "plan_coverage":
+                plan_coverage.append(evt)
+    except Exception as exc:
+        return {
+            "wall_s": time.monotonic() - t0,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    wall = time.monotonic() - t0
+    return {
+        "wall_s": wall,
+        "completed": completed,
+        "section_error": section_error,
+        "final_score": (completed or {}).get("final_score"),
+        "iterations": (completed or {}).get("iterations"),
+        "word_count": (completed or {}).get("word_count"),
+        "iter_scores": iter_scores,
+        "plan_coverage": plan_coverage,
+    }
+
+
 def _run_one_config(
     role: str, knob: str, value: str, workload: str,
     *, reps: int = 3, predict: int = 1500,
+    matrix_knob: str | None = None, matrix_value: str | None = None,
+    autowrite_section_args: dict | None = None,
+    baseline: str = "expert",
 ) -> dict:
-    """Patch → up → run reps → down → restore. Returns averaged dict."""
+    """Patch → up → run reps → down → restore. Returns averaged dict.
+
+    Phase 55.V15 — applies ``baseline`` first (default expert), then
+    patches the swept knob, then optionally a matrix knob (for the
+    paired sweep). All rolled back at tear-down.
+    """
     wcfg = WORKLOADS[workload]
-    prompt = _build_prompt(wcfg["approx_input_tokens"])
-    max_predict = predict or wcfg["max_predict"]
+    is_autowrite = wcfg.get("kind") == "autowrite"
+    if is_autowrite:
+        prompt = ""
+        max_predict = predict
+    else:
+        prompt = _build_prompt(wcfg["approx_input_tokens"])
+        max_predict = predict or wcfg["max_predict"]
 
     _down_all_roles()
+    # Apply the chosen baseline FIRST so non-swept params start from a
+    # known config, not whatever ROLE_DEFAULTS was at script start.
+    _apply_baseline(role, baseline)
     backup = _patch_role_for_run(role, knob, value)
+    if matrix_knob and matrix_value is not None:
+        # Stack a second patch on top of the same backup so one
+        # restore unwinds both. This is the matrix-mode path.
+        m_backup = _patch_role_for_run(role, matrix_knob, matrix_value)
+        # Merge backups: earlier _patch_role_for_run already captured
+        # the post-baseline state; the second backup captures the
+        # post-knob state. We need to restore to the FIRST one, so
+        # discard m_backup.
+        _ = m_backup
     cold_t0 = time.monotonic()
     cold_s = None
     failure = None
     runs: list[dict] = []
     peak_vram = -1
     try:
-        srv.up(role, wait=True)
-        cold_s = time.monotonic() - cold_t0
-        for _ in range(reps):
-            r = _run_single_request(role, prompt, max_predict)
-            runs.append(r)
-            v = _vram_used_mib()
-            if v > peak_vram:
-                peak_vram = v
-            if "error" in r:
-                failure = r["error"]
-                break
+        if is_autowrite:
+            # Engine handles its own up()/swap. We just patch and run.
+            cold_s = 0.0
+            for _ in range(reps):
+                aw_args = autowrite_section_args or {}
+                r = _run_autowrite_section_workload(**aw_args)
+                runs.append(r)
+                v = _vram_used_mib()
+                if v > peak_vram:
+                    peak_vram = v
+                if "error" in r:
+                    failure = r["error"]
+                    break
+        else:
+            srv.up(role, wait=True)
+            cold_s = time.monotonic() - cold_t0
+            for _ in range(reps):
+                r = _run_single_request(role, prompt, max_predict)
+                runs.append(r)
+                v = _vram_used_mib()
+                if v > peak_vram:
+                    peak_vram = v
+                if "error" in r:
+                    failure = r["error"]
+                    break
     except Exception as exc:
         failure = f"up_failed: {type(exc).__name__}: {exc}"
     finally:
@@ -345,12 +551,15 @@ def _run_one_config(
             "n": len(vals),
         }
 
-    return {
+    out = {
         "role": role,
         "knob": knob,
         "value": value,
+        "matrix_knob": matrix_knob,
+        "matrix_value": matrix_value,
+        "baseline": baseline,
         "workload": workload,
-        "approx_input_tokens": wcfg["approx_input_tokens"],
+        "approx_input_tokens": wcfg.get("approx_input_tokens"),
         "max_predict": max_predict,
         "reps_attempted": reps,
         "reps_ok": len(ok_runs),
@@ -364,6 +573,75 @@ def _run_one_config(
         "failure": failure,
         "raw_runs": runs,
     }
+    # Autowrite-section workload also surfaces the scorer-judged
+    # quality so we can detect quality regressions, not just throughput.
+    if is_autowrite:
+        out["final_score"] = _stat("final_score")
+        out["iterations"] = _stat("iterations")
+        out["word_count"] = _stat("word_count")
+    return out
+
+
+def _resolve_autowrite_section(slug: str | None) -> dict:
+    """Resolve --autowrite-section-slug into book_id + chapter_id.
+
+    If slug is None, picks the first section of the active book. If
+    slug is provided, finds the chapter that owns it. Raises if no
+    match.
+    """
+    from sqlalchemy import text as sql_text
+    from sciknow.storage.db import get_session
+    with get_session() as session:
+        book = session.execute(sql_text("""
+            SELECT id::text FROM books LIMIT 1
+        """)).fetchone()
+        if not book:
+            raise RuntimeError("no book in active project")
+        book_id = book[0]
+        if slug:
+            ch_rows = session.execute(sql_text("""
+                SELECT id::text, sections FROM book_chapters
+                WHERE book_id::text = :bid
+                ORDER BY number
+            """), {"bid": book_id}).fetchall()
+            for cid, secs in ch_rows:
+                if isinstance(secs, str):
+                    try:
+                        secs = json.loads(secs)
+                    except Exception:
+                        secs = []
+                if not isinstance(secs, list):
+                    continue
+                for s in secs:
+                    if isinstance(s, dict) and s.get("slug") == slug:
+                        return {
+                            "book_id": book_id,
+                            "chapter_id": cid,
+                            "section_type": slug,
+                        }
+            raise RuntimeError(f"no section with slug {slug!r} in book {book_id}")
+        # Default: first section of first chapter.
+        ch = session.execute(sql_text("""
+            SELECT id::text, sections FROM book_chapters
+            WHERE book_id::text = :bid ORDER BY number LIMIT 1
+        """), {"bid": book_id}).fetchone()
+        if not ch:
+            raise RuntimeError("no chapters in active book")
+        cid, secs = ch
+        if isinstance(secs, str):
+            try:
+                secs = json.loads(secs)
+            except Exception:
+                secs = []
+        if not isinstance(secs, list) or not secs:
+            raise RuntimeError(f"chapter {cid} has no sections")
+        first = secs[0]
+        if not isinstance(first, dict) or not first.get("slug"):
+            raise RuntimeError("first section has no slug")
+        return {
+            "book_id": book_id, "chapter_id": cid,
+            "section_type": first["slug"],
+        }
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
@@ -380,9 +658,31 @@ def main():
                    help="Single flag to sweep. ONE per run by design.")
     p.add_argument("--values", required=True,
                    help="Comma-separated values to test (e.g. 16384,24576,32768).")
+    p.add_argument("--matrix-knob", default=None,
+                   choices=(None, "ctx-size", "batch-size", "cache-type",
+                            "n-gpu-layers", "flash-attn", "parallel"),
+                   help="Phase 55.V15 — secondary knob for the 2-knob matrix "
+                        "mode. Each --value is paired with each --matrix-value, "
+                        "producing a full grid (#values × #matrix-values cells). "
+                        "Use sparingly; explicit by design.")
+    p.add_argument("--matrix-values", default=None,
+                   help="Comma-separated values for --matrix-knob. Required "
+                        "when --matrix-knob is set.")
     p.add_argument("--workload", default="typical",
                    choices=tuple(WORKLOADS.keys()),
-                   help="Synthetic prompt size.")
+                   help="'typical'/'large' = synthetic prompt; "
+                        "'autowrite-section' = real autowrite_section_stream "
+                        "with scorer-judged final_score (slow ~10 min/run).")
+    p.add_argument("--baseline", default="expert",
+                   choices=("expert", "current"),
+                   help="Phase 55.V15 — non-swept params start from this "
+                        "baseline. 'expert' = community Qwen3.6 24GB config "
+                        "(ctx 262144, q4_0 KV, fa on, np 1, ngl 99). "
+                        "'current' = whatever ROLE_DEFAULTS holds at start. "
+                        "Default: expert.")
+    p.add_argument("--autowrite-section-slug", default=None,
+                   help="Slug of the section to drive the autowrite-section "
+                        "workload. Default: first section of the active book.")
     p.add_argument("--reps", type=int, default=3,
                    help="Repetitions per (knob, value). Default 3.")
     p.add_argument("--predict", type=int, default=1500,
@@ -397,24 +697,68 @@ def main():
         console.print("[red]--values produced an empty list.[/red]")
         return 2
 
+    matrix_values: list[str] = []
+    if args.matrix_knob:
+        if not args.matrix_values:
+            console.print("[red]--matrix-knob requires --matrix-values.[/red]")
+            return 2
+        if args.matrix_knob == args.knob:
+            console.print("[red]--matrix-knob must differ from --knob.[/red]")
+            return 2
+        matrix_values = [v.strip() for v in args.matrix_values.split(",")
+                         if v.strip()]
+        if not matrix_values:
+            console.print("[red]--matrix-values produced an empty list.[/red]")
+            return 2
+
     out_dir = args.out_dir or Path(settings.data_dir) / "bench" / "substrate_sweep"
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    out_file = out_dir / f"{ts}-{args.role}-{args.knob}.jsonl"
+    suffix = (f"-{args.matrix_knob}" if args.matrix_knob else "")
+    out_file = out_dir / f"{ts}-{args.role}-{args.knob}{suffix}.jsonl"
+
+    aw_args = None
+    if args.workload == "autowrite-section":
+        aw_args = _resolve_autowrite_section(args.autowrite_section_slug)
+        console.print(
+            f"[dim]autowrite-section bound to "
+            f"book_id={aw_args['book_id'][:8]}… "
+            f"section={aw_args['section_type']}[/dim]"
+        )
 
     console.print(
         f"\n[bold]Substrate sweep[/bold] · role={args.role} · "
         f"knob={args.knob} · values={values} · workload={args.workload} · "
-        f"reps={args.reps}\n[dim]Writing: {out_file}[/dim]\n"
+        f"baseline={args.baseline} · reps={args.reps}"
+        + (f" · matrix={args.matrix_knob}={matrix_values}"
+           if args.matrix_knob else "")
+        + f"\n[dim]Writing: {out_file}[/dim]\n"
     )
+
+    # In matrix mode iterate the cartesian product; otherwise a single
+    # axis. The output shape (rows list) is the same — matrix_knob /
+    # matrix_value fields are populated only in matrix mode.
+    cells: list[tuple[str, str | None]] = []
+    if args.matrix_knob:
+        for v in values:
+            for mv in matrix_values:
+                cells.append((v, mv))
+    else:
+        cells = [(v, None) for v in values]
 
     rows: list[dict] = []
     with out_file.open("a") as fh:
-        for v in values:
-            console.print(f"  ▶ {args.knob}={v}")
+        for (v, mv) in cells:
+            label = f"{args.knob}={v}"
+            if mv is not None:
+                label += f"  {args.matrix_knob}={mv}"
+            console.print(f"  ▶ {label}")
             r = _run_one_config(
                 args.role, args.knob, v, args.workload,
                 reps=args.reps, predict=args.predict,
+                matrix_knob=args.matrix_knob, matrix_value=mv,
+                autowrite_section_args=aw_args,
+                baseline=args.baseline,
             )
             r["timestamp"] = datetime.now(timezone.utc).isoformat()
             fh.write(json.dumps(r) + "\n")
@@ -423,41 +767,97 @@ def main():
             if r["failure"]:
                 console.print(f"    [red]✗[/red] {r['failure'][:120]}")
             else:
-                d = (r["decode_tps"] or {}).get("mean")
-                pe = (r["prompt_eval_tps"] or {}).get("mean")
-                console.print(
-                    f"    [green]✓[/green] decode={d:.1f}t/s "
-                    f"prompt_eval={pe:.0f}t/s "
-                    f"peak_vram={r['peak_vram_mib']}MiB "
-                    f"cold={r['cold_load_s']:.1f}s"
-                )
+                if args.workload == "autowrite-section":
+                    fs = (r.get("final_score") or {}).get("mean")
+                    iters = (r.get("iterations") or {}).get("mean")
+                    wall = (r.get("wall_s") or {}).get("mean") or 0
+                    console.print(
+                        f"    [green]✓[/green] final_score="
+                        f"{(fs or 0):.2f} iter={iters or '?'} "
+                        f"wall={wall:.0f}s peak_vram={r['peak_vram_mib']}MiB"
+                    )
+                else:
+                    d = (r["decode_tps"] or {}).get("mean") or 0
+                    pe = (r["prompt_eval_tps"] or {}).get("mean") or 0
+                    console.print(
+                        f"    [green]✓[/green] decode={d:.1f}t/s "
+                        f"prompt_eval={pe:.0f}t/s "
+                        f"peak_vram={r['peak_vram_mib']}MiB "
+                        f"cold={(r['cold_load_s'] or 0):.1f}s"
+                    )
 
-    # Render summary table.
-    tbl = Table(title=f"Sweep: {args.role}.{args.knob}", show_lines=True)
-    tbl.add_column("value")
-    tbl.add_column("decode TPS", justify="right")
-    tbl.add_column("prompt-eval TPS", justify="right")
-    tbl.add_column("peak VRAM", justify="right")
-    tbl.add_column("cold load", justify="right")
-    tbl.add_column("wall (s)", justify="right")
-    tbl.add_column("status")
-    for r in rows:
-        if r["failure"]:
-            tbl.add_row(str(r["value"]), "—", "—", "—", "—", "—",
-                        f"[red]{r['failure'][:50]}[/red]")
-            continue
-        d = (r["decode_tps"] or {}).get("mean") or 0
-        pe = (r["prompt_eval_tps"] or {}).get("mean") or 0
-        wall = (r["wall_s"] or {}).get("mean") or 0
-        tbl.add_row(
-            str(r["value"]),
-            f"{d:.1f}",
-            f"{pe:.0f}",
-            f"{r['peak_vram_mib']} MiB",
-            f"{r['cold_load_s']:.1f}s",
-            f"{wall:.1f}",
-            f"[green]ok[/green] ({r['reps_ok']}/{r['reps_attempted']})",
+    # Render summary table — different columns for autowrite-section
+    # (quality probe) vs synthetic (throughput).
+    title_extra = f" × {args.matrix_knob}" if args.matrix_knob else ""
+    if args.workload == "autowrite-section":
+        tbl = Table(
+            title=f"Sweep (autowrite-section): {args.role}.{args.knob}{title_extra}",
+            show_lines=True,
         )
+        tbl.add_column(args.knob)
+        if args.matrix_knob:
+            tbl.add_column(args.matrix_knob)
+        tbl.add_column("final_score", justify="right")
+        tbl.add_column("iter", justify="right")
+        tbl.add_column("words", justify="right")
+        tbl.add_column("peak VRAM", justify="right")
+        tbl.add_column("wall (s)", justify="right")
+        tbl.add_column("status")
+        for r in rows:
+            row_cells = [str(r["value"])]
+            if args.matrix_knob:
+                row_cells.append(str(r.get("matrix_value") or ""))
+            if r["failure"]:
+                row_cells += ["—", "—", "—", "—", "—",
+                              f"[red]{r['failure'][:50]}[/red]"]
+            else:
+                fs = (r.get("final_score") or {}).get("mean") or 0
+                iters = (r.get("iterations") or {}).get("mean") or 0
+                wc = (r.get("word_count") or {}).get("mean") or 0
+                wall = (r.get("wall_s") or {}).get("mean") or 0
+                row_cells += [
+                    f"{fs:.2f}",
+                    f"{iters:.0f}",
+                    f"{wc:.0f}",
+                    f"{r['peak_vram_mib']} MiB",
+                    f"{wall:.1f}",
+                    f"[green]ok[/green] ({r['reps_ok']}/{r['reps_attempted']})",
+                ]
+            tbl.add_row(*row_cells)
+    else:
+        tbl = Table(
+            title=f"Sweep: {args.role}.{args.knob}{title_extra}",
+            show_lines=True,
+        )
+        tbl.add_column(args.knob)
+        if args.matrix_knob:
+            tbl.add_column(args.matrix_knob)
+        tbl.add_column("decode TPS", justify="right")
+        tbl.add_column("prompt-eval TPS", justify="right")
+        tbl.add_column("peak VRAM", justify="right")
+        tbl.add_column("cold load", justify="right")
+        tbl.add_column("wall (s)", justify="right")
+        tbl.add_column("status")
+        for r in rows:
+            row_cells = [str(r["value"])]
+            if args.matrix_knob:
+                row_cells.append(str(r.get("matrix_value") or ""))
+            if r["failure"]:
+                row_cells += ["—", "—", "—", "—", "—",
+                              f"[red]{r['failure'][:50]}[/red]"]
+            else:
+                d = (r["decode_tps"] or {}).get("mean") or 0
+                pe = (r["prompt_eval_tps"] or {}).get("mean") or 0
+                wall = (r["wall_s"] or {}).get("mean") or 0
+                row_cells += [
+                    f"{d:.1f}",
+                    f"{pe:.0f}",
+                    f"{r['peak_vram_mib']} MiB",
+                    f"{(r['cold_load_s'] or 0):.1f}s",
+                    f"{wall:.1f}",
+                    f"[green]ok[/green] ({r['reps_ok']}/{r['reps_attempted']})",
+                ]
+            tbl.add_row(*row_cells)
     console.print(tbl)
     console.print(f"\n[dim]Full log: {out_file}[/dim]\n")
     return 0

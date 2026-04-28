@@ -19659,11 +19659,13 @@ def l1_phase55_v9_expand_section_surface() -> None:
 
 
 def l1_phase55_v10_substrate_sweep_harness_present() -> None:
-    """Phase 55.V10 — bench harness script + planning doc exist.
+    """Phase 55.V10 / V15 — bench harness script + planning doc exist.
 
     The script is invoked manually (`uv run python scripts/...`); this
     test just guards against accidental deletion / rename and
-    verifies the harness exposes the documented knob set.
+    verifies the harness exposes the documented knob set + the V15
+    additions (expert baseline, matrix mode, autowrite-section
+    quality probe).
     """
     from pathlib import Path
     repo = Path(__file__).resolve().parents[2]
@@ -19677,6 +19679,32 @@ def l1_phase55_v10_substrate_sweep_harness_present() -> None:
         assert knob in src, (
             f"bench_substrate_sweep.py missing knob {knob!r} from the "
             f"documented sweep slate"
+        )
+    # V15 additions:
+    for marker in (
+        "_EXPERT_BASELINE",         # expert-baseline preset
+        "--baseline",               # CLI flag
+        "--matrix-knob",            # 2-knob matrix mode
+        "--matrix-values",
+        "_run_autowrite_section_workload",  # quality probe
+        "autowrite-section",        # workload name
+        "262144",                   # the expert ctx-size
+        "q4_0",                     # the expert KV-cache quant
+    ):
+        assert marker in src, (
+            f"bench_substrate_sweep.py missing V15 marker {marker!r}. "
+            f"V15 starts sweeps from the expert baseline; matrix + "
+            f"autowrite-section are required for the priority #1/#2/#3 "
+            f"sweeps in BENCH_OPTIMIZATION_PLAN.md."
+        )
+    # The plan doc must reference the priority slate.
+    plan_src = plan.read_text()
+    for marker in (
+        "Phase 55.V15", "expert", "262144", "q4_0", "autowrite-section",
+        "priority #1",
+    ):
+        assert marker in plan_src, (
+            f"BENCH_OPTIMIZATION_PLAN.md missing V15 marker {marker!r}"
         )
 
 
