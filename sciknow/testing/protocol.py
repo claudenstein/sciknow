@@ -19604,7 +19604,8 @@ def l1_phase55_v9_expand_section_surface() -> None:
     The command body is large; a smoke check verifies the helper
     exists, is mounted on the corpus subapp, and references the
     canonical seed-construction signals (plan bullets, section title,
-    topic_query).
+    topic_query). Also confirms the GUI wiring: API endpoint, JS
+    handler, and Corpus-menu button.
     """
     import inspect
     from sciknow.cli import db as _cli_db
@@ -19619,6 +19620,19 @@ def l1_phase55_v9_expand_section_surface() -> None:
     corpus_src = inspect.getsource(_cli_corpus)
     assert "expand-section" in corpus_src, (
         "expand-section not registered on the corpus subapp"
+    )
+    # GUI wiring: web endpoint + JS handler + menu button.
+    from sciknow.web.routes.corpus import api_corpus_expand_section
+    assert callable(api_corpus_expand_section)
+    from sciknow.testing.helpers import web_app_full_source
+    full = web_app_full_source()
+    assert "doExpandSection" in full, (
+        "doExpandSection JS handler missing — Corpus-menu button "
+        "won't fire"
+    )
+    assert "/api/corpus/expand-section" in full, (
+        "expand-section endpoint not referenced in JS — handler "
+        "can't reach it"
     )
 
 

@@ -5689,6 +5689,87 @@ async function doRankVisualsBook() {
 }
 
 
+// Phase 55.V9 — bulk corpus expansion for thin-coverage sections.
+// Wraps POST /api/corpus/expand-section. Default scope is "every
+// section in the active book whose latest draft scored below the
+// 0.85 convergence target". Streams the CLI's stdout via SSE.
+async function doExpandSection() {
+  // First confirm scope: only thin sections (default) vs every.
+  const onlyThin = confirm(
+    "Expand corpus for THIN-COVERAGE sections only?\n\n" +
+    "OK = only sections whose latest draft scored below 0.85 (the\n" +
+    "convergence target). The autowrite plateaued there because the\n" +
+    "evidence base is too narrow; this will pull related literature\n" +
+    "via Crossref / OpenAlex / S2 / arXiv per section's plan bullets.\n\n" +
+    "Cancel = run on every section regardless of score."
+  );
+  // Second confirm: dry-run vs live download.
+  const live = confirm(
+    "DRY-RUN first to see what would be downloaded?\n\n" +
+    "OK = LIVE (downloads + ingests).\n" +
+    "Cancel = dry-run (preview only, no changes)."
+  );
+
+  showStreamPanel('Corpus expand-section…');
+  const body = document.getElementById('stream-body');
+  body.innerHTML = '<div id="es-log" style="font-family:var(--font-mono);'
+    + 'font-size:13px;line-height:1.55;white-space:pre-wrap;'
+    + 'max-height:60vh;overflow-y:auto;"></div>';
+  const log = document.getElementById('es-log');
+
+  const fd = new FormData();
+  fd.append('all_sections', 'true');
+  fd.append('only_thin', onlyThin ? 'true' : 'false');
+  fd.append('thin_threshold', '0.85');
+  fd.append('budget_per_query', '10');
+  fd.append('max_queries', '6');
+  if (!live) fd.append('dry_run', 'true');
+
+  const res = await fetch('/api/corpus/expand-section',
+                          {method: 'POST', body: fd});
+  const data = await res.json();
+  if (!data || !data.job_id) {
+    log.innerHTML += '<div class="log-discard">Failed to start: '
+      + _escHTML(JSON.stringify(data)) + '</div>';
+    return;
+  }
+  currentJobId = data.job_id;
+  const source = new EventSource('/api/stream/' + data.job_id);
+  currentEventSource = source;
+  source.onmessage = function(e) {
+    const evt = JSON.parse(e.data);
+    if (evt.type === 'log') {
+      // _spawn_cli_streaming yields raw stdout lines tagged 'log'.
+      const line = evt.text || evt.line || '';
+      log.innerHTML += '<div>' + _escHTML(line) + '</div>';
+      log.scrollTop = log.scrollHeight;
+    } else if (evt.type === 'progress') {
+      log.innerHTML += '<div class="log-keep">'
+        + _escHTML(evt.detail || '') + '</div>';
+      log.scrollTop = log.scrollHeight;
+    } else if (evt.type === 'completed') {
+      log.innerHTML += '<div class="log-keep" '
+        + 'style="margin-top:1em;font-weight:bold;">'
+        + '✓ Done. Re-run autowrite to incorporate the new evidence.'
+        + '</div>';
+      source.close(); currentEventSource = null; currentJobId = null;
+    } else if (evt.type === 'error') {
+      log.innerHTML += '<div class="log-discard">Error: '
+        + _escHTML(evt.message || '') + '</div>';
+      source.close(); currentEventSource = null; currentJobId = null;
+    } else if (evt.type === 'done') {
+      log.innerHTML += '<div class="log-keep" style="margin-top:0.5em;">'
+        + 'Stream ended.</div>';
+      source.close(); currentEventSource = null; currentJobId = null;
+    }
+  };
+  source.onerror = function() {
+    log.innerHTML += '<div class="log-discard">SSE connection lost.</div>';
+    source.close(); currentEventSource = null; currentJobId = null;
+  };
+}
+
+
 function drawConvergenceChart() {
   const svg = document.querySelector('#aw-chart svg');
   if (!svg || awScores.length === 0) return;

@@ -42,6 +42,54 @@ async def api_corpus_enrich(
     return JSONResponse({"job_id": job_id})
 
 
+@router.post("/api/corpus/expand-section")
+async def api_corpus_expand_section(
+    chapter: str = Form(""),
+    section: str = Form(""),
+    all_sections: bool = Form(True),
+    only_thin: bool = Form(True),
+    thin_threshold: float = Form(0.85),
+    budget_per_query: int = Form(10),
+    max_queries: int = Form(6),
+    dry_run: bool = Form(False),
+):
+    """Phase 55.V9 — wraps `sciknow corpus expand-section` for the GUI.
+
+    Streams the CLI's stdout via the standard SSE job pipeline. The
+    book scope is derived from the active book (`_app._book_id`) so
+    no `book_title` is needed from the client.
+
+    Default: expand every thin section in the active book. The GUI
+    can narrow with `chapter` / `section` / `--every` (= `only_thin=false`).
+    """
+    from sciknow.web import app as _app
+    if not _app._book_id:
+        raise HTTPException(400, "No active book")
+
+    # Resolve the active book's title (the CLI takes a title or ID
+    # fragment; we feed the ID for unambiguous resolution).
+    job_id, _queue = _app._create_job("corpus_expand_section")
+    loop = asyncio.get_event_loop()
+    argv: list[str] = ["corpus", "expand-section", str(_app._book_id)]
+    if chapter:
+        argv.append(chapter)
+    if section:
+        argv += ["--section", section]
+    if all_sections:
+        argv.append("--all")
+    if not only_thin:
+        argv.append("--every")
+    argv += [
+        "--thin-threshold", str(thin_threshold),
+        "--budget-per-query", str(budget_per_query),
+        "--max-queries", str(max_queries),
+    ]
+    if dry_run:
+        argv.append("--dry-run")
+    _app._spawn_cli_streaming(job_id, argv, loop)
+    return JSONResponse({"job_id": job_id})
+
+
 @router.post("/api/corpus/ingest-directory")
 async def api_corpus_ingest_directory(
     path: str = Form(...),
