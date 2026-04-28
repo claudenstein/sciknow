@@ -4050,6 +4050,15 @@ def autowrite(
     # --rebuild, so the filter can compare against final_overall.
     existing_by_key: dict[tuple[str, str], dict] = {}
     if not rebuild or only_below_target:
+        # Phase 55.V12 — prefer the latest version with substantive
+        # content (>=100 words) so a prior context-overflow silent fail
+        # that left a 0-word placeholder doesn't shadow the real draft
+        # underneath it. Two-tier ordering:
+        #   tier 1 (preferred): word_count >= 100 (real content)
+        #   tier 2 (fallback):  any version (placeholder/empty)
+        # Within each tier, pick the highest version. If a section has
+        # only empty placeholders, the V11 fresh-write fallthrough in
+        # the resume loop kicks in and writes from scratch.
         with get_session() as session:
             existing_rows = session.execute(text("""
                 SELECT DISTINCT ON (chapter_id, section_type)
@@ -4057,7 +4066,10 @@ def autowrite(
                     custom_metadata, word_count
                 FROM drafts
                 WHERE book_id = :bid AND chapter_id IS NOT NULL
-                ORDER BY chapter_id, section_type, version DESC, created_at DESC
+                ORDER BY chapter_id, section_type,
+                         (COALESCE(word_count, 0) >= 100) DESC,
+                         version DESC,
+                         created_at DESC
             """), {"bid": book_id}).fetchall()
         for r in existing_rows:
             existing_by_key[(r[0], r[1])] = {
