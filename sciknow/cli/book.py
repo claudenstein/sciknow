@@ -4137,7 +4137,28 @@ def autowrite(
                     existing["custom_metadata"], existing["word_count"],
                 )
                 if not ok:
-                    if force_resume:
+                    # Phase 55.V11 — empty-placeholder fallthrough.
+                    # When the existing draft is below the resume
+                    # word-count threshold (typically 0 — a placeholder
+                    # row left over from a context-overflow silent fail
+                    # in a prior run), there is no content to "resume"
+                    # and the right behavior is to do a fresh write.
+                    # Don't skip the section; just leave resume_draft_id
+                    # as None so the engine runs planning + writing as
+                    # if it's brand-new.
+                    wc = int(existing.get("word_count") or 0)
+                    if wc < 100:
+                        console.print(
+                            f"[bold]Section {i}/{total}:[/bold] Ch.{ch_num} {ch_title} — {sec}\n"
+                            f"  [yellow]Empty placeholder ({wc} words);[/yellow] "
+                            f"falling through to fresh write."
+                        )
+                        # Leave resume_draft_id = None — the engine will
+                        # do planning + writing from scratch. The
+                        # placeholder row will be replaced (autowrite's
+                        # version logic creates a new draft row by
+                        # design — see _next_draft_version).
+                    elif force_resume:
                         # Phase 55.V7 — user passed --force-resume to
                         # override the safety gate. Use the partial
                         # content as-is; the convergence loop will
