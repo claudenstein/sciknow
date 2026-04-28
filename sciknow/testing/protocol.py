@@ -19621,26 +19621,40 @@ def l1_phase55_v9_expand_section_surface() -> None:
     assert "expand-section" in corpus_src, (
         "expand-section not registered on the corpus subapp"
     )
-    # GUI wiring (V9 + V13): preview endpoint + auto endpoint + Corpus
-    # modal tab + JS preview handler + JS auto handler.
+    # GUI wiring (V9 + V13 + V14): two side-by-side tabs.
+    #   corp-section       → RRF subprocess preview (deep, slow)
+    #   corp-section-fast  → OpenAlex topic-search preview (fast +
+    #                        per-seed cap + recency boost + MMR)
     from sciknow.web.routes.corpus import (
         api_corpus_expand_section,
         api_corpus_expand_section_preview,
+        api_corpus_expand_section_fast_preview,
     )
     assert callable(api_corpus_expand_section)
     assert callable(api_corpus_expand_section_preview)
+    assert callable(api_corpus_expand_section_fast_preview)
     from sciknow.testing.helpers import web_app_full_source
     full = web_app_full_source()
     for marker in (
+        # Slow / RRF tab
         "corp-section", "corp-section-pane",
         "/api/corpus/expand-section/preview",
         "/api/corpus/expand-section",
         "runExpandSectionPreview",
         "runExpandSectionAuto",
+        # Fast / topic-search tab (V14)
+        "corp-section-fast", "corp-section-fast-pane",
+        "/api/corpus/expand-section-fast/preview",
+        "runExpandSectionFastPreview",
+        # Three precision upgrades exposed in the form
+        "tl-secfx-percap",     # per-seed cap input
+        "tl-secfx-rec",        # recency boost input
+        "tl-secfx-mmr",        # MMR lambda input
     ):
         assert marker in full, (
             f"Corpus modal expand-section wiring missing: {marker!r}. "
-            f"V13 requires the canonical preview-cherry-pick pattern."
+            f"V13/V14 require both the slow RRF tab AND the fast "
+            f"topic-search tab with the three precision upgrades."
         )
 
 

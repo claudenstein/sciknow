@@ -5763,6 +5763,95 @@ async function runExpandSectionPreview() {
   }
 }
 
+// Phase 55.V14 — fast topic-search preview. Same cherry-pick modal
+// as runExpandSectionPreview but the backend uses OpenAlex full-text
+// search per seed (~1-2s/seed) plus per-seed cap + recency boost +
+// MMR diversity. ~30-50× faster than RRF, with the precision gap
+// closed by the three upgrades.
+function _readSecExFastForm() {
+  const fd = new FormData();
+  const ch  = (document.getElementById('tl-secfx-chapter') || {}).value || '';
+  const sec = (document.getElementById('tl-secfx-section') || {}).value || '';
+  if (ch.trim()) fd.append('chapter', ch.trim());
+  if (sec.trim()) fd.append('section', sec.trim());
+  fd.append('all_sections', (ch.trim() || sec.trim()) ? 'false' : 'true');
+  const onlyThin = (document.getElementById('tl-secfx-only-thin') || {}).checked;
+  fd.append('only_thin', onlyThin ? 'true' : 'false');
+  fd.append('thin_threshold', String(parseFloat(
+    (document.getElementById('tl-secfx-thresh') || {}).value || '0.85'
+  )));
+  fd.append('budget_per_query', String(parseInt(
+    (document.getElementById('tl-secfx-budget') || {}).value || '15', 10
+  )));
+  fd.append('max_queries', String(parseInt(
+    (document.getElementById('tl-secfx-maxq') || {}).value || '6', 10
+  )));
+  fd.append('per_seed_cap', String(parseInt(
+    (document.getElementById('tl-secfx-percap') || {}).value || '8', 10
+  )));
+  fd.append('recency_boost', String(parseFloat(
+    (document.getElementById('tl-secfx-rec') || {}).value || '0.05'
+  )));
+  fd.append('recency_year_floor', String(parseInt(
+    (document.getElementById('tl-secfx-rec-floor') || {}).value || '2020', 10
+  )));
+  fd.append('mmr_lambda', String(parseFloat(
+    (document.getElementById('tl-secfx-mmr') || {}).value || '0.6'
+  )));
+  fd.append('mmr_top_k', String(parseInt(
+    (document.getElementById('tl-secfx-mmr-k') || {}).value || '80', 10
+  )));
+  return fd;
+}
+
+async function runExpandSectionFastPreview() {
+  _eapResetModal(
+    '&#9889; Expand thin sections (fast) &mdash; Preview',
+    'Running OpenAlex topic-search per seed query in parallel…',
+    '(~1-2s per seed; per-seed cap + recency boost + MMR diversity applied post-merge)'
+  );
+  try {
+    const res = await fetch('/api/corpus/expand-section-fast/preview', {
+      method: 'POST', body: _readSecExFastForm(),
+    });
+    if (!res.ok) {
+      _eapShowError('HTTP ' + res.status + ': ' + await res.text());
+      return;
+    }
+    const data = await res.json();
+    _eapCandidates = data.candidates || [];
+    _eapSelected = new Set();
+    _eapCandidates.forEach(c => {
+      if (c.doi && !c.cached_status) _eapSelected.add(c.doi);
+    });
+    const info = data.info || {};
+    const mmr = info.mmr || {};
+    const note = info.message || '';
+    const mmrLabel = mmr.applied
+      ? `MMR(λ=${mmr.lambda}, demoted=${mmr.demoted})`
+      : 'MMR off';
+    document.getElementById('eap-info').innerHTML =
+      `<strong>${data.n_sections || 0}</strong> section(s) · `
+      + `<strong>${data.n_seeds || 0}</strong> unique seeds (`
+      + `${data.n_seeds_total || 0} pre-dedup) · `
+      + `<strong>${data.n_unique_references || 0}</strong> unique candidate(s) · `
+      + `dropped <strong>${data.dropped_in_corpus || 0}</strong> in-corpus, `
+      + `<strong>${data.cross_seed_duplicates || 0}</strong> cross-seed dup(s).`
+      + `<br><em>method: openalex_topic_search · cap=${info.per_seed_cap || 0} · `
+      + `recency=+${info.recency_boost || 0}@${info.recency_year_floor || 2020} · `
+      + `${_escHtml(mmrLabel)}</em>`
+      + (note ? `<br><em>${_escHtml(note)}</em>` : '');
+    document.getElementById('eap-loading').style.display = 'none';
+    document.getElementById('eap-content').style.display = 'block';
+    if (typeof eapRender === 'function') {
+      try { eapRender(); } catch (e) {}
+    }
+  } catch (e) {
+    _eapShowError(String(e));
+  }
+}
+
+
 async function runExpandSectionAuto() {
   if (!confirm(
     "Auto-download mode: skips the preview cherry-pick and runs the\n" +
@@ -10001,7 +10090,7 @@ function switchCorpusTab(name) {
   });
   ['corp-enrich', 'corp-cites', 'corp-agentic', 'corp-author',
    'corp-author-refs', 'corp-inbound', 'corp-topic', 'corp-coauth',
-   'corp-section'].forEach(n => {
+   'corp-section', 'corp-section-fast'].forEach(n => {
     const pane = document.getElementById(n + '-pane');
     if (pane) pane.style.display = (n === name) ? 'block' : 'none';
   });

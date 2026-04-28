@@ -167,6 +167,15 @@ async def api_corpus_expand_section_preview(
 
     Each candidate carries `_section_slug`, `_section_title`, and
     `_seed_query` so the GUI can group/badge by source.
+
+    Performance note: the RRF subprocess approach is THOROUGH but
+    slow — ~30-90 s per seed because each subprocess cold-loads
+    bge-m3 + walks corpus references. For 6 seeds × 20 thin sections
+    that's ~1-3 hours. If recall on thin sections is poor (the
+    corpus is too thin to follow citations), use the
+    "Expand thin sections (fast)" tab instead — that uses OpenAlex
+    full-text search per seed (~1-2 s/seed) with MMR + recency
+    boost + per-seed cap.
     """
     from sciknow.web import app as _app
     from sciknow.ingestion.agentic_expand import gather_candidates_for_gaps
@@ -239,6 +248,310 @@ async def api_corpus_expand_section_preview(
         ],
         "gaps": gathered.get("gaps") or [],
         "info": gathered.get("info") or {},
+    })
+
+
+# ── Phase 55.V14 — fast topic-search preview ───────────────────────────────────
+
+@router.post("/api/corpus/expand-section-fast/preview")
+async def api_corpus_expand_section_fast_preview(
+    chapter: str = Form(""),
+    section: str = Form(""),
+    all_sections: bool = Form(True),
+    only_thin: bool = Form(True),
+    thin_threshold: float = Form(0.85),
+    budget_per_query: int = Form(15),
+    max_queries: int = Form(6),
+    per_seed_cap: int = Form(8),
+    recency_boost: float = Form(0.05),
+    recency_year_floor: int = Form(2020),
+    mmr_lambda: float = Form(0.6),
+    mmr_top_k: int = Form(80),
+):
+    """Phase 55.V14 — FAST sibling of expand-section/preview.
+
+    Uses OpenAlex full-text search per UNIQUE seed query (deduped
+    across sections) instead of the RRF subprocess. ~30-50× faster:
+    one HTTP call per seed (~1-2 s) instead of cold-loading bge-m3
+    + walking corpus references in a subprocess (~30-90 s).
+
+    Three precision upgrades over a vanilla topic-search merge:
+
+    1. **Per-seed cap** (``per_seed_cap``, default 8) — only the
+       top-K hits per seed (by relevance) contribute to the merge,
+       so one over-broad seed can't drown the others.
+
+    2. **Recency boost** (``recency_boost``, default +0.05) — papers
+       with ``year >= recency_year_floor`` (default 2020) get a small
+       relevance bump. Counters OpenAlex's ``cited_by_count:desc``
+       sort which under-ranks recent breakthroughs.
+
+    3. **MMR diversity** (``mmr_lambda``, default 0.6; top
+       ``mmr_top_k`` = 80) — after merge, the top-K is reranked by
+       Maximal Marginal Relevance over title-string Jaccard
+       similarity to suppress near-duplicate clusters (review papers
+       that all share 80% of their title words). λ=0.6 leans
+       relevance > diversity; raise to 0.8 to favour relevance even
+       harder, lower to 0.4 to favour diversity.
+
+    All three upgrades are opt-out: pass ``per_seed_cap=0``,
+    ``recency_boost=0``, or ``mmr_lambda=1.0`` to disable.
+
+    Each candidate carries:
+      - ``_section_slug``, ``_section_title``, ``_chapter_number``
+        — first section that surfaced it (book order),
+      - ``_seed_query`` — first seed that surfaced it,
+      - ``_seed_count`` — number of distinct seeds that found it
+        (a coarse "how many sections want this paper?" signal),
+      - ``_recency_boost`` — points added by the recency rule (0
+        when the paper is older than the floor),
+      - ``relevance_score`` — bge-m3 cosine vs the seed itself.
+
+    Returns the same shape as expand-section/preview, plus
+    ``info.method = "openalex_topic_search"`` so the UI can label it.
+    """
+    from sciknow.web import app as _app
+    from concurrent.futures import ThreadPoolExecutor
+
+    if not _app._book_id:
+        raise HTTPException(400, "No active book")
+
+    flat_seeds, sections_meta = _expand_section_seeds(
+        _app._book_id,
+        chapter=(chapter or None), section=(section or None),
+        all_sections=all_sections, only_thin=only_thin,
+        thin_threshold=thin_threshold, max_queries=max_queries,
+    )
+
+    if not sections_meta:
+        return JSONResponse({
+            "candidates": [], "n_sections": 0, "n_seeds": 0,
+            "info": {"message": "No in-scope sections matched."},
+            "sections": [],
+        })
+    if not flat_seeds:
+        return JSONResponse({
+            "candidates": [], "n_sections": len(sections_meta), "n_seeds": 0,
+            "info": {"message": "Sections matched but produced no seed queries — empty plans?"},
+            "sections": sections_meta,
+        })
+
+    # Dedupe seeds across sections — many sections share bullets.
+    unique_seeds: list[str] = []
+    seen_seeds: set[str] = set()
+    seed_to_sections: dict[str, list[dict]] = {}
+    for s in sections_meta:
+        for q in s["seeds"]:
+            key = q.lower().strip()
+            if key not in seen_seeds:
+                seen_seeds.add(key)
+                unique_seeds.append(q)
+            seed_to_sections.setdefault(q, []).append(s)
+
+    # Per-seed OpenAlex topic-search in parallel. OpenAlex polite
+    # pool is 10 RPS; we cap at 5 in-flight to leave headroom.
+    from sciknow.core.expand_ops import find_topic_candidates
+
+    def _one_seed(q: str) -> tuple[str, list[dict], dict]:
+        try:
+            r = find_topic_candidates(
+                q, limit=int(budget_per_query),
+                relevance_query=q, score_relevance=True,
+            )
+            return q, r.get("candidates") or [], r.get("info") or {}
+        except Exception as exc:  # noqa: BLE001
+            return q, [], {"error": str(exc)[:200]}
+
+    loop = asyncio.get_event_loop()
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = [loop.run_in_executor(pool, _one_seed, q)
+                   for q in unique_seeds]
+        results = await asyncio.gather(*futures)
+
+    # ── Upgrade 1: per-seed cap (top-K by relevance) ──────────────
+    cap = max(1, int(per_seed_cap)) if per_seed_cap > 0 else None
+    gathered_per_seed: dict[str, list[dict]] = {}
+    per_seed_info: dict[str, dict] = {}
+    for q, cands, info in results:
+        if cap is not None:
+            cands_sorted = sorted(
+                cands,
+                key=lambda c: -(c.get("relevance_score") or 0),
+            )[:cap]
+        else:
+            cands_sorted = cands
+        gathered_per_seed[q] = cands_sorted
+        per_seed_info[q] = info
+
+    # ── Upgrade 2: recency boost ──────────────────────────────────
+    rec_boost = float(recency_boost or 0)
+    rec_floor = int(recency_year_floor or 2020)
+
+    def _boosted_score(c: dict) -> float:
+        base = float(c.get("relevance_score") or 0)
+        yr = c.get("year")
+        if rec_boost > 0 and isinstance(yr, int) and yr >= rec_floor:
+            return base + rec_boost
+        return base
+
+    # Aggregate: dedupe by DOI, track seed coverage, attribute to
+    # sections, apply recency boost.
+    merged: dict[str, dict] = {}
+    seed_counts: dict[str, set[str]] = {}
+    section_owners: dict[str, dict] = {}
+    section_seed_owner: dict[str, str] = {}
+    cross_seed_dups = 0
+    for q, cands in gathered_per_seed.items():
+        for c in cands:
+            doi = (c.get("doi") or "").lower().strip()
+            key = doi or ("title:" + (c.get("title") or "").strip().lower())
+            if not key.startswith("title:") and not doi:
+                continue
+            if key in merged:
+                cross_seed_dups += 1
+                seed_counts.setdefault(key, set()).add(q)
+                # Max relevance across seeds (strongest match wins).
+                cand_score = _boosted_score(c)
+                if cand_score > (merged[key].get("_score_boosted") or 0):
+                    merged[key]["_score_boosted"] = cand_score
+                    merged[key]["relevance_score"] = c.get("relevance_score")
+                continue
+            d = dict(c)
+            d["_score_boosted"] = _boosted_score(d)
+            d["_recency_boost"] = (
+                rec_boost if (rec_boost > 0 and isinstance(d.get("year"), int)
+                              and d["year"] >= rec_floor) else 0.0
+            )
+            merged[key] = d
+            seed_counts.setdefault(key, set()).add(q)
+            owner_section = seed_to_sections.get(q, [None])[0]
+            if owner_section:
+                section_owners[key] = owner_section
+                section_seed_owner[key] = q
+
+    # Filter out papers already in corpus.
+    dropped_in_corpus = 0
+    if merged:
+        with get_session() as session:
+            ex = session.execute(text(
+                "SELECT LOWER(doi) FROM paper_metadata WHERE doi IS NOT NULL"
+            )).fetchall()
+            existing = {r[0] for r in ex if r[0]}
+        before = len(merged)
+        merged = {
+            k: v for k, v in merged.items()
+            if not (v.get("doi") and v["doi"].lower() in existing)
+        }
+        dropped_in_corpus = before - len(merged)
+
+    # Annotate.
+    candidates_list: list[dict] = []
+    for key, c in merged.items():
+        sec = section_owners.get(key)
+        if sec:
+            c["_section_slug"] = sec["section_slug"]
+            c["_section_title"] = sec["section_title"]
+            c["_chapter_number"] = sec["chapter_number"]
+            c["_seed_query"] = section_seed_owner.get(key)
+        c["_seed_count"] = len(seed_counts.get(key, []))
+        candidates_list.append(c)
+
+    # Sort by boosted relevance desc, then seed_count desc.
+    candidates_list.sort(key=lambda v: (
+        -(v.get("_score_boosted") or 0),
+        -(v.get("_seed_count") or 0),
+        -(v.get("year") or 0),
+    ))
+
+    # ── Upgrade 3: MMR diversity over the top-K ───────────────────
+    # Token-set Jaccard on lowercased title — cheap, no extra
+    # embeddings required, surprisingly effective at suppressing
+    # review-paper / "X: a comprehensive review" clusters.
+    mmr_k = max(0, int(mmr_top_k or 0))
+    lam = float(mmr_lambda or 1.0)
+    mmr_log: dict = {"applied": False, "demoted": 0}
+    if 0 < lam < 1.0 and mmr_k > 0 and len(candidates_list) > mmr_k:
+        head = candidates_list[:mmr_k]
+        tail = candidates_list[mmr_k:]
+
+        import re as _re
+
+        def _tokens(s: str) -> set[str]:
+            return set(t for t in _re.findall(r"[a-z0-9]+",
+                                                (s or "").lower())
+                       if len(t) >= 3)
+
+        head_tokens = [_tokens(c.get("title") or "") for c in head]
+
+        # Greedy MMR: start with the top-relevance candidate, then
+        # at each step pick the candidate whose
+        #   λ * relevance − (1 − λ) * max_jaccard_to_chosen
+        # is maximal.
+        chosen: list[int] = [0]
+        chosen_set = {0}
+        scores = [c.get("_score_boosted") or 0 for c in head]
+        while len(chosen) < len(head):
+            best_idx, best_score = None, float("-inf")
+            for i in range(len(head)):
+                if i in chosen_set:
+                    continue
+                rel = scores[i]
+                # Max jaccard to any already-chosen.
+                max_j = 0.0
+                ti = head_tokens[i]
+                if ti:
+                    for j in chosen:
+                        tj = head_tokens[j]
+                        if not tj:
+                            continue
+                        inter = len(ti & tj)
+                        union = len(ti | tj) or 1
+                        jc = inter / union
+                        if jc > max_j:
+                            max_j = jc
+                mmr = lam * rel - (1 - lam) * max_j
+                if mmr > best_score:
+                    best_score = mmr
+                    best_idx = i
+            if best_idx is None:
+                break
+            chosen.append(best_idx)
+            chosen_set.add(best_idx)
+
+        head_reordered = [head[i] for i in chosen]
+        # Track demotions (rows that moved DOWN by ≥ 5 places).
+        demoted = 0
+        for new_pos, c in enumerate(head_reordered):
+            old_pos = head.index(c)
+            if new_pos - old_pos >= 5:
+                demoted += 1
+        candidates_list = head_reordered + tail
+        mmr_log = {
+            "applied": True, "lambda": lam,
+            "top_k": mmr_k, "demoted": demoted,
+        }
+
+    return JSONResponse({
+        "candidates": candidates_list,
+        "n_sections": len(sections_meta),
+        "n_seeds": len(unique_seeds),
+        "n_seeds_total": len(flat_seeds),
+        "n_unique_references": len(candidates_list),
+        "dropped_in_corpus": dropped_in_corpus,
+        "cross_seed_duplicates": cross_seed_dups,
+        "sections": [
+            {k: v for k, v in s.items() if k != "chapter_id"}
+            for s in sections_meta
+        ],
+        "info": {
+            "method": "openalex_topic_search",
+            "budget_per_seed": int(budget_per_query),
+            "per_seed_cap": int(per_seed_cap),
+            "max_queries_per_section": int(max_queries),
+            "recency_boost": rec_boost,
+            "recency_year_floor": rec_floor,
+            "mmr": mmr_log,
+        },
     })
 
 
