@@ -19563,6 +19563,49 @@ def l1_phase55_v3_down_recovers_when_pid_file_missing() -> None:
     assert "_read_pid" in src, "down() must consult _read_pid first"
 
 
+def l1_phase55_v6_autowrite_emits_section_error_on_failure() -> None:
+    """Phase 55.V6 — `autowrite_section_stream` yields a
+    `section_error` event when the inner body raises, instead of
+    letting the exception propagate out.
+
+    Real cases caught in a 2026-04-27/28 full-book run:
+    7 sections silently failed when both the planning and writing
+    prompts overflowed the writer's 16K context window — they ended
+    with `end total_tokens=0` and no `completed` event, while the
+    raised HTTP-400 exception bubbled out. The CLI's per-section
+    try/except (Phase 55.V4) caught the exception but couldn't tell
+    a context-overflow apart from any other crash, so the user just
+    saw a generic ✗ line. The yielded event now carries `error_type`
+    + `message` so consumers can branch.
+
+    This test asserts:
+    1. `autowrite_section_stream` source contains a `yield {... "type":
+       "section_error" ...}` block AND a matching `except Exception`
+       handler that doesn't re-raise (the "swallow → yield → continue"
+       pattern, not "log → re-raise").
+    2. `core/events.py` knows about the `section_error` event type so
+       SSE / structured consumers don't drop it.
+    """
+    import inspect
+    from sciknow.core import autowrite as aw
+
+    src = inspect.getsource(aw.autowrite_section_stream)
+    assert '"type": "section_error"' in src, (
+        "autowrite_section_stream must yield a section_error event on "
+        "exception (Phase 55.V6)"
+    )
+    assert "except Exception" in src and "error_type" in src, (
+        "autowrite_section_stream must catch and convert generic "
+        "exceptions into a section_error event with error_type"
+    )
+    # Confirm the event schema knows about it.
+    from sciknow.core.events import KNOWN_EVENT_TYPES
+    assert "section_error" in KNOWN_EVENT_TYPES, (
+        "core/events.py:KNOWN_EVENT_TYPES missing 'section_error' — "
+        "SSE consumers will drop the event"
+    )
+
+
 def l1_phase55_v5_plan_coverage_atomizes_markdown_bullets() -> None:
     """Phase 55.V5 — `atomize_plan` splits markdown-bullet plans
     correctly.
@@ -20281,6 +20324,11 @@ L1_TESTS: list[Callable] = [
     # section, pinning plan_coverage at 0 + dragging hard-topic
     # sections under the convergence target)
     l1_phase55_v5_plan_coverage_atomizes_markdown_bullets,
+    # Phase 55.V6 — autowrite_section_stream yields a section_error
+    # event on inner failure instead of propagating, so silent
+    # context-overflow fails surface as a uniform yield-event
+    # instead of a 0-token `end` with no signal.
+    l1_phase55_v6_autowrite_emits_section_error_on_failure,
 ]
 
 L2_TESTS: list[Callable] = [

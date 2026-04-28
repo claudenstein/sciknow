@@ -4087,6 +4087,18 @@ def autowrite(
 
                     elif t == "error":
                         console.print(f"[red]Error:[/red] {event.get('message', '')}")
+
+                    elif t == "section_error":
+                        # Phase 55.V6 \u2014 engine emitted a section_error
+                        # event (e.g. planning+writing both overflowed
+                        # the context window). The yield-event path
+                        # means no exception propagates here; we still
+                        # want to surface the failure so the user
+                        # sees it.
+                        section_errored = (
+                            f"{event.get('error_type', 'Error')}: "
+                            f"{event.get('message', '')}"
+                        )
         except KeyboardInterrupt:
             raise
         except Exception as exc:
@@ -4095,6 +4107,12 @@ def autowrite(
                 "autowrite section %r (Ch.%s) crashed: %s",
                 sec, ch_num, exc,
             )
+
+        # Phase 55.V4 + V6 \u2014 handle both raised exceptions (caught
+        # above) and yielded section_error events (caught in the
+        # event loop). Either way, print a uniform \u2717 line and
+        # continue to the next section.
+        if section_errored:
             console.print(
                 f"  [red]\u2717[/red] {sec.capitalize()}: failed \u2014 "
                 f"{section_errored[:200]}"

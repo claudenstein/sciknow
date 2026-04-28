@@ -143,6 +143,41 @@ def autowrite_section_stream(
             resume_from_draft_id=resume_from_draft_id,
             include_visuals=include_visuals,
         )
+    except (GeneratorExit, KeyboardInterrupt):
+        # Caller asked us to stop — propagate cleanly (the finally
+        # block flushes the log and emits the `end` event).
+        raise
+    except Exception as exc:
+        # Phase 55.V6 (2026-04-28) — surface silent / catastrophic
+        # section failures as a `section_error` event yielded to the
+        # consumer, instead of letting the exception propagate and
+        # produce a "0-token end" log entry with no actionable signal.
+        # Real cases caught in a full-book run on 2026-04-27/28:
+        #   - planning + writing prompts both overflowed the writer's
+        #     context window (16K) → HTTP 400, _stream_with_save
+        #     raised → 0-token writing + 0-token end, no completed
+        #     event. The CLI's per-section try/except (Phase 55.V4)
+        #     caught the propagated exception, but only AFTER
+        #     `_stream_with_save` had already exited cleanly via its
+        #     `finally: _flush()`, so the error never made it back
+        #     to the consumer with a recognisable shape. Emitting the
+        #     event here gives every downstream consumer (CLI live
+        #     dashboard, web SSE, log scrapers) a single uniform
+        #     signal: ``{"type": "section_error", "error_type": ...,
+        #     "message": ...}``. The `book autowrite --full` runner
+        #     can keep going to the next section without a Python
+        #     traceback in the user's terminal.
+        log.event(
+            "section_error",
+            error_type=type(exc).__name__,
+            message=str(exc)[:500],
+        )
+        yield {
+            "type": "section_error",
+            "error_type": type(exc).__name__,
+            "message": str(exc)[:500],
+        }
+        # Don't re-raise — consumer can continue with the next section.
     finally:
         log.close()
 
@@ -640,10 +675,20 @@ def _autowrite_section_body(
             )
             # Phase 15.3 — stream so the token counter sees activity
             # Phase 24 — token_observer feeds the heartbeat's t/s stat
+            # Phase 55.V6 (2026-04-28) — `format="json"` enforces
+            # OpenAI response_format=json_object server-side. Without
+            # it, Qwen3.6 routinely truncated the JSON mid-output
+            # around char 3500–5000 (the writer just stopped before
+            # closing brackets); ~10 sections in a full-book run
+            # caught the truncation pattern. The JSON-object mode
+            # makes the server constrain decoding to valid JSON, so
+            # if the model ever wants to stop early it must close
+            # the structure first. `_clean_json` salvage path retained
+            # below as a belt-and-braces safety net.
             plan_raw = yield from _stream_phase(
                 sys_p, usr_p, "planning",
                 model=model, temperature=0.2, num_ctx=16384,
-                token_observer=log.token,
+                token_observer=log.token, format="json",
             )
             plan_clean = re.sub(r'<think>.*?</think>\s*', '', plan_raw,
                                 flags=re.DOTALL).strip()

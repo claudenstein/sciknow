@@ -37,7 +37,18 @@ ROLE_DEFAULTS: dict[str, dict] = {
     "writer": {
         "port": 8090,
         "model": settings.writer_model_gguf,
-        "ctx_size": 16384,
+        # Phase 55.V6 (2026-04-28) — bumped 16384 → 24576 after a
+        # full-book autowrite run silently lost 7 sections to
+        # `request (16800 tokens) exceeds the available context size
+        # (16384 tokens)` errors. The planning prompt
+        # (system + 12 retrieved chunks + leitmotiv + prior_summaries
+        # + section_plan + book_plan) routinely hit 16500–17500 tokens
+        # on text-heavy sections (climate impacts, preparedness, etc).
+        # Phase 55.V1 evicts embedder + reranker before the writer
+        # phase, so the writer is alone with the GPU; +600 MB of KV
+        # cache for the larger ctx fits comfortably (writer @ 24K
+        # peaks at ~19 GB, leaving 5 GB headroom on the 24 GB 3090).
+        "ctx_size": 24576,
         "n_gpu_layers": 999,         # all layers on GPU
         "parallel": 1,
         "extra_flags": [
@@ -113,9 +124,16 @@ ROLE_DEFAULTS: dict[str, dict] = {
     # was a workaround for OOM-during-load with the embedder +
     # reranker still resident. Phase 55.V1 evicts them too (see
     # `_VRAM_CONFLICTS` below), so the scorer now gets the full
-    # 16K context that score / verify / CoVe prompts need on long
+    # context that score / verify / CoVe prompts need on long
     # sections. The conflict map is what makes this safe; do NOT
     # raise ctx_size without keeping the eviction policy in place.
+    #
+    # Phase 55.V6 (2026-04-28) — bumped 16384 → 24576 to match the
+    # writer. Verify prompts can be ~12K tokens (full draft + retrieved
+    # evidence + claims template); ~16K headroom prevents the same
+    # context-overflow that hit the writer's planning phase. Gemma
+    # 4 31B Q4_1 @ 24K KV-cache peaks at ~22 GB on the 3090 — within
+    # margin since gemma is alone in score phase.
     #
     # The role won't start unless SCORER_MODEL_GGUF is set; `infer up
     # --role scorer` no-ops with a clear error otherwise. On a 3090
@@ -124,7 +142,7 @@ ROLE_DEFAULTS: dict[str, dict] = {
     "scorer": {
         "port": 8094,
         "model": settings.scorer_model_gguf,
-        "ctx_size": 16384,
+        "ctx_size": 24576,
         "n_gpu_layers": 999,
         "parallel": 1,
         "extra_flags": [
