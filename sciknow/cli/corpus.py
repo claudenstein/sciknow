@@ -56,6 +56,7 @@ app.command(name="expand-topic")(_db.expand_topic)
 app.command(name="expand-coauthors")(_db.expand_coauthors)
 app.command(name="expand-inbound")(_db.expand_inbound_cmd)
 app.command(name="expand-oeuvre")(_db.expand_oeuvre_cmd)
+app.command(name="expand-section")(_db.expand_section_cmd)
 
 # ── visuals / equations / tables ────────────────────────────────────────
 app.command(name="extract-visuals")(_db.extract_visuals_cmd)

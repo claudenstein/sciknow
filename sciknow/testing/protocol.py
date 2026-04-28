@@ -19563,6 +19563,87 @@ def l1_phase55_v3_down_recovers_when_pid_file_missing() -> None:
     assert "_read_pid" in src, "down() must consult _read_pid first"
 
 
+def l1_phase55_v8_book_rank_visuals_surface() -> None:
+    """Phase 55.V8 — `book rank-visuals` CLI + batch endpoint exist
+    and import cleanly.
+
+    Smoke-style contract: the CLI command is registered under the
+    `sciknow book` subapp; the web batch endpoint is registered on
+    the visuals router; the JS handler is referenced from the Book
+    menu.
+    """
+    import inspect
+    from sciknow.cli import book as _cli_book
+    assert hasattr(_cli_book, "rank_visuals_cmd"), (
+        "sciknow book rank-visuals CLI handler missing"
+    )
+
+    from sciknow.web.routes.visuals import (
+        api_visuals_suggestions_batch, _rank_visuals_book_stream,
+    )
+    assert callable(api_visuals_suggestions_batch)
+    assert callable(_rank_visuals_book_stream)
+
+    # GUI menu wiring — the book template references the JS handler.
+    from sciknow.testing.helpers import (
+        get_test_client, web_app_full_source,
+    )
+    full = web_app_full_source()
+    assert "doRankVisualsBook" in full, (
+        "doRankVisualsBook JS handler missing — Book menu won't fire"
+    )
+    assert "/api/visuals/suggestions/batch" in full, (
+        "batch endpoint not referenced in JS — handler can't reach it"
+    )
+
+
+def l1_phase55_v9_expand_section_surface() -> None:
+    """Phase 55.V9 — `corpus expand-section` is mounted and pulls
+    seed queries from the section plan + title.
+
+    The command body is large; a smoke check verifies the helper
+    exists, is mounted on the corpus subapp, and references the
+    canonical seed-construction signals (plan bullets, section title,
+    topic_query).
+    """
+    import inspect
+    from sciknow.cli import db as _cli_db
+    assert hasattr(_cli_db, "expand_section_cmd")
+    src = inspect.getsource(_cli_db.expand_section_cmd)
+    for marker in ("plan", "section title", "topic_query"):
+        assert marker in src, (
+            f"expand_section_cmd missing reference to {marker!r}"
+        )
+    # Mounted on corpus subapp.
+    from sciknow.cli import corpus as _cli_corpus
+    corpus_src = inspect.getsource(_cli_corpus)
+    assert "expand-section" in corpus_src, (
+        "expand-section not registered on the corpus subapp"
+    )
+
+
+def l1_phase55_v10_substrate_sweep_harness_present() -> None:
+    """Phase 55.V10 — bench harness script + planning doc exist.
+
+    The script is invoked manually (`uv run python scripts/...`); this
+    test just guards against accidental deletion / rename and
+    verifies the harness exposes the documented knob set.
+    """
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[2]
+    script = repo / "scripts" / "bench_substrate_sweep.py"
+    plan = repo / "docs" / "BENCH_OPTIMIZATION_PLAN.md"
+    assert script.is_file(), f"missing: {script}"
+    assert plan.is_file(), f"missing: {plan}"
+    src = script.read_text()
+    for knob in ("ctx-size", "batch-size", "cache-type", "n-gpu-layers",
+                 "flash-attn", "parallel"):
+        assert knob in src, (
+            f"bench_substrate_sweep.py missing knob {knob!r} from the "
+            f"documented sweep slate"
+        )
+
+
 def l1_phase55_v6_autowrite_emits_section_error_on_failure() -> None:
     """Phase 55.V6 — `autowrite_section_stream` yields a
     `section_error` event when the inner body raises, instead of
@@ -20329,6 +20410,12 @@ L1_TESTS: list[Callable] = [
     # context-overflow fails surface as a uniform yield-event
     # instead of a 0-token `end` with no signal.
     l1_phase55_v6_autowrite_emits_section_error_on_failure,
+    # Phase 55.V8 — bulk rank-visuals (CLI + GUI + batch endpoint).
+    l1_phase55_v8_book_rank_visuals_surface,
+    # Phase 55.V9 — corpus expand-section (CLI for thin-coverage).
+    l1_phase55_v9_expand_section_surface,
+    # Phase 55.V10 — substrate flag-sweep bench harness + plan doc.
+    l1_phase55_v10_substrate_sweep_harness_present,
 ]
 
 L2_TESTS: list[Callable] = [
