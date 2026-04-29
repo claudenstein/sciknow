@@ -369,6 +369,7 @@
         <button role="menuitem" onclick="openBibliographyTools()" title="Phase 54.6.312 — Sanity-check and renumber the global bibliography. Use after adding new chapters/sections when the citation numbers in stored markdown look inconsistent."><svg class="icon"><use href="#i-book-open"/></svg> Bibliography tools</button>
         <button role="menuitem" onclick="takeSnapshot()" title="Snapshot the whole book's draft state — safety net before a destructive operation like autowrite-all."><svg class="icon"><use href="#i-camera"/></svg> Snapshot</button>
         <button role="menuitem" onclick="doAutowriteBook()" title="Phase 54.6.x — autowrite EVERY section of EVERY chapter in book order. Long-running. Existing drafts are skipped by default; the chapter-level wrapper auto-snapshots before touching each chapter so the operation is reversible from the Timeline. Take a Snapshot first if you want a single rollback point."><svg class="icon"><use href="#i-feather"/></svg> Autowrite whole book</button>
+        <button role="menuitem" onclick="doRankVisualsBook()" title="Phase 55.V8 — rank candidate figures/tables/charts for every section in the book and persist the top-K to drafts.custom_metadata.visual_suggestions. Skips drafts whose persisted ranking still matches the current content. Same payload the per-draft Visuals panel reads, just bulk."><svg class="icon"><use href="#i-image"/></svg> Rank visuals (whole book)</button>
         <button role="menuitem" onclick="openExportModal()" title="Export the book to Markdown, HTML, PDF (WeasyPrint), EPUB (pandoc), LaTeX, DOCX, or BibTeX."><svg class="icon"><use href="#i-download"/></svg> Export</button>
         <button role="menuitem" onclick="openBookSettings()" title="Per-book settings: title, description, plan (leitmotiv), target chapter length, style fingerprint, per-role model assignments."><svg class="icon"><use href="#i-sliders"/></svg> Settings</button>
         <!-- Phase 54.6.x — clean exit from the GUI so the user doesn't
@@ -399,6 +400,7 @@
         <button role="menuitem" onclick="openCorpusModal('corp-cites')" title="Outbound reference crawl — follow citations IN your papers to discover new work. RRF + MMR diversity + citation-context signals. Mirrors `sciknow db expand`."><svg class="icon"><use href="#i-globe"/></svg> Expand (citations)</button>
         <button role="menuitem" onclick="openCorpusModal('corp-author')" title="Fetch every paper by a named author via OpenAlex. Use when you want an author's full bibliography regardless of current citations. Mirrors `sciknow db expand-author`."><svg class="icon"><use href="#i-user"/></svg> Expand by author</button>
         <button role="menuitem" onclick="openExpandAuthorRefs()" title="Phase 54.6.309 — pick an existing author from the corpus. Aggregates every paper they cited across all their works (including self-cites), ranks by citation frequency, and lands in the cherry-pick modal before download. Mirrors `sciknow db expand-author-refs`."><svg class="icon"><use href="#i-user"/></svg> Expand by author's references</button>
+        <button role="menuitem" onclick="openCorpusModal('corp-section')" title="Phase 55.V9 — targeted corpus expansion for thin-coverage sections. Reads each section's plan bullets + section title, builds seed queries, and runs the standard expand pipeline per seed. Default scope: only sections whose latest draft scored below the convergence target (skips already-converged ones). Opens the Corpus — Enrich & Expand modal at the 'Expand thin sections' tab where you can preview candidates + cherry-pick, or run auto-download. Mirrors `sciknow corpus expand-section`."><svg class="icon"><use href="#i-target"/></svg> Expand thin sections</button>
         <button role="menuitem" onclick="openCorpusModal('corp-inbound')" title="Forward-in-time mirror of Expand: find papers that CITE your corpus. Mirrors `sciknow db expand-inbound`."><svg class="icon"><use href="#i-inbox"/></svg> Inbound cites</button>
         <button role="menuitem" onclick="openCorpusModal('corp-topic')" title="OpenAlex free-text topic search ranked by citation count. Good for kickstarting a new project."><svg class="icon"><use href="#i-tag"/></svg> Topic search</button>
         <button role="menuitem" onclick="openCorpusModal('corp-coauth')" title="Find people who coauthored with your corpus's authors. Useful for invisible-college expansion."><svg class="icon"><use href="#i-users"/></svg> Coauthors</button>
@@ -2953,6 +2955,10 @@
                   title="Free-text OpenAlex search. Push-based expansion — solves bootstrap / sideways-expansion problem.">&#128269; Topic search</button>
           <button class="tab" data-ctab="corp-coauth" onclick="switchCorpusTab('corp-coauth')"
                   title="Snowball via coauthors of corpus papers. Captures the 'invisible college' — same-lab researchers who don't always cite each other.">&#128101; Coauthors</button>
+          <button class="tab" data-ctab="corp-section" onclick="switchCorpusTab('corp-section')"
+                  title="Phase 55.V9 — Targeted expansion for thin-coverage sections. Reads each section's plan bullets + title, builds seed queries, runs the standard expand pipeline per seed in dry-run, and shows the merged candidate list for cherry-pick. Designed for the 'autowrite plateaued at 0.7x' pattern. Mirrors `sciknow corpus expand-section`.">&#127919; Expand thin sections</button>
+          <button class="tab" data-ctab="corp-section-fast" onclick="switchCorpusTab('corp-section-fast')"
+                  title="Phase 55.V14 — FAST sibling of Expand thin sections. Same per-section seed-query construction, but uses OpenAlex full-text search per seed instead of the RRF subprocess (~30-50× faster). Adds three precision upgrades: per-seed top-K cap, +0.05 recency boost for year >= 2020, and MMR diversity post-merge. Use when the slow RRF preview would take 1-3 hours, or when corpus connectivity is too thin for citation-following to find anything.">&#9889; Expand thin sections (fast)</button>
         </div>
 
         <!-- Enrich (metadata) panel -->
@@ -3380,6 +3386,120 @@
                     title="Build the coauthor shortlist and open the cherry-pick preview. No downloads until you approve rows.">&#128269; Preview candidates</button>
             <span class="u-hint">
               Best with a tight relevance threshold (0.6+) — this method has the noisiest recall.
+            </span>
+          </div>
+        </div>
+
+        <!-- Phase 55.V9 — Expand thin sections panel. -->
+        <div class="u-hidden-card" id="corp-section-pane">
+          <div class="u-note-md">
+            Targeted expansion for sections whose autowrite plateaued
+            (final_overall &lt; threshold). For each in-scope section,
+            uses the plan bullets + section title as seed queries,
+            spawns the standard RRF expand subprocess in dry-run per
+            seed, and merges the candidate shortlist for cherry-pick.
+            Mirrors <code>sciknow corpus expand-section</code>.
+          </div>
+          <div class="field u-row-wrap-end-tight">
+            <div class="u-col-wide"><label>Chapter (optional)</label>
+              <input type="text" id="tl-secex-chapter" value=""
+                     placeholder="(blank = whole book)"
+                     title="Chapter number (e.g. '3') or title fragment. Leave blank to cover every chapter in the book."/></div>
+            <div class="u-col-wide"><label>Section slug (optional)</label>
+              <input type="text" id="tl-secex-section" value=""
+                     placeholder="(blank = every section in scope)"
+                     title="Specific section slug like 'the_engine_of_the_sun'. Leave blank to cover every section in the chapter (or whole book)."/></div>
+            <div class="u-col-num"><label>Thin threshold</label>
+              <input type="number" id="tl-secex-thresh" value="0.85" min="0" max="1" step="0.05"
+                     title="Sections whose latest draft scored below this are considered thin. Default 0.85 = the autowrite convergence target."/></div>
+            <div class="u-col-num"><label>Budget / seed</label>
+              <input type="number" id="tl-secex-budget" value="10" min="1" max="50"
+                     title="Max papers fetched per seed query. The expand RRF ranker takes the top-N for the candidate shortlist."/></div>
+            <div class="u-col-num"><label>Max queries</label>
+              <input type="number" id="tl-secex-maxq" value="6" min="1" max="20"
+                     title="Cap on seed queries per section: section title + first N plan bullets."/></div>
+          </div>
+          <div class="field u-flex-raw u-gap-10 u-ai-center u-wrap u-mt-1">
+            <label class="u-label-row"
+                   title="Default ON: only sections with final_overall < threshold (or no draft) are expanded. Uncheck to run on every section regardless of score.">
+              <input type="checkbox" id="tl-secex-only-thin" checked> only-thin
+            </label>
+          </div>
+          <div class="u-row-mt u-flex-raw u-gap-2 u-ai-center u-wrap">
+            <button class="btn-primary" onclick="runExpandSectionPreview()"
+                    title="Build the merged candidate shortlist (across every seed query of every in-scope section) and open the cherry-pick preview. Nothing downloads until you tick rows.">
+              &#128269; Preview candidates
+            </button>
+            <button class="btn-secondary" onclick="runExpandSectionAuto()"
+                    title="Skip preview — run the full expand pipeline per seed and download every qualifying candidate that passes the relevance threshold. Logs stream below.">
+              &#9889; Auto-download (skip preview)
+            </button>
+            <span class="u-hint">
+              Preview cherry-picks; Auto runs the full pipeline. Re-run autowrite with <code>--resume --only-below-target</code> after.
+            </span>
+          </div>
+        </div>
+
+        <!-- Phase 55.V14 — Fast topic-search expand-thin-sections panel. -->
+        <div class="u-hidden-card" id="corp-section-fast-pane">
+          <div class="u-note-md">
+            FAST sibling of Expand thin sections. Uses OpenAlex
+            full-text search per seed (~1-2s/seed) instead of the
+            RRF subprocess (~30-90s/seed) — typical preview returns
+            in seconds instead of hours. Three precision upgrades
+            over a plain merge: per-seed top-K cap, recency boost
+            for year &ge; 2020, and MMR diversity to suppress
+            near-duplicate review-paper clusters.
+          </div>
+          <div class="field u-row-wrap-end-tight">
+            <div class="u-col-wide"><label>Chapter (optional)</label>
+              <input type="text" id="tl-secfx-chapter" value=""
+                     placeholder="(blank = whole book)"
+                     title="Chapter number (e.g. '3') or title fragment. Leave blank to cover every chapter."/></div>
+            <div class="u-col-wide"><label>Section slug (optional)</label>
+              <input type="text" id="tl-secfx-section" value=""
+                     placeholder="(blank = every section in scope)"
+                     title="Specific section slug. Leave blank to cover every section in the chapter."/></div>
+            <div class="u-col-num"><label>Thin threshold</label>
+              <input type="number" id="tl-secfx-thresh" value="0.85" min="0" max="1" step="0.05"
+                     title="Sections with final_overall below this are considered thin. Default 0.85."/></div>
+            <div class="u-col-num"><label>Budget / seed</label>
+              <input type="number" id="tl-secfx-budget" value="15" min="1" max="50"
+                     title="Max OpenAlex hits fetched per seed query. Default 15 (matches the typical breadth of full-text search hits per topic)."/></div>
+            <div class="u-col-num"><label>Max queries</label>
+              <input type="number" id="tl-secfx-maxq" value="6" min="1" max="20"
+                     title="Cap on seed queries per section (section title + first N plan bullets)."/></div>
+          </div>
+          <div class="field u-row-wrap-end-tight u-mt-1">
+            <div class="u-col-num"><label>Per-seed cap</label>
+              <input type="number" id="tl-secfx-percap" value="8" min="0" max="50"
+                     title="UPGRADE 1: Only the top-K hits per seed (by relevance) contribute to the merge. Prevents one over-broad seed from drowning out the others. 0 = no cap."/></div>
+            <div class="u-col-num"><label>Recency boost</label>
+              <input type="number" id="tl-secfx-rec" value="0.05" min="0" max="0.2" step="0.01"
+                     title="UPGRADE 2: Add this to the relevance score for papers from year >= floor. Counters OpenAlex's cited_by_count:desc bias toward classics. 0 = disabled."/></div>
+            <div class="u-col-num"><label>Recency floor (year)</label>
+              <input type="number" id="tl-secfx-rec-floor" value="2020" min="1900" max="2030"
+                     title="Year threshold for the recency boost. Papers from this year onward get +recency-boost relevance points."/></div>
+            <div class="u-col-num"><label>MMR λ</label>
+              <input type="number" id="tl-secfx-mmr" value="0.6" min="0" max="1" step="0.05"
+                     title="UPGRADE 3: Maximal Marginal Relevance trade-off. 1.0 = relevance only (no diversity); 0.5 = balanced; 0.0 = diversity only. 0.6 default leans toward relevance."/></div>
+            <div class="u-col-num"><label>MMR top-K</label>
+              <input type="number" id="tl-secfx-mmr-k" value="80" min="0" max="500"
+                     title="Apply MMR diversity to the top-K candidates only. The tail keeps relevance ordering. 0 = disable MMR."/></div>
+          </div>
+          <div class="field u-flex-raw u-gap-10 u-ai-center u-wrap u-mt-1">
+            <label class="u-label-row"
+                   title="Default ON: only sections with final_overall < threshold are expanded. Uncheck to run on every section.">
+              <input type="checkbox" id="tl-secfx-only-thin" checked> only-thin
+            </label>
+          </div>
+          <div class="u-row-mt u-flex-raw u-gap-2 u-ai-center u-wrap">
+            <button class="btn-primary" onclick="runExpandSectionFastPreview()"
+                    title="Run OpenAlex full-text search per seed query (parallel, ~1-2s/seed), apply the three precision upgrades, and open the cherry-pick preview. ~30-50× faster than the RRF preview.">
+              &#128269; Preview candidates (fast)
+            </button>
+            <span class="u-hint">
+              Same cherry-pick modal. Pick rows + click Download to fetch OA PDFs and ingest. Re-run autowrite afterwards.
             </span>
           </div>
         </div>

@@ -399,6 +399,139 @@ async def api_visuals_suggestions_rank(
     return JSONResponse(payload)
 
 
+@router.post("/api/visuals/suggestions/batch")
+async def api_visuals_suggestions_batch(
+    limit: int = 10,
+    overwrite: bool = False,
+):
+    """Phase 55.V8 — bulk visuals ranker for the active book.
+
+    Walks every active draft of every section in the active book and
+    runs `_visuals_rank_for_draft`, persisting the result to
+    `drafts.custom_metadata['visual_suggestions']`. Streams progress
+    events through the standard SSE job queue so the GUI can render
+    a live progress log. Skips drafts whose persisted ranking still
+    matches the current content (use `overwrite=True` to force).
+    """
+    from sciknow.web import app as _app
+    job_id, queue = _app._create_job("rank_visuals_batch")
+    loop = asyncio.get_event_loop()
+
+    def gen():
+        return _rank_visuals_book_stream(
+            book_id=_app._book_id, limit=limit, overwrite=overwrite,
+        )
+
+    thread = threading.Thread(
+        target=_app._run_generator_in_thread, args=(job_id, gen, loop), daemon=True)
+    thread.start()
+
+    return JSONResponse({"job_id": job_id})
+
+
+def _rank_visuals_book_stream(
+    *, book_id: str | None, limit: int = 10, overwrite: bool = False,
+):
+    """Generator yielding `progress` / `rank_done` / `rank_skipped` /
+    `rank_failed` / `completed` events for every section in the book.
+    Same persistence path as the per-draft endpoint."""
+    import hashlib as _h
+    from datetime import datetime as _dt
+
+    if not book_id:
+        yield {"type": "error", "message": "no active book"}
+        return
+
+    with get_session() as session:
+        ch_rows = session.execute(text("""
+            SELECT id::text, number, title FROM book_chapters
+            WHERE book_id::text = :bid
+            ORDER BY number
+        """), {"bid": book_id}).fetchall()
+        ch_ids = [c[0] for c in ch_rows]
+        ch_map = {c[0]: (c[1], c[2]) for c in ch_rows}
+        if not ch_ids:
+            yield {"type": "error", "message": "no chapters"}
+            return
+        placeholders = ", ".join(f":c{i}" for i in range(len(ch_ids)))
+        params = {f"c{i}": cid for i, cid in enumerate(ch_ids)}
+        drafts = session.execute(text(f"""
+            SELECT DISTINCT ON (chapter_id, section_type)
+                   id::text, chapter_id::text, section_type, content,
+                   custom_metadata
+            FROM drafts
+            WHERE chapter_id::text IN ({placeholders})
+            ORDER BY chapter_id, section_type,
+                     (custom_metadata->>'is_active')::boolean DESC NULLS LAST,
+                     version DESC
+        """), params).fetchall()
+
+    n_total = len(drafts)
+    yield {"type": "progress",
+           "detail": f"Ranking visuals for {n_total} drafts across {len(ch_rows)} chapters…"}
+
+    n_ranked = 0
+    n_skipped = 0
+    n_failed = 0
+    for d in drafts:
+        did, cid, sec, content, meta = d
+        ch_num, ch_title = ch_map.get(cid, ("?", ""))
+        label = f"Ch.{ch_num} {sec}"
+        if not (content or "").strip():
+            n_skipped += 1
+            yield {"type": "rank_skipped", "section": label,
+                   "reason": "empty draft"}
+            continue
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except Exception:
+                meta = {}
+        if not overwrite and isinstance(meta, dict):
+            blob = meta.get("visual_suggestions")
+            if isinstance(blob, dict):
+                cur_hash = _h.md5((content or "").encode(
+                    "utf-8", errors="ignore")).hexdigest()
+                if blob.get("content_hash") == cur_hash:
+                    n_skipped += 1
+                    yield {"type": "rank_skipped", "section": label,
+                           "reason": "cached", "n_hits": len(blob.get("hits") or [])}
+                    continue
+        try:
+            payload = _visuals_rank_for_draft(did, limit=limit)
+            hits = payload.get("hits") or []
+            cur_hash = _h.md5((content or "").encode(
+                "utf-8", errors="ignore")).hexdigest()
+            blob = {
+                "hits": hits,
+                "ranked_at": _dt.utcnow().isoformat() + "Z",
+                "content_hash": cur_hash,
+                "note": payload.get("note"),
+            }
+            with get_session() as session:
+                session.execute(text("""
+                    UPDATE drafts
+                       SET custom_metadata = COALESCE(custom_metadata, '{}'::jsonb)
+                                             || jsonb_build_object(
+                                                  'visual_suggestions',
+                                                  CAST(:blob AS jsonb))
+                     WHERE id::text = :did
+                """), {"did": did, "blob": json.dumps(blob)})
+                session.commit()
+            n_ranked += 1
+            avg = (sum((h.get("composite_score") or 0) for h in hits)
+                   / max(len(hits), 1)) if hits else 0
+            yield {"type": "rank_done", "section": label,
+                   "n_hits": len(hits), "avg_score": avg}
+        except Exception as exc:
+            n_failed += 1
+            yield {"type": "rank_failed", "section": label,
+                   "error": f"{type(exc).__name__}: {exc}"}
+
+    yield {"type": "completed",
+           "n_ranked": n_ranked, "n_skipped": n_skipped, "n_failed": n_failed}
+
+
 @router.delete("/api/visuals/suggestions")
 async def api_visuals_suggestions_clear(draft_id: str):
     """Drop the persisted visual-suggestions cache for a draft so the

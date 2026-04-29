@@ -283,6 +283,14 @@ def stream(
             and getattr(settings, "scorer_model_gguf", "")
         ):
             effective_role = "writer"
+        # Phase 55.V18 — extractor falls back to writer when not
+        # configured (empty extractor_model_gguf or use_llamacpp_extractor
+        # toggled off). Same shape as the scorer fallback above.
+        if role == "extractor" and not (
+            getattr(settings, "use_llamacpp_extractor", True)
+            and getattr(settings, "extractor_model_gguf", "")
+        ):
+            effective_role = "writer"
         yield from infer_client.chat_stream(
             system, user,
             model=model, temperature=temperature,
@@ -414,6 +422,7 @@ def complete(
     think: bool | None = None,
     top_p: float | None = None,
     top_k: int | None = None,
+    role: str = "writer",
 ) -> str:
     """
     Non-streaming completion. Returns the full response string.
@@ -436,7 +445,8 @@ def complete(
                           num_ctx=num_ctx, num_batch=num_batch,
                           num_predict=num_predict,
                           keep_alive=keep_alive, format=format,
-                          think=think, top_p=top_p, top_k=top_k))
+                          think=think, top_p=top_p, top_k=top_k,
+                          role=role))
 
 
 def complete_with_status(

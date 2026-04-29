@@ -5627,6 +5627,288 @@ async function doAutowriteBook() {
   };
 }
 
+// Phase 55.V8 — bulk visuals ranker for the whole book. Wraps the
+// `POST /api/visuals/suggestions/batch` endpoint (added below) with
+// progress streamed via SSE. The button lives in the Book menu.
+async function doRankVisualsBook() {
+  const ok = confirm(
+    "Rank candidate visuals for every section in this book?\n\n" +
+    "Walks every active draft, runs the 5-signal visuals ranker, " +
+    "and persists the top-10 per section. Skips drafts whose " +
+    "stored ranking still matches the current content. ~1-2 s per " +
+    "section on warm cache."
+  );
+  if (!ok) return;
+  showStreamPanel('Ranking visuals (whole book)…');
+  const body = document.getElementById('stream-body');
+  body.innerHTML = '<div id="rv-log" style="font-family:var(--font-mono);'
+    + 'font-size:13px;line-height:1.55;white-space:pre-wrap;"></div>';
+  const log = document.getElementById('rv-log');
+
+  const fd = new FormData();
+  fd.append('limit', '10');
+  const res = await fetch('/api/visuals/suggestions/batch', {method: 'POST', body: fd});
+  const data = await res.json();
+  if (!data || !data.job_id) {
+    log.innerHTML += '<div class="log-discard">Failed to start: '
+      + _escHTML(JSON.stringify(data)) + '</div>';
+    return;
+  }
+  currentJobId = data.job_id;
+  const source = new EventSource('/api/stream/' + data.job_id);
+  currentEventSource = source;
+  source.onmessage = function(e) {
+    const evt = JSON.parse(e.data);
+    if (evt.type === 'progress') {
+      log.innerHTML += '<div class="log-keep">'
+        + _escHTML(evt.detail || '') + '</div>';
+    } else if (evt.type === 'rank_done') {
+      const score = (evt.avg_score != null) ? evt.avg_score.toFixed(2) : '?';
+      log.innerHTML += '<div class="log-keep">  ✓ ' + _escHTML(evt.section || '')
+        + ': ' + (evt.n_hits || 0) + ' hits (avg ' + score + ')</div>';
+    } else if (evt.type === 'rank_skipped') {
+      log.innerHTML += '<div class="u-muted">  — ' + _escHTML(evt.section || '')
+        + ': cached</div>';
+    } else if (evt.type === 'rank_failed') {
+      log.innerHTML += '<div class="log-discard">  ✗ ' + _escHTML(evt.section || '')
+        + ': ' + _escHTML(evt.error || '') + '</div>';
+    } else if (evt.type === 'completed') {
+      log.innerHTML += '<div class="log-keep" style="margin-top:1em;font-weight:bold;">'
+        + '✓ Done. ranked=' + (evt.n_ranked || 0)
+        + ' skipped=' + (evt.n_skipped || 0)
+        + ' failed=' + (evt.n_failed || 0) + '</div>';
+      source.close(); currentEventSource = null; currentJobId = null;
+    } else if (evt.type === 'error') {
+      log.innerHTML += '<div class="log-discard">Error: '
+        + _escHTML(evt.message || '') + '</div>';
+      source.close(); currentEventSource = null; currentJobId = null;
+    } else if (evt.type === 'done') {
+      source.close(); currentEventSource = null; currentJobId = null;
+    }
+  };
+}
+
+
+// Phase 55.V9 — corpus expansion for thin-coverage sections.
+// Two flows:
+//   runExpandSectionPreview() — POST /api/corpus/expand-section/preview,
+//     parse the merged candidate list, open the cherry-pick modal
+//     (same _eapCandidates pipeline that Expand-by-author and
+//     Expand-by-author-refs use). User picks rows + downloads via
+//     the existing /api/corpus/expand-author/download-selected
+//     endpoint (it just consumes a list of {doi, title, year, ...}).
+//   runExpandSectionAuto() — POST /api/corpus/expand-section,
+//     skip the preview and run the full pipeline per seed.
+//
+// Both pull the form params from the corp-section pane.
+
+function _readSecExForm() {
+  const fd = new FormData();
+  const ch  = (document.getElementById('tl-secex-chapter') || {}).value || '';
+  const sec = (document.getElementById('tl-secex-section') || {}).value || '';
+  if (ch.trim()) fd.append('chapter', ch.trim());
+  if (sec.trim()) fd.append('section', sec.trim());
+  // No specific section/chapter ⇒ default to the whole book scope.
+  fd.append('all_sections', (ch.trim() || sec.trim()) ? 'false' : 'true');
+  const onlyThin = (document.getElementById('tl-secex-only-thin') || {}).checked;
+  fd.append('only_thin', onlyThin ? 'true' : 'false');
+  fd.append('thin_threshold', String(parseFloat(
+    (document.getElementById('tl-secex-thresh') || {}).value || '0.85'
+  )));
+  fd.append('budget_per_query', String(parseInt(
+    (document.getElementById('tl-secex-budget') || {}).value || '10', 10
+  )));
+  fd.append('max_queries', String(parseInt(
+    (document.getElementById('tl-secex-maxq') || {}).value || '6', 10
+  )));
+  return fd;
+}
+
+async function runExpandSectionPreview() {
+  _eapResetModal(
+    '&#127919; Expand thin sections &mdash; Preview',
+    'Building merged candidate shortlist across all in-scope sections…',
+    '(spawns one RRF dry-run per seed query; ~30-90s per seed)'
+  );
+  try {
+    const res = await fetch('/api/corpus/expand-section/preview', {
+      method: 'POST', body: _readSecExForm(),
+    });
+    if (!res.ok) {
+      _eapShowError('HTTP ' + res.status + ': ' + await res.text());
+      return;
+    }
+    const data = await res.json();
+    _eapCandidates = data.candidates || [];
+    _eapSelected = new Set();
+    _eapCandidates.forEach(c => {
+      if (c.doi && !c.cached_status) _eapSelected.add(c.doi);
+    });
+    const info = data.info || {};
+    const note = info.message || '';
+    document.getElementById('eap-info').innerHTML =
+      `<strong>${data.n_sections || 0}</strong> section(s) in scope · `
+      + `<strong>${data.n_seeds || 0}</strong> seed quer`
+      + ((data.n_seeds === 1) ? 'y' : 'ies') + ' · '
+      + `<strong>${data.n_unique_references || 0}</strong> unique candidate(s) · `
+      + `dropped <strong>${data.dropped_in_corpus || 0}</strong> dup(s).`
+      + (note ? `<br><em>${_escHtml(note)}</em>` : '');
+    document.getElementById('eap-loading').style.display = 'none';
+    document.getElementById('eap-content').style.display = 'block';
+    if (typeof eapRender === 'function') {
+      try { eapRender(); } catch (e) {}
+    }
+  } catch (e) {
+    _eapShowError(String(e));
+  }
+}
+
+// Phase 55.V14 — fast topic-search preview. Same cherry-pick modal
+// as runExpandSectionPreview but the backend uses OpenAlex full-text
+// search per seed (~1-2s/seed) plus per-seed cap + recency boost +
+// MMR diversity. ~30-50× faster than RRF, with the precision gap
+// closed by the three upgrades.
+function _readSecExFastForm() {
+  const fd = new FormData();
+  const ch  = (document.getElementById('tl-secfx-chapter') || {}).value || '';
+  const sec = (document.getElementById('tl-secfx-section') || {}).value || '';
+  if (ch.trim()) fd.append('chapter', ch.trim());
+  if (sec.trim()) fd.append('section', sec.trim());
+  fd.append('all_sections', (ch.trim() || sec.trim()) ? 'false' : 'true');
+  const onlyThin = (document.getElementById('tl-secfx-only-thin') || {}).checked;
+  fd.append('only_thin', onlyThin ? 'true' : 'false');
+  fd.append('thin_threshold', String(parseFloat(
+    (document.getElementById('tl-secfx-thresh') || {}).value || '0.85'
+  )));
+  fd.append('budget_per_query', String(parseInt(
+    (document.getElementById('tl-secfx-budget') || {}).value || '15', 10
+  )));
+  fd.append('max_queries', String(parseInt(
+    (document.getElementById('tl-secfx-maxq') || {}).value || '6', 10
+  )));
+  fd.append('per_seed_cap', String(parseInt(
+    (document.getElementById('tl-secfx-percap') || {}).value || '8', 10
+  )));
+  fd.append('recency_boost', String(parseFloat(
+    (document.getElementById('tl-secfx-rec') || {}).value || '0.05'
+  )));
+  fd.append('recency_year_floor', String(parseInt(
+    (document.getElementById('tl-secfx-rec-floor') || {}).value || '2020', 10
+  )));
+  fd.append('mmr_lambda', String(parseFloat(
+    (document.getElementById('tl-secfx-mmr') || {}).value || '0.6'
+  )));
+  fd.append('mmr_top_k', String(parseInt(
+    (document.getElementById('tl-secfx-mmr-k') || {}).value || '80', 10
+  )));
+  return fd;
+}
+
+async function runExpandSectionFastPreview() {
+  _eapResetModal(
+    '&#9889; Expand thin sections (fast) &mdash; Preview',
+    'Running OpenAlex topic-search per seed query in parallel…',
+    '(~1-2s per seed; per-seed cap + recency boost + MMR diversity applied post-merge)'
+  );
+  try {
+    const res = await fetch('/api/corpus/expand-section-fast/preview', {
+      method: 'POST', body: _readSecExFastForm(),
+    });
+    if (!res.ok) {
+      _eapShowError('HTTP ' + res.status + ': ' + await res.text());
+      return;
+    }
+    const data = await res.json();
+    _eapCandidates = data.candidates || [];
+    _eapSelected = new Set();
+    _eapCandidates.forEach(c => {
+      if (c.doi && !c.cached_status) _eapSelected.add(c.doi);
+    });
+    const info = data.info || {};
+    const mmr = info.mmr || {};
+    const note = info.message || '';
+    const mmrLabel = mmr.applied
+      ? `MMR(λ=${mmr.lambda}, demoted=${mmr.demoted})`
+      : 'MMR off';
+    document.getElementById('eap-info').innerHTML =
+      `<strong>${data.n_sections || 0}</strong> section(s) · `
+      + `<strong>${data.n_seeds || 0}</strong> unique seeds (`
+      + `${data.n_seeds_total || 0} pre-dedup) · `
+      + `<strong>${data.n_unique_references || 0}</strong> unique candidate(s) · `
+      + `dropped <strong>${data.dropped_in_corpus || 0}</strong> in-corpus, `
+      + `<strong>${data.cross_seed_duplicates || 0}</strong> cross-seed dup(s).`
+      + `<br><em>method: openalex_topic_search · cap=${info.per_seed_cap || 0} · `
+      + `recency=+${info.recency_boost || 0}@${info.recency_year_floor || 2020} · `
+      + `${_escHtml(mmrLabel)}</em>`
+      + (note ? `<br><em>${_escHtml(note)}</em>` : '');
+    document.getElementById('eap-loading').style.display = 'none';
+    document.getElementById('eap-content').style.display = 'block';
+    if (typeof eapRender === 'function') {
+      try { eapRender(); } catch (e) {}
+    }
+  } catch (e) {
+    _eapShowError(String(e));
+  }
+}
+
+
+async function runExpandSectionAuto() {
+  if (!confirm(
+    "Auto-download mode: skips the preview cherry-pick and runs the\n" +
+    "FULL expand pipeline per seed query (downloads every qualifying\n" +
+    "candidate that passes the relevance threshold).\n\n" +
+    "OK to proceed; Cancel to stop and use Preview instead."
+  )) return;
+  showStreamPanel('Expand thin sections — auto…');
+  const body = document.getElementById('stream-body');
+  body.innerHTML = '<div id="es-log" style="font-family:var(--font-mono);'
+    + 'font-size:13px;line-height:1.55;white-space:pre-wrap;'
+    + 'max-height:60vh;overflow-y:auto;"></div>';
+  const log = document.getElementById('es-log');
+  const res = await fetch('/api/corpus/expand-section',
+                          {method: 'POST', body: _readSecExForm()});
+  const data = await res.json();
+  if (!data || !data.job_id) {
+    log.innerHTML += '<div class="log-discard">Failed to start: '
+      + _escHTML(JSON.stringify(data)) + '</div>';
+    return;
+  }
+  currentJobId = data.job_id;
+  const source = new EventSource('/api/stream/' + data.job_id);
+  currentEventSource = source;
+  source.onmessage = function(e) {
+    const evt = JSON.parse(e.data);
+    if (evt.type === 'log') {
+      log.innerHTML += '<div>' + _escHTML(evt.text || evt.line || '') + '</div>';
+      log.scrollTop = log.scrollHeight;
+    } else if (evt.type === 'completed') {
+      log.innerHTML += '<div class="log-keep" '
+        + 'style="margin-top:1em;font-weight:bold;">'
+        + '✓ Done. Re-run autowrite to incorporate new evidence.'
+        + '</div>';
+      source.close(); currentEventSource = null; currentJobId = null;
+    } else if (evt.type === 'error') {
+      log.innerHTML += '<div class="log-discard">Error: '
+        + _escHTML(evt.message || '') + '</div>';
+      source.close(); currentEventSource = null; currentJobId = null;
+    } else if (evt.type === 'done') {
+      source.close(); currentEventSource = null; currentJobId = null;
+    }
+  };
+  source.onerror = function() {
+    log.innerHTML += '<div class="log-discard">SSE connection lost.</div>';
+    source.close(); currentEventSource = null; currentJobId = null;
+  };
+}
+
+// Backwards-compat shim — the menu button used to call doExpandSection
+// (V9-pre-tab implementation). It now opens the proper Corpus modal
+// at the new tab.
+function doExpandSection() {
+  openCorpusModal('corp-section');
+}
+
+
 function drawConvergenceChart() {
   const svg = document.querySelector('#aw-chart svg');
   if (!svg || awScores.length === 0) return;
@@ -9807,7 +10089,8 @@ function switchCorpusTab(name) {
     t.classList.toggle('active', t.dataset.ctab === name);
   });
   ['corp-enrich', 'corp-cites', 'corp-agentic', 'corp-author',
-   'corp-author-refs', 'corp-inbound', 'corp-topic', 'corp-coauth'].forEach(n => {
+   'corp-author-refs', 'corp-inbound', 'corp-topic', 'corp-coauth',
+   'corp-section', 'corp-section-fast'].forEach(n => {
     const pane = document.getElementById(n + '-pane');
     if (pane) pane.style.display = (n === name) ? 'block' : 'none';
   });

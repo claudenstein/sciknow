@@ -33,7 +33,7 @@ console = Console()
 # and any VRAM error surfaces with the others already up.
 # vlm is excluded from `all` because it hot-swaps with the writer
 # (both ~17 GB) — `corpus caption-visuals` manages the swap.
-_VALID_ROLES = ["writer", "embedder", "reranker", "vlm", "scorer"]
+_VALID_ROLES = ["writer", "embedder", "reranker", "vlm", "scorer", "extractor"]
 _ALL_BY_DEFAULT = ["writer", "embedder", "reranker"]
 
 

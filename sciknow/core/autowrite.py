@@ -103,6 +103,7 @@ def autowrite_section_stream(
     target_words: int | None = None,
     resume_from_draft_id: str | None = None,
     include_visuals: bool = False,   # Phase 54.6.142
+    force_resume: bool = False,      # Phase 55.V7
 ) -> Iterator[Event]:
     """Full convergence loop for one section: write -> score -> revise -> re-score.
 
@@ -120,6 +121,13 @@ def autowrite_section_stream(
     finished state (checkpoint in {initial, iteration_*_keep,
     iteration_*_discard, final, draft}) — partial states from
     interrupted runs are refused via _is_resumable_draft.
+
+    Phase 55.V7 — `force_resume=True` bypasses the partial-state
+    safety gate so an interrupted iteration_*_revising or
+    writing_in_progress draft can still be resumed using the
+    partially-written content. Risk: the partial content may end
+    mid-sentence; the convergence loop will smooth that out in the
+    next revision pass.
 
     Tail the log with:
 
@@ -142,6 +150,7 @@ def autowrite_section_stream(
             cove_threshold=cove_threshold, target_words=target_words,
             resume_from_draft_id=resume_from_draft_id,
             include_visuals=include_visuals,
+            force_resume=force_resume,
         )
     except (GeneratorExit, KeyboardInterrupt):
         # Caller asked us to stop — propagate cleanly (the finally
@@ -199,6 +208,7 @@ def _autowrite_section_body(
     target_words: int | None = None,
     resume_from_draft_id: str | None = None,
     include_visuals: bool = False,   # Phase 54.6.142
+    force_resume: bool = False,      # Phase 55.V7
 ) -> Iterator[Event]:
     """Phase 24 — the actual autowrite implementation, extracted from
     autowrite_section_stream so the public function can wrap it in a
@@ -275,7 +285,7 @@ def _autowrite_section_body(
             SELECT id::text, title, plan FROM books WHERE id::text = :bid
         """), {"bid": book_id}).fetchone()
         ch = session.execute(text("""
-            SELECT id::text, number, title, description, topic_query, topic_cluster
+            SELECT id::text, number, title, description, topic_query, topic_cluster, sections
             FROM book_chapters WHERE id::text = :cid
         """), {"cid": chapter_id}).fetchone()
 
@@ -285,8 +295,42 @@ def _autowrite_section_body(
         return
 
     b_title, b_plan = book[1], book[2]
-    ch_id, ch_num, ch_title, ch_desc, topic_query, topic_cluster = ch
+    ch_id, ch_num, ch_title, ch_desc, topic_query, topic_cluster, ch_sections = ch
     topic = topic_query or ch_title
+
+    # Phase 55.V19 — resolve the section's human-readable title and
+    # description from the chapter's `sections` JSON outline. The
+    # retrieval query at line ~471 used to be `f"{section_type} {topic}"`
+    # where section_type is the slug (`the_science_of_sunspots`). The
+    # underscores hurt sparse keyword matching, and the slug doesn't
+    # carry the topical intent — `the_science_of_sunspots` retrieves
+    # different chunks than `The Science of Sunspots magnetic flux`.
+    # Resolved with debug_verifier.py 2026-04-28: writer fabricated 34
+    # citations against header-only chunks because retrieval surfaced
+    # them. Better query → better evidence → less fabrication pressure.
+    _section_title: str | None = None
+    _section_description: str | None = None
+    try:
+        secs = ch_sections
+        if isinstance(secs, str):
+            import json as _json
+            secs = _json.loads(secs) if secs else []
+        if isinstance(secs, list):
+            for _s in secs:
+                if isinstance(_s, dict) and _s.get("slug") == section_type:
+                    _section_title = _s.get("title")
+                    _section_description = _s.get("description")
+                    break
+    except Exception as _exc:
+        logger.debug("section title resolution failed for %s: %s",
+                     section_type, _exc)
+    # Slug→spaces fallback so a misconfigured outline still produces
+    # a usable query (e.g. "the science of sunspots" beats
+    # "the_science_of_sunspots" for sparse matching).
+    section_title_for_query = (
+        _section_title
+        or section_type.replace("_", " ").strip()
+    )
 
     # Phase 28 — load resume source NOW (before any LLM calls) so we
     # can fail fast if it's in a partial state. resume_content stays
@@ -319,11 +363,20 @@ def _autowrite_section_body(
             return
 
         ok, reason = _is_resumable_draft(row[3], row[2])
-        if not ok:
+        if not ok and not force_resume:
             msg = f"cannot resume from draft {row[0][:8]}: {reason}"
             log.event("resume_refused", reason=reason, draft_id=row[0])
             yield {"type": "error", "message": msg}
             return
+        if not ok and force_resume:
+            # Phase 55.V7 — caller passed force_resume=True; treat the
+            # partial draft as a valid resume base. Log the override so
+            # post-mortem can correlate any odd output with the bypass.
+            log.event(
+                "resume_force_overridden",
+                reason=reason, draft_id=row[0],
+                word_count=int(row[2] or 0),
+            )
 
         resume_content = row[1] or ""
         resume_source_meta = {
@@ -446,10 +499,16 @@ def _autowrite_section_body(
 
     # Step 1: Initial draft
     log.stage("retrieval")
+    # Phase 55.V19 — section title (+ optional description) replace the
+    # slug `section_type` in the retrieval query. See the title-resolve
+    # block above for why.
+    _retrieval_query = f"{section_title_for_query} {topic}"
+    if _section_description:
+        _retrieval_query = f"{_retrieval_query} {_section_description}"
     with get_session() as session:
         prior_summaries = _get_prior_summaries(session, book_id, ch_num)
         results, sources = _retrieve_with_step_back(
-            session, qdrant, f"{section_type} {topic}",
+            session, qdrant, _retrieval_query,
             topic_cluster=topic_cluster, model=model,
             use_step_back=use_step_back,
         )

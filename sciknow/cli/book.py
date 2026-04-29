@@ -1825,6 +1825,195 @@ def insert_citations(
     _consume_events(gen, console)
 
 
+# ── rank-visuals (Phase 55.V8 — bulk visuals ranker) ─────────────────────────
+
+@app.command(name="rank-visuals")
+def rank_visuals_cmd(
+    book_title: Annotated[str, typer.Argument(help="Book title or ID fragment.")],
+    chapter:    Annotated[str | None, typer.Argument(help="Chapter number or title fragment. Omit + use --all to cover the whole book.")] = None,
+    section:    str | None = typer.Option(
+        None, "--section", "-s",
+        help="Section type. Omit to rank for every section in the chapter (or whole book with --all).",
+    ),
+    all_chapters: bool = typer.Option(
+        False, "--all",
+        help="Rank visuals for every section of every chapter in the book. Required if no chapter is given.",
+    ),
+    limit: int = typer.Option(
+        10, "--limit",
+        help="Top-K visuals to keep per draft (1–30).",
+    ),
+    overwrite: bool = typer.Option(
+        False, "--overwrite",
+        help="Re-rank even drafts that already have a fresh visual_suggestions blob (matched by content_hash).",
+    ),
+):
+    """
+    Phase 55.V8 — bulk visuals ranker.
+
+    Walks the latest active draft of every section in scope, runs the
+    5-signal visuals ranker, and persists the result to
+    ``drafts.custom_metadata['visual_suggestions']`` so the right-panel
+    Visuals tab + finalize-draft pre-export check can read it without
+    re-ranking. Same payload shape the per-draft web endpoint produces.
+
+    Skips already-ranked drafts whose persisted ``content_hash`` still
+    matches the current content (use ``--overwrite`` to force re-rank).
+
+    Examples:
+
+      sciknow book rank-visuals "Global Cooling" --all              # whole book
+      sciknow book rank-visuals "Global Cooling" 3                  # one chapter
+      sciknow book rank-visuals "Global Cooling" 3 -s methods       # one section
+      sciknow book rank-visuals "Global Cooling" --all --overwrite  # force re-rank
+    """
+    from sciknow.cli import preflight
+    preflight()
+    import hashlib as _h
+    import json as _json
+    from datetime import datetime as _dt
+    from sciknow.storage.db import get_session
+    from sqlalchemy import text as sql_text
+    from sciknow.web.routes.visuals import _visuals_rank_for_draft
+
+    if chapter is None and not all_chapters:
+        console.print(
+            "[red]Either supply a CHAPTER argument or use --all to cover the whole book.[/red]"
+        )
+        raise typer.Exit(1)
+
+    # Resolve book + chapter rows.
+    with get_session() as session:
+        book_row = session.execute(sql_text("""
+            SELECT id::text, title FROM books
+            WHERE title ILIKE :t OR id::text LIKE :p
+            LIMIT 1
+        """), {"t": f"%{book_title}%", "p": f"{book_title}%"}).fetchone()
+        if not book_row:
+            console.print(f"[red]Book not found: {book_title!r}[/red]")
+            raise typer.Exit(1)
+        book_id, btitle = book_row[0], book_row[1]
+
+        if all_chapters:
+            ch_rows = session.execute(sql_text("""
+                SELECT id::text, number, title FROM book_chapters
+                WHERE book_id::text = :bid
+                ORDER BY number
+            """), {"bid": book_id}).fetchall()
+        else:
+            try:
+                num = int(chapter)
+                ch_rows = session.execute(sql_text("""
+                    SELECT id::text, number, title FROM book_chapters
+                    WHERE book_id::text = :bid AND number = :n
+                """), {"bid": book_id, "n": num}).fetchall()
+            except ValueError:
+                ch_rows = session.execute(sql_text("""
+                    SELECT id::text, number, title FROM book_chapters
+                    WHERE book_id::text = :bid AND title ILIKE :t
+                    ORDER BY number
+                """), {"bid": book_id, "t": f"%{chapter}%"}).fetchall()
+        if not ch_rows:
+            console.print(f"[red]No chapters matched.[/red]")
+            raise typer.Exit(1)
+
+        # Pull the latest active draft per (chapter, section). Same
+        # ordering rule used by autowrite + the reader.
+        ch_ids = [c[0] for c in ch_rows]
+        placeholders = ", ".join(f":c{i}" for i in range(len(ch_ids)))
+        params = {f"c{i}": cid for i, cid in enumerate(ch_ids)}
+        if section:
+            extra = "AND section_type = :sec"
+            params["sec"] = section
+        else:
+            extra = ""
+        drafts = session.execute(sql_text(f"""
+            SELECT DISTINCT ON (chapter_id, section_type)
+                   id::text, chapter_id::text, section_type, content,
+                   custom_metadata, word_count
+            FROM drafts
+            WHERE chapter_id::text IN ({placeholders})
+            {extra}
+            ORDER BY chapter_id, section_type,
+                     (custom_metadata->>'is_active')::boolean DESC NULLS LAST,
+                     version DESC
+        """), params).fetchall()
+
+    ch_map = {c[0]: (c[1], c[2]) for c in ch_rows}
+    n_total = len(drafts)
+    if n_total == 0:
+        console.print("[yellow]No drafts found in scope.[/yellow]")
+        raise typer.Exit(0)
+
+    console.print(
+        f"[bold]Rank-visuals[/bold] · book={btitle!r} · "
+        f"chapters={len(ch_rows)} · drafts={n_total}"
+    )
+
+    n_ranked = 0
+    n_skipped = 0
+    n_failed = 0
+    for d in drafts:
+        did, cid, sec, content, meta, wc = d
+        ch_num, ch_title = ch_map.get(cid, ("?", ""))
+        prefix = f"  Ch.{ch_num} {sec}".ljust(55)
+
+        if not (content or "").strip():
+            console.print(f"{prefix} [dim]skipped (empty draft)[/dim]")
+            n_skipped += 1
+            continue
+
+        # Cache check: skip if persisted blob matches current content.
+        if not overwrite and isinstance(meta, dict):
+            blob = meta.get("visual_suggestions")
+            if isinstance(blob, dict):
+                cur_hash = _h.md5((content or "").encode(
+                    "utf-8", errors="ignore")).hexdigest()
+                if blob.get("content_hash") == cur_hash:
+                    n_skipped += 1
+                    n_hits = len(blob.get("hits") or [])
+                    console.print(
+                        f"{prefix} [dim]cached ({n_hits} hits, --overwrite to re-rank)[/dim]"
+                    )
+                    continue
+
+        try:
+            payload = _visuals_rank_for_draft(did, limit=limit)
+            hits = payload.get("hits") or []
+            cur_hash = _h.md5((content or "").encode(
+                "utf-8", errors="ignore")).hexdigest()
+            blob = {
+                "hits": hits,
+                "ranked_at": _dt.utcnow().isoformat() + "Z",
+                "content_hash": cur_hash,
+                "note": payload.get("note"),
+            }
+            with get_session() as session:
+                session.execute(sql_text("""
+                    UPDATE drafts
+                       SET custom_metadata = COALESCE(custom_metadata, '{}'::jsonb)
+                                             || jsonb_build_object(
+                                                  'visual_suggestions',
+                                                  CAST(:blob AS jsonb))
+                     WHERE id::text = :did
+                """), {"did": did, "blob": _json.dumps(blob)})
+                session.commit()
+            n_ranked += 1
+            avg_score = (sum((h.get("composite_score") or 0) for h in hits)
+                         / max(len(hits), 1)) if hits else 0
+            console.print(
+                f"{prefix} [green]✓[/green] {len(hits)} hits "
+                f"(avg score {avg_score:.2f})"
+            )
+        except Exception as exc:
+            n_failed += 1
+            console.print(f"{prefix} [red]✗ {type(exc).__name__}: {exc}[/red]")
+
+    console.print(
+        f"\n[bold]Done.[/bold] ranked={n_ranked} · skipped={n_skipped} · failed={n_failed}"
+    )
+
+
 # ── finalize-draft (Phase 54.6.145 — L3 VLM verify pre-export) ──────────────────
 
 @app.command(name="finalize-draft")
@@ -3700,6 +3889,20 @@ def autowrite(
             "from scratch."
         ),
     ),
+    force_resume: bool = typer.Option(
+        False, "--force-resume",
+        help=(
+            "Phase 55.V7 — bypass the partial-state safety gate. Resume "
+            "even from drafts marked `writing_in_progress` / "
+            "`iteration_*_revising` / `placeholder` — the partial "
+            "content is loaded as the iteration starting point. Use "
+            "this when an autowrite was interrupted mid-revision and "
+            "the next `--resume` keeps skipping the section with "
+            "'not safe to resume'. The partial content may end "
+            "mid-sentence; the convergence loop will smooth it out "
+            "in the next revision pass."
+        ),
+    ),
 ):
     """
     Autonomous write → review → revise convergence loop (inspired by Karpathy's autoresearch).
@@ -3847,6 +4050,15 @@ def autowrite(
     # --rebuild, so the filter can compare against final_overall.
     existing_by_key: dict[tuple[str, str], dict] = {}
     if not rebuild or only_below_target:
+        # Phase 55.V12 — prefer the latest version with substantive
+        # content (>=100 words) so a prior context-overflow silent fail
+        # that left a 0-word placeholder doesn't shadow the real draft
+        # underneath it. Two-tier ordering:
+        #   tier 1 (preferred): word_count >= 100 (real content)
+        #   tier 2 (fallback):  any version (placeholder/empty)
+        # Within each tier, pick the highest version. If a section has
+        # only empty placeholders, the V11 fresh-write fallthrough in
+        # the resume loop kicks in and writes from scratch.
         with get_session() as session:
             existing_rows = session.execute(text("""
                 SELECT DISTINCT ON (chapter_id, section_type)
@@ -3854,7 +4066,10 @@ def autowrite(
                     custom_metadata, word_count
                 FROM drafts
                 WHERE book_id = :bid AND chapter_id IS NOT NULL
-                ORDER BY chapter_id, section_type, version DESC, created_at DESC
+                ORDER BY chapter_id, section_type,
+                         (COALESCE(word_count, 0) >= 100) DESC,
+                         version DESC,
+                         created_at DESC
             """), {"bid": book_id}).fetchall()
         for r in existing_rows:
             existing_by_key[(r[0], r[1])] = {
@@ -3934,13 +4149,51 @@ def autowrite(
                     existing["custom_metadata"], existing["word_count"],
                 )
                 if not ok:
-                    console.print(
-                        f"[bold]Section {i}/{total}:[/bold] Ch.{ch_num} {ch_title} — {sec}\n"
-                        f"  [yellow]Skipping resume: {reason}[/yellow]"
-                    )
-                    console.print(f"{'=' * 72}")
-                    continue
-                resume_draft_id = existing["draft_id"]
+                    # Phase 55.V11 — empty-placeholder fallthrough.
+                    # When the existing draft is below the resume
+                    # word-count threshold (typically 0 — a placeholder
+                    # row left over from a context-overflow silent fail
+                    # in a prior run), there is no content to "resume"
+                    # and the right behavior is to do a fresh write.
+                    # Don't skip the section; just leave resume_draft_id
+                    # as None so the engine runs planning + writing as
+                    # if it's brand-new.
+                    wc = int(existing.get("word_count") or 0)
+                    if wc < 100:
+                        console.print(
+                            f"[bold]Section {i}/{total}:[/bold] Ch.{ch_num} {ch_title} — {sec}\n"
+                            f"  [yellow]Empty placeholder ({wc} words);[/yellow] "
+                            f"falling through to fresh write."
+                        )
+                        # Leave resume_draft_id = None — the engine will
+                        # do planning + writing from scratch. The
+                        # placeholder row will be replaced (autowrite's
+                        # version logic creates a new draft row by
+                        # design — see _next_draft_version).
+                    elif force_resume:
+                        # Phase 55.V7 — user passed --force-resume to
+                        # override the safety gate. Use the partial
+                        # content as-is; the convergence loop will
+                        # treat any mid-sentence cut-off as just
+                        # "this is the draft to revise".
+                        console.print(
+                            f"[bold]Section {i}/{total}:[/bold] Ch.{ch_num} {ch_title} — {sec}\n"
+                            f"  [yellow]--force-resume:[/yellow] using partial draft anyway "
+                            f"({reason})"
+                        )
+                        resume_draft_id = existing["draft_id"]
+                    else:
+                        console.print(
+                            f"[bold]Section {i}/{total}:[/bold] Ch.{ch_num} {ch_title} — {sec}\n"
+                            f"  [yellow]Skipping resume: {reason}[/yellow]\n"
+                            f"  [dim]Pass --force-resume to override, or run "
+                            f"`sciknow book draft rollback <draft_id>` to "
+                            f"restore the prior KEEP state.[/dim]"
+                        )
+                        console.print(f"{'=' * 72}")
+                        continue
+                else:
+                    resume_draft_id = existing["draft_id"]
 
         mode_label = " [dim](resume)[/dim]" if resume_draft_id else ""
         console.print(
@@ -3956,6 +4209,7 @@ def autowrite(
             target_words=target_words,
             resume_from_draft_id=resume_draft_id,
             include_visuals=include_visuals,
+            force_resume=force_resume,
         )
 
         # Live dashboard state
@@ -4751,6 +5005,115 @@ def draft_scores(
     final = meta.get("final_overall")
     if final is not None:
         console.print(f"\n[dim]Final overall: {final:.3f}  ·  target: {meta.get('target_score', '?')}  ·  max_iter: {meta.get('max_iter', '?')}[/dim]")
+
+
+@draft_app.command(name="rollback")
+def draft_rollback(
+    draft_id: Annotated[str, typer.Argument(help="Draft ID or prefix.")],
+    target: str = typer.Option(
+        "auto", "--target",
+        help=(
+            "Checkpoint to restore. 'auto' (default) picks the most "
+            "recent KEEP iteration in score_history; 'initial' resets "
+            "to the post-write pre-iteration state; or pass an explicit "
+            "checkpoint string like 'iteration_2_keep'."
+        ),
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y",
+        help="Skip the confirmation prompt.",
+    ),
+):
+    """
+    Phase 55.V7 — surgical recovery for drafts stuck in a partial state.
+
+    A draft in `iteration_N_revising` (revision stream interrupted) or
+    `writing_in_progress` (initial write interrupted) refuses
+    `--resume` because the content may end mid-sentence. This command
+    rewrites the draft's `custom_metadata.checkpoint` string to a
+    resumable value so the next `book autowrite --resume` picks it up.
+
+    The content itself is NOT modified — only the metadata flag. The
+    convergence loop will smooth out any dangling sentences in the
+    next revision pass.
+
+    Examples:
+
+      sciknow book draft rollback 3f2a1b4c                    # auto
+      sciknow book draft rollback 3f2a1b4c --target=initial   # reset
+      sciknow book draft rollback 3f2a1b4c --target=iteration_2_keep
+    """
+    from sciknow.cli import preflight
+    preflight(qdrant=False)
+    from sciknow.storage.db import get_session
+    from sqlalchemy import text as sql_text
+    import json as _json
+
+    with get_session() as session:
+        row = session.execute(sql_text("""
+            SELECT id::text, custom_metadata, content, word_count
+            FROM drafts
+            WHERE id::text LIKE :q
+            ORDER BY updated_at DESC
+            LIMIT 1
+        """), {"q": f"{draft_id}%"}).fetchone()
+
+    if not row:
+        console.print(f"[red]Draft not found: {draft_id}[/red]")
+        raise typer.Exit(1)
+
+    full_id, custom_meta, content, wc = row
+    meta = custom_meta or {}
+    if isinstance(meta, str):
+        try:
+            meta = _json.loads(meta)
+        except Exception:
+            meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+
+    cur_checkpoint = (meta.get("checkpoint") or "").strip() or "<none>"
+    history = meta.get("score_history") or []
+
+    # Resolve the target checkpoint string.
+    if target == "auto":
+        # Walk score_history backwards looking for the most recent
+        # iteration that has KEEP / DISCARD outcome — those rows
+        # mark a finished iteration boundary.
+        new_checkpoint = "initial"
+        for entry in reversed(history):
+            iteration = entry.get("iteration")
+            verdict = (entry.get("verdict") or "").upper()
+            if isinstance(iteration, int) and verdict in ("KEEP", "DISCARD"):
+                new_checkpoint = f"iteration_{iteration}_keep"
+                break
+    elif target == "initial":
+        new_checkpoint = "initial"
+    else:
+        new_checkpoint = target
+
+    console.print(f"[bold]Draft:[/bold] {full_id[:8]}... ({wc or 0} words)")
+    console.print(f"  [dim]current checkpoint:[/dim] {cur_checkpoint}")
+    console.print(f"  [dim]target checkpoint:[/dim]  [green]{new_checkpoint}[/green]")
+    console.print(f"  [dim]score history rows:[/dim] {len(history)}")
+    if not yes:
+        if not typer.confirm("Proceed?"):
+            console.print("[yellow]Aborted.[/yellow]")
+            raise typer.Exit(0)
+
+    meta["checkpoint"] = new_checkpoint
+    with get_session() as session:
+        session.execute(sql_text("""
+            UPDATE drafts
+            SET custom_metadata = CAST(:meta AS jsonb),
+                updated_at = NOW()
+            WHERE id::text = :did
+        """), {"meta": _json.dumps(meta), "did": full_id})
+        session.commit()
+    console.print(
+        f"[green]✓[/green] Draft {full_id[:8]} rolled back to "
+        f"`{new_checkpoint}`. Re-run with `--resume` to continue."
+    )
 
 
 @draft_app.command(name="compare")

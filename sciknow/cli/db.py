@@ -9230,6 +9230,302 @@ def _expand_common_download_and_ingest(
     )
 
 
+# ── Phase 55.V9 — section-targeted corpus expansion ─────────────────────────
+
+@app.command(name="expand-section")
+def expand_section_cmd(
+    book_title: str = typer.Argument(
+        ..., help="Book title or ID fragment.",
+    ),
+    chapter: str | None = typer.Argument(
+        None, help="Chapter number or title fragment. Omit + use --all to "
+                   "cover every section of the book.",
+    ),
+    section: str | None = typer.Option(
+        None, "--section", "-s",
+        help="Section slug (e.g. 'the_engine_of_the_sun'). Omit to cover "
+             "every section in the chapter (or whole book with --all).",
+    ),
+    all_sections: bool = typer.Option(
+        False, "--all",
+        help="Run for every section of every chapter in the book.",
+    ),
+    only_thin: bool = typer.Option(
+        True, "--only-thin/--every",
+        help="Default: only run on sections whose latest draft scored "
+             "below --thin-threshold (the autowrite plateaued there). "
+             "Pass --every to run on every section regardless.",
+    ),
+    thin_threshold: float = typer.Option(
+        0.85, "--thin-threshold",
+        help="Sections whose final_overall is below this are considered "
+             "thin and need expansion. Default matches the autowrite "
+             "convergence target.",
+    ),
+    budget_per_query: int = typer.Option(
+        10, "--budget-per-query",
+        help="Max papers to download per seed query (one query per "
+             "plan bullet). Default 10.",
+    ),
+    max_queries: int = typer.Option(
+        6, "--max-queries",
+        help="Cap on number of seed queries per section (uses the first "
+             "N plan bullets + section title). Default 6 — bullets beyond "
+             "this are usually redundant for retrieval.",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Show what would be expanded without actually downloading.",
+    ),
+    delay: float = typer.Option(
+        0.3, "--delay",
+        help="Seconds between API calls.",
+    ),
+    workers: int = typer.Option(
+        0, "--workers", "-w",
+        help="Parallel ingest workers. 0 = INGEST_WORKERS from .env.",
+    ),
+):
+    """
+    Phase 55.V9 — targeted corpus expansion for thin-coverage sections.
+
+    For each section in scope:
+      1. Read its plan (bullet list) + topic_query + cited paper titles.
+      2. Build seed queries: one per plan bullet (capped at --max-queries)
+         plus the section title as a catch-all.
+      3. For each seed, run ``sciknow corpus expand --relevance-query <seed>
+         --budget <budget_per_query>`` as a subprocess (so Qdrant /
+         DB / asyncio state stays clean across rounds — same pattern as
+         the agentic ``corpus expand --question`` orchestrator).
+      4. Print a per-section summary: papers added per seed, totals.
+
+    Skips sections whose latest draft already crossed --thin-threshold
+    (use --every to override). Re-run autowrite with --resume after to
+    pick up the new evidence.
+
+    Examples:
+
+      sciknow corpus expand-section "Global Cooling" --all          # whole book
+      sciknow corpus expand-section "Global Cooling" 3              # one chapter
+      sciknow corpus expand-section "Global Cooling" 3 -s the_engine_of_the_sun
+      sciknow corpus expand-section "Global Cooling" --all --dry-run
+      sciknow corpus expand-section "Global Cooling" --all --every  # ignore threshold
+    """
+    import json as _json
+    import re as _re
+    import sys as _sys
+    import subprocess as _subp
+    from sqlalchemy import text as sql_text
+    from sciknow.cli import preflight as _preflight
+    _preflight()
+    from sciknow.storage.db import get_session
+
+    if chapter is None and not all_sections:
+        console.print(
+            "[red]Either supply a CHAPTER argument or use --all to "
+            "cover the whole book.[/red]"
+        )
+        raise typer.Exit(1)
+
+    # Resolve book → chapters.
+    with get_session() as session:
+        book_row = session.execute(sql_text("""
+            SELECT id::text, title FROM books
+            WHERE title ILIKE :t OR id::text LIKE :p
+            LIMIT 1
+        """), {"t": f"%{book_title}%", "p": f"{book_title}%"}).fetchone()
+        if not book_row:
+            console.print(f"[red]Book not found: {book_title!r}[/red]")
+            raise typer.Exit(1)
+        book_id, btitle = book_row[0], book_row[1]
+
+        if all_sections:
+            ch_rows = session.execute(sql_text("""
+                SELECT id::text, number, title, sections, topic_query
+                FROM book_chapters
+                WHERE book_id::text = :bid
+                ORDER BY number
+            """), {"bid": book_id}).fetchall()
+        else:
+            try:
+                num = int(chapter)
+                ch_rows = session.execute(sql_text("""
+                    SELECT id::text, number, title, sections, topic_query
+                    FROM book_chapters
+                    WHERE book_id::text = :bid AND number = :n
+                """), {"bid": book_id, "n": num}).fetchall()
+            except ValueError:
+                ch_rows = session.execute(sql_text("""
+                    SELECT id::text, number, title, sections, topic_query
+                    FROM book_chapters
+                    WHERE book_id::text = :bid AND title ILIKE :t
+                    ORDER BY number
+                """), {"bid": book_id, "t": f"%{chapter}%"}).fetchall()
+        if not ch_rows:
+            console.print("[red]No chapters matched.[/red]")
+            raise typer.Exit(1)
+
+    # Build (chapter_id, ch_num, ch_title, section_dict) tuples.
+    section_targets: list[tuple[str, int, str, dict, str]] = []
+    for ch_id, ch_num, ch_title, sections_blob, topic_q in ch_rows:
+        sections = sections_blob
+        if isinstance(sections, str):
+            try:
+                sections = _json.loads(sections)
+            except Exception:
+                sections = []
+        if not isinstance(sections, list):
+            sections = []
+        for sec in sections:
+            if not isinstance(sec, dict):
+                continue
+            sec_slug = sec.get("slug") or ""
+            if section and sec_slug != section:
+                continue
+            section_targets.append((ch_id, ch_num, ch_title or "", sec, topic_q or ""))
+
+    if not section_targets:
+        console.print("[yellow]No sections matched.[/yellow]")
+        raise typer.Exit(0)
+
+    # Filter by thin threshold (default).
+    if only_thin:
+        with get_session() as session:
+            kept = []
+            for tup in section_targets:
+                ch_id, ch_num, ch_title, sec, topic_q = tup
+                slug = sec.get("slug") or ""
+                row = session.execute(sql_text("""
+                    SELECT custom_metadata FROM drafts
+                    WHERE chapter_id::text = :cid AND section_type = :sec
+                    ORDER BY (custom_metadata->>'is_active')::boolean DESC NULLS LAST,
+                             version DESC
+                    LIMIT 1
+                """), {"cid": ch_id, "sec": slug}).fetchone()
+                if not row:
+                    # No draft yet — definitely thin.
+                    kept.append(tup)
+                    continue
+                meta = row[0] or {}
+                if isinstance(meta, str):
+                    try: meta = _json.loads(meta)
+                    except Exception: meta = {}
+                final = meta.get("final_overall") if isinstance(meta, dict) else None
+                if final is None or float(final) < thin_threshold:
+                    kept.append(tup)
+            n_dropped = len(section_targets) - len(kept)
+            if n_dropped:
+                console.print(
+                    f"[dim]--only-thin: skipping {n_dropped} section(s) "
+                    f"already at-or-above {thin_threshold:.2f}.[/dim]"
+                )
+            section_targets = kept
+
+    if not section_targets:
+        console.print("[green]All in-scope sections already converged.[/green]")
+        raise typer.Exit(0)
+
+    console.print(
+        f"\n[bold]Expand-section[/bold] · book={btitle!r} · "
+        f"sections={len(section_targets)} · "
+        f"budget={budget_per_query}/query · "
+        f"max_queries={max_queries}/section"
+    )
+
+    # Helper: pick the seed queries for one section.
+    def _seeds_for(sec: dict, ch_title: str, topic_q: str) -> list[str]:
+        plan = (sec.get("plan") or "").strip()
+        title = (sec.get("title") or "").strip()
+        bullets: list[str] = []
+        # Phase 55.V5-style markdown-bullet split.
+        for raw in _re.split(r"(?:^|\n)\s*[-*•]\s+", plan):
+            raw = raw.strip()
+            # Truncate to ~80 chars — anything longer is a paragraph
+            # that won't make a useful seed query.
+            if len(raw) >= 15:
+                bullets.append(raw[:80])
+        # Fall back to sentence split + the section title if no bullets.
+        if not bullets and plan:
+            sents = [s.strip() for s in _re.split(r"(?<=[.!?])\s+", plan) if s.strip()]
+            bullets = [s[:80] for s in sents if len(s) >= 15]
+        # Always prepend the section title (or topic_query) as a
+        # catch-all anchor — bullets are deep-but-narrow; the title
+        # is shallow-but-broad.
+        anchor = title or topic_q or ch_title
+        seeds: list[str] = []
+        if anchor:
+            seeds.append(anchor[:80])
+        seeds.extend(bullets[:max_queries - len(seeds)])
+        return seeds
+
+    grand_total = 0
+    per_section: list[dict] = []
+    for ch_id, ch_num, ch_title, sec, topic_q in section_targets:
+        slug = sec.get("slug") or "?"
+        title = sec.get("title") or slug
+        seeds = _seeds_for(sec, ch_title, topic_q)
+        console.print(
+            f"\n[bold cyan]Ch.{ch_num} {ch_title} — {slug}[/bold cyan]\n"
+            f"  [dim]{len(seeds)} seed quer{'y' if len(seeds)==1 else 'ies'}[/dim]"
+        )
+        sec_total = 0
+        sec_log: list[dict] = []
+        for i, q in enumerate(seeds, 1):
+            console.print(f"  [{i}/{len(seeds)}] {q}")
+            argv = [
+                _sys.executable, "-m", "sciknow.cli.main", "corpus", "expand",
+                "--relevance-query", q,
+                "--budget", str(budget_per_query),
+                "--delay", str(delay),
+                "--workers", str(workers),
+            ]
+            if dry_run:
+                argv.append("--dry-run")
+            try:
+                # Capture stdout so we can parse "downloaded N" line. Don't
+                # silence — let it stream to the user too.
+                res = _subp.run(argv, check=False, capture_output=True, text=True)
+                tail = (res.stdout or "")[-2000:]
+                # Extract "↓ N downloaded" / "✓ N ingested" from the
+                # standard expand summary line.
+                m_dl = _re.search(r"↓\s*(\d+)\s+downloaded", tail)
+                m_in = _re.search(r"✓\s*(\d+)\s+ingested", tail)
+                n_dl = int(m_dl.group(1)) if m_dl else 0
+                n_in = int(m_in.group(1)) if m_in else 0
+                sec_total += n_in
+                sec_log.append({
+                    "seed": q,
+                    "downloaded": n_dl,
+                    "ingested": n_in,
+                    "ok": res.returncode == 0,
+                })
+                marker = "✓" if res.returncode == 0 else "✗"
+                console.print(
+                    f"      {marker} downloaded={n_dl} ingested={n_in}"
+                )
+            except Exception as exc:
+                sec_log.append({"seed": q, "error": str(exc)[:200]})
+                console.print(f"      [red]✗ {exc}[/red]")
+
+        per_section.append({
+            "chapter": ch_num, "section": slug, "title": title,
+            "seeds": sec_log, "total_added": sec_total,
+        })
+        grand_total += sec_total
+        console.print(f"  [bold]Subtotal:[/bold] {sec_total} new paper(s)")
+
+    console.print(
+        f"\n[bold green]Done.[/bold green]  Sections processed: "
+        f"{len(per_section)}  ·  Total new papers: {grand_total}"
+    )
+    if grand_total > 0 and not dry_run:
+        console.print(
+            "\n[dim]Re-run autowrite to incorporate the new evidence:[/dim]\n"
+            "  [cyan]sciknow book autowrite \"" + btitle +
+            "\" --full --resume --only-below-target[/cyan]"
+        )
+
+
 @app.command(name="expand-cites")
 def expand_cites(
     per_seed_cap: int = typer.Option(50, "--per-seed-cap",

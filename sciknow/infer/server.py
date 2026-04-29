@@ -150,6 +150,24 @@ ROLE_DEFAULTS: dict[str, dict] = {
             "--flash-attn", "on",
         ],
     },
+    # Phase 55.V18 — metadata extractor. A small ~6 GB GGUF
+    # (Qwen3.5-9B-Q5_K_M by default) dedicated to ingestion's
+    # rare metadata Layer 4 fallback. Co-resides with embedder +
+    # reranker + MinerU during ingest (~14 GB total on a 24 GB
+    # 3090) so the convert→embed loop never has to evict anything.
+    # ctx_size=8192 is plenty: the prompt is the first ~3000
+    # chars of the PDF + a short JSON-extraction template.
+    "extractor": {
+        "port": 8095,
+        "model": settings.extractor_model_gguf,
+        "ctx_size": 8192,
+        "n_gpu_layers": 999,
+        "parallel": 1,
+        "extra_flags": [
+            "--cont-batching",
+            "--flash-attn", "on",
+        ],
+    },
 }
 
 
@@ -219,6 +237,7 @@ def _resolve_url(role: str) -> str:
         "reranker": settings.infer_reranker_url,
         "vlm": settings.infer_vlm_url,
         "scorer": settings.infer_scorer_url,
+        "extractor": settings.infer_extractor_url,
     }[role]
 
 
@@ -325,9 +344,14 @@ def _build_argv(role: str, profile: str = "default") -> list[str]:
 # Spark users skip the swap entirely. The conflict-resolver respects
 # this flag — see `_should_evict_for_vram()`.
 _VRAM_CONFLICTS: dict[str, set[str]] = {
-    "writer":   {"scorer", "vlm", "embedder", "reranker"},
-    "scorer":   {"writer", "vlm", "embedder", "reranker"},
-    "vlm":      {"writer", "scorer", "embedder", "reranker"},
+    "writer":   {"scorer", "vlm", "extractor", "embedder", "reranker"},
+    "scorer":   {"writer", "vlm", "extractor", "embedder", "reranker"},
+    "vlm":      {"writer", "scorer", "extractor", "embedder", "reranker"},
+    # Phase 55.V18 — extractor (~6 GB Qwen3.5-9B) co-resides with
+    # the small retrieval roles + MinerU during ingest (sum
+    # ~14 GB on a 24 GB 3090). It's only the big-model peers it
+    # has to evict to start.
+    "extractor": {"writer", "scorer", "vlm"},
     "embedder": {"writer", "scorer", "vlm"},
     "reranker": {"writer", "scorer", "vlm"},
 }
