@@ -37,23 +37,25 @@ ROLE_DEFAULTS: dict[str, dict] = {
     "writer": {
         "port": 8090,
         "model": settings.writer_model_gguf,
-        # Phase 55.V6 (2026-04-28) — bumped 16384 → 24576 after a
-        # full-book autowrite run silently lost 7 sections to
-        # `request (16800 tokens) exceeds the available context size
-        # (16384 tokens)` errors. The planning prompt
-        # (system + 12 retrieved chunks + leitmotiv + prior_summaries
-        # + section_plan + book_plan) routinely hit 16500–17500 tokens
-        # on text-heavy sections (climate impacts, preparedness, etc).
-        # Phase 55.V1 evicts embedder + reranker before the writer
-        # phase, so the writer is alone with the GPU; +600 MB of KV
-        # cache for the larger ctx fits comfortably (writer @ 24K
-        # peaks at ~19 GB, leaving 5 GB headroom on the 24 GB 3090).
-        "ctx_size": 24576,
+        # Phase 55.V19 (2026-04-29) — bumped 24576 → 262144 after the
+        # substrate sweep (slates #1, #1b, #3, #4) verified the viral
+        # "262K on 24 GB" claim for q4_0 KV specifically. Measured at
+        # ctx=262144 + q4_0 KV: 22.4 GB peak, 36.0 t/s decode, 1129
+        # t/s prompt-eval (large workload). Requires the writer GGUF
+        # to be plain Q4_K_M (16.8 GB on disk); UD-Q4_K_XL is 0.8 GB
+        # bigger and pushes total over 24 GB. Set
+        # WRITER_MODEL_GGUF=...Qwen3.6-27B-Q4_K_M.gguf in .env to
+        # match. The earlier 24576 default was the conservative pre-
+        # bench number; with 262K headroom we never lose a section
+        # to "request exceeds context" again.
+        "ctx_size": 262144,
         "n_gpu_layers": 999,         # all layers on GPU
         "parallel": 1,
         "extra_flags": [
             "--cont-batching",
             "--flash-attn", "on",
+            "--cache-type-k", "q4_0",
+            "--cache-type-v", "q4_0",
         ],
     },
     "embedder": {
@@ -142,12 +144,21 @@ ROLE_DEFAULTS: dict[str, dict] = {
     "scorer": {
         "port": 8094,
         "model": settings.scorer_model_gguf,
-        "ctx_size": 24576,
+        # Phase 55.V19 (2026-04-29) — bumped 24576 → 131072 with q4_0
+        # KV. Slate #5 measured: gemma-4-31B-it Q4_1 + ctx=131072 +
+        # q4_0 KV = 22.7 GB peak (0.7 GB headroom on the 3090). The
+        # 262144 row OOMed (gemma is 0.4 GB heavier than the writer,
+        # eats the headroom q4_0 buys at 262K). 131K is the safe
+        # ceiling — half the writer's, but still 5× the prior 24K
+        # default and well above any realistic verifier/CoVe input.
+        "ctx_size": 131072,
         "n_gpu_layers": 999,
         "parallel": 1,
         "extra_flags": [
             "--cont-batching",
             "--flash-attn", "on",
+            "--cache-type-k", "q4_0",
+            "--cache-type-v", "q4_0",
         ],
     },
     # Phase 55.V18 — metadata extractor. A small ~6 GB GGUF
