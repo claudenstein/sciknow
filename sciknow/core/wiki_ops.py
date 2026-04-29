@@ -833,14 +833,22 @@ def update_concepts_for_paper(
     *,
     model: str | None = None,
 ) -> Iterator[Event]:
-    """Post-ingest hook: extract entities from a paper and update concept pages."""
+    """Post-ingest hook: extract entities from a paper and update concept pages.
+
+    Phase 55.V19 — entity extraction routes through the small `extractor`
+    role (Qwen3.5-9B, ~6 GB, port 8095) instead of the writer (~22 GB).
+    Extractor co-resides with embedder + reranker per `_VRAM_CONFLICTS`,
+    so this hook no longer triggers writer↔embedder ping-pong eviction
+    when called per-PDF during a bulk ingest.
+
+    Pre-fix this called `_swap_to_phase("generate")` which loaded the
+    writer for a small structured-output task — the wrong tool. Same
+    JSON entity-extraction prompt works fine on the 9B extractor.
+    """
     from sqlalchemy import text
     from sciknow.rag import wiki_prompts
     from sciknow.rag.llm import complete as llm_complete
     from sciknow.storage.db import get_session
-    # Phase 55.V3 — concept-page update is writer-only.
-    from sciknow.core.book_ops import _swap_to_phase
-    _swap_to_phase("generate")
 
     # Use the same model as the caller (avoids Ollama model-swap OOM).
     # Previously used llm_fast_model, but on a single GPU the swap from
@@ -878,7 +886,11 @@ def update_concepts_for_paper(
     )
 
     try:
-        raw = _strip_thinking(llm_complete(sys_e, usr_e, model=fast_model, temperature=0.0, num_ctx=8192))
+        raw = _strip_thinking(llm_complete(
+            sys_e, usr_e, model=fast_model,
+            temperature=0.0, num_ctx=8192,
+            role="extractor",  # Phase 55.V19 — small role, no writer thrash
+        ))
         entities = json.loads(_clean_json(raw), strict=False)
     except Exception as exc:
         yield {"type": "error", "message": f"Entity extraction failed: {exc}"}
@@ -923,8 +935,11 @@ def update_concepts_for_paper(
                 passage=passage,
             )
             try:
-                addition = _strip_thinking(llm_complete(sys_a, usr_a, model=fast_model,
-                                        temperature=0.1, num_ctx=4096))
+                addition = _strip_thinking(llm_complete(
+                    sys_a, usr_a, model=fast_model,
+                    temperature=0.1, num_ctx=4096,
+                    role="extractor",  # Phase 55.V19 — same as entity extraction
+                ))
                 # Append to existing file
                 existing_content = concept_path.read_text(encoding="utf-8")
                 updated_content = existing_content.rstrip() + "\n\n" + addition.strip() + "\n"
