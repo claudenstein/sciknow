@@ -285,7 +285,7 @@ def _autowrite_section_body(
             SELECT id::text, title, plan FROM books WHERE id::text = :bid
         """), {"bid": book_id}).fetchone()
         ch = session.execute(text("""
-            SELECT id::text, number, title, description, topic_query, topic_cluster, sections
+            SELECT id::text, number, title, description, topic_query, topic_cluster
             FROM book_chapters WHERE id::text = :cid
         """), {"cid": chapter_id}).fetchone()
 
@@ -295,42 +295,8 @@ def _autowrite_section_body(
         return
 
     b_title, b_plan = book[1], book[2]
-    ch_id, ch_num, ch_title, ch_desc, topic_query, topic_cluster, ch_sections = ch
+    ch_id, ch_num, ch_title, ch_desc, topic_query, topic_cluster = ch
     topic = topic_query or ch_title
-
-    # Phase 55.V19 — resolve the section's human-readable title and
-    # description from the chapter's `sections` JSON outline. The
-    # retrieval query at line ~471 used to be `f"{section_type} {topic}"`
-    # where section_type is the slug (`the_science_of_sunspots`). The
-    # underscores hurt sparse keyword matching, and the slug doesn't
-    # carry the topical intent — `the_science_of_sunspots` retrieves
-    # different chunks than `The Science of Sunspots magnetic flux`.
-    # Resolved with debug_verifier.py 2026-04-28: writer fabricated 34
-    # citations against header-only chunks because retrieval surfaced
-    # them. Better query → better evidence → less fabrication pressure.
-    _section_title: str | None = None
-    _section_description: str | None = None
-    try:
-        secs = ch_sections
-        if isinstance(secs, str):
-            import json as _json
-            secs = _json.loads(secs) if secs else []
-        if isinstance(secs, list):
-            for _s in secs:
-                if isinstance(_s, dict) and _s.get("slug") == section_type:
-                    _section_title = _s.get("title")
-                    _section_description = _s.get("description")
-                    break
-    except Exception as _exc:
-        logger.debug("section title resolution failed for %s: %s",
-                     section_type, _exc)
-    # Slug→spaces fallback so a misconfigured outline still produces
-    # a usable query (e.g. "the science of sunspots" beats
-    # "the_science_of_sunspots" for sparse matching).
-    section_title_for_query = (
-        _section_title
-        or section_type.replace("_", " ").strip()
-    )
 
     # Phase 28 — load resume source NOW (before any LLM calls) so we
     # can fail fast if it's in a partial state. resume_content stays
@@ -499,16 +465,10 @@ def _autowrite_section_body(
 
     # Step 1: Initial draft
     log.stage("retrieval")
-    # Phase 55.V19 — section title (+ optional description) replace the
-    # slug `section_type` in the retrieval query. See the title-resolve
-    # block above for why.
-    _retrieval_query = f"{section_title_for_query} {topic}"
-    if _section_description:
-        _retrieval_query = f"{_retrieval_query} {_section_description}"
     with get_session() as session:
         prior_summaries = _get_prior_summaries(session, book_id, ch_num)
         results, sources = _retrieve_with_step_back(
-            session, qdrant, _retrieval_query,
+            session, qdrant, f"{section_type} {topic}",
             topic_cluster=topic_cluster, model=model,
             use_step_back=use_step_back,
         )

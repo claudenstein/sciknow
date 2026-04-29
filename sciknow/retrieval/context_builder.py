@@ -51,19 +51,10 @@ class SearchResult:
 def build(
     candidates: list[SearchCandidate],
     session: Session,
-    *,
-    min_content_chars: int = 200,
 ) -> list[SearchResult]:
     """
     Hydrate candidates with full chunk content from PostgreSQL and return
     SearchResult objects ranked by their input order (already sorted by score).
-
-    Phase 55.V19 — `min_content_chars` filters out hydrated chunks whose
-    body is too short to serve as a citation source. Corpus audit
-    (2026-04-28) showed 1047 of 33,136 chunks (~3%) are <200 chars —
-    almost all are TOC entries, page numbers, dates, or section
-    headers without body text. They rank highly via sparse keyword
-    matching but cannot ground a claim. Set to 0 to disable.
     """
     if not candidates:
         return []
@@ -86,20 +77,15 @@ def build(
     content_map = {row[0]: row[1] for row in rows}
 
     results = []
-    for candidate in candidates:
-        content = content_map.get(candidate.chunk_id, candidate.content_preview)
-        if min_content_chars > 0 and content and len(content) < min_content_chars:
-            # Skip header-only / TOC / page-number chunks — they retrieve
-            # well via sparse keyword density but have no body to cite.
-            continue
+    for rank, candidate in enumerate(candidates, start=1):
         results.append(SearchResult(
-            rank=len(results) + 1,
+            rank=rank,
             score=candidate.rrf_score,
             chunk_id=candidate.chunk_id,
             document_id=candidate.document_id,
             section_type=candidate.section_type,
             section_title=candidate.section_title,
-            content=content,
+            content=content_map.get(candidate.chunk_id, candidate.content_preview),
             title=candidate.title,
             year=candidate.year,
             authors=candidate.authors,

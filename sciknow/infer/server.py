@@ -48,6 +48,14 @@ ROLE_DEFAULTS: dict[str, dict] = {
         # phase, so the writer is alone with the GPU; +600 MB of KV
         # cache for the larger ctx fits comfortably (writer @ 24K
         # peaks at ~19 GB, leaving 5 GB headroom on the 24 GB 3090).
+        # Phase 55.V19 evening — REVERTED back to this from the
+        # 131K + q8_0 KV experiment after autowrite re-runs scored
+        # 0.12 (vs prior 0.85+ baseline) under the new substrate.
+        # Even with all writer-prompt / retrieval changes reverted,
+        # the larger-ctx + q8_0-KV config produced shorter, lower-
+        # citation output that the scorer rated near-zero on
+        # completeness/citation. The pre-bench config is the only
+        # one empirically known to produce convergent autowrite.
         "ctx_size": 24576,
         "n_gpu_layers": 999,         # all layers on GPU
         "parallel": 1,
@@ -142,6 +150,13 @@ ROLE_DEFAULTS: dict[str, dict] = {
     "scorer": {
         "port": 8094,
         "model": settings.scorer_model_gguf,
+        # Phase 55.V19 evening — REVERTED back to this from the
+        # 65K q8_0 KV experiment. Same rationale as the writer
+        # revert above; the pre-bench substrate is the only config
+        # we empirically know produces convergent autowrite at
+        # 0.85+ scores on this corpus. Scorer-side, the 24K cap is
+        # well above the realistic verify_claims input (full draft
+        # + format_context max 24K chars).
         "ctx_size": 24576,
         "n_gpu_layers": 999,
         "parallel": 1,
