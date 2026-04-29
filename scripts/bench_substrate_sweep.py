@@ -138,8 +138,15 @@ _CHUNK_TEMPLATE = (
 
 
 def _build_prompt(approx_input_tokens: int) -> str:
-    """Stuff `_CHUNK_TEMPLATE` until the prompt reaches the target size."""
-    chunks_needed = max(1, approx_input_tokens // 90)  # ~90 tokens/chunk
+    """Stuff `_CHUNK_TEMPLATE` until the prompt reaches the target size.
+
+    Phase 55.V19 — empirical token count of `_CHUNK_TEMPLATE` is **175**
+    tokens (Qwen2.5 tokenizer; verified 2026-04-28). Earlier estimate
+    of 90 was off by ~2× and produced prompts much larger than
+    advertised — `large` workload claimed 18K tokens but emitted
+    ~35.6K, overflowing ctx=24576/32768 cells with HTTP 400.
+    """
+    chunks_needed = max(1, approx_input_tokens // 175)
     body = "".join(_CHUNK_TEMPLATE.format(i=i) for i in range(chunks_needed))
     return (
         f"Topic: {_TOPIC}\n\n"

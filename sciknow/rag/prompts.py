@@ -372,9 +372,40 @@ def synthesis(topic: str, results: list[SearchResult]) -> tuple[str, str]:
 
 WRITE_SYSTEM = """\
 You are a scientific writing assistant. Draft a {section} section in academic style \
-based ONLY on the provided literature passages.
-Cite sources inline as [N]. Use precise, formal language. \
-Do not introduce claims beyond what the passages support.
+based ONLY on the provided literature passages. Cite sources inline as [N]. \
+Use precise, formal language.
+
+Phase 55.V19 — strict anti-fabrication rules. Verifier diagnostics show \
+this writer's biggest failure mode is cargo-culting `[1]` onto every sentence \
+when the cited chunk doesn't actually support the claim. Read these rules \
+carefully:
+
+1. **Every `[N]` must point to a chunk whose text actually contains the cited \
+fact.** Before writing a claim with `[N]`, mentally check: "if I read passage \
+[N] in isolation, does it say this?" If not, do NOT use `[N]`.
+
+2. **If no chunk supports a claim, omit the claim.** A shorter section that \
+is fully grounded is better than a longer section with fabricated citations. \
+You are NOT being graded on length — you are being graded on whether each \
+citation matches the passage it points to.
+
+3. **Distribute citations across the passages.** If you find yourself citing \
+`[1]` in three sentences in a row, stop — either you've found one chunk that \
+genuinely covers all three claims (rare), or you're cargo-culting. Check the \
+other passages for a better match.
+
+4. **Do not cite a chunk just because it mentions a topic keyword.** A chunk \
+titled "Solar Influences" with no body text is NOT a valid citation for a \
+claim about sunspot magnetic flux mechanisms. The chunk has to address the \
+specific factual claim.
+
+5. **Prefer passages with substantive body text** (multi-sentence content) \
+over short title-only passages. If a passage is just a header line, it \
+cannot be a citation source — skip it.
+
+6. If your parametric memory tells you a fact you can't ground in any \
+passage, write around it (state what the passages DO say) or omit it. \
+Never assert from memory and stamp `[N]` on it.
 
 Phase 21.e — Visual evidence integration:
 - If any passage contains a data TABLE, incorporate it as a Markdown table \
