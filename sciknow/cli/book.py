@@ -1085,6 +1085,208 @@ def show(
     console.print()
 
 
+# ── book scoreboard ─────────────────────────────────────────────────────────────
+
+@app.command()
+def scoreboard(
+    title: Annotated[str, typer.Argument(help="Book title or ID fragment.")],
+    target_score: float = typer.Option(
+        0.85, "--target-score", "-t",
+        help="Threshold above which a section is considered converged. Default 0.85.",
+    ),
+    chapter: int | None = typer.Option(
+        None, "--chapter", "-c",
+        help="Filter to one chapter number. Omit to show every chapter.",
+    ),
+    only_thin: bool = typer.Option(
+        False, "--only-thin",
+        help="Show only sections below target_score (or with no draft).",
+    ),
+    only_converged: bool = typer.Option(
+        False, "--only-converged",
+        help="Show only sections at-or-above target_score.",
+    ),
+):
+    """Per-section scoreboard with iteration sparkline + status.
+
+    For every section in the book's outline, prints the latest active draft's
+    iteration history as a sparkline (▁▂▃▄▅▆▇█), its final overall score,
+    word count, version, and status:
+
+      ✓  converged   final >= target_score
+      ◯  thin        final < target_score
+      ⚠  in-progress draft has a partial revising checkpoint
+      —  pending     no draft yet
+
+    Examples:
+
+      sciknow book scoreboard "Global Cooling"
+      sciknow book scoreboard "Global Cooling" --chapter 3
+      sciknow book scoreboard "Global Cooling" --only-thin
+      sciknow book scoreboard "Global Cooling" --target-score 0.80
+    """
+    import json
+    from sqlalchemy import text
+    from sciknow.storage.db import get_session
+
+    # 8-bin sparkline (Unicode block elements). Score 0..1 maps to a glyph.
+    _SPARK = "▁▂▃▄▅▆▇█"
+
+    def _spark(scores: list[float]) -> str:
+        if not scores:
+            return ""
+        out = []
+        for s in scores:
+            try:
+                v = max(0.0, min(1.0, float(s)))
+            except (TypeError, ValueError):
+                out.append(" ")
+                continue
+            idx = min(len(_SPARK) - 1, int(round(v * (len(_SPARK) - 1))))
+            out.append(_SPARK[idx])
+        return "".join(out)
+
+    with get_session() as session:
+        book = _get_book(session, title)
+        if not book:
+            console.print(f"[red]Book not found:[/red] {title}")
+            raise typer.Exit(1)
+        book_id = book[0]
+
+        chapters_q = """
+            SELECT id::text, number, title, sections
+            FROM book_chapters
+            WHERE book_id::text = :bid
+        """
+        params: dict = {"bid": book_id}
+        if chapter is not None:
+            chapters_q += " AND number = :n"
+            params["n"] = chapter
+        chapters_q += " ORDER BY number"
+        chapter_rows = session.execute(text(chapters_q), params).fetchall()
+
+        if not chapter_rows:
+            console.print(f"[yellow]No chapters{f' matching --chapter {chapter}' if chapter else ''}.[/yellow]")
+            return
+
+    console.print()
+    console.print(f"[bold cyan]{book[1]}[/bold cyan]  [dim]· scoreboard · target ≥ {target_score:.2f}[/dim]")
+    console.print()
+
+    rendered_anything = False
+    for ch_id, ch_num, ch_title, sections_blob in chapter_rows:
+        sections = sections_blob
+        if isinstance(sections, str):
+            try:
+                sections = json.loads(sections)
+            except Exception:
+                sections = []
+        if not isinstance(sections, list):
+            continue
+
+        rows: list[tuple] = []
+        with get_session() as session:
+            for sec in sections:
+                if not isinstance(sec, dict):
+                    continue
+                slug = sec.get("slug") or "(no-slug)"
+
+                # Latest active draft for (chapter, section)
+                draft_row = session.execute(text("""
+                    SELECT id::text, version, word_count, custom_metadata
+                    FROM drafts
+                    WHERE chapter_id::text = :cid AND section_type = :sec
+                    ORDER BY (custom_metadata->>'is_active')::boolean DESC NULLS LAST,
+                             version DESC
+                    LIMIT 1
+                """), {"cid": ch_id, "sec": slug}).fetchone()
+
+                if not draft_row:
+                    rows.append((slug, "", "—", 0, 0, "pending", "—"))
+                    continue
+
+                did, vers, words, cm = draft_row
+                if isinstance(cm, str):
+                    try:
+                        cm = json.loads(cm) if cm else {}
+                    except Exception:
+                        cm = {}
+                cm = cm or {}
+                final = cm.get("final_overall")
+                checkpoint = cm.get("checkpoint") or ""
+                history = cm.get("score_history") or []
+                iter_scores = []
+                for h in history:
+                    sc = (h.get("scores") or {}).get("overall") if isinstance(h, dict) else None
+                    if sc is not None:
+                        iter_scores.append(sc)
+                spark = _spark(iter_scores)
+
+                # Status classification
+                in_progress = bool(checkpoint and "revising" in checkpoint and "writing" not in checkpoint)
+                if in_progress:
+                    status = "in-progress"
+                elif isinstance(final, (int, float)) and final >= target_score:
+                    status = "converged"
+                else:
+                    status = "thin"
+
+                final_str = f"{final:.2f}" if isinstance(final, (int, float)) else "—"
+                rows.append((slug, spark, final_str, len(iter_scores), words or 0, status, vers))
+
+        # Apply filters
+        if only_thin:
+            rows = [r for r in rows if r[5] in ("thin", "in-progress", "pending")]
+        if only_converged:
+            rows = [r for r in rows if r[5] == "converged"]
+        if not rows:
+            continue
+        rendered_anything = True
+
+        console.print(f"[bold]Ch.{ch_num} {ch_title}[/bold]")
+        tbl = Table(box=box.SIMPLE_HEAD, show_header=True, expand=False, padding=(0, 1))
+        tbl.add_column("Section", min_width=42, no_wrap=False)
+        tbl.add_column("Iter", justify="left", min_width=8)
+        tbl.add_column("Final", justify="right", width=6)
+        tbl.add_column("It", justify="right", width=3)
+        tbl.add_column("Words", justify="right", width=6)
+        tbl.add_column("v", justify="right", width=3)
+        tbl.add_column("Status", justify="left", width=14, no_wrap=True)
+
+        for slug, spark, final_str, niter, words, status, vers in rows:
+            color = {
+                "converged":  "green",
+                "thin":       "yellow",
+                "in-progress":"red",
+                "pending":    "dim",
+            }.get(status, "")
+            mark = {
+                "converged":  "✓",
+                "thin":       "◯",
+                "in-progress":"⚠",
+                "pending":    "—",
+            }.get(status, " ")
+            tbl.add_row(
+                slug,
+                spark,
+                final_str,
+                str(niter) if niter else "—",
+                str(words) if words else "—",
+                str(vers) if vers else "—",
+                f"[{color}]{mark} {status}[/{color}]" if color else f"{mark} {status}",
+            )
+        console.print(tbl)
+        console.print()
+
+    if not rendered_anything:
+        if only_thin:
+            console.print("[green]All sections at-or-above target.[/green]")
+        elif only_converged:
+            console.print("[yellow]No converged sections yet.[/yellow]")
+        else:
+            console.print("[yellow]No sections found.[/yellow]")
+
+
 # ── chapter add ────────────────────────────────────────────────────────────────
 
 @chapter_app.command(name="add")
