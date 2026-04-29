@@ -693,7 +693,15 @@ def _get_book_data():
                    d.word_count, d.sources, d.version, d.summary,
                    d.review_feedback, d.chapter_id::text,
                    d.parent_draft_id::text, d.created_at,
-                   bc.number AS ch_num, bc.title AS ch_title
+                   bc.number AS ch_num, bc.title AS ch_title,
+                   -- Phase 55.V19 — surface the autowrite scores into
+                   -- the sidebar so each section shows its convergence
+                   -- state at a glance. final_overall is the post-loop
+                   -- score; checkpoint flags interrupted revisions
+                   -- (engine refuses to resume those without --force-
+                   -- resume).
+                   (d.custom_metadata->>'final_overall')::float AS final_overall,
+                   d.custom_metadata->>'checkpoint' AS checkpoint
             FROM drafts d
             LEFT JOIN book_chapters bc ON bc.id = d.chapter_id
             WHERE d.book_id = :bid
@@ -1481,12 +1489,18 @@ def _render_book(book, chapters, drafts, gaps, comments,
             seen_slugs.add(slug)
             d = draft_by_slug.get(slug)
             if d:
+                # Phase 55.V19 — d[14] = final_overall (autowrite final
+                # score), d[15] = checkpoint (interrupted-revision flag)
+                _final = d[14] if len(d) > 14 else None
+                _checkpoint = d[15] if len(d) > 15 else None
                 sections.append({
                     "id": d[0], "type": d[2] or "text",
                     "title": tmpl["title"],
                     "plan": tmpl["plan"],
                     "version": d[6] or 1, "words": d[4] or 0,
                     "status": "drafted",
+                    "final_overall": _final,
+                    "checkpoint": _checkpoint,
                 })
             else:
                 sections.append({
@@ -1495,6 +1509,8 @@ def _render_book(book, chapters, drafts, gaps, comments,
                     "plan": tmpl["plan"],
                     "version": 0, "words": 0,
                     "status": "empty",
+                    "final_overall": None,
+                    "checkpoint": None,
                 })
         # Append orphan drafts (drafts whose section_type doesn't match
         # any current template slug) at the end so the user can find
@@ -1502,12 +1518,16 @@ def _render_book(book, chapters, drafts, gaps, comments,
         for slug, d in draft_by_slug.items():
             if slug in seen_slugs:
                 continue
+            _final = d[14] if len(d) > 14 else None
+            _checkpoint = d[15] if len(d) > 15 else None
             sections.append({
                 "id": d[0], "type": d[2] or "text",
                 "title": _titleify_slug_for_display(slug),
                 "plan": "",
                 "version": d[6] or 1, "words": d[4] or 0,
                 "status": "orphan",
+                "final_overall": _final,
+                "checkpoint": _checkpoint,
             })
 
         sidebar_items.append({
@@ -1791,6 +1811,39 @@ def _render_sidebar(items, active_id):
             sec_v = int(sec.get("version") or 0)
             sec_w = int(sec.get("words") or 0)
 
+            # Phase 55.V19 — autowrite convergence score badge.
+            # final_overall ∈ [0,1], or None for never-scored drafts.
+            # Color tiers: green ≥0.85 (converged), amber 0.65-0.84
+            # (thin), red <0.65 (poor). Checkpoint with "*_revising"
+            # marks an interrupted run that won't resume without
+            # --force-resume; render as a small ⚠ badge.
+            sec_final = sec.get("final_overall")
+            sec_checkpoint = sec.get("checkpoint") or ""
+            if isinstance(sec_final, (int, float)):
+                if sec_final >= 0.85:
+                    _score_cls = "sec-score sec-score-good"
+                elif sec_final >= 0.65:
+                    _score_cls = "sec-score sec-score-mid"
+                else:
+                    _score_cls = "sec-score sec-score-low"
+                _score_html = (
+                    f'<span class="{_score_cls}" '
+                    f'title="Latest autowrite final_overall score. '
+                    f'Green ≥0.85 (converged), amber 0.65–0.84 (thin), '
+                    f'red <0.65.">{sec_final:.2f}</span>'
+                )
+            else:
+                _score_html = ""
+            _stuck_html = ""
+            if "revising" in sec_checkpoint and "writing" not in sec_checkpoint:
+                _stuck_html = (
+                    f'<span class="sec-stuck-badge" '
+                    f'title="Autowrite was interrupted mid-revision '
+                    f'(checkpoint={sec_checkpoint!r}). Resume skips '
+                    f'this; use --force-resume or `book draft '
+                    f'rollback &lt;id&gt;`.">⚠</span>'
+                )
+
             # Phase 32.4 — inline ✗ delete button mirrors what
             # rebuildSidebar() in sciknow.js renders. Without this, the
             # section ✗ button only existed AFTER a JS rebuild fired
@@ -1849,6 +1902,7 @@ def _render_sidebar(items, active_id):
                     f'<span class="sec-status-dot orphan"></span>'
                     f'{display} '
                     f'<span class="meta">orphan \u00b7 v{sec_v} \u00b7 {sec_w}w</span>'
+                    f'{_score_html}{_stuck_html}'
                     f'<button class="sec-orphan-adopt" '
                     f'onclick="event.preventDefault();event.stopPropagation();'
                     f'adoptOrphanSection(\'{ch_id}\',\'{sec_type}\')" '
@@ -1878,6 +1932,7 @@ def _render_sidebar(items, active_id):
                     f'<span class="sec-status-dot drafted"></span>'
                     f'{display} '
                     f'<span class="meta">v{sec_v} \u00b7 {sec_w}w</span>'
+                    f'{_score_html}{_stuck_html}'
                     f'{sec_del_btn}</a>'
                 )
         if not ch["sections"]:

@@ -208,6 +208,36 @@ button, input, textarea, select { font-family: inherit; color: inherit; }
 .sec-link .meta { font-size: 11px; color: var(--fg-faint); margin-left: 6px; }
 .sec-link.empty { color: var(--fg-faint); font-style: italic; }
 
+/* Phase 55.V19 — autowrite final_overall score badge in the sidebar.
+   Compact pill, color-coded by tier. Tooltip explains the bands. */
+.sec-link .sec-score {
+  font-size: 10.5px;
+  font-weight: 600;
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-variant-numeric: tabular-nums;
+  vertical-align: 1px;
+}
+.sec-link .sec-score-good { background: #dcfce7; color: #166534; }
+.sec-link .sec-score-mid  { background: #fef3c7; color: #854d0e; }
+.sec-link .sec-score-low  { background: #fee2e2; color: #991b1b; }
+.sec-link .sec-stuck-badge {
+  font-size: 11px;
+  margin-left: 4px;
+  cursor: help;
+  color: #c2410c;
+}
+@media (prefers-color-scheme: dark) {
+  .sec-link .sec-score-good { background: #14532d; color: #bbf7d0; }
+  .sec-link .sec-score-mid  { background: #78350f; color: #fde68a; }
+  .sec-link .sec-score-low  { background: #7f1d1d; color: #fecaca; }
+}
+body.sidebar-rail .sidebar .sec-link .sec-score,
+body.sidebar-rail .sidebar .sec-link .sec-stuck-badge {
+  display: none !important;
+}
+
 /* ── Phase 54.6.194 — sidebar rail mode.
    A compact ~64px chapter navigator. Shows chapter numbers as
    vertical labels (Ch.1 / Ch.2 / …) with the status-dot row
