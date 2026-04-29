@@ -1948,19 +1948,30 @@ def _render_sidebar(items, active_id):
     return out
 
 
+_LEADING_CITE_NUM = re.compile(r"^\s*\[(\d+)\]")
+
+
 def _render_sources(sources):
     """Render the right-panel sources list. Phase 22 — escapes each
-    source string. Phase 48 — the source strings already carry their
-    own `[1]`, `[2]` prefix (emitted by the writer prompt), so we
-    suppress the <ol> auto-numbering to avoid the redundant
-    "1. [1] Smith et al…" rendering. The <li> tag itself stays so that
-    buildPopovers can still query `#panel-sources li` in order."""
+    source string. Phase 48 — source strings already carry their own
+    `[N]` prefix (emitted by the writer or the global bibliography
+    remap), so we suppress <ol> auto-numbering. **Phase 55.V19b**: the
+    `[N]` from the source string drives the DOM `id` and `data-ref`,
+    not the sequential position. Without this, when the body has been
+    remapped to global bibliography numbers (Phase 54.6.309) the
+    sources panel still emits `id="source-1"`, `source-2"`, ... and
+    every body citation past the local-source-count is flagged
+    citation-broken even though the source IS present in the deduped
+    panel — just under its global number, not its position."""
     if not sources:
         return "<em>No sources.</em>"
     out = '<ol style="list-style:none;padding-left:0;margin-left:0;">'
-    for i, s in enumerate(sources):
-        if s:
-            out += f'<li id="source-{i+1}">{_esc(s)}</li>'
+    for i, s in enumerate(sources, start=1):
+        if not s:
+            continue
+        m = _LEADING_CITE_NUM.match(s)
+        n = int(m.group(1)) if m else i
+        out += f'<li id="source-{n}" data-ref="{n}">{_esc(s)}</li>'
     out += "</ol>"
     return out
 

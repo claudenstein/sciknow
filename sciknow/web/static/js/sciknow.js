@@ -5086,8 +5086,15 @@ function buildPopovers() {
   // Extract source data from the sources panel
   const sourceItems = document.querySelectorAll('#panel-sources li');
   const sourceData = {};
+  // Phase 55.V19b — key by the [N] prefix on the <li> (server emits
+  // `data-ref="N"` from the source string's leading `[N]`), falling
+  // back to sequential index for legacy / un-prefixed sources. This
+  // is required when the body has been remapped to global bibliography
+  // numbers (e.g. [49], [55]) but the panel only holds the cited
+  // subset — keying by position would mis-align every globalized cite.
   sourceItems.forEach((li, i) => {
-    sourceData[i + 1] = li.textContent;
+    const ref = li.dataset.ref ? parseInt(li.dataset.ref) : (i + 1);
+    sourceData[ref] = li.textContent;
   });
 
   // Phase 20 — count broken citations so we can warn the user once.
