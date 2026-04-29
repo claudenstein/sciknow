@@ -30,10 +30,18 @@ Workload = `typical` (5K input + 1500 output, reps=3).
   region.** Only q8_0 shows a measurable drop (~2.5%, 65K→131K).
   The viral "flat 40 t/s curve" claim has the right shape, just at
   ~36-38 t/s on this hardware/build.
-- **q8_0:q4_0 asymmetric K:V is structurally broken** on this
-  llama.cpp build. Server boots, inference hangs past 300s at every
-  ctx tested (16K, 262K). Likely a missing fused flash-attn kernel
-  for asymmetric K/V quants. Tracked separately; do not promote.
+- **q8_0:q4_0 asymmetric K:V is non-viable** on this llama.cpp build.
+  Tested 2026-04-28 at ctx=16K with reps=1 across `--flash-attn on`
+  and `--flash-attn off`:
+  - FA on: decode 14.7 t/s, prompt-eval 108 t/s — server boots but
+    runs ~3× slower decode and ~12× slower prefill than non-mixed
+    cache types (~36 t/s decode and ~1270 t/s prefill at the same
+    ctx). The earlier ReadTimeouts at 262K were just this slow path
+    × large workload exceeding the 300s request timeout.
+  - FA off: `up_failed` (server doesn't become healthy in 180s).
+    llama.cpp evidently has no non-FA code path for asymmetric K/V.
+  Either way, do not promote — even the working configuration is
+  too slow to make the 25%-VRAM-savings worthwhile.
 
 **Production decision (with slate #2 quality probe parked):**
 
