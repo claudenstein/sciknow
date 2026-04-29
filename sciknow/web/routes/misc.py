@@ -28,6 +28,112 @@ def _titleify_slug_for_display(slug: str) -> str:
     return slug.replace("-", " ").replace("_", " ").strip().capitalize()
 
 
+# Phase 55.V19 — GGUF max-ctx detection. Cached per-file so we don't
+# re-parse the metadata block every dashboard load. Returns the
+# architectural context_length from GGUF; None if the file isn't
+# readable or the key isn't present.
+_GGUF_MAX_CTX_CACHE: dict[str, int | None] = {}
+
+
+def _gguf_max_ctx(path: str) -> int | None:
+    if path in _GGUF_MAX_CTX_CACHE:
+        return _GGUF_MAX_CTX_CACHE[path]
+    try:
+        import gguf as _gguf
+        r = _gguf.GGUFReader(path)
+        for fname, f in r.fields.items():
+            if "context_length" in fname or "max_position_embeddings" in fname:
+                try:
+                    val = int(f.contents())
+                    _GGUF_MAX_CTX_CACHE[path] = val
+                    return val
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    _GGUF_MAX_CTX_CACHE[path] = None
+    return None
+
+
+def _build_substrate_view() -> dict:
+    """Render the ROLE_DEFAULTS map + GGUF max-ctx detection +
+    live healthy state for the dashboard's substrate config view.
+
+    Phase 55.V19 — surfaces the per-role config (model, ctx_size,
+    KV cache type, parallel slots) plus a `maxed` flag set when the
+    role's ctx_size equals the GGUF's architectural context_length
+    (e.g. bge-m3 / bge-reranker-v2-m3 are bert-architecture with a
+    hard 8192 cap; setting ctx higher there would just allocate
+    unused KV).
+    """
+    import os
+    from pathlib import Path
+    try:
+        from sciknow.infer.server import ROLE_DEFAULTS, _VRAM_CONFLICTS, health
+    except Exception as exc:
+        return {"error": f"infer.server unavailable: {exc}"}
+
+    # Categorise roles by VRAM cohort so the GUI can render them
+    # as two tables (big-model exclusive vs small co-resident).
+    BIG = ("writer", "scorer", "vlm")
+    SMALL = ("extractor", "embedder", "reranker")
+
+    rows: list[dict] = []
+    for role in BIG + SMALL:
+        cfg = ROLE_DEFAULTS.get(role)
+        if not cfg:
+            continue
+        flags = cfg.get("extra_flags") or []
+        # Pull --cache-type-k/v from extra_flags (default fp16 if absent).
+        cache_k = "fp16"
+        cache_v = "fp16"
+        for i, f in enumerate(flags):
+            if f == "--cache-type-k" and i + 1 < len(flags):
+                cache_k = flags[i + 1]
+            elif f == "--cache-type-v" and i + 1 < len(flags):
+                cache_v = flags[i + 1]
+
+        model_path = str(cfg.get("model") or "")
+        max_ctx = _gguf_max_ctx(model_path)
+        ctx_size = int(cfg.get("ctx_size") or 0)
+        parallel = int(cfg.get("parallel") or 1)
+
+        try:
+            healthy = bool(health(role, timeout=0.3))
+        except Exception:
+            healthy = False
+
+        # llama-server's --ctx-size is the TOTAL context budget across
+        # all parallel slots; per-slot ctx is ctx_size / parallel. The
+        # GGUF's `context_length` is the model architectural per-slot
+        # max, so the "maxed" check has to compare per-slot, not total.
+        # Without this, the embedder (parallel=4, ctx=32768, per-slot
+        # 8192) would falsely show as maxed because total 32768 ≥ 8192.
+        per_slot_ctx = ctx_size // parallel if parallel > 0 else ctx_size
+        is_maxed = (max_ctx is not None and per_slot_ctx >= max_ctx)
+
+        rows.append({
+            "role": role,
+            "cohort": "big" if role in BIG else "small",
+            "port": cfg.get("port"),
+            "model_filename": os.path.basename(model_path) if model_path else "",
+            "model_path": model_path,
+            "ctx_size": ctx_size,
+            "per_slot_ctx": per_slot_ctx,
+            "model_max_ctx": max_ctx,
+            "maxed": is_maxed,
+            "cache_k": cache_k,
+            "cache_v": cache_v,
+            "parallel": parallel,
+            "n_gpu_layers": cfg.get("n_gpu_layers"),
+            "extra_flags_str": " ".join(flags),
+            "healthy": healthy,
+            "evicts": sorted(_VRAM_CONFLICTS.get(role, set())),
+        })
+
+    return {"roles": rows}
+
+
 @router.get("/api/section/{draft_id}")
 async def api_section(draft_id: str):
     """Return section data as JSON for SPA navigation."""
@@ -343,6 +449,14 @@ async def api_dashboard():
     except Exception as exc:
         _app.logger.warning("dashboard total_compute stats failed: %s", exc)
 
+    # Phase 55.V19 — substrate config view. For each role report
+    # model file, ctx_size, K/V cache type, parallel slots, and
+    # whether the configured ctx_size matches the model's
+    # architectural max (read from GGUF metadata, cached). Helps
+    # the user verify the runtime config matches what they expect
+    # without dropping to a CLI.
+    substrate = _build_substrate_view()
+
     return {
         "heatmap": heatmap,
         # Phase 30 — column headers are positional integers, not slugs
@@ -357,6 +471,7 @@ async def api_dashboard():
         "autowrite_stats": autowrite_stats,
         "total_compute": total_compute,
         "gaps": open_gaps,
+        "substrate": substrate,
     }
 
 

@@ -289,14 +289,142 @@ def _get_nli():
     return _NLI_MODEL
 
 
+_LLM_NLI_SYSTEM = (
+    "You are a strict text-entailment classifier. For each numbered "
+    "(PREMISE, HYPOTHESIS) pair, decide whether the premise entails "
+    "the hypothesis. Reply with ONE NUMBER per line — exactly one of:\n"
+    "  1.0  = the premise clearly entails the hypothesis\n"
+    "  0.5  = neutral — the premise neither entails nor contradicts\n"
+    "  0.0  = the premise contradicts or has no relevant content\n"
+    "No prose, no labels, just one decimal number per pair, in order. "
+    "If a pair lacks any premise text, score it 0.0."
+)
+
+
+def _llm_nli_entail_probs(
+    premise_hyp_pairs: list[tuple[str, str]],
+    *,
+    role: str = "scorer",
+    max_pairs_per_call: int = 12,
+) -> list[float]:
+    """LLM-based entailment scoring via llama-server.
+
+    Phase 55.V19 — replaces the in-process PyTorch CrossEncoder
+    (`cross-encoder/nli-deberta-v3-base`) which OOM'd whenever a
+    big-model role was already resident on the GPU. The scorer
+    (gemma-4-31B-it Q4_1) is up during the autowrite score phase
+    anyway; reusing it for NLI eliminates the dual-pool VRAM
+    contention permanently.
+
+    Trade vs the cross-encoder: ~500 ms per pair (vs ~50 ms NLI
+    on GPU); discrete output bands (1.0 / 0.5 / 0.0) instead of
+    a calibrated continuous probability. For autowrite's two
+    callers (`citation_align`, `plan_coverage`) the discreteness
+    is fine — both threshold at 0.5 anyway.
+
+    Batches up to ``max_pairs_per_call`` pairs per request to
+    amortise the prompt setup. With max_pairs=12 the prompt fits
+    in <2K tokens for typical chunk+claim sizes.
+    """
+    if not premise_hyp_pairs:
+        return []
+
+    from sciknow.infer import client as _ifc
+
+    # Cap each side to keep the prompt tractable. Premise can be a
+    # full chunk (up to ~3K chars); hypothesis is a single sentence
+    # or bullet (~200 chars).
+    def _trim(text: str, max_chars: int) -> str:
+        text = (text or "").strip()
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars] + "…"
+
+    out: list[float] = []
+    for i in range(0, len(premise_hyp_pairs), max_pairs_per_call):
+        batch = premise_hyp_pairs[i:i + max_pairs_per_call]
+        # Build a numbered prompt. The scorer is gemma; chat-template
+        # handling lives in infer.client, we just need plain user text.
+        user_lines = []
+        for j, (premise, hypothesis) in enumerate(batch, start=1):
+            user_lines.append(
+                f"=== PAIR {j} ===\n"
+                f"PREMISE: {_trim(premise, 2400)}\n"
+                f"HYPOTHESIS: {_trim(hypothesis, 600)}\n"
+            )
+        user = (
+            "\n".join(user_lines)
+            + f"\n\nReturn exactly {len(batch)} number(s), one per line, "
+            f"in the same order as the pairs above."
+        )
+        try:
+            raw = _ifc.chat_complete(
+                _LLM_NLI_SYSTEM, user,
+                role=role,
+                temperature=0.0,
+                num_predict=8 * len(batch),  # ~3 chars + newline per number
+                num_ctx=8192,
+            )
+        except Exception as exc:
+            # Bubble up so the caller's existing graceful-fallback path
+            # can mark the dimension as disabled (returns 0.0 for all
+            # pairs in batch and continues).
+            raise RuntimeError(
+                f"LLM-NLI call failed (role={role}): "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+
+        # Parse one number per line. Tolerate stray whitespace/text by
+        # extracting the first decimal token from each line.
+        import re as _re
+        lines = [ln.strip() for ln in (raw or "").splitlines() if ln.strip()]
+        scores: list[float] = []
+        for ln in lines:
+            m = _re.search(r"([01](?:\.\d+)?|0\.\d+|0|1)", ln)
+            if m:
+                try:
+                    v = float(m.group(1))
+                    scores.append(max(0.0, min(1.0, v)))
+                except ValueError:
+                    pass
+        # Pad/truncate to the batch size. Missing ⇒ 0.0 (fail-closed).
+        if len(scores) < len(batch):
+            scores += [0.0] * (len(batch) - len(scores))
+        out.extend(scores[:len(batch)])
+    return out
+
+
 def _nli_entail_probs(premise_hyp_pairs: list[tuple[str, str]]) -> list[float]:
     """Batch-score (premise, hypothesis) pairs. Returns P(entailment)
     in [0, 1] per pair.
 
-    The cross-encoder output has 3 classes in order
-    [contradiction, entailment, neutral]. We softmax and take column 1."""
+    Phase 55.V19 — by default routes through the scorer LLM
+    (`_llm_nli_entail_probs`) rather than the in-process PyTorch
+    CrossEncoder. The CrossEncoder path is still available via the
+    ``USE_LLM_NLI=false`` env override for the bench harness, where
+    the substrate isn't necessarily up and the calibrated continuous
+    output of the cross-encoder is preferred for fine-grained
+    metrics.
+    """
     if not premise_hyp_pairs:
         return []
+
+    import os
+    use_llm = os.environ.get("USE_LLM_NLI", "true").strip().lower() not in ("0", "false", "no")
+    if use_llm:
+        try:
+            return _llm_nli_entail_probs(premise_hyp_pairs)
+        except Exception as exc:
+            # Fall through to PyTorch as a last resort (also OOM-prone
+            # but mathematically more accurate). Most callers wrap us
+            # in their own try/except and treat any exception as
+            # "feature disabled".
+            import logging
+            logging.getLogger(__name__).warning(
+                "LLM-NLI failed; falling back to PyTorch cross-encoder: %s",
+                exc,
+            )
+
     nli = _get_nli()
     import numpy as np
     logits = nli.predict(premise_hyp_pairs, convert_to_numpy=True,

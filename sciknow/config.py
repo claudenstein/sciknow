@@ -592,6 +592,27 @@ class Settings(BaseSettings):
     def wiki_dir(self) -> Path:
         return self.data_dir / "wiki"
 
+    # Phase 55.V19 — controls the per-PDF wiki concept-update hook in
+    # `pipeline.ingest()` (post-ingest, after embedding). The hook
+    # extracts entities + writes wiki concept pages, which is an LLM
+    # call that under v2-llamacpp loads the 17–22 GB writer and
+    # triggers writer↔embedder ping-pong eviction (the writer is up
+    # for the wiki call, gets evicted when the next PDF needs the
+    # embedder, gets re-loaded for the next PDF's wiki call, …) for
+    # ~30 s per PDF of swap thrash.
+    #
+    # Under v1-Ollama the same hook was cheap (`keep_alive=-1` kept
+    # the model warm without explicit eviction). Under v2 the hook
+    # has to be explicitly opted into. Default OFF — `corpus ingest`
+    # only does ingest work; run `sciknow wiki update` afterwards if
+    # you want the concept pages refreshed.
+    #
+    # When ON, the wiki extraction routes through the small
+    # `extractor` role (Qwen3.5-9B, ~6 GB), which co-resides with
+    # the embedder + reranker without eviction. So enabling it under
+    # v2 is now actually safe; OFF stays the conservative default.
+    wiki_update_on_ingest: bool = False
+
     # Phase 54.6.24 — auto-backup
     backup_retain_count: int = 7
     backup_include_code: bool = True

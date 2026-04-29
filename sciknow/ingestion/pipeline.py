@@ -586,9 +586,18 @@ def ingest(
             logger.info(f"INGEST OK    {pdf_path.name}  doc={doc_id}")
 
             # Wiki post-ingest hook: update concept pages if wiki is initialized.
-            # Wrapped in try/except so wiki failures never block ingestion.
+            # Phase 55.V19 — also gate on `wiki_update_on_ingest` (default
+            # False under v2-llamacpp). The hook loads the writer for an
+            # LLM concept-extraction call, which triggers writer↔embedder
+            # ping-pong eviction (~30 s/paper of swap thrash) on a 24 GB
+            # 3090. v1-Ollama got away with always-on because keep_alive=-1
+            # kept the model warm; v2 has explicit VRAM discipline.
+            # Run `sciknow wiki update` after ingest instead, or set
+            # `WIKI_UPDATE_ON_INGEST=true` in .env to opt back in (the
+            # hook now routes through the small `extractor` role so it's
+            # cheap under v2 too).
             try:
-                if settings.wiki_dir.exists():
+                if settings.wiki_dir.exists() and settings.wiki_update_on_ingest:
                     from sciknow.core.wiki_ops import update_concepts_for_paper
                     for event in update_concepts_for_paper(str(doc_id)):
                         if event.get("type") == "error":

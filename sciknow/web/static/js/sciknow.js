@@ -3752,6 +3752,62 @@ async function showDashboard() {
   html += '<div class="stat-tile"><div class="num">' + s.comments + '</div><div class="lbl">Comments</div></div>';
   html += '</div>';
 
+  // Phase 55.V19 — substrate config tables. Two tables:
+  //   1. Big-model exclusive cohort (writer/scorer/vlm) — only one
+  //      can be loaded at a time on the GPU.
+  //   2. Small co-resident cohort (extractor/embedder/reranker) —
+  //      can all share the GPU with MinerU during ingest.
+  // Each row shows model file, ctx, K/V cache type, parallel slots,
+  // a "maxed" indicator (✓ when ctx == GGUF context_length), and
+  // a live healthy state.
+  if (data.substrate && Array.isArray(data.substrate.roles)) {
+    const fmtCtx = (n) => {
+      if (n >= 1024 && n % 1024 === 0) return (n / 1024) + 'K';
+      return String(n);
+    };
+    const renderSubstrateTable = (rows, title) => {
+      let h = '<h3 class="u-heading-section u-lg u-semibold u-muted u-upper u-ls-sm" style="margin-top:24px;">' + title + '</h3>';
+      h += '<div style="overflow-x:auto;">';
+      h += '<table class="substrate-table" style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:8px;">';
+      h += '<thead><tr style="border-bottom:1px solid var(--border);text-align:left;">'
+        +  '<th style="padding:6px 10px;">role</th>'
+        +  '<th style="padding:6px 10px;">model</th>'
+        +  '<th style="padding:6px 10px;text-align:right;">ctx</th>'
+        +  '<th style="padding:6px 10px;text-align:right;">model max</th>'
+        +  '<th style="padding:6px 10px;">K quant</th>'
+        +  '<th style="padding:6px 10px;">V quant</th>'
+        +  '<th style="padding:6px 10px;text-align:right;">slots</th>'
+        +  '<th style="padding:6px 10px;">status</th>'
+        + '</tr></thead><tbody>';
+      for (const r of rows) {
+        const maxedHtml = r.maxed
+          ? '<span title="ctx_size matches GGUF context_length — cannot be raised at the model architectural level" style="color:#16a34a;font-weight:600;">✓ maxed</span>'
+          : (r.model_max_ctx ? '<span style="color:var(--fg-faint);">' + fmtCtx(r.model_max_ctx) + '</span>' : '<span style="color:var(--fg-faint);">—</span>');
+        const healthyDot = r.healthy
+          ? '<span title="role is healthy on its port" style="color:#16a34a;">●</span> '
+          : '<span title="role is not running" style="color:var(--fg-faint);">○</span> ';
+        const kClass = r.cache_k === 'fp16' ? '' : 'background:#dbeafe;color:#1e3a8a;padding:1px 5px;border-radius:3px;font-weight:600;';
+        const vClass = r.cache_v === 'fp16' ? '' : 'background:#dbeafe;color:#1e3a8a;padding:1px 5px;border-radius:3px;font-weight:600;';
+        h += '<tr style="border-bottom:1px solid var(--border-faint);">'
+          +  '<td style="padding:6px 10px;font-weight:600;">' + healthyDot + escapeHtml(r.role) + '</td>'
+          +  '<td style="padding:6px 10px;font-family:var(--font-mono);" title="' + escapeHtml(r.model_path) + '">' + escapeHtml(r.model_filename) + '</td>'
+          +  '<td style="padding:6px 10px;text-align:right;font-family:var(--font-mono);">' + fmtCtx(r.ctx_size) + '</td>'
+          +  '<td style="padding:6px 10px;text-align:right;">' + maxedHtml + '</td>'
+          +  '<td style="padding:6px 10px;"><span style="' + kClass + '">' + escapeHtml(r.cache_k) + '</span></td>'
+          +  '<td style="padding:6px 10px;"><span style="' + vClass + '">' + escapeHtml(r.cache_v) + '</span></td>'
+          +  '<td style="padding:6px 10px;text-align:right;">' + (r.parallel || 1) + '</td>'
+          +  '<td style="padding:6px 10px;font-size:11px;color:var(--fg-faint);" title="evicts: ' + escapeHtml((r.evicts || []).join(', ')) + '">:' + r.port + '</td>'
+          + '</tr>';
+      }
+      h += '</tbody></table></div>';
+      return h;
+    };
+    const big = data.substrate.roles.filter(r => r.cohort === 'big');
+    const small = data.substrate.roles.filter(r => r.cohort === 'small');
+    html += renderSubstrateTable(big, 'Substrate &mdash; big-model roles (mutually exclusive on GPU)');
+    html += renderSubstrateTable(small, 'Substrate &mdash; small co-resident roles (share GPU with MinerU)');
+  }
+
   // Phase 35 — Total Compute panel. Aggregates every LLM-backed job
   // (write/review/revise/argue/gaps/autowrite/plan/...) from the
   // llm_usage_log ledger so the user can see total GPU compute spent
