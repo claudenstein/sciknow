@@ -5909,7 +5909,7 @@ def expand(
     relevance:          bool  = typer.Option(True,  "--relevance/--no-relevance",
                                               help="Filter candidate references by semantic relevance to the corpus."),
     relevance_threshold: float = typer.Option(0.0, "--relevance-threshold",
-                                               help="Cosine similarity threshold (0 = use EXPAND_RELEVANCE_THRESHOLD from .env, default 0.55)."),
+                                               help="Cosine similarity threshold (0 = use EXPAND_RELEVANCE_THRESHOLD from .env, default 0.75)."),
     relevance_query:    str   = typer.Option("",    "--relevance-query", "-q",
                                               help="Free-text topic anchor for the relevance filter. If empty, the corpus centroid is used."),
     workers:            int   = typer.Option(0,     "--workers", "-w",
@@ -6282,6 +6282,60 @@ def expand(
                 downloadable = sorted(
                     kept, key=lambda r: r._relevance_score, reverse=True
                 )
+
+                # Phase 55.V19 — reranker cross-encoder pass on top of
+                # the cosine prefilter. bge-m3 cosine alone scored
+                # cross-domain stellar-physics papers (X-Ray Spectroscopy
+                # of Stars, Star-Forming Galaxies at Cosmic Noon) at
+                # 0.55-0.70 against solar-physics seeds because the
+                # vocabulary overlaps even though the domain doesn't.
+                # The bge-reranker-v2-m3 cross-encoder reads (query, doc)
+                # pairs jointly and is much sharper at fine-grained
+                # relevance — typically 0.5+ for on-topic, near-0 for
+                # cross-domain noise. Only runs when `relevance_query`
+                # is explicit (centroid mode has no usable query string).
+                if relevance_query and downloadable:
+                    try:
+                        from sciknow.infer import client as _ifc
+                        rerank_threshold = 0.5  # cross-encoder score
+                        # Reranker prefers actual abstract/title content;
+                        # truncate to 800 chars per the reranker's
+                        # ubatch=8192 budget across the batch.
+                        docs_for_rerank = [
+                            (r.title or r.raw_text or "")[:800]
+                            for r in downloadable
+                        ]
+                        rerank_scores: list[float] = _ifc.rerank(
+                            relevance_query, docs_for_rerank,
+                        )
+                        for r, rs in zip(downloadable, rerank_scores):
+                            r._rerank_score = float(rs)
+                        before_rr = len(downloadable)
+                        downloadable = [
+                            r for r in downloadable
+                            if r._rerank_score >= rerank_threshold
+                        ]
+                        downloadable.sort(
+                            key=lambda r: r._rerank_score, reverse=True,
+                        )
+                        rr_dropped = before_rr - len(downloadable)
+                        if rr_dropped:
+                            console.print(
+                                f"  [bold]Reranker pass[/bold]: kept "
+                                f"[green]{len(downloadable)}[/green]  "
+                                f"[red]dropped {rr_dropped}[/red] "
+                                f"(cross-encoder cut at "
+                                f"{rerank_threshold:.2f})"
+                            )
+                    except Exception as rr_exc:
+                        # Reranker role might be down; this is non-fatal
+                        # since the cosine filter already removed obvious
+                        # noise. Log and continue with cosine results.
+                        console.print(
+                            f"[yellow]⚠ Reranker pass skipped: "
+                            f"{type(rr_exc).__name__}: "
+                            f"{str(rr_exc)[:100]}[/yellow]"
+                        )
         except Exception as exc:
             # Most common failure mode: CUDA OOM because another model
             # (Ollama-held LLM, or a concurrent ingest) is occupying VRAM.
@@ -7904,7 +7958,7 @@ def expand_author(
     relevance_query: str = typer.Option("", "--relevance-query", "-q",
         help="Free-text topic anchor for the relevance filter. If empty, the corpus centroid is used."),
     relevance_threshold: float = typer.Option(0.0, "--relevance-threshold",
-        help="Cosine similarity threshold (0 = use EXPAND_RELEVANCE_THRESHOLD from .env, default 0.55)."),
+        help="Cosine similarity threshold (0 = use EXPAND_RELEVANCE_THRESHOLD from .env, default 0.75)."),
     # Phase 43d — default resolved in body (see `expand` above).
     download_dir: Path = typer.Option(None, "--download-dir", "-d",
         help="Directory where new PDFs are saved before ingestion (default: <project data>/downloads)."),
