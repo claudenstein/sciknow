@@ -37,31 +37,26 @@ ROLE_DEFAULTS: dict[str, dict] = {
     "writer": {
         "port": 8090,
         "model": settings.writer_model_gguf,
-        # Phase 55.V6 (2026-04-28) — bumped 16384 → 24576 after a
-        # full-book autowrite run silently lost 7 sections to
-        # `request (16800 tokens) exceeds the available context size
-        # (16384 tokens)` errors. The planning prompt
-        # (system + 12 retrieved chunks + leitmotiv + prior_summaries
-        # + section_plan + book_plan) routinely hit 16500–17500 tokens
-        # on text-heavy sections (climate impacts, preparedness, etc).
-        # Phase 55.V1 evicts embedder + reranker before the writer
-        # phase, so the writer is alone with the GPU; +600 MB of KV
-        # cache for the larger ctx fits comfortably (writer @ 24K
-        # peaks at ~19 GB, leaving 5 GB headroom on the 24 GB 3090).
-        # Phase 55.V19 evening — REVERTED back to this from the
-        # 131K + q8_0 KV experiment after autowrite re-runs scored
-        # 0.12 (vs prior 0.85+ baseline) under the new substrate.
-        # Even with all writer-prompt / retrieval changes reverted,
-        # the larger-ctx + q8_0-KV config produced shorter, lower-
-        # citation output that the scorer rated near-zero on
-        # completeness/citation. The pre-bench config is the only
-        # one empirically known to produce convergent autowrite.
-        "ctx_size": 24576,
+        # Phase 55.V19 (2026-04-29 morning, 2nd attempt) — moving back
+        # to ctx=262144 + q4_0 KV in a clean environment. The first
+        # attempt at this config produced 0.12 scores, but that was
+        # confounded with (a) the verifier-fix prompt tightening
+        # (reverted in d208135), (b) a polluted corpus from expand-
+        # thin-sections — 1532 chunks of off-topic stellar physics
+        # (deleted), (c) the relevance filter being too lax (now
+        # 0.55 → 0.75 + reranker pass). Re-trying the long-ctx
+        # substrate in this clean state. Slate #1b measured
+        # Q4_K_M + ctx=262144 + q4_0 KV at 22.4 GB peak.
+        # REQUIRES WRITER_MODEL_GGUF=...Qwen3.6-27B-Q4_K_M.gguf in
+        # .env (16.8 GB; UD-Q4_K_XL at 17.6 GB pushes total over 24).
+        "ctx_size": 262144,
         "n_gpu_layers": 999,         # all layers on GPU
         "parallel": 1,
         "extra_flags": [
             "--cont-batching",
             "--flash-attn", "on",
+            "--cache-type-k", "q4_0",
+            "--cache-type-v", "q4_0",
         ],
     },
     "embedder": {
@@ -114,7 +109,12 @@ ROLE_DEFAULTS: dict[str, dict] = {
         "port": 8093,
         "model": settings.vlm_model_gguf,
         "mmproj": settings.vlm_mmproj_gguf,
-        "ctx_size": 16384,
+        # Phase 55.V19 — bumped 16384 → 32768. Adds ~0.75 GB KV
+        # (Qwen3-VL is 48 layers × 4 kv_heads × 64 head_dim, fp16).
+        # Total VLM footprint ~18.5 GB on a 24 GB 3090, still 5+ GB
+        # headroom. Useful for figures with substantial OCR'd text
+        # in the image + caption + mention paragraphs context.
+        "ctx_size": 32768,
         "n_gpu_layers": 999,
         "parallel": 1,
         "extra_flags": [
@@ -150,19 +150,20 @@ ROLE_DEFAULTS: dict[str, dict] = {
     "scorer": {
         "port": 8094,
         "model": settings.scorer_model_gguf,
-        # Phase 55.V19 evening — REVERTED back to this from the
-        # 65K q8_0 KV experiment. Same rationale as the writer
-        # revert above; the pre-bench substrate is the only config
-        # we empirically know produces convergent autowrite at
-        # 0.85+ scores on this corpus. Scorer-side, the 24K cap is
-        # well above the realistic verify_claims input (full draft
-        # + format_context max 24K chars).
-        "ctx_size": 24576,
+        # Phase 55.V19 (2026-04-29 morning, 2nd attempt) — moving to
+        # ctx=131077 + q4_0 KV per user spec to mirror the writer's
+        # long-ctx config. Slate #5 measured ctx=131072 + q4_0 KV at
+        # 22.7 GB peak (0.7 GB headroom on the 3090) — 131077 is the
+        # same in practice. Tight but fits. The 262144 row OOM'd in
+        # slate #5 (gemma 18 GB + q4_0 KV at 262K + buffer ~25 GB).
+        "ctx_size": 131077,
         "n_gpu_layers": 999,
         "parallel": 1,
         "extra_flags": [
             "--cont-batching",
             "--flash-attn", "on",
+            "--cache-type-k", "q4_0",
+            "--cache-type-v", "q4_0",
         ],
     },
     # Phase 55.V18 — metadata extractor. A small ~6 GB GGUF
@@ -175,12 +176,27 @@ ROLE_DEFAULTS: dict[str, dict] = {
     "extractor": {
         "port": 8095,
         "model": settings.extractor_model_gguf,
-        "ctx_size": 8192,
+        # Phase 55.V19 — bumped 8192 → 131077 with q8_0 KV.
+        # Extractor handles ingestion's metadata Layer 4 + (Phase
+        # 55.V19 fix) wiki concept extraction. Real prompts are
+        # short (~3000 chars / ~750 tokens), so 131K is overkill
+        # for capacity, but the spare ctx is free with q8_0 KV
+        # (~2.1 GB reserved vs 4.2 GB at fp16). Co-resident with
+        # embedder + reranker + MinerU during ingest:
+        #   model 6 + KV 2 + buf 1 = ~9 GB extractor
+        #   + embedder 1.1 + reranker 0.7 + MinerU 6 = ~16.8 GB
+        #   on 24 GB → ~7 GB free. Healthy.
+        # q8_0 over q4_0: short structured-output prompts (JSON
+        # metadata) are precision-sensitive; q8_0's PPL delta is
+        # negligible while q4_0 has the GGML #5932 GQA risk.
+        "ctx_size": 131077,
         "n_gpu_layers": 999,
         "parallel": 1,
         "extra_flags": [
             "--cont-batching",
             "--flash-attn", "on",
+            "--cache-type-k", "q8_0",
+            "--cache-type-v", "q8_0",
         ],
     },
 }

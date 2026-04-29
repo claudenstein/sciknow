@@ -4314,8 +4314,19 @@ def autowrite(
                 )
                 raise typer.Exit(0)
 
-        if not resume:
-            # Default: skip existing drafts
+        if not resume and not rebuild:
+            # Default: skip existing drafts (only when neither --resume
+            # nor --rebuild is set). Phase 55.V19 — added the
+            # `not rebuild` guard. Pre-fix, `--full --rebuild
+            # --only-below-target` filtered to below-target sections
+            # via the previous block, then this block dropped EVERY
+            # remaining target because they all had drafts (the whole
+            # point of --only-below-target is they DO have drafts —
+            # they're just below threshold). Result: "All sections
+            # already have drafts" exit 0 even though --rebuild was
+            # passed. The skip path is meant ONLY for the bare-default
+            # invocation (no --resume, no --rebuild) where the user
+            # genuinely just wants new sections written.
             before = len(targets)
             targets = [(cid, cn, ct, sec) for cid, cn, ct, sec in targets
                         if (cid, sec) not in existing_by_key]
