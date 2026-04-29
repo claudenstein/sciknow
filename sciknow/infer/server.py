@@ -37,28 +37,31 @@ ROLE_DEFAULTS: dict[str, dict] = {
     "writer": {
         "port": 8090,
         "model": settings.writer_model_gguf,
-        # Phase 55.V19 (2026-04-29 evening) — first set ctx=262144 +
-        # Q4_K_M + q4_0 KV based on slate #1b numbers, then rolled
-        # back to ctx=131072 + UD-Q4_K_XL + q8_0 KV after the
-        # autowrite section `the_sumerian_and_egyptian_minima` scored
-        # 0.12 (vs 0.35 baseline on sunspots). Cause confounded with
-        # the verifier-fix prompt tightening that landed the same
-        # window, but the substrate-side rollback removes two
-        # quality risks at once: (a) GGML #5932 flagged Qwen GQA as
-        # q4_0-KV-sensitive at long context, (b) plain Q4_K_M drops
-        # unsloth's Dynamic calibration. Slate #3 measured this exact
-        # config (UD-Q4_K_XL + ctx 131K + q8_0 KV) at 22.4 GB peak
-        # (1.6 GB headroom) and 35.5 t/s decode. ctx=131K is still
-        # ~7× the production prompt size (max ~18K), so no real-world
-        # "request exceeds context" risk.
-        "ctx_size": 131072,
+        # Phase 55.V6 (2026-04-28) — bumped 16384 → 24576 after a
+        # full-book autowrite run silently lost 7 sections to
+        # `request (16800 tokens) exceeds the available context size
+        # (16384 tokens)` errors. The planning prompt
+        # (system + 12 retrieved chunks + leitmotiv + prior_summaries
+        # + section_plan + book_plan) routinely hit 16500–17500 tokens
+        # on text-heavy sections (climate impacts, preparedness, etc).
+        # Phase 55.V1 evicts embedder + reranker before the writer
+        # phase, so the writer is alone with the GPU; +600 MB of KV
+        # cache for the larger ctx fits comfortably (writer @ 24K
+        # peaks at ~19 GB, leaving 5 GB headroom on the 24 GB 3090).
+        # Phase 55.V19 evening — REVERTED back to this from the
+        # 131K + q8_0 KV experiment after autowrite re-runs scored
+        # 0.12 (vs prior 0.85+ baseline) under the new substrate.
+        # Even with all writer-prompt / retrieval changes reverted,
+        # the larger-ctx + q8_0-KV config produced shorter, lower-
+        # citation output that the scorer rated near-zero on
+        # completeness/citation. The pre-bench config is the only
+        # one empirically known to produce convergent autowrite.
+        "ctx_size": 24576,
         "n_gpu_layers": 999,         # all layers on GPU
         "parallel": 1,
         "extra_flags": [
             "--cont-batching",
             "--flash-attn", "on",
-            "--cache-type-k", "q8_0",
-            "--cache-type-v", "q8_0",
         ],
     },
     "embedder": {
@@ -147,23 +150,19 @@ ROLE_DEFAULTS: dict[str, dict] = {
     "scorer": {
         "port": 8094,
         "model": settings.scorer_model_gguf,
-        # Phase 55.V19 (2026-04-29 evening, 2nd revision) — moved to
-        # ctx=65536 + q8_0 KV after the writer was rolled back to
-        # the same quality-safer pattern (q8_0 KV closes the GGML
-        # #5932 Qwen-GQA q4_0 risk). Scorer's judge prompts top out
-        # around the 16-24K input range (verify_claims gets full
-        # draft + format_context max 24K chars), so 65K is still 3×
-        # the realistic prompt size. Live-validated 22.6 GB peak
-        # after the move (gemma 18 GB + q8_0 KV at 65K ≈ 3 GB +
-        # buffer 1.6 GB).
-        "ctx_size": 65536,
+        # Phase 55.V19 evening — REVERTED back to this from the
+        # 65K q8_0 KV experiment. Same rationale as the writer
+        # revert above; the pre-bench substrate is the only config
+        # we empirically know produces convergent autowrite at
+        # 0.85+ scores on this corpus. Scorer-side, the 24K cap is
+        # well above the realistic verify_claims input (full draft
+        # + format_context max 24K chars).
+        "ctx_size": 24576,
         "n_gpu_layers": 999,
         "parallel": 1,
         "extra_flags": [
             "--cont-batching",
             "--flash-attn", "on",
-            "--cache-type-k", "q8_0",
-            "--cache-type-v", "q8_0",
         ],
     },
     # Phase 55.V18 — metadata extractor. A small ~6 GB GGUF
