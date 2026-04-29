@@ -37,25 +37,28 @@ ROLE_DEFAULTS: dict[str, dict] = {
     "writer": {
         "port": 8090,
         "model": settings.writer_model_gguf,
-        # Phase 55.V19 (2026-04-29) — bumped 24576 → 262144 after the
-        # substrate sweep (slates #1, #1b, #3, #4) verified the viral
-        # "262K on 24 GB" claim for q4_0 KV specifically. Measured at
-        # ctx=262144 + q4_0 KV: 22.4 GB peak, 36.0 t/s decode, 1129
-        # t/s prompt-eval (large workload). Requires the writer GGUF
-        # to be plain Q4_K_M (16.8 GB on disk); UD-Q4_K_XL is 0.8 GB
-        # bigger and pushes total over 24 GB. Set
-        # WRITER_MODEL_GGUF=...Qwen3.6-27B-Q4_K_M.gguf in .env to
-        # match. The earlier 24576 default was the conservative pre-
-        # bench number; with 262K headroom we never lose a section
-        # to "request exceeds context" again.
-        "ctx_size": 262144,
+        # Phase 55.V19 (2026-04-29 evening) — first set ctx=262144 +
+        # Q4_K_M + q4_0 KV based on slate #1b numbers, then rolled
+        # back to ctx=131072 + UD-Q4_K_XL + q8_0 KV after the
+        # autowrite section `the_sumerian_and_egyptian_minima` scored
+        # 0.12 (vs 0.35 baseline on sunspots). Cause confounded with
+        # the verifier-fix prompt tightening that landed the same
+        # window, but the substrate-side rollback removes two
+        # quality risks at once: (a) GGML #5932 flagged Qwen GQA as
+        # q4_0-KV-sensitive at long context, (b) plain Q4_K_M drops
+        # unsloth's Dynamic calibration. Slate #3 measured this exact
+        # config (UD-Q4_K_XL + ctx 131K + q8_0 KV) at 22.4 GB peak
+        # (1.6 GB headroom) and 35.5 t/s decode. ctx=131K is still
+        # ~7× the production prompt size (max ~18K), so no real-world
+        # "request exceeds context" risk.
+        "ctx_size": 131072,
         "n_gpu_layers": 999,         # all layers on GPU
         "parallel": 1,
         "extra_flags": [
             "--cont-batching",
             "--flash-attn", "on",
-            "--cache-type-k", "q4_0",
-            "--cache-type-v", "q4_0",
+            "--cache-type-k", "q8_0",
+            "--cache-type-v", "q8_0",
         ],
     },
     "embedder": {
