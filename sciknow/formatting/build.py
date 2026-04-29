@@ -107,8 +107,8 @@ def _ordered_chapter_drafts(
         return [d for k, d in drafts_by_key.items() if k[0] == chapter_id]
     out = []
     for sec in sections_meta:
-        key = (chapter_id, sec.get("key", "") if isinstance(sec, dict) else "")
-        d = drafts_by_key.get(key)
+        slug = sec.get("slug", "") if isinstance(sec, dict) else ""
+        d = drafts_by_key.get((chapter_id, slug))
         if d:
             out.append(d)
     return out
