@@ -3001,7 +3001,7 @@
                      title="Parallel ingestion worker subprocesses. 0 = use INGEST_WORKERS from .env (default 1). Each worker loads its own MinerU (~7GB VRAM) + bge-m3 — raise only when the LLM is off-GPU."/></div>
             <div class="u-col-num"><label>Relev. thr</label>
               <input type="number" id="tl-exp-relthr" value="0.0" min="0" max="1" step="0.05"
-                     title="Cosine similarity floor against the corpus centroid. 0 = use EXPAND_RELEVANCE_THRESHOLD from .env (default 0.55). Raise to require tighter topical match."/></div>
+                     title="Cosine similarity floor against the corpus centroid. 0 = use EXPAND_RELEVANCE_THRESHOLD from .env (default 0.75). Raise to require tighter topical match."/></div>
           </div>
           <div class="field u-flex-raw u-gap-10 u-ai-center u-wrap u-mt-1">
             <label class="u-label-row">
@@ -3176,7 +3176,7 @@
                      title="Parallel download workers. 0 = use EXPAND_WORKERS from .env (default 8)."></div>
             <div class="u-col-num"><label>Relev. thr</label>
               <input type="number" id="tl-eauth-relthr" value="0.0" min="0" max="1" step="0.05"
-                     title="Cosine-similarity floor against the corpus centroid or anchor. 0 = use EXPAND_RELEVANCE_THRESHOLD from .env (default 0.55)."></div>
+                     title="Cosine-similarity floor against the corpus centroid or anchor. 0 = use EXPAND_RELEVANCE_THRESHOLD from .env (default 0.75)."></div>
           </div>
           <div class="field u-flex-raw u-gap-10 u-ai-center u-wrap u-mt-1">
             <label class="u-label-row"

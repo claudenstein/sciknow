@@ -461,11 +461,18 @@ class Settings(BaseSettings):
     useful_count_boost_factor: float = 0.15
 
     # `sciknow db expand` relevance filter. Cosine similarity threshold under
-    # which candidate references are dropped before download. 0.55 is a sane
-    # default for bge-m3 — ~80% of on-topic refs score above it on a focused
-    # library, while off-topic references (statistical methods cited from a
-    # climate paper, etc.) typically score 0.3-0.45.
-    expand_relevance_threshold: float = 0.55
+    # which candidate references are dropped before download. Phase 55.V19
+    # bumped 0.55 → 0.75 after the global-cooling corpus picked up 11
+    # off-topic stellar-physics papers (Star-Forming Galaxies at Cosmic Noon,
+    # X-Ray Spectroscopy of Stars, etc.) via expand-section seed queries
+    # that legitimately read "solar dynamo / sunspots / magnetic activity" —
+    # bge-m3 cosine-scores cross-domain stellar physics 0.55-0.70 against
+    # those seeds because the vocab overlaps even though the domain is
+    # wrong. 0.75 is roughly the inflection where same-domain refs still
+    # pass while cross-domain stellar/cosmology refs are filtered. Pair
+    # with the reranker pass in expand_ops._rerank_filter for sharper
+    # cross-encoder relevance on surviving candidates.
+    expand_relevance_threshold: float = 0.75
 
     @model_validator(mode="after")
     def _project_wins_over_env_overrides(self):
