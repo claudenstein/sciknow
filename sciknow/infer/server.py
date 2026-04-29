@@ -147,21 +147,23 @@ ROLE_DEFAULTS: dict[str, dict] = {
     "scorer": {
         "port": 8094,
         "model": settings.scorer_model_gguf,
-        # Phase 55.V19 (2026-04-29) — bumped 24576 → 131072 with q4_0
-        # KV. Slate #5 measured: gemma-4-31B-it Q4_1 + ctx=131072 +
-        # q4_0 KV = 22.7 GB peak (0.7 GB headroom on the 3090). The
-        # 262144 row OOMed (gemma is 0.4 GB heavier than the writer,
-        # eats the headroom q4_0 buys at 262K). 131K is the safe
-        # ceiling — half the writer's, but still 5× the prior 24K
-        # default and well above any realistic verifier/CoVe input.
-        "ctx_size": 131072,
+        # Phase 55.V19 (2026-04-29 evening, 2nd revision) — moved to
+        # ctx=65536 + q8_0 KV after the writer was rolled back to
+        # the same quality-safer pattern (q8_0 KV closes the GGML
+        # #5932 Qwen-GQA q4_0 risk). Scorer's judge prompts top out
+        # around the 16-24K input range (verify_claims gets full
+        # draft + format_context max 24K chars), so 65K is still 3×
+        # the realistic prompt size. Live-validated 22.6 GB peak
+        # after the move (gemma 18 GB + q8_0 KV at 65K ≈ 3 GB +
+        # buffer 1.6 GB).
+        "ctx_size": 65536,
         "n_gpu_layers": 999,
         "parallel": 1,
         "extra_flags": [
             "--cont-batching",
             "--flash-attn", "on",
-            "--cache-type-k", "q4_0",
-            "--cache-type-v", "q4_0",
+            "--cache-type-k", "q8_0",
+            "--cache-type-v", "q8_0",
         ],
     },
     # Phase 55.V18 — metadata extractor. A small ~6 GB GGUF
