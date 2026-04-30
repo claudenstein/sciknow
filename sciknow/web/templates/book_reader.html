@@ -550,6 +550,16 @@
 <!-- Main content -->
 <main class="main" id="content">
   <h1 id="draft-title">{active_title}</h1>
+  <!-- Phase 55.V19e — section navigation arrows -->
+  <div id="section-nav" class="section-nav" style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin:-2px 0 8px;font-size:13px;">
+    <button id="nav-prev" data-action="nav-prev-section"
+            style="background:none;border:1px solid var(--border);color:var(--fg);padding:4px 10px;border-radius:6px;cursor:pointer;display:none;max-width:48%;text-align:left;"
+            title="Go to previous section">← <span id="nav-prev-label" class="u-faint"></span></button>
+    <span style="flex:1;"></span>
+    <button id="nav-next" data-action="nav-next-section"
+            style="background:none;border:1px solid var(--border);color:var(--fg);padding:4px 10px;border-radius:6px;cursor:pointer;display:none;max-width:48%;text-align:right;"
+            title="Go to next section"><span id="nav-next-label" class="u-faint"></span> →</button>
+  </div>
   <div class="subtitle" id="draft-subtitle">
     Version <span id="draft-version">{active_version}</span> &middot;
     <span id="draft-words">{active_words}</span> words
@@ -1140,12 +1150,61 @@
         </button>
         <span style="margin-left:auto;color:var(--fg-muted);font-size:11px;"
               id="tl-status" title="Polled scope + entry count."></span>
+        <button class="btn btn--sm" id="tl-snapshot-btn" onclick="tlTakeSnapshot()"
+                style="margin-left:8px;background:var(--accent,#4a90e2);color:white;"
+                title="Take a snapshot of the current scope (section / chapter / book) right now. Stored under the timeline.">
+          📸 Snapshot
+        </button>
+        <button class="btn btn--sm" id="tl-autosnap-btn" onclick="tlOpenAutoSnap()"
+                style="margin-left:6px;"
+                title="Configure automatic snapshots (after autowrite, after save, on a schedule).">
+          ⏱ Auto…
+        </button>
       </div>
       <!-- Body — populated by tlRender() -->
       <div id="tl-body" style="flex:1;overflow:auto;"></div>
       <!-- Compare drawer — shows when two rows are selected -->
       <div id="tl-compare" class="u-hidden"
            style="border-top:1px solid var(--border);padding-top:8px;max-height:50vh;overflow:auto;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Phase 55.V19f — Auto-snapshot config modal -->
+<div class="modal-overlay" id="autosnap-modal" onclick="if(event.target===this)closeModal('autosnap-modal')">
+  <div class="modal" style="max-width:480px;">
+    <div class="modal-header">
+      <h3 style="margin:0;">Auto-snapshot</h3>
+      <button class="modal-close" onclick="closeModal('autosnap-modal')" title="Close.">&times;</button>
+    </div>
+    <div class="modal-body" style="display:flex;flex-direction:column;gap:10px;">
+      <p class="u-muted" style="margin:0;font-size:12px;">Snapshots are saved bundles that you can restore from the Timeline tab. Auto-snapshot fires for the chosen scope.</p>
+      <label style="display:flex;align-items:center;gap:8px;">
+        <input type="checkbox" id="asnap-enabled"> <strong>Enable auto-snapshot</strong>
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;">
+        <input type="checkbox" id="asnap-after-autowrite"> Snapshot after every autowrite run
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;">
+        <input type="checkbox" id="asnap-after-save"> Snapshot after every manual save
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;">
+        Periodic: every
+        <input type="number" id="asnap-interval" min="0" max="1440" step="5" value="0" style="width:64px;"> minutes
+        <span class="u-muted u-tiny">(0 disables periodic)</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;">
+        Scope:
+        <select id="asnap-scope">
+          <option value="section">Active section</option>
+          <option value="chapter">Active chapter</option>
+          <option value="book">Whole book</option>
+        </select>
+      </label>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px;">
+        <button class="btn btn--sm" onclick="closeModal('autosnap-modal')">Cancel</button>
+        <button class="btn btn--sm" onclick="tlSaveAutoSnap()" style="background:var(--accent,#4a90e2);color:white;">Save</button>
+      </div>
     </div>
   </div>
 </div>
@@ -4167,6 +4226,11 @@
               <option value="book" selected>End of book</option>
               <option value="chapter">Per chapter</option>
             </select>
+          </label>
+          <label style="grid-column:1/-1;">Save folder (server-side path)
+            <input id="pro-export-folder" type="text" style="width:100%;"
+                   placeholder="(blank = browser download only)"
+                   title="When set, the built file is also written to this folder on the server (in addition to being offered as a browser download). Tilde `~` expands to your home directory. The path is remembered across sessions in this browser." />
           </label>
           <label style="display:flex;align-items:center;gap:6px;margin-top:18px;">
             <input type="checkbox" id="pro-export-twocolumn" />

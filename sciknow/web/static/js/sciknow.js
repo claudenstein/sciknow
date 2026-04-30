@@ -78,6 +78,9 @@ const ACTIONS = {
   // sidebar and the heatmap callers.
   'open-chapter-modal': (el) => openChapterModal(el.dataset.chapterId),
   'load-section': (el) => loadSection(el.dataset.draftId),
+  // Phase 55.V19e — prev/next section navigation arrows.
+  'nav-prev-section': () => navigateSection(-1),
+  'nav-next-section': () => navigateSection(1),
   'write-for-gap': (el) => writeForGap(parseInt(el.dataset.chapterNum, 10)),
   'expand-single-gap': (el) => expandSingleGap(el.dataset.gapDesc),
 
@@ -149,6 +152,62 @@ function navTo(el) {
   if (!draftId) return true;  // fallback to normal navigation
   loadSection(draftId);
   return false;  // prevent default <a> navigation
+}
+
+// Phase 55.V19e — prev/next section nav using the same ordered-sections
+// list shown in the sidebar. Walks chaptersData in chapter+section order
+// and finds the current draft's position; ±1 navigates to the adjacent
+// section, crossing chapter boundaries.
+function _orderedSectionDrafts() {
+  const out = [];
+  if (!Array.isArray(chaptersData)) return out;
+  for (const ch of chaptersData) {
+    if (!ch || !Array.isArray(ch.sections)) continue;
+    for (const s of ch.sections) {
+      if (s && s.id) out.push({draftId: s.id, title: s.title || s.type || '', chapterTitle: ch.title || ''});
+    }
+  }
+  return out;
+}
+
+function navigateSection(delta) {
+  const order = _orderedSectionDrafts();
+  if (!order.length || !currentDraftId) return;
+  const idx = order.findIndex(s => s.draftId === currentDraftId);
+  if (idx < 0) return;
+  const next = order[idx + delta];
+  if (next) loadSection(next.draftId);
+}
+
+function buildSectionNav() {
+  const order = _orderedSectionDrafts();
+  const prevBtn = document.getElementById('nav-prev');
+  const nextBtn = document.getElementById('nav-next');
+  const prevLab = document.getElementById('nav-prev-label');
+  const nextLab = document.getElementById('nav-next-label');
+  if (!prevBtn || !nextBtn) return;
+  if (!currentDraftId) {
+    prevBtn.style.display = 'none';
+    nextBtn.style.display = 'none';
+    return;
+  }
+  const idx = order.findIndex(s => s.draftId === currentDraftId);
+  const prev = idx > 0 ? order[idx - 1] : null;
+  const next = idx >= 0 && idx < order.length - 1 ? order[idx + 1] : null;
+  if (prev) {
+    prevBtn.style.display = 'inline-block';
+    if (prevLab) prevLab.textContent = (prev.title || '').slice(0, 60);
+    prevBtn.title = 'Previous section: ' + (prev.title || '');
+  } else {
+    prevBtn.style.display = 'none';
+  }
+  if (next) {
+    nextBtn.style.display = 'inline-block';
+    if (nextLab) nextLab.textContent = (next.title || '').slice(0, 60);
+    nextBtn.title = 'Next section: ' + (next.title || '');
+  } else {
+    nextBtn.style.display = 'none';
+  }
 }
 
 // Phase 14.2 — empty-state UX: select a chapter without needing a draft.
@@ -281,6 +340,16 @@ async function loadSection(draftId) {
     // sections meta so a renamed section shows the new title in the
     // center h1 instead of the stale slug-based drafts.title snapshot.
     document.getElementById('draft-title').textContent = data.display_title || data.title;
+    // Phase 55.V19d — restore subtitle structure before setting version/words.
+    // showChapterEmptyState overwrites #draft-subtitle innerHTML with the
+    // "No drafts yet" message, which destroys the inner #draft-version
+    // and #draft-words spans. Without this restore, loadSection's next two
+    // .textContent assignments raise TypeError on null and the body never
+    // gets updated — user ends up with the new section's title bolted
+    // onto the previous chapter's empty-state body.
+    document.getElementById('draft-subtitle').innerHTML =
+      'Version <span id="draft-version"></span> · ' +
+      '<span id="draft-words"></span> words';
     document.getElementById('draft-version').textContent = data.version;
     document.getElementById('draft-words').textContent = data.word_count;
     // When the draft has no body (autowrite stub, freshly-deleted content,
@@ -329,6 +398,9 @@ async function loadSection(draftId) {
     // Build citation popovers + update status selector
     setTimeout(buildPopovers, 100);
     if (data.status) document.getElementById('status-select').value = data.status;
+
+    // Phase 55.V19e — refresh prev/next section nav arrows.
+    buildSectionNav();
   } catch(e) {
     console.error('Navigation failed:', e);
   }
@@ -3302,6 +3374,22 @@ async function populateProExportControls() {
   } catch (e) {
     console.error('Failed to load pro-export templates:', e);
   }
+
+  // Phase 55.V19g — restore the saved export folder from localStorage.
+  // Persisted across browser sessions for this origin.
+  const folderInput = document.getElementById('pro-export-folder');
+  if (folderInput) {
+    folderInput.value = localStorage.getItem('sciknow.exportFolder') || '';
+    if (!folderInput._persistBound) {
+      folderInput._persistBound = true;
+      folderInput.addEventListener('change', () => {
+        localStorage.setItem('sciknow.exportFolder', folderInput.value || '');
+      });
+      folderInput.addEventListener('blur', () => {
+        localStorage.setItem('sciknow.exportFolder', folderInput.value || '');
+      });
+    }
+  }
 }
 
 function _proExportRequestPayload(fmt) {
@@ -3315,6 +3403,7 @@ function _proExportRequestPayload(fmt) {
     two_column: v('pro-export-twocolumn').checked,
     bib_style: v('pro-export-bibstyle').value || 'numeric',
     bibliography_placement: v('pro-export-bibplacement').value || 'book',
+    save_to_path: (v('pro-export-folder').value || '').trim() || null,
     cover_page: v('pro-export-cover').checked,
     table_of_contents: v('pro-export-toc').checked,
     list_of_figures: v('pro-export-lof').checked,
@@ -3384,9 +3473,16 @@ function _pollProExportJob(jobId, fmt) {
       status.textContent = `${j.status}: ${j.progress || ''} (${elapsed}s)`;
     } else if (j.status === 'done') {
       clearInterval(_proExportPollTimer); _proExportPollTimer = null;
+      let extras = '';
+      if (j.saved_to) {
+        extras = ` · <span style="color:var(--accent,#4a90e2);">saved to ${_escHTML(j.saved_to)}</span>`;
+      } else if (j.save_error) {
+        extras = ` · <span style="color:var(--danger,#c62828);" title="${_escHTML(j.save_error)}">save failed</span>`;
+      }
       status.innerHTML =
         `<strong>✓ ready</strong> · ${(j.size/1024).toFixed(0)} KB · ${elapsed}s · ` +
-        `<a href="/api/export/pro/job/${jobId}/download" target="_blank">download ${j.filename}</a>`;
+        `<a href="/api/export/pro/job/${jobId}/download" target="_blank">download ${j.filename}</a>` +
+        extras;
       pdfBtn.disabled = texBtn.disabled = false;
       // Auto-trigger download
       window.location.href = '/api/export/pro/job/' + jobId + '/download';
@@ -5178,6 +5274,7 @@ function buildPopovers() {
 
 // Build popovers on page load
 document.addEventListener('DOMContentLoaded', buildPopovers);
+document.addEventListener('DOMContentLoaded', buildSectionNav);
 
 // ── Autowrite Dashboard (Phase 4) ────────────────────────────────────
 // Enhanced autowrite that shows convergence chart
@@ -5663,6 +5760,8 @@ async function doAutowriteBook() {
       status.textContent = 'Book autowrite complete: '
         + evt.n_chapters_completed + '/' + evt.n_chapters + ' chapters · '
         + evt.n_sections_completed + ' sections written';
+      // Phase 55.V19f — fire auto-snapshot if configured.
+      if (typeof _autoSnapFire === 'function') _autoSnapFire('autowrite');
       awLog.innerHTML += '<div class="log-keep u-bold u-border-t u-pt-6 u-mt-6">'
         + '✓ Book complete: ' + evt.n_chapters_completed + '/' + evt.n_chapters
         + ' chapters · ' + evt.n_sections_completed + ' sections written, '
@@ -17956,12 +18055,128 @@ function _tlSnapshotsTable(snaps, kind) {
       + '<td style="text-align:right;">' + (s.word_count || 0).toLocaleString() + '</td>'
       + '<td>' + _tlBriefHtml(s.meta) + '</td>'
       + '<td><button class="btn btn--sm" onclick="tlRestoreSnapshot(\'' + _escHTML(s.id) + '\')" '
-        + 'title="Insert this snapshot as a NEW draft bundle (non-destructive).">Restore</button></td>'
+        + 'title="Insert this snapshot as a NEW draft bundle (non-destructive).">Restore</button>'
+      + ' <button class="btn btn--sm" style="background:var(--danger,#c62828);color:white;" '
+        + 'onclick="tlDeleteSnapshot(\'' + _escHTML(s.id) + '\')" '
+        + 'title="Permanently delete this snapshot. Cannot be undone.">Delete</button></td>'
       + '</tr>';
   }
   html += '</table>';
   return html;
 }
+
+// Phase 55.V19f — take a snapshot at the current scope.
+async function tlTakeSnapshot() {
+  const name = prompt('Optional snapshot name (leave blank for auto-name):') || '';
+  let url, target;
+  if (_tlScope === 'section') {
+    if (!currentDraftId) { alert('Open a section first.'); return; }
+    url = '/api/snapshot/' + currentDraftId;
+    target = currentDraftId;
+  } else if (_tlScope === 'chapter') {
+    if (!currentChapterId) { alert('Open a chapter first.'); return; }
+    url = '/api/snapshot/chapter/' + currentChapterId;
+    target = currentChapterId;
+  } else if (_tlScope === 'book') {
+    const bid = (window.SCIKNOW_BOOTSTRAP && window.SCIKNOW_BOOTSTRAP.bookId) || '';
+    if (!bid) { alert('No active book.'); return; }
+    url = '/api/snapshot/book/' + bid;
+    target = bid;
+  } else {
+    return;
+  }
+  const fd = new FormData();
+  if (name) fd.append('name', name);
+  const r = await fetch(url, {method: 'POST', body: fd});
+  if (!r.ok) { alert('Snapshot failed (' + r.status + ')'); return; }
+  await tlRender();
+}
+
+// Phase 55.V19f — delete a snapshot by id.
+async function tlDeleteSnapshot(id) {
+  if (!id) return;
+  if (!confirm('Permanently delete this snapshot? This cannot be undone.')) return;
+  const r = await fetch('/api/snapshot/' + id, {method: 'DELETE'});
+  if (!r.ok) { alert('Delete failed (' + r.status + ')'); return; }
+  await tlRender();
+}
+
+// Phase 55.V19f — open / close + save the auto-snapshot config modal.
+async function tlOpenAutoSnap() {
+  const bid = (window.SCIKNOW_BOOTSTRAP && window.SCIKNOW_BOOTSTRAP.bookId) || '';
+  if (!bid) { alert('No active book.'); return; }
+  let cfg;
+  try {
+    const r = await fetch('/api/autosnapshot/' + bid);
+    cfg = await r.json();
+  } catch (_) {
+    cfg = {enabled: false, after_autowrite: false, after_save: false, interval_minutes: 0, scope: 'section'};
+  }
+  const dlg = document.getElementById('autosnap-modal');
+  if (!dlg) {
+    alert('Auto-snapshot modal markup not present (template may need a reload).');
+    return;
+  }
+  document.getElementById('asnap-enabled').checked = !!cfg.enabled;
+  document.getElementById('asnap-after-autowrite').checked = !!cfg.after_autowrite;
+  document.getElementById('asnap-after-save').checked = !!cfg.after_save;
+  document.getElementById('asnap-interval').value = cfg.interval_minutes || 0;
+  document.getElementById('asnap-scope').value = cfg.scope || 'section';
+  openModal('autosnap-modal');
+}
+
+async function tlSaveAutoSnap() {
+  const bid = (window.SCIKNOW_BOOTSTRAP && window.SCIKNOW_BOOTSTRAP.bookId) || '';
+  if (!bid) return;
+  const fd = new FormData();
+  fd.append('enabled', document.getElementById('asnap-enabled').checked ? 'true' : 'false');
+  fd.append('after_autowrite', document.getElementById('asnap-after-autowrite').checked ? 'true' : 'false');
+  fd.append('after_save', document.getElementById('asnap-after-save').checked ? 'true' : 'false');
+  fd.append('interval_minutes', document.getElementById('asnap-interval').value || '0');
+  fd.append('scope', document.getElementById('asnap-scope').value || 'section');
+  const r = await fetch('/api/autosnapshot/' + bid, {method: 'PUT', body: fd});
+  if (!r.ok) { alert('Save failed (' + r.status + ')'); return; }
+  closeModal('autosnap-modal');
+  _autoSnapInstall();   // re-arm the interval timer
+}
+
+// Auto-snapshot interval scheduler. Reads cfg on load, fires at the
+// configured cadence. Hook into the autowrite / save lifecycle for
+// the event-triggered modes.
+let _autoSnapTimer = null;
+async function _autoSnapInstall() {
+  if (_autoSnapTimer) { clearInterval(_autoSnapTimer); _autoSnapTimer = null; }
+  const bid = (window.SCIKNOW_BOOTSTRAP && window.SCIKNOW_BOOTSTRAP.bookId) || '';
+  if (!bid) return;
+  let cfg;
+  try {
+    cfg = await (await fetch('/api/autosnapshot/' + bid)).json();
+  } catch (_) { return; }
+  window._autoSnapCfg = cfg;
+  if (cfg && cfg.enabled && cfg.interval_minutes > 0) {
+    _autoSnapTimer = setInterval(() => _autoSnapFire('interval'),
+                                 cfg.interval_minutes * 60 * 1000);
+  }
+}
+
+async function _autoSnapFire(reason) {
+  const cfg = window._autoSnapCfg;
+  if (!cfg || !cfg.enabled) return;
+  if (reason === 'autowrite' && !cfg.after_autowrite) return;
+  if (reason === 'save' && !cfg.after_save) return;
+  const scope = cfg.scope || 'section';
+  const bid = (window.SCIKNOW_BOOTSTRAP && window.SCIKNOW_BOOTSTRAP.bookId) || '';
+  let url;
+  if (scope === 'section' && currentDraftId) url = '/api/snapshot/' + currentDraftId;
+  else if (scope === 'chapter' && currentChapterId) url = '/api/snapshot/chapter/' + currentChapterId;
+  else if (scope === 'book' && bid) url = '/api/snapshot/book/' + bid;
+  if (!url) return;
+  const fd = new FormData();
+  fd.append('name', 'auto · ' + reason + ' · ' + new Date().toISOString().slice(0,19));
+  try { await fetch(url, {method: 'POST', body: fd}); } catch (_) {}
+}
+
+document.addEventListener('DOMContentLoaded', _autoSnapInstall);
 
 function tlOnSelect(checkbox) {
   const id = checkbox.dataset.tlId;

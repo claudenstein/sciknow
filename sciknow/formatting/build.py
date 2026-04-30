@@ -165,6 +165,19 @@ def _build_document(
                 sections_meta = None
         ch_drafts = _ordered_chapter_drafts(ch_id, sections_meta, drafts_by_key)
 
+        # Build slug → clean title map from sections_meta. Source of
+        # truth for section names — drafts.title is the autowrite-
+        # stamped string ("Ch.1 Introduction: ... — Why_the_sun_matters_more
+        # (autowrite)") which leaks into export headings if used directly.
+        title_by_slug: dict[str, str] = {}
+        if isinstance(sections_meta, list):
+            for sm in sections_meta:
+                if isinstance(sm, dict):
+                    slug = sm.get("slug", "")
+                    title = sm.get("title", "")
+                    if slug and title:
+                        title_by_slug[slug] = title
+
         sections: list[Section] = []
         for d in ch_drafts:
             d_id, d_title, d_section, d_content, d_words, _, _, _, _ = d
@@ -178,19 +191,24 @@ def _build_document(
                 figure_assets=figure_assets,
                 image_root=image_root,
             )
-            # Section title: section_type from project_type if available,
-            # falling back to the draft's own title.
-            display_title = d_title or ""
+            # Section title resolution order: chapter sections_meta clean
+            # title → project_type default-section title → slug-as-Title
+            # Case → drafts.title (last resort, may be stamped). The old
+            # order preferred drafts.title which produced exports like
+            # "Ch.1 Introduction: ... Why_the_sun_matters_more (autowrite)".
+            display_title = title_by_slug.get(d_section or "", "")
             if not display_title and d_section:
                 from sciknow.core.project_type import target_words_for  # noqa: F401
                 for s in pt.default_sections:
                     if s.key == d_section:
                         display_title = s.title
                         break
-                if not display_title:
-                    display_title = d_section.replace("_", " ").title()
+            if not display_title and d_section:
+                display_title = d_section.replace("_", " ").title()
+            if not display_title:
+                display_title = d_title or "Section"
             sections.append(Section(
-                title=display_title or "Section",
+                title=display_title,
                 section_type=d_section,
                 blocks=blocks,
                 word_count=d_words or 0,

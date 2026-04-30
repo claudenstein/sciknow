@@ -572,3 +572,91 @@ async def timeline_book(book_id: str):
             for r in snap_rows
         ],
     }
+
+
+# ── Phase 55.V19f: delete snapshot ───────────────────────────────────────────
+
+
+@router.delete("/api/snapshot/{snapshot_id}")
+async def delete_snapshot(snapshot_id: str):
+    """Delete a snapshot by id. Idempotent: 404 if it doesn't exist."""
+    with get_session() as session:
+        row = session.execute(
+            text("DELETE FROM draft_snapshots WHERE id::text = :sid RETURNING id"),
+            {"sid": snapshot_id},
+        ).fetchone()
+        session.commit()
+    if not row:
+        raise HTTPException(404, "Snapshot not found")
+    return {"deleted": snapshot_id}
+
+
+# ── Phase 55.V19f: auto-snapshot configuration (per book, persisted on
+# the book.custom_metadata JSON) ─────────────────────────────────────────────
+
+
+@router.get("/api/autosnapshot/{book_id}")
+async def get_autosnapshot_config(book_id: str):
+    """Read the auto-snapshot config for one book.
+
+    Stored under ``books.custom_metadata->'auto_snapshot'`` so it lives
+    with the rest of the book's editor preferences and survives across
+    sessions without a new column.
+    """
+    with get_session() as session:
+        row = session.execute(
+            text("SELECT custom_metadata FROM books WHERE id::text = :bid"),
+            {"bid": book_id},
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "Book not found")
+    md = row[0] if isinstance(row[0], dict) else {}
+    cfg = md.get("auto_snapshot") if isinstance(md, dict) else None
+    if not isinstance(cfg, dict):
+        cfg = {
+            "enabled": False,
+            "after_autowrite": False,
+            "after_save": False,
+            "interval_minutes": 0,
+            "scope": "section",
+        }
+    return cfg
+
+
+@router.put("/api/autosnapshot/{book_id}")
+async def set_autosnapshot_config(
+    book_id: str,
+    enabled: bool = Form(False),
+    after_autowrite: bool = Form(False),
+    after_save: bool = Form(False),
+    interval_minutes: int = Form(0),
+    scope: str = Form("section"),
+):
+    """Persist the auto-snapshot config. Validates scope ∈ {section, chapter, book}."""
+    if scope not in ("section", "chapter", "book"):
+        raise HTTPException(400, "scope must be section|chapter|book")
+    cfg = {
+        "enabled": bool(enabled),
+        "after_autowrite": bool(after_autowrite),
+        "after_save": bool(after_save),
+        "interval_minutes": max(0, int(interval_minutes)),
+        "scope": scope,
+    }
+    with get_session() as session:
+        existing = session.execute(
+            text("SELECT custom_metadata FROM books WHERE id::text = :bid"),
+            {"bid": book_id},
+        ).fetchone()
+        if not existing:
+            raise HTTPException(404, "Book not found")
+        md = existing[0] if isinstance(existing[0], dict) else {}
+        if not isinstance(md, dict):
+            md = {}
+        md["auto_snapshot"] = cfg
+        session.execute(
+            text("UPDATE books SET custom_metadata = CAST(:m AS jsonb) "
+                 "WHERE id::text = :bid"),
+            {"m": json.dumps(md), "bid": book_id},
+        )
+        session.commit()
+    return cfg
