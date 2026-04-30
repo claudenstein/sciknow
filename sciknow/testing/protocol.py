@@ -19959,6 +19959,76 @@ def l1_phase56_b_thresholds_descend_with_depth() -> None:
     )
 
 
+def l1_phase56_c_hedge_strength_enum_stable() -> None:
+    """Phase 56.C — HedgeStrength values are stable strings the writer
+    prompt and scorer verifier both consume. Don't change them.
+    """
+    from sciknow.core.claim_extractor import HedgeStrength
+    assert HedgeStrength.STRONG.value == "strong"
+    assert HedgeStrength.QUALIFIED.value == "qualified"
+    assert HedgeStrength.SPECULATIVE.value == "speculative"
+
+
+def l1_phase56_c_hedge_inference_lowest_wins() -> None:
+    """Phase 56.C — when multiple cue-strengths are present in a
+    chunk, the LOWEST strength wins (be conservative)."""
+    from sciknow.core.claim_extractor import (
+        HedgeStrength, infer_hedge_from_text,
+    )
+    # Strong + speculative cues → speculative
+    assert infer_hedge_from_text(
+        "This shows X but might be wrong."
+    ) == HedgeStrength.SPECULATIVE
+    # Qualified + strong → qualified
+    assert infer_hedge_from_text(
+        "This shows it suggests a correlation."
+    ) == HedgeStrength.QUALIFIED
+    # Pure strong → strong
+    assert infer_hedge_from_text(
+        "This shows the effect."
+    ) == HedgeStrength.STRONG
+    # No cue → qualified default
+    assert infer_hedge_from_text(
+        "The Maunder Minimum was a period."
+    ) == HedgeStrength.QUALIFIED
+
+
+def l1_phase56_c_claim_jsonable_round_trip() -> None:
+    """Phase 56.C — Claim ↔ JSON serialisation is lossless. Used when
+    persisting / reloading the claim plan."""
+    from sciknow.core.claim_extractor import (
+        Claim, HedgeStrength,
+        claims_to_jsonable, claims_from_jsonable,
+    )
+    src = [
+        Claim(
+            claim_id="c1", text="A.",
+            scope="post-1500", hedge_strength=HedgeStrength.STRONG,
+            anchor_cluster_id="cluster-1",
+            candidate_chunk_ids=["chunk-a"],
+        ),
+    ]
+    out = claims_from_jsonable(claims_to_jsonable(src))
+    assert len(out) == 1
+    assert out[0].text == src[0].text
+    assert out[0].scope == src[0].scope
+    assert out[0].hedge_strength == src[0].hedge_strength
+    assert out[0].anchor_cluster_id == src[0].anchor_cluster_id
+    assert out[0].candidate_chunk_ids == src[0].candidate_chunk_ids
+
+
+def l1_phase56_c_extraction_prompt_demands_atomicity() -> None:
+    """Phase 56.C — the claim-extraction system prompt explicitly
+    requires atomic claims and rejects compound 'X AND Y'. Source-
+    grep so a refactor doesn't drop the rule."""
+    from sciknow.core import claim_extractor as _ce
+    sys = _ce.CLAIM_EXTRACTION_SYSTEM
+    assert "ATOMIC" in sys.upper()
+    # The prompt demonstrates wrong-vs-right with explicit "AND"
+    assert "AND" in sys
+    assert "candidate_chunk_ids" in sys
+
+
 def l1_phase56_h_clean_ending_strips_dangling_cite() -> None:
     """Phase 56.H — orphan ``[`` / ``[N`` / ``[N,`` at end-of-content
     is stripped by the section-ending safety net.
@@ -20854,6 +20924,11 @@ L1_TESTS: list[Callable] = [
     l1_phase56_b_outline_proposer_api,
     l1_phase56_b_proposal_dataclass_shape,
     l1_phase56_b_thresholds_descend_with_depth,
+    # Phase 56.C — atomic claim extraction
+    l1_phase56_c_hedge_strength_enum_stable,
+    l1_phase56_c_hedge_inference_lowest_wins,
+    l1_phase56_c_claim_jsonable_round_trip,
+    l1_phase56_c_extraction_prompt_demands_atomicity,
     # Phase 56.H — section-ending safety net
     l1_phase56_h_clean_ending_strips_dangling_cite,
     l1_phase56_h_clean_ending_slices_mid_sentence,
