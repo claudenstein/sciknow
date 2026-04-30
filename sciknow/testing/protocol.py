@@ -19840,6 +19840,66 @@ def l1_phase55_v18_extractor_role_for_metadata() -> None:
     )
 
 
+def l1_phase56_a_topic_node_schema() -> None:
+    """Phase 56.A — TopicNode carries every field the outline proposer
+    will read from. Source-grep guard so a refactor can't drop one
+    silently."""
+    import inspect as _inspect
+    from sciknow.core.topic_tree import TopicNode
+    src = _inspect.getsource(TopicNode)
+    for fld in (
+        "node_id", "level", "summary_text", "title", "section_title",
+        "document_ids", "child_chunk_ids", "year_min", "year_max",
+        "section_types", "topic_clusters", "centroid",
+        "children", "parent",
+    ):
+        assert f"{fld}:" in src, f"TopicNode must declare field {fld!r}"
+
+
+def l1_phase56_a_topic_tree_api_surface() -> None:
+    """Phase 56.A — TopicTree exposes the public methods the outline
+    proposer (56.B) and coverage feedback (56.G) depend on."""
+    from sciknow.core.topic_tree import TopicTree
+    for method in (
+        "from_qdrant", "all_nodes", "get", "roots", "children_of",
+        "papers_in", "score_against_scope", "walk_in_scope", "stats",
+    ):
+        assert hasattr(TopicTree, method), (
+            f"TopicTree must expose {method!r}"
+        )
+
+
+def l1_phase56_a_embed_book_scope_signature() -> None:
+    """Phase 56.A — embed_book_scope is the canonical scope-vector
+    builder. Two args (description + optional plan), returns a 1-D
+    unit vector."""
+    import inspect as _inspect
+    from sciknow.core.topic_tree import embed_book_scope
+    sig = _inspect.signature(embed_book_scope)
+    params = list(sig.parameters)
+    assert params == ["book_description", "book_plan"], (
+        f"embed_book_scope signature changed: {params}"
+    )
+
+
+def l1_phase56_a_walk_in_scope_uses_threshold() -> None:
+    """Phase 56.A — walk_in_scope's threshold gate is mandatory and
+    defaults to a discriminating value (not 0). Source-grep so a
+    well-meaning 'just yield everything' patch doesn't silently
+    blow up the outline proposer with off-topic clusters."""
+    import inspect as _inspect
+    from sciknow.core import topic_tree as _tt
+    src = _inspect.getsource(_tt.TopicTree.walk_in_scope)
+    # Threshold is a kwarg with a positive default
+    assert "threshold:" in src and "= 0.30" in src, (
+        "walk_in_scope must keep a threshold default (currently 0.30)"
+    )
+    # And the threshold actively filters
+    assert "score < threshold" in src, (
+        "walk_in_scope must filter by threshold"
+    )
+
+
 def l1_phase56_h_clean_ending_strips_dangling_cite() -> None:
     """Phase 56.H — orphan ``[`` / ``[N`` / ``[N,`` at end-of-content
     is stripped by the section-ending safety net.
@@ -20726,6 +20786,11 @@ L1_TESTS: list[Callable] = [
     # Phase 55.V18 — dedicated metadata extractor role (Qwen3.5-9B
     # at port 8095) co-resides with retrieval roles + MinerU.
     l1_phase55_v18_extractor_role_for_metadata,
+    # Phase 56.A — topic tree
+    l1_phase56_a_topic_node_schema,
+    l1_phase56_a_topic_tree_api_surface,
+    l1_phase56_a_embed_book_scope_signature,
+    l1_phase56_a_walk_in_scope_uses_threshold,
     # Phase 56.H — section-ending safety net
     l1_phase56_h_clean_ending_strips_dangling_cite,
     l1_phase56_h_clean_ending_slices_mid_sentence,
