@@ -19900,6 +19900,65 @@ def l1_phase56_a_walk_in_scope_uses_threshold() -> None:
     )
 
 
+def l1_phase56_b_outline_proposer_api() -> None:
+    """Phase 56.B — outline proposer module exports the public types
+    and entry-point the CLI + tests rely on."""
+    from sciknow.core.outline_proposer import (
+        OutlineProposal, ChapterProposal, SectionProposal,
+        SubsectionProposal,
+        propose_outline, render_proposal_text, write_proposal_to_book,
+    )
+    # Round-trip a render against an empty proposal.
+    out = render_proposal_text(OutlineProposal(book_id="dummy"))
+    assert "Outline proposal" in out
+
+
+def l1_phase56_b_proposal_dataclass_shape() -> None:
+    """Phase 56.B — ChapterProposal carries an anchor_cluster_id (the
+    bridge to the topic tree) and SectionProposal renders to the
+    legacy book_chapters.sections JSON shape so we can persist
+    without a schema change."""
+    import inspect as _inspect
+    from sciknow.core.outline_proposer import (
+        ChapterProposal, SectionProposal,
+    )
+    src = _inspect.getsource(ChapterProposal)
+    assert "anchor_cluster_id:" in src, (
+        "ChapterProposal must keep anchor_cluster_id (link to topic tree)"
+    )
+    sec = SectionProposal(
+        title="Test Section",
+        plan_bullets=["Bullet one.", "Bullet two."],
+        anchor_cluster_id="dummy-id",
+        n_papers=10,
+        scope_relevance=0.42,
+    )
+    legacy = sec.as_legacy_section()
+    assert legacy["title"] == "Test Section"
+    assert "slug" in legacy and legacy["slug"]   # auto-generated
+    assert "Bullet one." in legacy["plan"]
+    assert legacy["anchor_cluster_id"] == "dummy-id"
+
+
+def l1_phase56_b_thresholds_descend_with_depth() -> None:
+    """Phase 56.B — scope thresholds get more permissive as we drill
+    deeper. Once a chapter cluster passes, more of its sub-clusters
+    can be in-scope without re-meeting the strict top-level bar.
+    Source-grep so a refactor doesn't accidentally invert this."""
+    from sciknow.core.outline_proposer import (
+        SCOPE_THRESHOLD_CHAPTER,
+        SCOPE_THRESHOLD_SECTION,
+        SCOPE_THRESHOLD_SUBSECTION,
+    )
+    assert (
+        SCOPE_THRESHOLD_CHAPTER > SCOPE_THRESHOLD_SECTION
+        > SCOPE_THRESHOLD_SUBSECTION > 0
+    ), (
+        f"thresholds must descend: ch={SCOPE_THRESHOLD_CHAPTER} > "
+        f"sec={SCOPE_THRESHOLD_SECTION} > sub={SCOPE_THRESHOLD_SUBSECTION}"
+    )
+
+
 def l1_phase56_h_clean_ending_strips_dangling_cite() -> None:
     """Phase 56.H — orphan ``[`` / ``[N`` / ``[N,`` at end-of-content
     is stripped by the section-ending safety net.
@@ -20791,6 +20850,10 @@ L1_TESTS: list[Callable] = [
     l1_phase56_a_topic_tree_api_surface,
     l1_phase56_a_embed_book_scope_signature,
     l1_phase56_a_walk_in_scope_uses_threshold,
+    # Phase 56.B — outline proposer
+    l1_phase56_b_outline_proposer_api,
+    l1_phase56_b_proposal_dataclass_shape,
+    l1_phase56_b_thresholds_descend_with_depth,
     # Phase 56.H — section-ending safety net
     l1_phase56_h_clean_ending_strips_dangling_cite,
     l1_phase56_h_clean_ending_slices_mid_sentence,

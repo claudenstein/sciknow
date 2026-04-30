@@ -5928,3 +5928,98 @@ def style_show(
     console.print(format_fingerprint_for_prompt(fp))
     if "samples_warning" in fp:
         console.print(f"[dim]{fp['samples_warning']}[/dim]")
+
+
+# ── outline proposer (Phase 56.B) ────────────────────────────────────────────
+
+
+@app.command(name="propose-outline")
+def propose_outline_cmd(
+    book_title: Annotated[str, typer.Argument(help="Book title or ID fragment.")],
+    target_chapters: int = typer.Option(
+        12, "--target-chapters", help="Cap on top-level clusters → chapter candidates.",
+    ),
+    sections_per_chapter: int = typer.Option(
+        6, "--sections-per-chapter", help="Cap per chapter.",
+    ),
+    subsections_per_section: int = typer.Option(
+        4, "--subsections-per-section",
+        help="Cap per section. 0 disables subsection drilldown.",
+    ),
+    save_json: Annotated[Path | None, typer.Option(
+        "--save-json", help="Write the proposal as JSON for inspection.",
+    )] = None,
+    accept: bool = typer.Option(
+        False, "--accept",
+        help="Persist the proposal into book_chapters (overwrites existing).",
+    ),
+    model: str | None = typer.Option(
+        None, "--model", help="Override the writer model.",
+    ),
+):
+    """
+    Phase 56.B — propose a corpus-driven outline for a book.
+
+    Walks the project's RAPTOR topic tree, scores clusters against the
+    book's scope (description + plan), and emits a candidate outline
+    with chapters / sections / subsections each anchored to a specific
+    cluster_id.
+
+    Default mode is read-only — prints the proposal and (optionally)
+    saves a JSON dump. Pass ``--accept`` to persist into book_chapters.
+
+    Examples:
+
+      sciknow book propose-outline "Global Cooling"
+      sciknow book propose-outline "Global Cooling" --save-json /tmp/outline.json
+      sciknow book propose-outline "Global Cooling" --accept
+    """
+    from sciknow.core.outline_proposer import (
+        propose_outline,
+        render_proposal_text,
+        write_proposal_to_book,
+    )
+    from sciknow.storage.db import get_session
+
+    with get_session() as session:
+        row = _get_book(session, book_title)
+    if not row:
+        console.print(f"[red]Book not found:[/red] {book_title}")
+        raise typer.Exit(code=1)
+    book_id, title = row[0], row[1]
+
+    console.print(f"\n[bold]Proposing outline for:[/bold] {title}")
+    console.print(
+        f"  caps: chapters={target_chapters}, "
+        f"sections/ch={sections_per_chapter}, "
+        f"subsections/sec={subsections_per_section}"
+    )
+    console.print("  This calls the writer LLM once per (chapter, section, "
+                  "subsection) candidate — expect a few minutes…\n")
+
+    proposal = propose_outline(
+        book_id,
+        target_chapters=target_chapters,
+        sections_per_chapter=sections_per_chapter,
+        subsections_per_section=subsections_per_section,
+        model=model,
+    )
+
+    console.print(render_proposal_text(proposal))
+
+    if save_json:
+        import json as _json, dataclasses as _dc
+        save_json.write_text(
+            _json.dumps(_dc.asdict(proposal), indent=2),
+            encoding="utf-8",
+        )
+        console.print(f"[dim]JSON dump → {save_json}[/dim]")
+
+    if accept:
+        n = write_proposal_to_book(proposal, overwrite=True)
+        console.print(f"[green]✓ Persisted {n} chapter(s) to book_chapters.[/green]")
+    else:
+        console.print(
+            "[dim]Read-only mode. Pass --accept to write the proposal "
+            "into book_chapters.[/dim]"
+        )
