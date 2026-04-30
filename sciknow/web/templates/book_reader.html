@@ -4161,6 +4161,13 @@
                     title="Citation/bibliography style. Numeric is the universal default.">
             </select>
           </label>
+          <label>Bibliography placement
+            <select id="pro-export-bibplacement" style="width:100%;"
+                    title="Where the bibliography is printed. End-of-book = single deduped reference list at the end (default). Per chapter = a References section after each chapter via biblatex refsection. Book-style templates only.">
+              <option value="book" selected>End of book</option>
+              <option value="chapter">Per chapter</option>
+            </select>
+          </label>
           <label style="display:flex;align-items:center;gap:6px;margin-top:18px;">
             <input type="checkbox" id="pro-export-twocolumn" />
             Two-column (papers only)

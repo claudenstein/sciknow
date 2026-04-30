@@ -87,6 +87,7 @@ class ProExportRequest(BaseModel):
     paper: str = "a4paper"
     two_column: bool = False
     bib_style: str = "numeric"
+    bibliography_placement: str = "book"   # "book" | "chapter"
     cover_page: bool = True
     table_of_contents: bool = True
     list_of_figures: bool = False
@@ -109,6 +110,9 @@ def _build_export_options(req: ProExportRequest):
         paper=req.paper if req.paper in ("a4paper", "letterpaper") else "a4paper",
         two_column=req.two_column,
         bib_style=req.bib_style,
+        bibliography_placement=(req.bibliography_placement
+                                if req.bibliography_placement in ("book", "chapter")
+                                else "book"),
         cover_page=req.cover_page,
         table_of_contents=req.table_of_contents,
         list_of_figures=req.list_of_figures,

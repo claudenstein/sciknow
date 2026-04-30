@@ -4632,6 +4632,11 @@ def export(
                                     help="a4paper or letterpaper."),
     bib_style:  str = typer.Option("numeric", "--bib-style",
                                     help="numeric, authoryear, ieee, apa, chicago."),
+    bib_placement: str = typer.Option("book", "--bib-placement",
+                                       help="book = single bibliography at end (default); "
+                                            "chapter = per-chapter references via biblatex "
+                                            "refsection. Book-style templates only — paper "
+                                            "templates ignore this and always print at end."),
 ):
     """
     Compile all chapter drafts into a single document.
@@ -4683,12 +4688,19 @@ def export(
             build_book_tex_bundle,
             LatexCompileError,
         )
+        if bib_placement not in ("book", "chapter"):
+            console.print(
+                f"[red]invalid --bib-placement:[/red] {bib_placement!r} "
+                "(expected 'book' or 'chapter')"
+            )
+            raise typer.Exit(2)
         opts = ExportOptions(
             template_slug=template,
             font_family=font_family,
             font_size_pt=font_size,
             paper=paper,
             bib_style=bib_style,
+            bibliography_placement=bib_placement,
         )
         safe = book[1].lower().replace(" ", "_").replace("/", "-")[:50]
         try:

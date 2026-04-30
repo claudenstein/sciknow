@@ -3314,6 +3314,7 @@ function _proExportRequestPayload(fmt) {
     paper: v('pro-export-paper').value || 'a4paper',
     two_column: v('pro-export-twocolumn').checked,
     bib_style: v('pro-export-bibstyle').value || 'numeric',
+    bibliography_placement: v('pro-export-bibplacement').value || 'book',
     cover_page: v('pro-export-cover').checked,
     table_of_contents: v('pro-export-toc').checked,
     list_of_figures: v('pro-export-lof').checked,

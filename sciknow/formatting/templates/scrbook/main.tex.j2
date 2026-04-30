@@ -12,7 +12,11 @@
 \input{preamble_common.tex}
 \input{preamble.tex}
 
+((* if options.bibliography_placement == "chapter" and not is_flat *))
+\usepackage[backend=biber,style=((( bib_style ))),refsection=chapter]{biblatex}
+((* else *))
 \usepackage[backend=biber,style=((( bib_style )))]{biblatex}
+((* endif *))
 \addbibresource{refs.bib}
 
 \title{((( front.title | tex_escape )))((* if front.subtitle *))\\\large ((( front.subtitle | tex_escape ))) ((* endif *))}
@@ -37,11 +41,14 @@
 ((* else *))
 ((* for ch in chapters *))
 ((( ch | chapter_to_latex )))
+((* if options.bibliography_placement == "chapter" and bib_entries *))
+\printbibliography[heading=subbibintoc, title={References}]
+((* endif *))
 ((* endfor *))
 ((* endif *))
 
 \backmatter
-((* if bib_entries *))
+((* if bib_entries and (options.bibliography_placement != "chapter" or is_flat) *))
 \printbibliography[heading=bibintoc]
 ((* endif *))
 \end{document}
