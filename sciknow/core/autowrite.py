@@ -962,6 +962,25 @@ def _autowrite_section_body(
             token_observer=log.token,
         )
 
+        # Phase 56.H — section-ending safety net. The writer model
+        # (Qwen3.x family) routinely emits EOS mid-sentence or even
+        # mid-word at ~60-80% of the prompted length target. Strip
+        # any orphan `[` citation opener and slice back to the last
+        # clean sentence boundary if needed. Lossy (the slice can
+        # remove a partial sentence) but bounded: at most 15% of
+        # body, else the partial is kept. Documented in
+        # docs/research/SECTION_ENDING_RESEARCH.md.
+        from sciknow.core.draft_finalize import ensure_clean_ending, _ends_cleanly
+        _pre_clean_len = len(content)
+        if not _ends_cleanly(content):
+            content = ensure_clean_ending(content)
+            log.event("ending_repair",
+                      stage="initial",
+                      pre_chars=_pre_clean_len,
+                      post_chars=len(content),
+                      removed_chars=_pre_clean_len - len(content),
+                      now_clean=_ends_cleanly(content))
+
         # Promote the just-finished initial draft from "writing_in_progress"
         # to "initial". Same draft row, just updated metadata + final flush
         # to lock in the post-loop content (the streaming saves may have
@@ -1631,6 +1650,20 @@ def _autowrite_section_body(
             model=model, save_callback=_save_revising,
             token_observer=log.token,
         )
+
+        # Phase 56.H — same safety net on the revision output. Each
+        # revision is a fresh writer call, so it has the same EOS-bias
+        # mid-sentence risk as the initial draft.
+        if not _ends_cleanly(revised):
+            _pre_rev_len = len(revised)
+            revised = ensure_clean_ending(revised)
+            log.event("ending_repair",
+                      stage="revising",
+                      iteration=iteration + 1,
+                      pre_chars=_pre_rev_len,
+                      post_chars=len(revised),
+                      removed_chars=_pre_rev_len - len(revised),
+                      now_clean=_ends_cleanly(revised))
 
         # Re-score (Fix 3: same results) — Phase 15.3 streamed
         log.stage("rescoring", iteration=iteration + 1)

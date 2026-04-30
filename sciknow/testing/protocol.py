@@ -19840,6 +19840,114 @@ def l1_phase55_v18_extractor_role_for_metadata() -> None:
     )
 
 
+def l1_phase56_h_clean_ending_strips_dangling_cite() -> None:
+    """Phase 56.H — orphan ``[`` / ``[N`` / ``[N,`` at end-of-content
+    is stripped by the section-ending safety net.
+    """
+    from sciknow.core.draft_finalize import ensure_clean_ending, _ends_cleanly
+
+    # Big body so the slice fallback also has room to fire.
+    body = ("Sentence with a citation [3]. " * 8) + "Trailing fragment ["
+    cleaned = ensure_clean_ending(body)
+    assert _ends_cleanly(cleaned), (
+        f"dangling [ should be stripped + sliced clean; got: {cleaned[-40:]!r}"
+    )
+
+    # [N variant
+    body2 = ("First. Second. " * 12) + "And here we cut [3"
+    cleaned2 = ensure_clean_ending(body2)
+    assert _ends_cleanly(cleaned2), (
+        f"dangling [3 should be cleaned; got: {cleaned2[-40:]!r}"
+    )
+
+    # [N, variant
+    body3 = ("Alpha. Beta. " * 12) + "Mid-list cut [3, 5,"
+    cleaned3 = ensure_clean_ending(body3)
+    assert _ends_cleanly(cleaned3), (
+        f"dangling [3, 5, should be cleaned; got: {cleaned3[-40:]!r}"
+    )
+
+
+def l1_phase56_h_clean_ending_slices_mid_sentence() -> None:
+    """Phase 56.H — mid-sentence and mid-word cutoffs are sliced
+    back to the last sentence terminator when retention permits.
+    """
+    from sciknow.core.draft_finalize import ensure_clean_ending, _ends_cleanly
+
+    body = (
+        "First sentence is here. Second sentence is here. "
+        "Third sentence is here. Fourth sentence is here. "
+        "Fifth sentence is here. Sixth sentence is here. "
+        "Now we cut mid-wo"
+    )
+    cleaned = ensure_clean_ending(body)
+    assert _ends_cleanly(cleaned), (
+        f"mid-word should be sliced clean; got: {cleaned[-40:]!r}"
+    )
+    assert len(cleaned) >= int(len(body) * 0.85), (
+        f"slice removed too much: kept {len(cleaned)} of {len(body)}"
+    )
+
+
+def l1_phase56_h_clean_ending_preserves_clean_text() -> None:
+    """Phase 56.H — text that already ends cleanly round-trips
+    unchanged. Idempotency invariant.
+    """
+    from sciknow.core.draft_finalize import ensure_clean_ending
+
+    samples = [
+        "Solar minima coincide with cooling. The Maunder is the canonical example.",
+        "Question? Answer. Period.",
+        "A claim ends in close quote. Done.",
+        "",
+    ]
+    for s in samples:
+        out = ensure_clean_ending(s)
+        assert out == s, f"clean text should round-trip: {s!r} -> {out!r}"
+        assert ensure_clean_ending(out) == out, (
+            f"non-idempotent on clean input: {s!r}"
+        )
+
+
+def l1_phase56_h_clean_ending_keeps_partial_when_too_lossy() -> None:
+    """Phase 56.H — when slicing would lose more than 15% of the
+    body, the partial / mid-word output is kept as the lesser evil.
+    """
+    from sciknow.core.draft_finalize import ensure_clean_ending, _ends_cleanly
+
+    short_lossy = (
+        "Tiny intro. "
+        + ("More body without any terminator " * 4)
+        + "and a midword"
+    )
+    cleaned = ensure_clean_ending(short_lossy)
+    assert not _ends_cleanly(cleaned), (
+        f"expected partial kept (slice would lose too much); got: {cleaned!r}"
+    )
+    assert "Tiny intro." in cleaned
+
+
+def l1_phase56_h_autowrite_wires_clean_ending() -> None:
+    """Phase 56.H — autowrite's initial-draft + revision paths both
+    invoke ensure_clean_ending. Source-grep guard so a refactor that
+    drops the call doesn't silently lose the safety net.
+    """
+    import inspect as _inspect
+    from sciknow.core import autowrite as _aw
+    src = _inspect.getsource(_aw)
+    assert "from sciknow.core.draft_finalize import" in src, (
+        "autowrite must import draft_finalize (Phase 56.H safety net)"
+    )
+    n_calls = src.count("ensure_clean_ending(")
+    assert n_calls >= 2, (
+        f"expected ensure_clean_ending called >= 2 times in autowrite; "
+        f"saw {n_calls}"
+    )
+    assert 'log.event("ending_repair"' in src, (
+        "autowrite should emit `ending_repair` telemetry events"
+    )
+
+
 def l1_phase55_v6_autowrite_emits_section_error_on_failure() -> None:
     """Phase 55.V6 — `autowrite_section_stream` yields a
     `section_error` event when the inner body raises, instead of
@@ -20618,6 +20726,12 @@ L1_TESTS: list[Callable] = [
     # Phase 55.V18 — dedicated metadata extractor role (Qwen3.5-9B
     # at port 8095) co-resides with retrieval roles + MinerU.
     l1_phase55_v18_extractor_role_for_metadata,
+    # Phase 56.H — section-ending safety net
+    l1_phase56_h_clean_ending_strips_dangling_cite,
+    l1_phase56_h_clean_ending_slices_mid_sentence,
+    l1_phase56_h_clean_ending_preserves_clean_text,
+    l1_phase56_h_clean_ending_keeps_partial_when_too_lossy,
+    l1_phase56_h_autowrite_wires_clean_ending,
 ]
 
 L2_TESTS: list[Callable] = [
