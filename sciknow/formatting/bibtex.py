@@ -64,13 +64,88 @@ def _short_hash(s: str, n: int = 4) -> str:
 
 
 def _safe_bibtex_value(v) -> str:
-    """Escape a value for BibTeX braces. Null → empty string."""
+    """Escape a value for BibTeX braces. Null → empty string.
+
+    Beyond brace balancing, escape TeX-special characters that biber
+    will pass through to the .bbl verbatim — without escaping, they
+    explode at \\printbibliography time. Common offenders in real
+    metadata: ``&`` (journals like "Astronomy & Astrophysics", "Energy
+    & Environment"), ``%`` (occasional in titles), ``#`` (rare).
+
+    We deliberately do NOT escape ``_``, ``$``, ``^``, ``~`` here —
+    those legitimately appear in DOIs, identifiers, and math formulas
+    in titles, and over-escaping breaks more than it fixes. If a field
+    contains math, biber expects authors to wrap it in $...$ themselves.
+    """
     if v is None:
         return ""
     s = str(v)
-    # No need to escape backslash inside braces; only need to balance braces.
     s = s.replace("{", r"\{").replace("}", r"\}")
+    # Escape only standalone TeX specials — skip already-escaped ones
+    # (e.g. \& in pre-escaped input) by using a negative lookbehind.
+    # Underscore must be escaped too: it triggers "Missing $ inserted"
+    # in any text field (titles like "Lightfoot_JBAS" or notes
+    # containing filenames). biblatex's URL/DOI formatters accept
+    # the escaped form fine, so this is safe across all field kinds.
+    s = re.sub(r"(?<!\\)&", r"\\&", s)
+    s = re.sub(r"(?<!\\)%", r"\\%", s)
+    s = re.sub(r"(?<!\\)#", r"\\#", s)
+    s = re.sub(r"(?<!\\)_", r"\\_", s)
     return s
+
+
+def _safe_authors_for_biber(s: str) -> str:
+    """Coerce an author-list string into biber's required form.
+
+    Biber expects authors separated by ``and`` and at most one comma per
+    author segment (``Last, First``). It crashes hard ("Name has too
+    many commas, skipping entry") when fed APA-style flattened lists
+    like ``Lean, J., Beer, J., & Bradley, R.`` — which is exactly the
+    shape `_bibtex_entry_from_apa` produces from a parsed source line
+    when no structured author column is available. A single bad
+    entry takes down the whole bibliography (the .bbl is partial,
+    *every* `\\cite` falls back to printing the raw key, and latexmk
+    aborts before the TOC pass).
+
+    Strategy:
+    1. Replace ``&`` and ``and`` separators with a canonical `` and ``.
+    2. Split, and for any segment that still has >1 comma, look for
+       the APA pattern ``initial. , Capital`` and rewrite that comma
+       as `` and `` (it's the author boundary, not the surname/initials
+       boundary).
+    3. As a fallback for unparseable junk, keep the first comma and
+       drop the rest — lossy but biber-safe.
+    """
+    if not s:
+        return s
+    s = s.strip()
+    s = re.sub(r"\s*&\s*", " and ", s)
+    s = re.sub(r"\s+and\s+", " and ", s)
+
+    fixed: list[str] = []
+    for chunk in s.split(" and "):
+        chunk = chunk.strip().rstrip(",").strip()
+        if not chunk:
+            continue
+        if chunk.count(",") <= 1:
+            fixed.append(chunk)
+            continue
+        # APA: "Last, F., Last, F., Last, F." — the comma directly after
+        # an initial+period (or the trailing initial of a chain like
+        # "F.M.") is the author boundary. Rewrite those commas to " and ".
+        rebuilt = re.sub(r"(\.)\s*,\s*([A-Z])", r"\1 and \2", chunk)
+        if rebuilt != chunk:
+            fixed.extend(
+                p.strip().rstrip(",").strip()
+                for p in rebuilt.split(" and ") if p.strip()
+            )
+            continue
+        # Last resort: keep the first comma (treat as Last, First) and
+        # convert any further commas to spaces so biber doesn't choke.
+        first, rest = chunk.split(",", 1)
+        fixed.append(f"{first.strip()}, {rest.replace(',', ' ').strip()}")
+
+    return " and ".join(fixed)
 
 
 def _bibtex_entry_from_metadata(citekey: str, row) -> str:
@@ -89,7 +164,7 @@ def _bibtex_entry_from_metadata(citekey: str, row) -> str:
         author_str = " and ".join(n for n in names if n)
     fields = []
     if title:        fields.append(f"  title     = {{{_safe_bibtex_value(title)}}}")
-    if author_str:   fields.append(f"  author    = {{{_safe_bibtex_value(author_str)}}}")
+    if author_str:   fields.append(f"  author    = {{{_safe_bibtex_value(_safe_authors_for_biber(author_str))}}}")
     if year:         fields.append(f"  year      = {{{year}}}")
     if journal:      fields.append(f"  journal   = {{{_safe_bibtex_value(journal)}}}")
     if volume:       fields.append(f"  volume    = {{{_safe_bibtex_value(volume)}}}")
@@ -119,7 +194,7 @@ def _bibtex_entry_from_apa(citekey: str, apa_line: str) -> str:
         title = s[m.end():].split(".")[0].strip()
     fields = [f"  title = {{{_safe_bibtex_value(title)}}}"]
     if authors:
-        fields.append(f"  author = {{{_safe_bibtex_value(authors)}}}")
+        fields.append(f"  author = {{{_safe_bibtex_value(_safe_authors_for_biber(authors))}}}")
     if year:
         fields.append(f"  year = {{{year}}}")
     if doi:
