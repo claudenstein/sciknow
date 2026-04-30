@@ -3363,11 +3363,37 @@ def _retrieve_with_step_back(
 
 
 def _clean_json(raw: str) -> str:
-    """Strip markdown fences and extract the JSON object."""
+    r"""Strip markdown fences and extract the JSON object.
+
+    Phase 55.V19 — hardened against gemma's tendency to emit stray
+    backslashes inside string fields. Two passes:
+
+      1. Strip backslashes that aren't followed by ANY valid JSON
+         escape character: \&, \_, \$, \( etc. become &, _, $, (.
+         Same as before.
+
+      2. Strip \u sequences that aren't followed by exactly 4 hex
+         digits. Pre-fix, the regex preserved \u because u is a
+         "valid" escape lead character, but if the next 4 chars
+         weren't hex, json.loads would raise "Invalid \escape" or
+         "Invalid \uXXXX escape" deep into the string. This is the
+         specific failure mode that fired ~once per scoring/verify
+         pass on the gemma scorer at q4_0 KV / 131K ctx.
+
+    The two-pass approach lets us preserve valid \uXXXX (Greek
+    letters, em-dashes, etc.) while stripping invalid ones.
+    """
     cleaned = raw.strip()
     if cleaned.startswith("```"):
         cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    # Pass 1: strip non-JSON-escape backslash sequences (preserves
+    # valid \uXXXX since `u` is in the negation set).
     cleaned = re.sub(r'\\(?!["\\/bfnrtu])', '', cleaned)
+    # Pass 2: strip `\u` not followed by 4 hex digits. Replace the
+    # `\u` with `u` (preserve the literal `u` since the LLM probably
+    # meant a unicode reference but bungled it; better to keep the
+    # text than lose it).
+    cleaned = re.sub(r'\\u(?![0-9a-fA-F]{4})', 'u', cleaned)
     first = cleaned.find("{")
     last = cleaned.rfind("}")
     if first >= 0 and last > first:

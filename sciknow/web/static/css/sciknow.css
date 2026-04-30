@@ -2449,6 +2449,12 @@ body.panel-hidden   .col-peek-panel   { display: block; }
             border-bottom: 1px solid var(--border-strong);
             font-family: var(--font-mono); font-size: 12px;
             color: var(--fg); box-shadow: 0 2px 8px rgba(0,0,0,0.04); }
+/* Phase 55.V19h — `.u-hidden` (display:none) and `.task-bar` (display:flex)
+   have equal specificity, but the .task-bar rule lives later in the file,
+   so the global `u-hidden` utility silently lost the cascade and the bar
+   was visible from page load — the empty "..., ?, 0 tok, 0.0 tok/s, 0s,
+   ETA ?" report. Re-arm `u-hidden` for the bar via a 2-class selector. */
+.task-bar.u-hidden { display: none; }
 body.task-bar-open { padding-top: 40px; }
 .task-bar .tb-dot { width: 10px; height: 10px; border-radius: 50%;
                     background: var(--success); flex-shrink: 0;

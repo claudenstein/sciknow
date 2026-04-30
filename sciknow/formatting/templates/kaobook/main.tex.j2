@@ -17,7 +17,11 @@
 \input{preamble.tex}
 
 \usepackage[english]{babel}
+((* if options.bibliography_placement == "chapter" and not is_flat *))
+\usepackage[backend=biber,style=((( bib_style ))),citestyle=((( bib_style ))),refsection=chapter]{biblatex}
+((* else *))
 \usepackage[backend=biber,style=((( bib_style ))),citestyle=((( bib_style )))]{biblatex}
+((* endif *))
 \addbibresource{refs.bib}
 
 \title{((( front.title | tex_escape )))((* if front.subtitle *)): ((( front.subtitle | tex_escape )))((* endif *))}
@@ -92,9 +96,16 @@
 ((* endfor *))
 ((* endif *))
 ((* else *))
-((# Book layout: one \chapter per Chapter, \section per Section. #))
+((# Book layout: one \chapter per Chapter, \section per Section.
+   With bibliography_placement=="chapter", `refsection=chapter` (set on
+   the biblatex package above) auto-opens a refsection at every \chapter
+   so we just need to emit \printbibliography per chapter; with
+   placement=="book" we print once at end of \backmatter. #))
 ((* for ch in chapters *))
 ((( ch | chapter_to_latex )))
+((* if options.bibliography_placement == "chapter" and bib_entries *))
+\printbibliography[heading=subbibintoc, title={References}]
+((* endif *))
 ((* endfor *))
 ((* endif *))
 
@@ -105,7 +116,7 @@
 ((( front.acknowledgements | tex_escape )))
 ((* endif *))
 
-((* if bib_entries *))
+((* if bib_entries and (options.bibliography_placement != "chapter" or is_flat) *))
 \printbibliography[heading=bibintoc]
 ((* endif *))
 

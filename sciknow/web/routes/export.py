@@ -54,6 +54,8 @@ class _ProExportJob:
     output_bytes: bytes = b""
     output_filename: str = ""
     output_mimetype: str = ""
+    saved_to: str = ""           # absolute path on the server, if save_to_path was set
+    save_error: str = ""         # populated when save_to_path failed
     options_snapshot: dict = field(default_factory=dict)
 
 
@@ -87,6 +89,12 @@ class ProExportRequest(BaseModel):
     paper: str = "a4paper"
     two_column: bool = False
     bib_style: str = "numeric"
+    bibliography_placement: str = "book"   # "book" | "chapter"
+    # Phase 55.V19g — optional server-side save path. When set, the
+    # built file is also written to this folder (in addition to being
+    # returned via the /download endpoint). Path is expanded through
+    # os.path.expanduser so "~" works.
+    save_to_path: Optional[str] = None
     cover_page: bool = True
     table_of_contents: bool = True
     list_of_figures: bool = False
@@ -109,6 +117,9 @@ def _build_export_options(req: ProExportRequest):
         paper=req.paper if req.paper in ("a4paper", "letterpaper") else "a4paper",
         two_column=req.two_column,
         bib_style=req.bib_style,
+        bibliography_placement=(req.bibliography_placement
+                                if req.bibliography_placement in ("book", "chapter")
+                                else "book"),
         cover_page=req.cover_page,
         table_of_contents=req.table_of_contents,
         list_of_figures=req.list_of_figures,
@@ -146,6 +157,19 @@ def _run_pro_export(job_id: str, book_id: str, req: ProExportRequest) -> None:
             job.output_mimetype = "application/pdf"
             job.output_filename = f"{book_id[:8]}.pdf"
             job.log_text = log_text
+        # Phase 55.V19g — also write to server-side save path if requested.
+        if req.save_to_path:
+            try:
+                import os, pathlib
+                target_dir = pathlib.Path(os.path.expanduser(req.save_to_path)).resolve()
+                target_dir.mkdir(parents=True, exist_ok=True)
+                target_file = target_dir / job.output_filename
+                target_file.write_bytes(job.output_bytes)
+                job.saved_to = str(target_file)
+            except Exception as save_exc:
+                log.warning("save_to_path failed for %s: %s",
+                            req.save_to_path, save_exc)
+                job.save_error = f"{type(save_exc).__name__}: {save_exc}"
         job.status = "done"
         job.progress = "done"
     except LatexCompileError as e:
@@ -203,6 +227,8 @@ async def export_pro_job_status(job_id: str):
         "error": job.error,
         "log_excerpt": (job.log_text[-2000:] if job.log_text else ""),
         "filename": job.output_filename,
+        "saved_to": job.saved_to,
+        "save_error": job.save_error,
         "size": len(job.output_bytes),
         "elapsed_seconds": (
             (job.finished_at or time.monotonic()) - job.started_at

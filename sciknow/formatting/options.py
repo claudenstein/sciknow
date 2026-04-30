@@ -259,6 +259,12 @@ class ExportOptions:
     bib_style: str = "numeric"
     sort_bib: Literal["citeorder", "alpha"] = "citeorder"
     hyperlink_dois: bool = True
+    # Where to place the bibliography in book-style templates (kaobook,
+    # classicthesis, scrbook, memoir*). Paper-style templates ignore
+    # this and always print at end-of-document.
+    #   "book"    — single bibliography at end of book (default)
+    #   "chapter" — per-chapter bibliography via biblatex refsection
+    bibliography_placement: Literal["book", "chapter"] = "book"
 
     # Front matter / structure
     cover_page: bool = True

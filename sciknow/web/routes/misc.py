@@ -312,8 +312,11 @@ async def api_dashboard():
     ch_section_drafts: dict[str, dict] = {}
     total_words = 0
     for d in drafts:
+        # Phase 55.V19 added final_overall + checkpoint columns at the
+        # end of the drafts SELECT. Unpack what we need positionally so
+        # the dashboard works regardless of trailing columns.
         draft_id, title, sec_type, content, wc, sources, version, summary, \
-            review_fb, ch_id, parent_id, created, ch_num, ch_title = d
+            review_fb, ch_id, parent_id, created, ch_num, ch_title = d[:14]
         total_words += wc or 0
         if not ch_id:
             continue
@@ -825,8 +828,9 @@ async def corkboard_data():
     # Build latest draft per chapter+section
     ch_sections: dict[str, dict] = {}
     for d in drafts:
+        # Phase 55.V19 — see same fix in api_dashboard above.
         draft_id, title, sec_type, content, wc, sources, version, summary, \
-            review_fb, ch_id, parent_id, created, ch_num, ch_title = d
+            review_fb, ch_id, parent_id, created, ch_num, ch_title = d[:14]
         if not ch_id:
             continue
         if ch_id not in ch_sections:

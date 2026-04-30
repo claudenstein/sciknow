@@ -1110,6 +1110,26 @@ def _autowrite_section_body(
             scores = json.loads(_clean_json(score_raw), strict=False)
         except Exception as exc:
             logger.warning("Scoring failed: %s", exc)
+            # Phase 55.V19 — dump raw scorer output to a side file so
+            # we can inspect what gemma actually emitted that broke
+            # the parse. Only on failure, so no perf impact in the
+            # happy path. The file is overwritten per failure (last-
+            # one-wins) since we just need a recent example.
+            try:
+                from pathlib import Path as _Path
+                _dump_path = _Path(settings.data_dir) / "autowrite" / "_last_scoring_failure.txt"
+                _dump_path.parent.mkdir(parents=True, exist_ok=True)
+                _dump_path.write_text(
+                    f"Exception: {type(exc).__name__}: {exc}\n"
+                    f"score_raw len: {len(score_raw or '')}\n"
+                    f"--- raw scorer output ---\n"
+                    f"{score_raw}\n"
+                    f"--- after _clean_json ---\n"
+                    f"{_clean_json(score_raw or '')}\n",
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
             log.event("scoring_failed", message=str(exc)[:200])
             scores = {"overall": 0.5, "weakest_dimension": "unknown",
                       "revision_instruction": "Improve overall quality."}

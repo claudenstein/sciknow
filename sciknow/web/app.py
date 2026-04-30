@@ -683,11 +683,12 @@ def _get_book_data():
             WHERE bc.book_id = :bid ORDER BY bc.number
         """), {"bid": _book_id}).fetchall()
 
-        # Phase 54.6.309 — keep the tuple shape (14 columns) but push an
-        # ``is_active`` sort key into ORDER BY so a user-pinned version
-        # beats MAX(version). The downstream collapse in _render_book
-        # already picks the first row per (chapter, section), so this
-        # ordering is enough — no consumer needs to read the flag.
+        # Phase 54.6.309 / 55.V19 — 16-column tuple. ``is_active`` sort
+        # key in ORDER BY so a user-pinned version beats MAX(version);
+        # the downstream collapse in _render_book picks the first row
+        # per (chapter, section). Last two columns (final_overall,
+        # checkpoint) are surfaced into the sidebar to show convergence
+        # state at a glance.
         drafts = session.execute(text("""
             SELECT d.id::text, d.title, d.section_type, d.content,
                    d.word_count, d.sources, d.version, d.summary,
@@ -1024,7 +1025,7 @@ def _strip_md(text_in: str) -> str:
 
 
 def _draft_to_md(draft_row, *, include_sources: bool = True) -> str:
-    """Render a single draft as markdown. draft_row is the 14-tuple
+    """Render a single draft as markdown. draft_row is the 16-tuple
     from _get_book_data's drafts query."""
     title = draft_row[1] or "Untitled"
     content = draft_row[3] or ""
@@ -1437,7 +1438,8 @@ def _render_book(book, chapters, drafts, gaps, comments,
     draft_map = {}
     for d in drafts:
         draft_id, title, sec_type, content, wc, sources, version, summary, \
-            review_fb, ch_id, parent_id, created, ch_num, ch_title = d
+            review_fb, ch_id, parent_id, created, ch_num, ch_title, \
+            final_overall, checkpoint = d
         draft_map[draft_id] = d
         key = ch_id or "__none__"
         if key not in chapter_drafts:
@@ -1946,19 +1948,30 @@ def _render_sidebar(items, active_id):
     return out
 
 
+_LEADING_CITE_NUM = re.compile(r"^\s*\[(\d+)\]")
+
+
 def _render_sources(sources):
     """Render the right-panel sources list. Phase 22 — escapes each
-    source string. Phase 48 — the source strings already carry their
-    own `[1]`, `[2]` prefix (emitted by the writer prompt), so we
-    suppress the <ol> auto-numbering to avoid the redundant
-    "1. [1] Smith et al…" rendering. The <li> tag itself stays so that
-    buildPopovers can still query `#panel-sources li` in order."""
+    source string. Phase 48 — source strings already carry their own
+    `[N]` prefix (emitted by the writer or the global bibliography
+    remap), so we suppress <ol> auto-numbering. **Phase 55.V19b**: the
+    `[N]` from the source string drives the DOM `id` and `data-ref`,
+    not the sequential position. Without this, when the body has been
+    remapped to global bibliography numbers (Phase 54.6.309) the
+    sources panel still emits `id="source-1"`, `source-2"`, ... and
+    every body citation past the local-source-count is flagged
+    citation-broken even though the source IS present in the deduped
+    panel — just under its global number, not its position."""
     if not sources:
         return "<em>No sources.</em>"
     out = '<ol style="list-style:none;padding-left:0;margin-left:0;">'
-    for i, s in enumerate(sources):
-        if s:
-            out += f'<li id="source-{i+1}">{_esc(s)}</li>'
+    for i, s in enumerate(sources, start=1):
+        if not s:
+            continue
+        m = _LEADING_CITE_NUM.match(s)
+        n = int(m.group(1)) if m else i
+        out += f'<li id="source-{n}" data-ref="{n}">{_esc(s)}</li>'
     out += "</ol>"
     return out
 
