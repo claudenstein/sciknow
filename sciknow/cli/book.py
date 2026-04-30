@@ -5928,3 +5928,56 @@ def style_show(
     console.print(format_fingerprint_for_prompt(fp))
     if "samples_warning" in fp:
         console.print(f"[dim]{fp['samples_warning']}[/dim]")
+
+
+# ── bibliography archive (Phase 55.V19k) ─────────────────────────────────────
+
+
+@app.command(name="archive-bibliography")
+def archive_bibliography(
+    book_title: Annotated[str, typer.Argument(help="Book title or ID fragment.")],
+    prune: bool = typer.Option(
+        False, "--prune",
+        help="Remove orphan symlinks (citekeys no longer in the bib).",
+    ),
+):
+    """
+    Symlink every cited paper's PDF into ``<project>/bibliography/`` so
+    the book's source set is browsable as a directory.
+
+    File naming uses the BibTeX citekey (e.g. ``Mrner2015_762a.pdf``),
+    matching ``refs.bib`` 1:1 for the book. The folder is gitignored
+    — it's a derived artifact, regeneratable from the database.
+
+    Examples:
+
+      sciknow book archive-bibliography "Global Cooling"
+      sciknow book archive-bibliography "Global Cooling" --prune
+    """
+    from sciknow.core.bibliography_archive import (
+        archive_book_bibliography,
+        prune_bibliography_archive,
+    )
+    from sciknow.storage.db import get_session
+
+    with get_session() as session:
+        row = _get_book(session, book_title)
+    if not row:
+        console.print(f"[red]Book not found:[/red] {book_title}")
+        raise typer.Exit(code=1)
+    book_id, title = row[0], row[1]
+
+    if prune:
+        removed = prune_bibliography_archive(book_id)
+        console.print(f"[yellow]Pruned {removed} orphan symlink(s).[/yellow]")
+
+    result = archive_book_bibliography(book_id)
+    console.print(f"\n[bold]Bibliography archive for {title}[/bold]")
+    console.print(f"  folder: [cyan]{result.bibliography_dir}[/cyan]")
+    console.print(f"  {result.summary()}")
+    if result.missing_titles:
+        console.print("\n[dim]Sample of papers without a local PDF:[/dim]")
+        for t in result.missing_titles[:5]:
+            console.print(f"  • {t}")
+        if len(result.missing_titles) > 5:
+            console.print(f"  … and {len(result.missing_titles) - 5} more")
