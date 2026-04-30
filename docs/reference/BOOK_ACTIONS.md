@@ -78,7 +78,7 @@ A typical first pass: **Outline → Autowrite each section → Verify Draft → 
 - **Plan coverage dimension** (54.6.79): scores NLI entailment of each atomic plan bullet against the draft; if coverage is the weakest dimension AND < target, the revision instruction names the missed bullets.
 - **CoVe** (optional, `use_cove=True` default): Chain-of-Verification pass on any claim below `cove_threshold` before committing the draft.
 
-**Cost.** 1-4 min per section typically. 4 model swaps per iteration on a 24 GB GPU (see `docs/PHASE_LOG.md` 54.6.X for the breakdown). Expensive but the highest-quality output sciknow can produce single-shot.
+**Cost.** 1-4 min per section typically. 4 model swaps per iteration on a 24 GB GPU (see `docs/roadmap/PHASE_LOG.md` 54.6.X for the breakdown). Expensive but the highest-quality output sciknow can produce single-shot.
 
 ### Edit
 
@@ -339,4 +339,4 @@ Read the cards directly in the UI — each has a short description of when it ap
 | gaps | `gaps` | `gaps_stream` | SSE via stream endpoints |
 | snapshot / snapshot-restore | `snapshot` / `snapshot-restore` | `bundle_*` | Bundles modal |
 
-See `docs/PHASE_LOG.md` for the phases that introduced each feature — search e.g. "54.6.83" for Verify Draft or "54.6.71" for Align Citations.
+See `docs/roadmap/PHASE_LOG.md` for the phases that introduced each feature — search e.g. "54.6.83" for Verify Draft or "54.6.71" for Align Citations.

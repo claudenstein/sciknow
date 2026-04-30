@@ -11,7 +11,7 @@ This module is the single source of truth for resolving which project
 is currently active. It has **no runtime dependencies on settings** so
 ``sciknow/config.py`` can safely import it without a circular import.
 
-See ``docs/PROJECTS.md`` for the full design (sharing policy, one-shot
+See ``docs/reference/PROJECTS.md`` for the full design (sharing policy, one-shot
 migration path, CLI surface).
 
 ## Precedence

@@ -200,7 +200,7 @@ def init(
     from_existing: bool = typer.Option(
         False, "--from-existing",
         help="One-shot migration: adopt the current single-tenant install (data/, sciknow DB, "
-             "unprefixed Qdrant collections) into this project slot. See `docs/PROJECTS.md` §43f.",
+             "unprefixed Qdrant collections) into this project slot. See `docs/reference/PROJECTS.md` §43f.",
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run",

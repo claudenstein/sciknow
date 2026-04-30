@@ -11,7 +11,7 @@ outbound I/O. The rule file is user-editable in the repo; after
 adding new aliases, re-run ``sciknow wiki compile --rebuild`` to
 re-populate ``knowledge_graph`` with the updated mapping.
 
-See ``docs/ROADMAP_INGESTION.md`` §3.7.1 for the research context
+See ``docs/roadmap/ROADMAP_INGESTION.md`` §3.7.1 for the research context
 and next-step Wikidata grounding option.
 """
 from __future__ import annotations

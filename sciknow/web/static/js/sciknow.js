@@ -3837,7 +3837,7 @@ async function showDashboard() {
     + '&bull; <strong>AI Write / Autowrite / Review / Revise / Verify / Align / Argue / Gaps / &hellip;</strong> appear in the '
     + '<em>draft toolbar</em> &mdash; click any section in the sidebar to open its draft and the toolbar shows up. '
     + 'Click the <strong>?</strong> button at the end of the toolbar for a full reference, or read '
-    + '<a href="https://github.com/claudenstein/sciknow/blob/main/docs/BOOK_ACTIONS.md" target="_blank" style="color:var(--link);">docs/BOOK_ACTIONS.md</a>.'
+    + '<a href="https://github.com/claudenstein/sciknow/blob/main/docs/reference/BOOK_ACTIONS.md" target="_blank" style="color:var(--link);">docs/reference/BOOK_ACTIONS.md</a>.'
     + '</div>';
 
   // Book stats — modernized stat-tile cards

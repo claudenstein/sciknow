@@ -1,6 +1,6 @@
 # DeepScientist — Ranked Port List
 
-[&larr; Back to README](../README.md) · [Comparison](COMPARISON.md) · [Roadmap](ROADMAP.md)
+[&larr; Back to README](../README.md) · [Comparison](../benchmarks/COMPARISON.md) · [Roadmap](../roadmap/ROADMAP.md)
 
 ---
 
@@ -21,7 +21,7 @@ These look like DeepScientist innovations at first glance but sciknow has equiva
 
 | # | DeepScientist feature | Where sciknow covers it | Notes |
 |---|---|---|---|
-| 0a | Findings Memory (`memory_service.py:14–272`) with embedding-free substring search | `autowrite_lessons` table (Phase 32.7) + `_get_relevant_lessons` (`book_ops.py:1010`) | sciknow's version uses bge-m3 embeddings — strictly better than substring. See `docs/LESSONS.md`. |
+| 0a | Findings Memory (`memory_service.py:14–272`) with embedding-free substring search | `autowrite_lessons` table (Phase 32.7) + `_get_relevant_lessons` (`book_ops.py:1010`) | sciknow's version uses bge-m3 embeddings — strictly better than substring. See `docs/reference/LESSONS.md`. |
 | 0b | Recency decay on memory retrieval | `_get_relevant_lessons` recency formula: `2^(-age_days / 30)` | Generative Agents 2023 formula. DeepScientist uses a simpler last-modified sort. |
 | 0c | Per-project isolation (quest dirs) | Phase 43 `projects/<slug>/` layout + per-project PostgreSQL DB + Qdrant collections | sciknow's isolation is stronger — the DB boundary is enforced at the connection layer, not just the filesystem. |
 | 0d | LLM-as-reviewer at the end of a run | `_verify_draft_inner` + Phase 46.C `ensemble_review_stream` (NeurIPS rubric + meta-reviewer) | Ours is more structured — numeric rubric, stance rotation, mechanical fallback. |

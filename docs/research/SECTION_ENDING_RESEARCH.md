@@ -1,7 +1,7 @@
 # Mid-Sentence Section Endings — Research Survey
 
 **Status:** research notes / standalone reading. Not a phase plan.
-**Companion:** `docs/BIBLIOGRAPHY_COVERAGE_RESEARCH.md` (the orthogonal coverage problem).
+**Companion:** `docs/research/BIBLIOGRAPHY_COVERAGE_RESEARCH.md` (the orthogonal coverage problem).
 **Anchor commit:** `97cbac0` (research-doc commit; measurements from this state).
 
 ---

@@ -138,7 +138,7 @@ spaces, or backticks.
 | Step | Touches | Why it's separate |
 | --- | --- | --- |
 | `project destroy` | PG database, Qdrant collections, `projects/<slug>/data/` | Isolates each project; destroy leaves nothing behind. |
-| `project init` + `project use` | Creates a new PG db (`sciknow_<slug>`), empty data dir, sets `.active-project` | Per-project isolation — see `docs/PROJECTS.md`. |
+| `project init` + `project use` | Creates a new PG db (`sciknow_<slug>`), empty data dir, sets `.active-project` | Per-project isolation — see `docs/reference/PROJECTS.md`. |
 | `db init` | Runs Alembic migrations, creates both Qdrant collections (`<slug>_papers`, `<slug>_abstracts`) | Idempotent; you always want to run this on a new project before ingesting. |
 | `ingest directory` | PDFs → MinerU → metadata → chunker → bge-m3 dense + sparse → Qdrant + PG | Resume-safe — the `documents` table is keyed on file SHA-256. |
 | `db enrich` | Hits Crossref / OpenAlex / arXiv for any paper without a DOI | Cheap on subsequent runs (only queries papers that still lack metadata). |

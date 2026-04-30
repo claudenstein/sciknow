@@ -147,7 +147,7 @@ def test_cmd(
     Run L1 on every PR. Run L2 before shipping a "Phase" feature drop or after
     infrastructure changes. Run L3 after retrieval / LLM / embedder changes.
     Run SMOKE after ANY change in the wiki / autowrite LLM pipelines.
-    See docs/TESTING.md for the full protocol and how to add new checks.
+    See docs/reference/TESTING.md for the full protocol and how to add new checks.
 
     Examples:
 
@@ -251,7 +251,7 @@ def bench_cmd(
                / NDCG@10 vs the bge-m3 baseline + ship-decision verdict
                (criterion: delta ≥ +0.06 MRR). ~20 s for 200 probes
                once the SPECTER2 model is cached. Currently PARKED per
-               docs/EXPAND_ENRICH_RESEARCH_2.md §2.2; this layer exists
+               docs/research/EXPAND_ENRICH_RESEARCH_2.md §2.2; this layer exists
                so future re-tests against new releases are one-shot.
       full   — every bench. Run before a release or after infra change.
     """

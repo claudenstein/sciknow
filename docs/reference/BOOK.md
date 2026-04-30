@@ -133,7 +133,7 @@ decides automatically whether to keep each iteration.
   drafting, weak for the editorial judgment calls that make a book
   yours.
 
-See `docs/STRATEGY.md` for the principled human + autowrite division
+See `docs/roadmap/STRATEGY.md` for the principled human + autowrite division
 of labor.
 
 ### Quality flags on `book write`
@@ -405,7 +405,7 @@ There are two export paths: the **CLI** (`sciknow book export`) and the **web re
 
 **Web reader** (txt / md / html / pdf — Phase 30 / 31)
 
-The toolbar's export button can target three scopes: a single draft, a chapter, or the whole book. The endpoint pattern is `/api/export/{draft,chapter,book}/{id}.{ext}`. PDF rendering uses [WeasyPrint](https://github.com/Kozea/WeasyPrint) directly off the rendered HTML, so the look matches what you see in the reader. PDF is **not** in the CLI export matrix yet — see `docs/ROADMAP.md` for the deferred CLI PDF/EPUB work.
+The toolbar's export button can target three scopes: a single draft, a chapter, or the whole book. The endpoint pattern is `/api/export/{draft,chapter,book}/{id}.{ext}`. PDF rendering uses [WeasyPrint](https://github.com/Kozea/WeasyPrint) directly off the rendered HTML, so the look matches what you see in the reader. PDF is **not** in the CLI export matrix yet — see `docs/roadmap/ROADMAP.md` for the deferred CLI PDF/EPUB work.
 
 Both paths deduplicate citations globally across all chapters — `[1]` in Ch.1 and `[3]` in Ch.5 pointing to the same paper become a unified `[N]` with a single bibliography entry.
 

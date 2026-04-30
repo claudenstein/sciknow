@@ -507,7 +507,7 @@ def types():
       Words/concept     — words_per_concept_range from ProjectType
                           (derived from literature per genre)
 
-    See docs/RESEARCH.md §24 for the research justification behind
+    See docs/research/RESEARCH.md §24 for the research justification behind
     every number.
     """
     from rich.table import Table as _RT
@@ -540,7 +540,7 @@ def types():
     console.print(table)
     console.print(
         "[dim]Concept-density sizing: sections with a bullet plan "
-        "auto-size as N × (wpc midpoint). See `docs/RESEARCH.md §24`.[/dim]"
+        "auto-size as N × (wpc midpoint). See `docs/research/RESEARCH.md §24`.[/dim]"
     )
 
 

@@ -102,7 +102,7 @@ def extract(pdf_path: Path, markdown_text: str) -> PaperMeta:
     # into the XMP PRISM/DC namespace at copy-edit time. PyMuPDF's
     # Info dict reader misses these, but the XMP stream is a clean,
     # near-zero-false-positive signal when present. See
-    # docs/ENRICH_RESEARCH.md §4.
+    # docs/research/ENRICH_RESEARCH.md §4.
     if not meta.doi:
         try:
             from sciknow.ingestion.enrich_sources import extract_xmp_doi

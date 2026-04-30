@@ -427,7 +427,7 @@ sciknow book export "Global Cooling" --format latex -o book.tex          # LaTeX
 sciknow book export "Global Cooling" --format docx -o book.docx          # DOCX
 ```
 
-> **PDF export** (Phase 31) is **only available in the web reader**, not in `sciknow book export`. The web reader exports `txt / md / html / pdf` via WeasyPrint at `/api/export/{draft,chapter,book}/{id}.{ext}`. CLI PDF/EPUB via Pandoc is on the roadmap (`docs/ROADMAP.md`).
+> **PDF export** (Phase 31) is **only available in the web reader**, not in `sciknow book export`. The web reader exports `txt / md / html / pdf` via WeasyPrint at `/api/export/{draft,chapter,book}/{id}.{ext}`. CLI PDF/EPUB via Pandoc is on the roadmap (`docs/roadmap/ROADMAP.md`).
 
 See [Book Writing System](BOOK.md) for the full workflow guide.
 

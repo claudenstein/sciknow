@@ -5,7 +5,7 @@ Revises: 0011
 Create Date: 2026-04-11
 
 Adds the autowrite_lessons table — the producer/consumer surface for the
-Reflexion-style episodic memory described in docs/RESEARCH.md §21 Layer 1.
+Reflexion-style episodic memory described in docs/research/RESEARCH.md §21 Layer 1.
 
 Producer side: after each successful autowrite run, _distill_lessons_from_run
 reads the per-iteration trajectory from autowrite_iterations (added in

@@ -33,7 +33,7 @@ Add new L1 tests to `sciknow/testing/protocol.py` and import shared
 helpers (`get_test_client`, `a_book_id`, `rendered_template_static`, …)
 from `sciknow/testing/helpers.py` — don't re-derive boilerplate.
 `sciknow bench` is a separate harness for perf/quality numbers; see
-`docs/TESTING.md` and `docs/BENCHMARKS.md`.
+`docs/reference/TESTING.md` and `docs/benchmarks/BENCHMARKS.md`.
 
 ## Runtime services
 
@@ -163,8 +163,8 @@ passed to ingest commands.
 
 - `CLAUDE.md` — full architecture and conventions (read first).
 - `README.md` — user-facing feature tour + quick start.
-- `docs/TESTING.md` — testing protocol, adding checks.
-- `docs/WORKFLOW.md` — zero-to-book command sequence.
-- `docs/PROJECTS.md` — multi-project design.
-- `docs/BENCHMARKS.md` — `sciknow bench` layers.
+- `docs/reference/TESTING.md` — testing protocol, adding checks.
+- `docs/reference/WORKFLOW.md` — zero-to-book command sequence.
+- `docs/reference/PROJECTS.md` — multi-project design.
+- `docs/benchmarks/BENCHMARKS.md` — `sciknow bench` layers.
 - `OPTIMIZATION.md` — GPU/model split plans (RTX 3090 + incoming DGX Spark).

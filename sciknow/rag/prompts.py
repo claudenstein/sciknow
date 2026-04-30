@@ -1392,7 +1392,7 @@ def write_section_v2(
     # Phase 54.6.142 — rhetorically-gated figure-citation instruction.
     # Only activated when a visuals prompt block is present (i.e. the
     # autowrite caller turned on include_visuals and the ranker surfaced
-    # candidates). Option D from docs/RESEARCH.md §7.X: the writer cites
+    # candidates). Option D from docs/research/RESEARCH.md §7.X: the writer cites
     # `[Fig. N]` only when a claim is directly *depicted* in the figure,
     # prefers text citations for background/synthesis. This distinction
     # matches how scientific writing actually works — figures show

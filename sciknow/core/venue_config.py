@@ -15,7 +15,7 @@ carrying two lists of case-insensitive substring patterns:
   venue matches an allowlist pattern wins over a blocklist hit and
   is kept.
 
-Design rationale (see ``docs/EXPAND_ENRICH_RESEARCH_2.md`` §4.4):
+Design rationale (see ``docs/research/EXPAND_ENRICH_RESEARCH_2.md`` §4.4):
 
 - JSON, not the project's ``.env.overlay``, so the data structure is
   richer than string=value AND so it's safe to commit via

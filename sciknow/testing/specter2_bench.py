@@ -1,6 +1,6 @@
 """Phase 54.6.121 (Tier 3 #1) — SPECTER2 rerank bench.
 
-Decision criterion (from `docs/EXPAND_ENRICH_RESEARCH_2.md` §2.2):
+Decision criterion (from `docs/research/EXPAND_ENRICH_RESEARCH_2.md` §2.2):
 SPECTER2 rerank must beat the bge-m3 baseline on MRR@10 by ≥ 0.06
 absolute (so > 0.60 on the global-cooling 0.514 baseline) for it to
 justify shipping as the default rerank step. Otherwise it stays an

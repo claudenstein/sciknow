@@ -20,7 +20,7 @@ Two A/B modes:
 Output: a Rich table and a JSONL artefact under
 ``<data_dir>/bench/retrieval_ab/bench-<ts>.jsonl``.
 
-Decision rule (from docs/EXPAND_ENRICH_RESEARCH_2.md §2.2): a candidate
+Decision rule (from docs/research/EXPAND_ENRICH_RESEARCH_2.md §2.2): a candidate
 must beat the baseline on MRR@10 by ≥0.03 to justify shipping. Anything
 less is within run-to-run noise.
 

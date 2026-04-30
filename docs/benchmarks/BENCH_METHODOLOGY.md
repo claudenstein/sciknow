@@ -153,6 +153,6 @@ event sooner or later. The rules exist because we paid for them.
 
 ## What changed in 54.6.85 (the fix)
 
-See `docs/PHASE_LOG.md` entry for Phase 54.6.85 — the full summary of
+See `docs/roadmap/PHASE_LOG.md` entry for Phase 54.6.85 — the full summary of
 code changes (new `ModelProfile`, `profile_for()`, `effective_budget()`,
 3-paper panel, `think` / `top_p` / `top_k` kwargs on `rag/llm`).

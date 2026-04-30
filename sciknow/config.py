@@ -76,7 +76,7 @@ class Settings(BaseSettings):
     # llama-server instance loaded with a non-Qwen GGUF (default
     # candidate: Gemma 4 31B Q4_1) so the score / rescore phases stop
     # being judged by a Qwen-family scorer (self-bias root-cause #2 in
-    # docs/ROADMAP.md §7). Disabled by default; flip
+    # docs/roadmap/ROADMAP.md §7). Disabled by default; flip
     # USE_LLAMACPP_SCORER=true + set SCORER_MODEL_GGUF to enable.
     # On the 3090 the scorer cannot co-reside with the writer (both
     # ~17–18 GB); use sequential mode (manual `infer down --role

@@ -1,6 +1,6 @@
 # sciknow v2 — Roadmap
 
-**Companion to** `docs/SCIKNOW_V2_SPEC.md`. Sequence the rebuild so each phase ships independently, can be tested independently, and either rolls forward or rolls back without disturbing the others.
+**Companion to** `docs/roadmap/SCIKNOW_V2_SPEC.md`. Sequence the rebuild so each phase ships independently, can be tested independently, and either rolls forward or rolls back without disturbing the others.
 
 **Branch model**: all v2 work on `v2-llamacpp`. v1 stays on `main`, frozen at the `last-ollama-build` tag (commit `cf91386`). Each phase below corresponds to one PR (or a small chain) merged to `v2-llamacpp`. After Phase G, `v2-llamacpp` merges to `main` and v1 retires.
 
@@ -197,4 +197,4 @@ These three gates require explicit go/no-go decisions before proceeding:
 2. **End of Phase B**: did the embedder server's throughput on bulk ingest stay within 0.8× of FlagEmbedding's? If not, decide whether to (a) keep `FlagEmbedding` as an ingestion-time fallback, (b) accept the slowdown, or (c) round-robin across multiple embedder server instances.
 3. **End of Phase D**: did retrieval recall@10 stay stable on a held-out 100-query set? If not, the canonical embedder choice may be wrong — consider Qwen3-Embedding-4B as the canonical instead of bge-m3 (and pay the 8 GB VRAM cost).
 
-Each gate's data lands in `docs/BENCHMARKS.md` at phase end.
+Each gate's data lands in `docs/benchmarks/BENCHMARKS.md` at phase end.

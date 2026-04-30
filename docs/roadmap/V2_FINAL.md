@@ -1,6 +1,6 @@
 # SciKnow v2 — Final Stretch
 
-**Companions:** [`docs/SCIKNOW_V2_ROADMAP.md`](SCIKNOW_V2_ROADMAP.md) (the original v1→v2 phase plan, all 7 phases shipped), [`MIGRATION.md`](../MIGRATION.md) (verb / settings reference), and — once Stage 5 closes — [`docs/POST_V2_ROADMAP.md`](POST_V2_ROADMAP.md) (the shipping order for v2.1, v2.2, DGX Spark, and the data-gated learning passes).
+**Companions:** [`docs/roadmap/SCIKNOW_V2_ROADMAP.md`](SCIKNOW_V2_ROADMAP.md) (the original v1→v2 phase plan, all 7 phases shipped), [`MIGRATION.md`](../MIGRATION.md) (verb / settings reference), and — once Stage 5 closes — [`docs/roadmap/POST_V2_ROADMAP.md`](POST_V2_ROADMAP.md) (the shipping order for v2.1, v2.2, DGX Spark, and the data-gated learning passes).
 
 This document covers the **post-shipment items** the original roadmap required but never marked done. The substrate code is fully landed and the L1+L2 contract suites are green; what's missing is the *verification layer* — proof that the substrate actually works end-to-end on a pure-v2 install (no Ollama, no FlagEmbedding) and that the spec's three decision gates have measured data behind them.
 
@@ -102,7 +102,7 @@ Each entry: one short paragraph, the metric, the verdict, and a link to the JSON
 - Run `sciknow corpus ingest directory` on a fresh batch of papers.
 - Run `sciknow wiki compile` on the resulting docs.
 - Run `sciknow book autowrite` on at least one chapter.
-- Watch `sciknow library doctor --watch 60` during all of the above; record any new alerts in `docs/PHASE_LOG.md` as a follow-up entry.
+- Watch `sciknow library doctor --watch 60` during all of the above; record any new alerts in `docs/roadmap/PHASE_LOG.md` as a follow-up entry.
 
 **Day-0 (2026-04-25) sanity already done.** SMOKE layer (`uv run sciknow test --layer SMOKE`) ran 5/5 ✓ against the substrate after Stage 2 landed:
 - `l3_extract_model_produces_clean_json` — 4 concepts + 6 triples in 12.8 s

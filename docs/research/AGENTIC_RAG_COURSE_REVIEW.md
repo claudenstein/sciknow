@@ -57,7 +57,7 @@ Langfuse integration is observability only, not evaluation.
 ### 1. User feedback capture → labeled-positives feedstock
 Course pattern: `POST /feedback {trace_id, score, comment}` pushes
 into Langfuse. **Sciknow gap**: the parked LambdaMART learn-to-rank
-(`docs/EXPAND_RESEARCH.md`) needs ≥500 labeled positives and has no
+(`docs/research/EXPAND_RESEARCH.md`) needs ≥500 labeled positives and has no
 collection pipe. A `feedback` table keyed on `(query, chunk_ids, ts,
 score, comment)` + a one-keystroke 👍/👎 on every `sciknow ask` +
 book-reader answer fills that gap passively.

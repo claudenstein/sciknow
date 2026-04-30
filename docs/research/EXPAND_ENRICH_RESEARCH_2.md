@@ -1,6 +1,6 @@
 # `db expand` + `db enrich` — 2026-04-19 research sweep
 
-Follow-on to `docs/EXPAND_RESEARCH.md` (Phase 49, shipped 2026-04-14).
+Follow-on to `docs/research/EXPAND_RESEARCH.md` (Phase 49, shipped 2026-04-14).
 That doc's seven-item priority stack is all implemented and status-
 confirmed; everything here is **net-new** work and is organized by
 expected impact per hour. Grouped into:

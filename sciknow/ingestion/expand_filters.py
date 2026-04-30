@@ -6,7 +6,7 @@ the RRF pool. Each filter is cheap (inspects the OpenAlex work dict
 that the ranker already fetches for every candidate) and returns a
 reason string so the dry-run TSV can attribute every drop.
 
-See `docs/EXPAND_RESEARCH.md` for the design rationale and the per-
+See `docs/research/EXPAND_RESEARCH.md` for the design rationale and the per-
 signal trade-offs. Filters here are hard-drop (the candidate never
 reaches the RRF); signals that *penalise* without dropping live on
 `CandidateFeatures` in `expand_ranker.py` instead.

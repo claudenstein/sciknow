@@ -163,7 +163,7 @@ Both DFlash and ik_llama.cpp require the same sciknow-side plumbing:
 2. L1 regression test `l1_phase54_6_XXX_llm_backend_surface`.
 3. Default backend stays Ollama — the new backend is opt-in via
    `.env` or per-project overlay.
-4. Document measured tok/s in `docs/BENCHMARKS.md`.
+4. Document measured tok/s in `docs/benchmarks/BENCHMARKS.md`.
 
 **Phase D (rollout):**
 

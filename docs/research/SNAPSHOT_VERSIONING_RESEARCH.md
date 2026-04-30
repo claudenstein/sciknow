@@ -1,7 +1,7 @@
 # Snapshot & Version Management — Research + Proposal
 
 **Status**: research note · not yet implemented · 2026-04-26
-**Companions**: [`docs/BOOK.md`](BOOK.md), [`docs/BOOK_ACTIONS.md`](BOOK_ACTIONS.md)
+**Companions**: [`docs/reference/BOOK.md`](../reference/BOOK.md), [`docs/reference/BOOK_ACTIONS.md`](../reference/BOOK_ACTIONS.md)
 **Author**: post-soak design pass for v2.1 / v2.2 polish
 
 This doc surveys how sciknow currently handles snapshots + draft versions

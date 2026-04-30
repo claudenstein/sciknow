@@ -18,7 +18,7 @@ the caller can drop back to the plain dense-only path. Callers
 MUST handle ``None``; we explicitly do NOT fall back silently
 because silent fallback would mask a misconfigured opt-in.
 
-See ``docs/ROADMAP_INGESTION.md`` §3.4.3.
+See ``docs/roadmap/ROADMAP_INGESTION.md`` §3.4.3.
 """
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
 # Post-v2 Roadmap
 
-**Companions:** [`docs/V2_FINAL.md`](V2_FINAL.md) (the four post-shipment stages that closed v2.0.0rc2 → v2.0.0), [`docs/ROADMAP.md`](ROADMAP.md) (the catch-all open-items doc), [`docs/SCIKNOW_V2_ROADMAP.md`](SCIKNOW_V2_ROADMAP.md) (the original v1→v2 phase plan, all 7 phases shipped).
+**Companions:** [`docs/roadmap/V2_FINAL.md`](V2_FINAL.md) (the four post-shipment stages that closed v2.0.0rc2 → v2.0.0), [`docs/roadmap/ROADMAP.md`](ROADMAP.md) (the catch-all open-items doc), [`docs/roadmap/SCIKNOW_V2_ROADMAP.md`](SCIKNOW_V2_ROADMAP.md) (the original v1→v2 phase plan, all 7 phases shipped).
 
 This doc is the **shipping order** for everything between today (2026-04-26, `v2.0.0rc2` on `v2-llamacpp`) and the next major version. It assumes the V2_FINAL stages 1–4 are done (they are, see the status table in `V2_FINAL.md`) and that the Stage 5 soak window will close cleanly.
 
@@ -14,7 +14,7 @@ The only thing standing between us and `v2.0.0` is the calendar soak window.
 
 | Step | Command | Notes |
 |---|---|---|
-| Soak (~7 days) | normal sciknow use against substrate | watch `library doctor --watch 60`; record any anomalies in `docs/PHASE_LOG.md` |
+| Soak (~7 days) | normal sciknow use against substrate | watch `library doctor --watch 60`; record any anomalies in `docs/roadmap/PHASE_LOG.md` |
 | Bump version | `sed -i 's/2.0.0rc2/2.0.0/' pyproject.toml && git commit` | RC2 → final |
 | Tag | `git tag v2.0.0 -m "..."` | on `v2-llamacpp` |
 | Merge | `git checkout main && git merge --no-ff v2-llamacpp` | one feature commit on main |
@@ -51,7 +51,7 @@ Kill the one-release deprecation hatches that v2.0 explicitly carried for compat
 
 ---
 
-## Phase 2 — v2.2 features (`docs/ROADMAP.md` Tier 1/2 leftovers)
+## Phase 2 — v2.2 features (`docs/roadmap/ROADMAP.md` Tier 1/2 leftovers)
 
 These are the only items in `ROADMAP.md` that are still genuinely open, don't require Spark, and pay back in real corpus quality. In effort-impact order:
 
@@ -61,13 +61,13 @@ These are the only items in `ROADMAP.md` that are still genuinely open, don't re
 
 3. **Autowrite stall investigation** (`ROADMAP.md` §5, depends on root cause). Phase 24 instrumented this; the next stall is the diagnostic opportunity. Not pre-planning work — be ready when one happens.
 
-**Exit criteria:** `pyproject.toml` 2.2.0; `docs/ROADMAP.md` §5 + §6b shrink by 2 entries; LoRA checkpoint added to the `INFER_*` config surface.
+**Exit criteria:** `pyproject.toml` 2.2.0; `docs/roadmap/ROADMAP.md` §5 + §6b shrink by 2 entries; LoRA checkpoint added to the `INFER_*` config surface.
 
 ---
 
 ## Phase 3 — DGX Spark unlock (gated on hardware arrival)
 
-Detailed in [`docs/ROADMAP.md`](ROADMAP.md) §3, ordered simplest-first:
+Detailed in [`docs/roadmap/ROADMAP.md`](ROADMAP.md) §3, ordered simplest-first:
 
 | Item | Effort | What it unlocks |
 |---|---|---|
@@ -87,7 +87,7 @@ Detailed in [`docs/ROADMAP.md`](ROADMAP.md) §3, ordered simplest-first:
 
 ## Phase 4 — data-gated learning passes (no code blocker, just dataset accumulation)
 
-From [`docs/ROADMAP.md`](ROADMAP.md) §4b. Currently waiting on usage:
+From [`docs/roadmap/ROADMAP.md`](ROADMAP.md) §4b. Currently waiting on usage:
 
 - **Layer 3 — Heuristic distillation (ERL-style).** Cluster Layer 1 lessons into generalized strategic principles; prepend unconditionally to the writer prompt. **Gate: ≥50 autowrite runs accumulated.** Effort: ~2 weeks once the data is there.
 - **Layer 4 export → Layer 6 training.** Layer 4 (DPO export) shipped in Phase 32.9. Layer 6 (writer LoRA) ships when both the Spark is up AND ≥2k validated preference pairs are in `data/preferences/<book>.jsonl`. Per Wolfe 2024, 2k pairs × 3 epochs is enough for meaningful gains.
@@ -98,7 +98,7 @@ These are watch-list items: the moment the counters cross the threshold, ship th
 
 ## What I'd skip / defer indefinitely
 
-- **Re-relitigating** the [`docs/RESEARCH.md`](RESEARCH.md) §526 rejected list (HyDE, Self-RAG, GraphRAG global, full RST, etc.). Rejected with documented reasons; the literature would have to materially change to revisit.
+- **Re-relitigating** the [`docs/research/RESEARCH.md`](../research/RESEARCH.md) §526 rejected list (HyDE, Self-RAG, GraphRAG global, full RST, etc.). Rejected with documented reasons; the literature would have to materially change to revisit.
 - **Inventing v3.** v2 just shipped a backend swap; v3 should wait until there's a concrete forcing function (a serving paradigm or model class we can't bolt onto v2's abstractions). Today there isn't one.
 
 ---

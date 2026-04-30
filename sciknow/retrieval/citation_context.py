@@ -23,7 +23,7 @@ Added to the RRF fusion as an 8th signal — it doesn't replace
 complementary: papers with few citations have no contexts, and
 papers with bad abstracts have no abstract signal.
 
-See ``docs/EXPAND_ENRICH_RESEARCH_2.md`` §2.1.
+See ``docs/research/EXPAND_ENRICH_RESEARCH_2.md`` §2.1.
 """
 from __future__ import annotations
 

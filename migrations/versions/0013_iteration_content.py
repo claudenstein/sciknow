@@ -5,7 +5,7 @@ Revision ID: 0013
 Revises: 0012
 Create Date: 2026-04-11
 
-Layer 4 of the compound-learning roadmap (docs/RESEARCH.md §21) needs
+Layer 4 of the compound-learning roadmap (docs/research/RESEARCH.md §21) needs
 the actual revised text from each autowrite iteration so it can build
 DPO preference pairs. Phase 32.6 (Layer 0) captured per-iteration scores
 and verdicts but not the content — drafts.content only holds the LATEST

@@ -1,6 +1,6 @@
 """Phase 54.6.145 — L3 (VLM) claim-depiction verification for final drafts.
 
-Per the Q2 design decision (docs/PHASE_LOG.md 54.6.142), the per-iteration
+Per the Q2 design decision (docs/roadmap/PHASE_LOG.md 54.6.142), the per-iteration
 autowrite loop runs L1 (resolution) + L2 (cross-encoder entailment)
 verification on `[Fig. N]` markers. L3 — running a vision-language model
 on `(claim_sentence, image)` pairs to check whether the figure actually

@@ -5,7 +5,7 @@ from a single ``/works/{id}`` fetch. Zero additional API load over what
 ``db expand`` / ``db enrich`` already does — we were fetching and
 discarding these fields.
 
-See ``docs/EXPAND_ENRICH_RESEARCH_2.md`` §1.1.
+See ``docs/research/EXPAND_ENRICH_RESEARCH_2.md`` §1.1.
 """
 from __future__ import annotations
 

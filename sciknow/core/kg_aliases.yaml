@@ -16,7 +16,7 @@
 # Pre-existing `knowledge_graph` rows are NOT migrated by the insert-
 # time canonicalizer. Run `sciknow wiki compile --rebuild` to re-
 # extract triples through the new mapping, OR run a one-off backfill
-# query (see docs/ROADMAP_INGESTION.md §3.7.1 notes).
+# query (see docs/roadmap/ROADMAP_INGESTION.md §3.7.1 notes).
 #
 # Contributions: this file is intentionally editable in-repo. Add
 # aliases when you see duplicate-looking entities in the KG UI; the

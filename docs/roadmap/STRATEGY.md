@@ -233,7 +233,7 @@ written. A book worth writing can't be fully autowritten.
 
 ## Related
 
-- `docs/RESEARCH.md` — the literature + design decisions behind each
+- `docs/research/RESEARCH.md` — the literature + design decisions behind each
   synthesis technique in use.
-- `docs/ROADMAP.md` — what's shipped and what's deferred.
-- `docs/BOOK.md` — operational walkthrough of the book commands.
+- `docs/roadmap/ROADMAP.md` — what's shipped and what's deferred.
+- `docs/reference/BOOK.md` — operational walkthrough of the book commands.

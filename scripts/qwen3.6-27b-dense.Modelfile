@@ -2,7 +2,7 @@
 # defaults baked. The GGUF declares architecture=qwen35 and Ollama
 # 0.21+ handles it via its qwen35 runner (Gated DeltaNet hybrid +
 # the qwen3.5 RENDERER/PARSER pair for chat template + <think>
-# splitting). Probe (docs/PHASE_LOG.md 54.6.243) confirms: simple
+# splitting). Probe (docs/roadmap/PHASE_LOG.md 54.6.243) confirms: simple
 # prompt → ~400 char <think> + clean content, no parsing bug, no
 # stop-token issue, done_reason=stop.
 #

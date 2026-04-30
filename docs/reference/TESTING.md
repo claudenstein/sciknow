@@ -6,7 +6,7 @@
 
 sciknow has a layered smoke-test harness, **not** a pytest suite. The CLI command is `sciknow test`. Every PR that touches synthesis, retrieval, ingestion, or storage should pass at least L1 before merging. Bigger PRs (a "Phase" feature drop, an infrastructure change, a model swap) should also pass L2 and ideally L3.
 
-> **Performance + quality measurements** live in a separate harness: `sciknow bench` (`sciknow/testing/bench.py`, Phase 44). `test` answers "is the code still correct?"; `bench` answers "how fast is it and how good are the outputs?". See [BENCHMARKS.md](BENCHMARKS.md) for the bench layers and how to add a metric.
+> **Performance + quality measurements** live in a separate harness: `sciknow bench` (`sciknow/testing/bench.py`, Phase 44). `test` answers "is the code still correct?"; `bench` answers "how fast is it and how good are the outputs?". See [BENCHMARKS.md](../benchmarks/BENCHMARKS.md) for the bench layers and how to add a metric.
 
 ## Why a smoke harness instead of pytest?
 
@@ -76,7 +76,7 @@ Anything that touches Python source. L1 catches:
 - `_save_draft` no longer accepts `custom_metadata`
 - A new CLI command is defined but not registered on the Typer app
 - The web reader template lost its `OVERSTATED` CSS class
-- `docs/RESEARCH.md` doesn't reference a new phase
+- `docs/research/RESEARCH.md` doesn't reference a new phase
 
 L1 is fast enough (~8 seconds with the heavy `umap` import) that there's no excuse to skip it. If a check is slower than 1 second, it should probably move to L2.
 
@@ -272,5 +272,5 @@ sciknow/
     └── protocol.py        # the harness + all test functions
 
 sciknow/cli/main.py        # `sciknow test` command (wraps the harness)
-docs/TESTING.md            # this document
+docs/reference/TESTING.md            # this document
 ```

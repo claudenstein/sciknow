@@ -4,7 +4,7 @@ Given a draft sentence (or paragraph) and the set of papers already
 cited in its vicinity, rank candidate visuals by how well each would
 serve as an inline citation at that point in the prose.
 
-Design is documented in detail in ``docs/RESEARCH.md §7.X`` (survey +
+Design is documented in detail in ``docs/research/RESEARCH.md §7.X`` (survey +
 design brief). This module is the implementation of §3, using only
 primitives sciknow already has: ``bge-reranker-v2-m3`` cross-encoder,
 ``visuals.ai_caption`` (Phase 54.6.72 VLM-enriched), and

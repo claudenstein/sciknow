@@ -81,7 +81,7 @@ Each project owns:
 ### Deliberately not shared (by design)
 
 A user might ask *"why can't two projects share a corpus?"* Answer:
-because corpus = bias (`docs/STRATEGY.md` §1). Two books drawing from
+because corpus = bias (`docs/roadmap/STRATEGY.md` §1). Two books drawing from
 the same paper pool produce two books reflecting the same selection
 bias. If you really want a shared corpus you can export from one
 project and import to another, but the default is isolation.
@@ -260,7 +260,7 @@ left off. A `--dry-run` flag prints the plan without executing.
 - L2: project isolation (create two projects, ingest different papers,
   assert no cross-visibility).
 - Update `CLAUDE.md`, `README.md`, `docs/INSTALLATION.md`,
-  `docs/OPERATIONS.md`.
+  `docs/reference/OPERATIONS.md`.
 - This doc stays as the design record.
 
 ---

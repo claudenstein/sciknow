@@ -7,11 +7,11 @@ plan. Each entry is a miniature hypothesis: what's the current state,
 what would change, what's the expected win, what's the cost.
 
 Cross-references:
-- `docs/INGESTION.md` — current pipeline architecture (source of truth).
-- `docs/ROADMAP.md` — shipped / deferred / rejected work across the app.
-- `docs/RESEARCH.md` §1-6 — ingestion research that already landed
+- `docs/reference/INGESTION.md` — current pipeline architecture (source of truth).
+- `docs/roadmap/ROADMAP.md` — shipped / deferred / rejected work across the app.
+- `docs/research/RESEARCH.md` §1-6 — ingestion research that already landed
   (MinerU, hybrid search, BERTopic, RAPTOR, wiki compile).
-- `docs/BENCHMARKS.md` — retrieval + VLM sweep numbers this roadmap
+- `docs/benchmarks/BENCHMARKS.md` — retrieval + VLM sweep numbers this roadmap
   builds on.
 
 **How to read this.** Section 3 is the full menu grouped by pipeline

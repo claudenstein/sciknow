@@ -9,7 +9,7 @@ expansion changed what the corpus is about": 0.00 = identical,
 0.05 = meaningful drift, 0.10+ = a new subtopic is being pulled in.
 Might be intentional (user wanted to broaden); should be explicit.
 
-See ``docs/EXPAND_ENRICH_RESEARCH_2.md`` §4.3.
+See ``docs/research/EXPAND_ENRICH_RESEARCH_2.md`` §4.3.
 """
 from __future__ import annotations
 

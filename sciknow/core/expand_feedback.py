@@ -13,7 +13,7 @@ Two consumers:
    and adding a weighted mean of the positive ones. Survivors
    described similarly to rejected papers rank lower; those similar
    to accepted ones rank higher. See
-   ``docs/EXPAND_ENRICH_RESEARCH_2.md`` §2.4.
+   ``docs/research/EXPAND_ENRICH_RESEARCH_2.md`` §2.4.
 
 2. **Future LambdaMART training data** — once ≥500 labels have
    accumulated, the JSON feeds a LightGBM train run (the Phase 49

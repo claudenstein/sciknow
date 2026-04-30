@@ -67,7 +67,7 @@ Usage examples:
       --baseline current --workload large
 
 Read scripts/bench_substrate_sweep.py top-of-file for the full
-methodology; docs/BENCH_OPTIMIZATION_PLAN.md captures the planning
+methodology; docs/roadmap/BENCH_OPTIMIZATION_PLAN.md captures the planning
 doc and how to interpret the table.
 """
 from __future__ import annotations

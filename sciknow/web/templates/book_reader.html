@@ -1296,7 +1296,7 @@
         <label class="u-row-click"
                title="Phase 54.6.142 visuals-in-writer. When on, the 5-signal ranker surfaces figures/tables to the writer, and the prompt includes the 'cite [Fig. N] only when directly depicted' gated instruction. Adds a visual_citation scoring dimension (hallucinated markers = hard 0.0, missed opportunities = 0.5). Level-1 + Level-2 verify run per iteration; Level-3 VLM claim-depiction is deferred to the finalize-draft pass. Default off so existing runs are untouched.">
           <input type="checkbox" id="aw-config-include-visuals"
-                 title="Include visuals (figures / tables / equations) in the writer's retrieval pool. See docs/RESEARCH.md §7.X."/>
+                 title="Include visuals (figures / tables / equations) in the writer's retrieval pool. See docs/research/RESEARCH.md §7.X."/>
           <span>&#128206; Include visuals in the writer</span>
         </label>
         <p style="font-size:11px;color:var(--fg-muted);margin:4px 0 0 28px;line-height:1.4;">
@@ -1416,7 +1416,7 @@
             <span class="u-hint">&mdash; steers the LLM through a named cognitive technique.</span>
           </label>
           <select class="u-w-full u-pill-lg" id="plan-outline-method-select"
-                  title="Optional elicitation method prepended to the outline prompt as a preamble. Steers the LLM through a named cognitive technique (e.g. Tree of Thoughts, First Principles, Peer Review Simulation). See docs/BOOK_ACTIONS.md for the full 24-method catalogue.">
+                  title="Optional elicitation method prepended to the outline prompt as a preamble. Steers the LLM through a named cognitive technique (e.g. Tree of Thoughts, First Principles, Peer Review Simulation). See docs/reference/BOOK_ACTIONS.md for the full 24-method catalogue.">
             <option value="">(default generic prompt)</option>
           </select>
         </div>
@@ -1516,7 +1516,7 @@
              different modal with a different tab structure. -->
         <div class="u-flex-raw u-gap-2 u-ai-center u-mb-3 u-wrap u-p-2 u-bg-tb u-border u-r-md">
           <button class="btn-secondary" onclick="planModalAutoPlanSections()"
-                  title="Phase 54.6.154/163 — LLM-generate a 3-4 bullet concept plan per empty section in the currently-picked chapter. Bullet counts drive the Phase-54.6.146 concept-density resolver: target_words = N bullets × wpc_midpoint. Skips sections that already have a plan unless 'Force overwrite' is ticked. Cost: ~5-10s per empty section (LLM_FAST_MODEL). See docs/RESEARCH.md §24 and docs/CONCEPT_DENSITY.md.">
+                  title="Phase 54.6.154/163 — LLM-generate a 3-4 bullet concept plan per empty section in the currently-picked chapter. Bullet counts drive the Phase-54.6.146 concept-density resolver: target_words = N bullets × wpc_midpoint. Skips sections that already have a plan unless 'Force overwrite' is ticked. Cost: ~5-10s per empty section (LLM_FAST_MODEL). See docs/research/RESEARCH.md §24 and docs/reference/CONCEPT_DENSITY.md.">
             &#129504; Auto-plan sections
           </button>
           <label class="u-chip"
@@ -1605,7 +1605,7 @@
                modal. Default: skip sections that already have a plan
                (matches the CLI's default behaviour). Force overwrites. -->
           <button class="btn-secondary" onclick="autoPlanChapterSections()"
-                  title="Phase 54.6.154/155 — LLM-generate a 3-4 bullet concept plan per empty section, using this chapter's scope + section titles. Bullet counts drive the Phase-54.6.146 concept-density resolver: target_words = N bullets × wpc_midpoint. Skips sections that already have a plan unless 'Force overwrite' is ticked. Cost: ~5-10s per empty section (LLM_FAST_MODEL, cheap structured task). See docs/RESEARCH.md §24.">
+                  title="Phase 54.6.154/155 — LLM-generate a 3-4 bullet concept plan per empty section, using this chapter's scope + section titles. Bullet counts drive the Phase-54.6.146 concept-density resolver: target_words = N bullets × wpc_midpoint. Skips sections that already have a plan unless 'Force overwrite' is ticked. Cost: ~5-10s per empty section (LLM_FAST_MODEL, cheap structured task). See docs/research/RESEARCH.md §24.">
             &#129504; Auto-plan sections
           </button>
           <label class="u-chip"
@@ -1731,7 +1731,7 @@
           Sections with a bullet plan auto-size bottom-up (concept count × wpc midpoint).
           Sections without a plan fall back to chapter target ÷ section count.
           Override per section in the Chapter modal's Sections tab.
-          See <code>docs/RESEARCH.md §24</code> for the research behind these ranges.
+          See <code>docs/research/RESEARCH.md §24</code> for the research behind these ranges.
         </p>
         <!-- Phase 54.6.156 — book-wide auto-plan wrapper for the 54.6.154 CLI. -->
         <div class="u-divider">
@@ -1828,7 +1828,7 @@
       <div class="u-hidden" id="bs-models-pane">
         <p class="u-note-mb-3">
           Current model assignments. Edit these in the project's <code>.env</code> file
-          (see <a href="https://github.com/claudenstein/sciknow/blob/main/docs/BOOK_ACTIONS.md" target="_blank">BOOK_ACTIONS.md</a>
+          (see <a href="https://github.com/claudenstein/sciknow/blob/main/docs/reference/BOOK_ACTIONS.md" target="_blank">BOOK_ACTIONS.md</a>
           for per-role guidance) and restart <code>sciknow book serve</code> to apply.
           Per-section model overrides are also available (Chapter modal → Sections tab, per row).
         </p>
@@ -1846,7 +1846,7 @@
         </table>
         <p class="u-tiny u-muted u-mt-3">
           Picks validated by the quality bench (<code>sciknow bench --layer quality</code>). See
-          <a href="https://github.com/claudenstein/sciknow/blob/main/docs/PHASE_LOG.md" target="_blank">PHASE_LOG 54.6.92</a>
+          <a href="https://github.com/claudenstein/sciknow/blob/main/docs/roadmap/PHASE_LOG.md" target="_blank">PHASE_LOG 54.6.92</a>
           for the v3 verdict that nailed down the current defaults.
         </p>
       </div>
@@ -2621,7 +2621,7 @@
           Create the writing project. The <strong>type</strong> drives section
           defaults, prompt conditioning, and length targets. Ranges below
           each type come from the Phase 54.6.146 concept-density literature
-          review (see <code>docs/RESEARCH.md §24</code>) — Cowan 2001's
+          review (see <code>docs/research/RESEARCH.md §24</code>) — Cowan 2001's
           3&ndash;4 novel-chunk capacity × genre-appropriate words per concept.
         </p>
         <div class="field u-row-wrap-end">

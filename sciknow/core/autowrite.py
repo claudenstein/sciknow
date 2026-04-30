@@ -828,7 +828,7 @@ def _autowrite_section_body(
     # a writer-facing block via format_visuals_prompt_block, and lets
     # write_section_v2 splice it into the user prompt while the paired
     # `visual_citation_block` rhetorically-gated instruction (Option D
-    # from docs/RESEARCH.md §7.X) lands in the system prompt.
+    # from docs/research/RESEARCH.md §7.X) lands in the system prompt.
     ranked_visuals_for_writer: list = []
     visuals_prompt_block_text: str | None = None
     if include_visuals and results:

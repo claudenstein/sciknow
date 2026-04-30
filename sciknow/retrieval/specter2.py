@@ -10,7 +10,7 @@ case.
 Net VRAM cost: ~600 MB for base + adapter at fp32, ~300 MB at fp16.
 Well within the 24 GB 3090's headroom even with the writer resident.
 
-Decision criterion (from `docs/EXPAND_ENRICH_RESEARCH_2.md` §2.2):
+Decision criterion (from `docs/research/EXPAND_ENRICH_RESEARCH_2.md` §2.2):
 SPECTER2 must beat bge-m3 on MRR@10 by ≥ 0.06 (so > 0.60 absolute on
 the global-cooling 0.514 baseline) for it to justify shipping as the
 default rerank step. Otherwise it stays an opt-in.

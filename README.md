@@ -68,7 +68,7 @@ A local-first scientific knowledge system that ingests papers, builds a compiled
 - **Book Settings panel** — one tabbed modal consolidates title, description, leitmotiv, target word count, and the style fingerprint (with on-demand refresh) so per-book config isn't scattered across four surfaces
 - **Projects modal with graceful restart** — switch active project from the browser; when a restart is required (DB / Qdrant singletons can't hot-swap), a one-click "⏻ Stop this server" button cleanly SIGTERMs the process so the terminal returns to `$` ready for the next `sciknow book serve` invocation
 - **Multi-format export** — Markdown, HTML, PDF (WeasyPrint), EPUB (pandoc), BibTeX, LaTeX, DOCX with global citation dedup, available from both the CLI and the web reader
-- **Professional LaTeX PDFs** — `sciknow book export --format pdf-pro --template <slug>` (or the **Export** modal in the web reader) drives a full Markdown→IR→Jinja→latexmk pipeline through real journal/book classes (kaobook, classicthesis, elsarticle, IEEEtran, REVTeX, memoir, tufte-book, +5 more). Per-template font + bib-style + cover-page + ToC controls; all 12 templates compile out of the box (lualatex). See [docs/FORMATTING.md](docs/FORMATTING.md).
+- **Professional LaTeX PDFs** — `sciknow book export --format pdf-pro --template <slug>` (or the **Export** modal in the web reader) drives a full Markdown→IR→Jinja→latexmk pipeline through real journal/book classes (kaobook, classicthesis, elsarticle, IEEEtran, REVTeX, memoir, tufte-book, +5 more). Per-template font + bib-style + cover-page + ToC controls; all 12 templates compile out of the box (lualatex). See [docs/reference/FORMATTING.md](docs/reference/FORMATTING.md).
 
 **Infrastructure**
 - **All local** — PostgreSQL + Qdrant + Ollama, no cloud APIs, no Docker
@@ -277,7 +277,7 @@ over ≥10 min — each swap costs 5-10 s of Ollama cold-load, so
 15/hr = ~3 min of pipeline cold-loads per hour, worth surfacing.
 
 **Phase 54.6.313** implements the top-ROI DOI recovery strategies
-from `docs/ENRICH_RESEARCH.md` as nine new layers in the `db enrich`
+from `docs/research/ENRICH_RESEARCH.md` as nine new layers in the `db enrich`
 cascade, **plus** three latent bugs: (1) Crossref/OpenAlex title-
 search was passing garbage `first_author` strings (`Usuario` /
 `Propietario` / `Benutzer` / `ASUS` / `hy` …) as search filters and
@@ -397,7 +397,7 @@ against the 54.6.309 bibliography / visuals-panel work:
    accessible without leaving edit mode). The Versions panel now
    renders the user-supplied name per row and supports inline rename
    via `POST /api/draft/{{id}}/rename-version`.
-5. **Research memo**: `docs/ENRICH_RESEARCH.md` documents the six most
+5. **Research memo**: `docs/research/ENRICH_RESEARCH.md` documents the six most
    promising additional DOI/ISBN sources (Semantic Scholar `/match`,
    Europe PMC, DataCite, OpenLibrary, LoC SRU, PDF XMP+footer-regex)
    plus the fuzzy-matching signals the current `db enrich` pipeline
@@ -704,11 +704,11 @@ sciknow project unarchive archives/<slug>-<ts>.skproj.tar
 sciknow --project <slug> <any subcommand>       # one-shot override
 ```
 
-See [`docs/PROJECTS.md`](docs/PROJECTS.md) for the full design.
+See [`docs/reference/PROJECTS.md`](docs/reference/PROJECTS.md) for the full design.
 
 ### Recent milestones
 
-sciknow is active; the [`docs/PHASE_LOG.md`](docs/PHASE_LOG.md) records
+sciknow is active; the [`docs/roadmap/PHASE_LOG.md`](docs/roadmap/PHASE_LOG.md) records
 every Phase commit. Most recent batches:
 
 - **55.S1 + 55.V1 (April 2026).** Cross-family autowrite scorer +
@@ -800,7 +800,7 @@ every Phase commit. Most recent batches:
   Delgado-2018 digital ceiling, corpus-grounded §24 validation
   bench, Brown 2008 idea-density regression harness, and a bottom-up
   vs top-down autowrite A/B harness. Research brief lives in
-  `docs/RESEARCH.md §24`. Also shipped: chunk-level FTS (**+8.6% R@1**),
+  `docs/research/RESEARCH.md §24`. Also shipped: chunk-level FTS (**+8.6% R@1**),
   scheduled OpenAlex velocity watcher.
 - **54.6.68-83 (April 2026).** Research-sweep implementation: retrieval
   MRR/Recall/NDCG bench, citation marker alignment, vision captioning
@@ -869,9 +869,9 @@ every Phase commit. Most recent batches:
 > `sciknow db` → `sciknow library` (lifecycle) + `sciknow corpus`
 > (growth/maintenance) with a one-release deprecation shim. See
 > [MIGRATION.md](MIGRATION.md) for the full v1→v2 verb / settings /
-> migration-path reference, [docs/V2_FINAL.md](docs/V2_FINAL.md) for
+> migration-path reference, [docs/roadmap/V2_FINAL.md](docs/roadmap/V2_FINAL.md) for
 > the post-shipment status + soak/tag procedure, and
-> [PHASE_LOG.md](docs/PHASE_LOG.md) for the per-phase summary. The
+> [PHASE_LOG.md](docs/roadmap/PHASE_LOG.md) for the per-phase summary. The
 > Quick Start below is the v2 path; v1 (Ollama) install instructions
 > live in [docs/INSTALLATION.md](docs/INSTALLATION.md).
 
@@ -943,48 +943,48 @@ Core guides — how to use sciknow, how it works, how to extend it:
 | Document | Contents |
 |---|---|
 | **[Installation](docs/INSTALLATION.md)** | Setup script, manual install, Ollama tuning, configuration reference |
-| **[Workflow](docs/WORKFLOW.md)** | End-to-end walkthrough: PDFs → ingest → wiki → book |
-| **[CLI Reference](docs/CLI.md)** | Complete command reference for every `sciknow` subcommand |
+| **[Workflow](docs/reference/WORKFLOW.md)** | End-to-end walkthrough: PDFs → ingest → wiki → book |
+| **[CLI Reference](docs/reference/CLI.md)** | Complete command reference for every `sciknow` subcommand |
 | **[Architecture](docs/ARCHITECTURE.md)** | System diagram, project structure, DB schema, service layer pattern |
-| **[Ingestion Pipeline](docs/INGESTION.md)** | PDF conversion (MinerU/Marker), metadata, chunking, embedding |
-| **[Retrieval & RAG](docs/RETRIEVAL.md)** | Hybrid search, RRF fusion, reranking, corrective RAG |
-| **[Book Writing System](docs/BOOK.md)** | Book workflow, autowrite convergence, web reader, export |
-| **[Formatting / LaTeX export](docs/FORMATTING.md)** | Professional PDF pipeline (12 templates), `pdf-pro`/`tex-bundle` formats, GUI Export tab |
-| **[Book Actions Reference](docs/BOOK_ACTIONS.md)** | Every AI button (outline/review/autowrite/verify/align/…) + the 24 elicitation + 24 brainstorming methods |
-| **[Multi-Project](docs/PROJECTS.md)** | Per-project isolation (DB + Qdrant + `data/`), lifecycle CLI |
-| **[Operations](docs/OPERATIONS.md)** | Backup/restore, expand, enrich, citations, dev notes |
-| **[Testing Protocol](docs/TESTING.md)** | 3-layer smoke harness (`sciknow test`); how to add checks |
-| **[Benchmarks](docs/BENCHMARKS.md)** | `sciknow bench` — performance + quality measurement; baseline findings |
-| **[Bench methodology](docs/BENCH_METHODOLOGY.md)** | Hard-won rules for fair LLM/VLM benchmarking; the 2026-04-17 failure that motivated them |
-| **[Concept-density length sizing](docs/CONCEPT_DENSITY.md)** | Bottom-up section sizing via Cowan 2001 (3-4 novel chunks × per-genre wpc). How to use the auto-plan buttons, length-report, retrieval-density widener, and Brown 2008 regression harness. |
-| **[Expand + enrich research (2026-04)](docs/EXPAND_ENRICH_RESEARCH_2.md)** | Gaps audit + 2024-2026 literature sweep; follow-on to `EXPAND_RESEARCH.md` for what's next in corpus growth |
+| **[Ingestion Pipeline](docs/reference/INGESTION.md)** | PDF conversion (MinerU/Marker), metadata, chunking, embedding |
+| **[Retrieval & RAG](docs/reference/RETRIEVAL.md)** | Hybrid search, RRF fusion, reranking, corrective RAG |
+| **[Book Writing System](docs/reference/BOOK.md)** | Book workflow, autowrite convergence, web reader, export |
+| **[Formatting / LaTeX export](docs/reference/FORMATTING.md)** | Professional PDF pipeline (12 templates), `pdf-pro`/`tex-bundle` formats, GUI Export tab |
+| **[Book Actions Reference](docs/reference/BOOK_ACTIONS.md)** | Every AI button (outline/review/autowrite/verify/align/…) + the 24 elicitation + 24 brainstorming methods |
+| **[Multi-Project](docs/reference/PROJECTS.md)** | Per-project isolation (DB + Qdrant + `data/`), lifecycle CLI |
+| **[Operations](docs/reference/OPERATIONS.md)** | Backup/restore, expand, enrich, citations, dev notes |
+| **[Testing Protocol](docs/reference/TESTING.md)** | 3-layer smoke harness (`sciknow test`); how to add checks |
+| **[Benchmarks](docs/benchmarks/BENCHMARKS.md)** | `sciknow bench` — performance + quality measurement; baseline findings |
+| **[Bench methodology](docs/benchmarks/BENCH_METHODOLOGY.md)** | Hard-won rules for fair LLM/VLM benchmarking; the 2026-04-17 failure that motivated them |
+| **[Concept-density length sizing](docs/reference/CONCEPT_DENSITY.md)** | Bottom-up section sizing via Cowan 2001 (3-4 novel chunks × per-genre wpc). How to use the auto-plan buttons, length-report, retrieval-density widener, and Brown 2008 regression harness. |
+| **[Expand + enrich research (2026-04)](docs/research/EXPAND_ENRICH_RESEARCH_2.md)** | Gaps audit + 2024-2026 literature sweep; follow-on to `EXPAND_RESEARCH.md` for what's next in corpus growth |
 
 Project planning and release history:
 
 | Document | Contents |
 |---|---|
-| **[Roadmap](docs/ROADMAP.md)** | Open items by source (QA, research runners-up, hardware-gated, compound-learning layers) |
-| **[Post-v2 roadmap](docs/POST_V2_ROADMAP.md)** | Shipping order from v2.0.0rc2 → v2.0.0 → v2.1 cleanup → v2.2 features → DGX Spark unlock → data-gated learning |
-| **[Ingestion roadmap](docs/ROADMAP_INGESTION.md)** | 43 research proposals for improving `sciknow refresh` / ingest — by pipeline stage + cross-cutting, priority-ranked |
-| **[Phase log](docs/PHASE_LOG.md)** | Release notes per phase commit, newest first |
-| **[Strategy](docs/STRATEGY.md)** | Long-range direction; why certain trade-offs were chosen |
-| **[Lessons](docs/LESSONS.md)** | Post-mortem + what-not-to-do notes accumulated over phases |
-| **[Credits](docs/CREDITS.md)** | Open-source projects and research papers sciknow builds on |
+| **[Roadmap](docs/roadmap/ROADMAP.md)** | Open items by source (QA, research runners-up, hardware-gated, compound-learning layers) |
+| **[Post-v2 roadmap](docs/roadmap/POST_V2_ROADMAP.md)** | Shipping order from v2.0.0rc2 → v2.0.0 → v2.1 cleanup → v2.2 features → DGX Spark unlock → data-gated learning |
+| **[Ingestion roadmap](docs/roadmap/ROADMAP_INGESTION.md)** | 43 research proposals for improving `sciknow refresh` / ingest — by pipeline stage + cross-cutting, priority-ranked |
+| **[Phase log](docs/roadmap/PHASE_LOG.md)** | Release notes per phase commit, newest first |
+| **[Strategy](docs/roadmap/STRATEGY.md)** | Long-range direction; why certain trade-offs were chosen |
+| **[Lessons](docs/reference/LESSONS.md)** | Post-mortem + what-not-to-do notes accumulated over phases |
+| **[Credits](docs/reference/CREDITS.md)** | Open-source projects and research papers sciknow builds on |
 
 Research notes (reading material, not authoritative for current behaviour):
 
 | Document | Contents |
 |---|---|
-| **[Research & innovations](docs/RESEARCH.md)** | Techniques implemented with literature references (BERTopic, GraphRAG, Self-RAG, TreeWriter, RAPTOR, CoVe, etc.) |
-| **[Comparative analysis](docs/COMPARISON.md)** | Audit vs karpathy/autoresearch, AI-Scientist, AutoResearchClaw, FARS |
-| **[Expand research](docs/EXPAND_RESEARCH.md)** | Discovery-pipeline design notes |
-| **[KG research](docs/KG_RESEARCH.md)** | Knowledge-graph extraction design |
-| **[Wiki compile speed](docs/WIKI_COMPILE_SPEED.md)** | Wiki-compile latency investigation |
-| **[Wiki UX research](docs/WIKI_UX_RESEARCH.md)** | Wiki browsing UX decisions |
-| **[Agentic RAG course review](docs/AGENTIC_RAG_COURSE_REVIEW.md)** | Historical review — what sciknow borrowed |
-| **[Autoreason review](docs/AUTOREASON_REVIEW.md)** | Same shape, autoreason |
-| **[MemPalace review](docs/MEMPALACE_REVIEW.md)** | Same shape, MemPalace |
-| **[DeepScientist ports](docs/DEEPSCIENTIST_PORTS.md)** | DeepScientist technique ports pending evaluation |
+| **[Research & innovations](docs/research/RESEARCH.md)** | Techniques implemented with literature references (BERTopic, GraphRAG, Self-RAG, TreeWriter, RAPTOR, CoVe, etc.) |
+| **[Comparative analysis](docs/benchmarks/COMPARISON.md)** | Audit vs karpathy/autoresearch, AI-Scientist, AutoResearchClaw, FARS |
+| **[Expand research](docs/research/EXPAND_RESEARCH.md)** | Discovery-pipeline design notes |
+| **[KG research](docs/research/KG_RESEARCH.md)** | Knowledge-graph extraction design |
+| **[Wiki compile speed](docs/benchmarks/WIKI_COMPILE_SPEED.md)** | Wiki-compile latency investigation |
+| **[Wiki UX research](docs/research/WIKI_UX_RESEARCH.md)** | Wiki browsing UX decisions |
+| **[Agentic RAG course review](docs/research/AGENTIC_RAG_COURSE_REVIEW.md)** | Historical review — what sciknow borrowed |
+| **[Autoreason review](docs/research/AUTOREASON_REVIEW.md)** | Same shape, autoreason |
+| **[MemPalace review](docs/research/MEMPALACE_REVIEW.md)** | Same shape, MemPalace |
+| **[DeepScientist ports](docs/research/DEEPSCIENTIST_PORTS.md)** | DeepScientist technique ports pending evaluation |
 
 ---
 
@@ -1013,7 +1013,7 @@ Run `sciknow infer up --role <writer|embedder|reranker|vlm|scorer>` on the remot
 
 ## Credits & Acknowledgements
 
-sciknow builds on excellent open-source projects and research. Full details in [Credits](docs/CREDITS.md).
+sciknow builds on excellent open-source projects and research. Full details in [Credits](docs/reference/CREDITS.md).
 
 **Key projects:** [MinerU](https://github.com/opendatalab/MinerU), [Marker](https://github.com/VikParuchuri/marker), [Qdrant](https://github.com/qdrant/qdrant), [Ollama](https://github.com/ollama/ollama), [bge-m3](https://huggingface.co/BAAI/bge-m3), [BERTopic](https://github.com/MaartenGr/BERTopic), [FastAPI](https://github.com/fastapi/fastapi), [Typer](https://github.com/tiangolo/typer), [Rich](https://github.com/Textualize/rich), [SQLAlchemy](https://github.com/sqlalchemy/sqlalchemy), [uv](https://github.com/astral-sh/uv)
 

@@ -1,8 +1,8 @@
 # Concept-density length sizing
 
-[&larr; Back to README](../README.md) · [Research brief (§24)](RESEARCH.md#24-concept-density-length-sizing-research-brief-2026-04-20) · [Phase log](PHASE_LOG.md)
+[&larr; Back to README](../README.md) · [Research brief (§24)](RESEARCH.md#24-concept-density-length-sizing-research-brief-2026-04-20) · [Phase log](../roadmap/PHASE_LOG.md)
 
-This document ties together the concept-density work that shipped across Phases 54.6.146–162. It's the "how do I use this" reference; the *why* is in [`RESEARCH.md §24`](RESEARCH.md#24-concept-density-length-sizing-research-brief-2026-04-20) and the per-phase implementation detail is in [`PHASE_LOG.md`](PHASE_LOG.md).
+This document ties together the concept-density work that shipped across Phases 54.6.146–162. It's the "how do I use this" reference; the *why* is in [`RESEARCH.md §24`](RESEARCH.md#24-concept-density-length-sizing-research-brief-2026-04-20) and the per-phase implementation detail is in [`PHASE_LOG.md`](../roadmap/PHASE_LOG.md).
 
 ## The idea
 
@@ -139,8 +139,8 @@ Every `[Fig. N]` marker gets scored 0–10 on claim-depiction match by the VLM. 
 
 ## See also
 
-- `docs/RESEARCH.md §24` — full research brief with Cowan / Mayer / Wiggins & McTighe / Brown 2008 citations and grade table for each guideline.
-- `docs/BENCHMARKS.md` — corpus section-length validation data.
-- `docs/PHASE_LOG.md` — per-phase implementation detail (search for `54.6.146` through `54.6.162`).
+- `docs/research/RESEARCH.md §24` — full research brief with Cowan / Mayer / Wiggins & McTighe / Brown 2008 citations and grade table for each guideline.
+- `docs/benchmarks/BENCHMARKS.md` — corpus section-length validation data.
+- `docs/roadmap/PHASE_LOG.md` — per-phase implementation detail (search for `54.6.146` through `54.6.162`).
 - `sciknow/core/project_type.py` — the source of truth for the per-type defaults and ranges.
 - `sciknow/core/book_ops.py` — `_get_section_concept_density_target`, `_adjust_target_for_retrieval_density`, etc.

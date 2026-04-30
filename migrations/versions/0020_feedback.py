@@ -10,7 +10,7 @@ response, a `sciknow book review` report, etc.). The fields are
 deliberately loose so any op can log into it without a per-op
 schema change. The expected longer-term consumer is the parked
 LambdaMART learn-to-rank upgrade described in
-``docs/EXPAND_RESEARCH.md`` — (query, chunk_ids, score) triples are
+``docs/research/EXPAND_RESEARCH.md`` — (query, chunk_ids, score) triples are
 exactly its training format.
 
 ``score`` is a signed small int rather than float so it's easy to

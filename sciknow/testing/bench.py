@@ -461,7 +461,7 @@ def b_corpus_section_coverage() -> Iterable[BenchMetric]:
 
 def b_corpus_section_length_distribution() -> Iterable[BenchMetric]:
     """Phase 54.6.157 — corpus-grounded section-length validation of
-    docs/RESEARCH.md §24.
+    docs/research/RESEARCH.md §24.
 
     For every canonical section type (introduction / methods / results /
     discussion), compute the IQR of word counts in THIS corpus's

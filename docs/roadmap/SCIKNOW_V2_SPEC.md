@@ -142,7 +142,7 @@ Opt-in. When `--profile spec-dec` is used:
 - Draft = Qwen3-1.7B Q4_K_M (compatible tokenizer)
 - llama-server flags: `--draft-model <draft.gguf> --draft-max 16 --draft-min 2`
 
-Expected speedup on this workload (autowrite section drafting, ~2k–4k token outputs): 1.6×–2.1× on a 3090 per the speculative-decoding memo. The default profile is **non-speculative**; spec-dec is a per-session opt-in until empirical results land in `docs/BENCHMARKS.md`.
+Expected speedup on this workload (autowrite section drafting, ~2k–4k token outputs): 1.6×–2.1× on a 3090 per the speculative-decoding memo. The default profile is **non-speculative**; spec-dec is a per-session opt-in until empirical results land in `docs/benchmarks/BENCHMARKS.md`.
 
 ### 3.5 Prompt cache
 
@@ -326,4 +326,4 @@ These are NOT decided in the spec; they go to the roadmap as research items:
 
 ---
 
-See `docs/SCIKNOW_V2_ROADMAP.md` for the phased migration plan.
+See `docs/roadmap/SCIKNOW_V2_ROADMAP.md` for the phased migration plan.

@@ -87,7 +87,7 @@ React/Vite frontend (`frontend/`).
 4. **REVIEW.md severity rubric (P0 / P1 / P2 + explicit skip list).**
    sciknow's CLAUDE.md is directive but doesn't enumerate review
    severity. Lifting this rubric verbatim as `docs/REVIEW.md` and
-   reference-linking it from `docs/PHASE_LOG.md` would standardize how
+   reference-linking it from `docs/roadmap/PHASE_LOG.md` would standardize how
    we describe pre-merge gates in phase entries and monitor alerts.
 
 5. **Session / telemetry split.** `agent/core/session.py` +

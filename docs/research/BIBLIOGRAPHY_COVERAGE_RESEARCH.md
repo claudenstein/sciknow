@@ -1,7 +1,7 @@
 # Bibliography Coverage in Retrieval-Augmented Book Writing — Research Survey
 
 **Status:** research notes / standalone reading. Not a phase plan.
-**Companion:** `docs/PHASE_56_ROADMAP.md` (the implementation track these techniques would slot into).
+**Companion:** `docs/roadmap/PHASE_56_ROADMAP.md` (the implementation track these techniques would slot into).
 **Anchor commit:** `342053d` (Phase 55.V19h GUI fix; bibliography measurements taken on this commit).
 
 ---
@@ -146,7 +146,7 @@ Build an entity / relation graph over the corpus, retrieve via graph community d
 
 **Cost:** Build-time only; retrieval-time cost is similar to standard top-K because the union of "leaf top-K" + "summary top-K" is ranked together.
 
-**Mapping to sciknow:** sciknow already has RAPTOR (per `docs/RESEARCH.md`). The *autowrite engine* doesn't currently retrieve from the RAPTOR collection by default — flipping the writer's retrieval to use leaf-∪-summary surfaces topical breadth that's already been computed. Free win once wired.
+**Mapping to sciknow:** sciknow already has RAPTOR (per `docs/research/RESEARCH.md`). The *autowrite engine* doesn't currently retrieve from the RAPTOR collection by default — flipping the writer's retrieval to use leaf-∪-summary surfaces topical breadth that's already been computed. Free win once wired.
 
 ### 2.6 Coverage telemetry & feedback loops
 

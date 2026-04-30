@@ -121,7 +121,7 @@ SEED_BENCHMARKS: list[dict] = [
                 "OmniDocBench's self-scoring. sciknow's MinerU 2.5 is NOT "
                 "on this leaderboard (only MinerU 1.3.10 at 61.5). Top "
                 "today: Infinity-Parser2-Pro 86.7, Chandra-2 85.9. See "
-                "docs/INGESTION.md for the audit.",
+                "docs/reference/INGESTION.md for the audit.",
     },
     {
         "dataset": "opendatalab/OmniDocBench",

@@ -1507,7 +1507,7 @@ async def api_corpus_expand(
     """Invoke `sciknow db expand` from the web UI — SSE log stream.
 
     ``budget`` is the RRF pool size per round (default 50); ``limit`` is
-    the hard cap on total downloads. See ``docs/EXPAND_RESEARCH.md`` §6a.
+    the hard cap on total downloads. See ``docs/research/EXPAND_RESEARCH.md`` §6a.
     Heavy flags (download_dir, delay) are left at CLI defaults to keep
     the web UX simple.
     """

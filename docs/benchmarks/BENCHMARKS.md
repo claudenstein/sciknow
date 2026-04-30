@@ -232,7 +232,7 @@ First time the `live` layer has been persisted with retrieval-quality metrics �
 | sparse ∩ FTS | **0.000** | zero shared candidates — either perfect complementarity or a bug |
 | mean overlap | 0.017 | low is good (more complementary signals) |
 
-The `sparse ∩ FTS = 0.0` specifically contradicts the bench's built-in "should be higher" expectation because both are lexical signals. Two hypotheses: (a) FTS is complementing vector signals by design and the note is stale — needs a design review to confirm; (b) the Postgres `tsvector` column is indexing something disjoint from what `chunks` are embedded (e.g. wrong content field, wrong tokenizer, stale index). Open action item — worth a 30-min investigation before calling retrieval "healthy". Flagged in `docs/PHASE_LOG.md` 54.6.135 as follow-up.
+The `sparse ∩ FTS = 0.0` specifically contradicts the bench's built-in "should be higher" expectation because both are lexical signals. Two hypotheses: (a) FTS is complementing vector signals by design and the note is stale — needs a design review to confirm; (b) the Postgres `tsvector` column is indexing something disjoint from what `chunks` are embedded (e.g. wrong content field, wrong tokenizer, stale index). Open action item — worth a 30-min investigation before calling retrieval "healthy". Flagged in `docs/roadmap/PHASE_LOG.md` 54.6.135 as follow-up.
 
 **Model throughput** (single-pass, CPU):
 

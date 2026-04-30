@@ -10,7 +10,7 @@ which walks each paper's ``content_list.json`` (MinerU output). Later
 phases (21.b–21.f) build retrieval, UI, and write-loop integration on
 top of this table.
 
-See docs/RESEARCH.md §21 for the full design.
+See docs/research/RESEARCH.md §21 for the full design.
 """
 from typing import Sequence, Union
 

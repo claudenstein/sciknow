@@ -513,7 +513,7 @@ Measurement isn't a research technique per se, but it's the lever that makes eve
 
 Every autowrite run produces ~30-50 LLM calls of structured signal: per-iteration scores across 6 dimensions, per-claim verification verdicts, CoVe questions and answers, retrieval queries and the top-k chunks they returned, KEEP/DISCARD verdicts on each revision, and the user's eventual approval (or rebuild). Until Phase 32.6 this signal evaporated the moment a draft was saved — only the *final* `score_history` JSONB column was kept on `drafts.custom_metadata`, and even then nothing aggregated across runs.
 
-The user's framing for this work was direct: *"do research about how to make the autowrite algorithm learn from every iteration; we want to have a database somehow with all that effort and compound it in a way that next iterations are more efficient."* This section is the answer. It's a layered plan where each layer is independently shippable and earlier layers are prerequisites for later ones. **Layer 0 shipped in Phase 32.6**; layers 1-6 are tracked in `docs/ROADMAP.md`.
+The user's framing for this work was direct: *"do research about how to make the autowrite algorithm learn from every iteration; we want to have a database somehow with all that effort and compound it in a way that next iterations are more efficient."* This section is the answer. It's a layered plan where each layer is independently shippable and earlier layers are prerequisites for later ones. **Layer 0 shipped in Phase 32.6**; layers 1-6 are tracked in `docs/roadmap/ROADMAP.md`.
 
 ### The four research families
 
@@ -642,7 +642,7 @@ A second measurement system lives beside `sciknow test`: `sciknow bench` (`scikn
 
 Design principle: benches **do not assert** — they measure. A drift from baseline is flagged but never raises, because the threshold for "bad" is workload-dependent (a GPU upgrade halves every latency metric, and that is not a regression). Pass/fail judgment stays in `sciknow test`, which is concerned with code correctness rather than metric drift.
 
-See [`docs/BENCHMARKS.md`](BENCHMARKS.md) for the full layer/metric taxonomy and how to add a new bench function.
+See [`docs/benchmarks/BENCHMARKS.md`](../benchmarks/BENCHMARKS.md) for the full layer/metric taxonomy and how to add a new bench function.
 
 ### Findings from the first recorded baseline (2026-04-13, global-cooling project, 2774 papers, 103k chunks)
 

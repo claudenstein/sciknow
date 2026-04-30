@@ -20,7 +20,7 @@ This is NOT pytest. It's a smoke-test runner that's invoked from the CLI:
 The convention is: every PR that touches synthesis pipeline, retrieval, or
 ingestion should pass at least L1 before merging. L2 and L3 are run before
 shipping a "Phase" feature drop or after any infrastructure change. See
-docs/TESTING.md for the full protocol.
+docs/reference/TESTING.md for the full protocol.
 
 Adding a new check is one function: write it, return ``TestResult.ok(...)``
 or ``TestResult.fail(...)``, then append it to the layer's list at the
@@ -1077,9 +1077,9 @@ def l1_web_rendered_js_is_valid() -> "TestResult":
 
 
 def l1_research_doc_up_to_date() -> None:
-    """docs/RESEARCH.md mentions all shipped phases."""
+    """docs/research/RESEARCH.md mentions all shipped phases."""
     from pathlib import Path
-    p = Path(__file__).resolve().parents[2] / "docs" / "RESEARCH.md"
+    p = Path(__file__).resolve().parents[2] / "docs" / "research" / "RESEARCH.md"
     text = p.read_text()
     for phase_marker in (
         "## 13. Hedging Fidelity",
@@ -1092,11 +1092,11 @@ def l1_research_doc_up_to_date() -> None:
         "## 21. Compound Learning from Iteration History",
         "## 22. CARS-Adapted Chapter Moves",
     ):
-        assert phase_marker in text, f"docs/RESEARCH.md missing section: {phase_marker!r}"
+        assert phase_marker in text, f"docs/research/RESEARCH.md missing section: {phase_marker!r}"
     # Implementation timeline should mention all phases up to 13.
     for phase in ("Phase 7:", "Phase 8:", "Phase 9:", "Phase 10:",
                   "Phase 11:", "Phase 12:", "Phase 13:"):
-        assert phase in text, f"docs/RESEARCH.md timeline missing {phase}"
+        assert phase in text, f"docs/research/RESEARCH.md timeline missing {phase}"
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -3620,13 +3620,13 @@ def l1_phase28_resume_wired_through() -> None:
 
 
 def l1_phase29_roadmap_doc_exists() -> None:
-    """Phase 29 — docs/ROADMAP.md is checked in and contains the
+    """Phase 29 — docs/roadmap/ROADMAP.md is checked in and contains the
     headings expected by the user-facing doc structure.
     """
     from pathlib import Path
     repo_root = Path(__file__).resolve().parent.parent.parent
-    roadmap = repo_root / "docs" / "ROADMAP.md"
-    assert roadmap.exists(), "docs/ROADMAP.md missing"
+    roadmap = repo_root / "docs" / "roadmap" / "ROADMAP.md"
+    assert roadmap.exists(), "docs/roadmap/ROADMAP.md missing"
     text = roadmap.read_text(encoding="utf-8")
     # Check the major sections so we don't accidentally truncate the file
     for heading in (
@@ -4861,7 +4861,7 @@ def l1_phase32_7_lessons_layer1() -> None:
     """Phase 32.7 — Layer 1: episodic memory store (lessons).
 
     The producer/consumer surface for the Reflexion-style learning
-    loop documented in docs/RESEARCH.md §21 Layer 1. Verifies the
+    loop documented in docs/research/RESEARCH.md §21 Layer 1. Verifies the
     schema, prompts, helpers, and wiring all exist and connect.
 
     Specifically:
@@ -6348,7 +6348,7 @@ def l1_phase46_citation_verify_surface() -> None:
     from sciknow.cli import book as book_cli
 
     # Verdict semantics: title similarity thresholds must match the
-    # AutoResearchClaw calibration (0.80 / 0.50) per docs/COMPARISON.md.
+    # AutoResearchClaw calibration (0.80 / 0.50) per docs/benchmarks/COMPARISON.md.
     assert cv.T_HIGH == 0.80
     assert cv.T_LOW  == 0.50
     assert cv._verdict_from_similarity(0.9)  == cv.VERIFIED
@@ -8365,7 +8365,7 @@ def l1_phase53_bootstrap_and_mcnemar() -> None:
 def l1_phase54_wiki_browsing_mvp() -> None:
     """Phase 54 — wiki MVP quartet.
 
-    Four upgrades per ``docs/WIKI_UX_RESEARCH.md``:
+    Four upgrades per ``docs/research/WIKI_UX_RESEARCH.md``:
       1. SPA-style hash route (#wiki / #wiki/<slug>)
       2. [[wiki-slug]] and [[slug|alt]] rendered as real hyperlinks
       3. Heading anchors with stable slug-safe ids (for TOC + deep link)
@@ -8823,7 +8823,7 @@ def l1_phase54_6_21_audit_fixes() -> None:
     import sciknow.testing.protocol as _prot
     assert hasattr(_prot, "SMOKE_TESTS"), (
         "SMOKE_TESTS list missing — Phase 54.6.39 single-example "
-        "pipeline smokes must stay registered (see docs/TESTING.md §SMOKE)"
+        "pipeline smokes must stay registered (see docs/reference/TESTING.md §SMOKE)"
     )
     smoke_names = {t.__name__ for t in _prot.SMOKE_TESTS}
     for required in (
@@ -10261,7 +10261,7 @@ def l1_phase54_6_162_gui_coverage_audit() -> None:
           `walk_book_lengths` (no SQL duplication)
       (C) Book Settings template has the two new panels
           (length-report + section-length) with refresh buttons
-      (D) `docs/CONCEPT_DENSITY.md` exists and links from README
+      (D) `docs/reference/CONCEPT_DENSITY.md` exists and links from README
           Documentation table
     """
     import inspect
@@ -10313,21 +10313,21 @@ def l1_phase54_6_162_gui_coverage_audit() -> None:
 
     # D) Docs consolidation
     repo_root = Path(__file__).resolve().parents[2]
-    concept_doc = repo_root / "docs" / "CONCEPT_DENSITY.md"
+    concept_doc = repo_root / "docs" / "reference" / "CONCEPT_DENSITY.md"
     assert concept_doc.exists(), (
-        f"docs/CONCEPT_DENSITY.md missing (Phase 54.6.162)"
+        f"docs/reference/CONCEPT_DENSITY.md missing (Phase 54.6.162)"
     )
     concept_text = concept_doc.read_text()
     # Must reference the core concepts + link back to §24
     for marker in ("Cowan", "Brown 2008", "words-per-concept",
                    "RESEARCH.md", "PHASE_LOG"):
         assert marker in concept_text, (
-            f"docs/CONCEPT_DENSITY.md must reference {marker!r}"
+            f"docs/reference/CONCEPT_DENSITY.md must reference {marker!r}"
         )
     # README links to the new doc
     readme = (repo_root / "README.md").read_text()
     assert "CONCEPT_DENSITY.md" in readme, (
-        "README Documentation table must link to docs/CONCEPT_DENSITY.md"
+        "README Documentation table must link to docs/reference/CONCEPT_DENSITY.md"
     )
 
 
@@ -11506,7 +11506,7 @@ def l1_phase54_6_146_concept_density_resolver() -> None:
 
     Guards the bottom-up sizing path that fires when a section has a
     plan with bulleted concepts. Target = n_concepts × wpc_midpoint.
-    Documented in docs/RESEARCH.md §24 — replaces the folklore "Miller
+    Documented in docs/research/RESEARCH.md §24 — replaces the folklore "Miller
     7±2 → 7 concepts per section" with Cowan's 3-4 novel-chunk bound.
 
     Pins:
@@ -12017,7 +12017,7 @@ def l1_phase54_6_140_visuals_eval_surface() -> None:
 def l1_phase54_6_139_visuals_ranker_surface() -> None:
     """Phase 54.6.139 — 5-signal visuals ranker surface + composition math.
 
-    Implements signals 1/2/3/5 from docs/RESEARCH.md §7.X.3 (signal 4
+    Implements signals 1/2/3/5 from docs/research/RESEARCH.md §7.X.3 (signal 4
     VLM faithfulness is deferred until an eval set exists to calibrate
     its weight). This test pins the signal weights, the section-prior
     mapping, and the public API shape — a refactor that silently
@@ -12044,7 +12044,7 @@ def l1_phase54_6_139_visuals_ranker_surface() -> None:
     # of the Phase 54.6.138 linker infrastructure.
     assert vr.W_MENTION >= 0.2, (
         f"mention-paragraph signal must be meaningfully weighted "
-        f"(>= 0.2); got {vr.W_MENTION}. See docs/RESEARCH.md §7.X signal 3."
+        f"(>= 0.2); got {vr.W_MENTION}. See docs/research/RESEARCH.md §7.X signal 3."
     )
 
     # C) Section prior sanity: results sections prefer chart/table;
@@ -12075,7 +12075,7 @@ def l1_phase54_6_138_visuals_mention_linker_surface() -> None:
     """Phase 54.6.138 — mention-paragraph linker surface + regex behaviour.
 
     The linker is infrastructure for the visuals-in-writer signal 3
-    from docs/RESEARCH.md §7.X — body paragraphs that reference a
+    from docs/research/RESEARCH.md §7.X — body paragraphs that reference a
     figure (``"Fig. 3 shows …"``) are the strongest retrieval signal
     for matching a figure to target draft prose per SciCap+. This test
     pins the regex behaviour on the hardest cases (sub-figure labels,
@@ -17987,10 +17987,10 @@ def l1_phase54_6_215_mineru_pipeline_deprecation_docs() -> None:
       B) .env.example documents MINERU_VLM_BACKEND + MINERU_VLM_MODEL
          (the settings shipped in Phases 1+2 but not previously
          surfaced in the example file).
-      C) docs/INGESTION.md §Stage 1 already carries the VLM-Pro
+      C) docs/reference/INGESTION.md §Stage 1 already carries the VLM-Pro
          primary narrative (Phase 2) AND mentions `vllm` + the
          cross-page / paragraph-merging / in-table capabilities.
-      D) docs/ROADMAP_INGESTION.md §3.1.6 lists Phase 6 as a
+      D) docs/roadmap/ROADMAP_INGESTION.md §3.1.6 lists Phase 6 as a
          non-optional closure item.
     """
     from pathlib import Path
@@ -18019,10 +18019,10 @@ def l1_phase54_6_215_mineru_pipeline_deprecation_docs() -> None:
         )
 
     # C) INGESTION.md narrative
-    ingestion_md = repo_root / "docs" / "INGESTION.md"
+    ingestion_md = repo_root / "docs" / "reference" / "INGESTION.md"
     ing_text = ingestion_md.read_text(encoding="utf-8")
     assert "primary backend post-54.6.212" in ing_text, (
-        "docs/INGESTION.md must keep the Phase 2 primary-backend wording"
+        "docs/reference/INGESTION.md must keep the Phase 2 primary-backend wording"
     )
     for capability in (
         "cross-page table merging",
@@ -18030,15 +18030,15 @@ def l1_phase54_6_215_mineru_pipeline_deprecation_docs() -> None:
         "in-table image recognition",
     ):
         assert capability in ing_text.lower(), (
-            f"docs/INGESTION.md should advertise {capability} so "
+            f"docs/reference/INGESTION.md should advertise {capability} so "
             f"users know why the migration was worth the re-ingest"
         )
 
     # D) Roadmap closure
-    roadmap_md = repo_root / "docs" / "ROADMAP_INGESTION.md"
+    roadmap_md = repo_root / "docs" / "roadmap" / "ROADMAP_INGESTION.md"
     rm_text = roadmap_md.read_text(encoding="utf-8")
     assert "3.1.6" in rm_text and "Phase 6" in rm_text, (
-        "docs/ROADMAP_INGESTION.md must reference §3.1.6 Phase 6"
+        "docs/roadmap/ROADMAP_INGESTION.md must reference §3.1.6 Phase 6"
     )
 
 
@@ -18357,19 +18357,19 @@ def l1_phase54_6_212_vlm_pro_default_dispatch() -> None:
         "deprecation message should name the pipeline backend"
     )
 
-    # E) docs/INGESTION.md narrative flip. Checks the tracked doc
+    # E) docs/reference/INGESTION.md narrative flip. Checks the tracked doc
     # (not gitignored CLAUDE.md) so the contract is enforceable in
     # fresh clones.
-    ingestion_md = Path(__file__).resolve().parents[2] / "docs" / "INGESTION.md"
-    assert ingestion_md.exists(), "docs/INGESTION.md missing"
+    ingestion_md = Path(__file__).resolve().parents[2] / "docs" / "reference" / "INGESTION.md"
+    assert ingestion_md.exists(), "docs/reference/INGESTION.md missing"
     ingestion_content = ingestion_md.read_text(encoding="utf-8")
     assert "primary backend post-54.6.212" in ingestion_content, (
-        "docs/INGESTION.md Stage 1 must name VLM-Pro as the primary "
+        "docs/reference/INGESTION.md Stage 1 must name VLM-Pro as the primary "
         "backend post-54.6.212 — otherwise new readers get the "
         "pre-migration mental model"
     )
     assert "deprecated as a pinned backend" in ingestion_content.lower(), (
-        "docs/INGESTION.md Stage 1 must flag MinerU pipeline as "
+        "docs/reference/INGESTION.md Stage 1 must flag MinerU pipeline as "
         "deprecated when pinned explicitly"
     )
 
@@ -19670,7 +19670,7 @@ def l1_phase55_v10_substrate_sweep_harness_present() -> None:
     from pathlib import Path
     repo = Path(__file__).resolve().parents[2]
     script = repo / "scripts" / "bench_substrate_sweep.py"
-    plan = repo / "docs" / "BENCH_OPTIMIZATION_PLAN.md"
+    plan = repo / "docs" / "roadmap" / "BENCH_OPTIMIZATION_PLAN.md"
     assert script.is_file(), f"missing: {script}"
     assert plan.is_file(), f"missing: {plan}"
     src = script.read_text()

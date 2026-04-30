@@ -122,7 +122,7 @@ CANDIDATE_PAPERS: list[str] = [
 # also gets its sampling params (temp, top_p, top_k) from
 # ``profile_for()`` below.
 #
-# Sources for the fix (see docs/PHASE_LOG.md 54.6.85 entry):
+# Sources for the fix (see docs/roadmap/PHASE_LOG.md 54.6.85 entry):
 #   - Qwen3-30B-A3B-Instruct-2507 HF card: temp 0.7, top_p 0.8, top_k 20
 #   - Qwen3.5 / 3.6 model cards: temp 1.0 thinking / 0.6 coding,
 #     top_p 0.95, top_k 20
@@ -181,7 +181,7 @@ def profile_for(model: str) -> ModelProfile:
     Qwen 3.5/3.6 get thinking treatment; everything else stays at
     non-thinking defaults.
 
-    See docs/PHASE_LOG.md 54.6.85 for the source-of-truth per family.
+    See docs/roadmap/PHASE_LOG.md 54.6.85 for the source-of-truth per family.
     Add new entries here when new candidates join ``CANDIDATE_MODELS``.
     """
     m = (model or "").lower()

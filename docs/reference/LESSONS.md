@@ -4,7 +4,7 @@
 
 ---
 
-This document answers a direct question: *"Is the MetaClaw / DeepScientist 'Findings Memory' pattern (opportunity D in `docs/COMPARISON.md`) already in sciknow?"*
+This document answers a direct question: *"Is the MetaClaw / DeepScientist 'Findings Memory' pattern (opportunity D in `docs/benchmarks/COMPARISON.md`) already in sciknow?"*
 
 **Short answer: yes.** It shipped as Phase 32.7 (2026-04-11) under the name **Compound Learning Layer 1** and has been in production since. Below is a concrete walkthrough of what's there, where, and how to inspect it.
 
@@ -124,13 +124,13 @@ print(_get_relevant_lessons(book_id="<uuid>",
 
 Phase 46 audit surfaced three concrete gaps worth considering for Phase 47:
 
-1. **Kind taxonomy**. DeepScientist's memory cards are typed into `{paper, idea, decision, episode, knowledge, rejected_idea}` (see `docs/COMPARISON.md` Appendix C, port analysis). sciknow's `autowrite_lessons.dimension` column is orthogonal — it records which *scorer axis* produced the lesson (groundedness / citation_accuracy / etc.), not *what kind of thing* the lesson refers to. Adding a `kind` column would let us retrieve "idea memories" and "decision memories" separately, and specifically prevent the `book gaps` generator from re-proposing rejected ideas.
+1. **Kind taxonomy**. DeepScientist's memory cards are typed into `{paper, idea, decision, episode, knowledge, rejected_idea}` (see `docs/benchmarks/COMPARISON.md` Appendix C, port analysis). sciknow's `autowrite_lessons.dimension` column is orthogonal — it records which *scorer axis* produced the lesson (groundedness / citation_accuracy / etc.), not *what kind of thing* the lesson refers to. Adding a `kind` column would let us retrieve "idea memories" and "decision memories" separately, and specifically prevent the `book gaps` generator from re-proposing rejected ideas.
 
 2. **Scope + promote-to-global**. Today every lesson is scoped to its book; cross-book lessons are retrieved only via the section_slug join and downweighted 0.7×. DeepScientist has an explicit `scope ∈ {quest, global}` and a promote-to-global action that copies a well-performing lesson into a shared cross-project pool. For sciknow that would mean a `sciknow_lessons` table keyed to `section_slug` (no `book_id`), and a migration gate like "importance ≥ 0.8 and score_delta > 0 across ≥ 3 books".
 
 3. **Fidelity tier on the producer**. Today `_distill_lessons_from_run` fires on every run that reaches a `run_id`. DeepScientist restricts "durable" memory writes to verified+ runs only. We could gate strong lessons (importance ≥ 0.8) to runs with `verification.groundedness_score ≥ 0.7` + `final_overall ≥ 0.7`, so low-quality runs can't pollute the memory.
 
-Each of these is 2–3 days of work and doesn't require DGX Spark. They're tracked in `docs/COMPARISON.md` Appendix C as Port A.
+Each of these is 2–3 days of work and doesn't require DGX Spark. They're tracked in `docs/benchmarks/COMPARISON.md` Appendix C as Port A.
 
 ## Bottom line
 

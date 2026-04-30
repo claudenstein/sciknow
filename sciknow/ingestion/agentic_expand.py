@@ -40,7 +40,7 @@ Design constraints:
 - Provenance: every round records which sub-topic it served and why.
   For now logs-only; Tier 4 #1 will persist to ``documents.provenance``.
 
-See ``docs/EXPAND_ENRICH_RESEARCH_2.md`` §3.1.
+See ``docs/research/EXPAND_ENRICH_RESEARCH_2.md`` §3.1.
 """
 from __future__ import annotations
 

@@ -6,7 +6,7 @@ ranker that considers citation-graph structure + semantic similarity
 (Cormack, Clarke & Buettcher 2009) into a single sortable score.
 
 The audit + research that justify this design live in
-`docs/EXPAND_RESEARCH.md`. The short version:
+`docs/research/EXPAND_RESEARCH.md`. The short version:
 
 - **Hard filters** (retraction, predatory venue, editorial/erratum,
   short proceedings, one-timer) drop candidates before they reach the

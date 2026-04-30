@@ -9,7 +9,7 @@ stop discarding OpenAlex fields we already fetch at enrich time, and
 one new timestamp/status pair for periodic retraction sweeps
 (``sciknow db refresh-retractions``).
 
-Rationale: see ``docs/EXPAND_ENRICH_RESEARCH_2.md`` §1.1-1.2.
+Rationale: see ``docs/research/EXPAND_ENRICH_RESEARCH_2.md`` §1.1-1.2.
 
 All nullable — existing rows stay as-is until the next enrich run
 populates them. The enricher is responsible for keeping them in sync

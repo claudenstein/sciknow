@@ -1,6 +1,6 @@
 """Additional metadata sources for `db enrich` — Phase 54.6.313.
 
-Implements the top-ROI strategies documented in docs/ENRICH_RESEARCH.md:
+Implements the top-ROI strategies documented in docs/research/ENRICH_RESEARCH.md:
 
   - extract_xmp_doi(pdf_path)           — PDF XMP packet parser. Reads the
                                           Adobe PRISM/DC namespace fields

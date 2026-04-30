@@ -380,7 +380,7 @@ def _get_section_concept_density_target(
     Returns ``None`` when there is no plan or no bullets, signalling
     the caller should fall through to the chapter-split fallback.
 
-    Per docs/RESEARCH.md §24, Cowan 2001's capacity bound is 3-4 novel
+    Per docs/research/RESEARCH.md §24, Cowan 2001's capacity bound is 3-4 novel
     chunks; Guideline 1 says sections should cap at that. The user
     chose option (b) soft warning on >4 concepts (Q3 of the
     2026-04-20 concept-density discussion): we log a one-line
@@ -1277,7 +1277,7 @@ def _auto_summarize(content: str, section_type: str, chapter_title: str, model: 
 # trajectory into the autowrite_runs / autowrite_iterations /
 # autowrite_retrievals tables (added in migration 0011). Designed to
 # fail soft: any persistence error is logged and swallowed so it never
-# kills a running autowrite job. Read more in docs/RESEARCH.md §21.
+# kills a running autowrite job. Read more in docs/research/RESEARCH.md §21.
 
 
 def _create_autowrite_run(
@@ -4271,7 +4271,7 @@ def _score_visual_citation(
 ) -> float:
     """Mechanical scorer for the `visual_citation` dimension.
 
-    Philosophy (docs/RESEARCH.md §7.X + the three-Q decision from the
+    Philosophy (docs/research/RESEARCH.md §7.X + the three-Q decision from the
     Q1 discussion): visuals are FREE for word count, but the scorer
     evaluates whether the writer used them appropriately. The score
     is a composite of three sub-signals:

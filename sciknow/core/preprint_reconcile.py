@@ -5,7 +5,7 @@ commonly an arXiv preprint + its later journal publication) and marks
 the non-canonical row with ``canonical_document_id`` so retrieval
 hides it without deleting it.
 
-See ``docs/EXPAND_ENRICH_RESEARCH_2.md`` §1.3.
+See ``docs/research/EXPAND_ENRICH_RESEARCH_2.md`` §1.3.
 
 Design (locked 54.6.125 — `user has no drafts` simplified):
 - **Canonical**: journal > preprint (peer-reviewed, stable DOI). Tie

@@ -16,7 +16,7 @@ Smith" stay distinct (matching too loosely would inflate the
 self-cite rate on common surnames). Anyone who wants looser matching
 can post-process the ``self_cite_authors`` list.
 
-See ``docs/ROADMAP_INGESTION.md`` §3.6.2.
+See ``docs/roadmap/ROADMAP_INGESTION.md`` §3.6.2.
 """
 from __future__ import annotations
 

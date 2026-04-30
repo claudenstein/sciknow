@@ -153,7 +153,7 @@ class PaperMetadata(Base):
 
     # Phase 54.6.111 (Tier 1 #1) — persisted OpenAlex enrichment.
     # Hydrated from a single /works/{id} call at enrich time; see
-    # docs/EXPAND_ENRICH_RESEARCH_2.md §1.1.
+    # docs/research/EXPAND_ENRICH_RESEARCH_2.md §1.1.
     oa_concepts: Mapped[list | None] = mapped_column(JSONB)           # [{display_name, level, score}]
     oa_funders: Mapped[list | None] = mapped_column(JSONB)            # [{name, id}]
     oa_grants: Mapped[list | None] = mapped_column(JSONB)             # [{funder, award_id}]
@@ -657,8 +657,8 @@ class Visual(Base):
 # These three tables capture per-run / per-iteration / per-retrieval data
 # that the autowrite loop produces but currently throws away. They are
 # the data foundation for the Layer 1+ learning system documented in
-# docs/RESEARCH.md §21 ("Compound learning from iteration history") and
-# tracked in docs/ROADMAP.md.
+# docs/research/RESEARCH.md §21 ("Compound learning from iteration history") and
+# tracked in docs/roadmap/ROADMAP.md.
 #
 # Layer 0 (this migration): just persist the data. The information is
 # already in scope inside autowrite_section_stream — it's just not being
@@ -976,7 +976,7 @@ class Feedback(Base):
     the thumbs-up/down next to it.
 
     Longer-term consumer: the parked LambdaMART learn-to-rank upgrade
-    (see docs/EXPAND_RESEARCH.md). (query, chunk_ids, score) triples
+    (see docs/research/EXPAND_RESEARCH.md). (query, chunk_ids, score) triples
     out of this table feed directly into LightGBM's pairwise training
     once ≥500 labeled positives accumulate."""
 

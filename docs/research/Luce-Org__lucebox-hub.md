@@ -103,7 +103,7 @@ target.
    Our autowrite loop has analogous knobs
    (`AUTOWRITE_MAX_ITERATIONS`, `AUTOWRITE_TARGET_SCORE`, visual
    ranker `candidate_k`) that we should sweep + document the same
-   way in `docs/BENCHMARKS.md`.
+   way in `docs/benchmarks/BENCHMARKS.md`.
 
 4. **Power-efficiency DVFS sweep.** The `tok/J` metric at different
    power caps is a framing we don't currently use. For a local-first

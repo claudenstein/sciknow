@@ -10,7 +10,7 @@ the source paper's body text that reference this specific visual
 ``sciknow db link-visual-mentions`` which scans the existing
 ``content_list.json`` — no re-ingestion needed.
 
-Rationale (from docs/RESEARCH.md §7.X, signal 3):
+Rationale (from docs/research/RESEARCH.md §7.X, signal 3):
 
 SciCap+ (Yang et al., 2023) established that the **mention-paragraph**
 — the author's own rhetorical framing of why the figure was cited at

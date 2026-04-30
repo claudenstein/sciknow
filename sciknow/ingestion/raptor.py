@@ -454,8 +454,8 @@ def _build_level(
     # threshold. This lets one chunk contribute to multiple cluster
     # summaries so its information is "visible" through more entry
     # points at retrieval time — better recall for queries that approach
-    # the topic from different angles. See docs/ROADMAP.md §2 and
-    # docs/RESEARCH.md for the research basis.
+    # the topic from different angles. See docs/roadmap/ROADMAP.md §2 and
+    # docs/research/RESEARCH.md for the research basis.
     from sciknow.config import settings
     soft_threshold = getattr(settings, "raptor_soft_threshold", 0.15)
     n_soft_added = 0

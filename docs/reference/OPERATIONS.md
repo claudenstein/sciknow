@@ -185,7 +185,7 @@ The web reader (`sciknow book serve`) runs every LLM operation as a job tracked 
 
 **Debugging a hung job.** Two channels: (1) `data/sciknow.log` for backend Python tracebacks, (2) for autowrite specifically, `data/autowrite/<run_id>.jsonl` for the per-iteration heartbeat log (Phase 24). The heartbeat fires from a side thread so even a stuck generator yields a "no progress in N seconds" line.
 
-**Web exports (Phase 30 / 31).** `GET /api/export/{draft,chapter,book}/{id}.{ext}` produces `txt / md / html / pdf`. PDF rendering uses WeasyPrint directly off the rendered HTML. The CLI `book export` command has a different format matrix (md / html / bibtex / latex / docx via Pandoc) — see `docs/BOOK.md` for the full split.
+**Web exports (Phase 30 / 31).** `GET /api/export/{draft,chapter,book}/{id}.{ext}` produces `txt / md / html / pdf`. PDF rendering uses WeasyPrint directly off the rendered HTML. The CLI `book export` command has a different format matrix (md / html / bibtex / latex / docx via Pandoc) — see `docs/reference/BOOK.md` for the full split.
 
 ---
 

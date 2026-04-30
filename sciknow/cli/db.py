@@ -170,7 +170,7 @@ def _move_downloaded_pdf(
 
 # ── Phase 49 — RRF-fused expand ranker orchestrator ───────────────────────
 # Lives at module scope so L1 tests can import it without instantiating
-# the whole Typer app. See docs/EXPAND_RESEARCH.md for the design
+# the whole Typer app. See docs/research/EXPAND_RESEARCH.md for the design
 # rationale + per-signal trade-offs; the per-signal math lives in
 # sciknow/ingestion/expand_ranker.py.
 
@@ -5917,7 +5917,7 @@ def expand(
                                                    "(0 = use INGEST_WORKERS from .env, default 1). Each worker loads its own "
                                                    "MinerU (~7GB VRAM) + bge-m3 (~2.2GB). On a 24GB 3090 with an LLM resident, "
                                                    "keep at 1. Raise to 2 only when the LLM is off-GPU."),
-    # ── Phase 49 — RRF-fused multi-signal ranker (see docs/EXPAND_RESEARCH.md)
+    # ── Phase 49 — RRF-fused multi-signal ranker (see docs/research/EXPAND_RESEARCH.md)
     strategy:           str   = typer.Option("rrf", "--strategy",
                                               help="Candidate ranking strategy: 'rrf' (default — multi-signal RRF "
                                                    "fusion with hard filters, co-citation, bib coupling, PageRank, "
@@ -6356,7 +6356,7 @@ def expand(
     # fuse via RRF, and cut to `budget`. Replaces `downloadable` with the
     # top-ranked survivors so the existing download flow below processes
     # exactly those. Dry-run mode writes the full shortlist TSV and exits.
-    # See docs/EXPAND_RESEARCH.md for the research behind each signal.
+    # See docs/research/EXPAND_RESEARCH.md for the research behind each signal.
     ranked_features: list = []
     if strategy == "rrf" and downloadable:
         downloadable, ranked_features = _run_rrf_ranker(
@@ -10299,7 +10299,7 @@ def link_visual_mentions_cmd(
     ``visuals.mention_paragraphs``.
 
     This is the infrastructure half of the visuals-in-writer feature
-    (docs/RESEARCH.md §7.X, signal 3). Per SciCap+ findings, the
+    (docs/research/RESEARCH.md §7.X, signal 3). Per SciCap+ findings, the
     mention-paragraph is the single strongest retrieval signal for
     matching a figure to target draft prose — stronger than the caption
     or the image itself — because it carries the author's rhetorical
@@ -10319,7 +10319,7 @@ def link_visual_mentions_cmd(
     After this runs, ``visuals.mention_paragraphs`` is either ``[]``
     (no body references found — e.g. decorative figures) or a list of
     ``{block_idx, text, context_before}`` entries ordered by paper
-    position. Downstream: the 5-signal write-loop ranker (docs/RESEARCH.md
+    position. Downstream: the 5-signal write-loop ranker (docs/research/RESEARCH.md
     §7.X.3) uses these against draft sentences as its mention-paragraph
     alignment signal.
     """

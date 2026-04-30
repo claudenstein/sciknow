@@ -21,7 +21,7 @@ Shipped types (Phase 45):
   Discussion, Conclusion). A paper is modelled as a single chapter
   with ``is_flat=True`` semantics on the UI side.
 
-Planned types (next tick of the plan in docs/STRATEGY.md):
+Planned types (next tick of the plan in docs/roadmap/STRATEGY.md):
 
 - ``scifi_novel``       — chapters + arcs, no citations, narrative prose.
 - ``literature_review`` — multi-chapter like a book but with CARS-heavy
@@ -76,7 +76,7 @@ class ProjectType:
     # emerges from the sum of section lengths rather than being
     # top-down allocated.
     #
-    # Numbers grounded in docs/RESEARCH.md §24 (Cowan 2001 for
+    # Numbers grounded in docs/research/RESEARCH.md §24 (Cowan 2001 for
     # concept counts, derived from section-length distributions for
     # wpc). The (low, high) ranges let the Level-0 resolver pick a
     # midpoint by default but carry enough information for a future

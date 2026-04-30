@@ -5,7 +5,7 @@ paper's ``content_list.json`` for body-text paragraphs that reference
 that number (``Fig. 3``, ``Figure 3``, ``Table 2``, ``Eq. 5``) and
 persist them as JSONB on ``visuals.mention_paragraphs``.
 
-Why this matters (docs/RESEARCH.md §7.X, signal 3): SciCap+ (Yang et
+Why this matters (docs/research/RESEARCH.md §7.X, signal 3): SciCap+ (Yang et
 al., 2023) showed that the mention-paragraph — the author's own prose
 framing of why the figure is cited at that point — is a stronger
 retrieval signal for matching a figure to target draft prose than

@@ -6,10 +6,10 @@ shipped, hardware-gated, or polish noticed during recent phases.
 Cross-referenced from the relevant phase commits where applicable.
 
 This doc replaces ad-hoc "planned" sections that were scattered across
-`docs/RESEARCH.md` and the auto-memory files. When something here
+`docs/research/RESEARCH.md` and the auto-memory files. When something here
 ships, move it to a Phase commit and delete the entry.
 
-> **Companion:** [`docs/POST_V2_ROADMAP.md`](POST_V2_ROADMAP.md) is the
+> **Companion:** [`docs/roadmap/POST_V2_ROADMAP.md`](POST_V2_ROADMAP.md) is the
 > shipping-order view (v2.0.0 → v2.1 → v2.2 → Spark → data-gated). It
 > *references* this doc's open items rather than duplicating them, so
 > when something ships here, the Post-v2 doc tracks the milestone.
@@ -30,7 +30,7 @@ These three were deferred:
 
 ## 2. Research runners-up (2026-04 lit sweep)
 
-From `docs/RESEARCH.md` §512. The 2026-04 literature sweep produced
+From `docs/research/RESEARCH.md` §512. The 2026-04 literature sweep produced
 five candidates that didn't make the first ship batch (Phases 7–12).
 In priority order:
 
@@ -40,7 +40,7 @@ In priority order:
 - [x] **~~MADAM-RAG (prompt-only core).~~** Shipped in Phase 34 as MADAM-RAG-lite. The tree planner can now tag paragraphs with a `contradiction` object: `{for: ["[1]"], against: ["[4]"], nature: "..."}`. The writer prompt renders this as explicit pro/con source guidance with a ⚡ CONTRADICTION indicator, telling the writer to present both sides fairly (and use Toulmin structure for tension paragraphs). This is the prompt-engineering core of Wang et al.'s MADAM-RAG (COLM 2025) without the multi-agent debate overhead — the full multi-agent version (2-3 extra LLM calls per contradiction paragraph) is deferred to the DGX Spark roadmap where the extra compute is affordable.
 - [x] **~~Soft RAPTOR clustering.~~** Shipped in Phase 34. The GMM `proba` matrix is now used: chunks with membership probability ≥ `RAPTOR_SOFT_THRESHOLD` (default 0.15) contribute to secondary clusters in addition to their argmax primary. This means a chunk about "solar forcing AND ocean heat content" can appear in BOTH the solar-forcing cluster summary AND the ocean-heat cluster summary, improving recall for queries that approach the overlap from either angle. Controlled by `settings.raptor_soft_threshold`; set to 0 to disable. Only affects `catalog raptor build`; existing RAPTOR nodes are unaffected until the next rebuild.
 
-**Do NOT relitigate** (rejected with documented reasons in `docs/RESEARCH.md` §526):
+**Do NOT relitigate** (rejected with documented reasons in `docs/research/RESEARCH.md` §526):
 HyDE, Self-RAG/CRAG (fine-tuned), Dense X / Propositional Retrieval,
 GraphRAG global, Late Chunking (Jina), full RST tree parsing, full
 Centering Cb/Cf/Cp machinery, FActScore as an online method, ALCE
@@ -57,8 +57,8 @@ memory and would be wasted on the existing 3090.
 - [ ] **Phase B — LLM host routing.** Split `ask question` (3090, fast) vs `book write` / `ask synthesize` (Spark, 70B+ model). ~50 lines in `sciknow/rag/llm.py`. Simplest of the three. **Start here when the box arrives.**
 - [ ] **Phase C — vLLM backend on Spark** for batch LLM workloads (catalog cluster, `db export --generate-qa`, `book argue` / `book gaps`). Big throughput win on batch operations.
 - [ ] **Phase E — QLoRA fine-tuning of `bge-reranker-v2-m3`** on the user's own climate corpus. Specialised reranker for the user's domain.
-- [ ] **Phase 47.S1 — CycleReviewer swap-in as the autowrite scorer.** `WestlakeNLP/CycleReviewer-ML-Llama3.1-8B` (fits the 3090 alone but not alongside our 27B writer). On Spark, co-reside with the flagship writer and route scoring requests to it. Paper claims 26.89% MAE vs individual human reviewers on OpenReview. Direct replacement for the current LLM-prompt scorer — we inherit the gain without training. Tracked in `docs/COMPARISON.md` Appendix D. **Preconditions**: Spark + mixed-workload scheduling.
-- [ ] **Phase 47.S2 — Iterative DPO on our own KEEP/DISCARD verdicts.** Phase 32.6 autowrite telemetry already captures `(overall_pre, overall_post, action)` per iteration. A post-Spark job exports `data/preferences/<book>.jsonl` in `{prompt, chosen, rejected}` shape, trains a LoRA on the writer with 2k+ validated pairs (3 epochs). See `docs/RESEARCH.md` §21 Layer 4. **Preconditions**: Spark + ≥ 2k validated pairs (we're accumulating).
+- [ ] **Phase 47.S1 — CycleReviewer swap-in as the autowrite scorer.** `WestlakeNLP/CycleReviewer-ML-Llama3.1-8B` (fits the 3090 alone but not alongside our 27B writer). On Spark, co-reside with the flagship writer and route scoring requests to it. Paper claims 26.89% MAE vs individual human reviewers on OpenReview. Direct replacement for the current LLM-prompt scorer — we inherit the gain without training. Tracked in `docs/benchmarks/COMPARISON.md` Appendix D. **Preconditions**: Spark + mixed-workload scheduling.
+- [ ] **Phase 47.S2 — Iterative DPO on our own KEEP/DISCARD verdicts.** Phase 32.6 autowrite telemetry already captures `(overall_pre, overall_post, action)` per iteration. A post-Spark job exports `data/preferences/<book>.jsonl` in `{prompt, chosen, rejected}` shape, trains a LoRA on the writer with 2k+ validated pairs (3 epochs). See `docs/research/RESEARCH.md` §21 Layer 4. **Preconditions**: Spark + ≥ 2k validated pairs (we're accumulating).
 - [ ] **Phase 47.S3 — fast-detect-gpt pre-publish gate.** Bao et al. method, MIT; `Qwen2.5-1.5B` as both scoring and reference. Today's 3090 has the VRAM if the writer is evicted; works better on Spark where the writer stays hot. Calibrate threshold against ~100 known-human climate papers. Gate as a warning badge, not a block.
 
 **Do NOT** move embedder / reranker to Spark — 3090 has 3.4× more
@@ -73,13 +73,13 @@ In effort-impact order:
 
 1. **CycleReviewer as autowrite scorer** (2 days + Spark). See Phase 47.S1 above. Direct drop-in against the existing scorer interface; inherits the published 26.89% MAE reduction without training on our end.
 2. **9-block NeurIPS rubric in the writer prompt** (2 days, no Spark needed — ✅ **already shipped** as `sciknow book ensemble-review` in Phase 46.C with N=3 stance-rotated reviewers + meta-reviewer).
-3. **Iterative DPO on sciknow's own preferences** (2 weeks + Spark). See Phase 47.S2 above. Already tracked in `docs/RESEARCH.md` §21 Layer 4 — CycleResearcher's RL loop is the current-gen reference implementation of the pattern.
+3. **Iterative DPO on sciknow's own preferences** (2 weeks + Spark). See Phase 47.S2 above. Already tracked in `docs/research/RESEARCH.md` §21 Layer 4 — CycleResearcher's RL loop is the current-gen reference implementation of the pattern.
 4. **fast-detect-gpt pre-publish gate** (3 days, GPU). See Phase 47.S3 above.
 
 The common thread: without Spark we're stuck running scoring on the
 same GPU as the writer, which means either (a) evicting the writer
 (cache-cold on resume) or (b) CPU-fallback on the scorer (50× slower —
-see `docs/BENCHMARKS.md` contention finding).
+see `docs/benchmarks/BENCHMARKS.md` contention finding).
 
 ---
 
@@ -101,7 +101,7 @@ Mostly small.
 ## 4b. Compound learning — Layers 1-6 (Phase 32.6 follow-on)
 
 Layer 0 (autowrite telemetry tables + persistence helpers) shipped in
-Phase 32.6 — see `docs/RESEARCH.md` §21 for the full architecture and
+Phase 32.6 — see `docs/research/RESEARCH.md` §21 for the full architecture and
 the literature review. Layers 1-6 are the actual learning passes that
 read from those tables. Each is independently shippable; later layers
 depend on earlier layers having data.
@@ -115,7 +115,7 @@ depend on earlier layers having data.
 
 **Validation harness:** all six layers use the same Track A measurement methodology as Phase 13 — `book autowrite-bench --runs 5` on a control chapter, before/after each layer ships. The mean shift must exceed the baseline std for the win to be real.
 
-**Anti-patterns to avoid** (full list in `docs/RESEARCH.md` §21): training a reward model from scratch instead of DPO; storing raw iteration text in the lessons table; prepending all past lessons to every prompt (the ExpeL anti-pattern that ERL specifically calls out); optimizing the writer with the same scorer as the supervisor without a human gate; trying to fine-tune on the 3090; conflating "compound learning" with "infinite context window".
+**Anti-patterns to avoid** (full list in `docs/research/RESEARCH.md` §21): training a reward model from scratch instead of DPO; storing raw iteration text in the lessons table; prepending all past lessons to every prompt (the ExpeL anti-pattern that ERL specifically calls out); optimizing the writer with the same scorer as the supervisor without a human gate; trying to fine-tune on the 3090; conflating "compound learning" with "infinite context window".
 
 ---
 
@@ -245,7 +245,7 @@ citations, KG, topics, RAPTOR, wiki compile, and cross-cutting
 observability — live in a dedicated doc so this file stays focused
 on "what's next to ship":
 
-→ [`docs/ROADMAP_INGESTION.md`](./ROADMAP_INGESTION.md)
+→ [`docs/roadmap/ROADMAP_INGESTION.md`](./ROADMAP_INGESTION.md)
 
 43 proposals grouped by pipeline stage + cross-cutting concerns, each
 with expected win, cost, and priority verdict (**Ship** / Investigate

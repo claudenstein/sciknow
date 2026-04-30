@@ -27,7 +27,7 @@ Design choices:
   losing the original signal would be worse than carrying a
   low-frequency tail.
 
-See ``docs/ROADMAP_INGESTION.md`` §3.7.2.
+See ``docs/roadmap/ROADMAP_INGESTION.md`` §3.7.2.
 """
 from __future__ import annotations
 
