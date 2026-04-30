@@ -20114,6 +20114,73 @@ def l1_phase56_d_constants_pinned() -> None:
     assert cr.MMR_LAMBDA == 0.65
 
 
+def l1_phase56_e_writer_skips_weak_claims() -> None:
+    """Phase 56.E — write_claim returns None when the claim's evidence
+    is weak. Core "drop, don't fabricate" guarantee.
+    """
+    from sciknow.core.claim_writer import write_claim
+    from sciknow.core.claim_extractor import Claim, HedgeStrength
+    from sciknow.retrieval.claim_retrieve import ClaimEvidence
+
+    claim = Claim(
+        claim_id="c-test", text="X causes Y.", scope="",
+        hedge_strength=HedgeStrength.QUALIFIED,
+        anchor_cluster_id="cluster-1",
+    )
+    weak_evidence = ClaimEvidence(
+        claim_id="c-test", claim_text="X causes Y.",
+        chunks=[], weak=True, weak_reason="no chunks above floor",
+    )
+    out = write_claim(claim, weak_evidence)
+    assert out is None, "weak claims must be dropped, not written"
+
+
+def l1_phase56_e_writer_skips_when_no_evidence() -> None:
+    """Phase 56.E — even a non-weak ClaimEvidence with empty chunks
+    list yields None. Belt-and-suspenders against an empty pool."""
+    from sciknow.core.claim_writer import write_claim
+    from sciknow.core.claim_extractor import Claim, HedgeStrength
+    from sciknow.retrieval.claim_retrieve import ClaimEvidence
+
+    claim = Claim(
+        claim_id="c2", text="A.", scope="",
+        hedge_strength=HedgeStrength.STRONG,
+        anchor_cluster_id="cluster-1",
+    )
+    out = write_claim(claim, ClaimEvidence(
+        claim_id="c2", claim_text="A.", chunks=[],
+    ))
+    assert out is None
+
+
+def l1_phase56_e_hedge_vocab_pinned_per_strength() -> None:
+    """Phase 56.E — _HEDGE_VOCAB has an entry per HedgeStrength enum
+    value; the entries contain known cue words. Source-grep so a
+    refactor doesn't drop a level."""
+    from sciknow.core.claim_writer import _HEDGE_VOCAB
+    from sciknow.core.claim_extractor import HedgeStrength
+
+    for hs in HedgeStrength:
+        assert hs in _HEDGE_VOCAB, f"missing hedge vocab for {hs}"
+    assert "shows" in _HEDGE_VOCAB[HedgeStrength.STRONG]
+    assert "suggests" in _HEDGE_VOCAB[HedgeStrength.QUALIFIED]
+    assert "may" in _HEDGE_VOCAB[HedgeStrength.SPECULATIVE]
+
+
+def l1_phase56_e_writer_prompt_demands_placeholder() -> None:
+    """Phase 56.E — writer prompt explicitly forbids [N] markers and
+    requires the <C:claim_id> placeholder. Source-grep so a refactor
+    that introduces LLM-chosen citations doesn't sneak through."""
+    from sciknow.core import claim_writer as _cw
+    src = _cw.CLAIM_WRITER_SYSTEM_TMPL
+    assert "<C:{claim_id}>" in src, (
+        "writer prompt must instruct the model to emit <C:claim_id>"
+    )
+    assert "do NOT use [N] markers" in src or "do NOT use [N]" in src, (
+        "writer prompt must forbid LLM-chosen [N] markers"
+    )
+
+
 def l1_phase56_h_clean_ending_strips_dangling_cite() -> None:
     """Phase 56.H — orphan ``[`` / ``[N`` / ``[N,`` at end-of-content
     is stripped by the section-ending safety net.
@@ -21019,6 +21086,11 @@ L1_TESTS: list[Callable] = [
     l1_phase56_d_mmr_selects_highest_relevance_first,
     l1_phase56_d_hyde_heuristic_targets_short_or_abstract,
     l1_phase56_d_constants_pinned,
+    # Phase 56.E — claim-driven writer
+    l1_phase56_e_writer_skips_weak_claims,
+    l1_phase56_e_writer_skips_when_no_evidence,
+    l1_phase56_e_hedge_vocab_pinned_per_strength,
+    l1_phase56_e_writer_prompt_demands_placeholder,
     # Phase 56.H — section-ending safety net
     l1_phase56_h_clean_ending_strips_dangling_cite,
     l1_phase56_h_clean_ending_slices_mid_sentence,
