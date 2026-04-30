@@ -325,16 +325,10 @@ def build_book_pdf(
 
     Returns ``(pdf_bytes, log_text, tex_source)``. Raises
     ``LatexCompileError`` on compile failure with the log attached.
-
-    Phase 55.V19k — also refreshes the per-project bibliography PDF
-    archive after rendering so the ``<project>/bibliography/`` folder
-    stays in sync with the cited set on every export. Best-effort:
-    archive failures don't fail the export.
     """
     opts = opts or ExportOptions()
     doc = _build_document(book_id, opts)
     tex_source, spec = render_document(doc, opts)
-    _refresh_bibliography_archive(book_id)
 
     with tempfile.TemporaryDirectory(prefix="sciknow_latex_") as tmp:
         workdir = Path(tmp)
@@ -542,14 +536,10 @@ def build_book_tex_bundle(
     vendored .cls/.sty files needed to compile offline.
 
     Returns ``(zip_bytes, tex_source)``.
-
-    Phase 55.V19k — also refreshes the per-project bibliography PDF
-    archive (best-effort, see ``build_book_pdf``).
     """
     opts = opts or ExportOptions()
     doc = _build_document(book_id, opts)
     tex_source, spec = render_document(doc, opts)
-    _refresh_bibliography_archive(book_id)
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -584,16 +574,3 @@ def build_book_tex_bundle(
             f"Document class: {spec.document_class}\n",
         )
     return buf.getvalue(), tex_source
-
-
-def _refresh_bibliography_archive(book_id: str) -> None:
-    """Best-effort hook: keep ``<project>/bibliography/`` in sync after
-    every export. Failures are logged and swallowed — never block an
-    export on archive bookkeeping. See
-    ``sciknow.core.bibliography_archive`` for the full API."""
-    try:
-        from sciknow.core.bibliography_archive import archive_book_bibliography
-        result = archive_book_bibliography(book_id)
-        log.info("bibliography archive refresh: %s", result.summary())
-    except Exception as exc:
-        log.warning("bibliography archive refresh failed: %s", exc)
