@@ -38,11 +38,29 @@ BIBLIOGRAPHY_TITLE = "Bibliography"
 
 _LOCAL_NUM_RE = re.compile(r"^\s*\[(\d+)\]\s*")
 
+# Phase 55.V19j — synthetic / non-paper APA lines that should never
+# enter the bibliography. RAPTOR summary nodes are emitted by retrieval
+# as APA strings like ``[3] (2026). RAPTOR L2 synthesis (346 papers).``;
+# they're useful retrieval context but they're not real publications,
+# and listing them in refs.bib is a self-citation of the corpus.
+_SYNTHETIC_SOURCE_RE = re.compile(
+    r"\bRAPTOR\s+L\d+\b",
+    re.IGNORECASE,
+)
+
 
 def _source_key(s: str) -> str:
     """Strip the leading ``[N] `` so two drafts that cite the same paper
     at different local numbers still dedupe to one bibliography entry."""
     return _LOCAL_NUM_RE.sub("", s or "").strip()
+
+
+def _is_synthetic_source_line(s: str) -> bool:
+    """True iff the APA source line was produced from a RAPTOR summary
+    node or any other synthetic source. Matched by title pattern; any
+    real publication titled "RAPTOR L2 ..." is so vanishingly unlikely
+    that the false-positive rate is effectively zero."""
+    return bool(_SYNTHETIC_SOURCE_RE.search(s or ""))
 
 
 def _renumber_source_line(s: str, new_num: int) -> str:
@@ -81,6 +99,13 @@ class BookBibliography:
     draft_cited_global_nums: dict[str, list[int]] = field(default_factory=dict)
     # Internal: source_key → global_num (1-based)
     _global_num_by_key: dict[str, int] = field(default_factory=dict)
+    # Phase 55.V19j — per-draft set of local numbers that point at a
+    # synthetic source (RAPTOR summary etc.) and were intentionally
+    # excluded from the global bibliography. remap_content STRIPS these
+    # `[N]` markers from the body instead of leaving them as orphans
+    # (which would otherwise visually realign onto a different paper
+    # because global numbering shifts down past the skipped synthetic).
+    _synthetic_locals_per_draft: dict[str, set[int]] = field(default_factory=dict)
 
     # ── Construction ────────────────────────────────────────────────
 
@@ -176,6 +201,15 @@ class BookBibliography:
                 if not m:
                     continue
                 local_num = int(m.group(1))
+                # Phase 55.V19j — skip synthetic sources (RAPTOR summary
+                # nodes) so they never reach refs.bib. Track the local
+                # number so remap_content can strip the matching body
+                # markers (otherwise global numbering shifts down past
+                # the skipped slot and the body's `[N]` visually points
+                # at the wrong paper).
+                if _is_synthetic_source_line(ls):
+                    bib._synthetic_locals_per_draft.setdefault(did, set()).add(local_num)
+                    continue
                 key = _source_key(ls)
                 if not key:
                     continue
@@ -224,18 +258,36 @@ class BookBibliography:
 
         Uses a two-pass substitution with ``__CITE_n__`` placeholders so
         renumbering ``[1]→[3]`` doesn't cascade into ``[3]→[something]``.
-        Unknown locals (missing from the source list) are left as-is.
+        Unknown locals (missing from the source list) are left as-is —
+        so post-write QA (citation_align, GUI citation-broken styling)
+        can detect them.
+
+        Phase 55.V19j — locals that pointed at a *synthetic* source
+        (RAPTOR summary node, deliberately skipped from the bibliography)
+        are STRIPPED rather than left orphan. Without this, the global
+        numbering shift after a skip would silently realign the body's
+        `[N]` onto the next non-synthetic paper, mis-citing it.
+        Whitespace cleanup: a single space before the marker is also
+        removed so we don't leave a `"...statement  ."` double-space.
         """
         local_map = self.draft_local_to_global.get(draft_id)
         if not content or not local_map:
             return content or ""
 
+        synthetic = self._synthetic_locals_per_draft.get(draft_id, set())
+
         def _to_placeholder(match: re.Match) -> str:
             n = int(match.group(1))
+            if n in synthetic:
+                return "__SYNTH_CITE__"
             g = local_map.get(n)
             return f"[__CITE_{g}__]" if g is not None else match.group(0)
 
         out = re.sub(r"\[(\d+)\]", _to_placeholder, content)
+        # Drop synthetic-citation placeholders + the optional single
+        # leading space. Sequences like "[5]__SYNTH_CITE__" (two
+        # markers, one synthetic) collapse cleanly.
+        out = re.sub(r"\s?__SYNTH_CITE__", "", out)
         out = re.sub(r"\[__CITE_(\d+)__\]", r"[\1]", out)
         return out
 

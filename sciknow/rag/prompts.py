@@ -97,16 +97,46 @@ def _norm_title(title: str | None) -> str:
     return re.sub(r'[^a-z0-9]', '', title.lower())
 
 
+# Phase 55.V19j — synthetic / non-paper sources should not enter the
+# writer's [N] menu. Detected by the RAPTOR summary section_type prefix
+# (raptor_l1, raptor_l2, ...) and by the canonical title pattern that
+# the RAPTOR retrieval emits in `retrieval/hybrid_search.py`. Without
+# this filter they end up in `drafts.sources` and then in the book's
+# refs.bib as @misc entries with titles like "RAPTOR L2 synthesis (346
+# papers)" — a self-citation of the corpus itself, not a real
+# publication.
+_RAPTOR_TITLE_RE = re.compile(r"^\s*RAPTOR\s+L\d+\b", re.IGNORECASE)
+
+
+def _is_synthetic_source(r) -> bool:
+    """True for RAPTOR summary nodes and any other synthetic sources
+    that aren't real publications. They're useful as retrieval signals
+    but should never appear as a citable [N] in the writer's prompt
+    or in the saved drafts.sources list."""
+    sec = (getattr(r, "section_type", "") or "").lower()
+    if sec.startswith("raptor_l") or sec == "raptor":
+        return True
+    title = getattr(r, "title", "") or ""
+    if _RAPTOR_TITLE_RE.search(title):
+        return True
+    return False
+
+
 def _dedup(results: list[SearchResult]) -> list[SearchResult]:
     """
     Remove duplicate results, keeping the highest-ranked occurrence.
     Deduplicates by document_id first, then by normalised title
     (catches the same paper ingested twice from different files).
+
+    Phase 55.V19j — also drops synthetic / non-paper sources (RAPTOR
+    summary nodes) so they never reach the writer's citable [N] menu.
     """
     seen_docs: set[str] = set()
     seen_titles: set[str] = set()
     out = []
     for r in results:
+        if _is_synthetic_source(r):
+            continue
         nt = _norm_title(r.title)
         if r.document_id in seen_docs:
             continue
