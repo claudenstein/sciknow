@@ -239,3 +239,71 @@ def upgrade_v1_cmd(
         f"[green]✓ upgrade complete.[/green] "
         f"Marker: {marker} ({len(sidecars)} sidecar(s) dropped)"
     )
+
+
+# ── research bibliography (Phase 55.V19l) ────────────────────────────────────
+
+
+@app.command(name="research-bibliography")
+def research_bibliography_cmd(
+    rate: float = typer.Option(
+        0.5, "--rate",
+        help="Minimum seconds between HTTP requests. Be polite to arXiv.",
+    ),
+    use_unpaywall: bool = typer.Option(
+        True, "--unpaywall/--no-unpaywall",
+        help="Probe Unpaywall for OA copies of DOI-cited papers.",
+    ),
+):
+    """
+    Build / refresh the bibliography of papers cited by the sciknow
+    research docs themselves (everything under ``docs/``).
+
+    Walks ``docs/`` for arXiv / ACL / DOI references, downloads each
+    open-access PDF into ``<repo>/bibliography/``, and writes an
+    ``INDEX.md`` cross-referencing each paper to the docs that cite
+    it. Idempotent: re-running only fetches new entries. The folder
+    is gitignored — a derived artifact, regeneratable on demand.
+    """
+    from pathlib import Path
+    from sciknow.config import settings
+    from sciknow.core.research_bibliography import (
+        discover_citations,
+        download_research_bibliography,
+        write_index,
+    )
+
+    repo_root = Path(__file__).resolve().parents[2]
+    docs_root = repo_root / "docs"
+    bib_dir = repo_root / "bibliography"
+
+    if not docs_root.is_dir():
+        console.print(f"[red]docs/ not found at {docs_root}[/red]")
+        raise typer.Exit(code=1)
+
+    email = settings.crossref_email if use_unpaywall else None
+    if use_unpaywall and not email:
+        console.print(
+            "[yellow]CROSSREF_EMAIL not set in .env — DOI citations will "
+            "be skipped (no Unpaywall fallback).[/yellow]"
+        )
+
+    console.print(f"Scanning [cyan]{docs_root}[/cyan]…")
+    citations = discover_citations(docs_root)
+    console.print(f"  found {len(citations)} unique citations")
+
+    result = download_research_bibliography(
+        docs_root,
+        bibliography_dir=bib_dir,
+        email=email,
+        rate_limit_seconds=rate,
+    )
+    write_index(citations, bib_dir)
+
+    console.print(f"\n[bold]Research bibliography[/bold]")
+    console.print(f"  folder: [cyan]{bib_dir}[/cyan]")
+    console.print(f"  {result.summary()}")
+    if result.failures:
+        console.print(f"\n[dim]Sample of download failures:[/dim]")
+        for key, url in result.failures[:5]:
+            console.print(f"  • {key}  ←  {url}")
