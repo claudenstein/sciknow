@@ -20029,6 +20029,91 @@ def l1_phase56_c_extraction_prompt_demands_atomicity() -> None:
     assert "candidate_chunk_ids" in sys
 
 
+def l1_phase56_d_rrf_fusion_top_match() -> None:
+    """Phase 56.D — Reciprocal Rank Fusion: a candidate ranked first
+    in two pools beats a candidate ranked first in one + second in
+    the other. Cheap correctness check on the RRF math."""
+    from dataclasses import dataclass
+    from sciknow.retrieval.claim_retrieve import _rrf_fuse
+
+    @dataclass
+    class C:
+        chunk_id: str
+
+    pool_a = [C(chunk_id=f"a{i}") for i in range(5)]
+    # Pool B: same chunks, different order.
+    pool_b = [C(chunk_id=f"a{i}") for i in [0, 4, 2, 6, 8]]
+    fused = _rrf_fuse([pool_a, pool_b])
+    ids = [c.chunk_id for c, _ in fused]
+    assert ids[0] == "a0", f"expected a0 first, got {ids}"
+
+
+def l1_phase56_d_mmr_selects_highest_relevance_first() -> None:
+    """Phase 56.D — MMR's first pick is always the highest-relevance
+    candidate (no diversity penalty applies on an empty selected
+    set). With orthogonal mock embeddings, subsequent picks should
+    follow descending relevance (no diversity differentiation)."""
+    from dataclasses import dataclass
+    import numpy as np
+    from sciknow.retrieval.claim_retrieve import _mmr
+
+    @dataclass
+    class C:
+        chunk_id: str
+        content: str
+
+    def mock_embed(texts):
+        return np.eye(len(texts), dtype=np.float32).tolist()
+
+    cands = [
+        (C(chunk_id=f"c{i}", content=f"chunk {i}"), 1.0 - i * 0.1)
+        for i in range(6)
+    ]
+    out = _mmr(cands, output_k=3, lambda_=0.5, embed_fn=mock_embed)
+    ids = [c.chunk_id for c, _ in out]
+    assert ids[0] == "c0", f"expected c0 first, got {ids}"
+
+
+def l1_phase56_d_hyde_heuristic_targets_short_or_abstract() -> None:
+    """Phase 56.D — HyDE fires on claims that are short OR abstract
+    (no proper noun, no number); skips concrete long claims."""
+    from sciknow.retrieval.claim_retrieve import _is_short_or_abstract
+    from sciknow.core.claim_extractor import Claim, HedgeStrength
+
+    short = Claim(
+        claim_id="x", text="Solar minima cool things.",
+        scope="", hedge_strength=HedgeStrength.QUALIFIED,
+        anchor_cluster_id="c1",
+    )
+    abstract = Claim(
+        claim_id="y",
+        text="this complex phenomenon arises from coupled feedback dynamical systems",
+        scope="", hedge_strength=HedgeStrength.QUALIFIED,
+        anchor_cluster_id="c1",
+    )
+    concrete = Claim(
+        claim_id="z",
+        text="The Maunder Minimum (1645-1715) coincided with North Atlantic cooling of 0.5 K.",
+        scope="", hedge_strength=HedgeStrength.STRONG,
+        anchor_cluster_id="c1",
+    )
+    assert _is_short_or_abstract(short) is True
+    assert _is_short_or_abstract(abstract) is True
+    assert _is_short_or_abstract(concrete) is False
+
+
+def l1_phase56_d_constants_pinned() -> None:
+    """Phase 56.D — entailment floor + weak min are pinned constants
+    that 56.E + 56.G read. Source-grep so a refactor doesn't change
+    them silently."""
+    from sciknow.retrieval import claim_retrieve as cr
+    assert cr.ENTAILMENT_FLOOR >= 0.5, (
+        "entailment floor should not drop below 0.5"
+    )
+    assert cr.WEAK_MIN_CHUNKS >= 1
+    assert cr.MMR_LAMBDA == 0.65
+
+
 def l1_phase56_h_clean_ending_strips_dangling_cite() -> None:
     """Phase 56.H — orphan ``[`` / ``[N`` / ``[N,`` at end-of-content
     is stripped by the section-ending safety net.
@@ -20929,6 +21014,11 @@ L1_TESTS: list[Callable] = [
     l1_phase56_c_hedge_inference_lowest_wins,
     l1_phase56_c_claim_jsonable_round_trip,
     l1_phase56_c_extraction_prompt_demands_atomicity,
+    # Phase 56.D — per-claim retrieval engine
+    l1_phase56_d_rrf_fusion_top_match,
+    l1_phase56_d_mmr_selects_highest_relevance_first,
+    l1_phase56_d_hyde_heuristic_targets_short_or_abstract,
+    l1_phase56_d_constants_pinned,
     # Phase 56.H — section-ending safety net
     l1_phase56_h_clean_ending_strips_dangling_cite,
     l1_phase56_h_clean_ending_slices_mid_sentence,
